@@ -1,0 +1,914 @@
+// Copyright 2025 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! HTTP source plugin descriptor and configuration DTOs.
+
+use crate::config::{
+    AuthConfig, BearerConfig, CorsConfig, EffectiveFromConfig, ElementTemplate, ElementType,
+    ErrorBehavior, HttpMethod, MappingCondition, OperationType, SignatureAlgorithm,
+    SignatureConfig, SignatureEncoding, TimestampFormat, WebhookConfig, WebhookMapping,
+    WebhookRoute,
+};
+use crate::{HttpSourceBuilder, HttpSourceConfig};
+use drasi_plugin_sdk::prelude::*;
+use std::collections::HashMap;
+use utoipa::OpenApi;
+
+/// HTTP source configuration DTO.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::HttpSourceConfig)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HttpSourceConfigDto {
+    pub host: ConfigValue<String>,
+    pub port: ConfigValue<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<ConfigValue<String>>,
+    #[serde(default = "default_http_timeout_ms")]
+    pub timeout_ms: ConfigValue<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_max_batch_size: Option<ConfigValue<usize>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_min_batch_size: Option<ConfigValue<usize>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_max_wait_ms: Option<ConfigValue<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_min_wait_ms: Option<ConfigValue<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_window_secs: Option<ConfigValue<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_enabled: Option<ConfigValue<bool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<source::http::WebhookConfig>)]
+    pub webhooks: Option<WebhookConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<drasi_lib::DurabilityConfig>,
+}
+
+fn default_http_timeout_ms() -> ConfigValue<u64> {
+    ConfigValue::Static(10000)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::WebhookConfig)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookConfigDto {
+    #[serde(default)]
+    #[schema(value_type = source::http::ErrorBehavior)]
+    pub error_behavior: ErrorBehaviorDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<source::http::CorsConfig>)]
+    pub cors: Option<CorsConfigDto>,
+    #[schema(value_type = Vec<source::http::WebhookRoute>)]
+    pub routes: Vec<WebhookRouteDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::CorsConfig)]
+#[serde(rename_all = "camelCase")]
+pub struct CorsConfigDto {
+    #[serde(default = "default_cors_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_cors_origins")]
+    pub allow_origins: Vec<ConfigValue<String>>,
+    #[serde(default = "default_cors_methods")]
+    pub allow_methods: Vec<ConfigValue<String>>,
+    #[serde(default = "default_cors_headers")]
+    pub allow_headers: Vec<ConfigValue<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expose_headers: Vec<ConfigValue<String>>,
+    #[serde(default)]
+    pub allow_credentials: bool,
+    #[serde(default = "default_cors_max_age")]
+    pub max_age: u64,
+}
+
+fn default_cors_enabled() -> bool {
+    true
+}
+
+fn default_cors_origins() -> Vec<ConfigValue<String>> {
+    vec![ConfigValue::Static("*".to_string())]
+}
+
+fn default_cors_methods() -> Vec<ConfigValue<String>> {
+    vec![
+        ConfigValue::Static("GET".to_string()),
+        ConfigValue::Static("POST".to_string()),
+        ConfigValue::Static("PUT".to_string()),
+        ConfigValue::Static("PATCH".to_string()),
+        ConfigValue::Static("DELETE".to_string()),
+        ConfigValue::Static("OPTIONS".to_string()),
+    ]
+}
+
+fn default_cors_headers() -> Vec<ConfigValue<String>> {
+    vec![
+        ConfigValue::Static("Content-Type".to_string()),
+        ConfigValue::Static("Authorization".to_string()),
+        ConfigValue::Static("X-Requested-With".to_string()),
+    ]
+}
+
+fn default_cors_max_age() -> u64 {
+    3600
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, utoipa::ToSchema)]
+#[schema(as = source::http::ErrorBehavior)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorBehaviorDto {
+    #[default]
+    AcceptAndLog,
+    AcceptAndSkip,
+    Reject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::WebhookRoute)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookRouteDto {
+    pub path: ConfigValue<String>,
+    #[serde(default = "default_methods")]
+    #[schema(value_type = Vec<source::http::HttpMethod>)]
+    pub methods: Vec<HttpMethodDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<source::http::AuthConfig>)]
+    pub auth: Option<AuthConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<source::http::ErrorBehavior>)]
+    pub error_behavior: Option<ErrorBehaviorDto>,
+    #[schema(value_type = Vec<source::http::WebhookMapping>)]
+    pub mappings: Vec<WebhookMappingDto>,
+}
+
+fn default_methods() -> Vec<HttpMethodDto> {
+    vec![HttpMethodDto::Post]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
+#[schema(as = source::http::HttpMethod)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HttpMethodDto {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::AuthConfig)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthConfigDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<source::http::SignatureConfig>)]
+    pub signature: Option<SignatureConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<source::http::BearerConfig>)]
+    pub bearer: Option<BearerConfigDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::SignatureConfig)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureConfigDto {
+    #[serde(rename = "type")]
+    #[schema(value_type = source::http::SignatureAlgorithm)]
+    pub algorithm: SignatureAlgorithmDto,
+    pub secret_env: ConfigValue<String>,
+    pub header: ConfigValue<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<ConfigValue<String>>,
+    #[serde(default)]
+    #[schema(value_type = source::http::SignatureEncoding)]
+    pub encoding: SignatureEncodingDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::SignatureAlgorithm)]
+#[serde(rename_all = "kebab-case")]
+pub enum SignatureAlgorithmDto {
+    HmacSha1,
+    HmacSha256,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, utoipa::ToSchema)]
+#[schema(as = source::http::SignatureEncoding)]
+#[serde(rename_all = "lowercase")]
+pub enum SignatureEncodingDto {
+    #[default]
+    Hex,
+    Base64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::BearerConfig)]
+#[serde(rename_all = "camelCase")]
+pub struct BearerConfigDto {
+    pub token_env: ConfigValue<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::WebhookMapping)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookMappingDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<source::http::MappingCondition>)]
+    pub when: Option<MappingConditionDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<source::http::OperationType>)]
+    pub operation: Option<OperationTypeDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_from: Option<ConfigValue<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<HashMap<String, source::http::OperationType>>)]
+    pub operation_map: Option<HashMap<String, OperationTypeDto>>,
+    #[schema(value_type = source::http::ElementType)]
+    pub element_type: ElementTypeDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<source::http::EffectiveFromConfig>)]
+    pub effective_from: Option<EffectiveFromConfigDto>,
+    #[schema(value_type = source::http::ElementTemplate)]
+    pub template: ElementTemplateDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::MappingCondition)]
+#[serde(rename_all = "camelCase")]
+pub struct MappingConditionDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<ConfigValue<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<ConfigValue<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equals: Option<ConfigValue<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<ConfigValue<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regex: Option<ConfigValue<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::OperationType)]
+#[serde(rename_all = "lowercase")]
+pub enum OperationTypeDto {
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::ElementType)]
+#[serde(rename_all = "lowercase")]
+pub enum ElementTypeDto {
+    Node,
+    Relation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::EffectiveFromConfig)]
+#[serde(untagged)]
+pub enum EffectiveFromConfigDto {
+    Simple(ConfigValue<String>),
+    Explicit {
+        value: ConfigValue<String>,
+        format: TimestampFormatDto,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::TimestampFormat)]
+#[serde(rename_all = "snake_case")]
+pub enum TimestampFormatDto {
+    Iso8601,
+    UnixSeconds,
+    UnixMillis,
+    UnixNanos,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::http::ElementTemplate)]
+#[serde(rename_all = "camelCase")]
+pub struct ElementTemplateDto {
+    pub id: ConfigValue<String>,
+    pub labels: Vec<ConfigValue<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<ConfigValue<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<ConfigValue<String>>,
+}
+
+// --- Mapping functions ---
+
+fn map_error_behavior(dto: &ErrorBehaviorDto) -> ErrorBehavior {
+    match dto {
+        ErrorBehaviorDto::AcceptAndLog => ErrorBehavior::AcceptAndLog,
+        ErrorBehaviorDto::AcceptAndSkip => ErrorBehavior::AcceptAndSkip,
+        ErrorBehaviorDto::Reject => ErrorBehavior::Reject,
+    }
+}
+
+fn map_http_method(dto: &HttpMethodDto) -> HttpMethod {
+    match dto {
+        HttpMethodDto::Get => HttpMethod::Get,
+        HttpMethodDto::Post => HttpMethod::Post,
+        HttpMethodDto::Put => HttpMethod::Put,
+        HttpMethodDto::Patch => HttpMethod::Patch,
+        HttpMethodDto::Delete => HttpMethod::Delete,
+    }
+}
+
+fn map_signature_algorithm(dto: &SignatureAlgorithmDto) -> SignatureAlgorithm {
+    match dto {
+        SignatureAlgorithmDto::HmacSha1 => SignatureAlgorithm::HmacSha1,
+        SignatureAlgorithmDto::HmacSha256 => SignatureAlgorithm::HmacSha256,
+    }
+}
+
+fn map_signature_encoding(dto: &SignatureEncodingDto) -> SignatureEncoding {
+    match dto {
+        SignatureEncodingDto::Hex => SignatureEncoding::Hex,
+        SignatureEncodingDto::Base64 => SignatureEncoding::Base64,
+    }
+}
+
+fn map_operation_type(dto: &OperationTypeDto) -> OperationType {
+    match dto {
+        OperationTypeDto::Insert => OperationType::Insert,
+        OperationTypeDto::Update => OperationType::Update,
+        OperationTypeDto::Delete => OperationType::Delete,
+    }
+}
+
+fn map_element_type(dto: &ElementTypeDto) -> ElementType {
+    match dto {
+        ElementTypeDto::Node => ElementType::Node,
+        ElementTypeDto::Relation => ElementType::Relation,
+    }
+}
+
+fn map_timestamp_format(dto: &TimestampFormatDto) -> TimestampFormat {
+    match dto {
+        TimestampFormatDto::Iso8601 => TimestampFormat::Iso8601,
+        TimestampFormatDto::UnixSeconds => TimestampFormat::UnixSeconds,
+        TimestampFormatDto::UnixMillis => TimestampFormat::UnixMillis,
+        TimestampFormatDto::UnixNanos => TimestampFormat::UnixNanos,
+    }
+}
+
+async fn map_webhook_config(
+    dto: &WebhookConfigDto,
+    resolver: &DtoMapper,
+) -> Result<WebhookConfig, MappingError> {
+    let cors = if let Some(cors) = dto.cors.as_ref() {
+        Some(map_cors_config(cors, resolver).await?)
+    } else {
+        None
+    };
+
+    let mut routes = Vec::with_capacity(dto.routes.len());
+    for route in &dto.routes {
+        routes.push(map_webhook_route(route, resolver).await?);
+    }
+
+    Ok(WebhookConfig {
+        error_behavior: map_error_behavior(&dto.error_behavior),
+        cors,
+        routes,
+    })
+}
+
+async fn map_cors_config(
+    dto: &CorsConfigDto,
+    resolver: &DtoMapper,
+) -> Result<CorsConfig, MappingError> {
+    Ok(CorsConfig {
+        enabled: dto.enabled,
+        allow_origins: resolver.resolve_string_vec(&dto.allow_origins).await?,
+        allow_methods: resolver.resolve_string_vec(&dto.allow_methods).await?,
+        allow_headers: resolver.resolve_string_vec(&dto.allow_headers).await?,
+        expose_headers: resolver.resolve_string_vec(&dto.expose_headers).await?,
+        allow_credentials: dto.allow_credentials,
+        max_age: dto.max_age,
+    })
+}
+
+async fn map_webhook_route(
+    dto: &WebhookRouteDto,
+    resolver: &DtoMapper,
+) -> Result<WebhookRoute, MappingError> {
+    let auth = if let Some(auth) = dto.auth.as_ref() {
+        Some(map_auth_config(auth, resolver).await?)
+    } else {
+        None
+    };
+
+    let mut mappings = Vec::with_capacity(dto.mappings.len());
+    for mapping in &dto.mappings {
+        mappings.push(map_webhook_mapping(mapping, resolver).await?);
+    }
+
+    Ok(WebhookRoute {
+        path: resolver.resolve_string(&dto.path).await?,
+        methods: dto.methods.iter().map(map_http_method).collect(),
+        auth,
+        error_behavior: dto.error_behavior.as_ref().map(map_error_behavior),
+        mappings,
+    })
+}
+
+async fn map_auth_config(
+    dto: &AuthConfigDto,
+    resolver: &DtoMapper,
+) -> Result<AuthConfig, MappingError> {
+    let signature = if let Some(signature) = dto.signature.as_ref() {
+        Some(map_signature_config(signature, resolver).await?)
+    } else {
+        None
+    };
+
+    let bearer = if let Some(bearer) = dto.bearer.as_ref() {
+        Some(map_bearer_config(bearer, resolver).await?)
+    } else {
+        None
+    };
+
+    Ok(AuthConfig { signature, bearer })
+}
+
+async fn map_signature_config(
+    dto: &SignatureConfigDto,
+    resolver: &DtoMapper,
+) -> Result<SignatureConfig, MappingError> {
+    Ok(SignatureConfig {
+        algorithm: map_signature_algorithm(&dto.algorithm),
+        secret_env: resolver.resolve_string(&dto.secret_env).await?,
+        header: resolver.resolve_string(&dto.header).await?,
+        prefix: resolver.resolve_optional_string(&dto.prefix).await?,
+        encoding: map_signature_encoding(&dto.encoding),
+    })
+}
+
+async fn map_bearer_config(
+    dto: &BearerConfigDto,
+    resolver: &DtoMapper,
+) -> Result<BearerConfig, MappingError> {
+    Ok(BearerConfig {
+        token_env: resolver.resolve_string(&dto.token_env).await?,
+    })
+}
+
+async fn map_webhook_mapping(
+    dto: &WebhookMappingDto,
+    resolver: &DtoMapper,
+) -> Result<WebhookMapping, MappingError> {
+    let when = if let Some(condition) = dto.when.as_ref() {
+        Some(map_mapping_condition(condition, resolver).await?)
+    } else {
+        None
+    };
+
+    let effective_from = if let Some(effective_from) = dto.effective_from.as_ref() {
+        Some(map_effective_from(effective_from, resolver).await?)
+    } else {
+        None
+    };
+
+    Ok(WebhookMapping {
+        when,
+        operation: dto.operation.as_ref().map(map_operation_type),
+        operation_from: resolver
+            .resolve_optional_string(&dto.operation_from)
+            .await?,
+        operation_map: dto.operation_map.as_ref().map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), map_operation_type(v)))
+                .collect()
+        }),
+        element_type: map_element_type(&dto.element_type),
+        effective_from,
+        template: map_element_template(&dto.template, resolver).await?,
+    })
+}
+
+async fn map_mapping_condition(
+    dto: &MappingConditionDto,
+    resolver: &DtoMapper,
+) -> Result<MappingCondition, MappingError> {
+    Ok(MappingCondition {
+        header: resolver.resolve_optional_string(&dto.header).await?,
+        field: resolver.resolve_optional_string(&dto.field).await?,
+        equals: resolver.resolve_optional_string(&dto.equals).await?,
+        contains: resolver.resolve_optional_string(&dto.contains).await?,
+        regex: resolver.resolve_optional_string(&dto.regex).await?,
+    })
+}
+
+async fn map_effective_from(
+    dto: &EffectiveFromConfigDto,
+    resolver: &DtoMapper,
+) -> Result<EffectiveFromConfig, MappingError> {
+    match dto {
+        EffectiveFromConfigDto::Simple(v) => Ok(EffectiveFromConfig::Simple(
+            resolver.resolve_string(v).await?,
+        )),
+        EffectiveFromConfigDto::Explicit { value, format } => Ok(EffectiveFromConfig::Explicit {
+            value: resolver.resolve_string(value).await?,
+            format: map_timestamp_format(format),
+        }),
+    }
+}
+
+async fn map_element_template(
+    dto: &ElementTemplateDto,
+    resolver: &DtoMapper,
+) -> Result<ElementTemplate, MappingError> {
+    Ok(ElementTemplate {
+        id: resolver.resolve_string(&dto.id).await?,
+        labels: resolver.resolve_string_vec(&dto.labels).await?,
+        properties: dto.properties.clone(),
+        from: resolver.resolve_optional_string(&dto.from).await?,
+        to: resolver.resolve_optional_string(&dto.to).await?,
+    })
+}
+
+// --- Reverse mapping: internal config → DTO ---
+
+impl From<&ErrorBehavior> for ErrorBehaviorDto {
+    fn from(eb: &ErrorBehavior) -> Self {
+        match eb {
+            ErrorBehavior::AcceptAndLog => ErrorBehaviorDto::AcceptAndLog,
+            ErrorBehavior::AcceptAndSkip => ErrorBehaviorDto::AcceptAndSkip,
+            ErrorBehavior::Reject => ErrorBehaviorDto::Reject,
+        }
+    }
+}
+
+impl From<&HttpMethod> for HttpMethodDto {
+    fn from(m: &HttpMethod) -> Self {
+        match m {
+            HttpMethod::Get => HttpMethodDto::Get,
+            HttpMethod::Post => HttpMethodDto::Post,
+            HttpMethod::Put => HttpMethodDto::Put,
+            HttpMethod::Patch => HttpMethodDto::Patch,
+            HttpMethod::Delete => HttpMethodDto::Delete,
+        }
+    }
+}
+
+impl From<&SignatureAlgorithm> for SignatureAlgorithmDto {
+    fn from(a: &SignatureAlgorithm) -> Self {
+        match a {
+            SignatureAlgorithm::HmacSha1 => SignatureAlgorithmDto::HmacSha1,
+            SignatureAlgorithm::HmacSha256 => SignatureAlgorithmDto::HmacSha256,
+        }
+    }
+}
+
+impl From<&SignatureEncoding> for SignatureEncodingDto {
+    fn from(e: &SignatureEncoding) -> Self {
+        match e {
+            SignatureEncoding::Hex => SignatureEncodingDto::Hex,
+            SignatureEncoding::Base64 => SignatureEncodingDto::Base64,
+        }
+    }
+}
+
+impl From<&OperationType> for OperationTypeDto {
+    fn from(op: &OperationType) -> Self {
+        match op {
+            OperationType::Insert => OperationTypeDto::Insert,
+            OperationType::Update => OperationTypeDto::Update,
+            OperationType::Delete => OperationTypeDto::Delete,
+        }
+    }
+}
+
+impl From<&ElementType> for ElementTypeDto {
+    fn from(et: &ElementType) -> Self {
+        match et {
+            ElementType::Node => ElementTypeDto::Node,
+            ElementType::Relation => ElementTypeDto::Relation,
+        }
+    }
+}
+
+impl From<&TimestampFormat> for TimestampFormatDto {
+    fn from(f: &TimestampFormat) -> Self {
+        match f {
+            TimestampFormat::Iso8601 => TimestampFormatDto::Iso8601,
+            TimestampFormat::UnixSeconds => TimestampFormatDto::UnixSeconds,
+            TimestampFormat::UnixMillis => TimestampFormatDto::UnixMillis,
+            TimestampFormat::UnixNanos => TimestampFormatDto::UnixNanos,
+        }
+    }
+}
+
+impl From<&MappingCondition> for MappingConditionDto {
+    fn from(c: &MappingCondition) -> Self {
+        Self {
+            header: c.header.as_ref().map(|v| ConfigValue::Static(v.clone())),
+            field: c.field.as_ref().map(|v| ConfigValue::Static(v.clone())),
+            equals: c.equals.as_ref().map(|v| ConfigValue::Static(v.clone())),
+            contains: c.contains.as_ref().map(|v| ConfigValue::Static(v.clone())),
+            regex: c.regex.as_ref().map(|v| ConfigValue::Static(v.clone())),
+        }
+    }
+}
+
+impl From<&EffectiveFromConfig> for EffectiveFromConfigDto {
+    fn from(e: &EffectiveFromConfig) -> Self {
+        match e {
+            EffectiveFromConfig::Simple(v) => {
+                EffectiveFromConfigDto::Simple(ConfigValue::Static(v.clone()))
+            }
+            EffectiveFromConfig::Explicit { value, format } => EffectiveFromConfigDto::Explicit {
+                value: ConfigValue::Static(value.clone()),
+                format: TimestampFormatDto::from(format),
+            },
+        }
+    }
+}
+
+impl From<&ElementTemplate> for ElementTemplateDto {
+    fn from(t: &ElementTemplate) -> Self {
+        Self {
+            id: ConfigValue::Static(t.id.clone()),
+            labels: t
+                .labels
+                .iter()
+                .map(|l| ConfigValue::Static(l.clone()))
+                .collect(),
+            properties: t.properties.clone(),
+            from: t.from.as_ref().map(|v| ConfigValue::Static(v.clone())),
+            to: t.to.as_ref().map(|v| ConfigValue::Static(v.clone())),
+        }
+    }
+}
+
+impl From<&WebhookMapping> for WebhookMappingDto {
+    fn from(m: &WebhookMapping) -> Self {
+        Self {
+            when: m.when.as_ref().map(MappingConditionDto::from),
+            operation: m.operation.as_ref().map(OperationTypeDto::from),
+            operation_from: m
+                .operation_from
+                .as_ref()
+                .map(|v| ConfigValue::Static(v.clone())),
+            operation_map: m.operation_map.as_ref().map(|om| {
+                om.iter()
+                    .map(|(k, v)| (k.clone(), OperationTypeDto::from(v)))
+                    .collect()
+            }),
+            element_type: ElementTypeDto::from(&m.element_type),
+            effective_from: m.effective_from.as_ref().map(EffectiveFromConfigDto::from),
+            template: ElementTemplateDto::from(&m.template),
+        }
+    }
+}
+
+impl From<&SignatureConfig> for SignatureConfigDto {
+    fn from(s: &SignatureConfig) -> Self {
+        Self {
+            algorithm: SignatureAlgorithmDto::from(&s.algorithm),
+            secret_env: ConfigValue::Static(s.secret_env.clone()),
+            header: ConfigValue::Static(s.header.clone()),
+            prefix: s.prefix.as_ref().map(|v| ConfigValue::Static(v.clone())),
+            encoding: SignatureEncodingDto::from(&s.encoding),
+        }
+    }
+}
+
+impl From<&BearerConfig> for BearerConfigDto {
+    fn from(b: &BearerConfig) -> Self {
+        Self {
+            token_env: ConfigValue::Static(b.token_env.clone()),
+        }
+    }
+}
+
+impl From<&AuthConfig> for AuthConfigDto {
+    fn from(a: &AuthConfig) -> Self {
+        Self {
+            signature: a.signature.as_ref().map(SignatureConfigDto::from),
+            bearer: a.bearer.as_ref().map(BearerConfigDto::from),
+        }
+    }
+}
+
+impl From<&WebhookRoute> for WebhookRouteDto {
+    fn from(r: &WebhookRoute) -> Self {
+        Self {
+            path: ConfigValue::Static(r.path.clone()),
+            methods: r.methods.iter().map(HttpMethodDto::from).collect(),
+            auth: r.auth.as_ref().map(AuthConfigDto::from),
+            error_behavior: r.error_behavior.as_ref().map(ErrorBehaviorDto::from),
+            mappings: r.mappings.iter().map(WebhookMappingDto::from).collect(),
+        }
+    }
+}
+
+impl From<&CorsConfig> for CorsConfigDto {
+    fn from(c: &CorsConfig) -> Self {
+        Self {
+            enabled: c.enabled,
+            allow_origins: c
+                .allow_origins
+                .iter()
+                .map(|v| ConfigValue::Static(v.clone()))
+                .collect(),
+            allow_methods: c
+                .allow_methods
+                .iter()
+                .map(|v| ConfigValue::Static(v.clone()))
+                .collect(),
+            allow_headers: c
+                .allow_headers
+                .iter()
+                .map(|v| ConfigValue::Static(v.clone()))
+                .collect(),
+            expose_headers: c
+                .expose_headers
+                .iter()
+                .map(|v| ConfigValue::Static(v.clone()))
+                .collect(),
+            allow_credentials: c.allow_credentials,
+            max_age: c.max_age,
+        }
+    }
+}
+
+impl From<&WebhookConfig> for WebhookConfigDto {
+    fn from(w: &WebhookConfig) -> Self {
+        Self {
+            error_behavior: ErrorBehaviorDto::from(&w.error_behavior),
+            cors: w.cors.as_ref().map(CorsConfigDto::from),
+            routes: w.routes.iter().map(WebhookRouteDto::from).collect(),
+        }
+    }
+}
+
+impl From<&HttpSourceConfig> for HttpSourceConfigDto {
+    fn from(config: &HttpSourceConfig) -> Self {
+        Self {
+            host: ConfigValue::Static(config.host.clone()),
+            port: ConfigValue::Static(config.port),
+            endpoint: config
+                .endpoint
+                .as_ref()
+                .map(|v| ConfigValue::Static(v.clone())),
+            timeout_ms: ConfigValue::Static(config.timeout_ms),
+            adaptive_max_batch_size: config.adaptive_max_batch_size.map(ConfigValue::Static),
+            adaptive_min_batch_size: config.adaptive_min_batch_size.map(ConfigValue::Static),
+            adaptive_max_wait_ms: config.adaptive_max_wait_ms.map(ConfigValue::Static),
+            adaptive_min_wait_ms: config.adaptive_min_wait_ms.map(ConfigValue::Static),
+            adaptive_window_secs: config.adaptive_window_secs.map(ConfigValue::Static),
+            adaptive_enabled: config.adaptive_enabled.map(ConfigValue::Static),
+            webhooks: config.webhooks.as_ref().map(WebhookConfigDto::from),
+            durability: config.durability.clone(),
+        }
+    }
+}
+
+#[derive(OpenApi)]
+#[openapi(components(schemas(
+    HttpSourceConfigDto,
+    WebhookConfigDto,
+    CorsConfigDto,
+    ErrorBehaviorDto,
+    WebhookRouteDto,
+    HttpMethodDto,
+    AuthConfigDto,
+    SignatureConfigDto,
+    SignatureAlgorithmDto,
+    SignatureEncodingDto,
+    BearerConfigDto,
+    WebhookMappingDto,
+    MappingConditionDto,
+    OperationTypeDto,
+    ElementTypeDto,
+    EffectiveFromConfigDto,
+    TimestampFormatDto,
+    ElementTemplateDto,
+)))]
+struct HttpSourceSchemas;
+
+/// Descriptor for the HTTP source plugin.
+pub struct HttpSourceDescriptor;
+
+#[async_trait]
+impl SourcePluginDescriptor for HttpSourceDescriptor {
+    fn kind(&self) -> &str {
+        "http"
+    }
+
+    fn config_version(&self) -> &str {
+        "1.0.0"
+    }
+
+    fn config_schema_name(&self) -> &str {
+        "source.http.HttpSourceConfig"
+    }
+
+    fn config_schema_json(&self) -> String {
+        use drasi_plugin_sdk::schema_ui::SchemaUiAnnotator;
+        let api = HttpSourceSchemas::openapi();
+        let schemas = serde_json::to_value(
+            &api.components
+                .as_ref()
+                .expect("OpenAPI components missing")
+                .schemas,
+        )
+        .expect("Failed to serialize config schema");
+
+        SchemaUiAnnotator::new(schemas, "source.http.HttpSourceConfig")
+            .expect("root schema not found")
+            .field("host", |f| {
+                f.group("Connection").order(1).placeholder("0.0.0.0")
+            })
+            .field("port", |f| {
+                f.group("Connection").order(2).placeholder("8081")
+            })
+            .field("endpoint", |f| {
+                f.group("Connection").order(3).placeholder("/api/data")
+            })
+            .field("timeoutMs", |f| {
+                f.group("Connection").order(4).placeholder("10000")
+            })
+            .field("webhooks", |f| f.group("Webhooks").order(1))
+            .field("adaptiveEnabled", |f| {
+                f.group("Adaptive Batching").order(1).collapsed(true)
+            })
+            .field("adaptiveMaxBatchSize", |f| {
+                f.group("Adaptive Batching").order(2)
+            })
+            .field("adaptiveMinBatchSize", |f| {
+                f.group("Adaptive Batching").order(3)
+            })
+            .field("adaptiveMaxWaitMs", |f| {
+                f.group("Adaptive Batching").order(4)
+            })
+            .field("adaptiveMinWaitMs", |f| {
+                f.group("Adaptive Batching").order(5)
+            })
+            .field("adaptiveWindowSecs", |f| {
+                f.group("Adaptive Batching").order(6)
+            })
+            .annotate()
+    }
+
+    async fn create_source(
+        &self,
+        id: &str,
+        config_json: &serde_json::Value,
+        auto_start: bool,
+    ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
+        let dto: HttpSourceConfigDto = serde_json::from_value(config_json.clone())?;
+        let mapper = DtoMapper::new();
+
+        let config = HttpSourceConfig {
+            host: mapper.resolve_string(&dto.host).await?,
+            port: mapper.resolve_typed(&dto.port).await?,
+            endpoint: mapper.resolve_optional(&dto.endpoint).await?,
+            timeout_ms: mapper.resolve_typed(&dto.timeout_ms).await?,
+            adaptive_max_batch_size: mapper
+                .resolve_optional(&dto.adaptive_max_batch_size)
+                .await?,
+            adaptive_min_batch_size: mapper
+                .resolve_optional(&dto.adaptive_min_batch_size)
+                .await?,
+            adaptive_max_wait_ms: mapper.resolve_optional(&dto.adaptive_max_wait_ms).await?,
+            adaptive_min_wait_ms: mapper.resolve_optional(&dto.adaptive_min_wait_ms).await?,
+            adaptive_window_secs: mapper.resolve_optional(&dto.adaptive_window_secs).await?,
+            adaptive_enabled: mapper.resolve_optional(&dto.adaptive_enabled).await?,
+            webhooks: if let Some(webhooks) = dto.webhooks.as_ref() {
+                Some(map_webhook_config(webhooks, &mapper).await?)
+            } else {
+                None
+            },
+            durability: dto.durability.clone(),
+        };
+
+        let mut source = HttpSourceBuilder::new(id)
+            .with_config(config)
+            .with_auto_start(auto_start)
+            .build()?;
+
+        source.base.set_raw_config(config_json.clone());
+
+        Ok(Box::new(source))
+    }
+}

@@ -1,0 +1,75 @@
+// Copyright 2026 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#![allow(unexpected_cfgs)]
+
+//! Host-side SDK for loading and interacting with Drasi cdylib plugins.
+//!
+//! This crate provides:
+//! - [`PluginLoader`] — scan directories and load cdylib plugins
+//! - Proxy types that wrap FFI vtables into real DrasiLib traits
+//!   ([`SourceProxy`], [`ReactionProxy`], [`SourcePluginProxy`], etc.)
+//! - [`StateStoreVtableBuilder`] — build a `StateStoreVtable` from a host `StateStoreProvider`
+//! - Callback types for log/lifecycle event capture
+
+pub mod callbacks;
+#[cfg(feature = "fetcher")]
+pub mod fetcher;
+pub mod identity_bridge;
+pub mod lifecycle;
+pub mod loader;
+pub mod lockfile;
+pub mod plugin_registry;
+pub mod plugin_types;
+pub mod proxies;
+#[cfg(feature = "registry")]
+pub mod registry;
+pub mod snapshot_fetcher_bridge;
+pub mod state_store_bridge;
+pub mod wal_provider_bridge;
+pub mod watcher;
+
+pub use callbacks::{CallbackContext, CapturedLifecycle, CapturedLog, InstanceCallbackContext};
+pub use identity_bridge::IdentityProviderVtableBuilder;
+pub use loader::{
+    is_plugin_binary, plugin_kind_from_filename, scan_plugin_metadata, LoadedPlugin, PluginLoader,
+    PluginLoaderConfig, PluginMetadataSummary, DEFAULT_PLUGIN_FILE_PATTERNS,
+    PLUGIN_BINARY_EXTENSIONS,
+};
+
+// Re-export the ConfigResolverFn type so consumers can build host-side callbacks.
+pub use drasi_plugin_sdk::ffi::ConfigResolverFn;
+pub use proxies::bootstrap_provider::{BootstrapPluginProxy, BootstrapProviderProxy};
+pub use proxies::reaction::{ReactionPluginProxy, ReactionProxy};
+pub use proxies::secret_store::{
+    HostSecretStoreProxy, SecretStorePluginProxy, SecretStoreValueResolverAdapter,
+};
+pub use proxies::source::{SourcePluginProxy, SourceProxy};
+pub use snapshot_fetcher_bridge::SnapshotFetcherVtableBuilder;
+pub use state_store_bridge::StateStoreVtableBuilder;
+pub use wal_provider_bridge::WalProviderVtableBuilder;
+
+pub use plugin_types::{
+    PluginCategory, PluginEvent, PluginFileEvent, PluginKindEntry, PluginStatus,
+};
+
+pub use lockfile::{
+    compute_file_hash, FileIntegrityStatus, LockedPlugin, PluginLockfile, PluginSignatureInfo,
+};
+
+pub use plugin_registry::{PluginKindInfo, PluginRegistry, RegisteredDescriptor};
+
+pub use lifecycle::{LoadedPluginState, PluginLifecycleManager};
+
+pub use watcher::{PluginWatcher, PluginWatcherConfig};

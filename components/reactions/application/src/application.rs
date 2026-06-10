@@ -22,10 +22,10 @@ use std::sync::Arc;
 // RecvError no longer needed with trait-based receivers
 use tokio::sync::{mpsc, RwLock};
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, QueryResult};
+use drasi_lib::channels::{ComponentStatus, QueryResult};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
 use std::collections::HashMap;
 
 /// Handle for programmatic consumption of query results from an Application Reaction
@@ -36,7 +36,7 @@ use std::collections::HashMap;
 ///
 /// # Usage Pattern
 ///
-/// 1. Get the handle from `DrasiServerCore::reaction_handle()`
+/// 1. Get the handle from `DrasiLib::reaction_handle()`
 /// 2. Choose a consumption pattern:
 ///    - **Subscription** (recommended): Use `subscribe_with_options()` for flexible result consumption
 ///    - **Async Stream**: Use `as_stream()` for async iteration
@@ -528,23 +528,19 @@ impl Reaction for ApplicationReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting application reaction".to_string()),
             )
-            .await?;
-
-        // Subscribe to all configured queries using ReactionBase
-        // QueryProvider is available from initialize() context
-        self.base.subscribe_to_queries().await?;
+            .await;
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Application reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
@@ -606,17 +602,33 @@ impl Reaction for ApplicationReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Application reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
+        self.base.enqueue_query_result(result).await
+    }
+
+    fn is_durable(&self) -> bool {
+        false
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        false
+    }
+
+    fn default_recovery_policy(&self) -> drasi_lib::recovery::ReactionRecoveryPolicy {
+        drasi_lib::recovery::ReactionRecoveryPolicy::Strict
     }
 }
 

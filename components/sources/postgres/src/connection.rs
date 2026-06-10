@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::{anyhow, Result};
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use log::{debug, info, trace, warn};
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -282,6 +282,7 @@ impl ReplicationConnection {
             consistent_point: String::new(),
             snapshot_name: None,
             output_plugin: "pgoutput".to_string(),
+            restart_lsn: None,
         };
 
         loop {
@@ -313,7 +314,14 @@ impl ReplicationConnection {
                 BackendMessage::ErrorResponse(err) => {
                     if err.message.contains("already exists") {
                         debug!("Replication slot already exists: {slot_name}");
-                        // Try to get existing slot info
+                        // Drain the ReadyForQuery that PostgreSQL sends after ErrorResponse
+                        loop {
+                            let drain_msg = self.read_message().await?;
+                            if let BackendMessage::ReadyForQuery(status) = drain_msg {
+                                self.transaction_status = status;
+                                break;
+                            }
+                        }
                         return self.get_replication_slot_info(slot_name).await;
                     }
                     return Err(anyhow!("CREATE_REPLICATION_SLOT failed: {}", err.message));
@@ -331,16 +339,79 @@ impl ReplicationConnection {
         &mut self,
         slot_name: &str,
     ) -> Result<ReplicationSlotInfo> {
-        // For existing slots, we can assume they exist and use default values
-        // The actual slot info will be retrieved when we start replication
-        debug!("Using existing replication slot: {slot_name}");
+        debug!("Querying existing replication slot: {slot_name}");
 
-        Ok(ReplicationSlotInfo {
+        let slot_name_escaped = slot_name.replace('\'', "''");
+        let query = format!(
+            "SELECT slot_name, confirmed_flush_lsn, restart_lsn, plugin FROM pg_replication_slots WHERE slot_name = '{slot_name_escaped}'"
+        );
+
+        self.send_message(FrontendMessage::Query(query)).await?;
+
+        let mut slot_info = ReplicationSlotInfo {
             slot_name: slot_name.to_string(),
-            consistent_point: "0/0".to_string(), // Will be updated from START_REPLICATION
+            consistent_point: "0/0".to_string(),
             snapshot_name: None,
             output_plugin: "pgoutput".to_string(),
-        })
+            restart_lsn: None,
+        };
+        let mut found_row = false;
+
+        loop {
+            let msg = self.read_message().await?;
+            match msg {
+                BackendMessage::RowDescription(_) => {
+                    // Skip row description
+                }
+                BackendMessage::DataRow(row) => {
+                    found_row = true;
+                    if row.len() >= 4 {
+                        if let Some(Some(confirmed_flush_lsn)) = row.get(1) {
+                            let lsn = String::from_utf8_lossy(confirmed_flush_lsn).to_string();
+                            if !lsn.is_empty() {
+                                slot_info.consistent_point = lsn;
+                            }
+                        }
+                        if let Some(Some(restart_lsn_val)) = row.get(2) {
+                            let lsn = String::from_utf8_lossy(restart_lsn_val).to_string();
+                            if !lsn.is_empty() {
+                                slot_info.restart_lsn = Some(lsn.clone());
+                                // Fall back to restart_lsn for consistent_point if confirmed_flush is unset
+                                if slot_info.consistent_point == "0/0" {
+                                    slot_info.consistent_point = lsn;
+                                }
+                            }
+                        }
+                        if let Some(Some(plugin)) = row.get(3) {
+                            slot_info.output_plugin = String::from_utf8_lossy(plugin).to_string();
+                        }
+                    }
+                }
+                BackendMessage::CommandComplete(_) => {
+                    // Command completed
+                }
+                BackendMessage::ReadyForQuery(status) => {
+                    self.transaction_status = status;
+                    break;
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(anyhow!("Failed to query replication slot: {}", err.message));
+                }
+                _ => {
+                    warn!("Unexpected message during slot query: {msg:?}");
+                }
+            }
+        }
+
+        if !found_row {
+            return Err(anyhow!("Replication slot not found: {slot_name}"));
+        }
+
+        info!(
+            "Using existing replication slot: {slot_name} at LSN {}",
+            slot_info.consistent_point
+        );
+        Ok(slot_info)
     }
 
     pub async fn start_replication(
@@ -503,12 +574,14 @@ impl ReplicationConnection {
     }
 }
 
-fn format_lsn(lsn: u64) -> String {
+/// Formats a WAL LSN `u64` as the PostgreSQL `"high/low"` hex notation (e.g. `"0/1A3F00"`).
+pub(crate) fn format_lsn(lsn: u64) -> String {
     format!("{:X}/{:X}", lsn >> 32, lsn & 0xFFFFFFFF)
 }
 
-#[allow(dead_code)]
-fn parse_lsn(lsn_str: &str) -> Result<u64> {
+/// Parses a PostgreSQL LSN string in `"high/low"` hex notation into a `u64`.
+/// Returns an error if the string is not in `"X/Y"` format.
+pub(crate) fn parse_lsn(lsn_str: &str) -> Result<u64> {
     let parts: Vec<&str> = lsn_str.split('/').collect();
     if parts.len() != 2 {
         return Err(anyhow!("Invalid LSN format: {lsn_str}"));
@@ -518,4 +591,24 @@ fn parse_lsn(lsn_str: &str) -> Result<u64> {
     let low = u64::from_str_radix(parts[1], 16)?;
 
     Ok((high << 32) | low)
+}
+
+/// Encodes a WAL LSN as the opaque source-position bytes used by checkpoints and resume.
+pub(crate) fn lsn_to_position_bytes(lsn: u64) -> Bytes {
+    Bytes::from(lsn.to_be_bytes().to_vec())
+}
+
+/// Decodes opaque source-position bytes back to a WAL LSN.
+pub(crate) fn position_bytes_to_lsn(position: &Bytes) -> Result<u64> {
+    if position.len() != 8 {
+        return Err(anyhow!(
+            "Invalid Postgres LSN position: expected 8 bytes, got {}",
+            position.len()
+        ));
+    }
+
+    let bytes: [u8; 8] = position[..8]
+        .try_into()
+        .map_err(|_| anyhow!("unexpected: array conversion failed after length check"))?;
+    Ok(u64::from_be_bytes(bytes))
 }

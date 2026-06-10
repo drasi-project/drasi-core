@@ -29,8 +29,8 @@ use crate::{
     },
     index_cache::shadowed_future_queue::ShadowedFutureQueue,
     interface::{
-        ElementArchiveIndex, ElementIndex, FutureQueue, MiddlewareSetupError, QueryBuilderError,
-        ResultIndex,
+        ElementArchiveIndex, ElementIndex, FutureQueue, MiddlewareSetupError, NoOpSessionControl,
+        QueryBuilderError, ResultIndex, SessionControl,
     },
     middleware::{
         MiddlewareContainer, MiddlewareTypeRegistry, SourceMiddlewarePipeline,
@@ -54,6 +54,7 @@ pub struct QueryBuilder {
     middleware_registry: Option<Arc<MiddlewareTypeRegistry>>,
     source_middleware: Vec<Arc<SourceMiddlewareConfig>>,
     source_pipelines: HashMap<Arc<str>, Vec<Arc<str>>>,
+    session_control: Option<Arc<dyn SessionControl>>,
 
     query_source: String,
     query_parser: Arc<dyn QueryParser>,
@@ -73,6 +74,7 @@ impl QueryBuilder {
             middleware_registry: None,
             source_middleware: Vec::new(),
             source_pipelines: HashMap::new(),
+            session_control: None,
             query_source: query.into(),
             query_parser: parser,
         }
@@ -135,6 +137,11 @@ impl QueryBuilder {
 
     pub fn with_future_queue(mut self, future_queue: Arc<dyn FutureQueue>) -> Self {
         self.future_queue = Some(future_queue);
+        self
+    }
+
+    pub fn with_session_control(mut self, sc: Arc<dyn SessionControl>) -> Self {
+        self.session_control = Some(sc);
         self
     }
 
@@ -222,6 +229,11 @@ impl QueryBuilder {
             }
         }?;
 
+        let session_control = match self.session_control.take() {
+            Some(sc) => sc,
+            None => Arc::new(NoOpSessionControl),
+        };
+
         element_index.set_joins(&match_path, &self.joins).await;
 
         Ok(ContinuousQuery::new(
@@ -233,6 +245,7 @@ impl QueryBuilder {
             part_evaluator,
             future_queue,
             source_pipelines,
+            session_control,
         ))
     }
 }

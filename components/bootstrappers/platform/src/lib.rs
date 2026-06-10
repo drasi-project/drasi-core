@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! Platform bootstrap plugin for Drasi
 //!
 //! This plugin provides the Platform bootstrap provider implementation for fetching
@@ -40,10 +42,25 @@
 //!     .expect("Failed to create provider");
 //! ```
 
+pub mod descriptor;
 pub mod platform;
 
 pub use drasi_lib::bootstrap::PlatformBootstrapConfig;
 pub use platform::{PlatformBootstrapProvider, PlatformBootstrapProviderBuilder};
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "platform-bootstrap",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [descriptor::PlatformBootstrapDescriptor],
+);
 
 #[cfg(test)]
 mod tests {

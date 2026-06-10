@@ -14,29 +14,32 @@
 
 //! # Storage Backend Configuration for DrasiLib
 //!
-//! This module provides configuration and factory support for different storage backends
-//! that can be used for query indexes. DrasiLib supports three storage backends:
+//! This module provides configuration and factory support for the storage backends
+//! used for query indexes. A storage backend is either in-memory or a named persistent
+//! plugin (e.g. RocksDB or Redis/Garnet).
 //!
 //! ## Storage Backend Types
 //!
-//! - **Memory**: In-memory storage (volatile, fast, no persistence)
-//! - **RocksDB**: Local persistent storage using RocksDB (persistent, local, production-ready)
-//! - **Redis/Garnet**: Distributed storage using Redis/Garnet (persistent, distributed, scalable)
+//! - **Memory**: In-memory storage (volatile, fast, no persistence). Fully self-contained.
+//! - **Plugin** (`kind: rocksdb`, `kind: redis`, ...): Persistent storage provided by an
+//!   index backend plugin. The backend is selected by `kind` and carries its own
+//!   plugin-specific config (e.g. `path`, `connectionString`).
 //!
 //! ## Configuration
 //!
-//! Storage backends can be configured globally and referenced by queries, or configured
-//! inline for specific queries.
+//! Storage backends can be declared globally and referenced by id, or configured inline
+//! on a single query. Both use a `kind` discriminator and camelCase fields, consistent
+//! with every other DrasiLib component DTO.
 //!
-//! ### Named Backends (Global Configuration)
+//! ### Named Backends (Global Declaration)
 //!
 //! ```yaml
 //! storage_backends:
 //!   - id: rocks_persistent
-//!     backend_type: rocksdb
+//!     kind: rocksdb
 //!     path: /data/drasi
-//!     enable_archive: true
-//!     direct_io: false
+//!     enableArchive: true
+//!     directIo: false
 //!
 //! queries:
 //!   - id: my_query
@@ -53,10 +56,37 @@
 //!     query: "MATCH (n) RETURN n"
 //!     sources: [my_source]
 //!     storage_backend:
-//!       backend_type: rocksdb
-//!       path: /data/drasi
-//!       enable_archive: true
+//!       kind: memory
+//!       enableArchive: true
 //! ```
+//!
+//! ## Embedded (in-process) usage
+//!
+//! When running DrasiLib as an embedded Rust library, persistent (plugin) backends are
+//! supplied as pre-built providers and registered by name via
+//! [`crate::builder::DrasiLibBuilder::with_index_provider`]. A query selects a provider
+//! by referencing that same name through [`StorageBackendRef::Named`]:
+//!
+//! ```ignore
+//! use drasi_index_rocksdb::RocksDbIndexProvider;
+//! use drasi_lib::{DrasiLib, Query, StorageBackendRef};
+//! use std::sync::Arc;
+//!
+//! let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
+//! let query = Query::cypher("my_query")
+//!     .query("MATCH (n) RETURN n")
+//!     .from_source("my_source")
+//!     .with_storage_backend(StorageBackendRef::Named("rocksdb".to_string()))
+//!     .build();
+//! let core = DrasiLib::builder()
+//!     .with_index_provider("rocksdb", Arc::new(provider))
+//!     .with_query(query)
+//!     .build()
+//!     .await?;
+//! ```
+//!
+//! Only in-memory backends can be instantiated purely from configuration in embedded
+//! mode; a plugin backend always requires a matching injected provider.
 //!
 //! ## Performance Characteristics
 //!
@@ -70,7 +100,9 @@ pub mod config;
 pub mod factory;
 
 pub use config::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
-pub use factory::{IndexError, IndexFactory, IndexSet};
+pub use factory::{IndexError, IndexFactory};
 
-// Re-export IndexBackendPlugin from drasi_core for plugin developers
+// Re-export IndexSet and IndexBackendPlugin from drasi_core for plugin developers
+pub use drasi_core::interface::CreatedIndexes;
 pub use drasi_core::interface::IndexBackendPlugin;
+pub use drasi_core::interface::IndexSet;

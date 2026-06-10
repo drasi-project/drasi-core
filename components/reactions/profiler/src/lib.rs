@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! Profiler reaction plugin for Drasi
 //!
 //! This plugin implements Profiler reactions for Drasi.
@@ -29,6 +31,7 @@
 //! ```
 
 pub mod config;
+pub mod descriptor;
 pub mod profiler;
 
 pub use config::ProfilerReactionConfig;
@@ -150,3 +153,17 @@ mod tests {
         assert_eq!(reaction.id(), "test-reaction");
     }
 }
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "profiler-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::ProfilerReactionDescriptor],
+    bootstrap_descriptors = [],
+);

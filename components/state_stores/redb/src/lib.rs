@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! Redb-Based State Store Provider for Drasi
 //!
 //! This crate provides a persistent state store provider using [redb](https://docs.rs/redb),

@@ -1029,6 +1029,24 @@ When modifying the gRPC source:
 
 Licensed under the Apache License, Version 2.0. See the LICENSE file for details.
 
+## Plugin Packaging
+
+This source is compiled as a dynamic plugin (cdylib) that can be loaded by drasi-server at runtime.
+
+**Key files:**
+- `Cargo.toml` — includes `crate-type = ["lib", "cdylib"]`
+- `src/descriptor.rs` — implements `SourcePluginDescriptor` with kind `"grpc"`, configuration DTO, and OpenAPI schema generation
+- `src/lib.rs` — invokes `drasi_plugin_sdk::export_plugin!` to export the plugin entry point
+
+**Building:**
+```bash
+cargo build -p drasi-source-grpc
+```
+
+The compiled `.so` (Linux) / `.dylib` (macOS) / `.dll` (Windows) is placed in `target/debug/` and can be copied to the server's `plugins/` directory.
+
+For more details on the plugin descriptor pattern and configuration DTOs, see the [Source Developer Guide](../README.md#packaging-as-a-dynamic-plugin).
+
 ## Related Components
 
 - **HTTP Source**: REST API alternative for web applications

@@ -1,5 +1,4 @@
-#![allow(clippy::unwrap_used)]
-// Copyright 2024 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used)]
 use std::sync::Arc;
 
 use serde_json::json;
@@ -29,6 +29,7 @@ use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod data;
@@ -141,14 +142,18 @@ pub async fn crosses_above_and_stays_above(config: &(impl QueryTestConfig + Send
         // println!("Node Result - Update sensor value ({}): {:?}", timestamp, node_result);
         assert_eq!(node_result.len(), 1);
 
-        assert!(node_result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "freezerId" => VariableValue::from(json!("equip_01")),
-              // "timeRangeStart" => VariableValue::from(json!(1696150860)),
-              // "timeRangeEnd" => VariableValue::from(json!(1696151760)),
-              "minTempInTimeRange" => VariableValue::from(json!(36))
-            )
-        }));
+        assert!(contains_data(
+            &node_result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "freezerId" => VariableValue::from(json!("equip_01")),
+                  // "timeRangeStart" => VariableValue::from(json!(1696150860)),
+                  // "timeRangeEnd" => VariableValue::from(json!(1696151760)),
+                  "minTempInTimeRange" => VariableValue::from(json!(36))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         timestamp += 60;
     }
@@ -175,13 +180,17 @@ pub async fn crosses_above_and_stays_above(config: &(impl QueryTestConfig + Send
         // println!("Node Result - Update sensor value ({}): {:?}", timestamp, node_result);
         assert_eq!(node_result.len(), 1);
 
-        assert!(node_result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "freezerId" => VariableValue::from(json!("equip_01")),
-              // "timeRangeStart" => VariableValue::from(json!(1696150860)),
-              // "timeRangeEnd" => VariableValue::from(json!(1696151760)),
-              "minTempInTimeRange" => VariableValue::from(json!(36))
-            )
-        }));
+        assert!(contains_data(
+            &node_result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "freezerId" => VariableValue::from(json!("equip_01")),
+                  // "timeRangeStart" => VariableValue::from(json!(1696150860)),
+                  // "timeRangeEnd" => VariableValue::from(json!(1696151760)),
+                  "minTempInTimeRange" => VariableValue::from(json!(36))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }

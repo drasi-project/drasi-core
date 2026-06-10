@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! Application reaction plugin for Drasi
 //!
 //! This plugin implements Application reactions for Drasi.
@@ -34,6 +36,7 @@
 
 pub mod application;
 pub mod config;
+pub mod descriptor;
 pub mod subscription;
 
 pub use application::ApplicationReaction;
@@ -125,3 +128,5 @@ mod tests {
         assert_eq!(reaction.id(), "test-reaction");
     }
 }
+
+// Core plugin — registered statically by the server, not exported for dynamic loading.

@@ -15,6 +15,7 @@
 //! MS SQL Server executor for stored procedure invocation.
 
 use anyhow::{anyhow, Result};
+use drasi_lib::identity::Credentials;
 use log::{debug, info};
 use serde_json::Value;
 use std::sync::Arc;
@@ -38,8 +39,41 @@ pub struct MsSqlExecutor {
 
 impl MsSqlExecutor {
     /// Create a new MS SQL executor
-    pub async fn new(config: &MsSqlStoredProcReactionConfig) -> Result<Self> {
+    ///
+    /// The `identity_provider` parameter allows injecting a credential provider
+    /// from the runtime context. If provided, it takes precedence over the
+    /// config's identity_provider. Falls back to config's user/password if neither is set.
+    pub async fn new(
+        config: &MsSqlStoredProcReactionConfig,
+        identity_provider: Option<std::sync::Arc<dyn drasi_lib::identity::IdentityProvider>>,
+    ) -> Result<Self> {
         let port = config.get_port();
+
+        // Resolve credentials: injected provider > config provider > user/password
+        let effective_provider = identity_provider.as_ref().map(|p| p.as_ref());
+        let config_provider = config.identity_provider.as_deref();
+        let provider = effective_provider.or(config_provider);
+
+        let (username, password) = if let Some(provider) = provider {
+            debug!("Using identity provider for authentication");
+            let context = drasi_lib::identity::CredentialContext::new()
+                .with_property("hostname", &config.hostname)
+                .with_property("port", port.to_string());
+            let credentials = provider.get_credentials(&context).await?;
+            if credentials.is_certificate() {
+                anyhow::bail!(
+                    "Certificate-based authentication is not supported for MS SQL Server. \
+                     The tiberius driver does not expose client certificate configuration. \
+                     Use token or password authentication instead."
+                );
+            }
+            credentials
+                .try_into_auth_pair()
+                .map_err(|_| anyhow::anyhow!("Unexpected credential type for MS SQL Server"))?
+        } else {
+            debug!("Using username/password for authentication");
+            (config.user.clone(), config.password.clone())
+        };
 
         info!(
             "Connecting to MS SQL Server: {}:{}/{}",
@@ -50,7 +84,7 @@ impl MsSqlExecutor {
         let mut tiberius_config = TiberiusConfig::new();
         tiberius_config.host(&config.hostname);
         tiberius_config.port(port);
-        tiberius_config.authentication(AuthMethod::sql_server(&config.user, &config.password));
+        tiberius_config.authentication(AuthMethod::sql_server(&username, &password));
         tiberius_config.database(&config.database);
         tiberius_config.trust_cert(); // For self-signed certificates
 

@@ -14,7 +14,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use super::process_solution;
+use super::{process_solution, IGNORED_ROW_SIGNATURE};
 
 use crate::{
     evaluation::{
@@ -80,6 +80,7 @@ async fn aggregating_part_to_scalar_part_add_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -90,6 +91,7 @@ async fn aggregating_part_to_scalar_part_add_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -99,7 +101,8 @@ async fn aggregating_part_to_scalar_part_add_solution() {
             after: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(3.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -108,6 +111,7 @@ async fn aggregating_part_to_scalar_part_add_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -117,7 +121,8 @@ async fn aggregating_part_to_scalar_part_add_solution() {
             after: variablemap![
               "key" => json!("bar"),
               "my_sum" => json!(5.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -195,6 +200,7 @@ async fn aggregating_part_to_scalar_part_update_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -204,6 +210,7 @@ async fn aggregating_part_to_scalar_part_update_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -213,6 +220,7 @@ async fn aggregating_part_to_scalar_part_update_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -223,6 +231,7 @@ async fn aggregating_part_to_scalar_part_update_solution() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node1a.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -236,7 +245,8 @@ async fn aggregating_part_to_scalar_part_update_solution() {
             after: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(4.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -246,6 +256,7 @@ async fn aggregating_part_to_scalar_part_update_solution() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1a.clone()],
             after: variablemap!["a" => node1b.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -259,7 +270,8 @@ async fn aggregating_part_to_scalar_part_update_solution() {
             after: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(3.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -269,6 +281,7 @@ async fn aggregating_part_to_scalar_part_update_solution() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1b.clone()],
             after: variablemap!["a" => node1c.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -279,6 +292,7 @@ async fn aggregating_part_to_scalar_part_update_solution() {
               "key" => json!("foo"),
               "my_sum" => json!(3.0)
             ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -288,6 +302,7 @@ async fn aggregating_part_to_scalar_part_update_solution() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1c.clone()],
             after: variablemap!["a" => node1d.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -298,6 +313,7 @@ async fn aggregating_part_to_scalar_part_update_solution() {
               "key" => json!("foo"),
               "my_sum" => json!(7.0)
             ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -307,6 +323,7 @@ async fn aggregating_part_to_scalar_part_update_solution() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node2.clone()],
             after: variablemap!["a" => node2a.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -321,6 +338,7 @@ async fn aggregating_part_to_scalar_part_update_solution() {
               "key" => json!("foo"),
               "my_sum" => json!(5.0)
             ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -368,6 +386,7 @@ async fn aggregating_part_to_scalar_part_remove_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -377,6 +396,7 @@ async fn aggregating_part_to_scalar_part_remove_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -386,6 +406,7 @@ async fn aggregating_part_to_scalar_part_remove_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -395,6 +416,7 @@ async fn aggregating_part_to_scalar_part_remove_solution() {
         &evaluator,
         QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -408,7 +430,8 @@ async fn aggregating_part_to_scalar_part_remove_solution() {
             after: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(1.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -417,6 +440,7 @@ async fn aggregating_part_to_scalar_part_remove_solution() {
         &evaluator,
         QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -427,6 +451,7 @@ async fn aggregating_part_to_scalar_part_remove_solution() {
               "key" => json!("foo"),
               "my_sum" => json!(1.0)
             ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -476,6 +501,7 @@ async fn aggregating_part_to_aggregating_part_add_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -493,6 +519,7 @@ async fn aggregating_part_to_aggregating_part_add_solution() {
             grouping_keys: vec!["Category".to_string()],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -501,6 +528,7 @@ async fn aggregating_part_to_aggregating_part_add_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -518,6 +546,7 @@ async fn aggregating_part_to_aggregating_part_add_solution() {
             grouping_keys: vec!["Category".to_string()],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -526,6 +555,7 @@ async fn aggregating_part_to_aggregating_part_add_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -543,6 +573,7 @@ async fn aggregating_part_to_aggregating_part_add_solution() {
             grouping_keys: vec!["Category".to_string()],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -598,6 +629,7 @@ async fn aggregating_part_to_aggregating_part_update_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -607,6 +639,7 @@ async fn aggregating_part_to_aggregating_part_update_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -616,6 +649,7 @@ async fn aggregating_part_to_aggregating_part_update_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -626,6 +660,7 @@ async fn aggregating_part_to_aggregating_part_update_solution() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node1a.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -643,6 +678,7 @@ async fn aggregating_part_to_aggregating_part_update_solution() {
             grouping_keys: vec!["Category".to_string()],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -706,6 +742,7 @@ async fn aggregating_part_to_aggregating_part_group_switch() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -715,6 +752,7 @@ async fn aggregating_part_to_aggregating_part_group_switch() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -724,6 +762,7 @@ async fn aggregating_part_to_aggregating_part_group_switch() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -734,6 +773,7 @@ async fn aggregating_part_to_aggregating_part_group_switch() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node1a.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -751,6 +791,7 @@ async fn aggregating_part_to_aggregating_part_group_switch() {
             grouping_keys: vec!["Category".to_string()],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -760,6 +801,7 @@ async fn aggregating_part_to_aggregating_part_group_switch() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1a.clone()],
             after: variablemap!["a" => node1b.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -778,6 +820,7 @@ async fn aggregating_part_to_aggregating_part_group_switch() {
                 grouping_keys: vec!["Category".to_string()],
                 default_before: false,
                 default_after: false,
+                row_signature: IGNORED_ROW_SIGNATURE,
             },
             QueryPartEvaluationContext::Aggregation {
                 before: Some(variablemap![
@@ -791,6 +834,7 @@ async fn aggregating_part_to_aggregating_part_group_switch() {
                 grouping_keys: vec!["Category".to_string()],
                 default_before: false,
                 default_after: false,
+                row_signature: IGNORED_ROW_SIGNATURE,
             },
         ]
     );
@@ -817,6 +861,7 @@ async fn test_list_indexing_with_clause() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: BTreeMap::new(),
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -825,7 +870,8 @@ async fn test_list_indexing_with_clause() {
         vec![QueryPartEvaluationContext::Adding {
             after: variablemap![
               "expression" => json!(7)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -891,6 +937,7 @@ async fn aggregating_part_to_aggregating_part_group_switch_with_comments() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -900,6 +947,7 @@ async fn aggregating_part_to_aggregating_part_group_switch_with_comments() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -909,6 +957,7 @@ async fn aggregating_part_to_aggregating_part_group_switch_with_comments() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -919,6 +968,7 @@ async fn aggregating_part_to_aggregating_part_group_switch_with_comments() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node1a.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -936,6 +986,7 @@ async fn aggregating_part_to_aggregating_part_group_switch_with_comments() {
             grouping_keys: vec!["Category".to_string()],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -945,6 +996,7 @@ async fn aggregating_part_to_aggregating_part_group_switch_with_comments() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1a.clone()],
             after: variablemap!["a" => node1b.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -963,6 +1015,7 @@ async fn aggregating_part_to_aggregating_part_group_switch_with_comments() {
                 grouping_keys: vec!["Category".to_string()],
                 default_before: false,
                 default_after: false,
+                row_signature: IGNORED_ROW_SIGNATURE,
             },
             QueryPartEvaluationContext::Aggregation {
                 before: Some(variablemap![
@@ -976,6 +1029,7 @@ async fn aggregating_part_to_aggregating_part_group_switch_with_comments() {
                 grouping_keys: vec!["Category".to_string()],
                 default_before: false,
                 default_after: false,
+                row_signature: IGNORED_ROW_SIGNATURE,
             },
         ]
     );
@@ -1027,6 +1081,7 @@ async fn sequential_aggregations1() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -1042,6 +1097,7 @@ async fn sequential_aggregations1() {
             grouping_keys: vec![],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1050,6 +1106,7 @@ async fn sequential_aggregations1() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -1065,6 +1122,7 @@ async fn sequential_aggregations1() {
             grouping_keys: vec![],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1073,6 +1131,7 @@ async fn sequential_aggregations1() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -1088,6 +1147,7 @@ async fn sequential_aggregations1() {
             grouping_keys: vec![],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1096,6 +1156,7 @@ async fn sequential_aggregations1() {
         &evaluator,
         QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -1111,6 +1172,7 @@ async fn sequential_aggregations1() {
             grouping_keys: vec![],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1119,6 +1181,7 @@ async fn sequential_aggregations1() {
         &evaluator,
         QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -1134,6 +1197,7 @@ async fn sequential_aggregations1() {
             grouping_keys: vec![],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -1183,6 +1247,7 @@ async fn sequential_aggregations2() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -1198,6 +1263,7 @@ async fn sequential_aggregations2() {
             grouping_keys: vec![],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1206,6 +1272,7 @@ async fn sequential_aggregations2() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -1221,6 +1288,7 @@ async fn sequential_aggregations2() {
             grouping_keys: vec![],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1229,6 +1297,7 @@ async fn sequential_aggregations2() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -1244,6 +1313,7 @@ async fn sequential_aggregations2() {
             grouping_keys: vec![],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1252,6 +1322,7 @@ async fn sequential_aggregations2() {
         &evaluator,
         QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -1267,6 +1338,7 @@ async fn sequential_aggregations2() {
             grouping_keys: vec![],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1275,6 +1347,7 @@ async fn sequential_aggregations2() {
         &evaluator,
         QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -1290,6 +1363,7 @@ async fn sequential_aggregations2() {
             grouping_keys: vec![],
             default_before: false,
             default_after: false,
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -1342,6 +1416,7 @@ async fn aggregating_part_to_scalar_part_add_solution_emit_remove() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -1351,7 +1426,8 @@ async fn aggregating_part_to_scalar_part_add_solution_emit_remove() {
             after: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(1.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1360,6 +1436,7 @@ async fn aggregating_part_to_scalar_part_add_solution_emit_remove() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -1373,7 +1450,8 @@ async fn aggregating_part_to_scalar_part_add_solution_emit_remove() {
             after: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(3.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1382,6 +1460,7 @@ async fn aggregating_part_to_scalar_part_add_solution_emit_remove() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -1391,7 +1470,8 @@ async fn aggregating_part_to_scalar_part_add_solution_emit_remove() {
             after: variablemap![
               "key" => json!("bar"),
               "my_sum" => json!(5.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1400,6 +1480,7 @@ async fn aggregating_part_to_scalar_part_add_solution_emit_remove() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node4.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -1412,7 +1493,8 @@ async fn aggregating_part_to_scalar_part_add_solution_emit_remove() {
             before: variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(3.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }

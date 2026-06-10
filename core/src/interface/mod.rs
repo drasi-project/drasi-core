@@ -12,16 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod checkpoint_store;
 mod element_index;
 mod future_queue;
 mod index_backend;
+mod live_results_writer;
+mod outbox_writer;
 mod query_clock;
 mod result_index;
+mod session_control;
 mod source_middleware;
 
 use std::error::Error;
 use std::fmt::Display;
 
+pub use checkpoint_store::CheckpointStore;
+pub use checkpoint_store::SourceCheckpoint;
 use drasi_query_ast::api::QueryParseError;
 pub use element_index::ElementArchiveIndex;
 pub use element_index::ElementIndex;
@@ -31,7 +37,12 @@ pub use future_queue::FutureElementRef;
 pub use future_queue::FutureQueue;
 pub use future_queue::FutureQueueConsumer;
 pub use future_queue::PushType;
+pub use index_backend::CreatedIndexes;
 pub use index_backend::IndexBackendPlugin;
+pub use index_backend::IndexSet;
+pub use live_results_writer::LiveResultsWriter;
+pub use live_results_writer::RowMutation;
+pub use outbox_writer::OutboxWriter;
 pub use query_clock::QueryClock;
 pub use result_index::AccumulatorIndex;
 pub use result_index::LazySortedSetStore;
@@ -40,6 +51,9 @@ pub use result_index::ResultKey;
 pub use result_index::ResultOwner;
 pub use result_index::ResultSequence;
 pub use result_index::ResultSequenceCounter;
+pub use session_control::NoOpSessionControl;
+pub use session_control::SessionControl;
+pub use session_control::SessionGuard;
 pub use source_middleware::MiddlewareError;
 pub use source_middleware::MiddlewareSetupError;
 pub use source_middleware::SourceMiddleware;

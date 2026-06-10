@@ -24,9 +24,11 @@ use shared_tests::QueryTestConfig;
 use uuid::Uuid;
 
 use drasi_index_rocksdb::{
-    element_index::{self, RocksDbElementIndex},
+    element_index::{RocksDbElementIndex, RocksIndexOptions},
     future_queue::RocksDbFutureQueue,
+    open_unified_db,
     result_index::RocksDbResultIndex,
+    RocksDbSessionControl, RocksDbSessionState,
 };
 
 struct RocksDbQueryConfig {
@@ -46,8 +48,21 @@ impl RocksDbQueryConfig {
     }
 
     #[allow(clippy::unwrap_used)]
-    pub fn build_future_queue(&self, query_id: &str) -> RocksDbFutureQueue {
-        RocksDbFutureQueue::new(query_id, &self.url).unwrap()
+    pub fn build_future_queue(
+        &self,
+        query_id: &str,
+    ) -> (
+        RocksDbFutureQueue,
+        Arc<dyn drasi_core::interface::SessionControl>,
+    ) {
+        let options = RocksIndexOptions {
+            archive_enabled: true,
+            direct_io: false,
+        };
+        let db = open_unified_db(&self.url, query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        (RocksDbFutureQueue::new(db, session_state), session_control)
     }
 }
 
@@ -65,14 +80,18 @@ impl QueryTestConfig for RocksDbQueryConfig {
         log::info!("using in RocksDb indexes");
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let options = element_index::RocksIndexOptions {
+        let options = RocksIndexOptions {
             archive_enabled: true,
             direct_io: false,
         };
 
-        let element_index = RocksDbElementIndex::new(&query_id, &self.url, options).unwrap();
-        let ari = RocksDbResultIndex::new(&query_id, &self.url).unwrap();
-        let fqi = RocksDbFutureQueue::new(&query_id, &self.url).unwrap();
+        let db = open_unified_db(&self.url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+
+        let element_index = RocksDbElementIndex::new(db.clone(), options, session_state.clone());
+        let ari = RocksDbResultIndex::new(db.clone(), session_state.clone());
+        let fqi = RocksDbFutureQueue::new(db, session_state.clone());
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state));
 
         element_index.clear().await.unwrap();
         ari.clear().await.unwrap();
@@ -85,6 +104,7 @@ impl QueryTestConfig for RocksDbQueryConfig {
             .with_archive_index(element_index.clone())
             .with_result_index(Arc::new(ari))
             .with_future_queue(Arc::new(fqi))
+            .with_session_control(session_control)
     }
 }
 
@@ -266,27 +286,35 @@ mod index {
     #[serial]
     async fn future_queue_push_always() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_always(&fqi).await;
+        shared_tests::index::future_queue::push_always(&fqi, &sc).await;
     }
 
     #[tokio::test]
     #[serial]
     async fn future_queue_push_not_exists() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_not_exists(&fqi).await;
+        shared_tests::index::future_queue::push_not_exists(&fqi, &sc).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn future_queue_clear_removes_all() {
+        let test_config = RocksDbQueryConfig::new();
+        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        shared_tests::index::future_queue::clear_removes_all(&fqi, &sc).await;
     }
 
     #[tokio::test]
     #[serial]
     async fn future_queue_push_overwrite() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_overwrite(&fqi).await;
+        shared_tests::index::future_queue::push_overwrite(&fqi, &sc).await;
     }
 }
 
@@ -371,6 +399,173 @@ mod collect_aggregation {
     }
 }
 
+mod session {
+    use std::sync::Arc;
+
+    use drasi_core::{
+        evaluation::functions::aggregation::ValueAccumulator,
+        interface::{
+            AccumulatorIndex, ElementIndex, FutureQueue, PushType, ResultKey, ResultOwner,
+            SessionControl,
+        },
+        models::{Element, ElementMetadata, ElementPropertyMap, ElementReference},
+    };
+    use drasi_index_rocksdb::{
+        element_index::{RocksDbElementIndex, RocksIndexOptions},
+        future_queue::RocksDbFutureQueue,
+        open_unified_db,
+        result_index::RocksDbResultIndex,
+        RocksDbSessionControl, RocksDbSessionState,
+    };
+    use serial_test::serial;
+    use uuid::Uuid;
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    #[serial]
+    async fn session_rollback_discards_writes() {
+        let url = format!("test-data/{}", Uuid::new_v4());
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions {
+            archive_enabled: true,
+            direct_io: false,
+        };
+        let db = open_unified_db(&url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let element_index = RocksDbElementIndex::new(db.clone(), options, session_state.clone());
+        let result_index = RocksDbResultIndex::new(db.clone(), session_state.clone());
+        let future_queue = RocksDbFutureQueue::new(db, session_state.clone());
+        let session_control = RocksDbSessionControl::new(session_state);
+
+        element_index.clear().await.unwrap();
+        result_index.clear().await.unwrap();
+        future_queue.clear().await.unwrap();
+
+        let element_ref = ElementReference::new("source1", "node1");
+        let node = Element::Node {
+            metadata: ElementMetadata {
+                reference: element_ref.clone(),
+                labels: Arc::new([Arc::from("TestLabel")]),
+                effective_from: 1000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+        let result_key = ResultKey::InputHash(1);
+        let result_owner = ResultOwner::Function(0);
+
+        // Begin session, write to all three indexes, then rollback
+        session_control.begin().await.unwrap();
+
+        element_index.set_element(&node, &vec![]).await.unwrap();
+        result_index
+            .set(
+                result_key.clone(),
+                result_owner.clone(),
+                Some(ValueAccumulator::Count { value: 42 }),
+            )
+            .await
+            .unwrap();
+        future_queue
+            .push(PushType::Always, 1, 1, &element_ref, 10, 20)
+            .await
+            .unwrap();
+
+        session_control.rollback();
+
+        // Verify nothing persisted (reads require a session)
+        session_control.begin().await.unwrap();
+
+        let elem = element_index.get_element(&element_ref).await.unwrap();
+        assert!(elem.is_none(), "element should not persist after rollback");
+
+        let acc = result_index.get(&result_key, &result_owner).await.unwrap();
+        assert!(
+            acc.is_none(),
+            "accumulator should not persist after rollback"
+        );
+
+        session_control.rollback().unwrap();
+
+        let due = future_queue.peek_due_time().await.unwrap();
+        assert!(due.is_none(), "future queue should be empty after rollback");
+
+        let _ = std::fs::remove_dir_all(&url);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    #[serial]
+    async fn session_commit_persists_writes() {
+        let url = format!("test-data/{}", Uuid::new_v4());
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions {
+            archive_enabled: true,
+            direct_io: false,
+        };
+        let db = open_unified_db(&url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let element_index = RocksDbElementIndex::new(db.clone(), options, session_state.clone());
+        let result_index = RocksDbResultIndex::new(db.clone(), session_state.clone());
+        let future_queue = RocksDbFutureQueue::new(db, session_state.clone());
+        let session_control = RocksDbSessionControl::new(session_state);
+
+        element_index.clear().await.unwrap();
+        result_index.clear().await.unwrap();
+        future_queue.clear().await.unwrap();
+
+        let element_ref = ElementReference::new("source1", "node1");
+        let node = Element::Node {
+            metadata: ElementMetadata {
+                reference: element_ref.clone(),
+                labels: Arc::new([Arc::from("TestLabel")]),
+                effective_from: 1000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+        let result_key = ResultKey::InputHash(1);
+        let result_owner = ResultOwner::Function(0);
+
+        // Begin session, write to all three indexes, then commit
+        session_control.begin().await.unwrap();
+
+        element_index.set_element(&node, &vec![]).await.unwrap();
+        result_index
+            .set(
+                result_key.clone(),
+                result_owner.clone(),
+                Some(ValueAccumulator::Count { value: 42 }),
+            )
+            .await
+            .unwrap();
+        future_queue
+            .push(PushType::Always, 1, 1, &element_ref, 10, 20)
+            .await
+            .unwrap();
+
+        session_control.commit().await.unwrap();
+
+        // Verify data persisted (reads require a session)
+        session_control.begin().await.unwrap();
+
+        let elem = element_index.get_element(&element_ref).await.unwrap();
+        assert!(elem.is_some(), "element should persist after commit");
+
+        let acc = result_index.get(&result_key, &result_owner).await.unwrap();
+        assert!(acc.is_some(), "accumulator should persist after commit");
+        match acc.unwrap() {
+            ValueAccumulator::Count { value } => assert_eq!(value, 42),
+            other => panic!("expected Count, got {other:?}"),
+        }
+
+        session_control.rollback().unwrap();
+
+        let due = future_queue.peek_due_time().await.unwrap();
+        assert_eq!(due, Some(20));
+
+        let _ = std::fs::remove_dir_all(&url);
+    }
+}
+
 mod source_update_upsert {
     use super::RocksDbQueryConfig;
     use shared_tests::use_cases::*;
@@ -415,5 +610,200 @@ mod source_update_upsert {
     async fn test_aggregation_with_upserts() {
         let test_config = RocksDbQueryConfig::new();
         source_update_upsert::test_aggregation_with_upserts(&test_config).await;
+    }
+}
+
+mod checkpoint_tests {
+    use super::*;
+    use drasi_core::interface::{CheckpointStore, SessionControl};
+    use drasi_index_rocksdb::checkpoint::RocksDbCheckpointStore;
+
+    #[tokio::test]
+    async fn sequence_counter() {
+        let config = RocksDbQueryConfig::new();
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions {
+            archive_enabled: false,
+            direct_io: false,
+        };
+        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        let subject = RocksDbCheckpointStore::new(db, session_state);
+
+        session_control.begin().await.unwrap();
+        shared_tests::sequence_counter::sequence_counter(&subject).await;
+        session_control.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_round_trip() {
+        let config = RocksDbQueryConfig::new();
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions {
+            archive_enabled: false,
+            direct_io: false,
+        };
+        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        let subject = RocksDbCheckpointStore::new(db, session_state);
+
+        session_control.begin().await.unwrap();
+        shared_tests::sequence_counter::checkpoint_round_trip(&subject).await;
+        session_control.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn result_sequence_counter() {
+        let config = RocksDbQueryConfig::new();
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions {
+            archive_enabled: false,
+            direct_io: false,
+        };
+        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        let subject = RocksDbResultIndex::new(db, session_state);
+
+        session_control.begin().await.unwrap();
+        shared_tests::sequence_counter::result_sequence_counter(&subject).await;
+        session_control.commit().await.unwrap();
+    }
+
+    /// Verifies that checkpoints staged inside a session can be read back
+    /// WITHOUT an active session. This is the exact startup scenario:
+    /// a previous run stages & commits checkpoints, then on restart the
+    /// query manager reads them before opening any session.
+    #[tokio::test]
+    async fn checkpoint_read_outside_session() {
+        use bytes::Bytes;
+
+        let config = RocksDbQueryConfig::new();
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions {
+            archive_enabled: false,
+            direct_io: false,
+        };
+        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        let subject = RocksDbCheckpointStore::new(db, session_state);
+
+        // --- Stage checkpoints inside a session and commit ---
+        session_control.begin().await.unwrap();
+
+        let pos_pg = Bytes::from_static(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        subject
+            .stage_checkpoint("source-pg", 10, Some(&pos_pg))
+            .await
+            .unwrap();
+
+        let pos_mssql = Bytes::from(vec![0xAA; 20]);
+        subject
+            .stage_checkpoint("source-mssql", 20, Some(&pos_mssql))
+            .await
+            .unwrap();
+
+        session_control.commit().await.unwrap();
+        // Session is now closed — no active transaction
+
+        // --- Read individual checkpoints without a session ---
+        let cp_pg = subject
+            .read_checkpoint("source-pg")
+            .await
+            .expect("read_checkpoint should succeed without a session")
+            .expect("expected checkpoint for source-pg");
+        assert_eq!(cp_pg.sequence, 10);
+        assert_eq!(cp_pg.source_position.as_ref(), Some(&pos_pg));
+
+        let cp_mssql = subject
+            .read_checkpoint("source-mssql")
+            .await
+            .expect("read_checkpoint should succeed without a session")
+            .expect("expected checkpoint for source-mssql");
+        assert_eq!(cp_mssql.sequence, 20);
+        assert_eq!(cp_mssql.source_position.as_ref(), Some(&pos_mssql));
+
+        // Non-existent source returns None
+        let cp_none = subject
+            .read_checkpoint("source-nonexistent")
+            .await
+            .expect("read_checkpoint should succeed without a session");
+        assert!(cp_none.is_none());
+
+        // --- Read all checkpoints without a session ---
+        let all = subject
+            .read_all_checkpoints()
+            .await
+            .expect("read_all_checkpoints should succeed without a session");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all["source-pg"].sequence, 10);
+        assert_eq!(all["source-pg"].source_position.as_ref(), Some(&pos_pg));
+        assert_eq!(all["source-mssql"].sequence, 20);
+        assert_eq!(
+            all["source-mssql"].source_position.as_ref(),
+            Some(&pos_mssql)
+        );
+    }
+
+    /// Verifies that config hash can be written inside a session and read
+    /// back without a session, and that clear_checkpoints works without
+    /// a session.
+    #[tokio::test]
+    async fn config_hash_and_clear_outside_session() {
+        use bytes::Bytes;
+
+        let config = RocksDbQueryConfig::new();
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions {
+            archive_enabled: false,
+            direct_io: false,
+        };
+        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        let subject = RocksDbCheckpointStore::new(db, session_state);
+
+        // --- Write config hash (does not require a session) ---
+        subject
+            .write_config_hash(42)
+            .await
+            .expect("write_config_hash should succeed without a session");
+
+        // --- Read config hash without a session ---
+        let hash = subject
+            .read_config_hash()
+            .await
+            .expect("read_config_hash should succeed without a session");
+        assert_eq!(hash, Some(42));
+
+        // --- Stage a checkpoint, commit, then clear without a session ---
+        session_control.begin().await.unwrap();
+        let pos = Bytes::from_static(&[0xFF; 10]);
+        subject
+            .stage_checkpoint("src-1", 5, Some(&pos))
+            .await
+            .unwrap();
+        session_control.commit().await.unwrap();
+
+        // Verify it's there
+        let cp = subject.read_checkpoint("src-1").await.unwrap();
+        assert!(cp.is_some());
+
+        // Clear without a session
+        subject
+            .clear_checkpoints()
+            .await
+            .expect("clear_checkpoints should succeed without a session");
+
+        // Verify everything is gone
+        let cp = subject.read_checkpoint("src-1").await.unwrap();
+        assert!(cp.is_none());
+        let all = subject.read_all_checkpoints().await.unwrap();
+        assert!(all.is_empty());
+        let hash = subject.read_config_hash().await.unwrap();
+        assert!(hash.is_none());
     }
 }

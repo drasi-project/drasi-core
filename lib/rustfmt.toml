@@ -1,4 +1,4 @@
-# rustfmt configuration for Drasi Server Core
+# rustfmt configuration for drasi-lib
 # Ensures consistent code formatting across the project using stable features only
 
 # General formatting rules

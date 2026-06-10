@@ -1,3 +1,17 @@
+// Copyright 2026 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -249,16 +263,16 @@ where
     T: Clone + Send + Sync + 'static,
 {
     async fn recv(&mut self) -> Result<Arc<T>> {
-        match self.rx.recv().await {
-            Ok(change) => Ok(change),
-            Err(broadcast::error::RecvError::Closed) => {
-                Err(anyhow::anyhow!("Broadcast channel closed"))
-            }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                // Log the lag but try to continue
-                log::warn!("Broadcast receiver lagged by {n} messages");
-                // Try to receive the next message
-                self.recv().await
+        loop {
+            match self.rx.recv().await {
+                Ok(change) => return Ok(change),
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Err(anyhow::anyhow!("Broadcast channel closed"));
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    log::warn!("Broadcast receiver lagged by {n} messages");
+                    // Continue the loop to receive the next available message
+                }
             }
         }
     }
@@ -321,6 +335,16 @@ where
     rx: mpsc::Receiver<Arc<T>>,
 }
 
+impl<T> ChannelChangeReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    /// Creates a new `ChannelChangeReceiver` wrapping the given mpsc receiver.
+    pub fn new(rx: mpsc::Receiver<Arc<T>>) -> Self {
+        Self { rx }
+    }
+}
+
 #[async_trait]
 impl<T> ChangeReceiver<T> for ChannelChangeReceiver<T>
 where
@@ -334,11 +358,56 @@ where
     }
 }
 
+/// A composite receiver that yields pre-loaded replay events first, then
+/// delegates to a live channel receiver.
+///
+/// Used by WAL-backed transient sources during subscription: replay events
+/// from the WAL are loaded into memory and served first, guaranteeing correct
+/// ordering before live events begin flowing.
+///
+/// **Memory bound**: The replay buffer size is bounded by the WAL's
+/// `max_events` configuration (typically ≤10,000 events). A streaming
+/// approach could reduce peak memory for very large WALs but is not
+/// needed given the bounded capacity.
+pub struct ReplayThenLiveReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    replay: std::collections::VecDeque<Arc<T>>,
+    live: Box<dyn ChangeReceiver<T>>,
+}
+
+impl<T> ReplayThenLiveReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    /// Create a new composite receiver.
+    ///
+    /// `replay` events are served in order before delegating to `live`.
+    pub fn new(
+        replay: std::collections::VecDeque<Arc<T>>,
+        live: Box<dyn ChangeReceiver<T>>,
+    ) -> Self {
+        Self { replay, live }
+    }
+}
+
+#[async_trait]
+impl<T> ChangeReceiver<T> for ReplayThenLiveReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    async fn recv(&mut self) -> Result<Arc<T>> {
+        if let Some(event) = self.replay.pop_front() {
+            return Ok(event);
+        }
+        self.live.recv().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{sleep, Duration};
-
     #[derive(Clone, Debug, PartialEq)]
     struct TestMessage {
         id: u32,
@@ -478,7 +547,7 @@ mod tests {
         }
 
         // Give some time for messages to accumulate
-        sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
 
         // Try to receive - should handle lag and continue
         let result = receiver.recv().await;

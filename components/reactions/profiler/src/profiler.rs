@@ -19,11 +19,11 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::channels::ComponentStatus;
 use drasi_lib::managers::log_component_start;
 use drasi_lib::profiling::ProfilingMetadata;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
 use std::collections::HashMap;
 
 pub use super::config::ProfilerReactionConfig;
@@ -448,16 +448,18 @@ impl Reaction for ProfilerReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "window_size".to_string(),
-            serde_json::Value::Number(self.config.window_size.into()),
-        );
-        props.insert(
-            "report_interval_secs".to_string(),
-            serde_json::Value::Number(self.config.report_interval_secs.into()),
-        );
-        props
+        use crate::descriptor::ProfilerReactionConfigDto;
+        use drasi_plugin_sdk::ConfigValue;
+
+        let dto = ProfilerReactionConfigDto {
+            window_size: Some(ConfigValue::Static(self.config.window_size)),
+            report_interval_secs: Some(ConfigValue::Static(self.config.report_interval_secs)),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -477,23 +479,19 @@ impl Reaction for ProfilerReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting profiler reaction".to_string()),
             )
-            .await?;
-
-        // Subscribe to all configured queries using ReactionBase
-        // QueryProvider is available from initialize() context
-        self.base.subscribe_to_queries().await?;
+            .await;
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Profiler reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         info!(
             "[{}] Profiler started - window_size: {}, report_interval: {}s",
@@ -565,17 +563,36 @@ impl Reaction for ProfilerReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Profiler reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(
+        &self,
+        result: drasi_lib::channels::QueryResult,
+    ) -> anyhow::Result<()> {
+        self.base.enqueue_query_result(result).await
+    }
+
+    fn is_durable(&self) -> bool {
+        false
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        false
+    }
+
+    fn default_recovery_policy(&self) -> drasi_lib::recovery::ReactionRecoveryPolicy {
+        drasi_lib::recovery::ReactionRecoveryPolicy::AutoSkipGap
     }
 }
 

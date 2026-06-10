@@ -28,6 +28,7 @@ use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod data;
@@ -217,12 +218,16 @@ pub async fn crosses_above_three_times_in_an_hour(config: &(impl QueryTestConfig
         // println!("Node Result - Update sensor value ({}): {:?}", timestamp, result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "freezerId" => VariableValue::from(json!("equip_01")),
-              "countTempExceededInTimeRange" => VariableValue::from(json!(3))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "freezerId" => VariableValue::from(json!("equip_01")),
+                  "countTempExceededInTimeRange" => VariableValue::from(json!(3))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         timestamp += 60;
     }
@@ -249,15 +254,19 @@ pub async fn crosses_above_three_times_in_an_hour(config: &(impl QueryTestConfig
         println!("Node Result - Update sensor value ({timestamp}): {result:?}");
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "freezerId" => VariableValue::from(json!("equip_01")),
-              "countTempExceededInTimeRange" => VariableValue::from(json!(3))
-            ),
-            after: variablemap!(
-              "freezerId" => VariableValue::from(json!("equip_01")),
-              "countTempExceededInTimeRange" => VariableValue::from(json!(4))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "freezerId" => VariableValue::from(json!("equip_01")),
+                  "countTempExceededInTimeRange" => VariableValue::from(json!(3))
+                ),
+                after: variablemap!(
+                  "freezerId" => VariableValue::from(json!("equip_01")),
+                  "countTempExceededInTimeRange" => VariableValue::from(json!(4))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }

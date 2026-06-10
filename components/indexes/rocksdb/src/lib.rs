@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! RocksDB Index Backend for Drasi
 //!
 //! This crate provides a persistent storage backend for Drasi queries using RocksDB.
@@ -25,15 +27,32 @@
 //!
 //! let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
 //! let drasi = DrasiLib::builder()
-//!     .with_index_provider(Arc::new(provider))
+//!     .with_index_provider("rocksdb", Arc::new(provider))
 //!     .build()?;
 //! ```
 
+pub mod checkpoint;
+#[cfg(feature = "plugin-descriptor")]
+mod descriptor;
 pub mod element_index;
 pub mod future_queue;
+pub mod live_results;
+pub mod outbox;
 mod plugin;
 pub mod result_index;
+mod session_state;
 mod storage_models;
 
-// Re-export the plugin provider for easy access
+// Re-export the plugin provider and unified DB opener for easy access
+pub use checkpoint::RocksDbCheckpointStore;
+pub use live_results::RocksDbLiveResultsWriter;
+pub use outbox::RocksDbOutboxWriter;
+pub use plugin::open_unified_db;
 pub use plugin::RocksDbIndexProvider;
+
+#[cfg(feature = "plugin-descriptor")]
+pub use descriptor::{RocksDbIndexConfigDto, RocksDbIndexDescriptor};
+
+// Re-export session types
+pub use session_state::RocksDbSessionControl;
+pub use session_state::RocksDbSessionState;

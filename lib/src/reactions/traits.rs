@@ -41,9 +41,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use crate::channels::ComponentStatus;
+use crate::channels::{ComponentStatus, QueryResult};
 use crate::context::ReactionRuntimeContext;
 use crate::queries::Query;
+use crate::reactions::bootstrap_context::BootstrapContext;
+use crate::recovery::ReactionRecoveryPolicy;
 
 /// Trait for providing access to queries without requiring full DrasiLib dependency.
 ///
@@ -71,17 +73,15 @@ pub trait QueryProvider: Send + Sync {
 ///
 /// # Subscription Model
 ///
-/// Reactions manage their own subscriptions to queries using the broadcast channel pattern:
-/// - QueryProvider is injected via `inject_query_provider()` at add time
-/// - Reactions access queries via `query_provider.get_query_instance()`
-/// - For each query, reactions call `query.subscribe(reaction_id)`
-/// - Each subscription provides a broadcast receiver for that query's results
-/// - Reactions use a priority queue to process results from multiple queries in timestamp order
+/// Query subscriptions are managed by the host (DrasiLib/ReactionManager).
+/// After `start()` succeeds, the host subscribes to the reaction's configured queries
+/// and forwards results via `enqueue_query_result()`. Reactions should NOT
+/// subscribe to queries themselves.
 ///
 /// # Example Implementation
 ///
 /// ```ignore
-/// use drasi_lib::{Reaction, QueryProvider};
+/// use drasi_lib::Reaction;
 /// use drasi_lib::reactions::{ReactionBase, ReactionBaseParams};
 /// use drasi_lib::context::ReactionRuntimeContext;
 ///
@@ -120,9 +120,13 @@ pub trait QueryProvider: Send + Sync {
 ///     }
 ///
 ///     async fn start(&self) -> Result<()> {
-///         self.base.subscribe_to_queries().await?;
-///         // ... start processing
+///         // Start processing loop — host handles query subscriptions
+///         // after start() returns successfully
 ///         Ok(())
+///     }
+///
+///     async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+///         self.base.enqueue_query_result(result).await
 ///     }
 ///
 ///     // ... implement other methods
@@ -136,11 +140,26 @@ pub trait Reaction: Send + Sync {
     /// Get the reaction type name (e.g., "http", "log", "sse")
     fn type_name(&self) -> &str;
 
-    /// Get the reaction's configuration properties for inspection
+    /// Return **all** configuration properties for this reaction, including secrets.
     ///
-    /// This returns a HashMap representation of the reaction's configuration
-    /// for use in APIs and inspection. The actual typed configuration is
-    /// owned by the plugin - this is just for external visibility.
+    /// # Persistence contract
+    ///
+    /// This method is the **serialization hook** used by the host to persist
+    /// configuration to disk. When the server saves its config file it calls
+    /// `snapshot_configuration()`, which in turn calls `properties()` on every
+    /// reaction. The returned map is written to the YAML config so the component
+    /// can be recreated on the next startup.
+    ///
+    /// Because there is no separate config cache — the live component is the
+    /// single source of truth — any key/value omitted here will be **lost** on
+    /// the next save and the component will fail to start after a restart.
+    ///
+    /// # ⚠ Do not filter secrets
+    ///
+    /// Implementations **must** include sensitive values (passwords, tokens,
+    /// connection strings, etc.). Removing them makes the persistence round-trip
+    /// lossy and breaks restart. The host is responsible for protecting the
+    /// config file on disk; this method is not an external-facing API.
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value>;
 
     /// Get the list of query IDs this reaction subscribes to
@@ -163,7 +182,6 @@ pub trait Reaction: Send + Sync {
     /// - `reaction_id`: The reaction's unique identifier
     /// - `event_tx`: Channel for reporting component lifecycle events
     /// - `state_store`: Optional persistent state storage
-    /// - `query_provider`: Access to query instances for subscription
     ///
     /// Implementation should delegate to `self.base.initialize(context).await`.
     async fn initialize(&self, context: ReactionRuntimeContext);
@@ -171,12 +189,11 @@ pub trait Reaction: Send + Sync {
     /// Start the reaction
     ///
     /// The reaction should:
-    /// 1. Subscribe to all configured queries (using injected QueryProvider)
-    /// 2. Start its processing loop
-    /// 3. Update its status to Running
+    /// 1. Start its processing loop
+    /// 2. Update its status to Running
     ///
-    /// Note: QueryProvider is already available via `inject_query_provider()` which
-    /// is called when the reaction is added to DrasiLib.
+    /// Query subscriptions are managed by the host after start() returns.
+    /// Results are forwarded via `enqueue_query_result()`.
     async fn start(&self) -> Result<()>;
 
     /// Stop the reaction, cleaning up all subscriptions and tasks
@@ -184,6 +201,93 @@ pub trait Reaction: Send + Sync {
 
     /// Get the current status of the reaction
     async fn status(&self) -> ComponentStatus;
+
+    /// Enqueue a query result for processing.
+    ///
+    /// The host calls this to forward query results to the reaction after
+    /// subscribing on its behalf. The default implementation is a no-op.
+    /// Most reactions should delegate to `self.base.enqueue_query_result(result)`.
+    async fn enqueue_query_result(&self, _result: QueryResult) -> Result<()> {
+        Ok(())
+    }
+
+    /// Permanently clean up internal state when the reaction is being removed.
+    ///
+    /// This is called when `remove_reaction(id, cleanup: true)` is used.
+    /// Use this to release external resources that should not persist after
+    /// the reaction is deleted (e.g., delete output topics, remove external subscriptions).
+    ///
+    /// The default implementation is a no-op. Override only if your reaction
+    /// manages external state that needs explicit teardown.
+    ///
+    /// Errors are logged but do not prevent the reaction from being removed.
+    async fn deprovision(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Set the identity provider for this reaction.
+    ///
+    /// This method allows attaching a per-reaction identity provider after
+    /// construction (e.g. when wiring up a reaction from declarative config
+    /// that references a named identity provider). It is optional — reactions
+    /// that do not authenticate to external systems can ignore it.
+    ///
+    /// Identity providers set via this method take precedence over any
+    /// instance-wide provider injected through the runtime context during
+    /// `initialize()`.
+    ///
+    /// Implementations backed by a [`ReactionBase`](crate::reactions::ReactionBase)
+    /// should delegate to `self.base.set_identity_provider(provider).await`;
+    /// other implementors should store the provider and apply it during
+    /// `initialize()`.
+    async fn set_identity_provider(
+        &self,
+        _provider: std::sync::Arc<dyn crate::identity::IdentityProvider>,
+    ) {
+        // Default implementation does nothing - reactions that consume an
+        // identity provider should override this to delegate to their
+        // ReactionBase.
+    }
+
+    /// Whether this reaction requires a durable (persistent) state store.
+    ///
+    /// Reactions that checkpoint their outbox position should return `true`.
+    /// The host validates at startup that a durable `StateStoreProvider` is
+    /// configured when this returns `true`.
+    ///
+    /// Default: `false` (volatile state store is acceptable).
+    fn is_durable(&self) -> bool {
+        false
+    }
+
+    /// Whether this reaction needs a full snapshot on first start (no prior checkpoint).
+    ///
+    /// If `true`, the host calls `bootstrap()` with a `BootstrapContext` providing
+    /// `fetch_snapshot()` the first time the reaction starts with no existing checkpoint.
+    ///
+    /// Default: `false`.
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        false
+    }
+
+    /// The default recovery policy for this reaction.
+    ///
+    /// Can be overridden per-reaction instance via `ReactionBaseParams::recovery_policy`.
+    ///
+    /// Default: `ReactionRecoveryPolicy::Strict`.
+    fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
+        ReactionRecoveryPolicy::Strict
+    }
+
+    /// Called by the host during startup when bootstrap or recovery is needed.
+    ///
+    /// The `BootstrapContext` provides access to the query's `fetch_snapshot()`
+    /// and `fetch_outbox()` APIs, as well as checkpoint read/write helpers.
+    ///
+    /// Default: no-op.
+    async fn bootstrap(&self, _ctx: BootstrapContext) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Blanket implementation of Reaction for `Box<dyn Reaction>`
@@ -225,5 +329,36 @@ impl Reaction for Box<dyn Reaction + 'static> {
 
     async fn status(&self) -> ComponentStatus {
         (**self).status().await
+    }
+
+    async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+        (**self).enqueue_query_result(result).await
+    }
+
+    async fn deprovision(&self) -> Result<()> {
+        (**self).deprovision().await
+    }
+
+    async fn set_identity_provider(
+        &self,
+        provider: std::sync::Arc<dyn crate::identity::IdentityProvider>,
+    ) {
+        (**self).set_identity_provider(provider).await
+    }
+
+    fn is_durable(&self) -> bool {
+        (**self).is_durable()
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        (**self).needs_snapshot_on_fresh_start()
+    }
+
+    fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
+        (**self).default_recovery_policy()
+    }
+
+    async fn bootstrap(&self, ctx: BootstrapContext) -> Result<()> {
+        (**self).bootstrap(ctx).await
     }
 }

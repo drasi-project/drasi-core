@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! MySQL Stored Procedure reaction plugin for Drasi
 //!
 //! This plugin implements reactions that invoke MySQL stored procedures when
@@ -39,9 +41,24 @@
 //! ```
 
 pub mod config;
+pub mod descriptor;
 pub mod executor;
 pub mod parser;
 pub mod reaction;
 
 pub use config::{MySqlStoredProcReactionConfig, QueryConfig, TemplateSpec};
 pub use reaction::MySqlStoredProcReaction;
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "storedproc-mysql-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::MySqlStoredProcReactionDescriptor],
+    bootstrap_descriptors = [],
+);

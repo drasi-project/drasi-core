@@ -15,6 +15,7 @@ The SSE Reaction component exposes Drasi continuous query results to web clients
 - **CORS enabled**: Configured to allow cross-origin requests from any domain
 - **Timestamp tracking**: All events include millisecond-precision timestamps
 - **Priority queue processing**: Ensures events are processed in timestamp order
+- **On-demand snapshots**: REST endpoint to fetch the current full result set of any subscribed query
 
 ### Use Cases
 
@@ -268,6 +269,54 @@ Sent at regular intervals to keep connections alive. **Note:** Heartbeat message
 **Fields:**
 - `type` (string): Always `"heartbeat"` for heartbeat events
 - `ts` (number): Unix timestamp in milliseconds when the heartbeat was sent
+
+### Snapshot Endpoint
+
+The SSE Reaction exposes a REST endpoint that returns the current full result set of a subscribed query as a JSON array. This is useful for initializing client-side state before subscribing to the SSE stream for incremental updates.
+
+**Request:**
+
+```
+GET /snapshot/:query_id
+```
+
+**Success Response (200 OK):**
+
+```json
+[
+  {
+    "name": "Alice",
+    "age": 30
+  },
+  {
+    "name": "Bob",
+    "age": 25
+  }
+]
+```
+
+The response is a JSON array containing all rows currently in the query's result set. Each element is a JSON object whose shape matches the query's `RETURN` clause. The response is streamed using chunked transfer encoding, so memory usage remains proportional to a single row regardless of result set size. An empty result set returns `[]`.
+
+**Error Responses:**
+
+- `404 Not Found` — the query ID is not subscribed to this reaction or is not currently running
+- `503 Service Unavailable` — the snapshot fetcher is not available (e.g., the reaction has not been fully initialized)
+
+**Example — Initialize then stream:**
+
+```javascript
+// 1. Fetch the current snapshot to initialize state
+const snapshot = await fetch('http://localhost:8080/snapshot/sensor-data');
+const initialRows = await snapshot.json();
+renderTable(initialRows);
+
+// 2. Subscribe to SSE for incremental updates
+const source = new EventSource('http://localhost:8080/events');
+source.onmessage = (event) => {
+  const update = JSON.parse(event.data);
+  applyDiff(update);
+};
+```
 
 ## Usage Examples
 
@@ -595,6 +644,24 @@ The SSE Reaction handles various error conditions gracefully:
 - `serde_json`: JSON serialization
 - `chrono`: Timestamp generation
 - `log`: Logging framework
+
+## Plugin Packaging
+
+This reaction is compiled as a dynamic plugin (cdylib) that can be loaded by drasi-server at runtime.
+
+**Key files:**
+- `Cargo.toml` — includes `crate-type = ["lib", "cdylib"]`
+- `src/descriptor.rs` — implements `ReactionPluginDescriptor` with kind `"sse"`, configuration DTO, and OpenAPI schema generation
+- `src/lib.rs` — invokes `drasi_plugin_sdk::export_plugin!` to export the plugin entry point
+
+**Building:**
+```bash
+cargo build -p drasi-reaction-sse
+```
+
+The compiled `.so` (Linux) / `.dylib` (macOS) / `.dll` (Windows) is placed in `target/debug/` and can be copied to the server's `plugins/` directory.
+
+For more details on the plugin descriptor pattern and configuration DTOs, see the [Reaction Developer Guide](../README.md#packaging-as-a-dynamic-plugin).
 
 ## License
 

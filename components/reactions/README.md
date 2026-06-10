@@ -17,6 +17,7 @@ This guide explains how to create custom reaction plugins for Drasi. Reactions a
 - [Key Files Reference](#key-files-reference)
 - [Implementation Checklist](#implementation-checklist)
 - [Best Practices](#best-practices)
+- [Packaging as a Dynamic Plugin](#packaging-as-a-dynamic-plugin)
 - [Additional Resources](#additional-resources)
 
 ## Overview
@@ -34,10 +35,13 @@ Reactions are responsible for:
 |--------|-------------|-----------|
 | `drasi-reaction-log` | Console logging with template support | `log/` |
 | `drasi-reaction-http` | HTTP POST to external endpoints | `http/` |
+| `drasi-reaction-rabbitmq` | RabbitMQ exchange publisher | `rabbitmq/` |
 | `drasi-reaction-http-adaptive` | HTTP with adaptive batching | `http-adaptive/` |
 | `drasi-reaction-grpc` | gRPC streaming delivery | `grpc/` |
 | `drasi-reaction-grpc-adaptive` | gRPC with adaptive batching | `grpc-adaptive/` |
 | `drasi-reaction-sse` | Server-Sent Events streaming | `sse/` |
+| `drasi-reaction-dashboard` | WebSocket dashboard UI with visual designer | `dashboard/` |
+| `drasi-reaction-mcp` | MCP server with resource subscriptions | `mcp/` |
 | `drasi-reaction-application` | Programmatic/in-memory for embedded use | `application/` |
 | `drasi-reaction-platform` | Redis Streams publisher for platform integration | `platform/` |
 | `drasi-reaction-profiler` | Performance profiling and metrics | `profiler/` |
@@ -72,7 +76,7 @@ DrasiLib has no knowledge of which plugins exist - it only knows about the `Reac
 ### Context-based Initialization
 
 Reactions receive dependencies through a single `initialize()` method that provides a `ReactionRuntimeContext`:
-- `status_tx` - Channel for reporting component status events (Starting, Running, Stopped, Error)
+- `update_tx` - mpsc sender for fire-and-forget status updates to the component graph
 - `query_provider` - Query provider for accessing queries
 - `state_store` - Optional persistent state storage (if configured)
 - `reaction_id` - The reaction's unique identifier
@@ -86,7 +90,7 @@ All reactions must implement the `Reaction` trait from `drasi_lib`:
 ```rust
 use anyhow::Result;
 use async_trait::async_trait;
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::channels::ComponentStatus;
 use drasi_lib::{Reaction, QueryProvider};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -114,7 +118,7 @@ pub trait Reaction: Send + Sync {
 
     /// Initialize the reaction with runtime context.
     /// Called automatically by DrasiLib when the reaction is added.
-    /// The context provides access to status_tx, query_provider, and state_store.
+    /// The context provides access to update_tx, query_provider, and state_store.
     async fn initialize(&self, context: ReactionRuntimeContext);
 
     /// Start the reaction.
@@ -134,7 +138,7 @@ pub trait Reaction: Send + Sync {
 
 ### Key Design Points
 
-- **Context-based initialization**: Reactions receive a `ReactionRuntimeContext` via `initialize()` when added to DrasiLib. The context provides access to status_tx, query_provider, state_store, and other DrasiLib services.
+- **Context-based initialization**: Reactions receive a `ReactionRuntimeContext` via `initialize()` when added to DrasiLib. The context provides access to `update_tx` (graph status channel), `query_provider`, `state_store`, and other DrasiLib services.
 - **Async lifecycle**: All lifecycle methods (`start`, `stop`) are async.
 - **Multi-query subscription**: Reactions can subscribe to multiple queries via `query_ids()`.
 - **Priority queue processing**: Results from all queries are merged in timestamp order.
@@ -208,10 +212,7 @@ impl ReactionBaseParams {
 impl ReactionBase {
     // Status management
     pub async fn get_status(&self) -> ComponentStatus;
-    pub async fn set_status_with_event(&self, status: ComponentStatus, message: Option<String>) -> Result<()>;
-
-    // Component lifecycle events
-    pub async fn send_component_event(&self, status: ComponentStatus, message: Option<String>) -> Result<()>;
+    pub async fn set_status(&self, status: ComponentStatus, message: Option<String>);
 
     // Context initialization (called automatically by DrasiLib)
     pub async fn initialize(&self, context: ReactionRuntimeContext);
@@ -355,10 +356,10 @@ Use `ReactionBase` methods for status management:
 
 ```rust
 // Set status and send lifecycle event
-self.base.set_status_with_event(
+self.base.set_status(
     ComponentStatus::Running,
     Some("Connected to API".to_string()),
-).await?;
+).await;
 ```
 
 ## Creating a Reaction Plugin
@@ -429,7 +430,7 @@ pub use config::MyReactionConfig;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::channels::ComponentStatus;
 use drasi_lib::{QueryProvider, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use log::{debug, info};
@@ -494,11 +495,11 @@ impl Reaction for MyReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Subscribe to all configured queries using ReactionBase
         // QueryProvider was injected via inject_query_provider() when reaction was added
@@ -506,11 +507,11 @@ impl Reaction for MyReaction {
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
@@ -568,11 +569,11 @@ impl Reaction for MyReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
@@ -768,7 +769,7 @@ mod tests {
     async fn test_status_reporting() {
         use drasi_lib::context::ReactionRuntimeContext;
 
-        let (status_tx, mut event_rx) = mpsc::channel(100);
+        let (update_tx, mut event_rx) = mpsc::channel(100);
         let reaction = MyReaction::builder("test-reaction")
             .with_query("query1")
             .build();
@@ -782,22 +783,22 @@ mod tests {
             }
         }
 
-        // Initialize with context
+        // Initialize with context (wires the status handle to the graph channel)
         let context = ReactionRuntimeContext::new(
             "test-reaction",
-            status_tx,
+            update_tx,
             None,
             std::sync::Arc::new(MockQueryProvider),
         );
         reaction.base.initialize(context).await;
 
         // Manually trigger a status event
-        reaction.base.set_status_with_event(
+        reaction.base.set_status(
             ComponentStatus::Starting,
             Some("Test".to_string()),
-        ).await.unwrap();
+        ).await;
 
-        // Verify event was sent
+        // Verify event was sent to graph
         let event = event_rx.try_recv().unwrap();
         assert_eq!(event.status, ComponentStatus::Starting);
     }
@@ -870,6 +871,9 @@ When creating a new reaction plugin:
 - [ ] Add unit tests
 - [ ] Add integration tests
 - [ ] Document configuration options
+- [ ] Add `cdylib` crate type and plugin SDK dependencies to `Cargo.toml`
+- [ ] Create `descriptor.rs` with configuration DTOs and `ReactionPluginDescriptor` impl
+- [ ] Invoke `export_plugin!` macro in `lib.rs`
 
 ## Best Practices
 
@@ -980,17 +984,17 @@ Always send component events when transitioning states:
 
 ```rust
 async fn start(&self) -> Result<()> {
-    self.base.set_status_with_event(
+    self.base.set_status(
         ComponentStatus::Starting,
         Some("Initializing connection".to_string()),
-    ).await?;
+    ).await;
 
     // ... initialization logic ...
 
-    self.base.set_status_with_event(
+    self.base.set_status(
         ComponentStatus::Running,
         Some("Connected successfully".to_string()),
-    ).await?;
+    ).await;
 
     Ok(())
 }
@@ -1050,9 +1054,171 @@ let batcher = AdaptiveBatcher::new(batcher_config);
 
 See `http-adaptive/` and `grpc-adaptive/` for examples.
 
+## Packaging as a Dynamic Plugin
+
+Reactions can be compiled as `cdylib` shared libraries and loaded at runtime by the Drasi server. The log reaction (`log/`) is the canonical reference.
+
+### Cargo.toml Setup
+
+Add a `cdylib` crate type so the compiler produces a shared library, and pull in the plugin SDK and `utoipa` for schema generation:
+
+```toml
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+# ... other dependencies
+```
+
+See `log/Cargo.toml` for a complete example.
+
+### Configuration DTOs
+
+Create a `descriptor.rs` module that defines Data Transfer Objects for your plugin's configuration. These DTOs are serialized to JSON schema so the server can validate configuration at load time.
+
+```rust
+use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
+
+/// Configuration DTO for the reaction plugin.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = reaction::myreaction::MyReactionConfig)]
+#[serde(rename_all = "camelCase")]
+pub struct MyReactionConfigDto {
+    /// An endpoint URL (supports env-var resolution via ConfigValue).
+    pub endpoint: ConfigValue<String>,
+
+    /// Optional timeout in seconds.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Generates the OpenAPI component schemas for this plugin.
+#[derive(OpenApi)]
+#[openapi(components(schemas(MyReactionConfigDto)))]
+struct MyReactionSchemas;
+```
+
+Key points:
+- Derive `Serialize`, `Deserialize`, and `utoipa::ToSchema` on every DTO struct.
+- The `#[schema(as = reaction::kind::ConfigName)]` attribute sets the schema path that must match what `config_schema_name()` returns.
+- Use `ConfigValue<T>` for fields that should support environment-variable resolution (e.g. `"${MY_ENDPOINT}"`).
+
+### The ReactionPluginDescriptor Trait
+
+Implement `ReactionPluginDescriptor` to tell the host SDK how to create instances of your reaction:
+
+```rust
+pub struct MyReactionDescriptor;
+
+#[async_trait]
+impl ReactionPluginDescriptor for MyReactionDescriptor {
+    /// Unique kind identifier for this reaction type.
+    fn kind(&self) -> &str {
+        "my-reaction"
+    }
+
+    /// Semantic version of the configuration schema.
+    fn config_version(&self) -> &str {
+        "1.0.0"
+    }
+
+    /// Schema name matching the `#[schema(as = ...)]` attribute on the config DTO,
+    /// using dot notation (e.g. `reaction.myreaction.MyReactionConfig`).
+    fn config_schema_name(&self) -> &str {
+        "reaction.myreaction.MyReactionConfig"
+    }
+
+    /// Serializes the OpenAPI component schemas to JSON.
+    fn config_schema_json(&self) -> String {
+        let api = MyReactionSchemas::openapi();
+        serde_json::to_string(
+            &api.components
+                .as_ref()
+                .expect("OpenAPI components missing")
+                .schemas,
+        )
+        .expect("Failed to serialize config schema")
+    }
+
+    /// Deserializes config JSON into the DTO, maps to internal types,
+    /// and returns a boxed `Reaction` instance.
+    async fn create_reaction(
+        &self,
+        id: &str,
+        query_ids: Vec<String>,
+        config_json: &serde_json::Value,
+        auto_start: bool,
+    ) -> anyhow::Result<Box<dyn Reaction>> {
+        let dto: MyReactionConfigDto = serde_json::from_value(config_json.clone())?;
+
+        let reaction = MyReactionBuilder::new(id)
+            .with_queries(query_ids)
+            .with_auto_start(auto_start)
+            .with_endpoint(&dto.endpoint.resolve()?)
+            .build()?;
+
+        Ok(Box::new(reaction))
+    }
+}
+```
+
+See `log/src/descriptor.rs` for the full working implementation.
+
+### The export_plugin! Macro
+
+In `lib.rs`, invoke the `export_plugin!` macro to generate the C ABI entry points (`drasi_plugin_init` and `drasi_plugin_metadata`) that the host SDK looks for when loading the shared library:
+
+```rust
+pub mod descriptor;
+
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "my-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::MyReactionDescriptor],
+    bootstrap_descriptors = [],
+);
+```
+
+The `source_descriptors` and `bootstrap_descriptors` arrays are empty because this crate only provides a reaction. A single cdylib can export multiple descriptors of any type.
+
+### Building
+
+A standard `cargo build` produces the shared library:
+
+```bash
+cargo build          # target/debug/libmy_reaction.so   (Linux)
+                     # target/debug/libmy_reaction.dylib (macOS)
+                     # target/debug/my_reaction.dll      (Windows)
+```
+
+Copy the resulting library into the Drasi server's `plugins/` directory. The server discovers and loads it automatically on startup.
+
+> **Signing:** Published plugins should be signed with cosign: `cargo xtask publish-plugins --sign`
+
 ## Additional Resources
 
 - See individual plugin directories for implementation examples
 - Check `lib/CLAUDE.md` for library architecture details
 - Review `components/sources/README.md` for source development patterns
 - Review the parent `drasi-core/CLAUDE.md` for query engine information
+
+## AI Generated Reactions (experimental)
+
+We have experimental AI agents for developing new reactions. These agents work as a planner/executor pair where the `reaction-planner` will generate a comprehensive plan for building a reaction that the user must then review and refine. Once the user is satisfied with the plan, switch to the `reaction-plan-executor` agent to implement it.
+
+For local usage with the Copilot CLI:
+
+- Start Copilot CLI
+- Select the `reaction-planner` agent using `/agent`
+- Select the `claude-sonnet-4.5` or `claude-opus-4.5` model using `/model` (CLI does not use the model defined in the frontmatter)
+- Run a prompt like `Please write a plan for an XXXX reaction and save it to file in my workspace`
+- Once the plan is complete, review it and tweak it in the generated file
+- Switch to the `gpt-5.2-codex` model using `/model`
+- Switch to the `reaction-plan-executor` agent using `/agent`
+- Run the prompt: `please implement the plan`

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! HTTP reaction plugin for Drasi
 //!
 //! This plugin implements HTTP reactions for Drasi and provides extension traits
@@ -21,7 +23,6 @@
 //!
 //! ```rust,ignore
 //! use drasi_reaction_http::{HttpReaction, HttpReactionConfig};
-//! use drasi_lib::channels::ComponentEventSender;
 //! use std::sync::Arc;
 //!
 //! // Create configuration
@@ -37,12 +38,12 @@
 //!     "my-http-reaction",
 //!     vec!["query1".to_string()],
 //!     config,
-//!     event_tx,
 //! ));
 //! drasi.add_reaction(reaction).await?;
 //! ```
 
 pub mod config;
+pub mod descriptor;
 pub mod http;
 
 pub use config::{CallSpec, HttpReactionConfig, QueryConfig};
@@ -178,11 +179,11 @@ mod tests {
         assert_eq!(reaction.id(), "test-reaction");
         let props = reaction.properties();
         assert_eq!(
-            props.get("base_url"),
+            props.get("baseUrl"),
             Some(&serde_json::Value::String("http://localhost".to_string()))
         );
         assert_eq!(
-            props.get("timeout_ms"),
+            props.get("timeoutMs"),
             Some(&serde_json::Value::Number(5000.into()))
         );
     }
@@ -200,13 +201,13 @@ mod tests {
         assert_eq!(reaction.id(), "test-reaction");
         let props = reaction.properties();
         assert_eq!(
-            props.get("base_url"),
+            props.get("baseUrl"),
             Some(&serde_json::Value::String(
                 "http://api.example.com".to_string() // DevSkim: ignore DS137138
             ))
         );
         assert_eq!(
-            props.get("timeout_ms"),
+            props.get("timeoutMs"),
             Some(&serde_json::Value::Number(10000.into()))
         );
         assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
@@ -238,3 +239,17 @@ mod tests {
         assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
     }
 }
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "http-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::HttpReactionDescriptor],
+    bootstrap_descriptors = [],
+);

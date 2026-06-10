@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-storedproc-mssql"
-version = "0.2.1"
+version = "0.3.2"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "MS SQL Server Stored Procedure reaction plugin for Drasi"
@@ -22,6 +22,9 @@ license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi", "plugin", "reaction", "mssql", "storedproc"]
 categories = ["database"]
+
+[lib]
+crate-type = ["lib", "cdylib"]
 
 [dependencies]
 drasi-lib.workspace = true
@@ -40,13 +43,21 @@ serde_json = "1.0"
 regex = "1.10"
 log = "0.4"
 anyhow = "1.0"
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
 env_logger = "0.10.0"
 serial_test = "3.0"
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["mssql_server"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["mssql_server"] }
+shared-tests = { path = "../../../shared-tests" }
 
 [lints]
 workspace = true
+
+
+[features]
+# default = []
+dynamic-plugin = []

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! gRPC Adaptive reaction plugin for Drasi
 //!
 //! This plugin implements gRPC Adaptive reactions for Drasi.
@@ -30,6 +32,7 @@
 
 mod adaptive_batcher;
 pub mod config;
+pub mod descriptor;
 pub mod grpc_adaptive;
 
 pub use config::GrpcAdaptiveReactionConfig;
@@ -199,3 +202,17 @@ mod tests {
         assert_eq!(reaction.id(), "test-reaction");
     }
 }
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "grpc-adaptive-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::GrpcAdaptiveReactionDescriptor],
+    bootstrap_descriptors = [],
+);

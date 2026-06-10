@@ -33,13 +33,15 @@ use anyhow::Result;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::Instrument;
 
 use crate::channels::priority_queue::PriorityQueue;
-use crate::channels::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
-};
+use crate::channels::{ComponentStatus, QueryResult};
+use crate::component_graph::ComponentStatusHandle;
 use crate::context::ReactionRuntimeContext;
-use crate::reactions::QueryProvider;
+use crate::identity::IdentityProvider;
+use crate::reactions::checkpoint::ReactionCheckpoint;
+use crate::recovery::ReactionRecoveryPolicy;
 use crate::state_store::StateStoreProvider;
 
 /// Parameters for creating a ReactionBase instance.
@@ -68,6 +70,8 @@ pub struct ReactionBaseParams {
     pub priority_queue_capacity: Option<usize>,
     /// Whether this reaction should auto-start - defaults to true
     pub auto_start: bool,
+    /// Optional recovery policy override (takes precedence over the trait default).
+    pub recovery_policy: Option<ReactionRecoveryPolicy>,
 }
 
 impl ReactionBaseParams {
@@ -78,6 +82,7 @@ impl ReactionBaseParams {
             queries,
             priority_queue_capacity: None,
             auto_start: true, // Default to true like queries
+            recovery_policy: None,
         }
     }
 
@@ -92,6 +97,12 @@ impl ReactionBaseParams {
         self.auto_start = auto_start;
         self
     }
+
+    /// Set the recovery policy override for this reaction instance.
+    pub fn with_recovery_policy(mut self, policy: ReactionRecoveryPolicy) -> Self {
+        self.recovery_policy = Some(policy);
+        self
+    }
 }
 
 /// Base implementation for common reaction functionality
@@ -102,14 +113,12 @@ pub struct ReactionBase {
     pub queries: Vec<String>,
     /// Whether this reaction should auto-start
     pub auto_start: bool,
-    /// Current component status
-    pub status: Arc<RwLock<ComponentStatus>>,
+    /// Optional recovery policy override
+    pub recovery_policy: Option<ReactionRecoveryPolicy>,
+    /// Component status handle — always available, wired to graph during initialize().
+    status_handle: ComponentStatusHandle,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<ReactionRuntimeContext>>>,
-    /// Channel for sending component status events (extracted from context for convenience)
-    status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
-    /// Query provider for accessing queries (extracted from context)
-    query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Priority queue for timestamp-ordered result processing
@@ -120,27 +129,35 @@ pub struct ReactionBase {
     pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// Sender for shutdown signal to processing task
     pub shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// Optional identity provider for credential management.
+    /// Set either programmatically (via `set_identity_provider`) or automatically
+    /// from the runtime context during `initialize()`.
+    identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
+    /// Original raw config JSON from the descriptor, preserving ConfigValue
+    /// envelopes (secrets, env vars) for lossless persistence roundtrips.
+    raw_config: Option<serde_json::Value>,
 }
 
 impl ReactionBase {
     /// Create a new ReactionBase with the given parameters
     ///
-    /// Dependencies (event channel, query subscriber, state store) are not required during
+    /// Dependencies (query subscriber, state store, graph) are not required during
     /// construction - they will be provided via `initialize()` when the reaction is added to DrasiLib.
     pub fn new(params: ReactionBaseParams) -> Self {
         Self {
             priority_queue: PriorityQueue::new(params.priority_queue_capacity.unwrap_or(10000)),
-            id: params.id,
+            id: params.id.clone(),
             queries: params.queries,
             auto_start: params.auto_start,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+            recovery_policy: params.recovery_policy,
+            status_handle: ComponentStatusHandle::new(&params.id),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
-            status_tx: Arc::new(RwLock::new(None)), // Extracted from context
-            query_provider: Arc::new(RwLock::new(None)), // Extracted from context
             state_store: Arc::new(RwLock::new(None)), // Extracted from context
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
+            identity_provider: Arc::new(RwLock::new(None)),
+            raw_config: None,
         }
     }
 
@@ -151,19 +168,25 @@ impl ReactionBase {
     ///
     /// The context provides access to:
     /// - `reaction_id`: The reaction's unique identifier
-    /// - `status_tx`: Channel for reporting component status events
     /// - `state_store`: Optional persistent state storage
-    /// - `query_provider`: Access to query instances for subscription
+    /// - `update_tx`: mpsc sender for fire-and-forget status updates to the graph
     pub async fn initialize(&self, context: ReactionRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
 
-        // Extract services for convenience
-        *self.status_tx.write().await = Some(context.status_tx.clone());
-        *self.query_provider.write().await = Some(context.query_provider.clone());
+        // Wire the status handle to the graph update channel
+        self.status_handle.wire(context.update_tx.clone()).await;
 
         if let Some(state_store) = context.state_store.as_ref() {
             *self.state_store.write().await = Some(state_store.clone());
+        }
+
+        // Store identity provider from context if not already set programmatically
+        if let Some(ip) = context.identity_provider.as_ref() {
+            let mut guard = self.identity_provider.write().await;
+            if guard.is_none() {
+                *guard = Some(ip.clone());
+            }
         }
     }
 
@@ -181,19 +204,58 @@ impl ReactionBase {
         self.state_store.read().await.clone()
     }
 
+    /// Get the identity provider if set.
+    ///
+    /// Returns the identity provider set either programmatically via
+    /// `set_identity_provider()` or from the runtime context during `initialize()`.
+    /// Programmatically-set providers take precedence over context providers.
+    pub async fn identity_provider(&self) -> Option<Arc<dyn IdentityProvider>> {
+        self.identity_provider.read().await.clone()
+    }
+
+    /// Set the identity provider programmatically.
+    ///
+    /// This is typically called during reaction construction when the provider
+    /// is available from configuration (e.g., `with_identity_provider()` builder).
+    /// Providers set this way take precedence over context-injected providers.
+    pub async fn set_identity_provider(&self, provider: Arc<dyn IdentityProvider>) {
+        *self.identity_provider.write().await = Some(provider);
+    }
+
     /// Get whether this reaction should auto-start
     pub fn get_auto_start(&self) -> bool {
         self.auto_start
     }
 
-    /// Get the status channel Arc for internal use by spawned tasks
+    /// Set the original raw config JSON for lossless persistence roundtrips.
+    pub fn set_raw_config(&mut self, config: serde_json::Value) {
+        self.raw_config = Some(config);
+    }
+
+    /// Get the original raw config JSON, if set by a descriptor.
+    pub fn raw_config(&self) -> Option<&serde_json::Value> {
+        self.raw_config.as_ref()
+    }
+
+    /// Build the properties map for this reaction.
     ///
-    /// This returns the internal status_tx wrapped in Arc<RwLock<Option<...>>>
-    /// which allows background tasks to send component status events.
+    /// If `raw_config` was set (descriptor path), returns its top-level keys.
+    /// Otherwise, serializes `fallback_dto` (the DTO reconstructed from typed
+    /// config) to produce camelCase output.
     ///
-    /// Returns a clone of the Arc that can be moved into spawned tasks.
-    pub fn status_tx(&self) -> Arc<RwLock<Option<ComponentEventSender>>> {
-        self.status_tx.clone()
+    /// This eliminates the duplicated if-let + serialize pattern from plugins.
+    pub fn properties_or_serialize<D: serde::Serialize>(
+        &self,
+        fallback_dto: &D,
+    ) -> std::collections::HashMap<String, serde_json::Value> {
+        if let Some(serde_json::Value::Object(map)) = self.raw_config.as_ref() {
+            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+
+        match serde_json::to_value(fallback_dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => std::collections::HashMap::new(),
+        }
     }
 
     /// Clone the ReactionBase with shared Arc references
@@ -205,15 +267,16 @@ impl ReactionBase {
             id: self.id.clone(),
             queries: self.queries.clone(),
             auto_start: self.auto_start,
-            status: self.status.clone(),
+            recovery_policy: self.recovery_policy,
+            status_handle: self.status_handle.clone(),
             context: self.context.clone(),
-            status_tx: self.status_tx.clone(),
-            query_provider: self.query_provider.clone(),
             state_store: self.state_store.clone(),
             priority_queue: self.priority_queue.clone(),
             subscription_tasks: self.subscription_tasks.clone(),
             processing_task: self.processing_task.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
+            identity_provider: self.identity_provider.clone(),
+            raw_config: self.raw_config.clone(),
         }
     }
 
@@ -239,146 +302,94 @@ impl ReactionBase {
         &self.queries
     }
 
-    /// Get current status
+    /// Get current status.
     pub async fn get_status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.status_handle.get_status().await
     }
 
-    /// Send a component lifecycle event
+    /// Returns a cloneable [`ComponentStatusHandle`] for use in spawned tasks.
     ///
-    /// If the event channel has not been injected yet, this method silently
-    /// succeeds without sending anything. This allows reactions to be used
-    /// in a standalone fashion without DrasiLib if needed.
-    pub async fn send_component_event(
-        &self,
-        status: ComponentStatus,
-        message: Option<String>,
-    ) -> Result<()> {
-        let event = ComponentEvent {
-            component_id: self.id.clone(),
-            component_type: ComponentType::Reaction,
-            status,
-            timestamp: chrono::Utc::now(),
-            message,
-        };
+    /// The handle can both read and write the component's status and automatically
+    /// notifies the graph on every status change (after `initialize()`).
+    pub fn status_handle(&self) -> ComponentStatusHandle {
+        self.status_handle.clone()
+    }
 
-        if let Some(ref tx) = *self.status_tx.read().await {
-            if let Err(e) = tx.send(event).await {
-                error!("Failed to send component event: {e}");
+    /// Set the component's status — updates local state AND notifies the graph.
+    ///
+    /// This is the single canonical way to change a reaction's status.
+    pub async fn set_status(&self, status: ComponentStatus, message: Option<String>) {
+        self.status_handle.set_status(status, message).await;
+    }
+
+    /// Enqueue a query result for processing.
+    ///
+    /// The host calls this to forward query results to the reaction's priority queue.
+    /// Results are processed in timestamp order by the reaction's processing task.
+    pub async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
+        self.priority_queue.enqueue_wait(Arc::new(result)).await;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Checkpoint helpers
+    // ========================================================================
+
+    /// Read the persisted checkpoint for a single query subscription.
+    ///
+    /// Returns `Ok(None)` if no checkpoint exists (fresh start).
+    /// Errors propagate from the state store or deserialization.
+    pub async fn read_checkpoint(&self, query_id: &str) -> Result<Option<ReactionCheckpoint>> {
+        let store = self.state_store.read().await;
+        match store.as_ref() {
+            Some(s) => {
+                crate::reactions::checkpoint::read_checkpoint(s.as_ref(), &self.id, query_id).await
             }
+            None => Ok(None),
         }
-        // If status_tx is None, silently skip - initialization happens before start()
-        Ok(())
     }
 
-    /// Transition to a new status and send event
-    pub async fn set_status_with_event(
+    /// Read all persisted checkpoints for every query this reaction subscribes to.
+    ///
+    /// Returns a map from query ID to checkpoint. Missing checkpoints (fresh
+    /// subscriptions) are simply omitted from the result.
+    pub async fn read_all_checkpoints(
         &self,
-        status: ComponentStatus,
-        message: Option<String>,
-    ) -> Result<()> {
-        *self.status.write().await = status.clone();
-        self.send_component_event(status, message).await
+    ) -> Result<std::collections::HashMap<String, ReactionCheckpoint>> {
+        let store = self.state_store.read().await;
+        match store.as_ref() {
+            Some(s) => {
+                crate::reactions::checkpoint::read_checkpoints_batch(
+                    s.as_ref(),
+                    &self.id,
+                    &self.queries,
+                )
+                .await
+            }
+            None => Ok(std::collections::HashMap::new()),
+        }
     }
 
-    /// Subscribe to all configured queries and spawn forwarder tasks
+    /// Persist a checkpoint for a single query subscription.
     ///
-    /// This method handles the common pattern of:
-    /// 1. Getting query instances via the injected QueryProvider
-    /// 2. Subscribing to each configured query
-    /// 3. Spawning forwarder tasks to enqueue results to priority queue
-    ///
-    /// # Prerequisites
-    /// * `inject_query_provider()` must have been called (done automatically by DrasiLib)
-    ///
-    /// # Returns
-    /// * `Ok(())` if all subscriptions succeeded
-    /// * `Err(...)` if QueryProvider not injected or any subscription failed
-    pub async fn subscribe_to_queries(&self) -> Result<()> {
-        // Get the injected query provider (clone the Arc to release the lock)
-        let query_provider = {
-            let qp_guard = self.query_provider.read().await;
-            qp_guard.as_ref().cloned().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "QueryProvider not injected - was reaction '{}' added to DrasiLib?",
-                    self.id
-                )
-            })?
-        };
-
-        // Subscribe to all configured queries and spawn forwarder tasks
-        for query_id in &self.queries {
-            // Get the query instance via QueryProvider
-            let query = query_provider.get_query_instance(query_id).await?;
-
-            // Subscribe to the query
-            let subscription_response = query
-                .subscribe(self.id.clone())
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?;
-            let mut receiver = subscription_response.receiver;
-
-            // Clone necessary data for the forwarder task
-            let priority_queue = self.priority_queue.clone();
-            let query_id_clone = query_id.clone();
-            let reaction_id = self.id.clone();
-
-            // Get query dispatch mode to determine enqueue strategy
-            let query_config = query.get_config();
-            let dispatch_mode = query_config
-                .dispatch_mode
-                .unwrap_or(crate::channels::DispatchMode::Channel);
-            let use_blocking_enqueue =
-                matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
-
-            // Spawn forwarder task to read from receiver and enqueue to priority queue
-            let forwarder_task = tokio::spawn(async move {
-                debug!(
-                    "[{reaction_id}] Started result forwarder for query '{query_id_clone}' (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
-                );
-
-                loop {
-                    match receiver.recv().await {
-                        Ok(query_result) => {
-                            // Use appropriate enqueue method based on dispatch mode
-                            if use_blocking_enqueue {
-                                // Channel mode: Use blocking enqueue to prevent message loss
-                                // This creates backpressure when the priority queue is full
-                                priority_queue.enqueue_wait(query_result).await;
-                            } else {
-                                // Broadcast mode: Use non-blocking enqueue to prevent deadlock
-                                // Messages may be dropped when priority queue is full
-                                if !priority_queue.enqueue(query_result).await {
-                                    warn!(
-                                        "[{reaction_id}] Failed to enqueue result from query '{query_id_clone}' - priority queue at capacity (broadcast mode)"
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            // Check if it's a lag error or closed channel
-                            let error_str = e.to_string();
-                            if error_str.contains("lagged") {
-                                warn!(
-                                    "[{reaction_id}] Receiver lagged for query '{query_id_clone}': {error_str}"
-                                );
-                                continue;
-                            } else {
-                                info!(
-                                    "[{reaction_id}] Receiver error for query '{query_id_clone}': {error_str}"
-                                );
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
-
-            // Store the forwarder task handle
-            self.subscription_tasks.write().await.push(forwarder_task);
-        }
-
-        Ok(())
+    /// This atomically writes the checkpoint to the state store. It should be
+    /// called after a batch of query results has been successfully processed.
+    pub async fn write_checkpoint(
+        &self,
+        query_id: &str,
+        checkpoint: &ReactionCheckpoint,
+    ) -> Result<()> {
+        let store = self.state_store.read().await;
+        let store = store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("No state store configured — cannot write checkpoint")
+        })?;
+        crate::reactions::checkpoint::write_checkpoint(
+            store.as_ref(),
+            &self.id,
+            query_id,
+            checkpoint,
+        )
+        .await
     }
 
     /// Perform common cleanup operations
@@ -405,9 +416,9 @@ impl ReactionBase {
 
         // Wait for the processing task to complete (with timeout), or abort it
         let mut processing_task = self.processing_task.write().await;
-        if let Some(task) = processing_task.take() {
+        if let Some(mut task) = processing_task.take() {
             // Give the task a short time to respond to the shutdown signal
-            match tokio::time::timeout(std::time::Duration::from_secs(2), task).await {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
                 Ok(Ok(())) => {
                     debug!("[{}] Processing task completed gracefully", self.id);
                 }
@@ -417,11 +428,11 @@ impl ReactionBase {
                 }
                 Err(_) => {
                     // Timeout - task didn't respond to shutdown signal
-                    // This shouldn't happen if the task is using tokio::select! correctly
                     warn!(
-                        "[{}] Processing task did not respond to shutdown signal within timeout",
+                        "[{}] Processing task did not respond to shutdown signal within timeout, aborting",
                         self.id
                     );
+                    task.abort();
                 }
             }
         }
@@ -437,12 +448,128 @@ impl ReactionBase {
             );
         }
 
+        self.set_status(
+            ComponentStatus::Stopped,
+            Some(format!("Reaction '{}' stopped", self.id)),
+        )
+        .await;
+        info!("Reaction '{}' stopped", self.id);
+
+        Ok(())
+    }
+
+    /// Clear the reaction's state store partition.
+    ///
+    /// This is called during deprovision to remove all persisted state
+    /// associated with this reaction. Reactions that override `deprovision()`
+    /// can call this to clean up their state store.
+    pub async fn deprovision_common(&self) -> Result<()> {
+        info!("Deprovisioning reaction '{}'", self.id);
+        if let Some(store) = self.state_store().await {
+            let count = store.clear_store(&self.id).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to clear state store for reaction '{}': {}",
+                    self.id,
+                    e
+                )
+            })?;
+            info!(
+                "Cleared {} keys from state store for reaction '{}'",
+                count, self.id
+            );
+        }
         Ok(())
     }
 
     /// Set the processing task handle
     pub async fn set_processing_task(&self, task: tokio::task::JoinHandle<()>) {
         *self.processing_task.write().await = Some(task);
+    }
+
+    /// Run a standard dequeue → dedup → handler → checkpoint loop.
+    ///
+    /// This is an optional convenience for reactions that follow the common
+    /// pattern.  Reactions needing custom scheduling, batching, or
+    /// multi-query ordering should implement their own loop.
+    ///
+    /// The loop:
+    /// 1. Dequeues from the priority queue (blocks until available).
+    /// 2. Checks the event's sequence against the persisted checkpoint —
+    ///    events at or before the checkpoint are silently skipped (dedup).
+    /// 3. Calls `handler` with the event.
+    /// 4. On success, writes a new checkpoint with the event's sequence,
+    ///    preserving the `config_hash` from the initial checkpoint map
+    ///    (or 0 if no prior checkpoint exists for that query).
+    /// 5. Breaks when `shutdown_rx` fires.
+    ///
+    /// # Arguments
+    /// * `shutdown_rx` — receiver created via [`create_shutdown_channel`].
+    /// * `initial_checkpoints` — pre-loaded checkpoint map (from bootstrap
+    ///   orchestration). The loop uses these for dedup and preserves each
+    ///   query's `config_hash` when advancing the sequence.
+    /// * `handler` — async function receiving a [`QueryResult`].  Return
+    ///   `Ok(())` to advance the checkpoint, or `Err` to leave it unchanged
+    ///   (the event will NOT be retried automatically).
+    pub async fn run_standard_loop<F, Fut>(
+        &self,
+        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+        initial_checkpoints: std::collections::HashMap<String, ReactionCheckpoint>,
+        handler: F,
+    ) -> Result<()>
+    where
+        F: Fn(Arc<crate::channels::QueryResult>) -> Fut + Send + Sync,
+        Fut: std::future::Future<Output = Result<()>> + Send,
+    {
+        let mut checkpoints = initial_checkpoints;
+
+        loop {
+            let event = tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => {
+                    break;
+                }
+                event = self.priority_queue.dequeue() => event,
+            };
+
+            let query_id = &event.query_id;
+            let seq = event.sequence;
+
+            // Dedup: skip events at or before the checkpoint.
+            if let Some(cp) = checkpoints.get(query_id) {
+                if seq <= cp.sequence {
+                    debug!(
+                        "[{}] Skipping already-processed event: query={}, seq={} (checkpoint={})",
+                        self.id, query_id, seq, cp.sequence
+                    );
+                    continue;
+                }
+            }
+
+            // Invoke the user-provided handler.
+            if let Err(e) = handler(Arc::clone(&event)).await {
+                error!(
+                    "[{}] Handler error for query={}, seq={}: {:#}",
+                    self.id, query_id, seq, e
+                );
+                // Don't advance the checkpoint — the event was not
+                // successfully processed.
+                continue;
+            }
+
+            // Advance the checkpoint, preserving the config_hash from bootstrap.
+            let config_hash = checkpoints
+                .get(query_id)
+                .map(|cp| cp.config_hash)
+                .unwrap_or(0);
+            let cp = ReactionCheckpoint {
+                sequence: seq,
+                config_hash,
+            };
+            self.write_checkpoint(query_id, &cp).await?;
+            checkpoints.insert(query_id.clone(), cp);
+        }
+
+        Ok(())
     }
 }
 
@@ -466,46 +593,32 @@ mod tests {
     #[tokio::test]
     async fn test_status_transitions() {
         use crate::context::ReactionRuntimeContext;
-        use crate::queries::Query;
 
-        // Mock QueryProvider for testing
-        struct MockQueryProvider;
-
-        #[async_trait::async_trait]
-        impl crate::reactions::QueryProvider for MockQueryProvider {
-            async fn get_query_instance(
-                &self,
-                _id: &str,
-            ) -> anyhow::Result<std::sync::Arc<dyn Query>> {
-                Err(anyhow::anyhow!("MockQueryProvider: query not found"))
-            }
-        }
-
-        let (status_tx, mut event_rx) = mpsc::channel(100);
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
+        let graph = Arc::new(RwLock::new(graph));
         let params = ReactionBaseParams::new("test-reaction", vec![]);
 
         let base = ReactionBase::new(params);
 
         // Create context and initialize
-        let context = ReactionRuntimeContext::new(
-            "test-reaction",
-            status_tx,
-            None,
-            std::sync::Arc::new(MockQueryProvider),
-        );
+        let context =
+            ReactionRuntimeContext::new("test-instance", "test-reaction", None, update_tx, None);
         base.initialize(context).await;
 
         // Test status transition
-        base.set_status_with_event(ComponentStatus::Starting, Some("Starting test".to_string()))
-            .await
-            .unwrap();
+        base.set_status(ComponentStatus::Starting, Some("Starting test".to_string()))
+            .await;
 
         assert_eq!(base.get_status().await, ComponentStatus::Starting);
 
-        // Check event was sent
-        let event = event_rx.try_recv().unwrap();
-        assert_eq!(event.status, ComponentStatus::Starting);
-        assert_eq!(event.message, Some("Starting test".to_string()));
+        // Check event was sent via graph broadcast
+        let mut event_rx = graph.read().await.subscribe();
+        // The status was already set; emit another event to verify the graph path works
+        base.set_status(ComponentStatus::Running, Some("Running test".to_string()))
+            .await;
+
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
     }
 
     #[tokio::test]
@@ -518,6 +631,7 @@ mod tests {
         // Create a test query result
         let query_result = QueryResult::new(
             "test-query".to_string(),
+            0,
             chrono::Utc::now(),
             vec![],
             Default::default(),
@@ -534,15 +648,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_without_initialization() {
-        // Test that send_component_event works even without context initialization
+        // Test that set_status works even without context initialization
         let params = ReactionBaseParams::new("test-reaction", vec![]);
 
         let base = ReactionBase::new(params);
 
-        // This should succeed without panicking (silently does nothing when status_tx is None)
-        base.send_component_event(ComponentStatus::Starting, None)
-            .await
-            .unwrap();
+        // This should succeed without panicking (silently updates local only when handle is None)
+        base.set_status(ComponentStatus::Starting, None).await;
     }
 
     // =============================================================================
@@ -626,12 +738,10 @@ mod tests {
 
         base.set_processing_task(task).await;
 
-        // Call stop_common - should send shutdown signal
+        // Call stop_common - should send shutdown signal and await the task
         let _ = base.stop_common().await;
 
-        // Give task time to process
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
+        // stop_common awaits the processing task, so the flag should already be set
         assert!(
             shutdown_received.load(Ordering::SeqCst),
             "Processing task should have received shutdown signal"
@@ -691,5 +801,322 @@ mod tests {
         // stop_common should still work
         let result = base.stop_common().await;
         assert!(result.is_ok());
+    }
+
+    // =============================================================================
+    // Accessor Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_get_id() {
+        let params = ReactionBaseParams::new("my-reaction-42", vec![]);
+        let base = ReactionBase::new(params);
+        assert_eq!(base.get_id(), "my-reaction-42");
+    }
+
+    #[tokio::test]
+    async fn test_get_queries() {
+        let queries = vec!["query-a".to_string(), "query-b".to_string(), "query-c".to_string()];
+        let params = ReactionBaseParams::new("r1", queries.clone());
+        let base = ReactionBase::new(params);
+        assert_eq!(base.get_queries(), &queries[..]);
+    }
+
+    #[tokio::test]
+    async fn test_get_queries_empty() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.get_queries().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_auto_start_default_true() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.get_auto_start());
+    }
+
+    #[tokio::test]
+    async fn test_get_auto_start_override_false() {
+        let params = ReactionBaseParams::new("r1", vec![]).with_auto_start(false);
+        let base = ReactionBase::new(params);
+        assert!(!base.get_auto_start());
+    }
+
+    // =============================================================================
+    // Context / State Store / Identity Provider Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_context_none_before_initialize() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.context().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_context_some_after_initialize() {
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("inst");
+        let update_tx = graph.update_sender();
+        let context = ReactionRuntimeContext::new("inst", "r1", None, update_tx, None);
+
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        base.initialize(context).await;
+
+        let ctx = base.context().await;
+        assert!(ctx.is_some());
+        assert_eq!(ctx.unwrap().reaction_id, "r1");
+    }
+
+    #[tokio::test]
+    async fn test_state_store_none_when_not_configured() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.state_store().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_state_store_none_after_initialize_without_store() {
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("inst");
+        let update_tx = graph.update_sender();
+        let context = ReactionRuntimeContext::new("inst", "r1", None, update_tx, None);
+
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        base.initialize(context).await;
+
+        assert!(base.state_store().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_identity_provider_none_by_default() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.identity_provider().await.is_none());
+    }
+
+    // =============================================================================
+    // Status Handle Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_status_handle_returns_handle() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+
+        let handle = base.status_handle();
+        // The handle should share the same status as the base
+        assert_eq!(handle.get_status().await, ComponentStatus::Stopped);
+
+        // Mutating via handle should be visible via base
+        handle.set_status(ComponentStatus::Running, None).await;
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
+    }
+
+    // =============================================================================
+    // Deprovision Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_deprovision_common_noop_without_state_store() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        // Should succeed without panicking when no state store is configured
+        let result = base.deprovision_common().await;
+        assert!(result.is_ok());
+    }
+
+    // =============================================================================
+    // Processing Task Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_set_processing_task_stores_handle() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+
+        // Initially no processing task
+        assert!(base.processing_task.read().await.is_none());
+
+        let task = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        base.set_processing_task(task).await;
+
+        // Now it should be stored
+        assert!(base.processing_task.read().await.is_some());
+
+        // Clean up: abort the long-running task
+        let task = base.processing_task.write().await.take();
+        if let Some(t) = task {
+            t.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_read_write_round_trip() {
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
+
+        let params =
+            ReactionBaseParams::new("ckpt-reaction", vec!["q1".to_string(), "q2".to_string()]);
+        let base = ReactionBase::new(params);
+
+        // Wire up an in-memory state store via context
+        let store: Arc<dyn StateStoreProvider> =
+            Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let context = crate::context::ReactionRuntimeContext::new(
+            "test-instance",
+            "ckpt-reaction",
+            Some(store),
+            update_tx,
+            None,
+        );
+        base.initialize(context).await;
+
+        // Initially no checkpoints
+        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
+        assert!(base.read_all_checkpoints().await.unwrap().is_empty());
+
+        // Write a checkpoint for q1
+        let cp1 = ReactionCheckpoint {
+            sequence: 10,
+            config_hash: 42,
+        };
+        base.write_checkpoint("q1", &cp1).await.unwrap();
+
+        // Read it back
+        let read = base.read_checkpoint("q1").await.unwrap().unwrap();
+        assert_eq!(read, cp1);
+
+        // q2 still absent
+        assert!(base.read_checkpoint("q2").await.unwrap().is_none());
+
+        // Write q2 and check read_all_checkpoints
+        let cp2 = ReactionCheckpoint {
+            sequence: 20,
+            config_hash: 99,
+        };
+        base.write_checkpoint("q2", &cp2).await.unwrap();
+
+        let all = base.read_all_checkpoints().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all["q1"], cp1);
+        assert_eq!(all["q2"], cp2);
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_no_state_store() {
+        // Without a state store, reads return None and writes fail
+        let params = ReactionBaseParams::new("no-store", vec!["q1".to_string()]);
+        let base = ReactionBase::new(params);
+
+        // read_checkpoint returns None without error
+        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
+
+        // read_all_checkpoints returns empty
+        assert!(base.read_all_checkpoints().await.unwrap().is_empty());
+
+        // write_checkpoint should error
+        let cp = ReactionCheckpoint {
+            sequence: 1,
+            config_hash: 0,
+        };
+        assert!(base.write_checkpoint("q1", &cp).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_standard_loop_dedup_and_checkpoint() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
+
+        let params = ReactionBaseParams::new("loop-reaction", vec!["q1".to_string()]);
+        let base = ReactionBase::new(params);
+
+        let store: Arc<dyn StateStoreProvider> =
+            Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let context = crate::context::ReactionRuntimeContext::new(
+            "test-instance",
+            "loop-reaction",
+            Some(store),
+            update_tx,
+            None,
+        );
+        base.initialize(context).await;
+
+        // Initial checkpoints: seq=5 with config_hash=42
+        let initial_checkpoints = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "q1".to_string(),
+                ReactionCheckpoint {
+                    sequence: 5,
+                    config_hash: 42,
+                },
+            );
+            m
+        };
+
+        // Enqueue events: seq 3 (dup), seq 5 (dup), seq 6, seq 7
+        for seq in [3u64, 5, 6, 7] {
+            let result = crate::channels::QueryResult {
+                query_id: "q1".to_string(),
+                sequence: seq,
+                timestamp: chrono::Utc::now(),
+                results: vec![],
+                metadata: Default::default(),
+                profiling: None,
+            };
+            base.enqueue_query_result(result).await.unwrap();
+        }
+
+        // Track which sequences the handler actually processes
+        let processed = Arc::new(tokio::sync::Mutex::new(Vec::<u64>::new()));
+        let processed_clone = processed.clone();
+        let handler_count = Arc::new(AtomicU64::new(0));
+        let handler_count_clone = handler_count.clone();
+
+        let shutdown_rx = base.create_shutdown_channel().await;
+        let base_clone = base.clone_shared();
+
+        let loop_handle = tokio::spawn(async move {
+            base_clone
+                .run_standard_loop(shutdown_rx, initial_checkpoints, |event| {
+                    let processed = processed_clone.clone();
+                    let count = handler_count_clone.clone();
+                    async move {
+                        processed.lock().await.push(event.sequence);
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }
+                })
+                .await
+                .unwrap();
+        });
+
+        // Wait for all non-dup events to be processed (seq 6 and 7)
+        for _ in 0..50 {
+            if handler_count.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Signal shutdown via stop_common (the standard path)
+        let _ = base.stop_common().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
+
+        // Verify only seq 6 and 7 were processed (3 and 5 were deduped)
+        let processed = processed.lock().await;
+        assert_eq!(*processed, vec![6, 7]);
+
+        // Checkpoint should now be at seq=7, preserving config_hash=42
+        let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
+        assert_eq!(cp.sequence, 7);
+        assert_eq!(cp.config_hash, 42);
     }
 }

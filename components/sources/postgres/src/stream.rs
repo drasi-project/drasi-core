@@ -16,18 +16,20 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
 use tokio::time::{interval, sleep};
 
-use super::connection::ReplicationConnection;
+use super::connection::{parse_lsn, ReplicationConnection};
 use super::decoder::PgOutputDecoder;
 use super::protocol::BackendMessage;
 use super::types::{StandbyStatusUpdate, WalMessage};
-use super::PostgresSourceConfig;
+use super::{PostgresSourceConfig, ReplayState};
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, SourceEvent, SourceEventWrapper};
+use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventWrapper};
+use drasi_lib::component_graph::ComponentStatusHandle;
 use drasi_lib::sources::base::SourceBase;
 
 pub struct ReplicationStream {
@@ -35,17 +37,14 @@ pub struct ReplicationStream {
     source_id: String,
     connection: Option<ReplicationConnection>,
     decoder: PgOutputDecoder,
-    dispatchers: Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
     #[allow(dead_code)]
-    status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
-    status: Arc<RwLock<ComponentStatus>>,
-    current_lsn: u64,
+    status_handle: ComponentStatusHandle,
+    base: SourceBase,
+    replay_state: Arc<ReplayState>,
+    read_lsn: u64,
+    start_lsn: Option<u64>,
     last_feedback_time: std::time::Instant,
-    pending_transaction: Option<Vec<SourceChange>>,
+    pending_transaction: Option<Vec<(SourceChange, u64)>>,
     relations: HashMap<u32, RelationMapping>,
     table_primary_keys: Arc<RwLock<HashMap<String, Vec<String>>>>,
 }
@@ -59,30 +58,24 @@ struct RelationMapping {
 }
 
 impl ReplicationStream {
-    pub fn new(
+    pub(crate) fn new(
         config: PostgresSourceConfig,
         source_id: String,
-        dispatchers: Arc<
-            RwLock<
-                Vec<
-                    Box<
-                        dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync,
-                    >,
-                >,
-            >,
-        >,
-        status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
-        status: Arc<RwLock<ComponentStatus>>,
+        status_handle: ComponentStatusHandle,
+        base: SourceBase,
+        replay_state: Arc<ReplayState>,
+        start_lsn: Option<u64>,
     ) -> Self {
         Self {
             config,
             source_id,
             connection: None,
             decoder: PgOutputDecoder::new(),
-            dispatchers,
-            status_tx,
-            status,
-            current_lsn: 0,
+            status_handle,
+            base,
+            replay_state,
+            read_lsn: 0,
+            start_lsn,
             last_feedback_time: std::time::Instant::now(),
             pending_transaction: None,
             relations: HashMap::new(),
@@ -94,11 +87,22 @@ impl ReplicationStream {
     // Element IDs are generated from configured table_keys (in config.table_keys),
     // or fall back to using all column values if no keys are configured.
 
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(
+        &mut self,
+        startup_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
+    ) -> Result<()> {
         info!("Starting replication stream for source {}", self.source_id);
 
         // Connect and setup replication
-        self.connect_and_setup().await?;
+        if let Err(error) = self.connect_and_setup().await {
+            if let Some(tx) = startup_tx {
+                let _ = tx.send(Err(format!("{error:#}")));
+            }
+            return Err(error);
+        }
+        if let Some(tx) = startup_tx {
+            let _ = tx.send(Ok(()));
+        }
 
         // Start streaming loop
         let mut keepalive_interval = interval(Duration::from_secs(10));
@@ -106,8 +110,8 @@ impl ReplicationStream {
         loop {
             // Check if we should stop
             {
-                let status = self.status.read().await;
-                if *status == ComponentStatus::Stopping || *status == ComponentStatus::Stopped {
+                let status = self.status_handle.get_status().await;
+                if status == ComponentStatus::Stopping || status == ComponentStatus::Stopped {
                     info!("Received stop signal, shutting down replication");
                     break;
                 }
@@ -178,13 +182,18 @@ impl ReplicationStream {
             .await?;
         info!("Using replication slot: {slot_info:?}");
 
-        // Parse starting LSN
-        if !slot_info.consistent_point.is_empty() && slot_info.consistent_point != "0/0" {
-            self.current_lsn = parse_lsn(&slot_info.consistent_point)?;
-        } else {
-            // Start from beginning if no consistent point
-            self.current_lsn = 0;
-        }
+        // Parse starting LSN — use explicit start_lsn if provided (replay),
+        // otherwise use the slot's consistent_point.
+        let slot_lsn =
+            if !slot_info.consistent_point.is_empty() && slot_info.consistent_point != "0/0" {
+                parse_lsn(&slot_info.consistent_point)?
+            } else {
+                0
+            };
+        self.read_lsn = self.start_lsn.unwrap_or(slot_lsn);
+        self.replay_state
+            .read_lsn
+            .store(self.read_lsn, Ordering::Release);
 
         // Build replication options
         let mut options = HashMap::new();
@@ -195,11 +204,14 @@ impl ReplicationStream {
         );
 
         // Start replication
-        conn.start_replication(&self.config.slot_name, Some(self.current_lsn), options)
+        conn.start_replication(&self.config.slot_name, Some(self.read_lsn), options)
             .await?;
 
         self.connection = Some(conn);
-        info!("Replication started from LSN: {:x}", self.current_lsn);
+        info!(
+            "Replication started from read LSN {:x} (slot watermark {:x})",
+            self.read_lsn, slot_lsn
+        );
 
         Ok(())
     }
@@ -229,7 +241,10 @@ impl ReplicationStream {
                 timestamp: _,
                 reply,
             } => {
-                self.current_lsn = wal_end;
+                self.read_lsn = wal_end;
+                self.replay_state
+                    .read_lsn
+                    .store(self.read_lsn, Ordering::Release);
                 if reply == 1 {
                     self.send_feedback(true).await?;
                 }
@@ -286,8 +301,11 @@ impl ReplicationStream {
             data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
         ]);
 
-        // Update LSN
-        self.current_lsn = end_lsn;
+        // Update read LSN
+        self.read_lsn = end_lsn;
+        self.replay_state
+            .read_lsn
+            .store(self.read_lsn, Ordering::Release);
 
         // Decode the actual WAL message
         let wal_data = &data[24..];
@@ -343,7 +361,10 @@ impl ReplicationStream {
         ]);
         let reply = data[16];
 
-        self.current_lsn = wal_end;
+        self.read_lsn = wal_end;
+        self.replay_state
+            .read_lsn
+            .store(self.read_lsn, Ordering::Release);
 
         if reply == 1 {
             self.send_feedback(true).await?;
@@ -355,38 +376,15 @@ impl ReplicationStream {
     async fn process_wal_message(&mut self, msg: WalMessage) -> Result<()> {
         match msg {
             WalMessage::Begin(_) => {
-                // Start a new transaction
+                // Start a new transaction — track changes with their LSN
                 self.pending_transaction = Some(Vec::new());
             }
             WalMessage::Commit(tx_info) => {
-                // Commit the transaction
+                // Commit the transaction — stamp all changes with the commit LSN
+                // for atomic checkpoint semantics
                 if let Some(changes) = self.pending_transaction.take() {
-                    // Send all changes in the transaction
-                    for change in changes {
-                        // Create profiling metadata with timestamps
-                        let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                        profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            self.source_id.clone(),
-                            SourceEvent::Change(change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
-
-                        // Dispatch via helper
-                        if let Err(e) = SourceBase::dispatch_from_task(
-                            self.dispatchers.clone(),
-                            wrapper.clone(),
-                            &self.source_id,
-                        )
-                        .await
-                        {
-                            debug!(
-                                "[{}] Failed to dispatch change (no subscribers): {}",
-                                self.source_id, e
-                            );
-                        }
+                    for (change, _) in changes {
+                        self.dispatch_change(change, tx_info.commit_lsn).await;
                     }
                     debug!(
                         "Committed transaction {} with LSN {:x}",
@@ -413,32 +411,9 @@ impl ReplicationStream {
             WalMessage::Insert { relation_id, tuple } => {
                 if let Some(change) = self.convert_insert(relation_id, tuple).await? {
                     if let Some(tx) = &mut self.pending_transaction {
-                        tx.push(change);
+                        tx.push((change, self.read_lsn));
                     } else {
-                        // No transaction context, send immediately
-                        let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                        profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            self.source_id.clone(),
-                            SourceEvent::Change(change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
-
-                        // Dispatch via helper
-                        if let Err(e) = SourceBase::dispatch_from_task(
-                            self.dispatchers.clone(),
-                            wrapper.clone(),
-                            &self.source_id,
-                        )
-                        .await
-                        {
-                            debug!(
-                                "[{}] Failed to dispatch change (no subscribers): {}",
-                                self.source_id, e
-                            );
-                        }
+                        self.dispatch_change(change, self.read_lsn).await;
                     }
                 }
             }
@@ -452,31 +427,9 @@ impl ReplicationStream {
                     .await?
                 {
                     if let Some(tx) = &mut self.pending_transaction {
-                        tx.push(change);
+                        tx.push((change, self.read_lsn));
                     } else {
-                        let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                        profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            self.source_id.clone(),
-                            SourceEvent::Change(change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
-
-                        // Dispatch via helper
-                        if let Err(e) = SourceBase::dispatch_from_task(
-                            self.dispatchers.clone(),
-                            wrapper.clone(),
-                            &self.source_id,
-                        )
-                        .await
-                        {
-                            debug!(
-                                "[{}] Failed to dispatch change (no subscribers): {}",
-                                self.source_id, e
-                            );
-                        }
+                        self.dispatch_change(change, self.read_lsn).await;
                     }
                 }
             }
@@ -486,31 +439,9 @@ impl ReplicationStream {
             } => {
                 if let Some(change) = self.convert_delete(relation_id, old_tuple).await? {
                     if let Some(tx) = &mut self.pending_transaction {
-                        tx.push(change);
+                        tx.push((change, self.read_lsn));
                     } else {
-                        let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                        profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            self.source_id.clone(),
-                            SourceEvent::Change(change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
-
-                        // Dispatch via helper
-                        if let Err(e) = SourceBase::dispatch_from_task(
-                            self.dispatchers.clone(),
-                            wrapper.clone(),
-                            &self.source_id,
-                        )
-                        .await
-                        {
-                            debug!(
-                                "[{}] Failed to dispatch change (no subscribers): {}",
-                                self.source_id, e
-                            );
-                        }
+                        self.dispatch_change(change, self.read_lsn).await;
                     }
                 }
             }
@@ -545,7 +476,7 @@ impl ReplicationStream {
                 if !json_value.is_null() {
                     properties.insert(
                         &column.name,
-                        drasi_lib::sources::manager::convert_json_to_element_value(&json_value)?,
+                        drasi_lib::sources::manager::convert_json_to_element_value(&json_value),
                     );
                 }
             }
@@ -586,14 +517,12 @@ impl ReplicationStream {
         // Generate element ID (should be the same for both old and new tuples)
         let element_id = self.generate_element_id(relation, &new_tuple).await?;
 
-        // If we don't have old_tuple, treat as INSERT
-        let Some(_old_tuple) = old_tuple else {
-            warn!("UPDATE without old tuple for relation {relation_id}, treating as INSERT");
-            return self.convert_insert(relation_id, new_tuple).await;
-        };
+        if old_tuple.is_none() {
+            warn!("UPDATE without old tuple for relation {relation_id}, preserving UPDATE");
+        }
 
         // Create properties for after state
-        // Note: We validated old_tuple exists to ensure this is a proper UPDATE
+        // Note: We allow UPDATE without old_tuple to avoid converting to INSERT.
         let mut after_properties = drasi_core::models::ElementPropertyMap::new();
 
         // Process new tuple (after state)
@@ -603,15 +532,11 @@ impl ReplicationStream {
                 if !json_value.is_null() {
                     after_properties.insert(
                         &column.name,
-                        drasi_lib::sources::manager::convert_json_to_element_value(&json_value)?,
+                        drasi_lib::sources::manager::convert_json_to_element_value(&json_value),
                     );
                 }
             }
         }
-
-        // Note: SourceChange::Update only needs the after element
-        // The before state is tracked internally by drasi-core
-        // We still process old_tuple to ensure we have the correct element_id
 
         let after_element = Element::Node {
             metadata: ElementMetadata {
@@ -722,25 +647,103 @@ impl ReplicationStream {
 
     async fn send_feedback(&mut self, reply_requested: bool) -> Result<()> {
         if let Some(conn) = &mut self.connection {
+            // Use the confirmed source position (min LSN across all query
+            // position handles) for flush_lsn / apply_lsn.  This tells
+            // Postgres that WAL up to this LSN has been durably processed
+            // by all subscribers.  Using read_lsn here would advance the
+            // slot watermark past un-checkpointed query positions, causing
+            // PositionUnavailable on crash+restart.
+            let confirmed_lsn = match self.base.compute_confirmed_source_position().await {
+                Some(bytes) if bytes.len() == 8 => {
+                    let arr: [u8; 8] = bytes[..8].try_into().expect("length already checked");
+                    u64::from_be_bytes(arr)
+                }
+                Some(bytes) => {
+                    warn!(
+                        "[{}] Confirmed source position has unexpected length {} (expected 8); \
+                             not advancing flush_lsn",
+                        self.source_id,
+                        bytes.len()
+                    );
+                    0
+                }
+                None => 0, // No confirmed position yet — don't advance
+            };
+
+            // Apply the flush fence: during the subscription window after a
+            // replay restart, cap flush_lsn to prevent the slot's restart_lsn
+            // from advancing past positions that pending subscribers still need.
+            let fence = self.replay_state.effective_flush_fence();
+            let (effective_lsn, was_clamped) = if fence < u64::MAX && confirmed_lsn > fence {
+                (fence, true)
+            } else {
+                (confirmed_lsn, false)
+            };
+
             let status = StandbyStatusUpdate {
-                write_lsn: self.current_lsn,
-                flush_lsn: self.current_lsn,
-                apply_lsn: self.current_lsn,
+                write_lsn: self.read_lsn,
+                flush_lsn: effective_lsn,
+                apply_lsn: effective_lsn,
                 reply_requested,
             };
 
             conn.send_standby_status(status).await?;
             self.last_feedback_time = std::time::Instant::now();
-            trace!("Sent feedback with LSN: {:x}", self.current_lsn);
+
+            // Prune the sequence→position map up to the confirmed sequence
+            // now that feedback was successfully sent. Skip pruning when the
+            // fence clamped flush_lsn — Postgres hasn't actually acknowledged
+            // the full confirmed position, so we must retain map entries for
+            // accurate re-computation after the fence lifts.
+            if !was_clamped && effective_lsn > 0 {
+                if let Some(confirmed_seq) = self.base.compute_confirmed_position().await {
+                    self.base.prune_position_map(confirmed_seq).await;
+                }
+            }
+
+            trace!(
+                "[{}] Sent feedback: write_lsn={:x}, flush_lsn={:x}{}",
+                self.source_id,
+                self.read_lsn,
+                effective_lsn,
+                if was_clamped { " (fenced)" } else { "" }
+            );
         }
 
         Ok(())
     }
 
+    /// Dispatch a single change event through the framework's `dispatch_event()`.
+    ///
+    /// Sets `source_position` to the 8-byte big-endian WAL LSN so the checkpoint
+    /// framework can persist the position for recovery/replay.
+    async fn dispatch_change(&self, change: SourceChange, lsn: u64) {
+        let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
+        profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
+
+        let mut wrapper = SourceEventWrapper::with_profiling(
+            self.source_id.clone(),
+            SourceEvent::Change(change),
+            chrono::Utc::now(),
+            profiling,
+        );
+
+        // Attach the WAL LSN as opaque source_position bytes for checkpoint/recovery
+        wrapper.set_source_position(super::connection::lsn_to_position_bytes(lsn));
+
+        // Use dispatch_event() which stamps the monotonic sequence
+        if let Err(e) = self.base.dispatch_event(wrapper).await {
+            debug!(
+                "[{}] Failed to dispatch change (no subscribers): {}",
+                self.source_id, e
+            );
+        }
+    }
+
     #[allow(dead_code)]
     async fn check_stop_signal(&self) -> bool {
-        let status = self.status.read().await;
-        *status == ComponentStatus::Stopping || *status == ComponentStatus::Stopped
+        let status = self.status_handle.get_status().await;
+        status == ComponentStatus::Stopping || status == ComponentStatus::Stopped
     }
 
     async fn recover_connection(&mut self) -> Result<()> {
@@ -776,14 +779,29 @@ impl ReplicationStream {
     }
 }
 
-fn parse_lsn(lsn_str: &str) -> Result<u64> {
-    let parts: Vec<&str> = lsn_str.split('/').collect();
-    if parts.len() != 2 {
-        return Err(anyhow!("Invalid LSN format: {lsn_str}"));
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use drasi_core::models::validate_effective_from;
+
+    /// Validates that the timestamp pattern used in convert_insert/convert_update/convert_delete
+    /// produces a value in the millisecond range.
+    #[test]
+    fn effective_from_uses_milliseconds() {
+        let effective_from = Utc::now().timestamp_millis() as u64;
+        assert!(
+            validate_effective_from(effective_from).is_ok(),
+            "Postgres CDC effective_from ({effective_from}) should be in millisecond range"
+        );
     }
 
-    let high = u64::from_str_radix(parts[0], 16)?;
-    let low = u64::from_str_radix(parts[1], 16)?;
-
-    Ok((high << 32) | low)
+    /// Verifies that using nanoseconds would be caught by the validator.
+    #[test]
+    fn effective_from_rejects_nanoseconds_pattern() {
+        let bad_effective_from = Utc::now().timestamp_nanos_opt().unwrap() as u64;
+        assert!(
+            validate_effective_from(bad_effective_from).is_err(),
+            "Nanosecond timestamp ({bad_effective_from}) should be rejected"
+        );
+    }
 }

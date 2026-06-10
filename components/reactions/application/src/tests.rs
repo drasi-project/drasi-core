@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use drasi_lib::{recovery::ReactionRecoveryPolicy, Reaction};
 use std::collections::HashMap;
 
 fn create_test_reaction_config(id: &str, queries: Vec<String>) -> ReactionConfig {
@@ -32,6 +33,7 @@ fn create_test_reaction_config(id: &str, queries: Vec<String>) -> ReactionConfig
 fn create_test_query_result(query_id: &str) -> QueryResult {
     QueryResult {
         query_id: query_id.to_string(),
+        sequence: 0,
         results: vec![],
         metadata: HashMap::new(),
         profiling: None,
@@ -261,4 +263,18 @@ async fn test_query_result_creation_helper() {
     assert_eq!(result.query_id, "test-query");
     assert!(result.results.is_empty());
     assert!(result.metadata.is_empty());
+}
+
+#[tokio::test]
+async fn test_recovery_trait_defaults() {
+    let config = create_test_reaction_config("test-recovery", vec![]);
+    let (event_tx, _) = mpsc::channel(100);
+    let (reaction, _handle) = ApplicationReaction::new(config, event_tx);
+
+    assert!(!reaction.is_durable());
+    assert!(!reaction.needs_snapshot_on_fresh_start());
+    assert_eq!(
+        reaction.default_recovery_policy(),
+        ReactionRecoveryPolicy::Strict
+    );
 }

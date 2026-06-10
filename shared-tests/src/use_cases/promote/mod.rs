@@ -32,6 +32,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -157,15 +158,19 @@ async fn test_basic_promotion(config: &(impl QueryTestConfig + Send)) {
         "other" => VariableValue::Integer(Integer::from(123))
     );
 
-    assert!(result.contains(&QueryPartEvaluationContext::Adding {
-        after: variablemap!(
-            "id" => VariableValue::String("node1".to_string()),
-            "nested" => VariableValue::Object(nested_map),
-            "promoted_value" => VariableValue::String("hello".to_string()),
-            "original_prop" => null_vv(),
-            "another_promoted" => null_vv()
-        )
-    }));
+    assert!(contains_data(
+        &result,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "id" => VariableValue::String("node1".to_string()),
+                "nested" => VariableValue::Object(nested_map),
+                "promoted_value" => VariableValue::String("hello".to_string()),
+                "original_prop" => null_vv(),
+                "another_promoted" => null_vv()
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 }
 
 #[allow(clippy::unwrap_used)]
@@ -198,15 +203,19 @@ async fn test_multiple_mappings(config: &(impl QueryTestConfig + Send)) {
         "other" => VariableValue::Float(Float::from(99.5))
     );
 
-    assert!(result.contains(&QueryPartEvaluationContext::Adding {
-        after: variablemap!(
-            "id" => VariableValue::String("node2".to_string()),
-            "nested" => VariableValue::Object(nested_map),
-            "promoted_value" => VariableValue::Bool(true),
-            "another_promoted" => VariableValue::Float(Float::from(99.5)),
-            "original_prop" => null_vv()
-        )
-    }));
+    assert!(contains_data(
+        &result,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "id" => VariableValue::String("node2".to_string()),
+                "nested" => VariableValue::Object(nested_map),
+                "promoted_value" => VariableValue::Bool(true),
+                "another_promoted" => VariableValue::Float(Float::from(99.5)),
+                "original_prop" => null_vv()
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 }
 
 #[allow(clippy::unwrap_used)]
@@ -238,15 +247,19 @@ async fn test_conflict_overwrite(config: &(impl QueryTestConfig + Send)) {
         "value" => VariableValue::String("new_value".to_string())
     );
 
-    assert!(result.contains(&QueryPartEvaluationContext::Adding {
-        after: variablemap!(
-            "id" => VariableValue::String("node3".to_string()),
-            "nested" => VariableValue::Object(nested_map),
-            "promoted_value" => VariableValue::String("new_value".to_string()), // Overwritten
-            "original_prop" => null_vv(),
-            "another_promoted" => null_vv()
-        )
-    }));
+    assert!(contains_data(
+        &result,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "id" => VariableValue::String("node3".to_string()),
+                "nested" => VariableValue::Object(nested_map),
+                "promoted_value" => VariableValue::String("new_value".to_string()), // Overwritten
+                "original_prop" => null_vv(),
+                "another_promoted" => null_vv()
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 }
 
 #[allow(clippy::unwrap_used)]
@@ -278,15 +291,19 @@ async fn test_conflict_skip(config: &(impl QueryTestConfig + Send)) {
         "value" => VariableValue::String("new_value".to_string())
     );
 
-    assert!(result.contains(&QueryPartEvaluationContext::Adding {
-        after: variablemap!(
-            "id" => VariableValue::String("node4".to_string()),
-            "nested" => VariableValue::Object(nested_map),
-            "promoted_value" => VariableValue::String("original_value".to_string()), // Kept original
-            "original_prop" => null_vv(),
-            "another_promoted" => null_vv()
-        )
-    }));
+    assert!(contains_data(
+        &result,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "id" => VariableValue::String("node4".to_string()),
+                "nested" => VariableValue::Object(nested_map),
+                "promoted_value" => VariableValue::String("original_value".to_string()), // Kept original
+                "original_prop" => null_vv(),
+                "another_promoted" => null_vv()
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 }
 
 #[allow(clippy::unwrap_used)]
@@ -344,15 +361,19 @@ async fn test_error_no_match_skip(config: &(impl QueryTestConfig + Send)) {
     assert_eq!(result.len(), 1);
 
     // No promotion should happen
-    assert!(result.contains(&QueryPartEvaluationContext::Adding {
-        after: variablemap!(
-            "id" => VariableValue::String("node6".to_string()),
-            "original_prop" => VariableValue::String("data".to_string()),
-            "nested" => null_vv(),
-            "promoted_value" => null_vv(), // Not promoted
-            "another_promoted" => null_vv()
-        )
-    }));
+    assert!(contains_data(
+        &result,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "id" => VariableValue::String("node6".to_string()),
+                "original_prop" => VariableValue::String("data".to_string()),
+                "nested" => null_vv(),
+                "promoted_value" => null_vv(), // Not promoted
+                "another_promoted" => null_vv()
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 }
 
 #[allow(clippy::unwrap_used)]
@@ -446,11 +467,13 @@ async fn test_update_change(config: &(impl QueryTestConfig + Send)) {
         "another_promoted" => null_vv()
     );
 
-    assert!(
-        result_initial.contains(&QueryPartEvaluationContext::Adding {
-            after: expected_initial_state.clone()
-        })
-    );
+    assert!(contains_data(
+        &result_initial,
+        &QueryPartEvaluationContext::Adding {
+            after: expected_initial_state.clone(),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 
     // Perform update
     let update = create_node_update_change(
@@ -462,8 +485,9 @@ async fn test_update_change(config: &(impl QueryTestConfig + Send)) {
     assert_eq!(result_update.len(), 1);
 
     let updated_nested = variablemap!("value" => VariableValue::String("updated".to_string()));
-    assert!(
-        result_update.contains(&QueryPartEvaluationContext::Updating {
+    assert!(contains_data(
+        &result_update,
+        &QueryPartEvaluationContext::Updating {
             before: expected_initial_state,
             after: variablemap!(
                 "id" => VariableValue::String(node_id.to_string()),
@@ -471,9 +495,10 @@ async fn test_update_change(config: &(impl QueryTestConfig + Send)) {
                 "promoted_value" => VariableValue::String("updated".to_string()),
                 "original_prop" => null_vv(),
                 "another_promoted" => null_vv()
-            )
-        })
-    );
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 }
 
 #[allow(clippy::unwrap_used)]
@@ -520,11 +545,13 @@ async fn test_delete_change(config: &(impl QueryTestConfig + Send)) {
     let result_delete = query.process_source_change(delete).await.unwrap();
     assert_eq!(result_delete.len(), 1);
 
-    assert!(
-        result_delete.contains(&QueryPartEvaluationContext::Removing {
+    assert!(contains_data(
+        &result_delete,
+        &QueryPartEvaluationContext::Removing {
             before: expected_state_before_delete,
-        })
-    );
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 }
 
 #[allow(clippy::unwrap_used)]

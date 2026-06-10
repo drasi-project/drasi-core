@@ -16,6 +16,7 @@ This guide explains how to create custom source plugins for Drasi. Sources are t
 - [Configuration Patterns](#configuration-patterns)
 - [Testing Sources](#testing-sources)
 - [Key Files Reference](#key-files-reference)
+- [Packaging as a Dynamic Plugin](#packaging-as-a-dynamic-plugin)
 
 ## Overview
 
@@ -33,9 +34,12 @@ Sources are responsible for:
 | `drasi-source-application` | Programmatic/in-memory sources for embedded use | `application/` |
 | `drasi-source-grpc` | gRPC streaming data sources | `grpc/` |
 | `drasi-source-http` | HTTP endpoint polling with adaptive batching | `http/` |
+| `drasi-source-here-traffic` | HERE Traffic API polling source | `here-traffic/` |
 | `drasi-source-mock` | Test data generator for development | `mock/` |
 | `drasi-source-platform` | Redis Streams consumer for platform integration | `platform/` |
 | `drasi-source-postgres` | PostgreSQL WAL-based replication | `postgres/` |
+| `drasi-source-hyperliquid` | Hyperliquid market data streaming | `hyperliquid/` |
+| `drasi-source-sui-deepbook` | Sui DeepBook V3 event polling source | `sui-deepbook/` |
 
 ## Architecture
 
@@ -105,6 +109,13 @@ pub trait Source: Send + Sync {
         true
     }
 
+    /// Whether this source supports positional replay via `resume_from`.
+    /// Sources backed by a persistent log (e.g., Postgres WAL, Kafka) should
+    /// override this to return `true`. Default is `false`.
+    fn supports_replay(&self) -> bool {
+        false
+    }
+
     /// Start the source - begins data ingestion and event generation
     async fn start(&self) -> Result<()>;
 
@@ -123,6 +134,11 @@ pub trait Source: Send + Sync {
     /// - `enable_bootstrap`: Whether to request initial data
     /// - `nodes`: Set of node labels the query is interested in
     /// - `relations`: Set of relation labels the query is interested in
+    /// - `resume_from`: Optional sequence position to replay from (replay-capable sources)
+    /// - `request_position_handle`: Whether the query wants a feedback handle
+    ///
+    /// Replay-capable sources return `Err(SourceError::PositionUnavailable { .. })`
+    /// if they cannot honor `resume_from`.
     async fn subscribe(
         &self,
         settings: SourceSubscriptionSettings,
@@ -133,7 +149,7 @@ pub trait Source: Send + Sync {
 
     /// Initialize the source with runtime context.
     /// Called automatically by DrasiLib when the source is added.
-    /// The context provides access to DrasiLib services like status_tx and state_store.
+    /// The context provides access to the graph update channel (`update_tx`) and state_store.
     async fn initialize(&self, context: SourceRuntimeContext);
 
     /// Set the bootstrap provider for this source.
@@ -150,7 +166,7 @@ pub trait Source: Send + Sync {
 
 ### Key Design Points
 
-- **Context-based initialization**: Sources receive a `SourceRuntimeContext` via `initialize()` when added to DrasiLib. The context provides access to the status channel, state store, and other DrasiLib services.
+- **Context-based initialization**: Sources receive a `SourceRuntimeContext` via `initialize()` when added to DrasiLib. The context provides access to `update_tx` (for status updates to the graph), state store, and other DrasiLib services.
 - **Async lifecycle**: All lifecycle methods (`start`, `stop`, `subscribe`) are async.
 - **Generic properties**: The `properties()` method returns a HashMap for API inspection, while the actual typed configuration is owned by the plugin.
 - **Query context in subscribe**: The `subscribe()` method receives `SourceSubscriptionSettings` which includes the specific node and relation labels the query needs, enabling sources and bootstrap providers to filter data at the source level.
@@ -175,6 +191,12 @@ pub struct SourceSubscriptionSettings {
     pub nodes: HashSet<String>,
     /// Set of relation labels the query is interested in from this source
     pub relations: HashSet<String>,
+    /// If set, the subscribing query requests events replayed from this sequence position.
+    /// Only meaningful when the source returns `supports_replay() == true`.
+    pub resume_from: Option<u64>,
+    /// If true, the query requests a shared `Arc<AtomicU64>` position handle in the
+    /// `SubscriptionResponse` for reporting its durably-processed position back to the source.
+    pub request_position_handle: bool,
 }
 ```
 
@@ -182,6 +204,8 @@ This enables:
 - **Label filtering at source**: Sources can pre-filter data to only send relevant labels
 - **Bootstrap optimization**: Bootstrap providers can fetch only the data types needed
 - **Efficient joins**: Multi-source queries receive label allocations for each source
+- **Positional replay**: Replay-capable sources can resume from a requested sequence position
+- **Position feedback**: Queries can share their durably-processed position back to the source
 
 ## Using SourceBase
 
@@ -223,6 +247,7 @@ pub struct SourceBaseParams {
     pub id: String,
     pub dispatch_mode: Option<DispatchMode>,                              // Default: Channel
     pub dispatch_buffer_capacity: Option<usize>,                          // Default: 1000
+    pub state_store: Option<Arc<dyn StateStoreProvider>>,                 // Default: None
     pub bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>, // Default: None
     pub auto_start: bool,                                                 // Default: true
 }
@@ -231,6 +256,7 @@ impl SourceBaseParams {
     pub fn new(id: impl Into<String>) -> Self;
     pub fn with_dispatch_mode(self, mode: DispatchMode) -> Self;
     pub fn with_dispatch_buffer_capacity(self, capacity: usize) -> Self;
+    pub fn with_state_store(self, store: Arc<dyn StateStoreProvider>) -> Self;
     pub fn with_bootstrap_provider(self, provider: impl BootstrapProvider + 'static) -> Self;
     pub fn with_auto_start(self, auto_start: bool) -> Self;
 }
@@ -242,11 +268,7 @@ impl SourceBaseParams {
 impl SourceBase {
     // Status management
     pub async fn get_status(&self) -> ComponentStatus;
-    pub async fn set_status(&self, status: ComponentStatus);
-    pub async fn set_status_with_event(&self, status: ComponentStatus, message: Option<String>) -> Result<()>;
-
-    // Component lifecycle events
-    pub async fn send_component_event(&self, status: ComponentStatus, message: Option<String>) -> Result<()>;
+    pub async fn set_status(&self, status: ComponentStatus, message: Option<String>);
 
     // Event dispatching
     pub async fn dispatch_source_change(&self, change: SourceChange) -> Result<()>;
@@ -279,7 +301,7 @@ impl SourceBase {
 
     // Context initialization (called automatically by DrasiLib)
     pub async fn initialize(&self, context: SourceRuntimeContext);
-    pub fn status_tx(&self) -> Arc<RwLock<Option<ComponentEventSender>>>;
+    pub fn status_handle(&self) -> ComponentStatusHandle;
     pub async fn state_store(&self) -> Option<Arc<dyn StateStoreProvider>>;
 
     // Auto-start configuration
@@ -339,8 +361,6 @@ The unified event envelope:
 pub enum SourceEvent {
     Change(SourceChange),              // Data change
     Control(SourceControl),            // Query coordination
-    BootstrapStart { query_id: String },
-    BootstrapEnd { query_id: String },
 }
 ```
 
@@ -372,6 +392,10 @@ pub struct SubscriptionResponse {
     pub source_id: String,
     pub receiver: Box<dyn ChangeReceiver<SourceEventWrapper>>,
     pub bootstrap_receiver: Option<BootstrapEventReceiver>,
+    /// Shared handle for the query to report its last durably-processed sequence position.
+    /// Created by replay-capable sources when `request_position_handle` is true.
+    /// Initialized to `u64::MAX` (meaning "no position confirmed yet").
+    pub position_handle: Option<Arc<AtomicU64>>,
 }
 ```
 
@@ -448,7 +472,7 @@ Bootstrap provides initial data to newly subscribing queries. The bootstrap syst
 pub trait BootstrapProvider: Send + Sync {
     /// Perform bootstrap operation for the given request.
     /// Sends bootstrap events to the provided channel.
-    /// Returns the number of elements sent.
+    /// Returns a `BootstrapResult` with the event count plus handover metadata.
     ///
     /// # Arguments
     /// * `request` - Bootstrap request with query ID and labels
@@ -461,7 +485,18 @@ pub trait BootstrapProvider: Send + Sync {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         settings: Option<&SourceSubscriptionSettings>,
-    ) -> Result<usize>;  // Returns count of events sent
+    ) -> Result<BootstrapResult>;
+}
+
+pub struct BootstrapResult {
+    /// Number of bootstrap events sent through the channel.
+    pub event_count: usize,
+    /// Opaque token identifying the snapshot's position in the source's CDC
+    /// stream (e.g., a Postgres WAL LSN, Oracle SCN, MySQL binlog offset).
+    /// Persisted as the initial recovery checkpoint and used to start the CDC
+    /// stream exactly at the snapshot boundary. `None` for providers without a
+    /// positional concept.
+    pub source_position: Option<bytes::Bytes>,
 }
 
 pub struct BootstrapRequest {
@@ -562,14 +597,11 @@ pub enum ComponentStatus {
 Use `SourceBase` methods for status management:
 
 ```rust
-// Set status only
-self.base.set_status(ComponentStatus::Running).await;
-
 // Set status and send lifecycle event
-self.base.set_status_with_event(
+self.base.set_status(
     ComponentStatus::Running,
     Some("Connected to database".to_string()),
-).await?;
+).await;
 ```
 
 ## Creating a Source Plugin
@@ -706,15 +738,12 @@ impl Source for MySource {
 
     async fn start(&self) -> Result<()> {
         info!("Starting MySource '{}'", self.base.id);
-        self.base.set_status(ComponentStatus::Starting).await;
-        self.base
-            .send_component_event(ComponentStatus::Starting, Some("Initializing".to_string()))
-            .await?;
+        self.base.set_status(ComponentStatus::Starting, Some("Initializing".to_string())).await;
 
         // Clone what we need for the spawned task
         let dispatchers = self.base.dispatchers.clone();
         let source_id = self.base.id.clone();
-        let status = self.base.status.clone();
+        let status_handle = self.base.status_handle();
         let config = self.config.clone();
 
         // Spawn the main processing task
@@ -728,7 +757,7 @@ impl Source for MySource {
                 interval.tick().await;
 
                 // Check if we should stop
-                if !matches!(*status.read().await, ComponentStatus::Running) {
+                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     break;
                 }
 
@@ -787,20 +816,14 @@ impl Source for MySource {
         });
 
         *self.base.task_handle.write().await = Some(task);
-        self.base.set_status(ComponentStatus::Running).await;
-        self.base
-            .send_component_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+        self.base.set_status(ComponentStatus::Running, Some("Started".to_string())).await;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
         info!("Stopping MySource '{}'", self.base.id);
-        self.base.set_status(ComponentStatus::Stopping).await;
-        self.base
-            .send_component_event(ComponentStatus::Stopping, Some("Stopping".to_string()))
-            .await?;
+        self.base.set_status(ComponentStatus::Stopping, Some("Stopping".to_string())).await;
 
         // Cancel the task
         if let Some(handle) = self.base.task_handle.write().await.take() {
@@ -808,10 +831,7 @@ impl Source for MySource {
             let _ = handle.await;
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
-        self.base
-            .send_component_event(ComponentStatus::Stopped, Some("Stopped".to_string()))
-            .await?;
+        self.base.set_status(ComponentStatus::Stopped, Some("Stopped".to_string())).await;
 
         Ok(())
     }
@@ -1031,6 +1051,8 @@ mod tests {
             enable_bootstrap: false,
             nodes: ["Item"].iter().map(|s| s.to_string()).collect(),
             relations: HashSet::new(),
+            resume_from: None,
+            request_position_handle: false,
         };
 
         let response = source.subscribe(settings).await.unwrap();
@@ -1107,6 +1129,12 @@ When creating a new source plugin:
 - [ ] Dispatch events with profiling metadata
 - [ ] Optional: Implement bootstrap provider
 - [ ] Optional: Implement builder pattern for ergonomic construction
+- [ ] Optional: Package as a dynamic plugin (see [Packaging as a Dynamic Plugin](#packaging-as-a-dynamic-plugin)):
+  - [ ] Set `crate-type = ["lib", "cdylib"]` in `Cargo.toml`
+  - [ ] Add `drasi-plugin-sdk` and `utoipa` dependencies
+  - [ ] Create `descriptor.rs` with configuration DTOs and `SourcePluginDescriptor` impl
+  - [ ] Add `export_plugin!` macro invocation in `lib.rs`
+  - [ ] Build and verify the `.so`/`.dylib`/`.dll` loads in the server's `plugins/` directory
 - [ ] Add unit tests
 - [ ] Add integration tests
 - [ ] Document configuration options
@@ -1253,26 +1281,206 @@ Always send component events when transitioning states:
 
 ```rust
 async fn start(&self) -> Result<()> {
-    self.base.set_status(ComponentStatus::Starting).await;
-    self.base.send_component_event(
+    self.base.set_status(
         ComponentStatus::Starting,
         Some("Connecting to database".to_string()),
-    ).await?;
+    ).await;
 
     // ... initialization logic ...
 
-    self.base.set_status(ComponentStatus::Running).await;
-    self.base.send_component_event(
+    self.base.set_status(
         ComponentStatus::Running,
         Some("Connected successfully".to_string()),
-    ).await?;
+    ).await;
 
     Ok(())
 }
 ```
+
+## Packaging as a Dynamic Plugin
+
+Sources can be packaged as dynamic plugins (shared libraries) so they are loaded at runtime by the Drasi server. The mock source (`components/sources/mock/`) is the reference implementation for this pattern.
+
+### Cargo.toml Setup
+
+Add the `cdylib` crate type and the required dependencies:
+
+```toml
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+# ... your other dependencies
+```
+
+Keeping `"lib"` alongside `"cdylib"` lets the crate be used as a normal Rust library (e.g. in tests or when linking statically) in addition to producing the shared library.
+
+See `components/sources/mock/Cargo.toml` for a complete example.
+
+### Configuration DTOs
+
+Create a `descriptor.rs` module that defines configuration Data Transfer Objects (DTOs). These DTOs are serialized/deserialized from JSON and also provide an OpenAPI schema for the server's API documentation.
+
+```rust
+use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
+
+/// Configuration DTO for my source.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = source::my_kind::MySourceConfig)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MySourceConfigDto {
+    pub endpoint: ConfigValue<String>,
+    #[serde(default = "default_interval")]
+    pub poll_interval_ms: ConfigValue<u64>,
+}
+
+fn default_interval() -> ConfigValue<u64> {
+    ConfigValue::Static(5000)
+}
+
+#[derive(OpenApi)]
+#[openapi(components(schemas(MySourceConfigDto)))]
+struct MySourceSchemas;
+```
+
+Key points:
+- **`#[schema(as = source::my_kind::ConfigName)]`** sets the schema path used by the server to locate the schema.
+- **`ConfigValue<T>`** wraps values that can be either a literal (`ConfigValue::Static(val)`) or resolved from an environment variable at runtime. Use `DtoMapper::resolve_typed()` to resolve them.
+- The `OpenApi` derive struct generates the JSON schema that the server exposes.
+
+### The SourcePluginDescriptor Trait
+
+Implement `SourcePluginDescriptor` to tell the plugin SDK how to create your source:
+
+```rust
+use crate::MySourceBuilder;
+use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
+
+pub struct MySourceDescriptor;
+
+#[async_trait]
+impl SourcePluginDescriptor for MySourceDescriptor {
+    fn kind(&self) -> &str {
+        "my-kind"
+    }
+
+    fn config_version(&self) -> &str {
+        "1.0.0"
+    }
+
+    fn config_schema_name(&self) -> &str {
+        "source.my_kind.MySourceConfig"
+    }
+
+    fn config_schema_json(&self) -> String {
+        let api = MySourceSchemas::openapi();
+        serde_json::to_string(
+            &api.components
+                .as_ref()
+                .expect("OpenAPI components missing")
+                .schemas,
+        )
+        .expect("Failed to serialize config schema")
+    }
+
+    async fn create_source(
+        &self,
+        id: &str,
+        config_json: &serde_json::Value,
+        auto_start: bool,
+    ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
+        let dto: MySourceConfigDto = serde_json::from_value(config_json.clone())?;
+        let mapper = DtoMapper::new();
+
+        let source = MySourceBuilder::new(id)
+            .with_endpoint(&mapper.resolve_typed::<String>(&dto.endpoint)?)
+            .with_poll_interval_ms(mapper.resolve_typed(&dto.poll_interval_ms)?)
+            .with_auto_start(auto_start)
+            .build()?;
+
+        Ok(Box::new(source))
+    }
+}
+```
+
+The `config_schema_name()` return value must match the `#[schema(as = ...)]` path on your config DTO, using dot-separated segments (e.g. `source.my_kind.MySourceConfig`).
+
+### The export_plugin! Macro
+
+In your `lib.rs`, invoke the `export_plugin!` macro to generate the FFI entry points that the server uses to load the plugin:
+
+```rust
+pub mod descriptor;
+
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "my-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::MySourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);
+```
+
+The mock source gates this behind a `dynamic-plugin` feature flag so the macro is only compiled when building the shared library. This is optional but can be useful if you want to avoid the cdylib overhead in tests.
+
+### Building
+
+Build the plugin with:
+
+```bash
+cargo build
+```
+
+This produces a shared library in `target/debug/`:
+- Linux: `libdrasi_source_my_kind.so`
+- macOS: `libdrasi_source_my_kind.dylib`
+- Windows: `drasi_source_my_kind.dll`
+
+Copy the shared library into the server's `plugins/` directory (next to the `drasi-server` binary) and the server will load it automatically on startup.
+
+### Bundling Bootstrap Providers
+
+If your source has an associated bootstrap provider, you can export it from the same plugin crate. Implement `BootstrapPluginDescriptor` in your `descriptor.rs` and add it to the `bootstrap_descriptors` list in the `export_plugin!` macro:
+
+```rust
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "my-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::MySourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [descriptor::MyBootstrapDescriptor],
+);
+```
+
+This keeps the source and its bootstrap provider together in a single shared library.
+
+> **Signing:** Published plugins should be signed with cosign: `cargo xtask publish-plugins --sign`
 
 ## Additional Resources
 
 - See individual plugin directories for implementation examples
 - Check `lib/CLAUDE.md` for library architecture details
 - Review the parent `drasi-core/CLAUDE.md` for query engine information
+
+## AI Generated Sources (experimental)
+
+We have experimental AI agents for developing new sources. These agents work as a planner/executor pair where the `source-planner` will generate a comprehensive plan for building a source that the user must then review and refine. Once the user is satisfied with the plan, switch to the `source-plan-executor` agent to implement it.
+
+For local usage with the Copilot CLI:
+
+- Start Copilot CLI
+- Select the `source-planner` agent using `/agent`
+- Select the `claude-sonnet-4.5` or `claude-opus-4.5` model using `/model` (CLI does not use the model defined in the frontmatter)
+- Run a prompt like `Please write a plan for an XXXX source and save it to file in my workspace`
+- Once the plan is complete, review it and tweak it in the generated file
+- Switch to the `gpt-5.2-codex` model using `/model`
+- Switch to the `source-plan-executor` agent using `/agent`
+- Run the prompt: `please implement the plan`

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! Application bootstrap plugin for Drasi
 //!
 //! This plugin provides the Application bootstrap provider implementation for replaying
@@ -40,8 +42,12 @@
 //! ```
 
 pub mod application;
+pub mod descriptor;
 
 pub use application::{ApplicationBootstrapProvider, ApplicationBootstrapProviderBuilder};
+
+// Dynamic plugin entry point.
+// Core plugin — registered statically by the server, not exported for dynamic loading.
 
 #[cfg(test)]
 mod tests {

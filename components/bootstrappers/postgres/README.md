@@ -110,12 +110,12 @@ pub struct TableKeyConfig {
 
 ### PostgreSQL Table Format
 
-The bootstrap provider reads standard PostgreSQL tables from the `public` schema. Tables are automatically mapped from Cypher query labels using lowercase conversion.
+The bootstrap provider reads standard PostgreSQL tables from the `public` schema. Cypher query labels are used as-is to match PostgreSQL table names (case-sensitive), ensuring consistency with the CDC stream which also uses the actual table name.
 
 **Example Mapping:**
-- Cypher label `User` → PostgreSQL table `user`
-- Cypher label `Order` → PostgreSQL table `order`
-- Cypher label `Product` → PostgreSQL table `product`
+- Cypher label `users` → PostgreSQL table `users`
+- Cypher label `orders` → PostgreSQL table `orders`
+- Cypher label `Product` → PostgreSQL table `Product` (quoted identifier)
 
 ### Primary Key Detection
 
@@ -325,7 +325,7 @@ let query = Query::cypher("user-monitor")
 2. **Primary Key Discovery**: Queries PostgreSQL system catalogs for primary key information
 3. **Snapshot Creation**: Creates REPEATABLE READ transaction for consistency
 4. **LSN Capture**: Records current WAL position for replication coordination
-5. **Label Mapping**: Maps Cypher query labels to PostgreSQL table names
+5. **Label Mapping**: Uses Cypher query labels directly as PostgreSQL table names (case-sensitive)
 6. **Table Validation**: Verifies that mapped tables exist in the database
 7. **Data Streaming**: Reads rows from each table and converts to Drasi elements
 8. **Batch Transmission**: Sends events in batches of 1000 for efficiency
@@ -368,7 +368,7 @@ The provider returns errors for:
 
 ### Schema Discovery
 
-Tables are discovered dynamically based on query labels. The provider does not require pre-registration of tables—it automatically maps labels to tables and verifies their existence.
+Tables are discovered dynamically based on query labels. The provider uses labels as-is (case-sensitive) to match PostgreSQL table names and verifies their existence before reading data.
 
 ### Multi-Schema Support
 
@@ -424,8 +424,9 @@ env_logger::init();
 **Symptom:** Warning message about missing table
 
 **Solution:** Verify label-to-table mapping:
-- Cypher label `User` maps to table `user` (lowercase)
-- Specify exact table names in configuration
+- Cypher labels must match PostgreSQL table names exactly (case-sensitive)
+- For unquoted PostgreSQL tables, use lowercase labels (e.g., `users` not `Users`)
+- For quoted PostgreSQL tables, use the exact case (e.g., `"MixedCase"` → label `MixedCase`)
 - Check that tables exist in `public` schema
 
 ### "No primary key found" Warning
@@ -466,6 +467,24 @@ env_logger::init();
 - Consider bootstrapping tables separately
 - Monitor downstream consumer to ensure it's processing events
 - Increase channel buffer size if needed
+
+## Plugin Packaging
+
+This bootstrap provider is compiled as a dynamic plugin (cdylib) that can be loaded by drasi-server at runtime.
+
+**Key files:**
+- `Cargo.toml` — includes `crate-type = ["lib", "cdylib"]`
+- `src/descriptor.rs` — implements `BootstrapPluginDescriptor` with kind `"postgres"`, configuration DTO, and OpenAPI schema generation
+- `src/lib.rs` — invokes `drasi_plugin_sdk::export_plugin!` to export the plugin entry point
+
+**Building:**
+```bash
+cargo build -p drasi-bootstrap-postgres
+```
+
+The compiled `.so` (Linux) / `.dylib` (macOS) / `.dll` (Windows) is placed in `target/debug/` and can be copied to the server's `plugins/` directory.
+
+For more details on the plugin descriptor pattern and configuration DTOs, see the [Bootstrap Provider Developer Guide](../README.md#packaging-as-a-dynamic-plugin).
 
 ## License
 

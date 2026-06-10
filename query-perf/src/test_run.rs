@@ -45,7 +45,7 @@ pub struct TestRunArgs {
     seed: Option<u64>,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum IndexType {
     Memory,
     Redis,

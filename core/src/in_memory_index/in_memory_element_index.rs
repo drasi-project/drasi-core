@@ -1,5 +1,4 @@
-#![allow(clippy::unwrap_used)]
-// Copyright 2024 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used)]
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     hash::{Hash, Hasher},
@@ -100,15 +100,15 @@ impl InMemoryElementIndex {
                 out_node,
                 properties: _,
             } => {
-                let mut in_gaurd = self.element_by_slot_in.write().await;
-                let mut out_gaurd = self.element_by_slot_out.write().await;
+                let mut in_guard = self.element_by_slot_in.write().await;
+                let mut out_guard = self.element_by_slot_out.write().await;
 
                 for old_slot in affinity.drain() {
-                    if let Some(set) = in_gaurd.get_mut(&(old_slot, in_node.clone())) {
+                    if let Some(set) = in_guard.get_mut(&(old_slot, in_node.clone())) {
                         set.remove(&metadata.reference);
                     }
 
-                    if let Some(set) = out_gaurd.get_mut(&(old_slot, out_node.clone())) {
+                    if let Some(set) = out_guard.get_mut(&(old_slot, out_node.clone())) {
                         set.remove(&metadata.reference);
                     }
                 }
@@ -144,18 +144,18 @@ impl InMemoryElementIndex {
                 out_node,
                 properties: _,
             } => {
-                let mut in_gaurd = self.element_by_slot_in.write().await;
-                let mut out_gaurd = self.element_by_slot_out.write().await;
+                let mut in_guard = self.element_by_slot_in.write().await;
+                let mut out_guard = self.element_by_slot_out.write().await;
 
                 for slot in slots {
                     affinity.insert(*slot);
 
-                    in_gaurd
+                    in_guard
                         .entry((*slot, in_node.clone()))
                         .or_default()
                         .insert(metadata.reference.clone());
 
-                    out_gaurd
+                    out_guard
                         .entry((*slot, out_node.clone()))
                         .or_default()
                         .insert(metadata.reference.clone());
@@ -988,5 +988,135 @@ mod tests {
             .await
             .unwrap();
         assert!(retrieved.is_none());
+    }
+
+    /// Test that delete_source_join does not panic when join_key was never registered.
+    #[tokio::test]
+    async fn test_delete_source_join_missing_key_no_panic() {
+        let index = InMemoryElementIndex::new();
+
+        // Create element reference that was never inserted
+        let element_ref = ElementReference::new("test_source", "element_123");
+
+        // Create a join key that was never registered
+        let query_join = QueryJoin {
+            id: "test_join".to_string(),
+            keys: vec![QueryJoinKey {
+                label: "TestLabel".to_string(),
+                property: "id".to_string(),
+            }],
+        };
+
+        let join_key = &query_join.keys[0];
+        let value = ElementValue::String("test_value".into());
+
+        // This should NOT panic - previously it would panic on unwrap()
+        let result = index
+            .delete_source_join(&element_ref, &query_join, join_key, &value)
+            .await;
+
+        // Should complete successfully (no-op) without panic
+        assert!(result.is_ok());
+    }
+
+    /// Test that delete_source_join correctly removes an element that was previously registered.
+    #[tokio::test]
+    async fn test_delete_source_join_registered_key() {
+        let index = InMemoryElementIndex::new();
+
+        let element_ref = ElementReference::new("test_source", "element_456");
+        let value = ElementValue::String("shared_key".into());
+        let value_hash = get_value_hash(&value);
+
+        let query_join = QueryJoin {
+            id: "test_join".to_string(),
+            keys: vec![QueryJoinKey {
+                label: "TestLabel".to_string(),
+                property: "shared_id".to_string(),
+            }],
+        };
+
+        let join_key = &query_join.keys[0];
+
+        // Manually register the element in partial_joins
+        {
+            let mut guard = index.partial_joins.write().await;
+            let partial_joins = guard
+                .entry((query_join.id.clone(), value_hash))
+                .or_default();
+            partial_joins
+                .entry(join_key.clone())
+                .or_default()
+                .insert(element_ref.clone());
+        }
+
+        // Verify element was registered
+        {
+            let guard = index.partial_joins.read().await;
+            let partial_joins = guard.get(&(query_join.id.clone(), value_hash)).unwrap();
+            assert!(partial_joins.get(join_key).unwrap().contains(&element_ref));
+        }
+
+        // Delete should succeed
+        let result = index
+            .delete_source_join(&element_ref, &query_join, join_key, &value)
+            .await;
+        assert!(result.is_ok());
+
+        // Verify element was removed
+        {
+            let guard = index.partial_joins.read().await;
+            let partial_joins = guard.get(&(query_join.id.clone(), value_hash)).unwrap();
+            assert!(!partial_joins.get(join_key).unwrap().contains(&element_ref));
+        }
+    }
+
+    /// Test that after delete_source_join on a missing key, the index remains in a valid state.
+    #[tokio::test]
+    async fn test_delete_source_join_missing_key_index_integrity() {
+        let index = InMemoryElementIndex::new();
+
+        // Insert a different element with a different key
+        let existing_ref = ElementReference::new("test_source", "existing_element");
+        let existing_value = ElementValue::String("existing_key".into());
+        let existing_hash = get_value_hash(&existing_value);
+
+        let query_join = QueryJoin {
+            id: "integrity_join".to_string(),
+            keys: vec![QueryJoinKey {
+                label: "Label".to_string(),
+                property: "prop".to_string(),
+            }],
+        };
+
+        let join_key = &query_join.keys[0];
+
+        // Register the existing element
+        {
+            let mut guard = index.partial_joins.write().await;
+            let partial_joins = guard
+                .entry((query_join.id.clone(), existing_hash))
+                .or_default();
+            partial_joins
+                .entry(join_key.clone())
+                .or_default()
+                .insert(existing_ref.clone());
+        }
+
+        // Try to delete a different element with a different value hash (missing key)
+        let missing_ref = ElementReference::new("test_source", "missing_element");
+        let missing_value = ElementValue::String("nonexistent_key".into());
+
+        let result = index
+            .delete_source_join(&missing_ref, &query_join, join_key, &missing_value)
+            .await;
+        assert!(result.is_ok());
+
+        // Verify existing element is still intact
+        {
+            let guard = index.partial_joins.read().await;
+            let partial_joins = guard.get(&(query_join.id.clone(), existing_hash)).unwrap();
+            assert!(partial_joins.get(join_key).unwrap().contains(&existing_ref));
+        }
     }
 }

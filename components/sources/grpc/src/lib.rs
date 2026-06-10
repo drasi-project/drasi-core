@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! gRPC Source Plugin for Drasi
 //!
 //! This plugin exposes a gRPC endpoint for receiving data change events. External systems
@@ -100,6 +102,7 @@
 //! ```
 
 pub mod config;
+pub mod descriptor;
 
 #[cfg(test)]
 mod tests;
@@ -107,16 +110,19 @@ pub use config::GrpcSourceConfig;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{debug, error, info};
+use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 
 use drasi_lib::channels::{DispatchMode, *};
 use drasi_lib::managers::{log_component_start, log_component_stop};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+use drasi_lib::wal::{WalError, WalProvider};
 use drasi_lib::Source;
+use tracing::Instrument;
 
 // Include generated protobuf code
 // Allow unwrap in generated proto code - tonic generates code with unwrap() for HTTP response building
@@ -146,6 +152,10 @@ pub struct GrpcSource {
     base: SourceBase,
     /// gRPC source configuration
     config: GrpcSourceConfig,
+    /// WAL provider for durable event persistence (if durability is enabled)
+    wal: tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>,
+    /// Handle to the WAL pruning background task (if running)
+    prune_task: tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl GrpcSource {
@@ -204,6 +214,8 @@ impl GrpcSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 
@@ -228,6 +240,8 @@ impl GrpcSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 }
@@ -243,22 +257,22 @@ impl Source for GrpcSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "host".to_string(),
-            serde_json::Value::String(self.config.host.clone()),
-        );
-        props.insert(
-            "port".to_string(),
-            serde_json::Value::Number(self.config.port.into()),
-        );
-        if let Some(ref endpoint) = self.config.endpoint {
-            props.insert(
-                "endpoint".to_string(),
-                serde_json::Value::String(endpoint.clone()),
-            );
-        }
-        props
+        use crate::descriptor::GrpcSourceConfigDto;
+        use drasi_plugin_sdk::ConfigValue;
+
+        let dto = GrpcSourceConfigDto {
+            host: ConfigValue::Static(self.config.host.clone()),
+            port: ConfigValue::Static(self.config.port),
+            endpoint: self
+                .config
+                .endpoint
+                .as_ref()
+                .map(|e| ConfigValue::Static(e.clone())),
+            timeout_ms: ConfigValue::Static(self.config.timeout_ms),
+            durability: self.config.durability.clone(),
+        };
+
+        self.base.properties_or_serialize(&dto)
     }
 
     fn auto_start(&self) -> bool {
@@ -268,13 +282,62 @@ impl Source for GrpcSource {
     async fn start(&self) -> Result<()> {
         log_component_start("gRPC Source", &self.base.id);
 
-        self.base.set_status(ComponentStatus::Starting).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting gRPC source".to_string()),
             )
-            .await?;
+            .await;
+
+        // Initialize WAL if durability is enabled
+        let wal_ref: Option<Arc<dyn WalProvider>> =
+            if self.config.durability.as_ref().is_some_and(|d| d.enabled) {
+                let ctx = self
+                    .base
+                    .context()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("Context not initialized"))?;
+                let wal = ctx.wal_provider.clone().ok_or_else(|| {
+                    anyhow::anyhow!("Durability enabled but no WAL provider configured on DrasiLib")
+                })?;
+                let wal_config = self
+                    .config
+                    .durability
+                    .as_ref()
+                    .expect("durability checked above")
+                    .to_wal_config();
+                wal.register(&self.base.id, wal_config.clone())
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to register WAL for source '{}': {}",
+                            self.base.id,
+                            e
+                        )
+                    })?;
+
+                info!(
+                    "[{}] WAL registered: max_events={}, policy={:?}",
+                    self.base.id, wal_config.max_events, wal_config.capacity_policy
+                );
+
+                // Resume sequence counter from WAL head
+                let head = wal.head_sequence(&self.base.id).await.unwrap_or(0);
+                if head > 0 {
+                    self.base.set_next_sequence(head);
+                    info!(
+                        "[{}] WAL resumed from persisted state: head={}, next_sequence={}",
+                        self.base.id,
+                        head,
+                        head + 1
+                    );
+                }
+
+                *self.wal.write().await = Some(wal.clone());
+                Some(wal)
+            } else {
+                None
+            };
 
         // Get configuration
         let host = self.config.host.clone();
@@ -288,59 +351,104 @@ impl Source for GrpcSource {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         *self.base.shutdown_tx.write().await = Some(shutdown_tx);
 
+        // Get instance_id from context for log routing isolation
+        let instance_id = self
+            .base
+            .context()
+            .await
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
+
         // Create gRPC service
         let service = GrpcSourceService {
             source_id: self.base.id.clone(),
+            instance_id: instance_id.clone(),
             dispatchers: self.base.dispatchers.clone(),
+            wal: wal_ref.clone(),
         };
 
         let svc = SourceServiceServer::new(service);
 
         // Start the gRPC server
-        let status = Arc::clone(&self.base.status);
         let source_id = self.base.id.clone();
-        let status_tx = self.base.status_tx();
+        let reporter = self.base.status_handle();
 
-        let task = tokio::spawn(async move {
-            *status.write().await = ComponentStatus::Running;
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "grpc_source_server",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+        let task = tokio::spawn(
+            async move {
+                reporter
+                    .set_status(
+                        ComponentStatus::Running,
+                        Some(format!("gRPC source listening on {addr}")),
+                    )
+                    .await;
 
-            let running_event = ComponentEvent {
-                component_id: source_id.clone(),
-                component_type: ComponentType::Source,
-                status: ComponentStatus::Running,
-                timestamp: chrono::Utc::now(),
-                message: Some(format!("gRPC source listening on {addr}")),
-            };
+                // Run the server with graceful shutdown
+                let server =
+                    Server::builder()
+                        .add_service(svc)
+                        .serve_with_shutdown(addr, async move {
+                            let _ = shutdown_rx.await;
+                            debug!("gRPC source received shutdown signal");
+                        });
 
-            if let Some(ref tx) = *status_tx.read().await {
-                if let Err(e) = tx.send(running_event).await {
-                    error!("Failed to send component event: {e}");
+                if let Err(e) = server.await {
+                    error!("gRPC server error: {e}");
                 }
+
+                reporter.set_status(ComponentStatus::Stopped, None).await;
             }
-
-            // Run the server with graceful shutdown
-            let server = Server::builder()
-                .add_service(svc)
-                .serve_with_shutdown(addr, async move {
-                    let _ = shutdown_rx.await;
-                    debug!("gRPC source received shutdown signal");
-                });
-
-            if let Err(e) = server.await {
-                error!("gRPC server error: {e}");
-            }
-
-            *status.write().await = ComponentStatus::Stopped;
-        });
+            .instrument(span),
+        );
 
         *self.base.task_handle.write().await = Some(task);
-        self.base.set_status(ComponentStatus::Running).await;
+
+        // Spawn WAL pruning task if durability is enabled
+        if let Some(wal) = wal_ref {
+            let base = self.base.clone_shared();
+            let source_id = self.base.id.clone();
+            let prune_handle = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    if let Some(confirmed) = base.compute_confirmed_position().await {
+                        if confirmed > 0 {
+                            match wal.prune_up_to(&source_id, confirmed).await {
+                                Ok(pruned) => {
+                                    if pruned > 0 {
+                                        let remaining =
+                                            wal.event_count(&source_id).await.unwrap_or(0);
+                                        debug!(
+                                            "[{source_id}] WAL pruned: count={pruned}, confirmed_seq={confirmed}, remaining={remaining}"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("[{source_id}] WAL prune failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            *self.prune_task.write().await = Some(prune_handle);
+        }
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
         log_component_stop("gRPC Source", &self.base.id);
+        // Cancel WAL pruning task
+        if let Some(handle) = self.prune_task.write().await.take() {
+            handle.abort();
+        }
         self.base.stop_common().await
     }
 
@@ -352,7 +460,49 @@ impl Source for GrpcSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
+        // If WAL is enabled and subscriber is resuming, use WAL replay
+        let wal_guard = self.wal.read().await;
+        if let (Some(wal), Some(ref resume_from)) = (wal_guard.as_ref(), &settings.resume_from) {
+            // Decode resume_from as big-endian u64 sequence
+            if resume_from.len() >= 8 {
+                let resume_seq =
+                    u64::from_be_bytes(resume_from[..8].try_into().unwrap_or_default());
+                let wal_clone = wal.clone();
+                drop(wal_guard);
+                return self
+                    .base
+                    .subscribe_with_replay(&settings, wal_clone.as_ref(), resume_seq, "gRPC")
+                    .await;
+            } else {
+                drop(wal_guard);
+                return Err(anyhow::anyhow!(
+                    "Invalid resume_from position: expected at least 8 bytes, got {}",
+                    resume_from.len()
+                ));
+            }
+        }
+        drop(wal_guard);
         self.base.subscribe_with_bootstrap(&settings, "gRPC").await
+    }
+
+    fn supports_replay(&self) -> bool {
+        self.config.durability.as_ref().is_some_and(|d| d.enabled)
+    }
+
+    async fn deprovision(&self) -> Result<()> {
+        // Delete WAL data if durability was enabled
+        let wal_guard = self.wal.read().await;
+        if let Some(ref wal) = *wal_guard {
+            info!("[{}] Deprovisioning: deleting WAL data", self.base.id);
+            if let Err(e) = wal.delete_wal(&self.base.id).await {
+                warn!(
+                    "[{}] Failed to delete WAL during deprovision: {}",
+                    self.base.id, e
+                );
+            }
+        }
+        drop(wal_guard);
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -377,12 +527,16 @@ impl Source for GrpcSource {
 struct GrpcSourceService {
     /// The source ID used for event attribution
     source_id: String,
+    /// Instance ID for log routing isolation
+    instance_id: String,
     /// Shared dispatchers for sending events to subscribers
     dispatchers: Arc<
         RwLock<
             Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
         >,
     >,
+    /// WAL provider for durable persistence (if durability is enabled)
+    wal: Option<Arc<dyn WalProvider>>,
 }
 
 #[tonic::async_trait]
@@ -396,16 +550,50 @@ impl SourceService for GrpcSourceService {
         if let Some(proto_change) = event_request.event {
             match convert_proto_to_source_change(&proto_change, &self.source_id) {
                 Ok(source_change) => {
+                    // WAL append before ACK (if durability enabled)
+                    let wal_seq = if let Some(ref wal) = self.wal {
+                        match wal.append(&self.source_id, &source_change).await {
+                            Ok(seq) => {
+                                trace!(
+                                    "[{}] WAL append succeeded: sequence={}",
+                                    self.source_id,
+                                    seq
+                                );
+                                Some(seq)
+                            }
+                            Err(WalError::CapacityExhausted(_)) => {
+                                warn!(
+                                    "[{}] WAL capacity exhausted, rejecting event",
+                                    self.source_id
+                                );
+                                return Err(Status::resource_exhausted("WAL capacity exhausted"));
+                            }
+                            Err(e) => {
+                                error!("[{}] WAL append failed: {}", self.source_id, e);
+                                return Err(Status::internal(format!("WAL error: {e}")));
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
                     // Create profiling metadata with timestamps
                     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                    let wrapper = SourceEventWrapper::with_profiling(
+                    let mut wrapper = SourceEventWrapper::with_profiling(
                         self.source_id.clone(),
                         SourceEvent::Change(source_change),
                         chrono::Utc::now(),
                         profiling,
                     );
+
+                    // Set WAL-assigned sequence and source_position
+                    if let Some(seq) = wal_seq {
+                        wrapper.sequence = Some(seq);
+                        wrapper.source_position =
+                            Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
+                    }
 
                     debug!("[{}] Processing gRPC event: {:?}", self.source_id, &wrapper);
 
@@ -460,76 +648,129 @@ impl SourceService for GrpcSourceService {
     ) -> Result<Response<Self::StreamEventsStream>, Status> {
         let mut stream = request.into_inner();
         let source_id = self.source_id.clone();
+        let instance_id = self.instance_id.clone();
         let dispatchers = self.dispatchers.clone();
+        let wal = self.wal.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
 
-        tokio::spawn(async move {
-            let mut events_processed = 0u64;
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "grpc_stream_events",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+        tokio::spawn(
+            async move {
+                let mut events_processed = 0u64;
 
-            while let Ok(Some(proto_change)) = stream.message().await {
-                match convert_proto_to_source_change(&proto_change, &source_id) {
-                    Ok(source_change) => {
-                        // Create profiling metadata with timestamps
-                        let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                        profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
+                while let Ok(Some(proto_change)) = stream.message().await {
+                    match convert_proto_to_source_change(&proto_change, &source_id) {
+                        Ok(source_change) => {
+                            // WAL append before dispatch (if durability enabled)
+                            let wal_seq = if let Some(ref wal) = wal {
+                                match wal.append(&source_id, &source_change).await {
+                                    Ok(seq) => {
+                                        trace!(
+                                            "[{source_id}] WAL append succeeded (stream): sequence={seq}"
+                                        );
+                                        Some(seq)
+                                    }
+                                    Err(WalError::CapacityExhausted(_)) => {
+                                        warn!(
+                                            "[{source_id}] WAL capacity exhausted in stream, closing"
+                                        );
+                                        let _ = tx
+                                            .send(Err(Status::resource_exhausted(
+                                                "WAL capacity exhausted",
+                                            )))
+                                            .await;
+                                        return;
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "[{source_id}] WAL append failed in stream: {e}"
+                                        );
+                                        let _ = tx
+                                            .send(Err(Status::internal(format!("WAL error: {e}"))))
+                                            .await;
+                                        return;
+                                    }
+                                }
+                            } else {
+                                None
+                            };
 
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            source_id.clone(),
-                            SourceEvent::Change(source_change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
+                            // Create profiling metadata with timestamps
+                            let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
+                            profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                        // Dispatch via helper
-                        if let Err(e) = SourceBase::dispatch_from_task(
-                            dispatchers.clone(),
-                            wrapper.clone(),
-                            &source_id,
-                        )
-                        .await
-                        {
-                            debug!("[{source_id}] Failed to dispatch (no subscribers): {e}");
+                            let mut wrapper = SourceEventWrapper::with_profiling(
+                                source_id.clone(),
+                                SourceEvent::Change(source_change),
+                                chrono::Utc::now(),
+                                profiling,
+                            );
+
+                            // Set WAL-assigned sequence and source_position
+                            if let Some(seq) = wal_seq {
+                                wrapper.sequence = Some(seq);
+                                wrapper.source_position =
+                                    Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
+                            }
+
+                            // Dispatch via helper
+                            if let Err(e) = SourceBase::dispatch_from_task(
+                                dispatchers.clone(),
+                                wrapper.clone(),
+                                &source_id,
+                            )
+                            .await
+                            {
+                                debug!("[{source_id}] Failed to dispatch (no subscribers): {e}");
+                            }
+
+                            events_processed += 1;
+
+                            // Send periodic updates
+                            if events_processed.is_multiple_of(100) {
+                                let _ = tx
+                                    .send(Ok(StreamEventResponse {
+                                        success: true,
+                                        message: format!("Processed {events_processed} events"),
+                                        error: String::new(),
+                                        events_processed,
+                                    }))
+                                    .await;
+                            }
                         }
-
-                        events_processed += 1;
-
-                        // Send periodic updates
-                        if events_processed.is_multiple_of(100) {
+                        Err(e) => {
+                            error!("[{source_id}] Invalid event data: {e}");
                             let _ = tx
                                 .send(Ok(StreamEventResponse {
-                                    success: true,
-                                    message: format!("Processed {events_processed} events"),
-                                    error: String::new(),
+                                    success: false,
+                                    message: "Invalid event data".to_string(),
+                                    error: e.to_string(),
                                     events_processed,
                                 }))
                                 .await;
                         }
                     }
-                    Err(e) => {
-                        error!("[{source_id}] Invalid event data: {e}");
-                        let _ = tx
-                            .send(Ok(StreamEventResponse {
-                                success: false,
-                                message: "Invalid event data".to_string(),
-                                error: e.to_string(),
-                                events_processed,
-                            }))
-                            .await;
-                    }
                 }
-            }
 
-            // Send final response
-            let _ = tx
-                .send(Ok(StreamEventResponse {
-                    success: true,
-                    message: format!("Stream completed. Processed {events_processed} events"),
-                    error: String::new(),
-                    events_processed,
-                }))
-                .await;
-        });
+                // Send final response
+                let _ = tx
+                    .send(Ok(StreamEventResponse {
+                        success: true,
+                        message: format!("Stream completed. Processed {events_processed} events"),
+                        error: String::new(),
+                        events_processed,
+                    }))
+                    .await;
+            }
+            .instrument(span),
+        );
 
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             rx,
@@ -547,14 +788,25 @@ impl SourceService for GrpcSourceService {
         // This could be extended to support bootstrap
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
-        tokio::spawn(async move {
-            let _ = tx
-                .send(Ok(BootstrapResponse {
-                    elements: vec![],
-                    total_count: 0,
-                }))
-                .await;
-        });
+        let instance_id = self.instance_id.clone();
+        let source_id_for_span = self.source_id.clone();
+        let span = tracing::info_span!(
+            "grpc_request_bootstrap",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+        tokio::spawn(
+            async move {
+                let _ = tx
+                    .send(Ok(BootstrapResponse {
+                        elements: vec![],
+                        total_count: 0,
+                    }))
+                    .await;
+            }
+            .instrument(span),
+        );
 
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             rx,
@@ -811,6 +1063,7 @@ pub struct GrpcSourceBuilder {
     port: u16,
     endpoint: Option<String>,
     timeout_ms: u64,
+    durability: Option<drasi_lib::DurabilityConfig>,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
     bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
@@ -826,6 +1079,7 @@ impl GrpcSourceBuilder {
             port: 50051,
             endpoint: None,
             timeout_ms: 5000,
+            durability: None,
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
@@ -893,6 +1147,16 @@ impl GrpcSourceBuilder {
         self.port = config.port;
         self.endpoint = config.endpoint;
         self.timeout_ms = config.timeout_ms;
+        self.durability = config.durability;
+        self
+    }
+
+    /// Set the WAL durability configuration.
+    ///
+    /// When enabled, events are persisted to a Write-Ahead Log before
+    /// acknowledging the caller, enabling crash recovery and replay.
+    pub fn with_durability(mut self, config: drasi_lib::DurabilityConfig) -> Self {
+        self.durability = Some(config);
         self
     }
 
@@ -907,6 +1171,7 @@ impl GrpcSourceBuilder {
             port: self.port,
             endpoint: self.endpoint,
             timeout_ms: self.timeout_ms,
+            durability: self.durability,
         };
 
         let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
@@ -923,6 +1188,22 @@ impl GrpcSourceBuilder {
         Ok(GrpcSource {
             base: SourceBase::new(params)?,
             config,
+            wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 }
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "grpc-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::GrpcSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);

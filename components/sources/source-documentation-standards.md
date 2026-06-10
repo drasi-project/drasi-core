@@ -573,17 +573,14 @@ impl Source for MySource {
 
     async fn start(&self) -> Result<()> {
         // 1. Set status to Starting
-        self.base.set_status(ComponentStatus::Starting).await;
+        self.base.set_status(ComponentStatus::Starting, None).await;
 
-        // 2. Send component event
-        self.base.send_component_event(ComponentStatus::Starting, None).await?;
-
-        // 3. Spawn your task
+        // 2. Spawn your task
         let task = tokio::spawn(async move { /* ... */ });
         *self.base.task_handle.write().await = Some(task);
 
-        // 4. Set status to Running
-        self.base.set_status(ComponentStatus::Running).await;
+        // 3. Set status to Running
+        self.base.set_status(ComponentStatus::Running, None).await;
         Ok(())
     }
 
@@ -594,19 +591,10 @@ impl Source for MySource {
 
     async fn subscribe(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
         // Delegate to base for bootstrap handling
-        self.base.subscribe_with_bootstrap(
-            query_id, enable_bootstrap, node_labels, relation_labels, "MySource"
-        ).await
-    }
-
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
+        self.base.subscribe_with_bootstrap(&settings, "MySource").await
     }
 }
 ```
@@ -637,3 +625,26 @@ When reviewing a source plugin, verify:
 - [ ] Tests pass with `cargo test -p drasi-plugin-{name}`
 - [ ] No clippy warnings with `cargo clippy -p drasi-plugin-{name}`
 - [ ] Code is formatted with `cargo fmt`
+
+## Workspace Dependency Conventions
+
+When a component declares a workspace-inherited dependency and needs `default-features = false`,
+the **workspace root** entry (`[workspace.dependencies]` in the top-level `Cargo.toml`) must also set
+`default-features = false`. Cargo silently ignores a member-level `default-features` override when the
+workspace entry does not declare it, and has announced this will become a hard error in a future release.
+
+```toml
+# Cargo.toml (workspace root) — declare default-features so members can opt out reliably
+drasi-source-foo = { version = "0.1.0", path = "components/sources/foo", default-features = false }
+```
+
+```toml
+# components/bootstrappers/foo/Cargo.toml — inherits cleanly, no ignored override
+drasi-source-foo = { workspace = true }
+```
+
+Any consumer that needs the default feature set should opt back in explicitly:
+
+```toml
+drasi-source-foo = { workspace = true, features = ["default"] }
+```

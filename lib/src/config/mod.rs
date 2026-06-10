@@ -14,6 +14,7 @@
 
 pub mod runtime;
 pub mod schema;
+pub mod snapshot;
 
 #[cfg(test)]
 mod tests;
@@ -23,3 +24,8 @@ pub use runtime::{QueryRuntime, ReactionRuntime, RuntimeConfig, SourceRuntime};
 
 // Re-export schema types
 pub use schema::*;
+
+// Re-export snapshot types
+pub use snapshot::{
+    BootstrapSnapshot, ConfigurationSnapshot, QuerySnapshot, ReactionSnapshot, SourceSnapshot,
+};

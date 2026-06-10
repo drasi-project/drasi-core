@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-index-rocksdb"
-version = "0.2.1"
+version = "0.5.4"
 edition = "2021"
 license = "Apache-2.0"
 description = "Drasi Core RocksDb Index Plugin"
@@ -31,6 +31,7 @@ drasi-core.workspace = true
 drasi-query-ast.workspace = true
 rocksdb = { version = "0.21.0", features = ["default", "multi-threaded-cf"] }
 async-trait = "0.1.68"
+bytes = "1"
 hashers = "1.0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -39,10 +40,20 @@ fnv = "1.0.7"
 fastmurmur3 = "0.2.0"
 bit-set = "0.5.3"
 async-stream = "0.3.5"
+futures = "0.3"
 tokio = { version = "1.29.1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 ordered-float = "3.7.0"
 tracing = "0.1.37"
 prost = "0.12.3"
+drasi-plugin-sdk = { workspace = true, optional = true }
+utoipa = { workspace = true, optional = true }
+anyhow = { version = "1.0", optional = true }
+
+[features]
+# Enables the plugin descriptor + configuration DTO (env-var/secret resolution,
+# OpenAPI schema) so this backend can be driven by the Drasi plugin pipeline.
+# Off by default to keep core-only embedders lean.
+plugin-descriptor = ["dep:drasi-plugin-sdk", "dep:utoipa", "dep:anyhow"]
 
 [dev-dependencies]
 shared-tests = { path = "../../../shared-tests" }

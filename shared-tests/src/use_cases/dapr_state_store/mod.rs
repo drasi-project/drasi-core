@@ -37,6 +37,7 @@ use drasi_middleware::{
 use drasi_query_cypher::CypherParser;
 use serde_json::{json, Value as JsonValue};
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -215,9 +216,13 @@ async fn test_insert_basic_flow(config: &(impl QueryTestConfig + Send)) {
     );
 
     assert!(
-        result.contains(&QueryPartEvaluationContext::Adding {
-            after: expected_vars
-        }),
+        contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: expected_vars,
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ),
         "Result did not contain expected Adding context. Got: {result:?}"
     );
 }
@@ -282,10 +287,14 @@ async fn test_update_basic_flow(config: &(impl QueryTestConfig + Send)) {
     );
 
     assert!(
-        update_result.contains(&QueryPartEvaluationContext::Updating {
-            before: expected_vars_before,
-            after: expected_vars_after
-        }),
+        contains_data(
+            &update_result,
+            &QueryPartEvaluationContext::Updating {
+                before: expected_vars_before,
+                after: expected_vars_after,
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ),
         "Result did not contain expected Updating context. Got: {update_result:?}"
     );
 }
@@ -338,9 +347,13 @@ async fn test_delete_passthrough(config: &(impl QueryTestConfig + Send)) {
     );
 
     assert!(
-        delete_result.contains(&QueryPartEvaluationContext::Removing {
-            before: expected_vars_before_delete
-        }),
+        contains_data(
+            &delete_result,
+            &QueryPartEvaluationContext::Removing {
+                before: expected_vars_before_delete,
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ),
         "Result did not contain expected Removing context. Got: {delete_result:?}"
     );
 }

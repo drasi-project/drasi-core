@@ -171,13 +171,14 @@ impl BootstrapProvider for NoOpBootstrapProvider {
         request: BootstrapRequest,
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
-    ) -> Result<usize>;
+        settings: Option<&SourceSubscriptionSettings>,
+    ) -> Result<BootstrapResult>;
 }
 ```
 
-**Behavior**: Logs the bootstrap request for the query and immediately returns `Ok(0)` without sending any events.
+**Behavior**: Logs the bootstrap request for the query and immediately returns `BootstrapResult::default()` (event_count = 0) without sending any events.
 
-**Returns**: `Result<usize>` - Always returns `Ok(0)` indicating zero elements were sent.
+**Returns**: `Result<BootstrapResult>` — always returns a default `BootstrapResult` (`event_count: 0`, `source_position: None`) indicating zero elements were sent.
 
 ### NoOpBootstrapProviderBuilder
 
@@ -274,12 +275,13 @@ impl BootstrapProvider for NoOpBootstrapProvider {
         request: BootstrapRequest,
         _context: &BootstrapContext,
         _event_tx: BootstrapEventSender,
-    ) -> Result<usize> {
+        _settings: Option<&SourceSubscriptionSettings>,
+    ) -> Result<BootstrapResult> {
         info!(
             "No-op bootstrap for query {}: returning no data",
             request.query_id
         );
-        Ok(0)
+        Ok(BootstrapResult::default())
     }
 }
 ```
@@ -318,6 +320,24 @@ Contributions are welcome! The NoOp provider is intentionally simple, but improv
 - Integration tests
 
 Please see the main Drasi contributing guidelines for more information.
+
+## Plugin Packaging
+
+This bootstrap provider is compiled as a dynamic plugin (cdylib) that can be loaded by drasi-server at runtime.
+
+**Key files:**
+- `Cargo.toml` — includes `crate-type = ["lib", "cdylib"]`
+- `src/descriptor.rs` — implements `BootstrapPluginDescriptor` with kind `"noop"`, configuration DTO, and OpenAPI schema generation
+- `src/lib.rs` — invokes `drasi_plugin_sdk::export_plugin!` to export the plugin entry point
+
+**Building:**
+```bash
+cargo build -p drasi-bootstrap-noop
+```
+
+The compiled `.so` (Linux) / `.dylib` (macOS) / `.dll` (Windows) is placed in `target/debug/` and can be copied to the server's `plugins/` directory.
+
+For more details on the plugin descriptor pattern and configuration DTOs, see the [Bootstrap Provider Developer Guide](../README.md#packaging-as-a-dynamic-plugin).
 
 ## See Also
 

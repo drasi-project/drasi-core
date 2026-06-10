@@ -1,0 +1,31 @@
+FROM ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.5 AS toolchain
+
+FROM ubuntu:20.04
+
+# Copy runner scripts from the cross image
+COPY --from=toolchain /linux-runner /linux-runner
+
+# Install build dependencies
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates gcc g++ libc6-dev pkg-config \
+    perl make autoconf automake libtool \
+    protobuf-compiler libprotobuf-dev \
+    libclang-dev libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build libjq from source (with bundled oniguruma) for static linking
+ENV JQ_VERSION=1.7.1
+RUN curl -sSL https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-${JQ_VERSION}.tar.gz | tar xz \
+    && cd jq-${JQ_VERSION} \
+    && autoreconf -fi \
+    && ./configure --disable-shared --enable-static --with-oniguruma=builtin --prefix=/usr/local/jq \
+    && make -j$(nproc) \
+    && make install \
+    && cd .. && rm -rf jq-${JQ_VERSION}
+
+ENV JQ_LIB_DIR=/usr/local/jq/lib
+ENV ONIG_LIB_DIR=/usr/local/jq/lib
+ENV JQ_INCLUDE_DIR=/usr/local/jq/include
+ENV LIBJQ_STATIC=1
+ENV LIBONIG_STATIC=1

@@ -12,25 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! HTTP Source Plugin for Drasi
 //!
-//! This plugin exposes HTTP endpoints for receiving data change events. It includes
-//! adaptive batching for optimized throughput and supports both single-event and
-//! batch submission modes.
+//! This plugin exposes HTTP endpoints for receiving data change events. It supports
+//! two mutually exclusive modes:
 //!
-//! # Endpoints
+//! - **Standard Mode**: Fixed-format `HttpSourceChange` endpoints with adaptive batching
+//! - **Webhook Mode**: Configurable routes with template-based payload transformation
 //!
-//! The HTTP source exposes the following endpoints:
+//! # Standard Mode
+//!
+//! When no `webhooks` configuration is present, the source operates in standard mode
+//! with the following endpoints:
 //!
 //! - **`POST /sources/{source_id}/events`** - Submit a single event
 //! - **`POST /sources/{source_id}/events/batch`** - Submit multiple events
 //! - **`GET /health`** - Health check endpoint
 //!
-//! # Data Format
+//! ## Data Format
 //!
 //! Events are submitted as JSON using the `HttpSourceChange` format:
 //!
-//! ## Insert Operation
+//! ### Insert Operation
 //!
 //! ```json
 //! {
@@ -48,7 +53,7 @@
 //! }
 //! ```
 //!
-//! ## Update Operation
+//! ### Update Operation
 //!
 //! ```json
 //! {
@@ -64,7 +69,7 @@
 //! }
 //! ```
 //!
-//! ## Delete Operation
+//! ### Delete Operation
 //!
 //! ```json
 //! {
@@ -72,6 +77,48 @@
 //!     "id": "user-123",
 //!     "labels": ["User"]
 //! }
+//! ```
+//!
+//! # Webhook Mode
+//!
+//! When a `webhooks` section is present in the configuration, the source operates
+//! in webhook mode. This enables:
+//!
+//! - Custom routes with path parameters (e.g., `/github/events`, `/users/:id/hooks`)
+//! - Multiple HTTP methods per route (POST, PUT, PATCH, DELETE, GET)
+//! - Handlebars template-based payload transformation
+//! - HMAC signature verification (GitHub, Shopify style)
+//! - Bearer token authentication
+//! - Support for JSON, XML, YAML, and plain text payloads
+//!
+//! ## Webhook Configuration Example
+//!
+//! ```yaml
+//! webhooks:
+//!   error_behavior: accept_and_log
+//!   routes:
+//!     - path: "/github/events"
+//!       methods: ["POST"]
+//!       auth:
+//!         signature:
+//!           type: hmac-sha256
+//!           secret_env: GITHUB_WEBHOOK_SECRET
+//!           header: X-Hub-Signature-256
+//!           prefix: "sha256="
+//!       error_behavior: reject
+//!       mappings:
+//!         - when:
+//!             header: X-GitHub-Event
+//!             equals: push
+//!           operation: insert
+//!           element_type: node
+//!           effective_from: "{{payload.head_commit.timestamp}}"
+//!           template:
+//!             id: "commit-{{payload.head_commit.id}}"
+//!             labels: ["Commit"]
+//!             properties:
+//!               message: "{{payload.head_commit.message}}"
+//!               author: "{{payload.head_commit.author.name}}"
 //! ```
 //!
 //! ## Relation Element
@@ -139,17 +186,18 @@
 //!
 //! ## Rust
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use drasi_source_http::{HttpSource, HttpSourceBuilder};
+//! use std::sync::Arc;
 //!
-//! let config = HttpSourceBuilder::new()
+//! # async fn example() -> anyhow::Result<()> {
+//! let source = HttpSource::builder("http-source")
 //!     .with_host("0.0.0.0")
 //!     .with_port(8080)
 //!     .with_adaptive_enabled(true)
-//!     .build();
-//!
-//! let source = Arc::new(HttpSource::new("http-source", config)?);
-//! drasi.add_source(source).await?;
+//!     .build()?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## curl (Single Event)
@@ -169,11 +217,18 @@
 //! ```
 
 pub mod config;
+pub mod descriptor;
 pub use config::HttpSourceConfig;
 
 mod adaptive_batcher;
 mod models;
 mod time;
+
+// Webhook support modules
+pub mod auth;
+pub mod content_parser;
+pub mod route_matcher;
+pub mod template_engine;
 
 // Export HTTP source models and conversion
 pub use models::{convert_http_to_source_change, HttpElement, HttpSourceChange};
@@ -181,25 +236,35 @@ pub use models::{convert_http_to_source_change, HttpElement, HttpSourceChange};
 use anyhow::Result;
 use async_trait::async_trait;
 use axum::{
+    body::Bytes,
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, Method, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
+use tower_http::cors::{Any, CorsLayer};
 
-use drasi_lib::channels::*;
+use drasi_lib::channels::{ComponentType, *};
+use drasi_lib::schema::{NodeSchema, PropertySchema, RelationSchema, SourceSchema};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+use drasi_lib::wal::{WalError, WalProvider};
 use drasi_lib::Source;
+use tracing::Instrument;
 
 use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
+use crate::auth::{verify_auth, AuthResult};
+use crate::config::{CorsConfig, ErrorBehavior, WebhookConfig};
+use crate::content_parser::{parse_content, ContentType};
+use crate::route_matcher::{convert_method, find_matching_mappings, headers_to_map, RouteMatcher};
+use crate::template_engine::{TemplateContext, TemplateEngine};
 
 /// Response for event submission
 #[derive(Debug, Serialize, Deserialize)]
@@ -228,6 +293,10 @@ pub struct HttpSource {
     config: HttpSourceConfig,
     /// Adaptive batching configuration for throughput optimization
     adaptive_config: AdaptiveBatchConfig,
+    /// WAL provider for durable event persistence (if durability is enabled)
+    wal: tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>,
+    /// Handle to the WAL pruning background task (if running)
+    prune_task: tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Batch event request that can accept multiple events
@@ -245,6 +314,84 @@ struct HttpAppState {
     source_id: String,
     /// Channel for sending events to the adaptive batcher
     batch_tx: mpsc::Sender<SourceChangeEvent>,
+    /// Webhook configuration (if in webhook mode)
+    webhook_config: Option<Arc<WebhookState>>,
+    /// WAL provider for durable persistence (if durability is enabled)
+    wal: Option<Arc<dyn WalProvider>>,
+}
+
+/// State for webhook mode processing
+struct WebhookState {
+    /// Webhook configuration
+    config: WebhookConfig,
+    /// Route matcher for incoming requests
+    route_matcher: RouteMatcher,
+    /// Template engine for payload transformation
+    template_engine: TemplateEngine,
+}
+
+fn extract_property_schemas(properties: Option<&serde_json::Value>) -> Vec<PropertySchema> {
+    match properties {
+        Some(serde_json::Value::Object(map)) => map
+            .keys()
+            .map(|key| PropertySchema::new(key.clone()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn derive_schema_from_webhooks(webhooks: &WebhookConfig) -> Option<SourceSchema> {
+    let mut node_map: HashMap<String, Vec<PropertySchema>> = HashMap::new();
+    let mut relation_map: HashMap<String, Vec<PropertySchema>> = HashMap::new();
+
+    for route in &webhooks.routes {
+        for mapping in &route.mappings {
+            let Some(label) = mapping.template.labels.first().cloned() else {
+                continue;
+            };
+
+            let properties = extract_property_schemas(mapping.template.properties.as_ref());
+
+            match mapping.element_type {
+                crate::config::ElementType::Node => {
+                    let entry = node_map.entry(label).or_default();
+                    for prop in properties {
+                        if !entry.iter().any(|p| p.name == prop.name) {
+                            entry.push(prop);
+                        }
+                    }
+                }
+                crate::config::ElementType::Relation => {
+                    let entry = relation_map.entry(label).or_default();
+                    for prop in properties {
+                        if !entry.iter().any(|p| p.name == prop.name) {
+                            entry.push(prop);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let nodes: Vec<_> = node_map
+        .into_iter()
+        .map(|(label, properties)| NodeSchema { label, properties })
+        .collect();
+    let relations: Vec<_> = relation_map
+        .into_iter()
+        .map(|(label, properties)| RelationSchema {
+            label,
+            from: None,
+            to: None,
+            properties,
+        })
+        .collect();
+
+    if nodes.is_empty() && relations.is_empty() {
+        None
+    } else {
+        Some(SourceSchema { nodes, relations })
+    }
 }
 
 impl HttpSource {
@@ -268,15 +415,16 @@ impl HttpSource {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use drasi_source_http::{HttpSource, HttpSourceBuilder};
+    /// ```rust,no_run
+    /// use drasi_source_http::HttpSource;
     ///
-    /// let config = HttpSourceBuilder::new()
+    /// # fn example() -> anyhow::Result<()> {
+    /// let source = HttpSource::builder("my-http-source")
     ///     .with_host("0.0.0.0")
     ///     .with_port(8080)
-    ///     .build();
-    ///
-    /// let source = HttpSource::new("my-http-source", config)?;
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(id: impl Into<String>, config: HttpSourceConfig) -> Result<Self> {
         let id = id.into();
@@ -309,6 +457,8 @@ impl HttpSource {
             base: SourceBase::new(params)?,
             config,
             adaptive_config,
+            wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 
@@ -371,6 +521,8 @@ impl HttpSource {
             base: SourceBase::new(params)?,
             config,
             adaptive_config,
+            wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 
@@ -447,10 +599,61 @@ impl HttpSource {
         for (idx, event) in events.iter().enumerate() {
             match convert_http_to_source_change(event, source_id) {
                 Ok(source_change) => {
+                    // WAL append before ACK (if durability enabled)
+                    let sequence = if let Some(ref wal) = state.wal {
+                        match wal.append(&state.source_id, &source_change).await {
+                            Ok(seq) => {
+                                trace!(
+                                    "[{}] WAL append succeeded: sequence={}",
+                                    state.source_id,
+                                    seq
+                                );
+                                Some(seq)
+                            }
+                            Err(WalError::CapacityExhausted(_)) => {
+                                warn!(
+                                    "[{}] WAL capacity exhausted, rejecting event",
+                                    state.source_id
+                                );
+                                return Err((
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    Json(EventResponse {
+                                        success: false,
+                                        message: "WAL capacity exhausted".to_string(),
+                                        error: Some("Source durability buffer is full".to_string()),
+                                    }),
+                                ));
+                            }
+                            Err(e) => {
+                                error!(
+                                    "[{}] WAL append failed for event {}: {}",
+                                    state.source_id,
+                                    idx + 1,
+                                    e
+                                );
+                                // WAL durability failure is a server-side error — reject entire batch
+                                return Err((
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    Json(EventResponse {
+                                        success: false,
+                                        message: format!(
+                                            "WAL durability failure at event {}: {e}",
+                                            idx + 1
+                                        ),
+                                        error: Some(format!("WAL error: {e}")),
+                                    }),
+                                ));
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
                     let change_event = SourceChangeEvent {
                         source_id: source_id.to_string(),
                         change: source_change,
                         timestamp: chrono::Utc::now(),
+                        sequence,
                     };
 
                     if let Err(e) = state.batch_tx.send(change_event).await {
@@ -513,8 +716,235 @@ impl HttpSource {
         Json(serde_json::json!({
             "status": "healthy",
             "service": "http-source",
-            "features": ["adaptive-batching", "batch-endpoint"]
+            "features": ["adaptive-batching", "batch-endpoint", "webhooks"]
         }))
+    }
+
+    /// Handle webhook requests
+    ///
+    /// This handler processes requests in webhook mode, matching against
+    /// configured routes and transforming payloads using templates.
+    async fn handle_webhook(
+        method: axum::http::Method,
+        uri: axum::http::Uri,
+        headers: axum::http::HeaderMap,
+        State(state): State<HttpAppState>,
+        body: Bytes,
+    ) -> impl IntoResponse {
+        let path = uri.path();
+        let source_id = &state.source_id;
+
+        debug!("[{source_id}] Webhook received: {method} {path}");
+
+        // Get webhook state - should always be present in webhook mode
+        let webhook_state = match &state.webhook_config {
+            Some(ws) => ws,
+            None => {
+                error!("[{source_id}] Webhook handler called but no webhook config present");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(EventResponse {
+                        success: false,
+                        message: "Internal configuration error".to_string(),
+                        error: Some("Webhook mode not properly configured".to_string()),
+                    }),
+                );
+            }
+        };
+
+        // Convert method
+        let http_method = match convert_method(&method) {
+            Some(m) => m,
+            None => {
+                return handle_error(
+                    &webhook_state.config.error_behavior,
+                    source_id,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "Method not supported",
+                    None,
+                );
+            }
+        };
+
+        // Match route
+        let route_match = match webhook_state.route_matcher.match_route(
+            path,
+            &http_method,
+            &webhook_state.config.routes,
+        ) {
+            Some(rm) => rm,
+            None => {
+                debug!("[{source_id}] No matching route for {method} {path}");
+                return handle_error(
+                    &webhook_state.config.error_behavior,
+                    source_id,
+                    StatusCode::NOT_FOUND,
+                    "No matching route",
+                    None,
+                );
+            }
+        };
+
+        let route = route_match.route;
+        let error_behavior = route
+            .error_behavior
+            .as_ref()
+            .unwrap_or(&webhook_state.config.error_behavior);
+
+        // Verify authentication
+        let auth_result = verify_auth(route.auth.as_ref(), &headers, &body);
+        if let AuthResult::Failed(reason) = auth_result {
+            warn!("[{source_id}] Authentication failed for {path}: {reason}");
+            return handle_error(
+                error_behavior,
+                source_id,
+                StatusCode::UNAUTHORIZED,
+                "Authentication failed",
+                Some(&reason),
+            );
+        }
+
+        // Parse content
+        let content_type = ContentType::from_header(
+            headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+        );
+
+        let payload = match parse_content(&body, content_type) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("[{source_id}] Failed to parse payload: {e}");
+                return handle_error(
+                    error_behavior,
+                    source_id,
+                    StatusCode::BAD_REQUEST,
+                    "Failed to parse payload",
+                    Some(&e.to_string()),
+                );
+            }
+        };
+
+        // Build template context
+        let headers_map = headers_to_map(&headers);
+        let query_map = parse_query_string(uri.query());
+
+        let context = TemplateContext {
+            payload: payload.clone(),
+            route: route_match.path_params,
+            query: query_map,
+            headers: headers_map.clone(),
+            method: method.to_string(),
+            path: path.to_string(),
+            source_id: source_id.clone(),
+        };
+
+        // Find matching mappings
+        let matching_mappings = find_matching_mappings(&route.mappings, &headers_map, &payload);
+
+        if matching_mappings.is_empty() {
+            debug!("[{source_id}] No matching mappings for request");
+            return handle_error(
+                error_behavior,
+                source_id,
+                StatusCode::BAD_REQUEST,
+                "No matching mapping for request",
+                None,
+            );
+        }
+
+        // Process each matching mapping
+        let mut success_count = 0;
+        let mut error_count = 0;
+        let mut last_error = None;
+
+        for mapping in matching_mappings {
+            match webhook_state
+                .template_engine
+                .process_mapping(mapping, &context, source_id)
+            {
+                Ok(source_change) => {
+                    // WAL append before ACK (if durability enabled)
+                    let sequence = if let Some(ref wal) = state.wal {
+                        match wal.append(&state.source_id, &source_change).await {
+                            Ok(seq) => Some(seq),
+                            Err(WalError::CapacityExhausted(_)) => {
+                                return handle_error(
+                                    error_behavior,
+                                    source_id,
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "WAL capacity exhausted",
+                                    None,
+                                );
+                            }
+                            Err(e) => {
+                                error!("[{source_id}] WAL append failed: {e}");
+                                // WAL durability failure — reject to maintain at-least-once guarantee
+                                return handle_error(
+                                    error_behavior,
+                                    source_id,
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    &format!("WAL durability failure: {e}"),
+                                    None,
+                                );
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    let event = SourceChangeEvent {
+                        source_id: source_id.clone(),
+                        change: source_change,
+                        timestamp: chrono::Utc::now(),
+                        sequence,
+                    };
+
+                    if let Err(e) = state.batch_tx.send(event).await {
+                        error!("[{source_id}] Failed to send event to batcher: {e}");
+                        error_count += 1;
+                        last_error = Some(format!("Failed to queue event: {e}"));
+                    } else {
+                        success_count += 1;
+                    }
+                }
+                Err(e) => {
+                    warn!("[{source_id}] Failed to process mapping: {e}");
+                    error_count += 1;
+                    last_error = Some(e.to_string());
+                }
+            }
+        }
+
+        debug!("[{source_id}] Webhook processing complete: {success_count} succeeded, {error_count} failed");
+
+        if error_count > 0 && success_count == 0 {
+            handle_error(
+                error_behavior,
+                source_id,
+                StatusCode::BAD_REQUEST,
+                &format!("All {error_count} mappings failed"),
+                last_error.as_deref(),
+            )
+        } else if error_count > 0 {
+            (
+                StatusCode::OK,
+                Json(EventResponse {
+                    success: true,
+                    message: format!("Processed {success_count} events, {error_count} failed"),
+                    error: last_error,
+                }),
+            )
+        } else {
+            (
+                StatusCode::OK,
+                Json(EventResponse {
+                    success: true,
+                    message: format!("Processed {success_count} events successfully"),
+                    error: None,
+                }),
+            )
+        }
     }
 
     async fn run_adaptive_batcher(
@@ -565,12 +995,18 @@ impl HttpSource {
                 let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                 profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                let wrapper = SourceEventWrapper::with_profiling(
+                let mut wrapper = SourceEventWrapper::with_profiling(
                     event.source_id.clone(),
                     SourceEvent::Change(event.change),
                     event.timestamp,
                     profiling,
                 );
+
+                // Carry WAL-assigned sequence through to the wrapper
+                if let Some(seq) = event.sequence {
+                    wrapper.sequence = Some(seq);
+                    wrapper.source_position = Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
+                }
 
                 if let Err(e) =
                     SourceBase::dispatch_from_task(dispatchers.clone(), wrapper.clone(), &source_id)
@@ -629,38 +1065,82 @@ impl Source for HttpSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "host".to_string(),
-            serde_json::Value::String(self.config.host.clone()),
-        );
-        props.insert(
-            "port".to_string(),
-            serde_json::Value::Number(self.config.port.into()),
-        );
-        if let Some(ref endpoint) = self.config.endpoint {
-            props.insert(
-                "endpoint".to_string(),
-                serde_json::Value::String(endpoint.clone()),
-            );
-        }
-        props
+        use crate::descriptor::HttpSourceConfigDto;
+
+        self.base
+            .properties_or_serialize(&HttpSourceConfigDto::from(&self.config))
     }
 
     fn auto_start(&self) -> bool {
         self.base.get_auto_start()
     }
 
+    fn describe_schema(&self) -> Option<SourceSchema> {
+        self.config
+            .webhooks
+            .as_ref()
+            .and_then(derive_schema_from_webhooks)
+    }
+
     async fn start(&self) -> Result<()> {
         info!("[{}] Starting adaptive HTTP source", self.base.id);
 
-        self.base.set_status(ComponentStatus::Starting).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting adaptive HTTP source".to_string()),
             )
-            .await?;
+            .await;
+
+        // Initialize WAL if durability is enabled
+        let wal_ref: Option<Arc<dyn WalProvider>> =
+            if self.config.durability.as_ref().is_some_and(|d| d.enabled) {
+                let ctx = self
+                    .base
+                    .context()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("Context not initialized"))?;
+                let wal = ctx.wal_provider.clone().ok_or_else(|| {
+                    anyhow::anyhow!("Durability enabled but no WAL provider configured on DrasiLib")
+                })?;
+                let wal_config = self
+                    .config
+                    .durability
+                    .as_ref()
+                    .expect("durability checked above")
+                    .to_wal_config();
+                wal.register(&self.base.id, wal_config.clone())
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to register WAL for source '{}': {}",
+                            self.base.id,
+                            e
+                        )
+                    })?;
+
+                info!(
+                    "[{}] WAL registered: max_events={}, policy={:?}",
+                    self.base.id, wal_config.max_events, wal_config.capacity_policy
+                );
+
+                // Resume sequence counter from WAL head
+                let head = wal.head_sequence(&self.base.id).await.unwrap_or(0);
+                if head > 0 {
+                    self.base.set_next_sequence(head);
+                    info!(
+                        "[{}] WAL resumed from persisted state: head={}, next_sequence={}",
+                        self.base.id,
+                        head,
+                        head + 1
+                    );
+                }
+
+                *self.wal.write().await = Some(wal.clone());
+                Some(wal)
+            } else {
+                None
+            };
 
         let host = self.config.host.clone();
         let port = self.config.port;
@@ -676,33 +1156,98 @@ impl Source for HttpSource {
         // Start adaptive batcher task
         let adaptive_config = self.adaptive_config.clone();
         let source_id = self.base.id.clone();
+        let dispatchers = self.base.dispatchers.clone();
+
+        // Get instance_id from context for log routing isolation
+        let instance_id = self
+            .base
+            .context()
+            .await
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
 
         info!("[{source_id}] Starting adaptive batcher task");
-        tokio::spawn(Self::run_adaptive_batcher(
-            batch_rx,
-            self.base.dispatchers.clone(),
-            adaptive_config,
-            source_id.clone(),
-        ));
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "http_adaptive_batcher",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+        tokio::spawn(
+            async move {
+                Self::run_adaptive_batcher(
+                    batch_rx,
+                    dispatchers,
+                    adaptive_config,
+                    source_id.clone(),
+                )
+                .await
+            }
+            .instrument(span),
+        );
 
         // Create app state
+        let webhook_state = if let Some(ref webhook_config) = self.config.webhooks {
+            info!(
+                "[{}] Webhook mode enabled with {} routes",
+                self.base.id,
+                webhook_config.routes.len()
+            );
+            Some(Arc::new(WebhookState {
+                config: webhook_config.clone(),
+                route_matcher: RouteMatcher::new(&webhook_config.routes),
+                template_engine: TemplateEngine::new(),
+            }))
+        } else {
+            info!("[{}] Standard mode enabled", self.base.id);
+            None
+        };
+
         let state = HttpAppState {
             source_id: self.base.id.clone(),
             batch_tx,
+            webhook_config: webhook_state,
+            wal: wal_ref.clone(),
         };
 
-        // Build router
-        let app = Router::new()
-            .route("/health", get(Self::health_check))
-            .route(
-                "/sources/:source_id/events",
-                post(Self::handle_single_event),
-            )
-            .route(
-                "/sources/:source_id/events/batch",
-                post(Self::handle_batch_events),
-            )
-            .with_state(state);
+        // Build router based on mode
+        let app = if self.config.is_webhook_mode() {
+            // Webhook mode: only health check + catch-all webhook handler
+            let router = Router::new()
+                .route("/health", get(Self::health_check))
+                .fallback(Self::handle_webhook)
+                .with_state(state);
+
+            // Apply CORS if configured
+            if let Some(ref webhooks) = self.config.webhooks {
+                if let Some(ref cors_config) = webhooks.cors {
+                    if cors_config.enabled {
+                        info!("[{}] CORS enabled for webhook endpoints", self.base.id);
+                        router.layer(build_cors_layer(cors_config))
+                    } else {
+                        router
+                    }
+                } else {
+                    router
+                }
+            } else {
+                router
+            }
+        } else {
+            // Standard mode: original endpoints
+            Router::new()
+                .route("/health", get(Self::health_check))
+                .route(
+                    "/sources/:source_id/events",
+                    post(Self::handle_single_event),
+                )
+                .route(
+                    "/sources/:source_id/events/batch",
+                    post(Self::handle_batch_events),
+                )
+                .with_state(state)
+        };
 
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -711,33 +1256,44 @@ impl Source for HttpSource {
 
         // Start server
         let (error_tx, error_rx) = tokio::sync::oneshot::channel();
-        let server_handle = tokio::spawn(async move {
-            let addr = format!("{host}:{port}");
-            info!("[{source_id}] Adaptive HTTP source attempting to bind to {addr}");
+        let source_id = self.base.id.clone();
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "http_source_server",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+        let server_handle = tokio::spawn(
+            async move {
+                let addr = format!("{host}:{port}");
+                info!("[{source_id}] Adaptive HTTP source attempting to bind to {addr}");
 
-            let listener = match tokio::net::TcpListener::bind(&addr).await {
-                Ok(listener) => {
-                    info!("[{source_id}] Adaptive HTTP source successfully listening on {addr}");
-                    listener
-                }
-                Err(e) => {
-                    error!("[{source_id}] Failed to bind HTTP server to {addr}: {e}");
-                    let _ = error_tx.send(format!(
+                let listener = match tokio::net::TcpListener::bind(&addr).await {
+                    Ok(listener) => {
+                        info!("[{source_id}] Adaptive HTTP source successfully listening on {addr}");
+                        listener
+                    }
+                    Err(e) => {
+                        error!("[{source_id}] Failed to bind HTTP server to {addr}: {e}");
+                        let _ = error_tx.send(format!(
                         "Failed to bind HTTP server to {addr}: {e}. Common causes: port already in use, insufficient permissions"
                     ));
                     return;
                 }
             };
 
-            if let Err(e) = axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-            {
-                error!("[{source_id}] HTTP server error: {e}");
+                if let Err(e) = axum::serve(listener, app)
+                    .with_graceful_shutdown(async move {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                {
+                    error!("[{source_id}] HTTP server error: {e}");
+                }
             }
-        });
+            .instrument(span),
+        );
 
         *self.base.task_handle.write().await = Some(server_handle);
         *self.base.shutdown_tx.write().await = Some(shutdown_tx);
@@ -745,22 +1301,51 @@ impl Source for HttpSource {
         // Check for startup errors with a short timeout
         match timeout(Duration::from_millis(500), error_rx).await {
             Ok(Ok(error_msg)) => {
-                self.base.set_status(ComponentStatus::Error).await;
+                self.base.set_status(ComponentStatus::Error, None).await;
                 return Err(anyhow::anyhow!("{error_msg}"));
             }
             _ => {
-                self.base.set_status(ComponentStatus::Running).await;
+                self.base
+                    .set_status(
+                        ComponentStatus::Running,
+                        Some(format!(
+                    "Adaptive HTTP source running on {host_clone}:{port} with batch support"
+                )),
+                    )
+                    .await;
             }
         }
 
-        self.base
-            .send_component_event(
-                ComponentStatus::Running,
-                Some(format!(
-                    "Adaptive HTTP source running on {host_clone}:{port} with batch support"
-                )),
-            )
-            .await?;
+        // Spawn WAL pruning task if durability is enabled
+        if let Some(wal) = wal_ref {
+            let base = self.base.clone_shared();
+            let source_id = self.base.id.clone();
+            let prune_handle = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    if let Some(confirmed) = base.compute_confirmed_position().await {
+                        if confirmed > 0 {
+                            match wal.prune_up_to(&source_id, confirmed).await {
+                                Ok(pruned) => {
+                                    if pruned > 0 {
+                                        let remaining =
+                                            wal.event_count(&source_id).await.unwrap_or(0);
+                                        debug!(
+                                            "[{source_id}] WAL pruned: count={pruned}, confirmed_seq={confirmed}, remaining={remaining}"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("[{source_id}] WAL prune failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            *self.prune_task.write().await = Some(prune_handle);
+        }
 
         Ok(())
     }
@@ -768,13 +1353,17 @@ impl Source for HttpSource {
     async fn stop(&self) -> Result<()> {
         info!("[{}] Stopping adaptive HTTP source", self.base.id);
 
-        self.base.set_status(ComponentStatus::Stopping).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping adaptive HTTP source".to_string()),
             )
-            .await?;
+            .await;
+
+        // Cancel WAL pruning task
+        if let Some(handle) = self.prune_task.write().await.take() {
+            handle.abort();
+        }
 
         if let Some(tx) = self.base.shutdown_tx.write().await.take() {
             let _ = tx.send(());
@@ -784,13 +1373,12 @@ impl Source for HttpSource {
             let _ = timeout(Duration::from_secs(5), handle).await;
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Adaptive HTTP source stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
@@ -803,7 +1391,49 @@ impl Source for HttpSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
+        // If WAL is enabled and subscriber is resuming, use WAL replay
+        let wal_guard = self.wal.read().await;
+        if let (Some(wal), Some(ref resume_from)) = (wal_guard.as_ref(), &settings.resume_from) {
+            // Decode resume_from as big-endian u64 sequence
+            if resume_from.len() >= 8 {
+                let resume_seq =
+                    u64::from_be_bytes(resume_from[..8].try_into().unwrap_or_default());
+                let wal_clone = wal.clone();
+                drop(wal_guard);
+                return self
+                    .base
+                    .subscribe_with_replay(&settings, wal_clone.as_ref(), resume_seq, "HTTP")
+                    .await;
+            } else {
+                drop(wal_guard);
+                return Err(anyhow::anyhow!(
+                    "Invalid resume_from position: expected at least 8 bytes, got {}",
+                    resume_from.len()
+                ));
+            }
+        }
+        drop(wal_guard);
         self.base.subscribe_with_bootstrap(&settings, "HTTP").await
+    }
+
+    fn supports_replay(&self) -> bool {
+        self.config.durability.as_ref().is_some_and(|d| d.enabled)
+    }
+
+    async fn deprovision(&self) -> Result<()> {
+        // Delete WAL data if durability was enabled
+        let wal_guard = self.wal.read().await;
+        if let Some(ref wal) = *wal_guard {
+            info!("[{}] Deprovisioning: deleting WAL data", self.base.id);
+            if let Err(e) = wal.delete_wal(&self.base.id).await {
+                warn!(
+                    "[{}] Failed to delete WAL during deprovision: {}",
+                    self.base.id, e
+                );
+            }
+        }
+        drop(wal_guard);
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -830,15 +1460,17 @@ impl Source for HttpSource {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use drasi_source_http::HttpSource;
 ///
+/// # fn example() -> anyhow::Result<()> {
 /// let source = HttpSource::builder("my-source")
 ///     .with_host("0.0.0.0")
 ///     .with_port(8080)
 ///     .with_adaptive_enabled(true)
-///     .with_bootstrap_provider(my_provider)
 ///     .build()?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct HttpSourceBuilder {
     id: String,
@@ -852,6 +1484,8 @@ pub struct HttpSourceBuilder {
     adaptive_min_wait_ms: Option<u64>,
     adaptive_window_secs: Option<u64>,
     adaptive_enabled: Option<bool>,
+    webhooks: Option<WebhookConfig>,
+    durability: Option<drasi_lib::DurabilityConfig>,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
     bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
@@ -877,6 +1511,8 @@ impl HttpSourceBuilder {
             adaptive_min_wait_ms: None,
             adaptive_window_secs: None,
             adaptive_enabled: None,
+            webhooks: None,
+            durability: None,
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
@@ -974,6 +1610,24 @@ impl HttpSourceBuilder {
         self
     }
 
+    /// Set the webhook configuration to enable webhook mode.
+    ///
+    /// When webhook mode is enabled, the standard `HttpSourceChange` endpoints
+    /// are disabled and custom webhook routes are used instead.
+    pub fn with_webhooks(mut self, webhooks: WebhookConfig) -> Self {
+        self.webhooks = Some(webhooks);
+        self
+    }
+
+    /// Set the WAL durability configuration.
+    ///
+    /// When enabled, events are persisted to a Write-Ahead Log before
+    /// acknowledging the caller, enabling crash recovery and replay.
+    pub fn with_durability(mut self, config: drasi_lib::DurabilityConfig) -> Self {
+        self.durability = Some(config);
+        self
+    }
+
     /// Set the full configuration at once
     pub fn with_config(mut self, config: HttpSourceConfig) -> Self {
         self.host = config.host;
@@ -986,6 +1640,8 @@ impl HttpSourceBuilder {
         self.adaptive_min_wait_ms = config.adaptive_min_wait_ms;
         self.adaptive_window_secs = config.adaptive_window_secs;
         self.adaptive_enabled = config.adaptive_enabled;
+        self.webhooks = config.webhooks;
+        self.durability = config.durability;
         self
     }
 
@@ -1006,6 +1662,8 @@ impl HttpSourceBuilder {
             adaptive_min_wait_ms: self.adaptive_min_wait_ms,
             adaptive_window_secs: self.adaptive_window_secs,
             adaptive_enabled: self.adaptive_enabled,
+            webhooks: self.webhooks,
+            durability: self.durability,
         };
 
         // Build SourceBaseParams with all settings
@@ -1045,6 +1703,8 @@ impl HttpSourceBuilder {
             base: SourceBase::new(params)?,
             config,
             adaptive_config,
+            wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 }
@@ -1060,16 +1720,178 @@ impl HttpSource {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// use drasi_source_http::HttpSource;
+    ///
+    /// # fn example() -> anyhow::Result<()> {
     /// let source = HttpSource::builder("my-source")
     ///     .with_host("0.0.0.0")
     ///     .with_port(8080)
-    ///     .with_bootstrap_provider(my_provider)
     ///     .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn builder(id: impl Into<String>) -> HttpSourceBuilder {
         HttpSourceBuilder::new(id)
     }
+}
+
+/// Handle errors according to configured error behavior
+fn handle_error(
+    behavior: &ErrorBehavior,
+    source_id: &str,
+    status: StatusCode,
+    message: &str,
+    detail: Option<&str>,
+) -> (StatusCode, Json<EventResponse>) {
+    match behavior {
+        ErrorBehavior::Reject => {
+            debug!("[{source_id}] Rejecting request: {message}");
+            (
+                status,
+                Json(EventResponse {
+                    success: false,
+                    message: message.to_string(),
+                    error: detail.map(String::from),
+                }),
+            )
+        }
+        ErrorBehavior::AcceptAndLog => {
+            warn!("[{source_id}] Accepting with error (logged): {message}");
+            (
+                StatusCode::OK,
+                Json(EventResponse {
+                    success: true,
+                    message: format!("Accepted with warning: {message}"),
+                    error: detail.map(String::from),
+                }),
+            )
+        }
+        ErrorBehavior::AcceptAndSkip => {
+            trace!("[{source_id}] Accepting silently: {message}");
+            (
+                StatusCode::OK,
+                Json(EventResponse {
+                    success: true,
+                    message: "Accepted".to_string(),
+                    error: None,
+                }),
+            )
+        }
+    }
+}
+
+/// Parse query string into a HashMap
+fn parse_query_string(query: Option<&str>) -> HashMap<String, String> {
+    query
+        .map(|q| {
+            q.split('&')
+                .filter_map(|pair| {
+                    let mut parts = pair.splitn(2, '=');
+                    let key = parts.next()?;
+                    let value = parts.next().unwrap_or("");
+                    Some((urlencoding_decode(key), urlencoding_decode(value)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Simple URL decoding (handles %XX sequences) with proper UTF-8 handling
+fn urlencoding_decode(s: &str) -> String {
+    // Collect decoded bytes first, then convert to String to properly handle UTF-8
+    let mut decoded: Vec<u8> = Vec::with_capacity(s.len());
+    let mut chars = s.chars();
+
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let mut hex = String::new();
+            if let Some(c1) = chars.next() {
+                hex.push(c1);
+            }
+            if let Some(c2) = chars.next() {
+                hex.push(c2);
+            }
+
+            if hex.len() == 2 {
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    decoded.push(byte);
+                    continue;
+                }
+            }
+
+            // If we couldn't decode a valid %XX sequence, keep the original text
+            decoded.extend_from_slice(b"%");
+            decoded.extend_from_slice(hex.as_bytes());
+        } else if c == '+' {
+            decoded.push(b' ');
+        } else {
+            // Encode the character as UTF-8 and append its bytes
+            let mut buf = [0u8; 4];
+            let encoded = c.encode_utf8(&mut buf);
+            decoded.extend_from_slice(encoded.as_bytes());
+        }
+    }
+
+    // Convert bytes to string, replacing invalid UTF-8 sequences
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// Build a CORS layer from configuration
+fn build_cors_layer(cors_config: &CorsConfig) -> CorsLayer {
+    let mut cors = CorsLayer::new();
+
+    // Configure allowed origins
+    if cors_config.allow_origins.len() == 1 && cors_config.allow_origins[0] == "*" {
+        cors = cors.allow_origin(Any);
+    } else {
+        let origins: Vec<_> = cors_config
+            .allow_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        cors = cors.allow_origin(origins);
+    }
+
+    // Configure allowed methods
+    let methods: Vec<Method> = cors_config
+        .allow_methods
+        .iter()
+        .filter_map(|m| m.parse().ok())
+        .collect();
+    cors = cors.allow_methods(methods);
+
+    // Configure allowed headers
+    if cors_config.allow_headers.len() == 1 && cors_config.allow_headers[0] == "*" {
+        cors = cors.allow_headers(Any);
+    } else {
+        let headers: Vec<header::HeaderName> = cors_config
+            .allow_headers
+            .iter()
+            .filter_map(|h| h.parse().ok())
+            .collect();
+        cors = cors.allow_headers(headers);
+    }
+
+    // Configure exposed headers
+    if !cors_config.expose_headers.is_empty() {
+        let exposed: Vec<header::HeaderName> = cors_config
+            .expose_headers
+            .iter()
+            .filter_map(|h| h.parse().ok())
+            .collect();
+        cors = cors.expose_headers(exposed);
+    }
+
+    // Configure credentials
+    if cors_config.allow_credentials {
+        cors = cors.allow_credentials(true);
+    }
+
+    // Configure max age
+    cors = cors.max_age(Duration::from_secs(cors_config.max_age));
+
+    cors
 }
 
 #[cfg(test)]
@@ -1112,6 +1934,8 @@ mod tests {
                 adaptive_min_wait_ms: None,
                 adaptive_window_secs: None,
                 adaptive_enabled: None,
+                webhooks: None,
+                durability: None,
             };
             let source = HttpSource::with_dispatch(
                 "dispatch-source",
@@ -1188,6 +2012,108 @@ mod tests {
             let props = source.properties();
 
             assert!(!props.contains_key("endpoint"));
+        }
+
+        #[test]
+        fn test_describe_schema_uses_webhook_mappings() {
+            let source = HttpSourceBuilder::new("test")
+                .with_host("localhost")
+                .with_webhooks(WebhookConfig {
+                    error_behavior: ErrorBehavior::AcceptAndLog,
+                    cors: None,
+                    routes: vec![crate::config::WebhookRoute {
+                        path: "/events".to_string(),
+                        methods: vec![crate::config::HttpMethod::Post],
+                        auth: None,
+                        error_behavior: None,
+                        mappings: vec![crate::config::WebhookMapping {
+                            when: None,
+                            operation: Some(crate::config::OperationType::Insert),
+                            operation_from: None,
+                            operation_map: None,
+                            element_type: crate::config::ElementType::Node,
+                            effective_from: None,
+                            template: crate::config::ElementTemplate {
+                                id: "{{payload.id}}".to_string(),
+                                labels: vec!["Order".to_string()],
+                                properties: Some(serde_json::json!({
+                                    "total": "{{payload.total}}",
+                                    "status": "{{payload.status}}"
+                                })),
+                                from: None,
+                                to: None,
+                            },
+                        }],
+                    }],
+                })
+                .build()
+                .unwrap();
+
+            let schema = source
+                .describe_schema()
+                .expect("webhook-configured HTTP source should expose schema");
+
+            assert_eq!(schema.nodes.len(), 1);
+            let node = &schema.nodes[0];
+            assert_eq!(node.label, "Order");
+            assert!(node
+                .properties
+                .iter()
+                .any(|property| property.name == "total"));
+            assert!(node
+                .properties
+                .iter()
+                .any(|property| property.name == "status"));
+        }
+
+        #[test]
+        fn test_describe_schema_includes_relation_mappings() {
+            let source = HttpSourceBuilder::new("test")
+                .with_host("localhost")
+                .with_webhooks(WebhookConfig {
+                    error_behavior: ErrorBehavior::AcceptAndLog,
+                    cors: None,
+                    routes: vec![crate::config::WebhookRoute {
+                        path: "/events".to_string(),
+                        methods: vec![crate::config::HttpMethod::Post],
+                        auth: None,
+                        error_behavior: None,
+                        mappings: vec![crate::config::WebhookMapping {
+                            when: None,
+                            operation: Some(crate::config::OperationType::Insert),
+                            operation_from: None,
+                            operation_map: None,
+                            element_type: crate::config::ElementType::Relation,
+                            effective_from: None,
+                            template: crate::config::ElementTemplate {
+                                id: "{{payload.id}}".to_string(),
+                                labels: vec!["PLACED_BY".to_string()],
+                                properties: Some(serde_json::json!({
+                                    "placed_at": "{{payload.timestamp}}"
+                                })),
+                                from: None,
+                                to: None,
+                            },
+                        }],
+                    }],
+                })
+                .build()
+                .unwrap();
+
+            let schema = source
+                .describe_schema()
+                .expect("webhook-configured HTTP source should expose schema for relations");
+
+            assert_eq!(schema.relations.len(), 1);
+            let relation = &schema.relations[0];
+            assert_eq!(relation.label, "PLACED_BY");
+            assert!(relation
+                .properties
+                .iter()
+                .any(|property| property.name == "placed_at"));
+            // Static derivation cannot infer endpoints
+            assert_eq!(relation.from, None);
+            assert_eq!(relation.to, None);
         }
     }
 
@@ -1330,8 +2256,8 @@ mod tests {
                         ..
                     } => {
                         assert_eq!(metadata.reference.element_id.as_ref(), "follows-1");
-                        assert_eq!(out_node.element_id.as_ref(), "user-1");
-                        assert_eq!(in_node.element_id.as_ref(), "user-2");
+                        assert_eq!(in_node.element_id.as_ref(), "user-1");
+                        assert_eq!(out_node.element_id.as_ref(), "user-2");
                     }
                     _ => panic!("Expected Relation element"),
                 },
@@ -1419,3 +2345,86 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    use drasi_lib::sources::Source;
+
+    #[test]
+    fn test_builder_fallback_produces_camel_case() {
+        let source = HttpSourceBuilder::new("http-fallback")
+            .with_host("0.0.0.0")
+            .with_port(9090)
+            .with_endpoint("/ingest")
+            .with_timeout_ms(5000)
+            .with_adaptive_max_batch_size(500)
+            .with_adaptive_min_batch_size(10)
+            .with_adaptive_max_wait_ms(2000)
+            .with_adaptive_min_wait_ms(100)
+            .build()
+            .unwrap();
+
+        let props = source.properties();
+
+        // Must use camelCase keys (DTO serialization)
+        assert!(
+            props.contains_key("timeoutMs"),
+            "expected camelCase 'timeoutMs', got keys: {:?}",
+            props.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            props.contains_key("adaptiveMaxBatchSize"),
+            "expected camelCase 'adaptiveMaxBatchSize'"
+        );
+        assert!(
+            props.contains_key("adaptiveMinBatchSize"),
+            "expected camelCase 'adaptiveMinBatchSize'"
+        );
+        assert!(
+            props.contains_key("adaptiveMaxWaitMs"),
+            "expected camelCase 'adaptiveMaxWaitMs'"
+        );
+        assert!(
+            props.contains_key("adaptiveMinWaitMs"),
+            "expected camelCase 'adaptiveMinWaitMs'"
+        );
+
+        // Must NOT have snake_case keys
+        assert!(
+            !props.contains_key("timeout_ms"),
+            "should not have snake_case 'timeout_ms'"
+        );
+        assert!(
+            !props.contains_key("adaptive_max_batch_size"),
+            "should not have snake_case 'adaptive_max_batch_size'"
+        );
+
+        // Values should be correct
+        assert_eq!(props.get("host").and_then(|v| v.as_str()), Some("0.0.0.0"));
+        assert_eq!(props.get("port").and_then(|v| v.as_u64()), Some(9090));
+        assert_eq!(
+            props.get("endpoint").and_then(|v| v.as_str()),
+            Some("/ingest")
+        );
+        assert_eq!(props.get("timeoutMs").and_then(|v| v.as_u64()), Some(5000));
+        assert_eq!(
+            props.get("adaptiveMaxBatchSize").and_then(|v| v.as_u64()),
+            Some(500)
+        );
+    }
+}
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "http-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::HttpSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);

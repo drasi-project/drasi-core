@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! ScriptFile bootstrap plugin for Drasi
 //!
 //! This plugin provides the ScriptFile bootstrap provider implementation for reading
@@ -29,7 +31,7 @@
 //!     .build();
 //!
 //! // Or using configuration
-//! use drasi_lib::bootstrap::ScriptFileBootstrapConfig;
+//! use drasi_bootstrap_scriptfile::ScriptFileBootstrapConfig;
 //!
 //! let config = ScriptFileBootstrapConfig {
 //!     file_paths: vec!["/path/to/data.jsonl".to_string()],
@@ -42,12 +44,27 @@
 //! ]);
 //! ```
 
+pub mod descriptor;
 pub mod script_file;
 pub mod script_reader;
 pub mod script_types;
 
 pub use drasi_lib::bootstrap::ScriptFileBootstrapConfig;
 pub use script_file::{ScriptFileBootstrapProvider, ScriptFileBootstrapProviderBuilder};
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "scriptfile-bootstrap",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [descriptor::ScriptFileBootstrapDescriptor],
+);
 
 #[cfg(test)]
 mod tests {

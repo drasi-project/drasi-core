@@ -10,34 +10,88 @@ members = [
   "middleware",
   "lib",
 
+  # Shared component libraries
+  "components/mssql-common",
+  "components/mysql-common",
+  "components/kubernetes-common",
+  "components/oracle-common",
+  "components/sources/mapping",
+
+  # Bootstrap Plugins
+  "components/bootstrappers/postgres",
+  "components/bootstrappers/sqlite",
+  "components/bootstrappers/platform",
+  "components/bootstrappers/scriptfile",
+  "components/bootstrappers/application",
+  "components/bootstrappers/noop",
+  "components/bootstrappers/mssql",
+  "components/bootstrappers/dataverse",
+  "components/bootstrappers/mysql",
+  "components/bootstrappers/http",
+  "components/bootstrappers/open511",
+  "components/bootstrappers/gtfs-rt",
+  "components/bootstrappers/sui-deepbook",
+  "components/bootstrappers/kubernetes",
+  "components/bootstrappers/oracle",
+  "components/bootstrappers/here-traffic",
+  "components/bootstrappers/cloudflare-radar",
+  "components/bootstrappers/neo4j",
+  "components/neo4j-common",
+  "components/bootstrappers/kafka",
+
   # Source Plugins
   "components/sources/postgres",
+  "components/sources/sqlite",
   "components/sources/http",
   "components/sources/grpc",
   "components/sources/platform",
   "components/sources/application",
   "components/sources/mock",
-
-  # Bootstrap Plugins
-  "components/bootstrappers/postgres",
-  "components/bootstrappers/platform",
-  "components/bootstrappers/scriptfile",
-  "components/bootstrappers/application",
-  "components/bootstrappers/noop",
+  "components/sources/ris-live",
+  "components/sources/mssql",
+  "components/sources/dataverse",
+  "components/sources/open511",
+  "components/sources/gtfs-rt",
+  "components/sources/mysql",
+  "components/sources/hyperliquid",
+  "components/sources/sui-deepbook",
+  "components/sources/kubernetes",
+  "components/sources/oracle",
+  "components/sources/here-traffic",
+  "components/sources/cloudflare-radar",
+  "components/sources/neo4j",
+  "components/sources/kafka",
 
   # Reaction Plugins
   "components/reactions/http",
   "components/reactions/http-adaptive",
   "components/reactions/grpc",
   "components/reactions/grpc-adaptive",
+  "components/reactions/aws-sqs",
   "components/reactions/sse",
+  "components/reactions/rabbitmq",
+  "components/reactions/dashboard",
+  "components/reactions/mcp",
   "components/reactions/platform",
   "components/reactions/profiler",
   "components/reactions/application",
   "components/reactions/log",
+  "components/reactions/azure-storage",
+  "components/reactions/loki",
+  "components/reactions/file",
   "components/reactions/storedproc-mssql",
   "components/reactions/storedproc-mysql",
   "components/reactions/storedproc-postgres",
+  "components/reactions/snapshot-test",
+
+  # Identity Provider Plugins
+  "components/identity/azure",
+  "components/identity/aws",
+
+  # Secret Store Plugins
+  "components/secret_stores/file",
+  "components/secret_stores/azure-keyvault",
+  "components/secret_stores/keyring",
 
   # Index Plugins
   "components/indexes/rocksdb",
@@ -46,10 +100,26 @@ members = [
   # State Store Plugins
   "components/state_stores/redb",
 
+  # WAL Plugins
+  "components/wals/redb",
+
+  # FFI Primitives (shared FFI types and macros)
+  "components/ffi-primitives",
+
+  # Plugin SDK
+  "components/plugin-sdk",
+
+  # Host SDK (host-side plugin loading and proxy types)
+  "components/host-sdk",
+
+  # Build tooling
+  "xtask",
+
   # Internal
   "shared-tests",
   "query-perf",
   "examples/query",
+  "lib-integration-tests",
   ]
 
 # Exclude internal crates from workspace packaging
@@ -57,12 +127,15 @@ exclude = [
   "shared-tests",
   "query-perf",
   "examples/query",
+  "lib-integration-tests",
+  "examples/lib/neo4j-getting-started",
+  "xtask",
 ]
 
 resolver = "2"
 
 [workspace.package]
-version = "0.3.1"
+version = "0.9.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
@@ -71,23 +144,69 @@ categories = ["database"]
 
 [workspace.dependencies]
 # Internal workspace crates
-drasi-query-ast = { version = "0.3.2", path = "query-ast" }
-drasi-query-cypher = { version = "0.3.2", path = "query-cypher" }
-drasi-query-gql = { version = "0.3.2", path = "query-gql" }
-drasi-core = { version = "0.3.2", path = "core" }
-drasi-functions-cypher = { version = "0.3.2", path = "functions-cypher" }
-drasi-functions-gql = { version = "0.3.2", path = "functions-gql" }
-drasi-middleware = { version = "0.3.2", path = "middleware" }
-drasi-lib = { version = "0.3.2", path = "lib" }
+drasi-query-ast = { version = "0.3.5", path = "query-ast" }
+drasi-query-cypher = { version = "0.3.6", path = "query-cypher" }
+drasi-query-gql = { version = "0.3.6", path = "query-gql" }
+drasi-core = { version = "0.5.3", path = "core" }
+drasi-functions-cypher = { version = "0.5.3", path = "functions-cypher" }
+drasi-functions-gql = { version = "0.5.3", path = "functions-gql" }
+drasi-middleware = { version = "0.5.4", path = "middleware" }
+drasi-identity-azure = { version = "0.2.6", path = "components/identity/azure" }
+drasi-identity-aws = { version = "0.2.2", path = "components/identity/aws" }
+drasi-lib = { version = "0.8.5", path = "lib" }
+drasi-ffi-primitives = { version = "0.9.0", path = "components/ffi-primitives" }
+drasi-plugin-sdk = { version = "0.9.0", path = "components/plugin-sdk" }
+drasi-host-sdk = { version = "0.9.0", path = "components/host-sdk" }
+
+# Common dependencies
+im = "15"
+# Pin roaring below 0.11.4 which requires rustc 1.90.0 (transitive via sui-sdk-types)
+roaring = ">=0.11.2, <0.11.4"
+utoipa = { version = "4", features = ["chrono"] }
+drasi-index-rocksdb = { version = "0.5.4", path = "components/indexes/rocksdb" }
+drasi-index-garnet = { version = "0.3.1", path = "components/indexes/garnet" }
 
 # Component plugins
-drasi-source-postgres = { version = "0.1.2", path = "components/sources/postgres" }
-drasi-source-application = { version = "0.1.2", path = "components/sources/application" }
-drasi-bootstrap-application = { version = "0.1.2", path = "components/bootstrappers/application" }
-drasi-reaction-http = { version = "0.1.3", path = "components/reactions/http" }
-drasi-reaction-grpc = { version = "0.2.1", path = "components/reactions/grpc" }
-drasi-index-rocksdb = { version = "0.2.1", path = "components/indexes/rocksdb" }
-drasi-index-garnet = { version = "0.1.2", path = "components/indexes/garnet" }
+drasi-source-mssql = { version = "0.2.3", path = "components/sources/mssql" }
+drasi-bootstrap-mssql = { version = "0.2.6", path = "components/bootstrappers/mssql" }
+drasi-bootstrap-here-traffic = { version = "0.1.0", path = "components/bootstrappers/here-traffic" }
+drasi-bootstrap-postgres = { version = "0.2.6", path = "components/bootstrappers/postgres" }
+drasi-bootstrap-cloudflare-radar = { version = "0.1.1", path = "components/bootstrappers/cloudflare-radar" }
+drasi-reaction-application = { version = "0.3.4", path = "components/reactions/application" }
+drasi-source-postgres = { version = "0.2.3", path = "components/sources/postgres" }
+drasi-source-here-traffic = { version = "0.1.0", path = "components/sources/here-traffic" }
+drasi-source-application = { version = "0.2.3", path = "components/sources/application" }
+drasi-source-hyperliquid = { version = "0.1.2", path = "components/sources/hyperliquid" }
+drasi-source-cloudflare-radar = { version = "0.1.1", path = "components/sources/cloudflare-radar" }
+drasi-bootstrap-application = { version = "0.2.6", path = "components/bootstrappers/application" }
+drasi-reaction-http = { version = "0.2.3", path = "components/reactions/http" }
+drasi-reaction-grpc = { version = "0.3.3", path = "components/reactions/grpc" }
+drasi-reaction-file = { version = "0.1.0", path = "components/reactions/file" }
+drasi-reaction-aws-sqs = { version = "0.1.0", path = "components/reactions/aws-sqs" }
+drasi-mssql-common = { version = "0.2.4", path = "components/mssql-common" }
+drasi-mysql-common = { version = "0.2.2", path = "components/mysql-common" }
+drasi-bootstrap-mysql = { version = "0.2.4", path = "components/bootstrappers/mysql" }
+drasi-source-mysql = { version = "0.2.1", path = "components/sources/mysql" }
+drasi-source-ris-live = { version = "0.1.2", path = "components/sources/ris-live" }
+drasi-bootstrap-sui-deepbook = { version = "0.1.1", path = "components/bootstrappers/sui-deepbook" }
+drasi-source-sui-deepbook = { version = "0.1.1", path = "components/sources/sui-deepbook" }
+drasi-kubernetes-common = { version = "0.1.2", path = "components/kubernetes-common" }
+drasi-source-kubernetes = { version = "0.1.1", path = "components/sources/kubernetes" }
+drasi-bootstrap-kubernetes = { version = "0.1.1", path = "components/bootstrappers/kubernetes" }
+drasi-source-oracle = { version = "0.1.1", path = "components/sources/oracle" }
+drasi-bootstrap-oracle = { version = "0.1.1", path = "components/bootstrappers/oracle" }
+drasi-oracle-common = { version = "0.1.2", path = "components/oracle-common" }
+drasi-source-mapping = { version = "0.1.0", path = "components/sources/mapping" }
+drasi-source-kafka = { version = "0.1.0", path = "components/sources/kafka" }
+drasi-bootstrap-kafka = { version = "0.1.0", path = "components/bootstrappers/kafka" }
+drasi-source-gtfs-rt = { version = "0.1.1", path = "components/sources/gtfs-rt" }
+drasi-bootstrap-gtfs-rt = { version = "0.1.1", path = "components/bootstrappers/gtfs-rt" }
+drasi-source-open511 = { version = "0.1.1", path = "components/sources/open511" }
+drasi-bootstrap-open511 = { version = "0.1.0", path = "components/bootstrappers/open511" }
+drasi-source-neo4j = { version = "0.1.0", path = "components/sources/neo4j" }
+drasi-bootstrap-neo4j = { version = "0.1.0", path = "components/bootstrappers/neo4j" }
+drasi-neo4j-common = { version = "0.1.0", path = "components/neo4j-common" }
+drasi-bootstrap-sqlite = { version = "0.1.4", path = "components/bootstrappers/sqlite" }
 
 [workspace.lints.rust]
 warnings = "deny"
@@ -105,3 +224,9 @@ large_enum_variant = "allow"
 [profile.release]
 codegen-units = 1
 lto = true
+
+[profile.dev]
+# Faster incremental dev builds: skip debug info for dependencies
+# Your code still gets full debug info; only third-party crates are stripped
+[profile.dev.package."*"]
+debug = false

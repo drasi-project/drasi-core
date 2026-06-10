@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! PostgreSQL bootstrap plugin for Drasi
 //!
 //! This plugin provides the PostgreSQL bootstrap provider implementation following
@@ -51,7 +53,22 @@
 //! ```
 
 pub mod config;
+pub mod descriptor;
 pub mod postgres;
 
 pub use config::{PostgresBootstrapConfig, SslMode, TableKeyConfig};
 pub use postgres::{PostgresBootstrapProvider, PostgresBootstrapProviderBuilder};
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "postgres-bootstrap",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [descriptor::PostgresBootstrapDescriptor],
+);

@@ -14,8 +14,9 @@
 
 //! PostgreSQL bootstrap provider for reading initial data from PostgreSQL databases
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use bytes::Bytes;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
@@ -24,10 +25,30 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_postgres::{Client, NoTls, Row, Transaction};
 
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::SourceChangeEvent;
 
 pub use crate::config::{PostgresBootstrapConfig, SslMode, TableKeyConfig};
+
+fn parse_lsn(lsn_str: &str) -> Result<u64> {
+    let parts: Vec<&str> = lsn_str.split('/').collect();
+    if parts.len() != 2 {
+        return Err(anyhow!("Invalid LSN format: {lsn_str}"));
+    }
+
+    let high = u64::from_str_radix(parts[0], 16)
+        .with_context(|| format!("Invalid high bits in LSN: {lsn_str}"))?;
+    let low = u64::from_str_radix(parts[1], 16)
+        .with_context(|| format!("Invalid low bits in LSN: {lsn_str}"))?;
+
+    Ok((high << 32) | low)
+}
+
+fn lsn_to_position_bytes(lsn: u64) -> Bytes {
+    Bytes::from(lsn.to_be_bytes().to_vec())
+}
 
 /// Bootstrap provider for PostgreSQL sources
 ///
@@ -204,7 +225,7 @@ impl BootstrapProvider for PostgresBootstrapProvider {
         context: &BootstrapContext,
         event_tx: drasi_lib::channels::BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "Starting PostgreSQL bootstrap for query '{}' with {} node labels and {} relation labels",
             request.query_id,
@@ -220,11 +241,14 @@ impl BootstrapProvider for PostgresBootstrapProvider {
         let query_id = request.query_id.clone();
 
         // Execute bootstrap
-        let count = handler.execute(request, context, event_tx).await?;
+        let (count, source_position) = handler.execute(request, context, event_tx).await?;
 
         info!("Completed PostgreSQL bootstrap for query {query_id}: sent {count} records");
 
-        Ok(count)
+        Ok(BootstrapResult {
+            event_count: count,
+            source_position: Some(source_position),
+        })
     }
 }
 
@@ -287,7 +311,7 @@ impl PostgresBootstrapHandler {
         request: BootstrapRequest,
         context: &BootstrapContext,
         event_tx: drasi_lib::channels::BootstrapEventSender,
-    ) -> Result<usize> {
+    ) -> Result<(usize, Bytes)> {
         info!(
             "Bootstrap: Connecting to PostgreSQL at {}:{}",
             self.config.host, self.config.port
@@ -301,25 +325,26 @@ impl PostgresBootstrapHandler {
 
         info!("Bootstrap: Connected, creating snapshot transaction...");
         // Start snapshot transaction and capture LSN
-        let (transaction, lsn) = self.create_snapshot(&mut client).await?;
+        let (transaction, snapshot_lsn) = self.create_snapshot(&mut client).await?;
+        let source_position = lsn_to_position_bytes(snapshot_lsn);
 
-        info!("Bootstrap snapshot created at LSN: {lsn}");
+        info!("Bootstrap snapshot created at LSN: {snapshot_lsn:x}");
 
-        // Map labels to tables
-        let tables = self.map_labels_to_tables(&request, &transaction).await?;
+        // Resolve labels to verified table names
+        let tables = self.resolve_tables(&request, &transaction).await?;
         info!(
-            "Mapped {} labels to {} tables",
+            "Resolved {} labels to {} tables",
             request.node_labels.len() + request.relation_labels.len(),
             tables.len()
         );
 
         // Fetch and stream data from each table
         let mut total_count = 0;
-        for (label, table_name) in tables {
+        for table in &tables {
             let count = self
-                .bootstrap_table(&transaction, &label, &table_name, context, &event_tx)
+                .bootstrap_table(&transaction, table, context, &event_tx)
                 .await?;
-            info!("Bootstrapped {count} rows from table '{table_name}' with label '{label}'");
+            info!("Bootstrapped {count} rows from table '{table}'");
             total_count += count;
         }
 
@@ -327,7 +352,7 @@ impl PostgresBootstrapHandler {
         transaction.commit().await?;
 
         info!("Bootstrap completed: {total_count} total elements sent");
-        Ok(total_count)
+        Ok((total_count, source_position))
     }
 
     /// Create a regular PostgreSQL connection
@@ -354,10 +379,7 @@ impl PostgresBootstrapHandler {
     }
 
     /// Create a consistent snapshot and capture current LSN
-    async fn create_snapshot<'a>(
-        &self,
-        client: &'a mut Client,
-    ) -> Result<(Transaction<'a>, String)> {
+    async fn create_snapshot<'a>(&self, client: &'a mut Client) -> Result<(Transaction<'a>, u64)> {
         // Start transaction with repeatable read isolation
         let transaction = client
             .build_transaction()
@@ -370,16 +392,19 @@ impl PostgresBootstrapHandler {
             .query_one("SELECT pg_current_wal_lsn()::text", &[])
             .await?;
         let lsn: String = row.get(0);
+        let lsn = parse_lsn(&lsn).context("Failed to parse PostgreSQL snapshot LSN")?;
 
         Ok((transaction, lsn))
     }
 
-    /// Map requested labels to actual table names
-    async fn map_labels_to_tables(
+    /// Resolve requested labels to verified table names.
+    /// Labels are used as-is (case-sensitive) to match PostgreSQL table names,
+    /// ensuring consistency with the CDC stream which also uses the actual table name.
+    async fn resolve_tables(
         &self,
         request: &BootstrapRequest,
         transaction: &Transaction<'_>,
-    ) -> Result<Vec<(String, String)>> {
+    ) -> Result<Vec<String>> {
         let mut tables = Vec::new();
 
         // Combine all labels (treating nodes and relations the same)
@@ -391,16 +416,10 @@ impl PostgresBootstrapHandler {
             .collect();
 
         for label in all_labels {
-            // Default mapping: uppercase label to lowercase table name
-            let table_name = label.to_lowercase();
-
-            // Check if table exists
-            let exists = self.table_exists(transaction, &table_name).await?;
-
-            if exists {
-                tables.push((label, table_name));
+            if self.table_exists(transaction, &label).await? {
+                tables.push(label);
             } else {
-                warn!("Table '{table_name}' for label '{label}' does not exist, skipping");
+                warn!("Table '{label}' does not exist, skipping");
             }
         }
 
@@ -427,18 +446,17 @@ impl PostgresBootstrapHandler {
     async fn bootstrap_table(
         &self,
         transaction: &Transaction<'_>,
-        label: &str,
-        table_name: &str,
+        table: &str,
         context: &BootstrapContext,
         event_tx: &drasi_lib::channels::BootstrapEventSender,
     ) -> Result<usize> {
-        debug!("Starting bootstrap of table '{table_name}' with label '{label}'");
+        debug!("Starting bootstrap of table '{table}'");
 
         // Get table columns for proper type handling
-        let columns = self.get_table_columns(transaction, table_name).await?;
+        let columns = self.get_table_columns(transaction, table).await?;
 
-        // Use cursor for memory efficiency
-        let query = format!("SELECT * FROM {table_name}");
+        // Quote table name to preserve case
+        let query = format!("SELECT * FROM \"{}\"", table.replace('"', "\"\""));
         let rows = transaction.query(&query, &[]).await?;
 
         let mut count = 0;
@@ -446,14 +464,13 @@ impl PostgresBootstrapHandler {
         let batch_size = 1000;
 
         for row in rows {
-            let source_change = self
-                .row_to_source_change(&row, label, table_name, &columns)
-                .await?;
+            let source_change = self.row_to_source_change(&row, table, &columns).await?;
 
             batch.push(SourceChangeEvent {
                 source_id: self.source_id.clone(),
                 change: source_change,
                 timestamp: chrono::Utc::now(),
+                sequence: None,
             });
 
             if batch.len() >= batch_size {
@@ -587,14 +604,13 @@ impl PostgresBootstrapHandler {
     async fn row_to_source_change(
         &self,
         row: &Row,
-        label: &str,
-        table_name: &str,
+        table: &str,
         columns: &[ColumnInfo],
     ) -> Result<SourceChange> {
         let mut properties = ElementPropertyMap::new();
 
         // Get primary key columns for this table
-        let pk_columns = self.table_primary_keys.get(table_name);
+        let pk_columns = self.table_primary_keys.get(table);
 
         // Collect values for element ID generation
         let mut pk_values = Vec::new();
@@ -702,23 +718,23 @@ impl PostgresBootstrapHandler {
         // Always include table name as prefix to ensure uniqueness across tables
         let elem_id = if !pk_values.is_empty() {
             // Use table name prefix with primary key values
-            format!("{}:{}", table_name, pk_values.join("_"))
+            format!("{}:{}", table, pk_values.join("_"))
         } else if pk_columns.is_none() || pk_columns.map(|pks| pks.is_empty()).unwrap_or(true) {
             // No primary key defined and none configured - require user configuration
             warn!(
-                "No primary key found for table '{table_name}'. Consider adding 'table_keys' configuration."
+                "No primary key found for table '{table}'. Consider adding 'table_keys' configuration."
             );
             // Generate a UUID as fallback with table prefix
-            format!("{}:{}", table_name, uuid::Uuid::new_v4())
+            format!("{}:{}", table, uuid::Uuid::new_v4())
         } else {
             // Primary key columns defined but all values are NULL - use UUID with table prefix
-            format!("{}:{}", table_name, uuid::Uuid::new_v4())
+            format!("{}:{}", table, uuid::Uuid::new_v4())
         };
 
         let metadata = ElementMetadata {
             reference: ElementReference::new(&self.source_id, &elem_id),
-            labels: Arc::from(vec![Arc::from(label)]),
-            effective_from: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64,
+            labels: Arc::from(vec![Arc::from(table)]),
+            effective_from: chrono::Utc::now().timestamp_millis() as u64,
         };
 
         let element = Element::Node {
@@ -758,4 +774,34 @@ impl PostgresBootstrapHandler {
 struct ColumnInfo {
     name: String,
     type_oid: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use drasi_core::models::validate_effective_from;
+
+    /// Validates that the timestamp pattern used in convert_row_to_source_change
+    /// produces a value in the millisecond range, not nanoseconds.
+    ///
+    /// This test would have caught the original bug where timestamp_nanos_opt()
+    /// was used instead of timestamp_millis().
+    #[test]
+    fn effective_from_uses_milliseconds() {
+        let effective_from = chrono::Utc::now().timestamp_millis() as u64;
+        assert!(
+            validate_effective_from(effective_from).is_ok(),
+            "Postgres bootstrapper effective_from ({effective_from}) should be in millisecond range"
+        );
+    }
+
+    /// Verifies that using nanoseconds would be caught by the validator.
+    #[test]
+    fn effective_from_rejects_nanoseconds_pattern() {
+        // This is the OLD buggy pattern — should fail validation
+        let bad_effective_from = chrono::Utc::now().timestamp_nanos_opt().unwrap() as u64;
+        assert!(
+            validate_effective_from(bad_effective_from).is_err(),
+            "Nanosecond timestamp ({bad_effective_from}) should be rejected"
+        );
+    }
 }

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! Platform Source Plugin for Drasi
 //!
 //! This plugin consumes data change events from Redis Streams, which is the primary
@@ -158,6 +160,7 @@
 //! ```
 
 pub mod config;
+pub mod descriptor;
 pub use config::PlatformSourceConfig;
 
 use anyhow::Result;
@@ -172,12 +175,14 @@ use tokio::task::JoinHandle;
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, ControlOperation,
-    DispatchMode, SourceControl, SourceEvent, SourceEventWrapper, SubscriptionResponse,
+    ComponentStatus, ControlOperation, DispatchMode, SourceControl, SourceEvent,
+    SourceEventWrapper, SubscriptionResponse,
 };
+use drasi_lib::component_graph::ComponentStatusHandle;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::manager::convert_json_to_element_properties;
 use drasi_lib::Source;
+use tracing::Instrument;
 
 #[cfg(test)]
 mod tests;
@@ -708,6 +713,7 @@ impl PlatformSource {
     /// Start the stream consumer task
     async fn start_consumer_task(
         source_id: String,
+        instance_id: String,
         platform_config: PlatformConfig,
         dispatchers: Arc<
             RwLock<
@@ -718,9 +724,15 @@ impl PlatformSource {
                 >,
             >,
         >,
-        event_tx: Arc<RwLock<Option<ComponentEventSender>>>,
-        status: Arc<RwLock<ComponentStatus>>,
+        reporter: ComponentStatusHandle,
     ) -> JoinHandle<()> {
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "platform_source_consumer",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
         tokio::spawn(async move {
             info!(
                 "Starting platform source consumer for source '{}' on stream '{}'",
@@ -738,18 +750,10 @@ impl PlatformSource {
                 Ok(conn) => conn,
                 Err(e) => {
                     error!("Failed to connect to Redis: {e}");
-                    if let Some(ref tx) = *event_tx.read().await {
-                        let _ = tx
-                            .send(ComponentEvent {
-                                component_id: source_id.clone(),
-                                component_type: ComponentType::Source,
-                                status: ComponentStatus::Stopped,
-                                timestamp: chrono::Utc::now(),
-                                message: Some(format!("Failed to connect to Redis: {e}")),
-                            })
-                            .await;
-                    }
-                    *status.write().await = ComponentStatus::Stopped;
+                    reporter.set_status(
+                        ComponentStatus::Stopped,
+                        Some(format!("Failed to connect to Redis: {e}")),
+                    ).await;
                     return;
                 }
             };
@@ -765,18 +769,10 @@ impl PlatformSource {
             .await
             {
                 error!("Failed to create consumer group: {e}");
-                if let Some(ref tx) = *event_tx.read().await {
-                    let _ = tx
-                        .send(ComponentEvent {
-                            component_id: source_id.clone(),
-                            component_type: ComponentType::Source,
-                            status: ComponentStatus::Stopped,
-                            timestamp: chrono::Utc::now(),
-                            message: Some(format!("Failed to create consumer group: {e}")),
-                        })
-                        .await;
-                }
-                *status.write().await = ComponentStatus::Stopped;
+                reporter.set_status(
+                    ComponentStatus::Stopped,
+                    Some(format!("Failed to create consumer group: {e}")),
+                ).await;
                 return;
             }
 
@@ -929,22 +925,12 @@ impl PlatformSource {
                                                                     "Failed to transform event {}: {}",
                                                                     stream_id.id, e
                                                                 );
-                                                                if let Some(ref tx) =
-                                                                    *event_tx.read().await
-                                                                {
-                                                                    let _ = tx
-                                                                        .send(ComponentEvent {
-                                                                            component_id: source_id.clone(),
-                                                                            component_type:
-                                                                                ComponentType::Source,
-                                                                            status: ComponentStatus::Running,
-                                                                            timestamp: chrono::Utc::now(),
-                                                                            message: Some(format!(
-                                                                                "Transformation error: {e}"
-                                                                            )),
-                                                                        })
-                                                                        .await;
-                                                                }
+                                                                reporter.set_status(
+                                                                    ComponentStatus::Running,
+                                                                    Some(format!(
+                                                                        "Transformation error: {e}"
+                                                                    )),
+                                                                ).await;
                                                             }
                                                         }
                                                     }
@@ -1025,17 +1011,10 @@ impl PlatformSource {
                         // Check if it's a connection error
                         if is_connection_error(&e) {
                             error!("Redis connection lost: {e}");
-                            if let Some(ref tx) = *event_tx.read().await {
-                                let _ = tx
-                                    .send(ComponentEvent {
-                                        component_id: source_id.clone(),
-                                        component_type: ComponentType::Source,
-                                        status: ComponentStatus::Running,
-                                        timestamp: chrono::Utc::now(),
-                                        message: Some(format!("Redis connection lost: {e}")),
-                                    })
-                                    .await;
-                            }
+                            reporter.set_status(
+                                ComponentStatus::Running,
+                                Some(format!("Redis connection lost: {e}")),
+                            ).await;
 
                             // Try to reconnect
                             match Self::connect_with_retry(
@@ -1051,7 +1030,7 @@ impl PlatformSource {
                                 }
                                 Err(e) => {
                                     error!("Failed to reconnect to Redis: {e}");
-                                    *status.write().await = ComponentStatus::Stopped;
+                                    reporter.set_status(ComponentStatus::Stopped, None).await;
                                     return;
                                 }
                             }
@@ -1062,7 +1041,7 @@ impl PlatformSource {
                     }
                 }
             }
-        })
+        }.instrument(span))
     }
 }
 
@@ -1077,34 +1056,26 @@ impl Source for PlatformSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "redis_url".to_string(),
-            serde_json::Value::String(self.config.redis_url.clone()),
-        );
-        props.insert(
-            "stream_key".to_string(),
-            serde_json::Value::String(self.config.stream_key.clone()),
-        );
-        props.insert(
-            "consumer_group".to_string(),
-            serde_json::Value::String(self.config.consumer_group.clone()),
-        );
-        if let Some(ref consumer_name) = self.config.consumer_name {
-            props.insert(
-                "consumer_name".to_string(),
-                serde_json::Value::String(consumer_name.clone()),
-            );
+        use crate::descriptor::PlatformSourceConfigDto;
+        use drasi_plugin_sdk::ConfigValue;
+
+        let dto = PlatformSourceConfigDto {
+            redis_url: ConfigValue::Static(self.config.redis_url.clone()),
+            stream_key: ConfigValue::Static(self.config.stream_key.clone()),
+            consumer_group: ConfigValue::Static(self.config.consumer_group.clone()),
+            consumer_name: self
+                .config
+                .consumer_name
+                .as_ref()
+                .map(|n| ConfigValue::Static(n.clone())),
+            batch_size: ConfigValue::Static(self.config.batch_size),
+            block_ms: ConfigValue::Static(self.config.block_ms),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
         }
-        props.insert(
-            "batch_size".to_string(),
-            serde_json::Value::Number(self.config.batch_size.into()),
-        );
-        props.insert(
-            "block_ms".to_string(),
-            serde_json::Value::Number(self.config.block_ms.into()),
-        );
-        props
     }
 
     fn auto_start(&self) -> bool {
@@ -1133,15 +1104,28 @@ impl Source for PlatformSource {
         };
 
         // Update status
-        *self.base.status.write().await = ComponentStatus::Running;
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("Platform source running".to_string()),
+            )
+            .await;
+
+        // Get instance_id from context for log routing isolation
+        let instance_id = self
+            .base
+            .context()
+            .await
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
 
         // Start consumer task
         let task = Self::start_consumer_task(
             self.base.id.clone(),
+            instance_id,
             platform_config,
             self.base.dispatchers.clone(),
-            self.base.status_tx(),
-            self.base.status.clone(),
+            self.base.status_handle(),
         )
         .await;
 
@@ -1159,13 +1143,18 @@ impl Source for PlatformSource {
         }
 
         // Update status
-        *self.base.status.write().await = ComponentStatus::Stopped;
+        self.base
+            .set_status(
+                ComponentStatus::Stopped,
+                Some("Platform source stopped".to_string()),
+            )
+            .await;
 
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.base.status.read().await.clone()
+        self.base.get_status().await
     }
 
     async fn subscribe(
@@ -1387,7 +1376,7 @@ fn transform_platform_event(
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'properties' field"))?;
 
-        let properties = convert_json_to_element_properties(properties_obj)?;
+        let properties = convert_json_to_element_properties(properties_obj);
 
         // Build element based on type
         let element = match element_type {
@@ -1407,8 +1396,8 @@ fn transform_platform_event(
                 Element::Relation {
                     metadata,
                     properties,
-                    out_node: ElementReference::new(source_id, start_id),
-                    in_node: ElementReference::new(source_id, end_id),
+                    in_node: ElementReference::new(source_id, start_id),
+                    out_node: ElementReference::new(source_id, end_id),
                 }
             }
             _ => return Err(anyhow::anyhow!("Unknown element type: {element_type}")),
@@ -1538,3 +1527,17 @@ fn transform_control_event(cloud_event: Value, control_type: &str) -> Result<Vec
 
     Ok(control_events)
 }
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "platform-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::PlatformSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);

@@ -1,0 +1,856 @@
+// Copyright 2025 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#![allow(unexpected_cfgs)]
+
+//! Microsoft SQL Server CDC Source for Drasi
+//!
+//! This source plugin captures data changes from MS SQL Server databases using
+//! Change Data Capture (CDC). It monitors CDC change tables and converts changes
+//! to Drasi source events.
+//!
+//! # Features
+//!
+//! - Real-time change capture via CDC polling
+//! - LSN-based progress tracking with StateStore persistence
+//! - Automatic LSN validation and recovery
+//! - Support for INSERT, UPDATE, DELETE operations
+//! - Transaction grouping
+//! - Primary key discovery and custom key configuration
+//!
+//! # Prerequisites
+//!
+//! Before using this source, you must:
+//!
+//! 1. Enable CDC on the database:
+//!    ```sql
+//!    EXEC sys.sp_cdc_enable_db;
+//!    ```
+//!
+//! 2. Enable CDC on tables you want to monitor:
+//!    ```sql
+//!    EXEC sys.sp_cdc_enable_table
+//!        @source_schema = N'dbo',
+//!        @source_name = N'YourTable',
+//!        @role_name = NULL;
+//!    ```
+//!
+//! 3. Ensure SQL Server Agent is running (required for CDC)
+//!
+//! # Example
+//!
+//! ```no_run
+//! use drasi_source_mssql::{MsSqlSource, StartPosition};
+//! use drasi_lib::Source;
+//!
+//! # async fn example() -> anyhow::Result<()> {
+//! let source = MsSqlSource::builder("mssql-source")
+//!     .with_host("localhost")
+//!     .with_database("production")
+//!     .with_user("drasi_user")
+//!     .with_password("secure_password")
+//!     .with_tables(vec!["orders".to_string(), "customers".to_string()])
+//!     .with_start_position(StartPosition::Beginning)  // Capture all retained changes
+//!     .build()?;
+//!
+//! source.start().await?;
+//! # Ok(())
+//! # }
+//! ```
+
+pub mod decoder;
+pub mod descriptor;
+pub mod lsn;
+pub mod stream;
+pub mod types;
+
+// Re-export from drasi-mssql-common
+pub use drasi_mssql_common::config;
+pub use drasi_mssql_common::connection;
+pub use drasi_mssql_common::error;
+pub use drasi_mssql_common::keys;
+
+// Re-export main types
+pub use decoder::CdcOperation;
+pub use drasi_mssql_common::{
+    validate_sql_identifier, AuthMode, ConnectionError, EncryptionMode, LsnError, MsSqlConnection,
+    MsSqlError, MsSqlErrorKind, MsSqlSourceConfig, PrimaryKeyCache, PrimaryKeyError, StartPosition,
+    TableKeyConfig,
+};
+pub use lsn::Lsn;
+
+use anyhow::Result;
+use async_trait::async_trait;
+use drasi_lib::schema::{
+    normalize_table_label, NodeSchema, PropertySchema, PropertyType, SourceSchema,
+};
+use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+use drasi_lib::sources::Source;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::watch;
+use tokio::sync::RwLock;
+
+/// MS SQL CDC Source
+///
+/// Monitors MS SQL Server CDC change tables and emits source change events.
+pub struct MsSqlSource {
+    /// Source identifier
+    source_id: String,
+
+    /// Configuration
+    config: MsSqlSourceConfig,
+
+    /// Base source implementation (handles dispatching, status, etc.)
+    base: SourceBase,
+
+    /// CDC polling task handle
+    task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+
+    /// Shutdown signal sender for graceful shutdown.
+    /// Recreated on each `start()` so the CDC task always gets a clean
+    /// receiver without stale shutdown notifications from a prior `stop()`.
+    shutdown_tx: Arc<RwLock<watch::Sender<bool>>>,
+
+    /// Per-subscriber resume positions.
+    /// When a query subscribes with resume_from bytes, we deserialize to an LSN
+    /// and store it keyed by query_id. The CDC stream reads the minimum to
+    /// decide where to start polling from. Entries are removed when a query
+    /// calls `remove_position_handle`.
+    subscriber_resume_lsns: Arc<RwLock<HashMap<String, Lsn>>>,
+
+    /// Best-effort cached schema populated from SQL Server catalog metadata.
+    cached_schema: Arc<std::sync::RwLock<Option<SourceSchema>>>,
+}
+
+fn mssql_type_to_property_type(data_type: &str) -> Option<PropertyType> {
+    match data_type {
+        "tinyint" | "smallint" | "int" | "bigint" => Some(PropertyType::Integer),
+        "decimal" | "numeric" | "float" | "real" | "money" | "smallmoney" => {
+            Some(PropertyType::Float)
+        }
+        "bit" => Some(PropertyType::Boolean),
+        "date" | "datetime" | "datetime2" | "datetimeoffset" | "smalldatetime" | "time" => {
+            Some(PropertyType::Timestamp)
+        }
+        "json" => Some(PropertyType::Json),
+        "char" | "nchar" | "varchar" | "nvarchar" | "text" | "ntext" | "uniqueidentifier"
+        | "binary" | "varbinary" => Some(PropertyType::String),
+        _ => None,
+    }
+}
+
+async fn introspect_mssql_schema(config: &MsSqlSourceConfig) -> Result<Option<SourceSchema>> {
+    if config.tables.is_empty() {
+        return Ok(None);
+    }
+
+    let mut connection = MsSqlConnection::connect(config).await?;
+    let mut nodes = Vec::new();
+
+    for table in &config.tables {
+        let (schema_name, table_name) = table
+            .split_once('.')
+            .map(|(schema, name)| (schema.to_string(), name.to_string()))
+            .unwrap_or_else(|| ("dbo".to_string(), table.to_string()));
+
+        let rows = connection
+            .client_mut()
+            .query(
+                "SELECT COLUMN_NAME, DATA_TYPE \
+                 FROM INFORMATION_SCHEMA.COLUMNS \
+                 WHERE TABLE_SCHEMA = @P1 AND TABLE_NAME = @P2 \
+                 ORDER BY ORDINAL_POSITION",
+                &[&schema_name, &table_name],
+            )
+            .await?
+            .into_first_result()
+            .await?;
+
+        let properties = rows
+            .into_iter()
+            .filter_map(|row| {
+                let name: Option<&str> = row.get(0);
+                let name = match name {
+                    Some(n) if !n.is_empty() => n,
+                    _ => return None,
+                };
+                let data_type: &str = row.get(1).unwrap_or_default();
+                Some(PropertySchema {
+                    name: name.to_string(),
+                    data_type: mssql_type_to_property_type(data_type),
+                    description: None,
+                })
+            })
+            .collect();
+
+        nodes.push(NodeSchema {
+            label: normalize_table_label(&table_name),
+            properties,
+        });
+    }
+
+    Ok(Some(SourceSchema {
+        nodes,
+        relations: Vec::new(),
+    }))
+}
+
+impl MsSqlSource {
+    /// Create a new MS SQL source with configuration
+    ///
+    /// # Arguments
+    /// * `id` - Unique identifier for this source
+    /// * `config` - MS SQL source configuration
+    pub fn new(id: impl Into<String>, config: MsSqlSourceConfig) -> Result<Self> {
+        let source_id = id.into();
+
+        // Create base source parameters
+        let params = SourceBaseParams::new(&source_id);
+
+        // Create shutdown channel (false = running, true = shutdown)
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+
+        Ok(Self {
+            source_id,
+            config,
+            base: SourceBase::new(params)?,
+            task_handle: Arc::new(RwLock::new(None)),
+            shutdown_tx: Arc::new(RwLock::new(shutdown_tx)),
+            subscriber_resume_lsns: Arc::new(RwLock::new(HashMap::new())),
+            cached_schema: Arc::new(std::sync::RwLock::new(None)),
+        })
+    }
+
+    /// Create a builder for configuring the MS SQL source
+    ///
+    /// # Arguments
+    /// * `id` - Unique identifier for this source
+    ///
+    /// # Example
+    /// ```no_run
+    /// use drasi_source_mssql::MsSqlSource;
+    ///
+    /// # fn example() -> anyhow::Result<()> {
+    /// let source = MsSqlSource::builder("my-source")
+    ///     .with_host("localhost")
+    ///     .with_database("mydb")
+    ///     .with_user("user")
+    ///     .with_password("password")
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn builder(id: impl Into<String>) -> MsSqlSourceBuilder {
+        MsSqlSourceBuilder::new(id)
+    }
+}
+
+#[async_trait]
+impl Source for MsSqlSource {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "mssql"
+    }
+
+    fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        use crate::descriptor::{
+            AuthModeDto, EncryptionModeDto, MsSqlSourceConfigDto, StartPositionDto,
+            TableKeyConfigDto,
+        };
+        use drasi_plugin_sdk::ConfigValue;
+
+        let auth_mode_dto = match self.config.auth_mode {
+            crate::AuthMode::SqlServer => AuthModeDto::SqlServer,
+            crate::AuthMode::Windows => AuthModeDto::Windows,
+            crate::AuthMode::AzureAd => AuthModeDto::AzureAd,
+        };
+
+        let encryption_dto = match self.config.encryption {
+            crate::EncryptionMode::Off => EncryptionModeDto::Off,
+            crate::EncryptionMode::On => EncryptionModeDto::On,
+            crate::EncryptionMode::NotSupported => EncryptionModeDto::NotSupported,
+        };
+
+        let start_position_dto = match self.config.start_position {
+            crate::StartPosition::Beginning => StartPositionDto::Beginning,
+            crate::StartPosition::Current => StartPositionDto::Current,
+        };
+
+        let table_keys_dto: Vec<TableKeyConfigDto> = self
+            .config
+            .table_keys
+            .iter()
+            .map(|tk| TableKeyConfigDto {
+                table: tk.table.clone(),
+                key_columns: tk.key_columns.clone(),
+            })
+            .collect();
+
+        let dto = MsSqlSourceConfigDto {
+            host: ConfigValue::Static(self.config.host.clone()),
+            port: ConfigValue::Static(self.config.port),
+            database: ConfigValue::Static(self.config.database.clone()),
+            user: ConfigValue::Static(self.config.user.clone()),
+            password: ConfigValue::Static(self.config.password.clone()),
+            auth_mode: ConfigValue::Static(auth_mode_dto),
+            tables: self.config.tables.clone(),
+            poll_interval_ms: ConfigValue::Static(self.config.poll_interval_ms),
+            encryption: ConfigValue::Static(encryption_dto),
+            trust_server_certificate: ConfigValue::Static(self.config.trust_server_certificate),
+            table_keys: table_keys_dto,
+            start_position: ConfigValue::Static(start_position_dto),
+        };
+
+        self.base.properties_or_serialize(&dto)
+    }
+
+    fn auto_start(&self) -> bool {
+        self.base.get_auto_start()
+    }
+
+    fn describe_schema(&self) -> Option<SourceSchema> {
+        self.cached_schema
+            .read()
+            .ok()
+            .and_then(|schema| schema.clone())
+            .or_else(|| {
+                if self.config.tables.is_empty() {
+                    None
+                } else {
+                    Some(SourceSchema {
+                        nodes: self
+                            .config
+                            .tables
+                            .iter()
+                            .map(|table| NodeSchema::new(normalize_table_label(table)))
+                            .collect(),
+                        relations: Vec::new(),
+                    })
+                }
+            })
+    }
+
+    async fn status(&self) -> drasi_lib::channels::ComponentStatus {
+        self.base.get_status().await
+    }
+
+    async fn start(&self) -> Result<()> {
+        use drasi_lib::channels::ComponentStatus;
+
+        if self.base.get_status().await == ComponentStatus::Running {
+            return Ok(());
+        }
+
+        self.base.set_status(ComponentStatus::Starting, None).await;
+        self.base.reset_bootstrap_boundary();
+        log::info!("Starting MS SQL CDC source: {}", self.base.id);
+
+        // Create a brand-new shutdown channel so the CDC task gets a pristine
+        // receiver with no stale notifications from a prior stop() cycle.
+        let (new_tx, shutdown_rx) = watch::channel(false);
+        *self.shutdown_tx.write().await = new_tx;
+
+        match introspect_mssql_schema(&self.config).await {
+            Ok(Some(schema)) => {
+                if let Ok(mut cached) = self.cached_schema.write() {
+                    *cached = Some(schema);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::warn!(
+                    "Failed to introspect MS SQL schema for '{}': {e}",
+                    self.base.id
+                );
+            }
+        }
+
+        let config = self.config.clone();
+        let source_id = self.base.id.clone();
+        let base = self.base.clone_shared();
+        let subscriber_resume_lsns = self.subscriber_resume_lsns.clone();
+
+        // Spawn CDC polling task
+        let task_handle = tokio::spawn(async move {
+            if let Err(e) = stream::run_cdc_stream(
+                source_id.clone(),
+                config,
+                base,
+                shutdown_rx,
+                subscriber_resume_lsns,
+            )
+            .await
+            {
+                log::error!("CDC stream task failed for {source_id}: {e}");
+            }
+        });
+
+        // Store task handle for shutdown
+        *self.task_handle.write().await = Some(task_handle);
+
+        self.base.set_status(ComponentStatus::Running, None).await;
+
+        log::info!("MS SQL source '{}' started CDC polling", self.base.id);
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        use drasi_lib::channels::ComponentStatus;
+
+        log::info!("MS SQL source '{}' stopping", self.base.id);
+
+        // Signal the CDC polling loop to stop gracefully
+        if let Err(e) = self.shutdown_tx.read().await.send(true) {
+            log::warn!("Failed to send shutdown signal: {e}");
+        }
+
+        // Wait for the task to complete (with timeout)
+        if let Some(handle) = self.task_handle.write().await.take() {
+            // Give the task a chance to shut down gracefully
+            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+                Ok(Ok(())) => {
+                    log::debug!("CDC polling task stopped gracefully");
+                }
+                Ok(Err(e)) => {
+                    log::warn!("CDC polling task panicked: {e}");
+                }
+                Err(_) => {
+                    log::warn!("CDC polling task did not stop within timeout, it will be dropped");
+                }
+            }
+        }
+
+        // Clear stale dispatchers so a subsequent start()+subscribe() cycle
+        // does not race. Without this, the CDC loop could dispatch events to
+        // old dead receivers, silently dropping them while advancing the LSN.
+        self.base.clear_dispatchers().await;
+
+        // Clear stale resume LSNs — they will be repopulated by subscribe()
+        // on the next lifecycle with fresh checkpoint data.
+        self.subscriber_resume_lsns.write().await.clear();
+
+        // Clear cached schema so a subsequent start() re-introspects
+        if let Ok(mut cached) = self.cached_schema.write() {
+            *cached = None;
+        }
+
+        self.base.set_status(ComponentStatus::Stopped, None).await;
+
+        Ok(())
+    }
+
+    async fn subscribe(
+        &self,
+        settings: drasi_lib::config::SourceSubscriptionSettings,
+    ) -> Result<drasi_lib::channels::SubscriptionResponse> {
+        // If the subscriber has a resume_from position, deserialize it to an
+        // LSN and store it keyed by query_id. The CDC stream computes the min
+        // across all active subscribers to decide where to start polling from.
+        if let Some(ref resume_bytes) = settings.resume_from {
+            match Lsn::from_bytes(resume_bytes) {
+                Ok(lsn) => {
+                    log::info!(
+                        "Subscriber '{}' requesting resume from LSN {} on source '{}'",
+                        settings.query_id,
+                        lsn,
+                        self.base.id
+                    );
+                    let mut guard = self.subscriber_resume_lsns.write().await;
+                    guard.insert(settings.query_id.clone(), lsn);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to deserialize resume_from bytes to LSN for subscriber '{}': {e}",
+                        settings.query_id
+                    );
+                }
+            }
+        }
+
+        self.base
+            .subscribe_with_bootstrap(&settings, "MS SQL")
+            .await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        self.base.initialize(context.clone()).await;
+        // MSSQL LSNs are 10-byte big-endian — byte-lexicographic comparison is correct.
+        self.base
+            .set_position_comparator(drasi_lib::sources::ByteLexPositionComparator)
+            .await;
+    }
+
+    async fn set_bootstrap_provider(
+        &self,
+        provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>,
+    ) {
+        self.base.set_bootstrap_provider(provider).await;
+    }
+
+    async fn remove_position_handle(&self, query_id: &str) {
+        // Remove the per-subscriber resume LSN so the CDC stream no longer
+        // pins its start position on behalf of this query.
+        self.subscriber_resume_lsns.write().await.remove(query_id);
+        self.base.remove_position_handle(query_id).await;
+    }
+}
+
+/// Builder for MS SQL source
+///
+/// Provides a fluent API for constructing an MS SQL source with validation.
+pub struct MsSqlSourceBuilder {
+    id: String,
+    config: MsSqlSourceConfig,
+    bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
+}
+
+impl MsSqlSourceBuilder {
+    /// Create a new builder
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            config: MsSqlSourceConfig::default(),
+            bootstrap_provider: None,
+        }
+    }
+
+    /// Set the MS SQL server hostname
+    pub fn with_host(mut self, host: impl Into<String>) -> Self {
+        self.config.host = host.into();
+        self
+    }
+
+    /// Set the MS SQL server port
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.config.port = port;
+        self
+    }
+
+    /// Set the database name
+    pub fn with_database(mut self, database: impl Into<String>) -> Self {
+        self.config.database = database.into();
+        self
+    }
+
+    /// Set the database user
+    pub fn with_user(mut self, user: impl Into<String>) -> Self {
+        self.config.user = user.into();
+        self
+    }
+
+    /// Set the database password
+    pub fn with_password(mut self, password: impl Into<String>) -> Self {
+        self.config.password = password.into();
+        self
+    }
+
+    /// Set the authentication mode
+    pub fn with_auth_mode(mut self, auth_mode: AuthMode) -> Self {
+        self.config.auth_mode = auth_mode;
+        self
+    }
+
+    /// Set the list of tables to monitor
+    pub fn with_tables(mut self, tables: Vec<String>) -> Self {
+        self.config.tables = tables;
+        self
+    }
+
+    /// Add a single table to monitor
+    pub fn with_table(mut self, table: impl Into<String>) -> Self {
+        self.config.tables.push(table.into());
+        self
+    }
+
+    /// Set the CDC polling interval in milliseconds
+    pub fn with_poll_interval_ms(mut self, ms: u64) -> Self {
+        self.config.poll_interval_ms = ms;
+        self
+    }
+
+    /// Set the encryption mode
+    pub fn with_encryption(mut self, encryption: EncryptionMode) -> Self {
+        self.config.encryption = encryption;
+        self
+    }
+
+    /// Set whether to trust the server certificate
+    pub fn with_trust_server_certificate(mut self, trust: bool) -> Self {
+        self.config.trust_server_certificate = trust;
+        self
+    }
+
+    /// Add a table key configuration
+    pub fn with_table_key(mut self, table: impl Into<String>, key_columns: Vec<String>) -> Self {
+        self.config.table_keys.push(TableKeyConfig {
+            table: table.into(),
+            key_columns,
+        });
+        self
+    }
+
+    /// Set the starting position when no LSN is found in state store
+    pub fn with_start_position(mut self, position: StartPosition) -> Self {
+        self.config.start_position = position;
+        self
+    }
+
+    /// Set the bootstrap provider for initial data delivery
+    pub fn with_bootstrap_provider(
+        mut self,
+        provider: impl drasi_lib::bootstrap::BootstrapProvider + 'static,
+    ) -> Self {
+        self.bootstrap_provider = Some(Box::new(provider));
+        self
+    }
+
+    /// Build the MS SQL source
+    ///
+    /// # Errors
+    /// Returns error if required configuration is missing
+    pub fn build(self) -> Result<MsSqlSource> {
+        // Validate required fields
+        if self.config.database.is_empty() {
+            return Err(anyhow::anyhow!("Database name is required"));
+        }
+        if self.config.user.is_empty() {
+            return Err(anyhow::anyhow!("Database user is required"));
+        }
+
+        let source_id = self.id.clone();
+
+        // Create base source parameters
+        let mut params = SourceBaseParams::new(&source_id);
+
+        // Add bootstrap provider if configured
+        if let Some(provider) = self.bootstrap_provider {
+            params = params.with_bootstrap_provider(provider);
+        }
+
+        // Create shutdown channel (false = running, true = shutdown)
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+
+        Ok(MsSqlSource {
+            source_id,
+            config: self.config,
+            base: SourceBase::new(params)?,
+            task_handle: Arc::new(RwLock::new(None)),
+            shutdown_tx: Arc::new(RwLock::new(shutdown_tx)),
+            subscriber_resume_lsns: Arc::new(RwLock::new(HashMap::new())),
+            cached_schema: Arc::new(std::sync::RwLock::new(None)),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_builder_basic() {
+        let source = MsSqlSource::builder("test-source")
+            .with_host("localhost")
+            .with_database("testdb")
+            .with_user("testuser")
+            .with_password("testpass")
+            .build()
+            .unwrap();
+
+        assert_eq!(source.id(), "test-source");
+        assert_eq!(source.type_name(), "mssql");
+        assert_eq!(source.config.host, "localhost");
+        assert_eq!(source.config.database, "testdb");
+    }
+
+    #[test]
+    fn test_builder_with_tables() {
+        let source = MsSqlSource::builder("test-source")
+            .with_database("testdb")
+            .with_user("testuser")
+            .with_tables(vec!["table1".to_string(), "table2".to_string()])
+            .build()
+            .unwrap();
+
+        assert_eq!(source.config.tables.len(), 2);
+    }
+
+    #[test]
+    fn test_builder_missing_required_fields() {
+        let result = MsSqlSource::builder("test-source")
+            .with_host("localhost")
+            .build();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_builder_table_keys() {
+        let source = MsSqlSource::builder("test-source")
+            .with_database("testdb")
+            .with_user("testuser")
+            .with_table_key("orders", vec!["order_id".to_string()])
+            .build()
+            .unwrap();
+
+        assert_eq!(source.config.table_keys.len(), 1);
+        assert_eq!(source.config.table_keys[0].table, "orders");
+    }
+
+    #[test]
+    fn test_describe_schema_falls_back_to_configured_tables() {
+        let source = MsSqlSource::builder("test-source")
+            .with_database("testdb")
+            .with_user("testuser")
+            .with_tables(vec!["dbo.orders".to_string(), "customers".to_string()])
+            .build()
+            .unwrap();
+
+        let schema = source
+            .describe_schema()
+            .expect("configured mssql tables should produce fallback schema");
+
+        assert_eq!(schema.nodes.len(), 2);
+        assert!(schema.nodes.iter().any(|node| node.label == "orders"));
+        assert!(schema.nodes.iter().any(|node| node.label == "customers"));
+    }
+
+    #[test]
+    fn test_mssql_type_to_property_type_integer() {
+        assert_eq!(
+            mssql_type_to_property_type("int"),
+            Some(PropertyType::Integer)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("bigint"),
+            Some(PropertyType::Integer)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("smallint"),
+            Some(PropertyType::Integer)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("tinyint"),
+            Some(PropertyType::Integer)
+        );
+    }
+
+    #[test]
+    fn test_mssql_type_to_property_type_float() {
+        assert_eq!(
+            mssql_type_to_property_type("float"),
+            Some(PropertyType::Float)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("real"),
+            Some(PropertyType::Float)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("decimal"),
+            Some(PropertyType::Float)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("numeric"),
+            Some(PropertyType::Float)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("money"),
+            Some(PropertyType::Float)
+        );
+    }
+
+    #[test]
+    fn test_mssql_type_to_property_type_boolean() {
+        assert_eq!(
+            mssql_type_to_property_type("bit"),
+            Some(PropertyType::Boolean)
+        );
+    }
+
+    #[test]
+    fn test_mssql_type_to_property_type_timestamp() {
+        assert_eq!(
+            mssql_type_to_property_type("datetime"),
+            Some(PropertyType::Timestamp)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("datetime2"),
+            Some(PropertyType::Timestamp)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("datetimeoffset"),
+            Some(PropertyType::Timestamp)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("date"),
+            Some(PropertyType::Timestamp)
+        );
+    }
+
+    #[test]
+    fn test_mssql_type_to_property_type_json() {
+        assert_eq!(
+            mssql_type_to_property_type("json"),
+            Some(PropertyType::Json)
+        );
+    }
+
+    #[test]
+    fn test_mssql_type_to_property_type_string() {
+        assert_eq!(
+            mssql_type_to_property_type("nvarchar"),
+            Some(PropertyType::String)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("varchar"),
+            Some(PropertyType::String)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("text"),
+            Some(PropertyType::String)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("uniqueidentifier"),
+            Some(PropertyType::String)
+        );
+    }
+
+    #[test]
+    fn test_mssql_type_to_property_type_unknown_returns_none() {
+        assert_eq!(mssql_type_to_property_type("geography"), None);
+        assert_eq!(mssql_type_to_property_type("geometry"), None);
+        assert_eq!(mssql_type_to_property_type("xml"), None);
+    }
+}
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "mssql-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::MsSqlSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);

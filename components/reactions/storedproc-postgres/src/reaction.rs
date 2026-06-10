@@ -19,13 +19,14 @@ use async_trait::async_trait;
 use log::{debug, error, info};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
+use serde_json::json;
 
 use crate::config::{PostgresStoredProcReactionConfig, QueryConfig};
 use crate::executor::PostgresExecutor;
@@ -37,9 +38,9 @@ use drasi_lib::reactions::common::OperationType;
 /// Invokes PostgreSQL stored procedures when continuous query results change.
 /// Supports different procedures for ADD, UPDATE, and DELETE operations.
 pub struct PostgresStoredProcReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: PostgresStoredProcReactionConfig,
-    executor: Arc<PostgresExecutor>,
+    executor: RwLock<Option<Arc<PostgresExecutor>>>,
     parser: ParameterParser,
     task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
@@ -107,22 +108,37 @@ impl PostgresStoredProcReaction {
         // Validate configuration
         config.validate()?;
 
-        // Create database executor
-        let executor = Arc::new(PostgresExecutor::new(&config).await?);
-
         // Create reaction base
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
         }
 
+        let base = ReactionBase::new(params);
+
+        // If config has identity_provider, store it in base for unified access
+        if let Some(ip) = &config.identity_provider {
+            base.set_identity_provider(Arc::from(ip.clone_box())).await;
+        }
+
         Ok(Self {
-            base: ReactionBase::new(params),
+            base,
             config,
-            executor,
+            executor: RwLock::new(None),
             parser: ParameterParser::new(),
             task_handle: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Test the database connection
+    pub async fn test_connection(&self) -> Result<()> {
+        let guard = self.executor.read().await;
+        match guard.as_ref() {
+            Some(executor) => executor.test_connection().await,
+            None => Err(anyhow::anyhow!(
+                "Executor not initialized — call start() first"
+            )),
+        }
     }
 
     /// Prepare context data with after/before fields based on operation type
@@ -167,9 +183,8 @@ impl PostgresStoredProcReaction {
     }
 
     /// Spawn the processing task that handles query results
-    fn spawn_processing_task(&self) -> JoinHandle<()> {
+    fn spawn_processing_task(&self, executor: Arc<PostgresExecutor>) -> JoinHandle<()> {
         let priority_queue = self.base.priority_queue.clone();
-        let executor = self.executor.clone();
         let parser = self.parser.clone();
         let config = self.config.clone();
         let reaction_id = self.base.id.clone();
@@ -188,16 +203,19 @@ impl PostgresStoredProcReaction {
 
                 // Process each result item in the batch
                 for result_item in &query_result.results {
+                    let aggregation_data;
                     let (operation, data_value, result_type) = match result_item {
-                        ResultDiff::Add { data } => (OperationType::Add, data, "ADD"),
+                        ResultDiff::Add { data, .. } => (OperationType::Add, data, "ADD"),
                         ResultDiff::Update { data, .. } => (OperationType::Update, data, "UPDATE"),
-                        ResultDiff::Delete { data } => (OperationType::Delete, data, "DELETE"),
-                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
-                            debug!(
-                                "[{reaction_id}] Unknown operation type: aggregation/noop, skipping"
-                            );
-                            continue;
+                        ResultDiff::Delete { data, .. } => (OperationType::Delete, data, "DELETE"),
+                        ResultDiff::Aggregation { before, after, .. } => {
+                            aggregation_data = json!({
+                                "before": before,
+                                "after": after,
+                            });
+                            (OperationType::Update, &aggregation_data, "AGGREGATION")
                         }
+                        ResultDiff::Noop => continue,
                     };
 
                     // Get the command template for this query and operation type
@@ -261,18 +279,45 @@ impl Reaction for PostgresStoredProcReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert("database".to_string(), serde_json::json!("PostgreSQL"));
-        props.insert(
-            "hostname".to_string(),
-            serde_json::json!(self.config.hostname),
-        );
-        props.insert(
-            "database_name".to_string(),
-            serde_json::json!(self.config.database),
-        );
-        props.insert("ssl".to_string(), serde_json::json!(self.config.ssl));
-        props
+        use crate::descriptor::{
+            PostgresStoredProcReactionConfigDto, StoredProcQueryConfigDto,
+            StoredProcTemplateSpecDto,
+        };
+        use drasi_plugin_sdk::ConfigValue;
+
+        fn map_spec_to_dto(spec: &crate::TemplateSpec) -> StoredProcTemplateSpecDto {
+            StoredProcTemplateSpecDto {
+                template: spec.template.clone(),
+            }
+        }
+
+        fn map_qc_to_dto(qc: &crate::QueryConfig) -> StoredProcQueryConfigDto {
+            StoredProcQueryConfigDto {
+                added: qc.added.as_ref().map(map_spec_to_dto),
+                updated: qc.updated.as_ref().map(map_spec_to_dto),
+                deleted: qc.deleted.as_ref().map(map_spec_to_dto),
+            }
+        }
+
+        let dto = PostgresStoredProcReactionConfigDto {
+            hostname: Some(ConfigValue::Static(self.config.hostname.clone())),
+            port: self.config.port.map(ConfigValue::Static),
+            user: ConfigValue::Static(self.config.user.clone()),
+            password: ConfigValue::Static(self.config.password.clone()),
+            database: ConfigValue::Static(self.config.database.clone()),
+            ssl: Some(ConfigValue::Static(self.config.ssl)),
+            routes: self
+                .config
+                .routes
+                .iter()
+                .map(|(k, v)| (k.clone(), map_qc_to_dto(v)))
+                .collect(),
+            default_template: self.config.default_template.as_ref().map(map_qc_to_dto),
+            command_timeout_ms: Some(ConfigValue::Static(self.config.command_timeout_ms)),
+            retry_attempts: Some(ConfigValue::Static(self.config.retry_attempts)),
+        };
+
+        self.base.properties_or_serialize(&dto)
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -295,14 +340,18 @@ impl Reaction for PostgresStoredProcReaction {
             self.base.id, self.config.database
         );
 
-        // Test database connection
-        self.executor.test_connection().await?;
+        // Create executor (deferred to start so identity_provider from context is available)
+        let identity_provider = self.base.identity_provider().await;
+        let executor = Arc::new(PostgresExecutor::new(&self.config, identity_provider).await?);
 
-        // Subscribe to all queries
-        self.base.subscribe_to_queries().await?;
+        // Test database connection
+        executor.test_connection().await?;
+
+        // Store executor for later use
+        *self.executor.write().await = Some(executor.clone());
 
         // Spawn processing task
-        let task = self.spawn_processing_task();
+        let task = self.spawn_processing_task(executor);
         *self.task_handle.lock().await = Some(task);
 
         info!(
@@ -326,6 +375,25 @@ impl Reaction for PostgresStoredProcReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(
+        &self,
+        result: drasi_lib::channels::QueryResult,
+    ) -> anyhow::Result<()> {
+        self.base.enqueue_query_result(result).await
+    }
+
+    fn is_durable(&self) -> bool {
+        false
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        false
+    }
+
+    fn default_recovery_policy(&self) -> drasi_lib::recovery::ReactionRecoveryPolicy {
+        drasi_lib::recovery::ReactionRecoveryPolicy::Strict
     }
 }
 
@@ -397,7 +465,23 @@ impl PostgresStoredProcReactionBuilder {
         self
     }
 
+    /// Set the identity provider for authentication
+    ///
+    /// This takes precedence over `with_user` and `with_password`.
+    /// Use this for cloud authentication (Azure Managed Identity, AWS IAM, etc.)
+    pub fn with_identity_provider(
+        mut self,
+        provider: impl drasi_lib::identity::IdentityProvider + 'static,
+    ) -> Self {
+        self.config.identity_provider = Some(Box::new(provider));
+        self
+    }
+
     /// Enable or disable SSL/TLS
+    ///
+    /// SSL certificates must be installed in the system trust store.
+    /// For AWS RDS on macOS:
+    ///   sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/rds-ca-bundle.pem
     pub fn with_ssl(mut self, enable: bool) -> Self {
         self.config.ssl = enable;
         self
@@ -457,6 +541,25 @@ impl PostgresStoredProcReactionBuilder {
         self
     }
 
+    /// Set the stored procedure name (shortcut for simple configurations)
+    ///
+    /// Creates default templates that call the specified procedure with:
+    /// - added: passes @after data
+    /// - updated: passes @before and @after data
+    /// - deleted: passes @before data
+    pub fn with_stored_procedure(mut self, proc_name: impl Into<String>) -> Self {
+        use crate::config::TemplateSpec;
+
+        let proc = proc_name.into();
+        let query_config = QueryConfig {
+            added: Some(TemplateSpec::new(format!("CALL {proc}(@after)"))),
+            updated: Some(TemplateSpec::new(format!("CALL {proc}(@before, @after)"))),
+            deleted: Some(TemplateSpec::new(format!("CALL {proc}(@before)"))),
+        };
+        self.config.default_template = Some(query_config);
+        self
+    }
+
     /// Build the PostgresStoredProcReaction
     pub async fn build(self) -> Result<PostgresStoredProcReaction> {
         PostgresStoredProcReaction::from_builder(
@@ -467,5 +570,28 @@ impl PostgresStoredProcReactionBuilder {
             self.auto_start,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_lib::{recovery::ReactionRecoveryPolicy, Reaction};
+
+    #[tokio::test]
+    async fn test_recovery_trait_defaults() {
+        let reaction = PostgresStoredProcReaction::builder("test-postgres")
+            .with_connection("localhost", 5432, "testdb", "testuser", "testpass")
+            .with_stored_procedure("test_proc")
+            .build()
+            .await
+            .unwrap();
+
+        assert!(!reaction.is_durable());
+        assert!(!reaction.needs_snapshot_on_fresh_start());
+        assert_eq!(
+            reaction.default_recovery_policy(),
+            ReactionRecoveryPolicy::Strict
+        );
     }
 }

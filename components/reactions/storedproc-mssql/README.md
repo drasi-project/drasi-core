@@ -97,6 +97,8 @@ async fn main() -> anyhow::Result<()> {
 
 ### Builder API
 
+#### Traditional Username/Password Authentication
+
 ```rust
 let reaction = MsSqlStoredProcReaction::builder("my-reaction")
     .with_hostname("localhost")
@@ -114,6 +116,61 @@ let reaction = MsSqlStoredProcReaction::builder("my-reaction")
     .build()
     .await?;
 ```
+
+#### Cloud Identity Provider Authentication
+
+For cloud-managed SQL Server databases, you can use identity providers instead of passwords:
+
+**Azure AD Authentication (Azure SQL Database/Managed Instance):**
+
+```rust
+use drasi_lib::identity::AzureIdentityProvider;
+
+// For Azure Kubernetes Service with Workload Identity
+let identity_provider = AzureIdentityProvider::with_workload_identity("myuser@myserver")?;
+
+// For local development or Azure VMs with Managed Identity
+let identity_provider = AzureIdentityProvider::with_default_credentials("myuser@myserver")?;
+
+let reaction = MsSqlStoredProcReaction::builder("my-reaction")
+    .with_hostname("myserver.database.windows.net")
+    .with_port(1433)
+    .with_database("mydb")
+    .with_identity_provider(identity_provider)
+    .with_ssl(true)  // Required for Azure
+    .with_query("query1")
+    .with_added_command("EXEC add_record @id, @name")
+    .with_updated_command("EXEC update_record @id, @name")
+    .with_deleted_command("EXEC delete_record @id")
+    .build()
+    .await?;
+```
+
+**Password Provider (programmatic username/password):**
+
+```rust
+use drasi_lib::identity::PasswordIdentityProvider;
+
+let identity_provider = PasswordIdentityProvider::new("sa", "YourPassword123!");
+
+let reaction = MsSqlStoredProcReaction::builder("my-reaction")
+    .with_hostname("localhost")
+    .with_port(1433)
+    .with_database("mydb")
+    .with_identity_provider(identity_provider)
+    .with_query("query1")
+    .with_added_command("EXEC add_record @id, @name")
+    .with_updated_command("EXEC update_record @id, @name")
+    .with_deleted_command("EXEC delete_record @id")
+    .build()
+    .await?;
+```
+
+> **Note:** When using identity providers, do not call `.with_user()` or `.with_password()`. The identity provider handles authentication automatically.
+>
+> AWS RDS for SQL Server does not currently support IAM authentication. For AWS-hosted SQL Server instances, use traditional username/password authentication.
+>
+> See the [Identity Provider README](../../../lib/src/identity/README.md) for detailed setup instructions for Azure AD authentication.
 
 ### Configuration Options
 
@@ -174,6 +231,24 @@ The reaction includes automatic retry logic with exponential backoff:
 - **Use strong passwords**: The default `sa` account should have a strong password
 - **Enable encryption**: Use `.with_ssl(true)` for production deployments
 - **Self-signed certificates**: The reaction automatically trusts self-signed certificates
+
+## Plugin Packaging
+
+This reaction is compiled as a dynamic plugin (cdylib) that can be loaded by drasi-server at runtime.
+
+**Key files:**
+- `Cargo.toml` — includes `crate-type = ["lib", "cdylib"]`
+- `src/descriptor.rs` — implements `ReactionPluginDescriptor` with kind `"storedproc-mssql"`, configuration DTO, and OpenAPI schema generation
+- `src/lib.rs` — invokes `drasi_plugin_sdk::export_plugin!` to export the plugin entry point
+
+**Building:**
+```bash
+cargo build -p drasi-reaction-storedproc-mssql
+```
+
+The compiled `.so` (Linux) / `.dylib` (macOS) / `.dll` (Windows) is placed in `target/debug/` and can be copied to the server's `plugins/` directory.
+
+For more details on the plugin descriptor pattern and configuration DTOs, see the [Reaction Developer Guide](../README.md#packaging-as-a-dynamic-plugin).
 
 ## License
 

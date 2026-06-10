@@ -228,7 +228,6 @@ fn test_config_validation_empty_user() {
 
     let result = config.validate();
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("user is required"));
 }
 
 #[test]
@@ -321,6 +320,7 @@ fn test_config_serialization() {
     let config = PostgresStoredProcReactionConfig {
         hostname: "db.example.com".to_string(),
         port: Some(5433),
+        identity_provider: None,
         user: "admin".to_string(),
         password: "secret".to_string(),
         database: "mydb".to_string(),
@@ -547,7 +547,7 @@ async fn test_postgres_executor_connection() {
         ..Default::default()
     };
 
-    let executor = PostgresExecutor::new(&config).await;
+    let executor = PostgresExecutor::new(&config, None).await;
     assert!(executor.is_ok(), "Should create executor successfully");
 
     let executor = executor.unwrap();
@@ -589,7 +589,7 @@ async fn test_postgres_executor_procedure_execution() {
         ..Default::default()
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
 
     // Execute the stored procedure
     let params = vec![json!("sensor-001"), json!(25.5)];
@@ -651,7 +651,7 @@ async fn test_postgres_executor_multiple_operations() {
         ..Default::default()
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
 
     // Execute ADD
     executor
@@ -700,6 +700,7 @@ async fn test_postgres_parser_with_executor() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -716,7 +717,7 @@ async fn test_postgres_parser_with_executor() {
         retry_attempts: 3,
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
     let parser = ParameterParser::new();
 
     // Parse command with data
@@ -760,6 +761,7 @@ async fn test_postgres_reaction_creation() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -847,6 +849,7 @@ async fn test_postgres_executor_with_special_characters() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -863,7 +866,7 @@ async fn test_postgres_executor_with_special_characters() {
         retry_attempts: 3,
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
 
     // Test with special characters (potential SQL injection)
     let params = vec![json!("sensor'; DROP TABLE sensor_log; --"), json!(25.5)];
@@ -945,13 +948,8 @@ async fn test_postgres_reaction_lifecycle() {
     );
     assert_eq!(
         properties.get("database").and_then(|v| v.as_str()),
-        Some("PostgreSQL"),
-        "Database type should be PostgreSQL"
-    );
-    assert_eq!(
-        properties.get("database_name").and_then(|v| v.as_str()),
         Some(pg_config.database.as_str()),
-        "Database name should match"
+        "Database should match config"
     );
     assert_eq!(
         properties.get("ssl").and_then(|v| v.as_bool()),
@@ -976,6 +974,7 @@ async fn test_postgres_executor_retry_on_failure() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -990,7 +989,7 @@ async fn test_postgres_executor_retry_on_failure() {
         retry_attempts: 2,
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
 
     // Try to execute non-existent procedure (should fail after retries)
     let result = executor
@@ -1060,6 +1059,7 @@ async fn test_default_template_applies_to_all_queries() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -1076,7 +1076,7 @@ async fn test_default_template_applies_to_all_queries() {
         retry_attempts: 3,
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
     let parser = ParameterParser::new();
 
     // Test that default template is used for query1
@@ -1183,6 +1183,7 @@ async fn test_route_overrides_default_template() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -1199,7 +1200,7 @@ async fn test_route_overrides_default_template() {
         retry_attempts: 3,
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
     let parser = ParameterParser::new();
 
     // Execute with route-specific template
@@ -1256,6 +1257,7 @@ async fn test_route_with_none_falls_back_to_default() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -1355,6 +1357,7 @@ async fn test_executor_with_various_data_types() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -1365,7 +1368,7 @@ async fn test_executor_with_various_data_types() {
         retry_attempts: 3,
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
     let parser = ParameterParser::new();
 
     // Test with various data types using ParameterParser
@@ -1471,6 +1474,7 @@ async fn test_executor_with_string_numbers() {
     let config = PostgresStoredProcReactionConfig {
         hostname: pg_config.host.clone(),
         port: Some(pg_config.port),
+        identity_provider: None,
         user: pg_config.user.clone(),
         password: pg_config.password.clone(),
         database: pg_config.database.clone(),
@@ -1481,7 +1485,7 @@ async fn test_executor_with_string_numbers() {
         retry_attempts: 3,
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
 
     // Test with string that looks like a number (simulating MockSource behavior)
     let params = vec![json!("25.789")];

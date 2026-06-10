@@ -28,6 +28,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -139,17 +140,21 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         println!("Node Result - Add p6: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            grouping_keys: vec![],
-            default_before: true,
-            default_after: false,
-            before: Some(variablemap!(
-                "Gradient" => VariableValue::Float(Float::from_f64(1.5).unwrap())
-            )),
-            after: variablemap!(
-              "Gradient" => VariableValue::Float(Float::from_f64(6.771428571428571).unwrap())
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                grouping_keys: vec![],
+                default_before: true,
+                default_after: false,
+                before: Some(variablemap!(
+                    "Gradient" => VariableValue::Float(Float::from_f64(1.5).unwrap())
+                )),
+                after: variablemap!(
+                  "Gradient" => VariableValue::Float(Float::from_f64(6.771428571428571).unwrap())
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     // remove p2
@@ -167,17 +172,21 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         println!("Node Result - Remove p2: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            grouping_keys: vec![],
-            default_before: false,
-            default_after: true,
-            before: Some(variablemap!(
-                "Gradient" => VariableValue::Float(Float::from_f64(6.771428571428571).unwrap())
-            )),
-            after: variablemap!(
-              "Gradient" => VariableValue::Float(Float::from_f64(6.972972972972973).unwrap())
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                grouping_keys: vec![],
+                default_before: false,
+                default_after: true,
+                before: Some(variablemap!(
+                    "Gradient" => VariableValue::Float(Float::from_f64(6.771428571428571).unwrap())
+                )),
+                after: variablemap!(
+                  "Gradient" => VariableValue::Float(Float::from_f64(6.972972972972973).unwrap())
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     // remove p6
@@ -195,17 +204,21 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         println!("Node Result - Remove p6: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            grouping_keys: vec![],
-            default_before: false,
-            default_after: true,
-            before: Some(variablemap!(
-                "Gradient" => VariableValue::Float(Float::from_f64(6.972972972972973).unwrap())
-            )),
-            after: variablemap!(
-              "Gradient" => VariableValue::Float(Float::from_f64(1.4857142857142858).unwrap())
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                grouping_keys: vec![],
+                default_before: false,
+                default_after: true,
+                before: Some(variablemap!(
+                    "Gradient" => VariableValue::Float(Float::from_f64(6.972972972972973).unwrap())
+                )),
+                after: variablemap!(
+                  "Gradient" => VariableValue::Float(Float::from_f64(1.4857142857142858).unwrap())
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //remove p1, p3, p4, p5
@@ -347,16 +360,20 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         println!("Node Result - Add p6: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            grouping_keys: vec![],
-            default_before: true,
-            default_after: false,
-            before: Some(variablemap!(
-                "Gradient" => VariableValue::Float(Float::from_f64(1.5).unwrap())
-            )),
-            after: variablemap!(
-              "Gradient" => VariableValue::Float(Float::from_f64(6.771428571428571).unwrap())
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                grouping_keys: vec![],
+                default_before: true,
+                default_after: false,
+                before: Some(variablemap!(
+                    "Gradient" => VariableValue::Float(Float::from_f64(1.5).unwrap())
+                )),
+                after: variablemap!(
+                  "Gradient" => VariableValue::Float(Float::from_f64(6.771428571428571).unwrap())
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }

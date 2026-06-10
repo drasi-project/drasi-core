@@ -14,12 +14,13 @@
 
 //! Integration tests for SSE reaction with full DrasiLib setup
 
+mod mock_source;
+
 use anyhow::Result;
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_sse::{QueryConfig, SseExtension, SseReaction, TemplateSpec};
-use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 use futures_util::StreamExt;
-use std::collections::HashMap;
+use mock_source::{MockSource, PropertyMapBuilder};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -32,11 +33,8 @@ async fn test_sse_basic_integration() -> Result<()> {
         .is_test(true)
         .try_init();
 
-    // Create Application source and handle
-    let config = ApplicationSourceConfig {
-        properties: HashMap::new(),
-    };
-    let (app_source, handle) = ApplicationSource::new("test-source", config)?;
+    // Create mock source and handle
+    let (mock_source, handle) = MockSource::new("test-source")?;
 
     // Create a simple query
     let query = Query::cypher("test-query")
@@ -60,7 +58,7 @@ async fn test_sse_basic_integration() -> Result<()> {
     let core = Arc::new(
         DrasiLib::builder()
             .with_id("test-core")
-            .with_source(app_source)
+            .with_source(mock_source)
             .with_query(query)
             .with_reaction(sse_reaction)
             .build()
@@ -136,11 +134,8 @@ async fn test_sse_custom_templates_integration() -> Result<()> {
         .is_test(true)
         .try_init();
 
-    // Create Application source
-    let config = ApplicationSourceConfig {
-        properties: HashMap::new(),
-    };
-    let (app_source, handle) = ApplicationSource::new("test-source", config)?;
+    // Create mock source
+    let (mock_source, handle) = MockSource::new("test-source")?;
 
     // Create query
     let query = Query::cypher("test-query")
@@ -177,7 +172,7 @@ async fn test_sse_custom_templates_integration() -> Result<()> {
     let core = Arc::new(
         DrasiLib::builder()
             .with_id("test-core")
-            .with_source(app_source)
+            .with_source(mock_source)
             .with_query(query)
             .with_reaction(sse_reaction)
             .build()
@@ -229,6 +224,330 @@ async fn test_sse_custom_templates_integration() -> Result<()> {
     Ok(())
 }
 
+/// Test that aggregation query results are delivered as SSE events in default format.
+///
+/// When no custom routes are configured, the SSE reaction sends all results
+/// (including Aggregation variants) in the default JSON format.
+#[tokio::test]
+async fn test_sse_aggregation_default_format() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let (mock_source, handle) = MockSource::new("test-source")?;
+
+    // Aggregation query using COUNT
+    let query = Query::cypher("agg-default-query")
+        .query(
+            r#"
+            MATCH (s:Sensor)
+            RETURN count(s) AS sensor_count
+        "#,
+        )
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+
+    // No custom routes - uses default format
+    let sse_reaction = SseReaction::builder("test-sse-agg-default")
+        .with_port(18083)
+        .with_query("agg-default-query")
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("test-core-agg-default")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(sse_reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    let client = reqwest::Client::new();
+    let response = client.get("http://localhost:18083/events").send().await?;
+    assert_eq!(response.status(), 200);
+
+    let stream = response.bytes_stream();
+    let mut event_stream = eventsource_stream::EventStream::new(stream).take(5);
+
+    // Insert a sensor node - should trigger aggregation result
+    let props = PropertyMapBuilder::new()
+        .with_string("location", "building-a")
+        .with_float("temperature", 22.5)
+        .build();
+    handle
+        .send_node_insert("sensor-1", vec!["Sensor"], props)
+        .await?;
+
+    // Collect events with a timeout
+    let mut received_aggregation = false;
+    let collect_result = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event_result) = event_stream.next().await {
+            if let Ok(event) = event_result {
+                let data = event.data.clone();
+                log::info!("Received SSE event: {data}");
+
+                // Default format includes the serialized ResultDiff with type "aggregation"
+                if data.contains("aggregation") && data.contains("sensor_count") {
+                    received_aggregation = true;
+                    break;
+                }
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        collect_result.is_ok(),
+        "Timed out waiting for SSE aggregation event"
+    );
+    assert!(
+        received_aggregation,
+        "Should receive aggregation event with sensor_count"
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Test that aggregation results are routed through the `updated` template spec.
+///
+/// Aggregation events use the `updated` route configuration, allowing users
+/// to format aggregation output with custom Handlebars templates.
+#[tokio::test]
+async fn test_sse_aggregation_custom_template() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let (mock_source, handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("agg-template-query")
+        .query(
+            r#"
+            MATCH (s:Sensor)
+            RETURN count(s) AS sensor_count
+        "#,
+        )
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+
+    // Configure an "updated" template — aggregation events route through it
+    let custom_config = QueryConfig {
+        added: None,
+        updated: Some(TemplateSpec::with_extension(
+            r#"{"event":"aggregation_update","sensor_count":{{after.sensor_count}}}"#,
+            SseExtension { path: None },
+        )),
+        deleted: None,
+    };
+
+    let sse_reaction = SseReaction::builder("test-sse-agg-template")
+        .with_port(18084)
+        .with_query("agg-template-query")
+        .with_route("agg-template-query", custom_config)
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("test-core-agg-template")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(sse_reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    let client = reqwest::Client::new();
+    let response = client.get("http://localhost:18084/events").send().await?;
+    assert_eq!(response.status(), 200);
+
+    let stream = response.bytes_stream();
+    let mut event_stream = eventsource_stream::EventStream::new(stream).take(5);
+
+    let props = PropertyMapBuilder::new()
+        .with_string("location", "building-a")
+        .with_float("temperature", 22.5)
+        .build();
+    handle
+        .send_node_insert("sensor-1", vec!["Sensor"], props)
+        .await?;
+
+    let mut received_custom_event = false;
+    let collect_result = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event_result) = event_stream.next().await {
+            if let Ok(event) = event_result {
+                let data = event.data.clone();
+                log::info!("Received custom aggregation event: {data}");
+
+                if data.contains("aggregation_update") && data.contains("sensor_count") {
+                    // Verify the custom template was applied
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&data).expect("Event data should be valid JSON");
+                    assert_eq!(parsed["event"], "aggregation_update");
+                    assert_eq!(parsed["sensor_count"], 1);
+                    received_custom_event = true;
+                    break;
+                }
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        collect_result.is_ok(),
+        "Timed out waiting for custom aggregation SSE event"
+    );
+    assert!(
+        received_custom_event,
+        "Should receive custom templated aggregation event"
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Test aggregation before/after values across multiple inserts.
+///
+/// The first insert produces `Aggregation { before: { sensor_count: 0 }, after: { sensor_count: 1 } }`.
+/// The second insert produces `Aggregation { before: { sensor_count: 1 }, after: { sensor_count: 2 } }`.
+#[tokio::test]
+async fn test_sse_aggregation_before_after() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let (mock_source, handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("agg-ba-query")
+        .query(
+            r#"
+            MATCH (s:Sensor)
+            RETURN count(s) AS sensor_count
+        "#,
+        )
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+
+    // No custom routes - default format includes the full ResultDiff JSON
+    let sse_reaction = SseReaction::builder("test-sse-agg-ba")
+        .with_port(18085)
+        .with_query("agg-ba-query")
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("test-core-agg-ba")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(sse_reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    let client = reqwest::Client::new();
+    let response = client.get("http://localhost:18085/events").send().await?;
+    assert_eq!(response.status(), 200);
+
+    let stream = response.bytes_stream();
+    let mut event_stream = eventsource_stream::EventStream::new(stream).take(10);
+
+    // Insert first sensor
+    let props1 = PropertyMapBuilder::new()
+        .with_string("location", "building-a")
+        .with_float("temperature", 22.5)
+        .build();
+    handle
+        .send_node_insert("sensor-1", vec!["Sensor"], props1)
+        .await?;
+
+    // Give time for first event to be processed
+    sleep(Duration::from_millis(500)).await;
+
+    // Insert second sensor
+    let props2 = PropertyMapBuilder::new()
+        .with_string("location", "building-b")
+        .with_float("temperature", 24.0)
+        .build();
+    handle
+        .send_node_insert("sensor-2", vec!["Sensor"], props2)
+        .await?;
+
+    // Collect aggregation events
+    let mut aggregation_events: Vec<serde_json::Value> = Vec::new();
+    let collect_result = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event_result) = event_stream.next().await {
+            if let Ok(event) = event_result {
+                let data = event.data.clone();
+                log::info!("Received SSE event: {data}");
+
+                if data.contains("aggregation") && data.contains("sensor_count") {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data) {
+                        aggregation_events.push(parsed);
+                        if aggregation_events.len() >= 2 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        collect_result.is_ok(),
+        "Timed out waiting for aggregation SSE events"
+    );
+    assert!(
+        aggregation_events.len() >= 2,
+        "Should receive at least 2 aggregation events, got {}",
+        aggregation_events.len()
+    );
+
+    // First event: before has the initial aggregation state (count=0)
+    let first_results = aggregation_events[0]["results"]
+        .as_array()
+        .expect("results should be an array");
+    let first_agg = first_results
+        .iter()
+        .find(|r| r["type"] == "aggregation")
+        .expect("First event should contain aggregation result");
+    assert_eq!(
+        first_agg["before"]["sensor_count"], 0,
+        "First aggregation before should have sensor_count=0"
+    );
+    assert_eq!(first_agg["after"]["sensor_count"], 1);
+
+    // Second event: before should contain previous state (count=1)
+    let second_results = aggregation_events[1]["results"]
+        .as_array()
+        .expect("results should be an array");
+    let second_agg = second_results
+        .iter()
+        .find(|r| r["type"] == "aggregation")
+        .expect("Second event should contain aggregation result");
+    assert_eq!(
+        second_agg["before"]["sensor_count"], 1,
+        "Second aggregation before should have sensor_count=1"
+    );
+    assert_eq!(second_agg["after"]["sensor_count"], 2);
+
+    core.stop().await?;
+    Ok(())
+}
+
 /// Test SSE with multi-path routing
 #[tokio::test]
 async fn test_sse_multi_path_integration() -> Result<()> {
@@ -236,11 +555,8 @@ async fn test_sse_multi_path_integration() -> Result<()> {
         .is_test(true)
         .try_init();
 
-    // Create Application source
-    let config = ApplicationSourceConfig {
-        properties: HashMap::new(),
-    };
-    let (app_source, handle) = ApplicationSource::new("test-source", config)?;
+    // Create mock source
+    let (mock_source, handle) = MockSource::new("test-source")?;
 
     // Create two queries
     let person_query = Query::cypher("person-query")
@@ -300,7 +616,7 @@ async fn test_sse_multi_path_integration() -> Result<()> {
     let core = Arc::new(
         DrasiLib::builder()
             .with_id("test-core")
-            .with_source(app_source)
+            .with_source(mock_source)
             .with_query(person_query)
             .with_query(company_query)
             .with_reaction(sse_reaction)
@@ -383,6 +699,465 @@ async fn test_sse_multi_path_integration() -> Result<()> {
         received_company,
         "Should receive company event on /companies path"
     );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Test snapshot endpoint returns current query result set
+#[tokio::test]
+async fn test_sse_snapshot_endpoint() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let (mock_source, handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("snap-query")
+        .query(
+            r#"
+            MATCH (p:Person)
+            RETURN p.name AS name, p.age AS age
+        "#,
+        )
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+
+    // Use a unique port to avoid conflicts with other tests
+    let sse_reaction = SseReaction::builder("snap-sse")
+        .with_port(18086)
+        .with_query("snap-query")
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("snap-core")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(sse_reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    // Insert some data
+    let props1 = PropertyMapBuilder::new()
+        .with_string("name", "Alice")
+        .with_integer("age", 30)
+        .build();
+    handle
+        .send_node_insert("person-1", vec!["Person"], props1)
+        .await?;
+
+    let props2 = PropertyMapBuilder::new()
+        .with_string("name", "Bob")
+        .with_integer("age", 25)
+        .build();
+    handle
+        .send_node_insert("person-2", vec!["Person"], props2)
+        .await?;
+
+    // Give the query engine time to process
+    sleep(Duration::from_millis(500)).await;
+
+    // Hit the snapshot endpoint
+    let client = reqwest::Client::new();
+    let response = client
+        .get("http://localhost:18086/snapshot/snap-query")
+        .send()
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    let body: serde_json::Value = response.json().await?;
+    let rows = body.as_array().expect("snapshot should be a JSON array");
+    assert_eq!(rows.len(), 2, "Should have 2 rows in snapshot");
+
+    // Verify the data (order may vary)
+    let names: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r.get("name").and_then(|n| n.as_str()))
+        .collect();
+    assert!(names.contains(&"Alice"), "Should contain Alice");
+    assert!(names.contains(&"Bob"), "Should contain Bob");
+
+    // Verify 404 for unknown query
+    let resp_404 = client
+        .get("http://localhost:18086/snapshot/nonexistent")
+        .send()
+        .await?;
+    assert_eq!(resp_404.status(), 404);
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Test snapshot endpoint returns empty array when query has no results
+#[tokio::test]
+async fn test_sse_snapshot_empty_result() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("empty-query")
+        .query(
+            r#"
+            MATCH (p:Person)
+            RETURN p.name AS name
+        "#,
+        )
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+
+    let sse_reaction = SseReaction::builder("empty-sse")
+        .with_port(18087)
+        .with_query("empty-query")
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("empty-core")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(sse_reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    // No data inserted — snapshot should return empty JSON array
+    let client = reqwest::Client::new();
+    let response = client
+        .get("http://localhost:18087/snapshot/empty-query")
+        .send()
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    let body: serde_json::Value = response.json().await?;
+    let rows = body.as_array().expect("snapshot should be a JSON array");
+    assert!(rows.is_empty(), "Empty query should return empty array");
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Test snapshot endpoint with large result set streams correctly
+#[tokio::test]
+async fn test_sse_snapshot_large_result() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let (mock_source, handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("large-query")
+        .query(
+            r#"
+            MATCH (p:Person)
+            RETURN p.name AS name, p.age AS age
+        "#,
+        )
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+
+    let sse_reaction = SseReaction::builder("large-sse")
+        .with_port(18088)
+        .with_query("large-query")
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("large-core")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(sse_reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    // Insert 100 rows
+    for i in 0..100 {
+        let props = PropertyMapBuilder::new()
+            .with_string("name", &format!("Person-{i}"))
+            .with_integer("age", 20 + (i % 50))
+            .build();
+        let id = format!("person-{i}");
+        handle
+            .send_node_insert(id.as_str(), vec!["Person"], props)
+            .await?;
+    }
+
+    // Give the query engine time to process all inserts
+    sleep(Duration::from_millis(1000)).await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get("http://localhost:18088/snapshot/large-query")
+        .send()
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // Verify the response is streamed (chunked transfer encoding)
+    assert_eq!(
+        response
+            .headers()
+            .get("transfer-encoding")
+            .and_then(|v| v.to_str().ok()),
+        Some("chunked"),
+        "Snapshot response should use chunked transfer encoding"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+        "Snapshot response should have application/json content type"
+    );
+    // Verify content-length is absent (streaming responses don't know size upfront)
+    assert!(
+        response.headers().get("content-length").is_none(),
+        "Streaming response should not have content-length header"
+    );
+
+    let body: serde_json::Value = response.json().await?;
+    let rows = body.as_array().expect("snapshot should be a JSON array");
+    assert_eq!(rows.len(), 100, "Should have 100 rows in snapshot");
+
+    // Verify each row has the expected fields
+    for row in rows {
+        assert!(
+            row.get("name").is_some(),
+            "Each row should have a name field"
+        );
+        assert!(
+            row.get("age").is_some(),
+            "Each row should have an age field"
+        );
+    }
+
+    core.stop().await?;
+    Ok(())
+}
+
+// ============================================================================
+// DurableMemoryStateStoreProvider — test wrapper for SSE restart tests
+// ============================================================================
+
+/// Wrapper around `MemoryStateStoreProvider` that reports `is_durable() == true`,
+/// enabling checkpoint and outbox persistence across reaction restart cycles.
+struct DurableMemoryStateStoreProvider {
+    inner: drasi_lib::MemoryStateStoreProvider,
+}
+
+impl DurableMemoryStateStoreProvider {
+    fn new() -> Self {
+        Self {
+            inner: drasi_lib::MemoryStateStoreProvider::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvider {
+    async fn get(
+        &self,
+        store_id: &str,
+        key: &str,
+    ) -> drasi_lib::state_store::StateStoreResult<Option<Vec<u8>>> {
+        self.inner.get(store_id, key).await
+    }
+
+    async fn set(
+        &self,
+        store_id: &str,
+        key: &str,
+        value: Vec<u8>,
+    ) -> drasi_lib::state_store::StateStoreResult<()> {
+        self.inner.set(store_id, key, value).await
+    }
+
+    async fn delete(
+        &self,
+        store_id: &str,
+        key: &str,
+    ) -> drasi_lib::state_store::StateStoreResult<bool> {
+        self.inner.delete(store_id, key).await
+    }
+
+    async fn contains_key(
+        &self,
+        store_id: &str,
+        key: &str,
+    ) -> drasi_lib::state_store::StateStoreResult<bool> {
+        self.inner.contains_key(store_id, key).await
+    }
+
+    async fn get_many(
+        &self,
+        store_id: &str,
+        keys: &[&str],
+    ) -> drasi_lib::state_store::StateStoreResult<std::collections::HashMap<String, Vec<u8>>> {
+        self.inner.get_many(store_id, keys).await
+    }
+
+    async fn set_many(
+        &self,
+        store_id: &str,
+        entries: &[(&str, &[u8])],
+    ) -> drasi_lib::state_store::StateStoreResult<()> {
+        self.inner.set_many(store_id, entries).await
+    }
+
+    async fn delete_many(
+        &self,
+        store_id: &str,
+        keys: &[&str],
+    ) -> drasi_lib::state_store::StateStoreResult<usize> {
+        self.inner.delete_many(store_id, keys).await
+    }
+
+    async fn clear_store(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<usize> {
+        self.inner.clear_store(store_id).await
+    }
+
+    async fn list_keys(
+        &self,
+        store_id: &str,
+    ) -> drasi_lib::state_store::StateStoreResult<Vec<String>> {
+        self.inner.list_keys(store_id).await
+    }
+
+    async fn store_exists(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<bool> {
+        self.inner.store_exists(store_id).await
+    }
+
+    async fn key_count(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<usize> {
+        self.inner.key_count(store_id).await
+    }
+
+    fn is_durable(&self) -> bool {
+        true
+    }
+}
+
+/// Test: SSE snapshot endpoint returns correct data after reaction restart.
+///
+/// Verifies that after inserting data, stopping the reaction, and restarting it,
+/// the `/snapshot` endpoint still returns the previously committed query results
+/// (either from outbox replay or live-results persistence).
+#[tokio::test]
+async fn test_sse_snapshot_recovery_after_restart() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let (mock_source, handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("recovery-query")
+        .query(
+            r#"
+            MATCH (p:Person)
+            RETURN p.name AS name, p.age AS age
+        "#,
+        )
+        .from_source("test-source")
+        .with_outbox_capacity(100)
+        .auto_start(true)
+        .build();
+
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let sse_reaction = SseReaction::builder("recovery-sse")
+        .with_port(18089)
+        .with_query("recovery-query")
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("recovery-core")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(sse_reaction)
+            .with_state_store_provider(state_store.clone())
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    // Insert initial data
+    let props1 = PropertyMapBuilder::new()
+        .with_string("name", "Alice")
+        .with_integer("age", 30)
+        .build();
+    handle
+        .send_node_insert("person-1", vec!["Person"], props1)
+        .await?;
+
+    let props2 = PropertyMapBuilder::new()
+        .with_string("name", "Bob")
+        .with_integer("age", 25)
+        .build();
+    handle
+        .send_node_insert("person-2", vec!["Person"], props2)
+        .await?;
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Verify snapshot has 2 rows before restart
+    let client = reqwest::Client::new();
+    let response = client
+        .get("http://localhost:18089/snapshot/recovery-query")
+        .send()
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await?;
+    let rows = body.as_array().expect("should be array");
+    assert_eq!(rows.len(), 2, "Should have 2 rows before restart");
+
+    // Stop the reaction (simulates a restart)
+    core.stop_reaction("recovery-sse").await?;
+    sleep(Duration::from_millis(500)).await;
+
+    // Restart the reaction
+    core.start_reaction("recovery-sse").await?;
+    sleep(Duration::from_millis(1000)).await;
+
+    // Verify the snapshot endpoint still returns the same data after restart.
+    // The SSE reaction should recover from the outbox and re-populate its state.
+    let response = client
+        .get("http://localhost:18089/snapshot/recovery-query")
+        .send()
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await?;
+    let rows = body.as_array().expect("should be array after restart");
+    assert_eq!(
+        rows.len(),
+        2,
+        "Should still have 2 rows after restart (recovered from outbox)"
+    );
+
+    // Verify the data is correct
+    let names: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r.get("name").and_then(|v| v.as_str()))
+        .collect();
+    assert!(names.contains(&"Alice"), "Alice should be in snapshot");
+    assert!(names.contains(&"Bob"), "Bob should be in snapshot");
 
     core.stop().await?;
     Ok(())

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! HTTP Adaptive reaction plugin for Drasi
 //!
 //! This plugin implements HTTP Adaptive reactions for Drasi and provides extension traits
@@ -33,6 +35,7 @@
 
 mod adaptive_batcher;
 pub mod config;
+pub mod descriptor;
 pub mod http_adaptive;
 
 pub use config::HttpAdaptiveReactionConfig;
@@ -188,7 +191,7 @@ mod tests {
         assert_eq!(reaction.id(), "test-reaction");
         let props = reaction.properties();
         assert_eq!(
-            props.get("base_url"),
+            props.get("baseUrl"),
             Some(&serde_json::Value::String("http://localhost".to_string())) // DevSkim: ignore DS137138
         );
     }
@@ -219,3 +222,17 @@ mod tests {
         assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
     }
 }
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "http-adaptive-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::HttpAdaptiveReactionDescriptor],
+    bootstrap_descriptors = [],
+);

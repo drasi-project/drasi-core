@@ -319,40 +319,65 @@ mod exceeds_one_standard_deviation {
 
 mod unit_tests {
     use crate::sequence_counter;
+    use drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore;
     use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 
     #[tokio::test]
     pub async fn sequence_counter() {
-        let subject = InMemoryResultIndex::new();
+        let subject = InMemoryCheckpointStore::new();
         sequence_counter::sequence_counter(&subject).await;
+    }
+
+    #[tokio::test]
+    pub async fn checkpoint_round_trip() {
+        let subject = InMemoryCheckpointStore::new();
+        sequence_counter::checkpoint_round_trip(&subject).await;
+    }
+
+    #[tokio::test]
+    pub async fn result_sequence_counter() {
+        let subject = InMemoryResultIndex::new();
+        sequence_counter::result_sequence_counter(&subject).await;
     }
 }
 
 mod index {
     use crate::index;
     use drasi_core::{
-        in_memory_index::in_memory_future_queue::InMemoryFutureQueue, interface::FutureQueue,
+        in_memory_index::in_memory_future_queue::InMemoryFutureQueue,
+        interface::{FutureQueue, NoOpSessionControl},
     };
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn future_queue_push_always() {
         let fqi = InMemoryFutureQueue::new();
+        let sc: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
-        index::future_queue::push_always(&fqi).await;
+        index::future_queue::push_always(&fqi, &sc).await;
     }
 
     #[tokio::test]
     async fn future_queue_push_not_exists() {
         let fqi = InMemoryFutureQueue::new();
+        let sc: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
-        index::future_queue::push_not_exists(&fqi).await;
+        index::future_queue::push_not_exists(&fqi, &sc).await;
+    }
+
+    #[tokio::test]
+    async fn future_queue_clear_removes_all() {
+        let fqi = InMemoryFutureQueue::new();
+        let sc: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(NoOpSessionControl);
+        index::future_queue::clear_removes_all(&fqi, &sc).await;
     }
 
     #[tokio::test]
     async fn future_queue_push_overwrite() {
         let fqi = InMemoryFutureQueue::new();
+        let sc: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
-        index::future_queue::push_overwrite(&fqi).await;
+        index::future_queue::push_overwrite(&fqi, &sc).await;
     }
 }
 
@@ -627,5 +652,28 @@ mod source_update_upsert {
     async fn test_aggregation_with_upserts() {
         let test_config = InMemoryQueryConfig::new();
         source_update_upsert::test_aggregation_with_upserts(&test_config).await;
+    }
+}
+
+mod string_operators {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn starts_with() {
+        let test_config = InMemoryQueryConfig::new();
+        string_operators::starts_with(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn ends_with() {
+        let test_config = InMemoryQueryConfig::new();
+        string_operators::ends_with(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn contains_op() {
+        let test_config = InMemoryQueryConfig::new();
+        string_operators::contains_op(&test_config).await;
     }
 }

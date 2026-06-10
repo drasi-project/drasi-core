@@ -1,0 +1,14 @@
+[target.x86_64-unknown-linux-musl]
+dockerfile = "Dockerfile.cross-musl"
+
+[target.aarch64-unknown-linux-musl]
+dockerfile = "Dockerfile.cross-musl-aarch64"
+
+[target.x86_64-unknown-linux-gnu]
+dockerfile = "Dockerfile.cross-gnu"
+
+[target.aarch64-unknown-linux-gnu]
+dockerfile = "Dockerfile.cross-gnu-aarch64"
+
+[target.x86_64-pc-windows-gnu]
+dockerfile = "Dockerfile.cross-windows-gnu"

@@ -1,5 +1,4 @@
-#![allow(clippy::unwrap_used)]
-// Copyright 2024 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#![allow(clippy::unwrap_used)]
 #![allow(dead_code)]
 pub mod match_path;
 pub mod solution;
@@ -351,13 +352,13 @@ async fn get_adjacent_elements(
             out_node,
             properties: _,
         } => {
-            let adjecent_ref = match direction {
+            let adjacent_ref = match direction {
                 SolveDirection::Outward => out_node,
                 SolveDirection::Inward => in_node,
             };
 
             match element_index
-                .get_slot_element_by_ref(target_slot, adjecent_ref)
+                .get_slot_element_by_ref(target_slot, adjacent_ref)
                 .await?
             {
                 Some(adjacent_element) => Ok(Box::pin(tokio_stream::once::<ElementResult>(Ok(

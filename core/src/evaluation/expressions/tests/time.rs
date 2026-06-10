@@ -87,7 +87,7 @@ fn create_time_expression_test_function_registry() -> Arc<FunctionRegistry> {
 }
 
 #[tokio::test]
-async fn evalute_local_time_hh_mm_ss() {
+async fn evaluate_local_time_hh_mm_ss() {
     let expr = "localtime('12:54:03')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
@@ -132,7 +132,7 @@ async fn evalute_local_time_hh_mm_ss() {
 }
 
 #[tokio::test]
-async fn evalute_local_time_fraction() {
+async fn evaluate_local_time_fraction() {
     let expr = "localtime('12:54:03.1234')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
@@ -177,7 +177,7 @@ async fn evalute_local_time_fraction() {
 }
 
 #[tokio::test]
-async fn evalute_local_time_hh_mm() {
+async fn evaluate_local_time_hh_mm() {
     let expr = "localtime('12:54')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
@@ -201,7 +201,7 @@ async fn evalute_local_time_hh_mm() {
 }
 
 #[tokio::test]
-async fn evalute_zoned_time_hh_mm_utc() {
+async fn evaluate_zoned_time_hh_mm_utc() {
     let expr = "time('12:54:51Z')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
@@ -230,7 +230,7 @@ async fn evalute_zoned_time_hh_mm_utc() {
 }
 
 #[tokio::test]
-async fn evalute_zoned_time_hh_mm_offset() {
+async fn evaluate_zoned_time_hh_mm_offset() {
     let expr = "time('12:54:51+03:00')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
@@ -285,7 +285,7 @@ async fn evalute_zoned_time_hh_mm_offset() {
 }
 
 #[tokio::test]
-async fn evalute_zoned_time_hh_mm_frac_offset() {
+async fn evaluate_zoned_time_hh_mm_frac_offset() {
     let expr = "time('12:54:51.1234+03:00')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 

@@ -1,5 +1,4 @@
-#![allow(clippy::unwrap_used)]
-// Copyright 2024 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used)]
 use std::sync::Arc;
 
 use serde_json::json;
@@ -28,6 +28,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -69,17 +70,21 @@ pub async fn min_value(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         //println!("Node Result - Add t1: {:?}", result);
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            grouping_keys: vec![],
-            default_before: true,
-            default_after: false,
-            before: Some(variablemap!(
-                "min_value" => VariableValue::Null
-            )),
-            after: variablemap!(
-              "min_value" => VariableValue::from(json!(5.0))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                grouping_keys: vec![],
+                default_before: true,
+                default_after: false,
+                before: Some(variablemap!(
+                    "min_value" => VariableValue::Null
+                )),
+                after: variablemap!(
+                  "min_value" => VariableValue::from(json!(5.0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Add lower value
@@ -101,17 +106,21 @@ pub async fn min_value(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         //println!("Node Result - Add t3: {:?}", result);
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            grouping_keys: vec![],
-            default_before: true,
-            default_after: false,
-            before: Some(variablemap!(
-              "min_value" => VariableValue::from(json!(5.0))
-            )),
-            after: variablemap!(
-              "min_value" => VariableValue::from(json!(3.0))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                grouping_keys: vec![],
+                default_before: true,
+                default_after: false,
+                before: Some(variablemap!(
+                  "min_value" => VariableValue::from(json!(5.0))
+                )),
+                after: variablemap!(
+                  "min_value" => VariableValue::from(json!(3.0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Increment lower value
@@ -132,17 +141,21 @@ pub async fn min_value(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            grouping_keys: vec![],
-            default_before: false,
-            default_after: false,
-            before: Some(variablemap!(
-              "min_value" => VariableValue::from(json!(3.0))
-            )),
-            after: variablemap!(
-              "min_value" => VariableValue::from(json!(4.0))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                grouping_keys: vec![],
+                default_before: false,
+                default_after: false,
+                before: Some(variablemap!(
+                  "min_value" => VariableValue::from(json!(3.0))
+                )),
+                after: variablemap!(
+                  "min_value" => VariableValue::from(json!(4.0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Increment higher value

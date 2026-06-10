@@ -28,6 +28,7 @@ use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod data;
@@ -220,11 +221,15 @@ pub async fn steps_happen_in_any_order(config: &(impl QueryTestConfig + Send)) {
         println!("Node Result - Add Completed Step ({timestamp}): {result:?}");
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "customerId" => VariableValue::from(json!("cust_02")),
-              "customerEmail" => VariableValue::from(json!("cust_02@reflex.org"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "customerId" => VariableValue::from(json!("cust_02")),
+                  "customerEmail" => VariableValue::from(json!("cust_02@reflex.org"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
