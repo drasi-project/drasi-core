@@ -35,7 +35,7 @@ use crate::channels::events::SourceEventWrapper;
 use crate::channels::{ChannelChangeReceiver, ComponentStatus, SubscriptionResponse};
 use crate::config::{QueryConfig, SourceSubscriptionSettings};
 use crate::context::SourceRuntimeContext;
-use crate::indexes::{IndexBackendPlugin, StorageBackendRef, StorageBackendSpec};
+use crate::indexes::{IndexBackendPlugin, StorageBackendRef};
 use crate::sources::{Source, SourceBase, SourceBaseParams, SourceError};
 use crate::{DrasiLib, Query, RecoveryPolicy};
 
@@ -217,9 +217,10 @@ async fn build_e2e_lib(
     default_recovery_policy: Option<RecoveryPolicy>,
 ) -> anyhow::Result<Arc<DrasiLib>> {
     let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
-    let mut builder = DrasiLib::builder()
-        .with_id(id)
-        .with_index_provider(Arc::new(provider) as Arc<dyn IndexBackendPlugin>);
+    let mut builder = DrasiLib::builder().with_id(id).with_index_provider(
+        "persistent",
+        Arc::new(provider) as Arc<dyn IndexBackendPlugin>,
+    );
 
     if let Some(policy) = default_recovery_policy {
         builder = builder.with_default_recovery_policy(policy);
@@ -239,11 +240,7 @@ fn make_persistent_query(
         .from_source(source_id)
         .auto_start(false)
         .enable_bootstrap(false)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: "/tmp/e2e-test-drasi".to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }));
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()));
 
     if let Some(policy) = recovery_policy {
         q = q.with_recovery_policy(policy);
@@ -611,11 +608,7 @@ async fn test_e2e_config_change_triggers_rebootstrap() {
         .from_source("cfg-src")
         .auto_start(false)
         .enable_bootstrap(false)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: "/tmp/e2e-test-drasi".to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }))
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
         .build();
     core.add_query(query1).await.unwrap();
     core.start_query("cfg-q").await.unwrap();
@@ -635,11 +628,7 @@ async fn test_e2e_config_change_triggers_rebootstrap() {
         .from_source("cfg-src")
         .auto_start(false)
         .enable_bootstrap(false)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: "/tmp/e2e-test-drasi".to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }))
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
         .build();
     core.update_query("cfg-q", query2).await.unwrap();
 

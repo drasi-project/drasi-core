@@ -575,14 +575,12 @@ impl DrasiLibConfig {
         for query in &self.queries {
             if let Some(backend_ref) = &query.storage_backend {
                 match backend_ref {
-                    StorageBackendRef::Named(backend_id) => {
-                        if !storage_backend_ids.contains(backend_id) {
-                            return Err(anyhow::anyhow!(
-                                "Query '{}' references unknown storage backend: '{}'",
-                                query.id,
-                                backend_id
-                            ));
-                        }
+                    StorageBackendRef::Named(_backend_id) => {
+                        // Named references are validated leniently here: a name absent
+                        // from `storage_backends` may still be satisfied by a provider
+                        // injected at build time via `with_index_provider`. Strict
+                        // referential validation (against the union of declared backends
+                        // and injected providers) is performed in the builder.
                     }
                     StorageBackendRef::Inline(spec) => {
                         // Validate inline backend configuration

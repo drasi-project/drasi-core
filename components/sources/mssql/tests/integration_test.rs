@@ -956,11 +956,7 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
         let (reaction, handle) = ApplicationReaction::builder("app-reaction-rt1")
             .with_query(QUERY_ID)
@@ -972,7 +968,7 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -1113,11 +1109,7 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
         let (reaction, handle) = ApplicationReaction::builder("app-reaction-bs1")
             .with_query(QUERY_ID)
@@ -1129,7 +1121,7 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -1276,11 +1268,7 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
         let (reaction, handle) = ApplicationReaction::builder("app-reaction-full-restart")
             .with_query(QUERY_ID)
@@ -1292,7 +1280,7 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -1455,11 +1443,7 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: q1_dir.to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
 
         let query2 = Query::cypher(q2_id)
@@ -1472,11 +1456,7 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: q2_dir.to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
 
         let (reaction1, handle1) = ApplicationReaction::builder("mq-reaction1")
@@ -1495,7 +1475,7 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
             .with_query(query2)
             .with_reaction(reaction1)
             .with_reaction(reaction2)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -1797,11 +1777,7 @@ async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
         let (reaction, handle) = ApplicationReaction::builder("app-reaction-ffi-restart")
             .with_query(QUERY_ID)
@@ -1812,7 +1788,7 @@ async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .context("Failed to build DrasiLib with FFI plugins")?;

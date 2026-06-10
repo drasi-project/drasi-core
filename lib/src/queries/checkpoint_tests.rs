@@ -239,7 +239,10 @@ mod tests {
             update_tx.clone(),
         ));
 
-        let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], None));
+        let index_factory = Arc::new(crate::indexes::IndexFactory::new(
+            vec![],
+            std::collections::HashMap::new(),
+        ));
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
 
         let query_manager = Arc::new(crate::queries::QueryManager::new(
@@ -1492,7 +1495,11 @@ mod tests {
 
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(
             vec![],
-            Some(Arc::new(MockPersistentPlugin::new())),
+            std::collections::HashMap::from([(
+                "persistent".to_string(),
+                Arc::new(MockPersistentPlugin::new())
+                    as Arc<dyn crate::indexes::IndexBackendPlugin>,
+            )]),
         ));
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
 
@@ -1512,7 +1519,7 @@ mod tests {
 
     /// Create a query config that uses a persistent storage backend.
     fn create_persistent_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
-        use crate::indexes::config::{StorageBackendRef, StorageBackendSpec};
+        use crate::indexes::config::StorageBackendRef;
         QueryConfig {
             id: id.to_string(),
             query: "MATCH (n:Person) RETURN n.name".to_string(),
@@ -1534,11 +1541,7 @@ mod tests {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
-            storage_backend: Some(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: "/tmp/test-drasi".to_string(),
-                enable_archive: false,
-                direct_io: false,
-            })),
+            storage_backend: Some(StorageBackendRef::Named("persistent".to_string())),
             recovery_policy: None,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
@@ -1833,12 +1836,8 @@ mod tests {
                     priority_queue_capacity: None,
                     dispatch_buffer_capacity: None,
                     dispatch_mode: None,
-                    storage_backend: Some(crate::indexes::config::StorageBackendRef::Inline(
-                        crate::indexes::config::StorageBackendSpec::RocksDb {
-                            path: "/tmp/test-drasi".to_string(),
-                            enable_archive: false,
-                            direct_io: false,
-                        },
+                    storage_backend: Some(crate::indexes::config::StorageBackendRef::Named(
+                        "persistent".to_string(),
                     )),
                     recovery_policy: None,
                     outbox_capacity: 1000,
@@ -2271,7 +2270,13 @@ mod tests {
             update_tx.clone(),
         ));
 
-        let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], Some(plugin)));
+        let index_factory = Arc::new(crate::indexes::IndexFactory::new(
+            vec![],
+            std::collections::HashMap::from([(
+                "persistent".to_string(),
+                plugin as Arc<dyn crate::indexes::IndexBackendPlugin>,
+            )]),
+        ));
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
 
         let query_manager = Arc::new(crate::queries::QueryManager::new(
@@ -2766,7 +2771,7 @@ mod orchestration_tests {
         sources: Vec<String>,
         recovery_policy: Option<RecoveryPolicy>,
     ) -> QueryConfig {
-        use crate::indexes::config::{StorageBackendRef, StorageBackendSpec};
+        use crate::indexes::config::StorageBackendRef;
         QueryConfig {
             id: id.to_string(),
             query: "MATCH (n:Person) RETURN n.name".to_string(),
@@ -2788,11 +2793,7 @@ mod orchestration_tests {
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
-            storage_backend: Some(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: "/tmp/test-drasi".to_string(),
-                enable_archive: false,
-                direct_io: false,
-            })),
+            storage_backend: Some(StorageBackendRef::Named("persistent".to_string())),
             recovery_policy,
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
@@ -2870,7 +2871,13 @@ mod orchestration_tests {
             update_tx.clone(),
         ));
 
-        let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], plugin));
+        let providers: std::collections::HashMap<
+            String,
+            Arc<dyn crate::indexes::IndexBackendPlugin>,
+        > = plugin
+            .map(|p| std::collections::HashMap::from([("persistent".to_string(), p)]))
+            .unwrap_or_default();
+        let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], providers));
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
 
         let query_manager = Arc::new(crate::queries::QueryManager::new(

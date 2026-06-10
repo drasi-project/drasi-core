@@ -530,7 +530,7 @@ async fn test_oracle_checkpoint_resume() -> Result<()> {
 #[serial]
 async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
-    use drasi_lib::{StorageBackendRef, StorageBackendSpec};
+    use drasi_lib::StorageBackendRef;
     use std::sync::Arc;
 
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -585,11 +585,7 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
 
         let (reaction, handle) = ApplicationReaction::builder("oracle-cp-reaction")
@@ -603,7 +599,7 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -696,7 +692,7 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
 #[serial]
 async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
-    use drasi_lib::{StorageBackendRef, StorageBackendSpec};
+    use drasi_lib::StorageBackendRef;
     use std::sync::Arc;
 
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -747,11 +743,7 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
 
         let (reaction, handle) = ApplicationReaction::builder("oracle-restart-reaction")
@@ -765,7 +757,7 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .context("Failed to build DrasiLib")?;
