@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::processor::Processor;
 use super::MqttReactionBuilder;
-use crate::config::MqttReactionConfig;
+use crate::client::Client;
+use crate::{config::MqttReactionConfig, processor::ResultProcessor};
 use anyhow::Result;
 use drasi_core::evaluation::variable_value::de;
 use drasi_lib::{
@@ -37,6 +37,7 @@ pub struct MqttReaction {
     base: ReactionBase,
     config: MqttReactionConfig,
     event_loop_task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    event_loop_shutdown_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl MqttReaction {
@@ -49,7 +50,11 @@ impl MqttReaction {
     ///
     /// The event channel is automatically injected when the reaction is added
     /// to DrasiLib via `add_reaction()`.
-    pub fn new(id: impl Into<String>, queries: Vec<String>, config: MqttReactionConfig) -> anyhow::Result<Self> {
+    pub fn new(
+        id: impl Into<String>,
+        queries: Vec<String>,
+        config: MqttReactionConfig,
+    ) -> anyhow::Result<Self> {
         Self::create_internal(id.into(), queries, config, None, true)
     }
 
@@ -91,6 +96,10 @@ impl MqttReaction {
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> anyhow::Result<Self> {
+        let mut config = config;
+        if config.client_id.is_none() {
+            config.client_id = Some(format!("drasi-mqtt-{id}"));
+        }
 
         config.validate(&queries)?;
 
@@ -103,8 +112,9 @@ impl MqttReaction {
 
         Ok(Self {
             base,
-            config: config,
+            config,
             event_loop_task: Arc::new(tokio::sync::Mutex::new(None)),
+            event_loop_shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 }
@@ -130,7 +140,9 @@ impl Reaction for MqttReaction {
             self.config
                 .client_id
                 .as_ref()
-                .map_or(serde_json::Value::Null, |v| serde_json::Value::String(v.clone())),
+                .map_or(serde_json::Value::Null, |v| {
+                    serde_json::Value::String(v.clone())
+                }),
         );
         props.insert(
             "protocol_version".to_string(),
@@ -166,13 +178,15 @@ impl Reaction for MqttReaction {
             "max_inflight".to_string(),
             self.config
                 .max_inflight
-                .map_or(serde_json::Value::Null, |v| serde_json::Value::Number(v.into())),
+                .map_or(serde_json::Value::Null, |v| {
+                    serde_json::Value::Number(v.into())
+                }),
         );
         props.insert(
             "keep_alive".to_string(),
-            self.config
-                .keep_alive
-                .map_or(serde_json::Value::Null, |v| serde_json::Value::Number(v.into())),
+            self.config.keep_alive.map_or(serde_json::Value::Null, |v| {
+                serde_json::Value::Number(v.into())
+            }),
         );
         props.insert(
             "clean_start".to_string(),
@@ -184,13 +198,17 @@ impl Reaction for MqttReaction {
             "conn_timeout".to_string(),
             self.config
                 .conn_timeout
-                .map_or(serde_json::Value::Null, |v| serde_json::Value::Number(v.into())),
+                .map_or(serde_json::Value::Null, |v| {
+                    serde_json::Value::Number(v.into())
+                }),
         );
         props.insert(
             "session_expiry_interval".to_string(),
-            self.config.session_expiry_interval.map_or(serde_json::Value::Null, |v| {
-                serde_json::Value::Number(v.into())
-            }),
+            self.config
+                .session_expiry_interval
+                .map_or(serde_json::Value::Null, |v| {
+                    serde_json::Value::Number(v.into())
+                }),
         );
 
         props
@@ -211,36 +229,88 @@ impl Reaction for MqttReaction {
     async fn start(&self) -> Result<()> {
         log_component_start("MQTT Reaction", &self.base.id);
 
-        info!(
-            "[{}] MQTT reaction started",
-            self.base.id
-        );
+        info!("[{}] MQTT reaction started", self.base.id);
 
         // transition to Starting
-        self.base.set_status(
-            ComponentStatus::Starting,
-            Some(format!("[{}] Starting MQTT reaction", self.base.id)),
-        ).await;
+        self.base
+            .set_status(
+                ComponentStatus::Starting,
+                Some(format!("[{}] Starting MQTT reaction", self.base.id)),
+            )
+            .await;
 
-        
-        // create shutdown channel for graceful termination
-        let mut shutdown_rx = self.base.create_shutdown_channel().await;
-
-        // create shutdown channel for graceful termination
-        let shared_base = self.base.clone_shared();
-        let reaction_name = self.base.id.clone();
+        // clone config and base
         let config = self.config.clone();
+        let base = self.base.clone_shared();
 
-        // start the main processing task
-        let processing_task_handle = tokio::spawn(Processor::run_internal(
-            reaction_name,
-            shared_base,
-            config,
-            shutdown_rx,
-        ));
+        // create the main processor which will handle results processing
+        let mut processor = if let Ok(p) = ResultProcessor::new(config, base).await {
+            p
+        } else {
+            error!(
+                "[{}] Failed to create MQTT ResultProcessor, stopping reaction",
+                self.base.id
+            );
+            self.base
+                .set_status(
+                    ComponentStatus::Error,
+                    Some(format!(
+                        "[{}] MQTT reaction stopped due to initialization failure",
+                        self.base.id
+                    )),
+                )
+                .await;
+            return Ok(());
+        };
 
-        // store the processing task handle
-        self.base.set_processing_task(processing_task_handle).await;
+        // start the processing loop and event loop
+        let (event_loop_shutdown_tx, event_loop_shutdown_rx) = tokio::sync::oneshot::channel();
+        let event_loop_handle =
+            if let Ok(h) = processor.start_event_loop(event_loop_shutdown_rx).await {
+                h
+            } else {
+                error!(
+                    "[{}] Failed to start MQTT event loop, stopping reaction",
+                    self.base.id
+                );
+                self.base
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(format!(
+                            "[{}] MQTT reaction stopped due to initialization failure",
+                            self.base.id
+                        )),
+                    )
+                    .await;
+                return Ok(());
+            };
+        *self.event_loop_task.lock().await = Some(event_loop_handle);
+        *self.event_loop_shutdown_tx.lock().await = Some(event_loop_shutdown_tx);
+
+        let processing_shutdown_rx = self.base.create_shutdown_channel().await;
+        let processing_handle = if let Ok(h) = processor
+            .start_processing_loop(processing_shutdown_rx)
+            .await
+        {
+            h
+        } else {
+            error!(
+                "[{}] Failed to start MQTT processing loop, stopping reaction",
+                self.base.id
+            );
+            self.base
+                .set_status(
+                    ComponentStatus::Error,
+                    Some(format!(
+                        "[{}] MQTT reaction stopped due to initialization failure",
+                        self.base.id
+                    )),
+                )
+                .await;
+            return Ok(());
+        };
+
+        self.base.set_processing_task(processing_handle);
 
         // transition to Running
         self.base
@@ -254,16 +324,24 @@ impl Reaction for MqttReaction {
     }
 
     async fn stop(&self) -> Result<()> {
+        self.base
+            .set_status(
+                ComponentStatus::Stopping,
+                Some(format!("[{}] MQTT reaction stopping", self.base.id)),
+            )
+            .await;
 
-        self.base.set_status(ComponentStatus::Stopping, Some(format!("[{}] MQTT reaction stopping", self.base.id))).await;
-
-
-        // Use ReactionBase common stop functionality
+        // stop the processing loop
         self.base.stop_common().await?;
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // stop the event loop and wait for it to finish aborting
+        if let Some(tx) = self.event_loop_shutdown_tx.lock().await.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.event_loop_task.lock().await.take() {
+            let _ = handle.await;
+        }
 
-        // Transition to Stopped
         self.base
             .set_status(
                 ComponentStatus::Stopped,
@@ -285,3 +363,59 @@ impl Reaction for MqttReaction {
         self.base.enqueue_query_result(result).await
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_config() -> MqttReactionConfig {
+        MqttReactionConfig {
+            url: "mqtt://localhost:1883".to_string(),
+            client_id: None,
+            protocol_version: crate::config::MqttProtocolVersion::V5,
+            routes: std::collections::HashMap::new(),
+            default_template: None,
+            identity_provider: None,
+            tls: None,
+            event_channel_capacity: 100,
+            max_inflight: None,
+            keep_alive: None,
+            clean_start: None,
+            conn_timeout: None,
+            session_expiry_interval: None,
+        }
+    }
+
+    #[test]
+    fn create_internal_assigns_default_client_id_when_missing() {
+        let reaction = MqttReaction::create_internal(
+            "rx-1".to_string(),
+            vec!["q1".to_string()],
+            base_config(),
+            None,
+            true,
+        )
+        .expect("reaction should be created");
+
+        assert_eq!(reaction.config.client_id.as_deref(), Some("drasi-mqtt-rx-1"));
+    }
+
+    #[test]
+    fn create_internal_preserves_explicit_client_id() {
+        let mut config = base_config();
+        config.client_id = Some("custom-client".to_string());
+
+        let reaction = MqttReaction::create_internal(
+            "rx-2".to_string(),
+            vec!["q1".to_string()],
+            config,
+            None,
+            true,
+        )
+        .expect("reaction should be created");
+
+        assert_eq!(reaction.config.client_id.as_deref(), Some("custom-client"));
+    }
+}
+

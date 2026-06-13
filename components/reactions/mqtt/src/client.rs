@@ -14,22 +14,19 @@
 
 use crate::config::MqttQoS;
 use crate::config::{MqttProtocolVersion, MqttReactionConfig};
+use crate::processor::MqttEventLoop;
+use crate::verifier::NoVerifier;
 use anyhow::Result;
-use drasi_lib::reactions::ReactionBase;
-use drasi_lib::reactions::ReactionBaseParams;
-use log::{error, info, warn};
-use rumqttc::v5::{mqttbytes::QoS as QosV5, AsyncClient as AsyncClientV5, Event, EventLoop as EventLoopV5, Incoming, MqttOptions as MqttOptionsV5};
-use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS};
+use log::error;
+use rumqttc::v5::{
+    mqttbytes::{v5::PublishProperties, QoS as QosV5}, AsyncClient as AsyncClientV5,
+    MqttOptions as MqttOptionsV5,
+};
+use rumqttc::{AsyncClient, MqttOptions, QoS};
 use rustls::ClientConfig;
-use core::error;
+use rustls::RootCertStore;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::runtime::Handle;
-use rustls::{RootCertStore};
-use rustls::HandshakeType::Certificate;
-use crate::verifier::NoVerifier;
-use rustls_native_certs;
-use rustls_pemfile::certs;
 
 impl MqttQoS {
     pub fn to_rumqttc_qos_v3_1_1(&self) -> QoS {
@@ -45,7 +42,6 @@ impl MqttQoS {
             MqttQoS::AtLeastOnce => QosV5::AtLeastOnce,
         }
     }
-    
 }
 
 enum MqttAsyncClient {
@@ -54,18 +50,42 @@ enum MqttAsyncClient {
 }
 
 trait Publish {
-    async fn publish(&self, topic: &str, payload: Vec<u8>, qos: MqttQoS, retain: bool) -> Result<()>;
+    async fn publish(&self, topic: &str, qos: MqttQoS, retain: bool, payload: String)
+        -> Result<()>;
 }
 
 impl Publish for MqttAsyncClient {
-    async fn publish(&self, topic: &str, payload: Vec<u8>, qos: MqttQoS, retain: bool) -> Result<()> {
+    async fn publish(
+        &self,
+        topic: &str,
+        qos: MqttQoS,
+        retain: bool,
+        payload: String,
+    ) -> Result<()> {
         match self {
             MqttAsyncClient::V5(client) => {
-                client.publish(topic, qos.to_rumqttc_qos_v5(), retain, payload).await?;
+                // set the hardcoded (V1) properties for v5 publish
+                let publish_properties = PublishProperties {
+                    content_type: Some("application/json".to_string()),
+                    payload_format_indicator: Some(1),
+                    ..Default::default()
+                };
+
+                client
+                    .publish_with_properties(
+                        topic,
+                        qos.to_rumqttc_qos_v5(),
+                        retain,
+                        payload,
+                        publish_properties,
+                    )
+                    .await?;
                 Ok(())
             }
             MqttAsyncClient::V3_1_1(client) => {
-                client.publish(topic, qos.to_rumqttc_qos_v3_1_1(), retain, payload).await?;
+                client
+                    .publish(topic, qos.to_rumqttc_qos_v3_1_1(), retain, payload)
+                    .await?;
                 Ok(())
             }
         }
@@ -73,102 +93,52 @@ impl Publish for MqttAsyncClient {
 }
 
 pub struct Client {
-    pub(crate) client_id: String,
     client: MqttAsyncClient,
 }
 
 impl Client {
-    pub async fn new(
-        config: &MqttReactionConfig,
-        mut shutdown_rx: tokio::sync::mpsc::Receiver<()>,
-    ) -> Result<(Self, tokio::task::JoinHandle<()>)> {
-
+    pub async fn new(config: &MqttReactionConfig) -> anyhow::Result<(Self, MqttEventLoop)> {
         match config.protocol_version {
             MqttProtocolVersion::V5 => {
                 let mqtt_options_v5 = Self::config_to_mqtt_options_v5(config).await?;
-                let (client, event_loop) = AsyncClientV5::new(mqtt_options_v5, config.event_channel_capacity);
-                let client_id = config.client_id.clone().unwrap_or_else(|| "".to_string());
-                let event_loop_handle = Self::start_event_loop_v5(client_id.clone(), event_loop, shutdown_rx).await?;
-                Ok((Self { client_id, client: MqttAsyncClient::V5(client) }, event_loop_handle))
+                let (client, event_loop) =
+                    AsyncClientV5::new(mqtt_options_v5, config.event_channel_capacity);
+                Ok((
+                    Self {
+                        client: MqttAsyncClient::V5(client),
+                    },
+                    MqttEventLoop::V5(event_loop),
+                ))
             }
             MqttProtocolVersion::V3_1_1 => {
                 let mqtt_options_v3_1_1 = Self::config_to_mqtt_options_v3_1_1(config).await?;
-                let (client, event_loop) = AsyncClient::new(mqtt_options_v3_1_1, config.event_channel_capacity);
-                let client_id = config.client_id.clone().unwrap_or_else(|| "".to_string());
-                let event_loop_handle = Self::start_event_loop_v3_1_1(client_id.clone(), event_loop, shutdown_rx).await?;
-                Ok((Self { client_id, client: MqttAsyncClient::V3_1_1(client) }, event_loop_handle))
+                let (client, event_loop) =
+                    AsyncClient::new(mqtt_options_v3_1_1, config.event_channel_capacity);
+                Ok((
+                    Self {
+                        client: MqttAsyncClient::V3_1_1(client),
+                    },
+                    MqttEventLoop::V3_1_1(event_loop),
+                ))
             }
         }
     }
 
-    async fn start_event_loop_v3_1_1(
-        client_id: String,
-        mut event_loop: EventLoop,
-        mut shutdown_rx: tokio::sync::mpsc::Receiver<()>,
-    ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-        let handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = shutdown_rx.recv() => {
-                        info!("[{client_id}] Received MQTT event loop shutdown signal, exiting event loop");
-                        break;
-                    },
-                    event = event_loop.poll() => {
-                        match event {
-                            Ok(_) => {},
-                            Err(e) => {
-                                warn!("[{client_id}] MQTT event loop error: {e}");
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(handle)
-    }
-
-    async fn start_event_loop_v5(
-        client_id: String,
-        mut event_loop: EventLoopV5,
-        mut shutdown_rx: tokio::sync::mpsc::Receiver<()>,
-    ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-        let handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = shutdown_rx.recv() => {
-                    info!("[{client_id}] Received MQTT event loop shutdown signal, exiting event loop");
-                    break;
-                    },
-                    event = event_loop.poll() => {
-                        match event {
-                            Ok(_) => {},
-                            Err(e) => {
-                                warn!("[{client_id}] MQTT event loop error: {e}");
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        Ok(handle)
-    }
-
+    /// Publish a message to the MQTT broker with the specified topic, payload, QoS, and retain flag.
     pub async fn publish(
         &self,
-        topic: &str,
-        payload: Vec<u8>,
+        topic: String,
         qos: MqttQoS,
         retain: bool,
+        payload: String,
     ) -> Result<()> {
-        self.client.publish(topic, payload, qos, retain).await?;
+        self.client.publish(&topic, qos, retain, payload).await?;
         Ok(())
     }
-
-    pub async fn config_to_mqtt_options_v5(
+    /// Translate the MqttReactionConfig into rumqttc::MqttOptions for v5
+    async fn config_to_mqtt_options_v5(
         config: &MqttReactionConfig,
     ) -> anyhow::Result<MqttOptionsV5> {
-
         // parse the URL to extract host and port
         let (host, port) = Self::parse_url(config)?;
 
@@ -183,56 +153,56 @@ impl Client {
         if let Some(identity_provider) = &config.identity_provider {
             let context = drasi_lib::identity::CredentialContext::new()
                 .with_property("hostname", &host)
-                .with_property("port", &port.to_string());
+                .with_property("port", port.to_string());
             let cred = identity_provider.get_credentials(&context).await;
             match cred {
-                Ok(cred) => {
-                    match cred {
-                        drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
-                            options.set_credentials(username, password);
-                        }
-                        _ => {
-                            error!("Unsupported credential type from identity provider, expected username/password");
-                            return Err(anyhow::anyhow!("Unsupported credential type from identity provider, deferred to v2"));
-                        }
+                Ok(cred) => match cred {
+                    drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
+                        options.set_credentials(username, password);
                     }
-                }
+                    _ => {
+                        error!("Unsupported credential type from identity provider, expected username/password");
+                        return Err(anyhow::anyhow!(
+                            "Unsupported credential type from identity provider, deferred to v2"
+                        ));
+                    }
+                },
                 Err(e) => {
                     error!("Failed to get credentials from identity provider: {e:?}");
-                    return Err(anyhow::anyhow!("Failed to get credentials from identity provider: {e:?}"));
+                    return Err(anyhow::anyhow!(
+                        "Failed to get credentials from identity provider: {e:?}"
+                    ));
                 }
             }
         }
 
         // set TLS options if provided (mTLS is not supported)
         if let Some(trasnport) = config.tls.as_ref() {
-
             let mut client_config = if trasnport.accept_invalid_certs {
                 ClientConfig::builder()
                     .dangerous()
                     .with_custom_certificate_verifier(Arc::new(NoVerifier))
                     .with_no_client_auth()
-            }
-            else {
-
+            } else {
                 let mut store: RootCertStore = RootCertStore::empty();
                 match &trasnport.ca {
                     None => {
                         // using system CA store
                         let certs = rustls_native_certs::load_native_certs().certs;
-                        for cert in  certs {
+                        for cert in certs {
                             store.add(cert)?;
                         }
-                    },
+                    }
                     Some(pem_bytes) => {
                         // using custom-user defined CA certs
-                        let certs = rustls_pemfile::certs(&mut &pem_bytes[..]).collect::<Result<Vec<_>, _>>()?;
+                        let certs = rustls_pemfile::certs(&mut &pem_bytes[..])
+                            .collect::<Result<Vec<_>, _>>()?;
                         for cert in certs {
                             store.add(cert)?;
                         }
                     }
                 }
-                
+
                 ClientConfig::builder()
                     .with_root_certificates(store)
                     .with_no_client_auth()
@@ -242,13 +212,9 @@ impl Client {
                 client_config.alpn_protocols = alpn.clone();
             }
 
-            options.set_transport(
-                rumqttc::Transport::tls_with_config(
-                    rumqttc::TlsConfiguration::Rustls(
-                        Arc::new(client_config),
-                    )
-                )
-            );
+            options.set_transport(rumqttc::Transport::tls_with_config(
+                rumqttc::TlsConfiguration::Rustls(Arc::new(client_config)),
+            ));
         }
 
         if let Some(keep_alive) = config.keep_alive {
@@ -270,11 +236,10 @@ impl Client {
         Ok(options)
     }
 
-
-    pub async fn config_to_mqtt_options_v3_1_1(
+    /// Translate the MqttReactionConfig into rumqttc::MqttOptions for v3.1.1
+    async fn config_to_mqtt_options_v3_1_1(
         config: &MqttReactionConfig,
     ) -> anyhow::Result<MqttOptions> {
-
         // parse the URL to extract host and port
         let (host, port) = Self::parse_url(config)?;
 
@@ -289,56 +254,56 @@ impl Client {
         if let Some(identity_provider) = &config.identity_provider {
             let context = drasi_lib::identity::CredentialContext::new()
                 .with_property("hostname", &host)
-                .with_property("port", &port.to_string());
+                .with_property("port", port.to_string());
             let cred = identity_provider.get_credentials(&context).await;
             match cred {
-                Ok(cred) => {
-                    match cred {
-                        drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
-                            options.set_credentials(username, password);
-                        }
-                        _ => {
-                            error!("Unsupported credential type from identity provider, expected username/password");
-                            return Err(anyhow::anyhow!("Unsupported credential type from identity provider, deferred to v2"));
-                        }
+                Ok(cred) => match cred {
+                    drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
+                        options.set_credentials(username, password);
                     }
-                }
+                    _ => {
+                        error!("Unsupported credential type from identity provider, expected username/password");
+                        return Err(anyhow::anyhow!(
+                            "Unsupported credential type from identity provider, deferred to v2"
+                        ));
+                    }
+                },
                 Err(e) => {
                     error!("Failed to get credentials from identity provider: {e:?}");
-                    return Err(anyhow::anyhow!("Failed to get credentials from identity provider: {e:?}"));
+                    return Err(anyhow::anyhow!(
+                        "Failed to get credentials from identity provider: {e:?}"
+                    ));
                 }
             }
         }
 
         // set TLS options if provided (mTLS is not supported)
         if let Some(trasnport) = config.tls.as_ref() {
-
             let mut client_config = if trasnport.accept_invalid_certs {
                 ClientConfig::builder()
                     .dangerous()
                     .with_custom_certificate_verifier(Arc::new(NoVerifier))
                     .with_no_client_auth()
-            }
-            else {
-
+            } else {
                 let mut store: RootCertStore = RootCertStore::empty();
                 match &trasnport.ca {
                     None => {
                         // using system CA store
                         let certs = rustls_native_certs::load_native_certs().certs;
-                        for cert in  certs {
+                        for cert in certs {
                             store.add(cert)?;
                         }
-                    },
+                    }
                     Some(pem_bytes) => {
                         // using custom-user defined CA certs
-                        let certs = rustls_pemfile::certs(&mut &pem_bytes[..]).collect::<Result<Vec<_>, _>>()?;
+                        let certs = rustls_pemfile::certs(&mut &pem_bytes[..])
+                            .collect::<Result<Vec<_>, _>>()?;
                         for cert in certs {
                             store.add(cert)?;
                         }
                     }
                 }
-                
+
                 ClientConfig::builder()
                     .with_root_certificates(store)
                     .with_no_client_auth()
@@ -348,13 +313,9 @@ impl Client {
                 client_config.alpn_protocols = alpn.clone();
             }
 
-            options.set_transport(
-                rumqttc::Transport::tls_with_config(
-                    rumqttc::TlsConfiguration::Rustls(
-                        Arc::new(client_config),
-                    )
-                )
-            );
+            options.set_transport(rumqttc::Transport::tls_with_config(
+                rumqttc::TlsConfiguration::Rustls(Arc::new(client_config)),
+            ));
         }
 
         if let Some(keep_alive) = config.keep_alive {
@@ -374,8 +335,13 @@ impl Client {
 
     fn parse_url(config: &MqttReactionConfig) -> anyhow::Result<(String, u16)> {
         let url = url::Url::parse(&config.url)?;
-        let host = url.host_str().ok_or_else(|| anyhow::anyhow!("Invalid URL: missing host"))?.to_string();
-        let port = url.port_or_known_default().ok_or_else(|| anyhow::anyhow!("Invalid URL: missing port and no default for scheme"))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid URL: missing host"))?
+            .to_string();
+        let port = url.port_or_known_default().ok_or_else(|| {
+            anyhow::anyhow!("Invalid URL: missing port and no default for scheme")
+        })?;
         Ok((host, port))
     }
 }

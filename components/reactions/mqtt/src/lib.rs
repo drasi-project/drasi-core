@@ -16,12 +16,12 @@
 mod client;
 pub mod config;
 mod mqtt;
-mod verifier;
 mod processor;
+mod verifier;
 use drasi_lib::identity::IdentityProvider;
+use drasi_lib::reactions::common::QueryConfig;
 pub use mqtt::MqttReaction;
 use std::collections::HashMap;
-use drasi_lib::reactions::common::QueryConfig;
 
 use crate::config::{MqttExtension, MqttProtocolVersion, MqttReactionConfig, MqttTlsConfig};
 
@@ -45,7 +45,6 @@ pub struct MqttReactionBuilder {
     conn_timeout: Option<u64>,
     session_expiry_interval: Option<u32>,
 }
-
 
 impl MqttReactionBuilder {
     // Create a new MQTT reaction builder with given ID
@@ -125,10 +124,7 @@ impl MqttReactionBuilder {
         self
     }
 
-    pub fn with_identity_provider(
-        mut self,
-        identity_provider: Box<dyn IdentityProvider>,
-    ) -> Self {
+    pub fn with_identity_provider(mut self, identity_provider: Box<dyn IdentityProvider>) -> Self {
         self.identity_provider = Some(identity_provider);
         self
     }

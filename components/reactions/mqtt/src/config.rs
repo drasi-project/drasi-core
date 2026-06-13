@@ -15,10 +15,9 @@
 //! Configuration types for MQTT reaction.
 //!
 //! This module contains configuration types for MQTT reaction and shared types.
+use drasi_lib::identity::IdentityProvider;
 use drasi_lib::reactions::common::TemplateRouting;
 pub use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
-use drasi_lib::identity::IdentityProvider;
-use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -26,12 +25,11 @@ fn default_event_channel_capacity() -> usize {
     100
 }
 
-
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize, Copy)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub enum MqttQoS {
-    AtMostOnce,  // QoS 0
-    #[default] 
+    AtMostOnce, // QoS 0
+    #[default]
     AtLeastOnce, // QoS 1
 }
 
@@ -65,7 +63,6 @@ pub struct MqttExtension {
     /// Silently omitted on v3.1.1 connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_expiry_interval: Option<u32>,
-
 
     /// MQTT Topic Slashes count
     #[serde(skip)]
@@ -191,31 +188,34 @@ impl TemplateRouting<MqttExtension> for MqttReactionConfig {
 }
 
 impl MqttReactionConfig {
-    pub fn validate(
-        &self,
-        queries: &Vec<String>
-    ) -> anyhow::Result<()>
-    {
-
+    pub fn validate(&self, queries: &Vec<String>) -> anyhow::Result<()> {
         // initial validation for values
         if self.event_channel_capacity == 0 {
-            return Err(anyhow::anyhow!("Event channel capacity must be greater than 0"));
+            return Err(anyhow::anyhow!(
+                "Event channel capacity must be greater than 0"
+            ));
         }
 
-        if self.max_inflight.map_or(false, |m| m == 0) {
-            return Err(anyhow::anyhow!("Max inflight messages must be greater than 0"));
+        if self.max_inflight == Some(0) {
+            return Err(anyhow::anyhow!(
+                "Max inflight messages must be greater than 0"
+            ));
         }
 
-        if self.keep_alive.map_or(false, |k| k < 5) {
-            return Err(anyhow::anyhow!("Keep-alive interval must be at least 5 seconds"));
+        if self.keep_alive.is_some_and(|k| k < 5) {
+            return Err(anyhow::anyhow!(
+                "Keep-alive interval must be at least 5 seconds"
+            ));
         }
 
-        if self.conn_timeout .map_or(false, |t| t == 0) {
+        if self.conn_timeout == Some(0) {
             return Err(anyhow::anyhow!("Connection timeout must be greater than 0"));
         }
 
-        if self.session_expiry_interval.map_or(false, |s| s == 0) {
-            return Err(anyhow::anyhow!("Session expiry interval must be greater than 0"));
+        if self.session_expiry_interval == Some(0) {
+            return Err(anyhow::anyhow!(
+                "Session expiry interval must be greater than 0"
+            ));
         }
 
         // validate the TLS config
@@ -232,13 +232,10 @@ impl MqttReactionConfig {
             self.validate_route(default_template)?;
         }
 
-
         Ok(())
     }
-    
-    fn validate_tls_config(
-        &self
-    ) -> anyhow::Result<()> {
+
+    fn validate_tls_config(&self) -> anyhow::Result<()> {
         if let Some(tls_config) = self.tls.as_ref() {
             if tls_config.client_auth.is_some() {
                 return Err(anyhow::anyhow!(
@@ -249,10 +246,7 @@ impl MqttReactionConfig {
         Ok(())
     }
 
-    fn validate_url_type(
-        &self
-    ) -> anyhow::Result<()>
-    {
+    fn validate_url_type(&self) -> anyhow::Result<()> {
         let url = url::Url::parse(&self.url)
             .map_err(|e| anyhow::anyhow!("Invalid MQTT broker URL '{}': {}", self.url, e))?;
 
@@ -263,8 +257,7 @@ impl MqttReactionConfig {
         let valid_schemes = ["mqtt", "mqtts", "ws", "wss"];
         if !valid_schemes.contains(&schema) {
             return Err(anyhow::anyhow!(
-                "Unsupported URL scheme '{}'. Valid schemes are: {:?}",
-                schema, valid_schemes
+                "Unsupported URL scheme '{schema}'. Valid schemes are: {valid_schemes:?}"
             ));
         }
 
@@ -273,14 +266,14 @@ impl MqttReactionConfig {
             "mqtts" | "wss" => {
                 if self.tls.is_none() {
                     return Err(anyhow::anyhow!(
-                        "TLS configuration is required for URL scheme '{}'", schema
+                        "TLS configuration is required for URL scheme '{schema}'"
                     ));
                 }
             }
             "mqtt" | "ws" => {
                 if self.tls.is_some() {
                     return Err(anyhow::anyhow!(
-                        "TLS configuration should be None for URL scheme '{}'", schema
+                        "TLS configuration should be None for URL scheme '{schema}'"
                     ));
                 }
             }
@@ -289,19 +282,15 @@ impl MqttReactionConfig {
         Ok(())
     }
 
-    fn validate_routes(
-        &self,
-        queries: &Vec<String>
-    ) -> anyhow::Result<()> {
-
+    fn validate_routes(&self, queries: &Vec<String>) -> anyhow::Result<()> {
         let unique_queries = queries.iter().collect::<std::collections::HashSet<_>>();
         // check that all routes reference valid queries and validate each route config
         let mut subscribed_queries_ctr = 0;
         for (query_id, query_config) in &self.routes {
             if !unique_queries.contains(query_id) {
-                return Err(
-                    anyhow::anyhow!("Route defined for query '{}' which is not in the list of valid queries", query_id)
-                );
+                return Err(anyhow::anyhow!(
+                    "Route defined for query '{query_id}' which is not in the list of valid queries"
+                ));
             } else {
                 self.validate_route(query_config)?;
                 subscribed_queries_ctr += 1;
@@ -310,11 +299,7 @@ impl MqttReactionConfig {
         Ok(())
     }
 
-    fn validate_route(
-        &self,
-        route_config: &QueryConfig<MqttExtension>
-    ) -> anyhow::Result<()> {
-        
+    fn validate_route(&self, route_config: &QueryConfig<MqttExtension>) -> anyhow::Result<()> {
         if let Some(added) = route_config.added.as_ref() {
             self.validate_template(&added.template)?;
             self.validate_topic(&added.extension.topic)?;
@@ -333,23 +318,21 @@ impl MqttReactionConfig {
         Ok(())
     }
 
-    fn validate_template(
-        &self,
-        template: &str
-    ) -> anyhow::Result<()> {
-        
+    fn validate_template(&self, template: &str) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn validate_topic(
-        &self,
-        topic: &str
-    ) -> anyhow::Result<()> {
-
-        if topic.len() == 0 {
+    fn validate_topic(&self, topic: &str) -> anyhow::Result<()> {
+        if topic.is_empty() {
             return Err(anyhow::anyhow!("Topic cannot be empty"));
         }
-        
+
+        if topic.len() > u16::MAX as usize {
+            return Err(anyhow::anyhow!(
+                "Topic UTF-8 length exceeds MQTT limit of 65535 bytes"
+            ));
+        }
+
         let topic_bytes = topic.as_bytes();
         let topic_len = topic_bytes.len();
 
@@ -360,15 +343,75 @@ impl MqttReactionConfig {
             }
 
             if b == b'+' || b == b'#' {
-                return Err(anyhow::anyhow!("Topic cannot contain wildcard characters '+' or '#'"));
+                return Err(anyhow::anyhow!(
+                    "Topic cannot contain wildcard characters '+' or '#'"
+                ));
             }
 
             if i != 0 && b == b'/' && topic_bytes[i - 1] == b'/' {
-                return Err(anyhow::anyhow!("Topic cannot contain empty levels (consecutive '/')"));
+                return Err(anyhow::anyhow!(
+                    "Topic cannot contain empty levels (consecutive '/')"
+                ));
             }
         }
         Ok(())
     }
+}
 
-    
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_config() -> MqttReactionConfig {
+        MqttReactionConfig {
+            url: "mqtt://localhost:1883".to_string(),
+            client_id: Some("test-client".to_string()),
+            protocol_version: MqttProtocolVersion::V5,
+            routes: HashMap::new(),
+            default_template: None,
+            identity_provider: None,
+            tls: None,
+            event_channel_capacity: 100,
+            max_inflight: Some(10),
+            keep_alive: Some(30),
+            clean_start: Some(true),
+            conn_timeout: Some(5_000),
+            session_expiry_interval: None,
+        }
+    }
+
+    #[test]
+    fn validate_topic_rejects_empty() {
+        let cfg = base_config();
+        let err = cfg.validate_topic("").unwrap_err();
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn validate_topic_rejects_wildcards() {
+        let cfg = base_config();
+        assert!(cfg.validate_topic("stocks/+/updated").is_err());
+        assert!(cfg.validate_topic("stocks/#").is_err());
+    }
+
+    #[test]
+    fn validate_topic_rejects_empty_level() {
+        let cfg = base_config();
+        let err = cfg.validate_topic("stocks//updated").unwrap_err();
+        assert!(err.to_string().contains("empty levels"));
+    }
+
+    #[test]
+    fn validate_topic_rejects_too_long() {
+        let cfg = base_config();
+        let topic = "a".repeat(65536);
+        let err = cfg.validate_topic(&topic).unwrap_err();
+        assert!(err.to_string().contains("65535"));
+    }
+
+    #[test]
+    fn validate_topic_accepts_valid_topic() {
+        let cfg = base_config();
+        assert!(cfg.validate_topic("stocks/all-prices/updated").is_ok());
+    }
 }

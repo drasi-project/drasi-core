@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use rustls::client::danger::ServerCertVerifier;
+use rustls::crypto::CryptoProvider;
 
 #[derive(Debug)]
 pub struct NoVerifier;
@@ -48,9 +49,9 @@ impl ServerCertVerifier for NoVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
+        CryptoProvider::get_default()
+            .expect("rustls CryptoProvider not installed")
             .signature_verification_algorithms
             .supported_schemes()
     }
-
 }
