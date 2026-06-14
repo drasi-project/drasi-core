@@ -15,6 +15,11 @@ Drasi Server supports two build modes for plugins:
 Both modes use the same plugin source code — the `export_plugin!` macro generates FFI
 entry points only when the `dynamic-plugin` feature is enabled on a plugin crate.
 
+> **Note:** The server-level feature flags above are plural (`builtin-plugins`, `dynamic-plugins`).
+> Each individual plugin crate also defines a **singular** `dynamic-plugin = []` feature that
+> gates its own `export_plugin!` invocation. Both layers must be enabled for a plugin to load
+> dynamically.
+
 ## Architecture Diagram
 
 ```
@@ -63,7 +68,7 @@ entry points only when the `dynamic-plugin` feature is enabled on a plugin crate
 
 | Crate | Location | Role |
 |-------|----------|------|
-| `drasi-plugin-sdk` | `drasi-core/components/plugin-sdk` | Plugin-side SDK: FFI types, vtables, `export_plugin!` macro, vtable generation, FfiLogger, FfiStateStoreProxy |
+| `drasi-plugin-sdk` | `drasi-core/components/plugin-sdk` | Plugin-side SDK: FFI types, vtables, `export_plugin!` macro, vtable generation, FfiTracingLayer, FfiStateStoreProxy |
 | `drasi-host-sdk` | `drasi-core/components/host-sdk` | Host-side SDK: `PluginLoader`, proxy types (impl Source/Reaction/SourcePlugin), callback wiring, schema merging |
 | `drasi-server` | `drasi-server/` | Application: REST API, config persistence, OpenAPI spec, server lifecycle — uses `drasi-host-sdk` for dynamic loading |
 | `drasi-lib` | `drasi-core/lib/` | Core processing: query engine, routers, channels — no FFI awareness |
@@ -106,7 +111,7 @@ Provide initial data snapshots to populate queries when sources are connected.
    c. Validate SDK version (major.minor must match host)
    d. Validate target triple (must match host)
    e. Resolve drasi_plugin_init() → FfiPluginRegistration
-   f. Call init → plugin initializes its tokio runtime, installs FfiLogger
+   f. Call init → plugin initializes its tokio runtime, installs FfiTracingLayer
    g. Wire log callback (plugin → host logging)
    h. Wire lifecycle callback (plugin → host events)
    i. Extract descriptor vtables into proxy types
@@ -137,7 +142,11 @@ pub extern "C" fn drasi_plugin_init() -> *mut FfiPluginRegistration
 |-------|-------|----------|-----------|
 | `sdk_version` | Major.minor match | **REJECT** | `#[repr(C)]` layout changes are breaking |
 | `target_triple` | Exact match | **REJECT** | Cannot load x86_64 `.so` on aarch64 |
+| `core_version` | Log only | **INFO** | Informational — core type layout validated via `sdk_version` |
+| `lib_version` | Log only | **INFO** | Informational — trait version validated via `sdk_version` |
 | `plugin_version` | Log only | **INFO** | Plugin's own version — no compatibility constraint |
+| `git_commit` | Log only | **INFO** | Build-time provenance (SHA of the plugin build) |
+| `build_timestamp` | Log only | **INFO** | Build-time provenance (timestamp of the plugin build) |
 
 ## FFI Boundary Design
 
@@ -239,19 +248,26 @@ OS thread.
 
 ### Plugin → Host Log Bridge
 
-Plugins use standard `log::info!()` / `log::error!()` macros. The `export_plugin!` macro
-installs an `FfiLogger` that forwards all log records to the host via a callback:
+Plugins use standard `log::info!()` / `tracing::info!()` macros. The bridge works in
+two steps:
+
+1. `tracing-log`'s `LogTracer` converts any `log` crate records into `tracing` events,
+   so both logging frameworks feed the same pipeline.
+2. `FfiTracingLayer` (in `components/plugin-sdk/src/ffi/tracing_bridge.rs`) subscribes to
+   those tracing events and forwards each one through the host log callback, preserving
+   span context for correct routing.
 
 ```
-Plugin: log::info!("connected")
-  → FfiLogger.log(record)
+Plugin: log::info!("connected")   or   tracing::info!("connected")
+  → LogTracer converts log records to tracing events
+  → FfiTracingLayer receives the tracing event (with span context)
   → Serialize to FfiLogEntry { level, plugin_id, message }
   → Call host_log_callback(entry_ptr)
-  → Host: log::log!(level, "[plugin:{}] {}", id, message)
+  → Host: re-logs the entry with the appropriate component key
 ```
 
-The `tracing` crate's `log` feature causes tracing events to fall back to `log` records
-when no tracing subscriber is set in the plugin's cdylib, so both logging frameworks work.
+> **Note:** The older `FfiLogger` (`log::Log` impl) has been removed. All log routing
+> now goes through `FfiTracingLayer`.
 
 ## Plugin Development Guide
 
@@ -292,6 +308,7 @@ impl Source for MyDbSource {
     async fn status(&self) -> ComponentStatus { /* ... */ }
     async fn subscribe(&self, settings: SourceSubscriptionSettings)
         -> anyhow::Result<SubscriptionResponse> { /* ... */ }
+    // optional: fn describe_schema(&self) -> Option<SourceSchema> { None }
     // ...
 }
 ```
@@ -423,14 +440,14 @@ where adaptive plugins inherit cdylib entry points from their base dependencies.
 
 ```sh
 # Static tests
-cargo test --lib                                                    # 196 tests
-cargo test --test error_resilience_test                             # 11 tests
+cargo test --lib
+cargo test --test error_resilience_test
 
 # Dynamic tests (requires: make build-dynamic-plugins)
-cargo test --no-default-features --features dynamic-plugins --lib   # 185 tests
+cargo test --no-default-features --features dynamic-plugins --lib
 
 # Host-SDK integration tests (requires pre-built cdylib plugins)
-cd ../drasi-core && cargo test -p drasi-host-sdk --test integration_test  # 22 tests
+cd ../drasi-core && cargo test -p drasi-host-sdk --test integration_test
 
 # Smoke tests (builds and runs server with all plugins)
 make test-smoke
