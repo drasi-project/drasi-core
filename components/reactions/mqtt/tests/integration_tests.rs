@@ -345,7 +345,7 @@ async fn test_mqtt_reaction_publish_qos0() {
 
     // inject data to the http source to trigger the reaction
     let http_client = reqwest::Client::new();
-    let handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await; // wait a bit to ensure the subscriber is ready
         let payload = r#"
             {

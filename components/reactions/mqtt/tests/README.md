@@ -1,6 +1,6 @@
 # MQTT Reaction Integration Tests
 
-These integration tests usese a real Mosquitto instance via testcontainers.
+These integration tests use a real Mosquitto instance via testcontainers.
 
 ## Running tests
 

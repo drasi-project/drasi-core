@@ -1,276 +1,293 @@
 # MQTT Reaction
 
-The MQTT reaction publishes Drasi continuous query changes to an MQTT broker. It is designed for IoT and event-driven integrations where query diffs (ADD/UPDATE/DELETE) should be emitted to MQTT topics in near real time.
+MQTT Reaction publishes Drasi continuous query result diffs to an MQTT broker.
+It is useful for IoT, edge, automation, and event-driven integrations where
+`ADD`, `UPDATE`, and `DELETE` changes should be delivered as MQTT messages.
 
 ## Overview
 
-This component subscribes to one or more Drasi queries and publishes each result diff as an MQTT message.
+The MQTT reaction subscribes to one or more Drasi queries and publishes each
+result diff to a configured MQTT topic.
 
-Supported capabilities:
+Key capabilities:
 
-- Builder-based setup (`MqttReactionBuilder`) and struct-based setup (`MqttReactionConfig`)
-- Per-query and per-operation routing (`added`, `updated`, `deleted`)
-- Topic/body templating via Handlebars
-- QoS and retain controls per call
-- Username/password authentication
-- TCP and TLS transport modes
-- Optional adaptive batching for higher throughput workloads
+- MQTT v5 by default, with MQTT v3.1.1 support
+- Plain TCP and TLS broker URLs
+- Per-query routing with `routes` and fallback `default_template`
+- Handlebars templates for MQTT topics and payloads
+- QoS 0 and QoS 1 publishing
+- Retained messages and empty retained payloads
+- Username/password authentication through an identity provider
+- Priority queue processing in timestamp order
 
-## Quick IoT Smoke Test
+## Configuration
 
-If you only want to verify MQTT publishing quickly:
+### Builder usage
 
-1. Run a local broker (for example, Mosquitto) on `localhost:1883`.
-2. Subscribe with a topic wildcard, for example `#`.
-3. Configure this reaction with one query and `default_topic`.
-4. Trigger data changes that produce query diffs.
-5. Confirm messages appear in your MQTT subscriber.
-
-Minimal reaction setup:
-
-```rust,ignore
+```rust
+use drasi_lib::identity::PasswordIdentityProvider;
+use drasi_lib::reactions::common::TemplateSpec;
+use drasi_reaction_mqtt::config::{MqttExtension, MqttQoS, QueryConfig};
 use drasi_reaction_mqtt::MqttReaction;
 
-let reaction = MqttReaction::builder("iot-mqtt")
-	.with_query("temperature-alerts")
-	.with_broker_addr("localhost")
-	.with_port(1883)
-	.with_default_topic("iot/alerts")
-	.build()?;
-```
+fn mqtt_extension(topic: &str) -> MqttExtension {
+    MqttExtension {
+        topic: topic.to_string(),
+        qos: MqttQoS::AtLeastOnce,
+        retain: false,
+        empty_payload: false,
+        message_expiry_interval: None,
+        slashes_count: topic.matches('/').count(),
+    }
+}
 
-When no explicit `query_configs` route exists, the reaction falls back to the default topic route for ADD/UPDATE/DELETE.
-
-## Configuration Approaches
-
-### Builder Pattern (Recommended)
-
-```rust,ignore
-use drasi_reaction_mqtt::{MqttReaction, config::MqttAuthMode};
+let default_template = QueryConfig {
+    added: Some(TemplateSpec::with_extension(
+        r#"{"op":"{{operation}}","query":"{{query_name}}","data":{{json after}}}"#,
+        mqtt_extension("drasi/{{query_name}}/added"),
+    )),
+    updated: Some(TemplateSpec::with_extension(
+        r#"{"op":"{{operation}}","before":{{json before}},"after":{{json after}}}"#,
+        mqtt_extension("drasi/{{query_name}}/updated"),
+    )),
+    deleted: Some(TemplateSpec::with_extension(
+        r#"{"op":"{{operation}}","data":{{json before}}}"#,
+        mqtt_extension("drasi/{{query_name}}/deleted"),
+    )),
+};
 
 let reaction = MqttReaction::builder("mqtt-reaction")
-	.with_query("stock-prices")
-	.with_broker_addr("mqtt.example.com")
-	.with_port(1883)
-	.with_default_topic("stocks/updates")
-	.with_keep_alive(60)
-	.with_auth_mode(MqttAuthMode::UsernamePassword {
-		username: "user".to_string(),
-		password: "pass".to_string(),
-	})
-	.build()?;
+    .with_query("temperature-alerts")
+    .with_url("mqtt://localhost:1883")
+    .with_client_id("drasi-temperature-alerts")
+    .with_keep_alive(30)
+    .with_default_template(default_template)
+    .with_identity_provider(Box::new(PasswordIdentityProvider::new("user", "pass")))
+    .build()?;
 ```
 
-### Config Struct Approach
+### Config struct usage
 
-```rust,ignore
-use drasi_reaction_mqtt::{MqttReaction, MqttReactionConfig};
-use drasi_reaction_mqtt::config::{MqttAuthMode, MqttTransportMode};
+```rust
+use std::collections::HashMap;
+
+use drasi_lib::reactions::common::TemplateSpec;
+use drasi_reaction_mqtt::config::{
+    MqttExtension, MqttProtocolVersion, MqttQoS, MqttReactionConfig, QueryConfig,
+};
+use drasi_reaction_mqtt::MqttReaction;
+
+fn mqtt_extension(topic: &str) -> MqttExtension {
+    MqttExtension {
+        topic: topic.to_string(),
+        qos: MqttQoS::AtLeastOnce,
+        retain: false,
+        empty_payload: false,
+        message_expiry_interval: None,
+        slashes_count: topic.matches('/').count(),
+    }
+}
+
+let mut routes = HashMap::new();
+routes.insert(
+    "temperature-alerts".to_string(),
+    QueryConfig {
+        added: Some(TemplateSpec::with_extension(
+            "{{json after}}",
+            mqtt_extension("alerts/temperature/added"),
+        )),
+        updated: Some(TemplateSpec::with_extension(
+            r#"{"before":{{json before}},"after":{{json after}}}"#,
+            mqtt_extension("alerts/temperature/updated"),
+        )),
+        deleted: Some(TemplateSpec::with_extension(
+            "{{json before}}",
+            mqtt_extension("alerts/temperature/deleted"),
+        )),
+    },
+);
 
 let config = MqttReactionConfig {
-	broker_addr: "mqtt.example.com".to_string(),
-	port: 1883,
-	transport_mode: MqttTransportMode::TCP,
-	keep_alive: 60,
-	clean_session: true,
-	auth_mode: MqttAuthMode::UsernamePassword {
-		username: "user".to_string(),
-		password: "pass".to_string(),
-	},
-	request_channel_capacity: 20,
-	event_channel_capacity: 40,
-	pending_throttle: 0,
-	connection_timeout: 30,
-	max_packet_size: 10 * 1024,
-	max_inflight: 100,
-	default_topic: "stocks/updates".to_string(),
-	query_configs: Default::default(),
-	adaptive: None,
+    url: "mqtt://localhost:1883".to_string(),
+    client_id: Some("drasi-temperature-alerts".to_string()),
+    protocol_version: MqttProtocolVersion::V5,
+    routes,
+    default_template: None,
+    identity_provider: None,
+    tls: None,
+    event_channel_capacity: 100,
+    max_inflight: Some(100),
+    keep_alive: Some(30),
+    clean_start: Some(true),
+    conn_timeout: Some(5_000),
+    session_expiry_interval: None,
 };
 
 let reaction = MqttReaction::new(
-	"mqtt-reaction",
-	vec!["stock-prices".to_string()],
-	config,
-);
+    "mqtt-reaction",
+    vec!["temperature-alerts".to_string()],
+    config,
+)?;
 ```
 
-## Builder API Reference
+## `MqttReactionConfig`
 
-`MqttReaction::builder(id)` returns `MqttReactionBuilder`.
+| Field | Type | Required | Default | Description |
+|---|---|---:|---|---|
+| `url` | `String` | Yes | `mqtt://localhost:1883` in builder | Broker URL. Supported schemes: `mqtt`, `mqtts`. |
+| `client_id` | `Option<String>` | No | `drasi-mqtt-{reaction_id}` | MQTT client ID. Set this when using persistent sessions. |
+| `protocol_version` | `MqttProtocolVersion` | No | `V5` | MQTT protocol version: `V5` or `V3_1_1`. |
+| `routes` | `HashMap<String, QueryConfig<MqttExtension>>` | No | `{}` | Query-specific templates. Keys must match subscribed query IDs. |
+| `default_template` | `Option<QueryConfig<MqttExtension>>` | No | `None` | Fallback templates used when a query route or operation template is missing. |
+| `identity_provider` | `Option<Box<dyn IdentityProvider>>` | No | `None` | Username/password credentials provider. |
+| `tls` | `Option<MqttTlsConfig>` | For `mqtts` | `None` | TLS configuration. Must be `None` for `mqtt`. |
+| `event_channel_capacity` | `usize` | No | `100` | Internal MQTT event channel capacity. Must be greater than `0`. |
+| `max_inflight` | `Option<u16>` | No | rumqttc default | Maximum outgoing inflight QoS 1 messages. |
+| `keep_alive` | `Option<u64>` | No | rumqttc default | Keep-alive interval in seconds. Must be at least `5` when set. |
+| `clean_start` | `Option<bool>` | No | rumqttc default | Clean session/start flag. |
+| `conn_timeout` | `Option<u64>` | No | rumqttc default | Connection timeout in milliseconds for MQTT v5. |
+| `session_expiry_interval` | `Option<u32>` | No | `None` | MQTT v5 session expiry interval. Meaningful with `clean_start: false`. |
 
-| Method | Purpose |
-|------|------|
-| `with_query(query)` | Add one subscribed query ID. |
-| `with_queries(queries)` | Replace all subscribed query IDs. |
-| `with_broker_addr(addr)` | Broker host or IP. |
-| `with_port(port)` | Broker port. |
-| `with_transport_mode(mode)` | Use `MqttTransportMode::TCP` or `MqttTransportMode::TLS { .. }`. |
-| `with_keep_alive(seconds)` | MQTT keep-alive interval. |
-| `with_clean_session(clean)` | MQTT clean start/session behavior. |
-| `with_auth_mode(auth)` | `MqttAuthMode::None` or `UsernamePassword`. |
-| `with_request_channel_capacity(cap)` | Outgoing request channel size. |
-| `with_event_channel_capacity(cap)` | MQTT event loop channel size, used in eventloop initialization. |
-| `with_pending_throttle(throttle)` | Delay between retransmits (`Duration::from_micros`). |
-| `with_connection_timeout(timeout)` | Connection timeout seconds. |
-| `with_max_packet_size(bytes)` | Max incoming packet size fallback. |
-| `with_max_inflight(count)` | Upper bound for in-flight outgoing publishes. |
-| `with_default_topic(topic)` | Default topic base for fallback routing. |
-| `with_query_config(query_name, config)` | Set route for a single query. (`*` to select all queries, default if a specific query is not found.). |
-| `with_query_configs(map)` | Replace route map. |
-| `with_query_configs_extend(iter)` | Extend route map. |
-| `with_priority_queue_capacity(cap)` | Override reaction priority queue capacity. |
-| `with_auto_start(bool)` | Auto-start when added to Drasi runtime. |
-| `with_adaptive_config(cfg)` | Provide full adaptive batching config. |
-| `with_min_adaptive_batch_size(size)` | Adaptive min batch size helper. |
-| `with_max_adaptive_batch_size(size)` | Adaptive max batch size helper. |
-| `with_adaptive_window_size(size)` | Adaptive throughput window size helper. |
-| `with_adaptive_batch_timeout_ms(ms)` | Adaptive batch timeout helper. |
-| `with_config(config)` | Apply full `MqttReactionConfig` at once. |
-| `build()` | Build `MqttReaction` (`anyhow::Result<MqttReaction>`). |
+## `MqttExtension`
 
-## `MqttReactionConfig` Reference
+`MqttExtension` adds MQTT-specific fields to the shared
+`TemplateSpec<MqttExtension>` type.
 
-Defaults are taken from `config.rs`.
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `topic` | `String` | empty | MQTT topic template. Must render to a valid publish topic. |
+| `qos` | `MqttQoS` | `AtLeastOnce` | `AtMostOnce` for QoS 0 or `AtLeastOnce` for QoS 1. |
+| `retain` | `bool` | `false` | Sets the MQTT retain flag. |
+| `empty_payload` | `bool` | `false` | Publishes a zero-byte payload instead of the rendered template. Useful for clearing retained messages. |
+| `message_expiry_interval` | `Option<u32>` | `None` | MQTT v5 message expiry interval in seconds. |
+| `slashes_count` | `usize` | `0` | Internal topic-template slash count used to reject unsafe rendered topics. Set to `topic.matches('/').count()` when constructing `MqttExtension` directly. |
 
-| Field | Type | Default | Notes |
-|------|------|------|------|
-| `broker_addr` | `String` | `"localhost"` | MQTT broker host. |
-| `port` | `u16` | `1883` | MQTT broker port. |
-| `transport_mode` | `MqttTransportMode` | `TCP` | `TCP` or `TLS { ca, alpn, client_auth }`. |
-| `keep_alive` | `u64` | `60` | Keep-alive in seconds. |
-| `clean_session` | `bool` | `true` | Clean session/start flag. |
-| `auth_mode` | `MqttAuthMode` | `None` | None or username/password. |
-| `request_channel_capacity` | `usize` | `10` | Publish request channel capacity. |
-| `event_channel_capacity` | `usize` | `20` | Event loop queue capacity. |
-| `pending_throttle` | `u64` | `0` | Applied as microseconds. |
-| `connection_timeout` | `u64` | `30` | Connection timeout in seconds. |
-| `max_packet_size` | `u32` | `10240` | Incoming packet size fallback. |
-| `max_inflight` | `u16` | `100` | Max inflight outgoing messages. |
-| `default_topic` | `String` | `""` | Used by fallback route generation. |
-| `query_configs` | `HashMap<String, MqttQueryConfig>` | `{}` | Per-query routing map. |
-| `adaptive` | `Option<AdaptiveBatchConfig>` | `None` | Enables adaptive batching when set. |
+## Routing
 
-## Routing and Payloads
+Routing follows the shared reaction template pattern:
 
-`query_configs` controls how each query publishes. For every query, `MqttQueryConfig` can specify:
+1. Use `routes[query_id]` for the matching query and operation.
+2. Fall back to `default_template` for the operation.
+3. If no template is found, skip the diff and log a warning.
 
-- `added: Option<MqttCallSpec>`
-- `updated: Option<MqttCallSpec>`
-- `deleted: Option<MqttCallSpec>`
+`QueryConfig<MqttExtension>` can configure separate templates for:
 
-`MqttCallSpec` fields:
+- `added`
+- `updated`
+- `deleted`
 
-- `topic: String` (required)
-- `body: String` (optional Handlebars template; empty means default JSON payload)
-- `retain: RetainPolicy` (`Retain` or `NoRetain`)
-- `qos: QualityOfService` (`AtMostOnce`, `AtLeastOnce`, `ExactlyOnce`)
+Aggregation diffs use the `updated` template and set `operation` to
+`"AGGREGATION"`.
 
-### Route Resolution Order
+## Template Variables
 
-When processing a query result, routing is resolved in this order:
+Payload and topic templates use Handlebars. Templates can reference:
 
-1. Exact query ID match in `query_configs`
-2. Wildcard key `"*"`
-3. Last segment of dotted query ID (for example `source.alerts` -> `alerts`)
-4. Fallback default route using `default_topic` for all operations
-
-### Default Payload Behavior
-
-If `call_spec.body` is empty, the reaction publishes serialized JSON of the operation payload.
-
-### Template Context Variables
-
-Handlebars templates can use:
-
-- `query_name`: query ID string
-- `operation`: `ADD`, `UPDATE`, `DELETE`
-- `after`: ADD data, UPDATE after state
-- `before`: UPDATE before state, DELETE data
-- `data`: available for UPDATE payload shape
+| Variable | ADD | UPDATE | DELETE | Description |
+|---|---|---|---|---|
+| `after` | Yes | Yes | No | New/current row state. |
+| `before` | No | Yes | Yes | Previous row state. |
+| `data` | No | Yes | No | Raw `data` field when present in update payloads. |
+| `query_name` | Yes | Yes | Yes | Query ID that produced the diff. |
+| `operation` | Yes | Yes | Yes | `ADD`, `UPDATE`, `DELETE`, or `AGGREGATION`. |
+| `timestamp` | Yes | Yes | Yes | Query result timestamp as RFC3339. |
 
 Helper:
 
-- `{{json value}}` serializes a value as JSON
+- `{{json value}}` serializes a nested value as JSON.
 
-## Example: Per-Operation Topics and Bodies
+If `template` is empty and `empty_payload` is `false`, the reaction publishes
+the raw JSON value for the diff.
 
-```rust,ignore
-use std::collections::HashMap;
-use drasi_reaction_mqtt::{MqttReaction, config::{
-	MqttCallSpec, MqttQueryConfig, QualityOfService, RetainPolicy
-}};
+## Topic Safety
 
-let sensor_query = MqttQueryConfig {
-	added: Some(MqttCallSpec {
-		topic: "iot/sensors/added".to_string(),
-		body: r#"{"op":"{{operation}}","query":"{{query_name}}","payload":{{json after}}}"#.to_string(),
-		retain: RetainPolicy::NoRetain,
-		qos: QualityOfService::AtLeastOnce,
-	}),
-	updated: Some(MqttCallSpec {
-		topic: "iot/sensors/updated".to_string(),
-		body: r#"{"before":{{json before}},"after":{{json after}}}"#.to_string(),
-		retain: RetainPolicy::NoRetain,
-		qos: QualityOfService::AtLeastOnce,
-	}),
-	deleted: Some(MqttCallSpec {
-		topic: "iot/sensors/deleted".to_string(),
-		body: r#"{"op":"{{operation}}","payload":{{json before}}}"#.to_string(),
-		retain: RetainPolicy::NoRetain,
-		qos: QualityOfService::AtLeastOnce,
-	}),
-};
+Configured and rendered topics are validated before publishing:
 
-let reaction = MqttReaction::builder("iot-routes")
-	.with_query("sensor-alerts")
-	.with_query_config("sensor-alerts", sensor_query)
-	.build()?;
+- Topics cannot be empty.
+- Topics cannot contain MQTT wildcards `+` or `#`.
+- Topics cannot contain null characters.
+- Topics cannot contain empty levels such as `alerts//temperature`.
+- Rendered template values cannot introduce additional `/` topic levels.
+- Topic UTF-8 length cannot exceed the MQTT limit of 65,535 bytes.
+
+## Broker URL and TLS
+
+Transport is selected by the `url` scheme:
+
+| Scheme | Transport | Default port |
+|---|---|---:|
+| `mqtt://` | TCP | `1883` |
+| `mqtts://` | TLS over TCP | `8883` |
+
+For `mqtts`, provide `MqttTlsConfig` with `with_tls(...)` or in
+`MqttReactionConfig.tls`. Public-CA brokers can use `MqttTlsConfig` with
+`ca: None` to load the system CA store. Custom CA bundles use PEM bytes in
+`ca`.
+
+`client_auth` is present in the type but is not supported in v1. If it is set,
+startup validation fails.
+
+## Authentication
+
+Username/password authentication is configured with an identity provider:
+
+```rust
+use drasi_lib::identity::PasswordIdentityProvider;
+use drasi_reaction_mqtt::MqttReaction;
+
+let reaction = MqttReaction::builder("mqtt-reaction")
+    .with_query("temperature-alerts")
+    .with_url("mqtt://broker.example.com:1883")
+    .with_identity_provider(Box::new(PasswordIdentityProvider::new("user", "pass")))
+    .build()?;
 ```
 
-## Authentication and Transport
+Other credential types are rejected in this version.
 
-### Authentication
+## Builder Methods
 
-- `MqttAuthMode::None`
-- `MqttAuthMode::UsernamePassword { username, password }`
+| Method | Description |
+|---|---|
+| `with_query(query)` | Add one subscribed query ID. |
+| `with_queries(queries)` | Replace all subscribed query IDs. |
+| `with_url(url)` | Set broker URL. |
+| `with_client_id(client_id)` | Set MQTT client ID. |
+| `with_protocol_version(version)` | Set `MqttProtocolVersion::V5` or `V3_1_1`. |
+| `with_route(query_name, route)` | Add a query-specific route. |
+| `with_routes(routes)` | Replace all query routes. |
+| `with_routes_extend(routes)` | Extend the route map. |
+| `with_default_template(template)` | Set fallback operation templates. |
+| `with_identity_provider(provider)` | Set credentials provider. |
+| `with_tls(tls)` | Set TLS configuration. |
+| `with_event_channel_capacity(capacity)` | Set MQTT event channel capacity. |
+| `with_max_inflight(max_inflight)` | Set max outgoing inflight messages. |
+| `with_keep_alive(seconds)` | Set keep-alive seconds. |
+| `with_clean_start(clean_start)` | Set clean session/start behavior. |
+| `with_conn_timeout(milliseconds)` | Set connection timeout. |
+| `with_session_expiry_interval(seconds)` | Set MQTT v5 session expiry interval. |
+| `with_priority_queue_capacity(capacity)` | Set reaction priority queue capacity. |
+| `with_auto_start(auto_start)` | Enable or disable automatic startup. |
+| `with_config(config)` | Apply a full `MqttReactionConfig`. |
+| `build()` | Validate and build the `MqttReaction`. |
 
-### Transport
+## Running Checks
 
-- `MqttTransportMode::TCP`
-- `MqttTransportMode::TLS { ca, alpn, client_auth }`
+Unit tests:
 
-TLS mode expects raw certificate/key bytes in config (`Vec<u8>` fields), which is convenient for loading from files or secrets before constructing the reaction.
+```bash
+cargo test -p drasi-reaction-mqtt
+```
 
-## Adaptive Batching
+Integration tests require Docker and a Mosquitto container:
 
-If `adaptive` is configured, the reaction switches from one-by-one processing to adaptive batching. The batcher adjusts batch size and wait times according to observed throughput to balance latency and throughput.
+```bash
+cargo test -p drasi-reaction-mqtt --test integrations_tests -- --ignored --nocapture
+```
 
-High-level behavior:
+## Limitations
 
-- low traffic: smaller batches, lower wait
-- high traffic: larger batches, longer wait
-
-Builder helpers:
-
-- `with_min_adaptive_batch_size`
-- `with_max_adaptive_batch_size`
-- `with_adaptive_window_size`
-- `with_adaptive_batch_timeout_ms`
-
-## Runtime and Lifecycle Notes
-
-- Add the reaction to Drasi runtime; runtime wiring (channels/context) is handled there.
-- `auto_start` defaults to `true` and can be disabled via builder.
-- `priority_queue_capacity` can be tuned for high-volume query diff streams.
-
-## Troubleshooting
-
-- No messages published:
-  Check broker address/port, query subscription IDs, and `query_configs` matching keys.
-- Messages published to unexpected topic:
-  Verify route resolution order and `default_topic` fallback behavior.
-- Template render errors:
-  Validate Handlebars syntax and variable names (`before`, `after`, `operation`, `query_name`).
-- Connection instability:
-  Tune `keep_alive`, `connection_timeout`, `max_inflight`, and channel capacities.
+- QoS 2 (`ExactlyOnce`) is not supported.
+- mTLS client certificates are not supported in v1.
+- Message expiry is defined in configuration but currently not applied to
+  publish properties.
+- The reaction publishes one MQTT message per diff.

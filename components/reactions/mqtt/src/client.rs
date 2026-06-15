@@ -177,15 +177,15 @@ impl Client {
         }
 
         // set TLS options if provided (mTLS is not supported)
-        if let Some(trasnport) = config.tls.as_ref() {
-            let mut client_config = if trasnport.accept_invalid_certs {
+        if let Some(transport) = config.tls.as_ref() {
+            let mut client_config = if transport.accept_invalid_certs {
                 ClientConfig::builder()
                     .dangerous()
                     .with_custom_certificate_verifier(Arc::new(NoVerifier))
                     .with_no_client_auth()
             } else {
                 let mut store: RootCertStore = RootCertStore::empty();
-                match &trasnport.ca {
+                match &transport.ca {
                     None => {
                         // using system CA store
                         let certs = rustls_native_certs::load_native_certs().certs;
@@ -208,7 +208,7 @@ impl Client {
                     .with_no_client_auth()
             };
 
-            if let Some(alpn) = &trasnport.alpn {
+            if let Some(alpn) = &transport.alpn {
                 client_config.alpn_protocols = alpn.clone();
             }
 
@@ -278,15 +278,15 @@ impl Client {
         }
 
         // set TLS options if provided (mTLS is not supported)
-        if let Some(trasnport) = config.tls.as_ref() {
-            let mut client_config = if trasnport.accept_invalid_certs {
+        if let Some(transport) = config.tls.as_ref() {
+            let mut client_config = if transport.accept_invalid_certs {
                 ClientConfig::builder()
                     .dangerous()
                     .with_custom_certificate_verifier(Arc::new(NoVerifier))
                     .with_no_client_auth()
             } else {
                 let mut store: RootCertStore = RootCertStore::empty();
-                match &trasnport.ca {
+                match &transport.ca {
                     None => {
                         // using system CA store
                         let certs = rustls_native_certs::load_native_certs().certs;
@@ -309,7 +309,7 @@ impl Client {
                     .with_no_client_auth()
             };
 
-            if let Some(alpn) = &trasnport.alpn {
+            if let Some(alpn) = &transport.alpn {
                 client_config.alpn_protocols = alpn.clone();
             }
 

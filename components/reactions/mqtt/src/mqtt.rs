@@ -13,25 +13,20 @@
 // limitations under the License.
 
 use super::MqttReactionBuilder;
-use crate::client::Client;
 use crate::{config::MqttReactionConfig, processor::ResultProcessor};
 use anyhow::Result;
-use drasi_core::evaluation::variable_value::de;
 use drasi_lib::{
-    channels::{ComponentStatus, ResultDiff},
+    channels::ComponentStatus,
     managers::log_component_start,
     Reaction,
 };
-use log::{debug, error, info, warn};
-use std::{default, sync::Arc};
+use log::{error, info};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use drasi_lib::reactions::{ReactionBase, ReactionBaseParams};
-use serde_json::{Map, Value};
-use std::{collections::HashMap, os::unix::process, sync::RwLock, time::Duration};
+use std::{collections::HashMap};
 
-use handlebars::{template, Handlebars};
-use rumqttc::v5::{mqttbytes::QoS, AsyncClient, Event, Incoming, MqttOptions};
 
 pub struct MqttReaction {
     base: ReactionBase,

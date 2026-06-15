@@ -161,14 +161,14 @@ impl ResultProcessor {
                 biased;
 
                 _ = &mut shutdown_rx => {
-                    // recieved shutdown signal, exit the loop
+                    // received shutdown signal, exit the loop
                     break;
                 }
 
                 result = priority_queue.dequeue() => {
                     let query_result = result.as_ref();
 
-                    if(query_result.results.is_empty()) {
+                    if query_result.results.is_empty() {
                         debug!("Skipping control signal for query '{}'", query_result.query_id);
                         continue;
                     } else if let Err(e) = Self::process_results(client.clone(), query_result, &handlebars, &config).await {
