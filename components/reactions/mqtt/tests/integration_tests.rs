@@ -65,7 +65,6 @@ fn mqtt_extension(topic: &str, qos: MqttQoS) -> MqttExtension {
         retain: false,
         empty_payload: false,
         message_expiry_interval: None,
-        slashes_count: topic.matches('/').count(),
     }
 }
 
@@ -209,7 +208,7 @@ async fn test_mqtt_reaction_with_authentication() {
     };
 
     // start the mosquitto broker
-    let mut guard = MosquittoGuard::new(&broker_config)
+    let mut _guard = MosquittoGuard::new(&broker_config)
         .await
         .expect("Failed to start Mosquitto broker");
 
@@ -253,7 +252,7 @@ async fn test_mqtt_reaction_authentication_failure() {
     };
 
     // start the mosquitto broker
-    let mut guard = MosquittoGuard::new(&broker_config)
+    let mut _guard = MosquittoGuard::new(&broker_config)
         .await
         .expect("Failed to start Mosquitto broker");
 

@@ -15,18 +15,17 @@
 use super::MqttReactionBuilder;
 use crate::{config::MqttReactionConfig, processor::ResultProcessor};
 use anyhow::Result;
-use drasi_lib::{
-    channels::ComponentStatus,
-    managers::log_component_start,
-    Reaction,
-};
+use drasi_lib::{channels::ComponentStatus, managers::log_component_start, Reaction};
 use log::{error, info};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use drasi_lib::reactions::{ReactionBase, ReactionBaseParams};
-use std::{collections::HashMap};
+use serde_json::Value;
+use std::collections::HashMap;
 
+use handlebars::{template, Handlebars};
+use rumqttc::v5::{mqttbytes::QoS, AsyncClient, Event, Incoming, MqttOptions};
 
 pub struct MqttReaction {
     base: ReactionBase,
@@ -130,15 +129,7 @@ impl Reaction for MqttReaction {
             "url".to_string(),
             serde_json::Value::String(self.config.url.clone()),
         );
-        props.insert(
-            "client_id".to_string(),
-            self.config
-                .client_id
-                .as_ref()
-                .map_or(serde_json::Value::Null, |v| {
-                    serde_json::Value::String(v.clone())
-                }),
-        );
+        props.insert("id".to_string(), self.base.id.clone().into());
         props.insert(
             "protocol_version".to_string(),
             serde_json::Value::String(
@@ -315,6 +306,8 @@ impl Reaction for MqttReaction {
             )
             .await;
 
+        info!("[{}] MQTT reaction started", self.base.id);
+
         Ok(())
     }
 
@@ -325,6 +318,8 @@ impl Reaction for MqttReaction {
                 Some(format!("[{}] MQTT reaction stopping", self.base.id)),
             )
             .await;
+
+        info!("[{}] MQTT reaction stopping", self.base.id);
 
         // stop the processing loop
         self.base.stop_common().await?;
@@ -343,6 +338,8 @@ impl Reaction for MqttReaction {
                 Some(format!("[{}] MQTT reaction stopped", self.base.id)),
             )
             .await;
+
+        info!("[{}] MQTT reaction stopped", self.base.id);
 
         Ok(())
     }

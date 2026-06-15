@@ -17,14 +17,20 @@ use drasi_lib::channels::ResultDiff;
 use drasi_lib::component_graph::ComponentStatusHandle;
 use drasi_lib::reactions::common::templates::TemplateRouting;
 use drasi_lib::reactions::common::OperationType;
-use drasi_lib::reactions::ReactionBase;
-use handlebars::{Context, Handlebars, Helper, HelperResult, JsonRender, Output, RenderContext};
+use drasi_lib::reactions::{self, ReactionBase};
+use handlebars::{
+    Context, Handlebars, Helper, HelperResult, Output, RenderContext, RenderErrorReason,
+};
 use log::{debug, error, info, warn};
 use rumqttc::v5::EventLoop as EventLoopV5;
 use rumqttc::EventLoop;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
+
+const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_millis(250);
+const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
 
 fn json_helper(
     h: &Helper<'_>,
@@ -34,17 +40,15 @@ fn json_helper(
     out: &mut dyn Output,
 ) -> HelperResult {
     if let Some(param) = h.param(0) {
-        out.write(&param.value().render())?;
+        let rendered = serde_json::to_string(param.value()).map_err(RenderErrorReason::from)?;
+        out.write(&rendered)?;
     } else {
         out.write("null")?;
     }
     Ok(())
 }
 
-fn validate_rendered_topic(
-    rendered_topic: &str,
-    template_slashes_count: usize,
-) -> anyhow::Result<()> {
+fn validate_rendered_topic(rendered_topic: &str, original_template: &str) -> anyhow::Result<()> {
     if rendered_topic.is_empty() {
         return Err(anyhow::anyhow!("Rendered topic is empty"));
     }
@@ -76,6 +80,7 @@ fn validate_rendered_topic(
     }
 
     let rendered_slashes_count = rendered_topic.matches('/').count();
+    let template_slashes_count = original_template.matches('/').count();
     if rendered_slashes_count > template_slashes_count {
         return Err(anyhow::anyhow!(
             "Rendered topic introduces additional '/' characters from interpolation"
@@ -99,12 +104,84 @@ fn is_terminal_v5_connack(code: rumqttc::v5::mqttbytes::v5::ConnectReturnCode) -
     )
 }
 
+fn is_terminal_v5_disconnect(code: rumqttc::v5::mqttbytes::v5::DisconnectReasonCode) -> bool {
+    use rumqttc::v5::mqttbytes::v5::DisconnectReasonCode as C;
+    matches!(
+        code,
+        C::MalformedPacket
+            | C::ProtocolError
+            | C::ImplementationSpecificError
+            | C::NotAuthorized
+            | C::TopicFilterInvalid
+            | C::TopicNameInvalid
+            | C::ReceiveMaximumExceeded
+            | C::TopicAliasInvalid
+            | C::PacketTooLarge
+            | C::PayloadFormatInvalid
+            | C::RetainNotSupported
+            | C::QoSNotSupported
+            | C::SharedSubscriptionNotSupported
+            | C::SubscriptionIdentifiersNotSupported
+            | C::WildcardSubscriptionsNotSupported
+    )
+}
+
 fn is_terminal_v4_connack(code: rumqttc::mqttbytes::v4::ConnectReturnCode) -> bool {
     use rumqttc::mqttbytes::v4::ConnectReturnCode as C;
     matches!(
         code,
         C::RefusedProtocolVersion | C::BadClientId | C::BadUserNamePassword | C::NotAuthorized
     )
+}
+
+#[derive(Debug, Clone)]
+struct ReconnectBackoff {
+    next: Duration,
+}
+
+impl ReconnectBackoff {
+    fn new() -> Self {
+        Self {
+            next: INITIAL_RECONNECT_BACKOFF,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.next = INITIAL_RECONNECT_BACKOFF;
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        let base = self.next;
+        self.next = base.saturating_mul(2).min(MAX_RECONNECT_BACKOFF);
+        jittered_backoff(base, reconnect_jitter_seed())
+    }
+}
+
+fn reconnect_jitter_seed() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
+}
+
+fn jittered_backoff(base: Duration, seed: u128) -> Duration {
+    let max_jitter_millis = (base.as_millis() / 2).max(1);
+    let jitter_millis = seed % (max_jitter_millis + 1);
+    base + Duration::from_millis(jitter_millis as u64)
+}
+
+async fn wait_for_reconnect_backoff(
+    reaction_id: &str,
+    shutdown_rx: &mut oneshot::Receiver<()>,
+    delay: Duration,
+) -> bool {
+    tokio::select! {
+        _ = &mut *shutdown_rx => {
+            info!("[{reaction_id}] Received MQTT event loop shutdown signal, exiting event loop");
+            true
+        }
+        _ = tokio::time::sleep(delay) => false,
+    }
 }
 
 pub enum MqttEventLoop {
@@ -121,7 +198,12 @@ pub struct ResultProcessor {
 
 impl ResultProcessor {
     pub async fn new(config: MqttReactionConfig, base: ReactionBase) -> anyhow::Result<Self> {
-        let (client, event_loop) = Client::new(&config).await?;
+        let (client, event_loop) = if let Some(client_id) = &config.client_id {
+            Client::new(client_id.clone(), &config).await?
+        } else {
+            Client::new(base.id.clone(), &config).await?
+        };
+
         Ok(Self {
             client: Arc::new(client),
             event_loop: Some(event_loop),
@@ -139,13 +221,15 @@ impl ResultProcessor {
         let priority_queue = self.base.priority_queue.clone();
         let client = self.client.clone();
         let config = self.config.clone();
+        let reaction_id = self.base.id.clone();
         Ok(tokio::spawn(async move {
             // Processing loop logic here
-            Self::processing(client, priority_queue, shutdown_rx, config).await;
+            Self::processing(reaction_id, client, priority_queue, shutdown_rx, config).await;
         }))
     }
 
     async fn processing(
+        reaction_id: String,
         client: Arc<Client>,
         priority_queue: drasi_lib::channels::PriorityQueue<drasi_lib::channels::QueryResult>,
         mut shutdown_rx: oneshot::Receiver<()>,
@@ -169,10 +253,10 @@ impl ResultProcessor {
                     let query_result = result.as_ref();
 
                     if query_result.results.is_empty() {
-                        debug!("Skipping control signal for query '{}'", query_result.query_id);
+                        debug!("[{reaction_id}] Skipping control signal for query '{}'", query_result.query_id);
                         continue;
-                    } else if let Err(e) = Self::process_results(client.clone(), query_result, &handlebars, &config).await {
-                        error!("Error processing query result for query '{}': {e}", query_result.query_id);
+                    } else if let Err(e) = Self::process_results(reaction_id.clone(), client.clone(), query_result, &handlebars, &config).await {
+                        warn!("[{reaction_id}] Error processing query result for query '{}': {e}", query_result.query_id);
                     }
                 }
             }
@@ -180,6 +264,7 @@ impl ResultProcessor {
     }
 
     async fn process_results(
+        reaction_id: String,
         client: Arc<Client>,
         query_result: &drasi_lib::channels::QueryResult,
         handlebars: &Handlebars<'_>,
@@ -190,10 +275,12 @@ impl ResultProcessor {
         for result in &query_result.results {
             if matches!(result, ResultDiff::Noop) {
                 // skip noop results
+                debug!("[{reaction_id}] Skipping noop result for query '{query_id}'");
                 continue;
             }
 
             match ResultProcessor::process_single_result(
+                reaction_id.clone(),
                 client.clone(),
                 result.clone(),
                 handlebars,
@@ -214,6 +301,7 @@ impl ResultProcessor {
     }
 
     async fn process_single_result(
+        reaction_id: String,
         client: Arc<Client>,
         result: ResultDiff,
         handlebars: &Handlebars<'_>,
@@ -291,36 +379,55 @@ impl ResultProcessor {
             };
 
             let topic = handlebars.render_template(&spec.extension.topic, &context)?;
-            if let Err(e) = validate_rendered_topic(&topic, spec.extension.slashes_count) {
+            if let Err(e) = validate_rendered_topic(&topic, &spec.extension.topic) {
                 warn!(
-                    "Skipping publish for query '{query_id}' due to invalid rendered topic '{topic}': {e}"
+                    "[{reaction_id}] Skipping publish for query '{query_id}' due to invalid rendered topic '{topic}': {e}"
                 );
                 return Ok(());
             }
 
-            client
-                .publish(topic, spec.extension.qos, spec.extension.retain, payload)
-                .await?;
+            match client
+                .publish(
+                    topic.clone(),
+                    spec.extension.qos,
+                    spec.extension.retain,
+                    payload.clone(),
+                    spec.extension.message_expiry_interval,
+                )
+                .await
+            {
+                Ok(_) => {
+                    debug!(
+                            "[{reaction_id}] Punlished MQTT message for query '{query_id}' on topic '{topic}' with operation '{result_type}' with payload size {} bytes",
+                            payload.len()
+                        );
+                }
+                Err(e) => {
+                    warn!(
+                            "[{reaction_id}] Failed to publish MQTT message for query '{query_id}' on topic '{topic}': {e}"
+                        );
+                }
+            }
         } else {
             warn!(
-                "No matching template spec found for query '{query_id}' and operation '{result_type}'"
+                "[{reaction_id}] No matching template spec found for query '{query_id}' and operation '{result_type}'"
             );
         }
 
         Ok(())
     }
 
-    /// Start the MQTT event loop in a separate task and return the handle
+    /// start the event loop for processing incoming MQTT messages.
     pub async fn start_event_loop(
         &mut self,
         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
         let status_handle = self.base.status_handle();
         match &self.event_loop {
-            Some(MqttEventLoop::V5(event_loop)) => {
+            Some(MqttEventLoop::V5(_)) => {
                 self.start_event_loop_v5(shutdown_rx, status_handle).await
             }
-            Some(MqttEventLoop::V3_1_1(event_loop)) => {
+            Some(MqttEventLoop::V3_1_1(_)) => {
                 self.start_event_loop_v3_1_1(shutdown_rx, status_handle)
                     .await
             }
@@ -334,6 +441,7 @@ impl ResultProcessor {
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
         status_handle: ComponentStatusHandle,
     ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+        let reaction_id = self.base.id.clone();
         // take the ownership of the event loop
         let mut event_loop = match self.event_loop.take() {
             Some(MqttEventLoop::V3_1_1(event_loop)) => event_loop,
@@ -344,45 +452,47 @@ impl ResultProcessor {
             }
         };
 
-        let client_id = self
-            .config
-            .client_id
-            .clone()
-            .unwrap_or_else(|| " ".to_string());
-
         // start polling the event loop
         let handle = tokio::spawn(async move {
+            let mut reconnect_backoff = ReconnectBackoff::new();
+
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => {
-                        info!("[{client_id}] Received MQTT event loop shutdown signal, exiting event loop");
+                        info!("[{reaction_id}] Received MQTT event loop shutdown signal, exiting event loop");
                         break;
                     },
                     event = event_loop.poll() => {
                         match event {
-                            Ok(rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(connack))) => {
-                                if is_terminal_v4_connack(connack.code) {
-                                    error!("[{client_id}] MQTT v3.1.1 terminal CONNACK reason: {:?}", connack.code);
-                                    status_handle.set_status(
-                                        drasi_lib::ComponentStatus::Error,
-                                        Some(format!("MQTT terminal CONNACK reason: {:?}", connack.code))
-                                    ).await;
-                                    break;
+                            Ok(event) => {
+                                if let rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(connack)) = event {
+                                    if is_terminal_v4_connack(connack.code) {
+                                        error!("[{reaction_id}] MQTT v3.1.1 terminal CONNACK reason: {:?}", connack.code);
+                                        status_handle.set_status(
+                                            drasi_lib::ComponentStatus::Error,
+                                            Some(format!("[{reaction_id}] MQTT terminal CONNACK reason: {:?}", connack.code))
+                                        ).await;
+                                        break;
+                                    }
                                 }
+                                reconnect_backoff.reset();
                             }
-                            Ok(_) => {},
                             Err(e) => {
                                 match &e {
                                     rumqttc::ConnectionError::ConnectionRefused(code) if is_terminal_v4_connack(*code) => {
-                                        error!("[{client_id}] MQTT event loop terminal error: {e}");
+                                        error!("[{reaction_id}] MQTT event loop terminal error: {e}");
                                         status_handle.set_status(
                                             drasi_lib::ComponentStatus::Error,
-                                            Some(format!("MQTT event loop terminal error: {e}"))
+                                            Some(format!("[{reaction_id}] MQTT event loop terminal error: {e}"))
                                         ).await;
                                         break;
                                     }
                                     _ => {
-                                        warn!("[{client_id}] MQTT event loop transient error: {e}");
+                                        let delay = reconnect_backoff.next_delay();
+                                        warn!("[{reaction_id}] MQTT event loop transient error: {e}; retrying in {delay:?}");
+                                        if wait_for_reconnect_backoff(&reaction_id, &mut shutdown_rx, delay).await {
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -401,6 +511,7 @@ impl ResultProcessor {
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
         status_handle: ComponentStatusHandle,
     ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+        let reaction_id = self.base.id.clone();
         // take the ownership of the event loop
         let mut event_loop = match self.event_loop.take() {
             Some(MqttEventLoop::V5(event_loop)) => event_loop,
@@ -411,45 +522,60 @@ impl ResultProcessor {
             }
         };
 
-        let client_id = self
-            .config
-            .client_id
-            .clone()
-            .unwrap_or_else(|| " ".to_string());
-
         // start polling the event loop
         let handle = tokio::spawn(async move {
+            let mut reconnect_backoff = ReconnectBackoff::new();
+
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => {
-                    info!("[{client_id}] Received MQTT event loop shutdown signal, exiting event loop");
+                    info!("[{reaction_id}] Received MQTT event loop shutdown signal, exiting event loop");
                     break;
                     },
                     event = event_loop.poll() => {
                         match event {
-                            Ok(rumqttc::v5::Event::Incoming(rumqttc::v5::mqttbytes::v5::Packet::ConnAck(connack))) => {
-                                if is_terminal_v5_connack(connack.code) {
-                                    error!("[{client_id}] MQTT v5 terminal CONNACK reason: {:?}", connack.code);
-                                    status_handle.set_status(
-                                        drasi_lib::ComponentStatus::Error,
-                                        Some(format!("MQTT terminal CONNACK reason: {:?}", connack.code))
-                                    ).await;
-                                    break;
+                            Ok(event) => {
+                                if let rumqttc::v5::Event::Incoming(rumqttc::v5::mqttbytes::v5::Packet::ConnAck(connack)) = event {
+                                    if is_terminal_v5_connack(connack.code) {
+                                        error!("[{reaction_id}] MQTT v5 terminal CONNACK reason: {:?}", connack.code);
+                                        status_handle.set_status(
+                                            drasi_lib::ComponentStatus::Error,
+                                            Some(format!("[{reaction_id}] MQTT terminal CONNACK reason: {:?}", connack.code))
+                                        ).await;
+                                        break;
+                                    }
                                 }
+                                reconnect_backoff.reset();
                             }
-                            Ok(_) => {},
                             Err(e) => {
                                 match &e {
                                     rumqttc::v5::ConnectionError::ConnectionRefused(code) if is_terminal_v5_connack(*code) => {
-                                        error!("[{client_id}] MQTT event loop terminal error: {e}");
+                                        error!("[{reaction_id}] MQTT event loop terminal error: {e}");
                                         status_handle.set_status(
                                             drasi_lib::ComponentStatus::Error,
-                                            Some(format!("MQTT event loop terminal error: {e}"))
+                                            Some(format!("[{reaction_id}] MQTT event loop terminal error: {e}"))
+                                        ).await;
+                                        break;
+                                    }
+                                    rumqttc::v5::ConnectionError::MqttState(
+                                        rumqttc::v5::StateError::ServerDisconnect {
+                                            reason_code,
+                                            reason_string,
+                                        }
+                                    ) if is_terminal_v5_disconnect(*reason_code) => {
+                                        error!("[{reaction_id}] MQTT event loop terminal disconnect: {reason_code:?}, reason: {reason_string:?}");
+                                        status_handle.set_status(
+                                            drasi_lib::ComponentStatus::Error,
+                                            Some(format!("[{reaction_id}] MQTT terminal disconnect reason: {reason_code:?}"))
                                         ).await;
                                         break;
                                     }
                                     _ => {
-                                        warn!("[{client_id}] MQTT event loop transient error: {e}");
+                                        let delay = reconnect_backoff.next_delay();
+                                        warn!("[{reaction_id}] MQTT event loop transient error: {e}; retrying in {delay:?}");
+                                        if wait_for_reconnect_backoff(&reaction_id, &mut shutdown_rx, delay).await {
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -464,28 +590,162 @@ impl ResultProcessor {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_rendered_topic;
+    use super::{
+        is_terminal_v5_disconnect, jittered_backoff, validate_rendered_topic, ReconnectBackoff,
+        INITIAL_RECONNECT_BACKOFF, MAX_RECONNECT_BACKOFF,
+    };
+    use handlebars::Handlebars;
+    use rumqttc::v5::mqttbytes::v5::DisconnectReasonCode as DisconnectCode;
+    use serde_json::json;
+    use std::time::Duration;
+
+    fn handlebars_with_json_helper() -> Handlebars<'static> {
+        let mut handlebars = Handlebars::new();
+        handlebars.register_helper("json", Box::new(super::json_helper));
+        handlebars
+    }
 
     #[test]
     fn rendered_topic_rejects_wildcards() {
-        assert!(validate_rendered_topic("stocks/+/updated", 2).is_err());
-        assert!(validate_rendered_topic("stocks/#", 1).is_err());
+        assert!(
+            validate_rendered_topic("stocks/+/updated", "stocks/{{after.symbol}}/updated").is_err()
+        );
+        assert!(validate_rendered_topic("stocks/#", "stocks/{{after.symbol}}/updated").is_err());
     }
 
     #[test]
     fn rendered_topic_rejects_empty_levels() {
-        assert!(validate_rendered_topic("stocks//updated", 2).is_err());
+        assert!(
+            validate_rendered_topic("stocks//updated", "stocks/{{after.symbol}}/updated").is_err()
+        );
     }
 
     #[test]
     fn rendered_topic_rejects_slash_interpolation() {
-        let template_slashes = "stocks/{{after.symbol}}/updated".matches('/').count();
-        assert!(validate_rendered_topic("stocks/aapl/extra/updated", template_slashes).is_err());
+        assert!(validate_rendered_topic(
+            "stocks/aapl/extra/updated",
+            "stocks/{{after.symbol}}/updated"
+        )
+        .is_err());
     }
 
     #[test]
     fn rendered_topic_accepts_valid() {
-        let template_slashes = "stocks/{{after.symbol}}/updated".matches('/').count();
-        assert!(validate_rendered_topic("stocks/AAPL/updated", template_slashes).is_ok());
+        assert!(
+            validate_rendered_topic("stocks/AAPL/updated", "stocks/{{after.symbol}}/updated")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn json_helper_renders_full_payload_as_valid_json() {
+        let handlebars = handlebars_with_json_helper();
+        let data = json!({
+            "after": {
+                "id": "sensor\"<&>",
+                "temp": 22.4,
+                "active": true,
+                "tags": ["lab", "mqtt"],
+                "metadata": { "floor": 3 },
+                "optional": null
+            }
+        });
+
+        let rendered = handlebars.render_template("{{json after}}", &data).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+
+        assert_eq!(parsed, data["after"]);
+    }
+
+    #[test]
+    fn json_helper_keeps_hand_built_json_valid() {
+        let handlebars = handlebars_with_json_helper();
+        let data = json!({
+            "after": {
+                "id": "sensor\"<&>",
+                "temp": 22.4,
+                "optional": null
+            }
+        });
+
+        let rendered = handlebars
+            .render_template(
+                r#"{"id": {{json after.id}}, "temp": {{json after.temp}}, "optional": {{json after.optional}}}"#,
+                &data,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+
+        assert_eq!(
+            parsed,
+            json!({
+                "id": "sensor\"<&>",
+                "temp": 22.4,
+                "optional": null
+            })
+        );
+    }
+
+    #[test]
+    fn raw_interpolation_still_html_escapes_plain_text() {
+        let handlebars = handlebars_with_json_helper();
+        let data = json!({
+            "after": {
+                "id": "sensor\"<&>",
+                "temp": 22.4
+            }
+        });
+
+        let raw = handlebars
+            .render_template("{{after.id}} -> {{after.temp}}", &data)
+            .unwrap();
+        let json = handlebars
+            .render_template("{{json after.id}} -> {{json after.temp}}", &data)
+            .unwrap();
+
+        assert_eq!(raw, "sensor&quot;&lt;&amp;&gt; -> 22.4");
+        assert_eq!(json, r#""sensor\"<&>" -> 22.4"#);
+    }
+
+    #[test]
+    fn reconnect_backoff_doubles_until_cap() {
+        let mut backoff = ReconnectBackoff::new();
+
+        assert!(backoff.next_delay() >= INITIAL_RECONNECT_BACKOFF);
+        assert_eq!(backoff.next, INITIAL_RECONNECT_BACKOFF * 2);
+
+        for _ in 0..16 {
+            backoff.next_delay();
+        }
+
+        assert_eq!(backoff.next, MAX_RECONNECT_BACKOFF);
+
+        backoff.reset();
+        assert_eq!(backoff.next, INITIAL_RECONNECT_BACKOFF);
+    }
+
+    #[test]
+    fn reconnect_backoff_adds_bounded_jitter() {
+        let base = Duration::from_secs(10);
+        let delay = jittered_backoff(base, 4_999);
+
+        assert!(delay >= base);
+        assert!(delay <= base + Duration::from_secs(5));
+    }
+
+    #[test]
+    fn mqtt_v5_disconnect_classification_matches_terminal_reasons() {
+        assert!(is_terminal_v5_disconnect(DisconnectCode::NotAuthorized));
+        assert!(is_terminal_v5_disconnect(DisconnectCode::ProtocolError));
+        assert!(is_terminal_v5_disconnect(DisconnectCode::QoSNotSupported));
+
+        assert!(!is_terminal_v5_disconnect(DisconnectCode::ServerBusy));
+        assert!(!is_terminal_v5_disconnect(
+            DisconnectCode::ServerShuttingDown
+        ));
+        assert!(!is_terminal_v5_disconnect(
+            DisconnectCode::AdministrativeAction
+        ));
+        assert!(!is_terminal_v5_disconnect(DisconnectCode::SessionTakenOver));
     }
 }

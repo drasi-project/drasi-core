@@ -47,7 +47,6 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
 use drasi_lib::identity::PasswordIdentityProvider;
 use drasi_lib::reactions::common::TemplateSpec;
 use drasi_lib::{DrasiLib, Query};
@@ -177,7 +176,7 @@ async fn main() -> Result<()> {
     };
 
     let mqtt_url = std::env::var("MQTT_URL")
-        .unwrap_or_else(|_| "mqtt://localhost:8883".to_string());
+        .unwrap_or_else(|_| "mqtt://localhost:1883".to_string());
 
     let mut mqtt_builder = MqttReaction::builder("mqtt-reaction")
         .with_query("all-prices")

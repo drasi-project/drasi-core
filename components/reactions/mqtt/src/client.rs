@@ -50,8 +50,14 @@ enum MqttAsyncClient {
 }
 
 trait Publish {
-    async fn publish(&self, topic: &str, qos: MqttQoS, retain: bool, payload: String)
-        -> Result<()>;
+    async fn publish(
+        &self,
+        topic: &str,
+        qos: MqttQoS,
+        retain: bool,
+        payload: String,
+        message_expiry_interval: Option<u32>,
+    ) -> Result<()>;
 }
 
 impl Publish for MqttAsyncClient {
@@ -61,6 +67,7 @@ impl Publish for MqttAsyncClient {
         qos: MqttQoS,
         retain: bool,
         payload: String,
+        message_expiry_interval: Option<u32>,
     ) -> Result<()> {
         match self {
             MqttAsyncClient::V5(client) => {
@@ -68,6 +75,7 @@ impl Publish for MqttAsyncClient {
                 let publish_properties = PublishProperties {
                     content_type: Some("application/json".to_string()),
                     payload_format_indicator: Some(1),
+                    message_expiry_interval,
                     ..Default::default()
                 };
 
@@ -92,15 +100,18 @@ impl Publish for MqttAsyncClient {
     }
 }
 
-pub struct Client {
+pub(crate) struct Client {
     client: MqttAsyncClient,
 }
 
 impl Client {
-    pub async fn new(config: &MqttReactionConfig) -> anyhow::Result<(Self, MqttEventLoop)> {
+    pub async fn new(
+        id: String,
+        config: &MqttReactionConfig,
+    ) -> anyhow::Result<(Self, MqttEventLoop)> {
         match config.protocol_version {
             MqttProtocolVersion::V5 => {
-                let mqtt_options_v5 = Self::config_to_mqtt_options_v5(config).await?;
+                let mqtt_options_v5 = Self::config_to_mqtt_options_v5(&id, config).await?;
                 let (client, event_loop) =
                     AsyncClientV5::new(mqtt_options_v5, config.event_channel_capacity);
                 Ok((
@@ -111,7 +122,7 @@ impl Client {
                 ))
             }
             MqttProtocolVersion::V3_1_1 => {
-                let mqtt_options_v3_1_1 = Self::config_to_mqtt_options_v3_1_1(config).await?;
+                let mqtt_options_v3_1_1 = Self::config_to_mqtt_options_v3_1_1(&id, config).await?;
                 let (client, event_loop) =
                     AsyncClient::new(mqtt_options_v3_1_1, config.event_channel_capacity);
                 Ok((
@@ -131,23 +142,23 @@ impl Client {
         qos: MqttQoS,
         retain: bool,
         payload: String,
+        message_expiry_interval: Option<u32>,
     ) -> Result<()> {
-        self.client.publish(&topic, qos, retain, payload).await?;
+        self.client
+            .publish(&topic, qos, retain, payload, message_expiry_interval)
+            .await?;
         Ok(())
     }
     /// Translate the MqttReactionConfig into rumqttc::MqttOptions for v5
     async fn config_to_mqtt_options_v5(
+        id: &str,
         config: &MqttReactionConfig,
     ) -> anyhow::Result<MqttOptionsV5> {
         // parse the URL to extract host and port
         let (host, port) = Self::parse_url(config)?;
 
         // generate MQTT options based on the config
-        let mut options = if let Some(client_id) = &config.client_id {
-            MqttOptionsV5::new(client_id.clone(), host.clone(), port)
-        } else {
-            MqttOptionsV5::new("", host.clone(), port)
-        };
+        let mut options = MqttOptionsV5::new(id, host.clone(), port);
 
         // add identity provider credentials if provided
         if let Some(identity_provider) = &config.identity_provider {
@@ -233,22 +244,21 @@ impl Client {
             options.set_connection_timeout(conn_timeout);
         }
 
+        options.set_session_expiry_interval(config.session_expiry_interval);
+
         Ok(options)
     }
 
     /// Translate the MqttReactionConfig into rumqttc::MqttOptions for v3.1.1
     async fn config_to_mqtt_options_v3_1_1(
+        id: &str,
         config: &MqttReactionConfig,
     ) -> anyhow::Result<MqttOptions> {
         // parse the URL to extract host and port
         let (host, port) = Self::parse_url(config)?;
 
         // generate MQTT options based on the config
-        let mut options = if let Some(client_id) = &config.client_id {
-            MqttOptions::new(client_id.clone(), host.clone(), port)
-        } else {
-            MqttOptions::new("", host.clone(), port)
-        };
+        let mut options = MqttOptions::new(id, host.clone(), port);
 
         // add identity provider credentials if provided
         if let Some(identity_provider) = &config.identity_provider {

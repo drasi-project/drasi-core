@@ -63,10 +63,6 @@ pub struct MqttExtension {
     /// Silently omitted on v3.1.1 connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_expiry_interval: Option<u32>,
-
-    /// MQTT Topic Slashes count
-    #[serde(skip)]
-    pub slashes_count: usize,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -170,7 +166,7 @@ pub struct MqttReactionConfig {
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MqttProtocolVersion {
     #[default]
     V5,
@@ -279,13 +275,21 @@ impl MqttReactionConfig {
             }
             _ => unreachable!(), // already validated above
         }
+
+        let _host = url
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("MQTT broker URL '{}' must include a host", self.url))?;
+
+        let _port = url
+            .port()
+            .ok_or_else(|| anyhow::anyhow!("MQTT broker URL '{}' must include a port", self.url))?;
+
         Ok(())
     }
 
     fn validate_routes(&self, queries: &Vec<String>) -> anyhow::Result<()> {
         let unique_queries = queries.iter().collect::<std::collections::HashSet<_>>();
         // check that all routes reference valid queries and validate each route config
-        let mut subscribed_queries_ctr = 0;
         for (query_id, query_config) in &self.routes {
             if !unique_queries.contains(query_id) {
                 return Err(anyhow::anyhow!(
@@ -293,7 +297,6 @@ impl MqttReactionConfig {
                 ));
             } else {
                 self.validate_route(query_config)?;
-                subscribed_queries_ctr += 1;
             }
         }
         Ok(())
@@ -319,6 +322,11 @@ impl MqttReactionConfig {
     }
 
     fn validate_template(&self, template: &str) -> anyhow::Result<()> {
+        if template.contains("{{drasi.sequence}}") {
+            return Err(anyhow::anyhow!(
+                "The template cannot contain the 'drasi.sequence' variable as it is not supported in MQTT reaction v1"
+            ));
+        }
         Ok(())
     }
 
@@ -329,7 +337,7 @@ impl MqttReactionConfig {
 
         if topic.len() > u16::MAX as usize {
             return Err(anyhow::anyhow!(
-                "Topic UTF-8 length exceeds MQTT limit of 65535 bytes"
+                "topic UTF-8 length exceeds MQTT limit of 65535 bytes"
             ));
         }
 
@@ -354,6 +362,14 @@ impl MqttReactionConfig {
                 ));
             }
         }
+
+        // validate that the topic template rules aren't violated.
+        if topic.contains("{{drasi.sequence}}") {
+            return Err(anyhow::anyhow!(
+                "The topic cannot contain the 'drasi.sequence' variable as it is not supported in MQTT reaction v1"
+            ));
+        }
+
         Ok(())
     }
 }
