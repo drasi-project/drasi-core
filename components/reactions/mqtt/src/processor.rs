@@ -41,7 +41,10 @@ fn json_helper(
     Ok(())
 }
 
-fn validate_rendered_topic(rendered_topic: &str, template_slashes_count: usize) -> anyhow::Result<()> {
+fn validate_rendered_topic(
+    rendered_topic: &str,
+    template_slashes_count: usize,
+) -> anyhow::Result<()> {
     if rendered_topic.is_empty() {
         return Err(anyhow::anyhow!("Rendered topic is empty"));
     }

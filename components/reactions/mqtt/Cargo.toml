@@ -45,3 +45,13 @@ rustls = { version = "0.23.40", features = ["fips", "ring"] }
 rustls-native-certs = "0.8.4"
 rustls-pemfile = "2.2.0"
 chrono = "0.4.45"
+
+[dev-dependencies]
+drasi-source-http = { path = "../../sources/http" }
+testcontainers = "0.27"
+env_logger = "0.11"
+tokio-test = "0.4"
+rcgen = "0.13"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+serial_test = "3.0"
+reqwest = "0.11"

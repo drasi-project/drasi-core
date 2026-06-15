@@ -1,4 +1,4 @@
-// Copyright 2026 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -364,7 +364,6 @@ impl Reaction for MqttReaction {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,7 +397,10 @@ mod tests {
         )
         .expect("reaction should be created");
 
-        assert_eq!(reaction.config.client_id.as_deref(), Some("drasi-mqtt-rx-1"));
+        assert_eq!(
+            reaction.config.client_id.as_deref(),
+            Some("drasi-mqtt-rx-1")
+        );
     }
 
     #[test]
@@ -418,4 +420,3 @@ mod tests {
         assert_eq!(reaction.config.client_id.as_deref(), Some("custom-client"));
     }
 }
-

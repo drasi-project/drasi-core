@@ -1,4 +1,4 @@
-// Copyright 2026 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ use crate::verifier::NoVerifier;
 use anyhow::Result;
 use log::error;
 use rumqttc::v5::{
-    mqttbytes::{v5::PublishProperties, QoS as QosV5}, AsyncClient as AsyncClientV5,
-    MqttOptions as MqttOptionsV5,
+    mqttbytes::{v5::PublishProperties, QoS as QosV5},
+    AsyncClient as AsyncClientV5, MqttOptions as MqttOptionsV5,
 };
 use rumqttc::{AsyncClient, MqttOptions, QoS};
 use rustls::ClientConfig;

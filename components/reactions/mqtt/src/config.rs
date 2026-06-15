@@ -21,7 +21,7 @@ pub use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-fn default_event_channel_capacity() -> usize {
+pub fn default_event_channel_capacity() -> usize {
     100
 }
 
@@ -355,6 +355,26 @@ impl MqttReactionConfig {
             }
         }
         Ok(())
+    }
+}
+
+impl Default for MqttReactionConfig {
+    fn default() -> Self {
+        MqttReactionConfig {
+            url: "mqtt://localhost:1883".to_string(),
+            client_id: None,
+            protocol_version: MqttProtocolVersion::V5,
+            routes: HashMap::new(),
+            default_template: None,
+            identity_provider: None,
+            tls: None,
+            event_channel_capacity: default_event_channel_capacity(),
+            max_inflight: None,
+            keep_alive: None,
+            clean_start: None,
+            conn_timeout: None,
+            session_expiry_interval: None,
+        }
     }
 }
 
