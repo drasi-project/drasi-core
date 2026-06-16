@@ -552,11 +552,15 @@ impl PgOutputDecoder {
                 } else {
                     // Text format - parse PostgreSQL timestamptz string
                     let text = String::from_utf8_lossy(data);
-                    // PostgreSQL sends timestamptz in ISO 8601 format
-                    let timestamp = DateTime::parse_from_rfc3339(text.trim())
-                        .or_else(|_| {
-                            DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f%z")
-                        })
+                    let trimmed = text.trim();
+                    // PostgreSQL's logical replication protocol may send the
+                    // timezone offset in short form (e.g. `+00`, `-05`) rather
+                    // than the full ISO 8601 form (`+00:00`, `-05:00`). The
+                    // `%#z` specifier is a superset of `%z`: it accepts offsets
+                    // with missing minutes (and a bare `Z`) as well as the
+                    // 4-digit forms, so it is used as the fallback after rfc3339.
+                    let timestamp = DateTime::parse_from_rfc3339(trimmed)
+                        .or_else(|_| DateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f%#z"))
                         .map_err(|e| anyhow!("Failed to parse timestamptz from '{text}': {e}"))?
                         .with_timezone(&Utc);
                     Ok(PostgresValue::TimestampTz(timestamp))
@@ -869,6 +873,25 @@ mod tests {
             other => panic!("Expected ZonedDateTime, got {other:?}"),
         }
     }
+    use chrono::TimeZone;
+
+    #[test]
+    fn test_decode_timestamptz_text_full_offset() {
+        let decoder = PgOutputDecoder::new();
+        let value = decoder
+            .decode_column_value(b"2026-05-13 22:03:45.423627+00:00", 1184)
+            .expect("should parse timestamptz with full offset");
+        match value {
+            PostgresValue::TimestampTz(ts) => {
+                assert_eq!(
+                    ts,
+                    Utc.with_ymd_and_hms(2026, 5, 13, 22, 3, 45).unwrap()
+                        + chrono::Duration::microseconds(423627)
+                );
+            }
+            other => panic!("expected TimestampTz, got {other:?}"),
+        }
+    }
 
     #[test]
     fn decode_timestamptz_with_offset_format() {
@@ -878,6 +901,25 @@ mod tests {
                 assert_eq!(dt.offset().local_minus_utc(), 7200); // +02:00
             }
             other => panic!("Expected ZonedDateTime, got {other:?}"),
+        }
+    }
+          
+          
+    fn test_decode_timestamptz_text_short_offset() {
+        // PostgreSQL logical replication sends the short-form timezone offset.
+        let decoder = PgOutputDecoder::new();
+        let value = decoder
+            .decode_column_value(b"2026-05-13 22:03:45.423627+00", 1184)
+            .expect("should parse timestamptz with short offset");
+        match value {
+            PostgresValue::TimestampTz(ts) => {
+                assert_eq!(
+                    ts,
+                    Utc.with_ymd_and_hms(2026, 5, 13, 22, 3, 45).unwrap()
+                        + chrono::Duration::microseconds(423627)
+                );
+            }
+            other => panic!("expected TimestampTz, got {other:?}"),
         }
     }
 
@@ -907,6 +949,46 @@ mod tests {
             other => {
                 panic!("Expected ZonedDateTime for timestamptz OID with no tz info, got {other:?}")
             }
+        }
+    }
+  
+    fn test_decode_timestamptz_text_short_negative_offset() {
+        let decoder = PgOutputDecoder::new();
+        let value = decoder
+            .decode_column_value(b"2026-05-13 22:03:45.423627-05", 1184)
+            .expect("should parse timestamptz with short negative offset");
+        match value {
+            PostgresValue::TimestampTz(ts) => {
+                // Local time has a -05:00 offset, so the UTC representation
+                // is 5 hours ahead of the wall-clock time in the input.
+                assert_eq!(
+                    ts,
+                    Utc.with_ymd_and_hms(2026, 5, 14, 3, 3, 45).unwrap()
+                        + chrono::Duration::microseconds(423627)
+                );
+            }
+            other => panic!("expected TimestampTz, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_timestamptz_text_z_suffix() {
+        // A space-separated timestamp with a bare `Z` suffix fails
+        // `parse_from_rfc3339` (which requires a `T` separator) and must be
+        // handled by the `%#z` fallback.
+        let decoder = PgOutputDecoder::new();
+        let value = decoder
+            .decode_column_value(b"2026-05-13 22:03:45.423627Z", 1184)
+            .expect("should parse timestamptz with bare Z UTC suffix");
+        match value {
+            PostgresValue::TimestampTz(ts) => {
+                assert_eq!(
+                    ts,
+                    Utc.with_ymd_and_hms(2026, 5, 13, 22, 3, 45).unwrap()
+                        + chrono::Duration::microseconds(423627)
+                );
+            }
+            other => panic!("expected TimestampTz, got {other:?}"),
         }
     }
 
@@ -974,5 +1056,19 @@ mod tests {
             decode_column_value_text("hello world", 25).unwrap(),
             ElementValue::String(Arc::from("hello world"))
         );
+    }
+    fn test_decode_timestamptz_text_no_fractional_seconds() {
+        // The `%.f` specifier is optional, so whole-second timestamps (which
+        // PostgreSQL emits when subsecond precision is zero) must parse too.
+        let decoder = PgOutputDecoder::new();
+        let value = decoder
+            .decode_column_value(b"2026-05-13 22:03:45+00", 1184)
+            .expect("should parse timestamptz without fractional seconds");
+        match value {
+            PostgresValue::TimestampTz(ts) => {
+                assert_eq!(ts, Utc.with_ymd_and_hms(2026, 5, 13, 22, 3, 45).unwrap());
+            }
+            other => panic!("expected TimestampTz, got {other:?}"),
+        }
     }
 }
