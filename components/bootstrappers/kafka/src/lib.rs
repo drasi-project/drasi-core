@@ -33,9 +33,9 @@ use drasi_lib::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
 };
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
-use drasi_source_kafka::encode_position;
+use drasi_source_kafka::encode_partition_offsets;
 use drasi_source_mapping::{SourceMapping, SourceMappingEngine};
-use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message;
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use serde_json::Value as JsonValue;
@@ -93,7 +93,7 @@ impl KafkaBootstrapProvider {
     }
 
     /// Create a base consumer for bootstrap reading.
-    fn create_consumer(&self, source_id: &str) -> Result<BaseConsumer> {
+    fn create_consumer(&self, source_id: &str) -> Result<StreamConsumer> {
         let group_id = format!("__drasi_bootstrap_{}_{}", source_id, uuid::Uuid::new_v4());
         let mut client_config = ClientConfig::new();
         client_config
@@ -119,7 +119,7 @@ impl KafkaBootstrapProvider {
             client_config.set(key, value);
         }
 
-        let consumer: BaseConsumer = client_config
+        let consumer: StreamConsumer = client_config
             .create()
             .context("Failed to create Kafka bootstrap consumer")?;
 
@@ -218,6 +218,7 @@ impl BootstrapProvider for KafkaBootstrapProvider {
         // Fetch low/high watermarks for each partition.
         let mut low_watermarks: Vec<i64> = Vec::with_capacity(partition_count);
         let mut high_watermarks: Vec<i64> = Vec::with_capacity(partition_count);
+        let mut boundary_offsets: Vec<(i32, i64)> = Vec::with_capacity(partition_count);
         for partition in 0..partition_count as i32 {
             let (low, high) = consumer
                 .fetch_watermarks(&self.config.topic, partition, Duration::from_secs(10))
@@ -231,6 +232,7 @@ impl BootstrapProvider for KafkaBootstrapProvider {
             }
             low_watermarks.push(low);
             high_watermarks.push(high);
+            boundary_offsets.push((partition, high));
         }
 
         debug!(
@@ -249,11 +251,9 @@ impl BootstrapProvider for KafkaBootstrapProvider {
                 "Topic '{}' is empty, nothing to bootstrap",
                 self.config.topic
             );
-            let position = encode_position(0, &high_watermarks);
+            let position = encode_partition_offsets(&boundary_offsets);
             return Ok(BootstrapResult {
                 event_count: 0,
-                last_sequence: None,
-                sequences_aligned: false,
                 source_position: Some(position),
             });
         }
@@ -261,8 +261,12 @@ impl BootstrapProvider for KafkaBootstrapProvider {
         // Assign consumer to all partitions starting from beginning
         let mut tpl = TopicPartitionList::new();
         for partition in 0..partition_count as i32 {
-            tpl.add_partition_offset(&self.config.topic, partition, Offset::Beginning)
-                .context("Failed to add partition offset")?;
+            tpl.add_partition_offset(
+                &self.config.topic,
+                partition,
+                Offset::Offset(low_watermarks[partition as usize]),
+            )
+            .context("Failed to add partition offset")?;
         }
         consumer
             .assign(&tpl)
@@ -286,11 +290,14 @@ impl BootstrapProvider for KafkaBootstrapProvider {
                 break;
             }
 
-            // Use block_in_place so the blocking poll doesn't starve the Tokio runtime.
-            let poll_result = tokio::task::block_in_place(|| consumer.poll(poll_timeout));
+            // Use the async StreamConsumer so bootstrap works on any Tokio
+            // runtime flavor (no block_in_place, which requires a multi-thread
+            // runtime). A timeout bounds each wait so missing messages can't hang
+            // the loop indefinitely.
+            let poll_result = tokio::time::timeout(poll_timeout, consumer.recv()).await;
 
             match poll_result {
-                Some(Ok(msg)) => {
+                Ok(Ok(msg)) => {
                     let partition = msg.partition() as usize;
                     let offset = msg.offset();
                     let key = msg
@@ -299,15 +306,16 @@ impl BootstrapProvider for KafkaBootstrapProvider {
                         .unwrap_or_default();
                     let topic = msg.topic().to_string();
 
-                    // Update current offset
-                    if partition < current_offsets.len() {
-                        current_offsets[partition] = offset + 1;
+                    if partition >= current_offsets.len() {
+                        warn!("Kafka bootstrap: received message for unknown partition {} at offset {}", partition, offset);
+                        continue;
                     }
-
-                    // Check if we've reached the high watermark for this partition
-                    if partition < partition_done.len()
-                        && current_offsets[partition] >= high_watermarks[partition]
-                    {
+                    if offset >= high_watermarks[partition] {
+                        partition_done[partition] = true;
+                        continue;
+                    }
+                    current_offsets[partition] = offset + 1;
+                    if current_offsets[partition] >= high_watermarks[partition] {
                         partition_done[partition] = true;
                     }
 
@@ -356,17 +364,17 @@ impl BootstrapProvider for KafkaBootstrapProvider {
                         }
                     }
                 }
-                Some(Err(e)) => {
+                Ok(Err(e)) => {
                     warn!("Kafka bootstrap: consumer error: {}", e);
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                None => {
-                    // Poll returned no message (timeout) — continue checking
+                Err(_) => {
+                    // recv timed out (no message available) — continue checking
                 }
             }
         }
 
-        let position = encode_position(0, &high_watermarks);
+        let position = encode_partition_offsets(&boundary_offsets);
 
         info!(
             "Kafka bootstrap completed for query '{}': {} events from {} partitions",
@@ -375,8 +383,6 @@ impl BootstrapProvider for KafkaBootstrapProvider {
 
         Ok(BootstrapResult {
             event_count,
-            last_sequence: None,
-            sequences_aligned: false,
             source_position: Some(position),
         })
     }

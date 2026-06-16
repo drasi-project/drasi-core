@@ -26,7 +26,7 @@
 //!
 //! let provider = GarnetIndexProvider::new("redis://localhost:6379", None, true);
 //! let drasi = DrasiLib::builder()
-//!     .with_index_provider(Arc::new(provider))
+//!     .with_index_provider("redis", Arc::new(provider))
 //!     .build()?;
 //! ```
 

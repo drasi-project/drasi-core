@@ -203,10 +203,6 @@ unsafe impl Sync for FfiBootstrapSender {}
 pub struct FfiBootstrapResult {
     /// Number of events sent (>= 0), or -1 on error.
     pub event_count: i64,
-    /// Last sequence number, or -1 if not available.
-    pub last_sequence: i64,
-    /// Whether bootstrap/stream sequences are aligned for dedup.
-    pub sequences_aligned: bool,
     /// Pointer to source position bytes (null if not available).
     /// Callee owns the allocation; caller must free via `source_position_drop_fn`.
     pub source_position_ptr: *const u8,
@@ -283,10 +279,9 @@ drasi_ffi_primitives::ffi_vtable! {
         fn initialize_fn(state: *mut, ctx: *const FfiRuntimeContext),
 
         // Subscriptions
-        /// Subscribe with query_id, node_labels JSON, relation_labels JSON,
-        /// optional resume_from position bytes, and optional last_sequence
-        /// for sequence counter recovery.
-        fn subscribe_fn(state: *mut, source_id: FfiStr, enable_bootstrap: bool, query_id: FfiStr, nodes_json: FfiStr, relations_json: FfiStr, resume_from_ptr: *const u8, resume_from_len: u32, has_last_sequence: bool, last_sequence: u64, request_position_handle: bool) -> *mut FfiSubscriptionResponse,
+        /// Subscribe with query_id, node_labels JSON, relation_labels JSON, and
+        /// optional resume_from position bytes.
+        fn subscribe_fn(state: *mut, source_id: FfiStr, enable_bootstrap: bool, query_id: FfiStr, nodes_json: FfiStr, relations_json: FfiStr, resume_from_ptr: *const u8, resume_from_len: u32, request_position_handle: bool) -> *mut FfiSubscriptionResponse,
 
         /// Host calls this to inject an external bootstrap provider (from another plugin).
         fn set_bootstrap_provider_fn(state: *mut, provider: *mut BootstrapProviderVtable),

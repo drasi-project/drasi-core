@@ -134,13 +134,28 @@ EXIT;
 }
 
 pub fn insert_product(oracle: &OracleGuard, id: i64, name: &str, price: f64) -> Result<()> {
+    let escaped_name = name.replace('\'', "''");
     exec_sqlplus(
         oracle.container_id(),
         &oracle.config().password,
         &format!(
-            "WHENEVER SQLERROR EXIT FAILURE;\nINSERT INTO SYSTEM.DRASI_PRODUCTS (ID, NAME, PRICE) VALUES ({id}, '{name}', {price});\nCOMMIT;\nEXIT;\n"
+            "WHENEVER SQLERROR EXIT FAILURE;\nINSERT INTO SYSTEM.DRASI_PRODUCTS (ID, NAME, PRICE) VALUES ({id}, '{escaped_name}', {price});\nCOMMIT;\nEXIT;\n"
         ),
     )?;
+    Ok(())
+}
+
+pub fn insert_products_batch(oracle: &OracleGuard, products: &[(i64, String, f64)]) -> Result<()> {
+    let mut sql = String::from("WHENEVER SQLERROR EXIT FAILURE;\n");
+    for (id, name, price) in products {
+        let escaped_name = name.replace('\'', "''");
+        sql.push_str(&format!(
+            "INSERT INTO SYSTEM.DRASI_PRODUCTS (ID, NAME, PRICE) VALUES ({id}, '{escaped_name}', {price});\n"
+        ));
+    }
+    sql.push_str("COMMIT;\nEXIT;\n");
+
+    exec_sqlplus(oracle.container_id(), &oracle.config().password, &sql)?;
     Ok(())
 }
 

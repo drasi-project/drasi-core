@@ -402,9 +402,8 @@ Processes a bootstrap request from a query subscription.
 
 **Returns**:
 - `Result<BootstrapResult>`: A `BootstrapResult` whose `event_count` is the
-  number of matching events found. `last_sequence` is `None` and
-  `sequences_aligned` is `false` — application-source bootstrap does not share
-  a sequence namespace with the streaming path.
+  number of matching events found. `source_position` is `None` —
+  application-source bootstrap has no native position boundary.
 
 **Behavior**:
 1. Logs the bootstrap request details
