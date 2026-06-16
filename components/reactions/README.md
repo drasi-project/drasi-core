@@ -1574,7 +1574,15 @@ shape carried by `QueryResult` and its `ResultDiff` variants:
 | `UPDATE`    | the post-change row | the pre-change row  |
 | `DELETE`    | (omitted)           | the deleted row     |
 
-This shape is captured by the `ReactionEnvelope` TypeSpec model
+Two `ResultDiff` variants are not listed because they are not emitted
+as a distinct `operation`:
+
+- **`Aggregation`** — rendered as an `UPDATE`-shaped item: `after` is
+  always present, and `before` is included only when the previous
+  aggregate value is known.
+- **`Noop`** — carries no row data; it produces no item and is skipped.
+
+This per-item shape is captured by the `ReactionItem` TypeSpec model
 ([Appendix A](#appendix-a--full-typespec-schemas)).
 
 ### The three dispatch patterns
@@ -1694,13 +1702,14 @@ transport.
 
 ### Implementation guidance
 
-A canonical Pattern A item builder:
+A canonical Pattern A item builder. It returns `Option` so the caller
+can skip diffs that carry no row data (`Noop`):
 
 ```rust
 fn build_item(
     qr: &QueryResult,
     diff: &ResultDiff,
-) -> serde_json::Value {
+) -> Option<serde_json::Value> {
     let mut item = serde_json::Map::new();
     item.insert("queryId".into(),    serde_json::json!(qr.query_id));
     item.insert("sequenceId".into(), serde_json::json!(qr.sequence));
@@ -1719,18 +1728,32 @@ fn build_item(
             item.insert("operation".into(), serde_json::json!("DELETE"));
             item.insert("before".into(), data.clone());
         }
-        // Aggregation / Noop are reaction-specific; the canonical
-        // approach is to skip Noop entirely and emit Aggregation as
-        // an UPDATE-shaped item using its before/after pair.
-        _ => {}
+        // An aggregation result is the post-change aggregate value.
+        // Render it as an UPDATE-shaped item: `after` is always
+        // present, and `before` is included only when the previous
+        // aggregate value is known.
+        ResultDiff::Aggregation { before, after, .. } => {
+            item.insert("operation".into(), serde_json::json!("UPDATE"));
+            if let Some(before) = before {
+                item.insert("before".into(), before.clone());
+            }
+            item.insert("after".into(), after.clone());
+        }
+        // Noop carries no row data and MUST NOT produce an output item.
+        ResultDiff::Noop => return None,
     }
     if !qr.metadata.is_empty() {
         item.insert("metadata".into(),
             serde_json::Value::Object(qr.metadata.clone().into_iter().collect()));
     }
-    serde_json::Value::Object(item)
+    Some(serde_json::Value::Object(item))
 }
 ```
+
+Because `build_item` returns `Option`, callers iterate a
+`QueryResult`'s `results` and drop the `None` values — `Noop` diffs
+(and an empty `results` batch) produce no output. For example:
+`qr.results.iter().filter_map(|d| build_item(qr, d))`.
 
 Wrapping for Pattern B and Pattern C is a straightforward composition:
 Pattern B nests an array of items under `results` alongside the
@@ -2794,6 +2817,10 @@ model QueryResult {
  *   operation = "ADD"    -> `after` present, `before` absent
  *   operation = "UPDATE" -> `before` AND `after` present
  *   operation = "DELETE" -> `before` present, `after` absent
+ *
+ * Aggregation diffs are emitted with operation = "UPDATE" (`after`
+ * always present; `before` present only when the prior aggregate is
+ * known). Noop diffs are skipped and never produce an item.
  */
 @jsonSchema
 model ReactionItem {
