@@ -215,8 +215,6 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
         );
         Ok(BootstrapResult {
             event_count: count,
-            last_sequence: None,
-            sequences_aligned: false,
             source_position: None,
         })
     }
