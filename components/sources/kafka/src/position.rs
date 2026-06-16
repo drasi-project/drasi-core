@@ -30,6 +30,13 @@
 use bytes::Bytes;
 use drasi_lib::sources::PositionComparator;
 
+const BOOTSTRAP_BOUNDARY_MAGIC: &[u8; 4] = b"KBND";
+
+/// Defensive upper bound on the partition count decoded from a boundary blob.
+/// Kafka's documented maximum is ~200,000 partitions per topic; this guards
+/// against integer overflow and unbounded allocation from malformed input.
+const MAX_PARTITION_COUNT: usize = 1_000_000;
+
 /// Encode a position blob with the partition that produced the event.
 ///
 /// - `from_partition`: the partition index this message was consumed from
@@ -49,12 +56,15 @@ pub fn encode_position(from_partition: usize, offsets: &[i64]) -> Bytes {
 ///
 /// Returns `None` if the bytes are malformed (wrong length or too short).
 pub fn decode_position(bytes: &Bytes) -> Option<(usize, Vec<i64>)> {
-    if bytes.len() < 8 {
+    if bytes.len() < 8 || &bytes[0..4] == BOOTSTRAP_BOUNDARY_MAGIC {
         return None;
     }
 
     let from_partition = u32::from_be_bytes(bytes[0..4].try_into().ok()?) as usize;
     let partition_count = u32::from_be_bytes(bytes[4..8].try_into().ok()?) as usize;
+    if partition_count > MAX_PARTITION_COUNT {
+        return None;
+    }
     let expected_len = 8 + 8 * partition_count;
 
     if bytes.len() != expected_len {
@@ -70,6 +80,44 @@ pub fn decode_position(bytes: &Bytes) -> Option<(usize, Vec<i64>)> {
     }
 
     Some((from_partition, offsets))
+}
+
+/// Encode a Kafka bootstrap boundary as partition/high-watermark pairs.
+pub fn encode_partition_offsets(partition_offsets: &[(i32, i64)]) -> Bytes {
+    let mut buf = Vec::with_capacity(8 + 12 * partition_offsets.len());
+    buf.extend_from_slice(BOOTSTRAP_BOUNDARY_MAGIC);
+    buf.extend_from_slice(&(partition_offsets.len() as u32).to_be_bytes());
+    for &(partition, offset) in partition_offsets {
+        buf.extend_from_slice(&partition.to_be_bytes());
+        buf.extend_from_slice(&offset.to_be_bytes());
+    }
+    Bytes::from(buf)
+}
+
+/// Decode a Kafka bootstrap boundary into partition/high-watermark pairs.
+pub fn decode_partition_offsets(bytes: &Bytes) -> Option<Vec<(i32, i64)>> {
+    if bytes.len() < 8 || &bytes[0..4] != BOOTSTRAP_BOUNDARY_MAGIC {
+        return None;
+    }
+    let partition_count = u32::from_be_bytes(bytes[4..8].try_into().ok()?) as usize;
+    // Kafka's documented maximum is ~200,000 partitions per topic; cap defensively
+    // so an oversized count can't overflow the length arithmetic (on 32-bit) or
+    // trigger a huge Vec allocation before the length check.
+    if partition_count > MAX_PARTITION_COUNT {
+        return None;
+    }
+    if bytes.len() != 8 + 12 * partition_count {
+        return None;
+    }
+    let mut result = Vec::with_capacity(partition_count);
+    for i in 0..partition_count {
+        let start = 8 + 12 * i;
+        result.push((
+            i32::from_be_bytes(bytes[start..start + 4].try_into().ok()?),
+            i64::from_be_bytes(bytes[start + 4..start + 12].try_into().ok()?),
+        ));
+    }
+    Some(result)
 }
 
 /// Partition-aware position comparator for multi-partition Kafka sources.
@@ -159,6 +207,23 @@ mod tests {
         buf.extend_from_slice(&42i64.to_be_bytes()); // only 1 offset
         let bytes = Bytes::from(buf);
         assert!(decode_position(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_decode_rejects_oversized_partition_count() {
+        // A crafted blob claiming a huge partition_count must be rejected before
+        // any length arithmetic overflow or large allocation.
+        let oversized = (MAX_PARTITION_COUNT + 1) as u32;
+
+        let mut pos = Vec::new();
+        pos.extend_from_slice(&0u32.to_be_bytes()); // from_partition
+        pos.extend_from_slice(&oversized.to_be_bytes()); // partition_count
+        assert!(decode_position(&Bytes::from(pos)).is_none());
+
+        let mut boundary = Vec::new();
+        boundary.extend_from_slice(BOOTSTRAP_BOUNDARY_MAGIC);
+        boundary.extend_from_slice(&oversized.to_be_bytes()); // partition_count
+        assert!(decode_partition_offsets(&Bytes::from(boundary)).is_none());
     }
 
     #[test]

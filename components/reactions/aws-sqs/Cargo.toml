@@ -36,9 +36,10 @@ drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-credential-types = "1"
-aws-sdk-sqs = "1"
+# Pin AWS SDK crates below the 1.91 MSRV bump (introduced late Feb 2026) so cargo publish verification works on the 1.88 toolchain.
+aws-config = { version = ">=1, <1.8.18", features = ["behavior-version-latest"] }
+aws-credential-types = ">=1, <1.2.14"
+aws-sdk-sqs = ">=1, <1.94"
 chrono = "0.4"
 handlebars = "5.1"
 log = "0.4"

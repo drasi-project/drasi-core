@@ -1,0 +1,20 @@
+[package]
+name = "neo4j-getting-started"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+drasi-source-neo4j = { path = "../../../components/sources/neo4j" }
+drasi-bootstrap-neo4j = { path = "../../../components/bootstrappers/neo4j" }
+drasi-reaction-log = { path = "../../../components/reactions/log" }
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+env_logger = "0.10"
+
+[[bin]]
+name = "neo4j-getting-started"
+path = "main.rs"

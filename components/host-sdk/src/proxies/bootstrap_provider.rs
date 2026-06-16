@@ -122,12 +122,6 @@ impl BootstrapProvider for BootstrapProviderProxy {
             ));
         }
 
-        let last_sequence = if ffi_result.last_sequence >= 0 {
-            Some(ffi_result.last_sequence as u64)
-        } else {
-            None
-        };
-
         let source_position =
             if !ffi_result.source_position_ptr.is_null() && ffi_result.source_position_len > 0 {
                 let bytes = unsafe {
@@ -151,8 +145,6 @@ impl BootstrapProvider for BootstrapProviderProxy {
 
         Ok(BootstrapResult {
             event_count: ffi_result.event_count as usize,
-            last_sequence,
-            sequences_aligned: ffi_result.sequences_aligned,
             source_position,
         })
     }
@@ -162,7 +154,7 @@ impl Drop for BootstrapProviderProxy {
     fn drop(&mut self) {
         let drop_fn = self.vtable.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
-        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
+        super::drop_worker::execute_drop_fn(drop_fn, state);
     }
 }
 
@@ -326,6 +318,6 @@ impl Drop for BootstrapPluginProxy {
     fn drop(&mut self) {
         let drop_fn = self.vtable.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
-        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
+        super::drop_worker::execute_drop_fn(drop_fn, state);
     }
 }
