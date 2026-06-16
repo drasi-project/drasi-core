@@ -126,9 +126,9 @@ pub trait BootstrapProvider: Send + Sync {
 - **Channel-based delivery**: Events sent via MPSC channel, not returned directly
 - **Label filtering**: Both `request` and `settings` contain labels for filtering
 - **Sequence numbering**: Use `context.next_sequence()` for each event
-- **Return metadata**: Return a `BootstrapResult` with the event count plus
-  handover metadata (`last_sequence`, `sequences_aligned`) for the
-  bootstrap-to-streaming handover protocol
+- **Return metadata**: Return a `BootstrapResult` with the event count plus an
+  optional `source_position` marking the snapshot boundary for the
+  bootstrap-to-streaming handover
 
 ## Core Types
 
@@ -442,8 +442,7 @@ impl BootstrapProvider for MyBootstrapProvider {
 
         Ok(BootstrapResult {
             event_count: count,
-            last_sequence: None,
-            sequences_aligned: false,
+            source_position: None,
         })
     }
 }
@@ -722,7 +721,7 @@ When creating a new bootstrap provider plugin:
 - [ ] Use `context.next_sequence()` for each event
 - [ ] Send events via `event_tx.send(event).await`
 - [ ] Return a `BootstrapResult` with the event count (and, when applicable,
-      `last_sequence` / `sequences_aligned` for the handover protocol)
+      `source_position` marking the snapshot boundary for the handover)
 - [ ] Implement builder pattern for ergonomic construction
 - [ ] Implement `Default` trait if sensible defaults exist
 - [ ] Add unit tests for:
@@ -791,8 +790,7 @@ async fn bootstrap(&self, request: BootstrapRequest, ...) -> Result<BootstrapRes
 
     Ok(BootstrapResult {
         event_count: count,
-        last_sequence: None,
-        sequences_aligned: false,
+        source_position: None,
     })
 }
 ```

@@ -14,7 +14,10 @@
 
 //! Integration tests for MySQL source using testcontainers.
 
-use drasi_lib::{channels::ResultDiff, DrasiLib, Query};
+use drasi_core::models::SourceChange;
+use drasi_lib::channels::SourceEvent;
+use drasi_lib::config::SourceSubscriptionSettings;
+use drasi_lib::{channels::ResultDiff, ComponentStatus, DrasiLib, Query, Source};
 use drasi_reaction_application::ApplicationReaction;
 use mysql_async::prelude::*;
 use mysql_async::Conn;
@@ -24,6 +27,12 @@ use tokio::time::{sleep, timeout, Duration};
 
 use drasi_bootstrap_mysql::MySqlBootstrapProvider;
 use drasi_source_mysql::{MySqlReplicationSource, StartPosition, TableKeyConfig};
+
+/// Extract the trailing integer primary key from an element id of the form
+/// `table:pk` (e.g. `items:42` → 42).
+fn element_id_int(element_id: &str) -> Option<i64> {
+    element_id.rsplit(':').next()?.parse::<i64>().ok()
+}
 
 #[tokio::test]
 #[ignore]
@@ -478,9 +487,212 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
     );
 }
 
+#[tokio::test]
+#[ignore]
+async fn test_mysql_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() {
+    use std::collections::{HashMap, HashSet};
+
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    const SEED_COUNT: usize = 1_000;
+
+    let result = timeout(Duration::from_secs(300), async {
+        let (_container, port) = setup_mysql_container().await;
+        prepare_mysql_database(port).await;
+
+        // Seed rows BEFORE the source connects to the binlog so they are part
+        // of the bootstrap snapshot and must never be replayed by CDC.
+        let mut conn = test_conn(port).await;
+        for batch_start in (1..=SEED_COUNT).step_by(100) {
+            let values = (batch_start..batch_start + 100)
+                .map(|id| format!("('Seed{id}', {id}.00)"))
+                .collect::<Vec<_>>()
+                .join(",");
+            conn.query_drop(format!("INSERT INTO items (name, value) VALUES {values}"))
+                .await
+                .unwrap();
+        }
+
+        let bootstrap = MySqlBootstrapProvider::builder()
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_database("test")
+            .with_user("test")
+            .with_password("test")
+            .with_tables(vec!["items".to_string()])
+            .build()
+            .unwrap();
+
+        let source = MySqlReplicationSource::builder("mysql-overlap-src")
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_database("test")
+            .with_user("test")
+            .with_password("test")
+            .with_tables(vec!["items".to_string()])
+            .with_start_position(StartPosition::FromEnd)
+            .with_bootstrap_provider(bootstrap)
+            .build()
+            .unwrap();
+
+        source.start().await.unwrap();
+        for _ in 0..50 {
+            if source.status().await == ComponentStatus::Running {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        let settings = SourceSubscriptionSettings {
+            source_id: "mysql-overlap-src".to_string(),
+            enable_bootstrap: true,
+            query_id: "q-handover".to_string(),
+            nodes: HashSet::from(["items".to_string()]),
+            relations: HashSet::new(),
+            resume_from: None,
+            request_position_handle: true,
+        };
+        let response = source.subscribe(settings).await.unwrap();
+        let mut bootstrap_rx = response
+            .bootstrap_receiver
+            .expect("bootstrap_receiver should be present when enable_bootstrap is true");
+        let mut cdc_rx = response.receiver;
+
+        // Drain the entire bootstrap snapshot.
+        let mut bootstrap_ids: HashMap<i64, usize> = HashMap::new();
+        loop {
+            match timeout(Duration::from_secs(30), bootstrap_rx.recv()).await {
+                Ok(Some(event)) => {
+                    if let SourceChange::Insert { element } = &event.change {
+                        if let Some(id) =
+                            element_id_int(element.get_reference().element_id.as_ref())
+                        {
+                            *bootstrap_ids.entry(id).or_default() += 1;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => panic!("Timed out draining MySQL bootstrap snapshot"),
+            }
+        }
+
+        assert_eq!(
+            bootstrap_ids.len(),
+            SEED_COUNT,
+            "bootstrap should snapshot every seed row exactly once (got {})",
+            bootstrap_ids.len()
+        );
+        for id in 1..=SEED_COUNT as i64 {
+            assert_eq!(
+                bootstrap_ids.get(&id).copied().unwrap_or_default(),
+                1,
+                "seed row {id} missing or duplicated in bootstrap snapshot"
+            );
+        }
+
+        // Bootstrap is complete and the boundary is published. Mutations now are
+        // strictly after the boundary and must each be delivered exactly once by
+        // CDC, with no seed rows replayed.
+        let mut change_conn = test_conn(port).await;
+        change_conn
+            .query_drop("INSERT INTO items (name, value) VALUES ('PostBoundary', 1001.00)")
+            .await
+            .unwrap();
+        change_conn
+            .query_drop("UPDATE items SET name = 'Seed1Updated' WHERE id = 1")
+            .await
+            .unwrap();
+        change_conn
+            .query_drop("DELETE FROM items WHERE id = 2")
+            .await
+            .unwrap();
+        change_conn.disconnect().await.unwrap();
+
+        let mut inserts: HashMap<i64, usize> = HashMap::new();
+        let mut updates: HashMap<i64, usize> = HashMap::new();
+        let mut deletes: HashMap<i64, usize> = HashMap::new();
+        let started = std::time::Instant::now();
+        let mut idle_since = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(30) {
+            match timeout(Duration::from_millis(500), cdc_rx.recv()).await {
+                Ok(Ok(wrapper)) => {
+                    idle_since = std::time::Instant::now();
+                    if let SourceEvent::Change(change) = &wrapper.event {
+                        if let Some(id) = element_id_int(change.get_reference().element_id.as_ref())
+                        {
+                            match change {
+                                SourceChange::Insert { .. } => *inserts.entry(id).or_default() += 1,
+                                SourceChange::Update { .. } => *updates.entry(id).or_default() += 1,
+                                SourceChange::Delete { .. } => *deletes.entry(id).or_default() += 1,
+                                SourceChange::Future { .. } => {}
+                            }
+                        }
+                    }
+                }
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    let total_inserts: usize = inserts.values().sum();
+                    let done = total_inserts == 1
+                        && updates.get(&1) == Some(&1)
+                        && deletes.get(&2) == Some(&1);
+                    if done && idle_since.elapsed() >= Duration::from_secs(2) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // No gap: every post-boundary change was delivered exactly once.
+        let total_inserts: usize = inserts.values().sum();
+        assert_eq!(
+            total_inserts, 1,
+            "post-boundary insert missing or duplicated in CDC stream: {inserts:?}"
+        );
+        assert_eq!(
+            updates.get(&1),
+            Some(&1),
+            "post-boundary update missing or duplicated in CDC stream: {updates:?}"
+        );
+        assert_eq!(
+            deletes.get(&2),
+            Some(&1),
+            "post-boundary delete missing or duplicated in CDC stream: {deletes:?}"
+        );
+
+        // No overlap: the only change events permitted are the three
+        // post-boundary mutations; no pre-boundary seed row may be replayed.
+        assert_eq!(
+            inserts.len(),
+            1,
+            "unexpected extra inserts (CDC replayed pre-boundary events): {inserts:?}"
+        );
+        assert_eq!(
+            updates.len(),
+            1,
+            "unexpected extra updates (CDC replayed pre-boundary events): {updates:?}"
+        );
+        assert_eq!(
+            deletes.len(),
+            1,
+            "unexpected extra deletes (CDC replayed pre-boundary events): {deletes:?}"
+        );
+
+        source.stop().await.unwrap();
+        conn.disconnect().await.unwrap();
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "test_mysql_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps timed out"
+    );
+}
+
 // --- Checkpoint Recovery Integration Tests ---
 
-use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
+use drasi_lib::indexes::config::StorageBackendRef;
 use drasi_reaction_application::subscription::SubscriptionOptions;
 
 /// Helper to start a MySQL container with replication and GTID enabled.
@@ -651,11 +863,7 @@ async fn test_mysql_checkpoint_recovery_round_trip() {
             .from_source("mysql-cp-src")
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
 
         let (reaction, handle) = ApplicationReaction::builder("cp-reaction")
@@ -669,7 +877,7 @@ async fn test_mysql_checkpoint_recovery_round_trip() {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .unwrap();
@@ -798,11 +1006,7 @@ async fn test_mysql_bootstrap_then_restart_resumes_from_snapshot_position() {
             .from_source("mysql-bs-src")
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
 
         let (reaction, handle) = ApplicationReaction::builder("bs-reaction")
@@ -816,7 +1020,7 @@ async fn test_mysql_bootstrap_then_restart_resumes_from_snapshot_position() {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .unwrap();
@@ -930,11 +1134,7 @@ async fn test_mysql_full_restart_picks_up_offline_changes() {
             .from_source("mysql-fr-src")
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
 
         let (reaction, handle) = ApplicationReaction::builder("fr-reaction")
@@ -948,7 +1148,7 @@ async fn test_mysql_full_restart_picks_up_offline_changes() {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .unwrap();

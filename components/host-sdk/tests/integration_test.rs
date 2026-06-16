@@ -2545,7 +2545,6 @@ async fn test_cdylib_source_dispatches_events() {
         relations: std::collections::HashSet::new(),
         resume_from: None,
         request_position_handle: false,
-        last_sequence: None,
     };
     let sub = source.subscribe(settings).await.expect("Should subscribe");
     let receiver = sub.receiver;
@@ -2626,7 +2625,6 @@ async fn test_stress_rapid_subscribe_drop_under_load() {
             relations: std::collections::HashSet::new(),
             resume_from: None,
             request_position_handle: false,
-            last_sequence: None,
         };
         let sub = source.subscribe(settings).await.expect("Should subscribe");
         let mut receiver = sub.receiver;
@@ -2761,7 +2759,6 @@ async fn test_ffi_subscribe_position_handle() {
         relations: std::collections::HashSet::new(),
         resume_from: None,
         request_position_handle: true,
-        last_sequence: None,
     };
     let sub = source
         .subscribe(settings_with)
@@ -2795,7 +2792,6 @@ async fn test_ffi_subscribe_position_handle() {
         relations: std::collections::HashSet::new(),
         resume_from: None,
         request_position_handle: false,
-        last_sequence: None,
     };
     let sub2 = source
         .subscribe(settings_without)
@@ -2832,7 +2828,6 @@ async fn test_ffi_resume_from_skips_bootstrap() {
         relations: std::collections::HashSet::new(),
         resume_from: Some(resume_bytes),
         request_position_handle: true,
-        last_sequence: Some(100),
     };
     let sub = source
         .subscribe(settings)
@@ -2864,7 +2859,6 @@ async fn test_ffi_resume_from_skips_bootstrap() {
 /// source_position, without sending any bootstrap events.
 struct TestBootstrapProvider {
     source_position: Option<bytes::Bytes>,
-    last_sequence: Option<u64>,
 }
 
 #[async_trait::async_trait]
@@ -2880,8 +2874,6 @@ impl drasi_lib::bootstrap::BootstrapProvider for TestBootstrapProvider {
         drop(_event_tx);
         Ok(drasi_lib::bootstrap::BootstrapResult {
             event_count: 0,
-            last_sequence: self.last_sequence,
-            sequences_aligned: true,
             source_position: self.source_position.clone(),
         })
     }
@@ -2902,7 +2894,6 @@ async fn test_ffi_bootstrap_result_receiver_delivers_result() {
     let position_bytes = bytes::Bytes::from_static(b"\xDE\xAD\xBE\xEF\x00\x01\x02\x03");
     let provider = TestBootstrapProvider {
         source_position: Some(position_bytes.clone()),
-        last_sequence: Some(42),
     };
     source.set_bootstrap_provider(Box::new(provider)).await;
 
@@ -2915,7 +2906,6 @@ async fn test_ffi_bootstrap_result_receiver_delivers_result() {
         relations: std::collections::HashSet::new(),
         resume_from: None,
         request_position_handle: true,
-        last_sequence: None,
     };
     let sub = source
         .subscribe(settings)
@@ -2944,15 +2934,6 @@ async fn test_ffi_bootstrap_result_receiver_delivers_result() {
     assert_eq!(
         bootstrap_result.event_count, 0,
         "event_count should be 0 (no events sent)"
-    );
-    assert_eq!(
-        bootstrap_result.last_sequence,
-        Some(42),
-        "last_sequence should round-trip through FFI"
-    );
-    assert!(
-        bootstrap_result.sequences_aligned,
-        "sequences_aligned should round-trip through FFI"
     );
     assert_eq!(
         bootstrap_result.source_position,
@@ -3076,7 +3057,6 @@ async fn test_ffi_checkpoint_persist_and_resume_from() {
         relations: std::collections::HashSet::new(),
         resume_from: None,
         request_position_handle: true,
-        last_sequence: None,
     };
     let sub = source2
         .subscribe(settings)

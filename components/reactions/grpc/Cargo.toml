@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-grpc"
-version = "0.5.0"
+version = "0.3.4"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "gRPC reaction plugin for Drasi (configurable fixed and adaptive batching, with Handlebars output templating)"

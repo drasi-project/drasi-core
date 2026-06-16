@@ -1,8 +1,11 @@
 build:
 	cargo build -p drasi-reaction-dashboard
 
-test:
+test: test-js
 	cargo test -p drasi-reaction-dashboard
+
+test-js:
+	node tests/handlebars_helpers.test.js
 
 integration-test:
 	cargo test -p drasi-reaction-dashboard -- --ignored --nocapture
