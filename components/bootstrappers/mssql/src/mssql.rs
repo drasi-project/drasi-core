@@ -86,8 +86,6 @@ impl BootstrapProvider for MsSqlBootstrapProvider {
 
         Ok(BootstrapResult {
             event_count: count,
-            last_sequence: None,
-            sequences_aligned: false,
             source_position: snapshot_lsn.map(|lsn| Bytes::from(lsn.to_bytes())),
         })
     }

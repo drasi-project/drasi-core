@@ -41,7 +41,10 @@ pub mod descriptor;
 mod position;
 
 pub use config::{AutoOffsetReset, KafkaSourceConfig};
-pub use position::{decode_position, encode_position, KafkaPositionComparator};
+pub use position::{
+    decode_partition_offsets, decode_position, encode_partition_offsets, encode_position,
+    KafkaPositionComparator,
+};
 
 use async_trait::async_trait;
 use config::KafkaSourceBuilder;
@@ -191,6 +194,8 @@ impl Source for KafkaSource {
             )
             .await;
 
+        self.base.reset_bootstrap_boundary();
+
         // Set position comparator for multi-partition replay filtering
         self.base
             .set_position_comparator(KafkaPositionComparator)
@@ -274,15 +279,31 @@ impl Source for KafkaSource {
                         .await
                         .insert(settings.query_id.clone(), offsets);
                 }
-                None => {
-                    warn!(
+                None => match position::decode_partition_offsets(resume_bytes) {
+                    Some(partition_offsets) => {
+                        let mut offsets = vec![0; partition_offsets.len()];
+                        for (partition, offset) in partition_offsets {
+                            if partition >= 0 && (partition as usize) < offsets.len() {
+                                offsets[partition as usize] = offset;
+                            }
+                        }
+                        self.subscriber_resume_positions
+                            .write()
+                            .await
+                            .insert(settings.query_id.clone(), offsets);
+                    }
+                    None => warn!(
                         "[{}] Invalid Kafka resume position for query '{}'",
                         self.base.id, settings.query_id
-                    );
-                }
+                    ),
+                },
             }
         }
-        self.base.subscribe_with_bootstrap(&settings, "kafka").await
+        let response = self
+            .base
+            .subscribe_with_bootstrap(&settings, "kafka")
+            .await?;
+        Ok(response)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

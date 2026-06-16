@@ -28,7 +28,7 @@ use drasi_query_ast::ast;
 #[derive(Debug)]
 pub struct MatchPath {
     pub slots: Vec<MatchPathSlot>,
-    optional_paths: HashSet<usize>,
+    pub(crate) optional_paths: HashSet<usize>,
 }
 
 impl MatchPath {

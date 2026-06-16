@@ -26,18 +26,14 @@ pub use drasi_oracle_common::{
 
 use anyhow::Result;
 use async_trait::async_trait;
+use bytes::Bytes;
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::channels::{ComponentStatus, DispatchMode};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{watch, Mutex as AsyncMutex, RwLock};
-
-#[derive(Default)]
-pub(crate) struct BootstrapSyncState {
-    pub pending_scn: Option<Scn>,
-}
+use tokio::sync::{watch, RwLock};
 
 pub struct OracleSource {
     source_id: String,
@@ -45,7 +41,6 @@ pub struct OracleSource {
     base: SourceBase,
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     shutdown_tx: Arc<Mutex<Option<watch::Sender<bool>>>>,
-    bootstrap_sync: Arc<AsyncMutex<BootstrapSyncState>>,
     /// Per-subscriber resume positions from checkpoint recovery.
     /// Populated during subscribe() when a query provides resume_from bytes.
     /// The LogMiner poll loop uses the minimum SCN as its start point.
@@ -63,7 +58,6 @@ impl OracleSource {
             base: SourceBase::new(params)?,
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(Mutex::new(None)),
-            bootstrap_sync: Arc::new(AsyncMutex::new(BootstrapSyncState::default())),
             subscriber_resume_scns: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -110,8 +104,7 @@ impl Source for OracleSource {
             )
             .await;
         log::info!("Starting Oracle source '{}'", self.base.id);
-
-        self.bootstrap_sync.lock().await.pending_scn = None;
+        self.base.reset_bootstrap_boundary();
 
         let validation_config = self.config.clone();
         let validation_result =
@@ -133,7 +126,6 @@ impl Source for OracleSource {
         let source_id = self.base.id.clone();
         let config = self.config.clone();
         let base = self.base.clone_shared();
-        let bootstrap_sync = self.bootstrap_sync.clone();
         let subscriber_resume_scns = self.subscriber_resume_scns.clone();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         *self
@@ -145,7 +137,6 @@ impl Source for OracleSource {
             if let Err(error) = stream::run_logminer_stream(
                 source_id.clone(),
                 config,
-                bootstrap_sync,
                 subscriber_resume_scns,
                 base,
                 shutdown_rx,
@@ -214,7 +205,7 @@ impl Source for OracleSource {
         // and store it keyed by query_id. The LogMiner poll loop computes the min
         // across all active subscribers to decide where to start polling from.
         if let Some(ref resume_bytes) = settings.resume_from {
-            match Scn::from_bytes(resume_bytes) {
+            match decode_scn_position(resume_bytes) {
                 Ok(scn) => {
                     log::info!(
                         "Subscriber '{}' requesting resume from SCN {} on source '{}'",
@@ -243,14 +234,25 @@ impl Source for OracleSource {
 
         if should_bootstrap {
             let bootstrap_config = self.config.clone();
-            let bootstrap_scn =
+            let captured_bootstrap_scn =
                 tokio::task::spawn_blocking(move || stream::fetch_bootstrap_scn(&bootstrap_config))
                     .await
                     .map_err(|error| {
                         anyhow::anyhow!("Oracle bootstrap SCN task failed: {error}")
                     })??;
 
-            self.bootstrap_sync.lock().await.pending_scn = Some(bootstrap_scn);
+            let captured_position = encode_scn_position(captured_bootstrap_scn);
+            let bootstrap_scn = if self
+                .base
+                .publish_bootstrap_boundary(captured_position.clone())
+            {
+                captured_bootstrap_scn
+            } else if let Some(boundary_bytes) = self.base.try_bootstrap_boundary() {
+                decode_scn_position(&boundary_bytes).unwrap_or(captured_bootstrap_scn)
+            } else {
+                captured_bootstrap_scn
+            };
+
             bootstrap_properties.insert(
                 ORACLE_BOOTSTRAP_SCN_CONTEXT_PROPERTY.to_string(),
                 serde_json::Value::Number(serde_json::Number::from(bootstrap_scn.0)),
@@ -422,10 +424,17 @@ impl OracleSourceBuilder {
             base: SourceBase::new(params)?,
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(Mutex::new(None)),
-            bootstrap_sync: Arc::new(AsyncMutex::new(BootstrapSyncState::default())),
             subscriber_resume_scns: Arc::new(RwLock::new(HashMap::new())),
         })
     }
+}
+
+pub(crate) fn encode_scn_position(scn: Scn) -> Bytes {
+    Bytes::from(scn.to_bytes())
+}
+
+pub(crate) fn decode_scn_position(position: &Bytes) -> Result<Scn> {
+    Scn::from_bytes(position).map_err(|error| anyhow::anyhow!("invalid Oracle SCN bytes: {error}"))
 }
 
 #[cfg(test)]

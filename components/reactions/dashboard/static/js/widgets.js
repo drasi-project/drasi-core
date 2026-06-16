@@ -68,6 +68,19 @@ function getEChartsTheme() {
   return document.documentElement.getAttribute("data-theme") === "light" ? "drasi-light" : "drasi-dark";
 }
 
+// ─── Shared sort comparator ─────────────────────────────────
+function compareByField(a, b, field, order = "asc") {
+  const va = a?.[field], vb = b?.[field];
+  const na = Number(va), nb = Number(vb);
+  let cmp;
+  if (Number.isFinite(na) && Number.isFinite(nb)) {
+    cmp = na - nb;
+  } else {
+    cmp = String(va ?? "").localeCompare(String(vb ?? ""));
+  }
+  return order === "desc" ? -cmp : cmp;
+}
+
 // ─── Handlebars helpers ─────────────────────────────────────
 if (window.Handlebars) {
   const Hbs = window.Handlebars;
@@ -122,6 +135,83 @@ if (window.Handlebars) {
   Hbs.registerHelper("lt", function (a, b) { return Number(a) < Number(b); });
   Hbs.registerHelper("gte", function (a, b) { return Number(a) >= Number(b); });
   Hbs.registerHelper("lte", function (a, b) { return Number(a) <= Number(b); });
+
+  // Hyperlink helper — generates an <a> tag that opens in a new tab.
+  // Usage: {{link url "Link Text"}} or {{link url}} (defaults text to the URL)
+  Hbs.registerHelper("link", function (url, text) {
+    const href = String(url ?? "");
+    const label = typeof text === "string" ? text : href;
+    // Only allow safe URL schemes
+    const allowedScheme = /^(https?:|mailto:|\/|#)/i;
+    if (href && !allowedScheme.test(href)) {
+      return new Hbs.SafeString(Hbs.Utils.escapeExpression(label));
+    }
+    return new Hbs.SafeString(
+      `<a href="${Hbs.Utils.escapeExpression(href)}" target="_blank" rel="noopener noreferrer">${Hbs.Utils.escapeExpression(label)}</a>`
+    );
+  });
+
+  // Sort helper — block helper that sorts rows by a field.
+  // Usage: {{#sortBy rows "field"}}...{{/sortBy}} or {{#sortBy rows "field" "desc"}}...{{/sortBy}}
+  Hbs.registerHelper("sortBy", function (rows, field, order, options) {
+    if (typeof order === "object") { options = order; order = "asc"; }
+    const arr = Array.isArray(rows) ? [...rows] : [];
+    arr.sort((a, b) => compareByField(a, b, field, order));
+    let result = "";
+    for (let i = 0; i < arr.length; i++) {
+      result += options.fn(arr[i], { data: { ...options.data, index: i, first: i === 0, last: i === arr.length - 1 } });
+    }
+    return new Hbs.SafeString(result);
+  });
+
+  // Group helper — block helper that groups rows by a field value.
+  // Usage: {{#groupBy rows "field"}}{{@key}}: {{#each this}}...{{/each}}{{/groupBy}}
+  Hbs.registerHelper("groupBy", function (rows, field, options) {
+    const arr = Array.isArray(rows) ? rows : [];
+    const groups = {};
+    for (const row of arr) {
+      const key = String(row?.[field] ?? "");
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(row);
+    }
+    const sortedKeys = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+    let result = "";
+    for (const key of sortedKeys) {
+      result += options.fn(groups[key], { data: { ...options.data, key } });
+    }
+    return result;
+  });
+
+  // HTML helper — marks content as safe HTML (bypasses Handlebars escaping).
+  // Sanitized by DOMPurify if available; otherwise falls back to escaping.
+  // Usage: {{html myHtmlContent}}
+  Hbs.registerHelper("html", function (content) {
+    const raw = String(content ?? "");
+    if (window.DOMPurify) {
+      return new Hbs.SafeString(window.DOMPurify.sanitize(raw, { ADD_ATTR: ["target", "rel"] }));
+    }
+    // No DOMPurify available — escape to prevent XSS
+    return Hbs.Utils.escapeExpression(raw);
+  });
+
+  // Replace helper — replaces all occurrences of a substring.
+  // Usage: {{replace value "search" "replacement"}}
+  Hbs.registerHelper("replace", function (value, search, replacement) {
+    if (typeof value !== "string") return value;
+    if (typeof search !== "string") return value;
+    if (typeof replacement !== "string") replacement = "";
+    return value.split(search).join(replacement);
+  });
+
+  // TrimPrefix helper — removes a prefix from the start of a string.
+  // Usage: {{trimPrefix value "prefix"}}
+  Hbs.registerHelper("trimPrefix", function (value, prefix) {
+    const str = String(value ?? "");
+    if (typeof prefix === "string" && str.startsWith(prefix)) {
+      return str.slice(prefix.length);
+    }
+    return str;
+  });
 }
 
 export const WIDGET_TYPES = [
@@ -534,10 +624,20 @@ function renderMap(widget, runtime, container) {
   }, true);
 }
 
+
 function renderTable(widget, runtime, container) {
-  const rows = asRows(runtime);
+  // Store latest runtime on container so click handlers always use fresh data
+  container.__runtime = runtime;
+
+  let rows = asRows(runtime);
   const cfgCols = widget.config?.columns ?? [];
   const columns = cfgCols.length > 0 ? cfgCols : Object.keys(rows[0] ?? {});
+
+  // Apply sort if active (sort state stored on container, GC'd with DOM element)
+  const sortState = container.__sortState;
+  if (sortState) {
+    rows = [...rows].sort((a, b) => compareByField(a, b, sortState.field, sortState.order));
+  }
 
   const isNumeric = (v) => typeof v === "number" || (typeof v === "string" && /^-?\d+(\.\d+)?$/.test(v));
 
@@ -566,7 +666,20 @@ function renderTable(widget, runtime, container) {
   const headRow = document.createElement("tr");
   columns.forEach((c) => {
     const th = document.createElement("th");
-    th.textContent = String(c);
+    th.style.cursor = "pointer";
+    th.style.userSelect = "none";
+    const label = String(c);
+    const arrow = sortState?.field === c ? (sortState.order === "asc" ? " ▲" : " ▼") : "";
+    th.textContent = label + arrow;
+    th.addEventListener("click", () => {
+      const current = container.__sortState;
+      if (current?.field === c) {
+        container.__sortState = { field: c, order: current.order === "asc" ? "desc" : "asc" };
+      } else {
+        container.__sortState = { field: c, order: "asc" };
+      }
+      renderTable(widget, container.__runtime, container);
+    });
     headRow.appendChild(th);
   });
   thead.appendChild(headRow);
@@ -610,15 +723,22 @@ function renderText(widget, runtime, container) {
     aggregation: runtime?.aggregation ?? null,
   };
 
+  // Preserve scroll position across re-renders
+  const existing = container.querySelector(".widget-markdown");
+  const scrollTop = existing ? existing.scrollTop : 0;
+
   try {
     const compiled = Handlebars.compile(template);
     const markdown = compiled(context);
     const rawHtml = window.marked ? window.marked.parse(markdown) : markdown;
-    const safeHtml = window.DOMPurify ? window.DOMPurify.sanitize(rawHtml) : rawHtml;
+    const safeHtml = window.DOMPurify ? window.DOMPurify.sanitize(rawHtml, { ADD_ATTR: ["target", "rel"] }) : rawHtml;
     container.innerHTML = `<div class="widget-markdown">${safeHtml}</div>`;
   } catch (e) {
     container.innerHTML = `<div class="widget-markdown widget-error"><pre>Template error: ${escapeHtml(e.message)}</pre></div>`;
   }
+
+  const updated = container.querySelector(".widget-markdown");
+  if (updated) updated.scrollTop = scrollTop;
 }
 
 // ─── Public render dispatcher ───────────────────────────────

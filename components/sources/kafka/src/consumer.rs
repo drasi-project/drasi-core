@@ -15,7 +15,7 @@
 //! Kafka consumer task that reads messages and dispatches them as graph change events.
 
 use crate::config::KafkaSourceConfig;
-use crate::position::encode_position;
+use crate::position::{decode_partition_offsets, encode_position};
 use anyhow::{anyhow, Context, Result};
 use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::events::{SourceEvent, SourceEventWrapper};
@@ -81,12 +81,33 @@ impl KafkaConsumerTask {
         );
 
         let min_resume_offsets = self.minimum_resume_offsets(partition_count).await;
+        let bootstrap_offsets = if min_resume_offsets.is_none()
+            && self.base.has_bootstrap_provider()
+            && self.base.take_pending_initial_bootstrap()
+        {
+            match self
+                .wait_for_initial_bootstrap_offsets(partition_count)
+                .await
+            {
+                Ok(offsets) => Some(offsets),
+                // A shutdown during the boundary wait is a clean exit, not an error.
+                Err(e) if *self.shutdown_rx.borrow() => {
+                    info!("[{}] Kafka consumer shutting down: {e}", self.source_id);
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
+        } else {
+            None
+        };
 
         // Assign to all partitions.
         let mut tpl = TopicPartitionList::new();
         for partition in 0..partition_count as i32 {
             let start_offset = if let Some(ref offsets) = min_resume_offsets {
                 Offset::Offset(offsets.get(partition as usize).copied().unwrap_or(0).max(0))
+            } else if let Some(ref offsets) = bootstrap_offsets {
+                Offset::Offset(offsets[partition as usize].max(0))
             } else {
                 match self.config.auto_offset_reset {
                     crate::config::AutoOffsetReset::Earliest => Offset::Beginning,
@@ -111,12 +132,19 @@ impl KafkaConsumerTask {
                 "[{}] Starting from replay offsets: {:?}",
                 self.source_id, offsets
             );
+        } else if let Some(ref offsets) = bootstrap_offsets {
+            info!(
+                "[{}] Starting from bootstrap boundary offsets: {:?}",
+                self.source_id, offsets
+            );
         }
 
         // Track current offsets per partition (next offset to consume).
         // For Latest mode without resume, use high watermarks so checkpoints
         // don't incorrectly encode offset 0.
         let mut current_offsets = if let Some(offsets) = min_resume_offsets {
+            offsets
+        } else if let Some(offsets) = bootstrap_offsets {
             offsets
         } else if matches!(
             self.config.auto_offset_reset,
@@ -211,6 +239,56 @@ impl KafkaConsumerTask {
         }
 
         Ok(())
+    }
+
+    async fn wait_for_initial_bootstrap_offsets(
+        &mut self,
+        partition_count: usize,
+    ) -> Result<Vec<i64>> {
+        info!(
+            "[{}] Waiting for Kafka bootstrap boundary before initial consumption",
+            self.source_id
+        );
+        let boundary = tokio::select! {
+            boundary = self.base.wait_for_bootstrap_boundary() => boundary,
+            _ = self.shutdown_rx.changed() => {
+                if *self.shutdown_rx.borrow() {
+                    return Err(anyhow!("shutting down while waiting for bootstrap boundary"));
+                }
+                self.base.wait_for_bootstrap_boundary().await
+            }
+        };
+        let boundary = boundary.ok_or_else(|| anyhow!("Bootstrap boundary channel closed"))?;
+        let partition_offsets = decode_partition_offsets(&boundary)
+            .ok_or_else(|| anyhow!("Invalid Kafka bootstrap boundary position"))?;
+        Self::partition_offsets_to_vec(partition_offsets, partition_count)
+    }
+
+    fn partition_offsets_to_vec(
+        partition_offsets: Vec<(i32, i64)>,
+        partition_count: usize,
+    ) -> Result<Vec<i64>> {
+        let mut offsets: Vec<Option<i64>> = vec![None; partition_count];
+        for (partition, offset) in partition_offsets {
+            if partition < 0 || partition as usize >= partition_count {
+                return Err(anyhow!(
+                    "Bootstrap boundary contains partition {partition}, expected 0..{}",
+                    partition_count.saturating_sub(1)
+                ));
+            }
+            if offsets[partition as usize].replace(offset).is_some() {
+                return Err(anyhow!(
+                    "Bootstrap boundary contains duplicate partition {partition}"
+                ));
+            }
+        }
+        offsets
+            .into_iter()
+            .enumerate()
+            .map(|(partition, offset)| {
+                offset.ok_or_else(|| anyhow!("Bootstrap boundary missing partition {partition}"))
+            })
+            .collect()
     }
 
     async fn minimum_resume_offsets(&self, partition_count: usize) -> Option<Vec<i64>> {
