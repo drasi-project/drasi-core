@@ -35,6 +35,8 @@ members = [
   "components/bootstrappers/oracle",
   "components/bootstrappers/here-traffic",
   "components/bootstrappers/cloudflare-radar",
+  "components/bootstrappers/neo4j",
+  "components/neo4j-common",
   "components/bootstrappers/kafka",
 
   # Source Plugins
@@ -57,6 +59,7 @@ members = [
   "components/sources/oracle",
   "components/sources/here-traffic",
   "components/sources/cloudflare-radar",
+  "components/sources/neo4j",
   "components/sources/kafka",
 
   # Reaction Plugins
@@ -125,13 +128,14 @@ exclude = [
   "query-perf",
   "examples/query",
   "lib-integration-tests",
+  "examples/lib/neo4j-getting-started",
   "xtask",
 ]
 
 resolver = "2"
 
 [workspace.package]
-version = "0.8.5"
+version = "0.9.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
@@ -150,9 +154,9 @@ drasi-middleware = { version = "0.5.4", path = "middleware" }
 drasi-identity-azure = { version = "0.2.6", path = "components/identity/azure" }
 drasi-identity-aws = { version = "0.2.2", path = "components/identity/aws" }
 drasi-lib = { version = "0.8.5", path = "lib" }
-drasi-ffi-primitives = { version = "0.8.5", path = "components/ffi-primitives" }
-drasi-plugin-sdk = { version = "0.8.5", path = "components/plugin-sdk" }
-drasi-host-sdk = { version = "0.8.5", path = "components/host-sdk" }
+drasi-ffi-primitives = { version = "0.9.0", path = "components/ffi-primitives" }
+drasi-plugin-sdk = { version = "0.9.0", path = "components/plugin-sdk" }
+drasi-host-sdk = { version = "0.9.0", path = "components/host-sdk" }
 
 # Common dependencies
 im = "15"
@@ -199,6 +203,9 @@ drasi-source-gtfs-rt = { version = "0.1.1", path = "components/sources/gtfs-rt" 
 drasi-bootstrap-gtfs-rt = { version = "0.1.1", path = "components/bootstrappers/gtfs-rt" }
 drasi-source-open511 = { version = "0.1.1", path = "components/sources/open511" }
 drasi-bootstrap-open511 = { version = "0.1.0", path = "components/bootstrappers/open511" }
+drasi-source-neo4j = { version = "0.1.0", path = "components/sources/neo4j" }
+drasi-bootstrap-neo4j = { version = "0.1.0", path = "components/bootstrappers/neo4j" }
+drasi-neo4j-common = { version = "0.1.0", path = "components/neo4j-common" }
 drasi-bootstrap-sqlite = { version = "0.1.4", path = "components/bootstrappers/sqlite" }
 
 [workspace.lints.rust]

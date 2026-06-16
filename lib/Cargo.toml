@@ -100,7 +100,12 @@ assert_matches = "1.5"
 serial_test = "3.0"
 pretty_assertions = "1.4"
 test-case = "3.3"
-drasi-index-rocksdb = { path = "../components/indexes/rocksdb" }
+drasi-index-rocksdb = { path = "../components/indexes/rocksdb", features = [
+    "plugin-descriptor",
+] }
+# Mirrors how drasi-server depends on the plugin SDK to drive index backends
+# through their descriptor/DTO when statically linking a backend crate.
+drasi-plugin-sdk = { workspace = true }
 
 # Additional testing dependencies
 rstest = "0.18"

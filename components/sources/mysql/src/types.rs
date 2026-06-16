@@ -14,6 +14,7 @@
 
 //! MySQL source internal types
 
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use drasi_lib::sources::PositionComparator;
 
@@ -26,15 +27,41 @@ pub struct ReplicationState {
 }
 
 impl ReplicationState {
+    pub fn new(
+        binlog_file: impl Into<String>,
+        binlog_position: u32,
+        gtid_set: Option<String>,
+        last_processed_timestamp: u64,
+    ) -> Self {
+        Self {
+            binlog_file: binlog_file.into(),
+            binlog_position,
+            gtid_set: gtid_set.filter(|gtid| !gtid.trim().is_empty()),
+            last_processed_timestamp,
+        }
+    }
+
     /// Serialize this state to bytes for use as a source position token.
     pub fn to_position_bytes(&self) -> Bytes {
-        Bytes::from(serde_json::to_vec(self).expect("ReplicationState serialization cannot fail"))
+        encode_position(self).expect("ReplicationState serialization cannot fail")
     }
 
     /// Deserialize from position bytes.
     pub fn from_position_bytes(bytes: &[u8]) -> Option<Self> {
-        serde_json::from_slice(bytes).ok()
+        decode_position(bytes).ok()
     }
+}
+
+/// Encode a MySQL source position token shared by bootstrap handover and CDC checkpoints.
+pub fn encode_position(state: &ReplicationState) -> Result<Bytes> {
+    serde_json::to_vec(state)
+        .map(Bytes::from)
+        .context("Failed to encode MySQL replication position")
+}
+
+/// Decode a MySQL source position token shared by bootstrap handover and CDC checkpoints.
+pub fn decode_position(bytes: &[u8]) -> Result<ReplicationState> {
+    serde_json::from_slice(bytes).context("Failed to decode MySQL replication position")
 }
 
 /// Position comparator for MySQL binlog positions.

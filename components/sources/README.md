@@ -741,11 +741,12 @@ Important rules:
   values.
 - `resume_from` overrides bootstrap. A resuming query already has indexed state,
   so re-bootstrapping would corrupt it.
-- `BootstrapResult` carries handoff metadata (`last_sequence`,
-  `sequences_aligned`, and `source_position`) so the query can persist a safe
-  starting checkpoint.
-- Any Source can be paired with any Bootstrap Provider, but only aligned pairs
-  can safely share a sequence namespace.
+- `BootstrapResult` carries handoff metadata — its `source_position` marks the
+  snapshot's boundary in the streaming source's CDC stream — so the query can
+  persist a safe starting checkpoint and live streaming resumes exactly there.
+- Any Source can be paired with any Bootstrap Provider. A provider reports a
+  `source_position` only when its snapshot boundary is a position in the same
+  stream the Source replays from (e.g. a Postgres snapshot taken at an LSN).
 
 ### 4.5 Replay, Checkpoints, and Source Positions
 
@@ -2002,9 +2003,13 @@ pub trait BootstrapProvider: Send + Sync {
 
 ```rust,ignore
 pub struct BootstrapResult {
+    /// Number of bootstrap events sent through the channel.
     pub event_count: usize,
-    pub last_sequence: Option<u64>,
-    pub sequences_aligned: bool,
+    /// Opaque token identifying the snapshot's position in the streaming
+    /// source's CDC stream (e.g. a Postgres WAL LSN, Oracle SCN, MySQL binlog
+    /// offset). Persisted as the initial recovery checkpoint and used to start
+    /// the stream exactly at the snapshot boundary. `None` for providers
+    /// without a positional concept.
     pub source_position: Option<Bytes>,
 }
 ```
@@ -2012,19 +2017,20 @@ pub struct BootstrapResult {
 Use these fields carefully:
 
 - `event_count` is the number of bootstrap events sent.
-- `last_sequence` is the bootstrap snapshot boundary when the provider has a
-  sequence namespace.
-- `sequences_aligned` means the bootstrap sequence namespace matches the
-  streaming Source's sequence namespace.
-- `source_position` is the native snapshot boundary. When present, the framework
-  can persist it as the initial checkpoint so crash recovery resumes without
-  re-bootstrapping.
+- `source_position` is the snapshot's boundary in the streaming source's
+  position space. When the provider and the streaming Source share a stream
+  (e.g. a Postgres snapshot plus Postgres CDC), set it to the snapshot's
+  position: the framework persists it as the initial checkpoint, so live
+  streaming starts exactly at the boundary — no overlap, no gap. Leave it
+  `None` when the provider has no position in the Source's stream (file/fixture,
+  remote-query, or cross-system snapshots); the Source then streams from its own
+  start point.
 
 ### Provider design categories
 
 | Provider category | Use case |
 |-------------------|----------|
-| Native snapshot provider | Reads an initial snapshot from the same system that provides the live stream. This is the only category that should usually set `sequences_aligned = true`. |
+| Native snapshot provider | Reads an initial snapshot from the same system that provides the live stream. This is the only category that should usually report a `source_position` (the snapshot's boundary in that stream). |
 | File or fixture provider | Loads deterministic bootstrap data for tests, demos, or offline startup. |
 | Remote query provider | Pulls an initial snapshot from an existing API or service. |
 | In-memory provider | Replays state accumulated by an in-process source. |
@@ -2048,8 +2054,9 @@ sources:
 ```
 
 This is useful when the initial dataset lives in one system but live changes
-arrive through another. Only set `sequences_aligned = true` when the bootstrap
-and stream positions are actually in the same ordered namespace.
+arrive through another. Report a `source_position` only when the bootstrap
+boundary is a real position in the same stream the Source replays from;
+otherwise leave it `None`.
 
 ### Implementing a provider for your source
 
@@ -2115,10 +2122,9 @@ impl BootstrapProvider for OrdersBootstrap {
 
         Ok(BootstrapResult {
             event_count: count,
-            last_sequence: Some(count as u64),
-            // Only `true` if this snapshot shares the streaming source's
-            // ordered sequence namespace (e.g. a Postgres snapshot at an LSN).
-            sequences_aligned: false,
+            // Set this to the snapshot's position only when this provider shares
+            // the streaming source's CDC stream (e.g. a Postgres snapshot taken
+            // at an LSN); otherwise leave it None.
             source_position: None,
         })
     }
@@ -2715,7 +2721,7 @@ Bootstrap-capable sources/providers should test:
 
 - label filtering through `BootstrapRequest`
 - event counts
-- `last_sequence`, `sequences_aligned`, and `source_position`
+- `source_position` handover metadata (the snapshot boundary)
 - provider errors propagated through the bootstrap result channel
 - mix-and-match provider configuration where supported
 
@@ -2807,7 +2813,7 @@ For documentation-only changes to this guide, no cargo build or test is required
 - [ ] Bootstrap provider honors node/relation label filters.
 - [ ] Bootstrap result includes accurate handoff metadata.
 - [ ] Source does not bootstrap when `resume_from` is present.
-- [ ] `sequences_aligned` is true only for aligned sequence namespaces.
+- [ ] `source_position` is reported only when the snapshot boundary is a real position in the Source's own stream.
 
 #### Dynamic plugin packaging
 
@@ -3010,8 +3016,6 @@ pub struct BootstrapEvent {
 
 pub struct BootstrapResult {
     pub event_count: usize,
-    pub last_sequence: Option<u64>,
-    pub sequences_aligned: bool,
     pub source_position: Option<Bytes>,
 }
 ```

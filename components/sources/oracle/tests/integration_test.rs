@@ -16,18 +16,29 @@ mod oracle_helpers;
 
 use anyhow::{Context, Result};
 use drasi_bootstrap_oracle::OracleBootstrapProvider;
+use drasi_core::models::SourceChange;
 use drasi_lib::channels::ResultDiff;
-use drasi_lib::{DrasiLib, Query};
+use drasi_lib::channels::SourceEvent;
+use drasi_lib::config::SourceSubscriptionSettings;
+use drasi_lib::{ComponentStatus, DrasiLib, Query, Source};
 use drasi_reaction_application::subscription::SubscriptionOptions;
 use drasi_reaction_application::ApplicationReaction;
 use drasi_source_oracle::{OracleSource, StartPosition};
 use oracle_helpers::{
-    delete_product, insert_product, prepare_oracle_database, setup_oracle, update_product,
+    delete_product, insert_product, insert_products_batch, prepare_oracle_database, setup_oracle,
+    update_product,
 };
 use serde_json::Value;
 use serial_test::serial;
-use std::time::Duration;
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
+
+/// Extract the trailing integer primary key from an Oracle element id of the
+/// form `schema:table:pk` (e.g. `system:drasi_products:42` → 42).
+fn element_id_int(element_id: &str) -> Option<i64> {
+    element_id.rsplit(':').next()?.parse::<i64>().ok()
+}
 
 const QUERY_ID: &str = "oracle-products-query";
 const SOURCE_ID: &str = "oracle-source";
@@ -519,7 +530,7 @@ async fn test_oracle_checkpoint_resume() -> Result<()> {
 #[serial]
 async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
-    use drasi_lib::{StorageBackendRef, StorageBackendSpec};
+    use drasi_lib::StorageBackendRef;
     use std::sync::Arc;
 
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -574,11 +585,7 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
 
         let (reaction, handle) = ApplicationReaction::builder("oracle-cp-reaction")
@@ -592,7 +599,7 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -685,7 +692,7 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
 #[serial]
 async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
-    use drasi_lib::{StorageBackendRef, StorageBackendSpec};
+    use drasi_lib::StorageBackendRef;
     use std::sync::Arc;
 
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -736,11 +743,7 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
 
         let (reaction, handle) = ApplicationReaction::builder("oracle-restart-reaction")
@@ -754,7 +757,7 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -814,6 +817,219 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
     match result {
         Ok(inner) => inner?,
         Err(_) => anyhow::bail!("Oracle full restart checkpoint test timed out after 300 seconds"),
+    }
+
+    Ok(())
+}
+
+/// Verifies the bootstrap-to-CDC handover eliminates overlap and gaps using a
+/// direct source subscription: every seed row appears in the bootstrap snapshot
+/// exactly once, and each post-boundary mutation is delivered by CDC exactly
+/// once with no seed row replayed (Oracle is source-first: the boundary SCN is
+/// captured in `subscribe()` and the snapshot is taken `AS OF` that SCN).
+#[tokio::test]
+#[ignore]
+#[serial]
+async fn test_oracle_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() -> Result<()> {
+    use std::collections::HashMap;
+
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    const SEED_COUNT: i64 = 200;
+
+    let result = tokio::time::timeout(Duration::from_secs(420), async {
+        let oracle = setup_oracle()
+            .await
+            .context("Failed to start Oracle container")?;
+        prepare_oracle_database(&oracle)
+            .await
+            .context("Failed to prepare Oracle database")?;
+
+        // Seed rows BEFORE subscribing. They are part of the bootstrap snapshot
+        // (taken AS OF the boundary SCN captured in subscribe) and must never be
+        // replayed by CDC after the boundary.
+        let seed: Vec<(i64, String, f64)> = (1..=SEED_COUNT)
+            .map(|id| (id, format!("Seed{id}"), id as f64))
+            .collect();
+        insert_products_batch(&oracle, &seed).context("Failed to seed Oracle rows")?;
+
+        let config = oracle.config().clone();
+        let bootstrap_provider = OracleBootstrapProvider::builder()
+            .with_host(&config.host)
+            .with_port(config.port)
+            .with_service(&config.service)
+            .with_user(&config.user)
+            .with_password(&config.password)
+            .with_table(TABLE_NAME)
+            .build()
+            .context("Failed to build Oracle bootstrap provider")?;
+
+        let source = OracleSource::builder(SOURCE_ID)
+            .with_host(&config.host)
+            .with_port(config.port)
+            .with_service(&config.service)
+            .with_user(&config.user)
+            .with_password(&config.password)
+            .with_table(TABLE_NAME)
+            .with_poll_interval_ms(1_000)
+            .with_start_position(StartPosition::Current)
+            .with_bootstrap_provider(bootstrap_provider)
+            .build()
+            .context("Failed to build Oracle source")?;
+
+        source
+            .start()
+            .await
+            .context("Failed to start Oracle source")?;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(30) {
+            if source.status().await == ComponentStatus::Running {
+                break;
+            }
+            sleep(Duration::from_millis(200)).await;
+        }
+        anyhow::ensure!(
+            source.status().await == ComponentStatus::Running,
+            "Oracle source did not reach Running state"
+        );
+
+        // Subscribe directly to the source so we observe both the bootstrap
+        // snapshot and the CDC stream deterministically.
+        let settings = SourceSubscriptionSettings {
+            source_id: SOURCE_ID.to_string(),
+            enable_bootstrap: true,
+            query_id: "q-handover".to_string(),
+            nodes: HashSet::from(["drasi_products".to_string()]),
+            relations: HashSet::new(),
+            resume_from: None,
+            request_position_handle: true,
+        };
+        let response = source
+            .subscribe(settings)
+            .await
+            .context("Failed to subscribe to Oracle source")?;
+        let mut bootstrap_rx = response
+            .bootstrap_receiver
+            .expect("bootstrap_receiver should be present when enable_bootstrap is true");
+        let mut cdc_rx = response.receiver;
+
+        // Drain the entire bootstrap snapshot. Bootstrap events stop (channel
+        // closes) once the snapshot completes and the boundary is published.
+        let mut bootstrap_ids: HashMap<i64, usize> = HashMap::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(120), bootstrap_rx.recv()).await {
+                Ok(Some(event)) => {
+                    if let SourceChange::Insert { element } = &event.change {
+                        if let Some(id) =
+                            element_id_int(element.get_reference().element_id.as_ref())
+                        {
+                            *bootstrap_ids.entry(id).or_default() += 1;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => anyhow::bail!("Timed out draining bootstrap snapshot"),
+            }
+        }
+
+        anyhow::ensure!(
+            bootstrap_ids.len() == SEED_COUNT as usize,
+            "bootstrap should snapshot every seed row exactly once (got {})",
+            bootstrap_ids.len()
+        );
+        for id in 1..=SEED_COUNT {
+            anyhow::ensure!(
+                bootstrap_ids.get(&id).copied().unwrap_or_default() == 1,
+                "seed row {id} missing or duplicated in bootstrap snapshot"
+            );
+        }
+
+        // Bootstrap is complete and the boundary SCN is published. Mutations now
+        // are strictly after the boundary and must each be delivered exactly once
+        // by CDC, with no seed rows replayed.
+        let insert_id = SEED_COUNT + 1;
+        update_product(&oracle, 10, "ConcurrentUpdated", 999.0)
+            .context("Failed post-boundary update")?;
+        delete_product(&oracle, 20).context("Failed post-boundary delete")?;
+        insert_product(&oracle, insert_id, "ConcurrentInserted", 1001.0)
+            .context("Failed post-boundary insert")?;
+
+        let mut inserts: HashMap<i64, usize> = HashMap::new();
+        let mut updates: HashMap<i64, usize> = HashMap::new();
+        let mut deletes: HashMap<i64, usize> = HashMap::new();
+        let started = Instant::now();
+        let mut idle_since = Instant::now();
+        while started.elapsed() < Duration::from_secs(90) {
+            match tokio::time::timeout(Duration::from_millis(500), cdc_rx.recv()).await {
+                Ok(Ok(wrapper)) => {
+                    idle_since = Instant::now();
+                    if let SourceEvent::Change(change) = &wrapper.event {
+                        if let Some(id) = element_id_int(change.get_reference().element_id.as_ref())
+                        {
+                            match change {
+                                SourceChange::Insert { .. } => *inserts.entry(id).or_default() += 1,
+                                SourceChange::Update { .. } => *updates.entry(id).or_default() += 1,
+                                SourceChange::Delete { .. } => *deletes.entry(id).or_default() += 1,
+                                SourceChange::Future { .. } => {}
+                            }
+                        }
+                    }
+                }
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    let done = inserts.get(&insert_id) == Some(&1)
+                        && updates.get(&10) == Some(&1)
+                        && deletes.get(&20) == Some(&1);
+                    if done && idle_since.elapsed() >= Duration::from_secs(3) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // No gap: every post-boundary change delivered exactly once.
+        anyhow::ensure!(
+            inserts.get(&insert_id) == Some(&1),
+            "post-boundary insert missing or duplicated in CDC stream: {inserts:?}"
+        );
+        anyhow::ensure!(
+            updates.get(&10) == Some(&1),
+            "post-boundary update missing or duplicated in CDC stream: {updates:?}"
+        );
+        anyhow::ensure!(
+            deletes.get(&20) == Some(&1),
+            "post-boundary delete missing or duplicated in CDC stream: {deletes:?}"
+        );
+
+        // No overlap: CDC must not replay any pre-boundary seed row. The only
+        // change events permitted are the three post-boundary mutations.
+        anyhow::ensure!(
+            inserts.len() == 1,
+            "unexpected extra inserts (CDC replayed pre-boundary events): {inserts:?}"
+        );
+        anyhow::ensure!(
+            updates.len() == 1,
+            "unexpected extra updates (CDC replayed pre-boundary events): {updates:?}"
+        );
+        anyhow::ensure!(
+            deletes.len() == 1,
+            "unexpected extra deletes (CDC replayed pre-boundary events): {deletes:?}"
+        );
+
+        source
+            .stop()
+            .await
+            .context("Failed to stop Oracle source")?;
+        oracle.cleanup().await;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => anyhow::bail!("Oracle overlap handover test timed out after 420 seconds"),
     }
 
     Ok(())
