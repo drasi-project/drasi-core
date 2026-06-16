@@ -63,6 +63,7 @@ pub(crate) mod batch;
 pub mod config;
 pub mod descriptor;
 pub mod http;
+pub mod output;
 pub(crate) mod process;
 pub(crate) mod standard_loop;
 
@@ -75,6 +76,7 @@ pub use config::{
     HttpReactionConfig, OperationType, QueryConfig, TemplateRouting, TemplateSpec,
 };
 pub use http::HttpReaction;
+pub use output::{DefaultChangeNotification, Operation};
 
 /// Builder for the HTTP reaction.
 ///

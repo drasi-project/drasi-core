@@ -23,7 +23,8 @@ use reqwest::{
 };
 use serde_json::{Map, Value};
 
-use crate::config::{synthesized_default_spec, HttpCallSpec};
+use crate::config::HttpCallSpec;
+use crate::output::DefaultChangeNotification;
 
 /// Build a [`Handlebars`] registry pre-loaded with the `json` helper used
 /// across all HTTP templates.
@@ -94,9 +95,11 @@ fn build_context(result_type: &str, data: &Value, query_name: &str) -> Map<Strin
 
 /// Render `call_spec` against `data` and POST/PUT/etc. it to `{base_url}{url}`.
 ///
-/// On any render error, falls back to a raw `POST {base_url}/changes/{query_name}`
-/// with the raw `data` JSON — events are **never dropped** because a
-/// template failed.
+/// On any render error (URL, body, or header), falls back to a `POST
+/// {base_url}/changes/{query_name}` carrying `notification` as the body —
+/// events are **never dropped** because a template failed. The same
+/// notification is also sent as the body when `call_spec.template` is
+/// empty (i.e., the caller did not specify a body template).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_result(
     client: &Client,
@@ -106,19 +109,28 @@ pub(crate) async fn process_result(
     call_spec: &HttpCallSpec,
     result_type: &str,
     data: &Value,
+    notification: &DefaultChangeNotification,
     query_name: &str,
     reaction_name: &str,
 ) -> Result<()> {
     let context = build_context(result_type, data, query_name);
 
-    // Render the URL; on failure fall back to the synthesized default.
+    // Render the URL; on failure fall back to the default change-notification endpoint.
     let rendered_spec_url = match handlebars.render_template(&call_spec.extension.url, &context) {
         Ok(u) => u,
         Err(e) => {
             warn!(
                 "[{reaction_name}] URL template render failed for query '{query_name}' ({result_type}): {e} — falling back to /changes/{query_name}"
             );
-            return fallback_post(client, base_url, token, data, query_name, reaction_name).await;
+            return post_default_notification(
+                client,
+                base_url,
+                token,
+                notification,
+                query_name,
+                reaction_name,
+            )
+            .await;
         }
     };
     let full_url =
@@ -143,7 +155,7 @@ pub(crate) async fn process_result(
             format!("{base_url}{rendered_spec_url}")
         };
 
-    // Render body
+    // Render body. Empty template => emit the standard change-notification envelope.
     let body = if !call_spec.template.is_empty() {
         debug!(
             "[{reaction_name}] Rendering body template for query '{query_name}' ({result_type})"
@@ -154,12 +166,19 @@ pub(crate) async fn process_result(
                 warn!(
                     "[{reaction_name}] Body template render failed for query '{query_name}' ({result_type}): {e} — falling back to /changes/{query_name}"
                 );
-                return fallback_post(client, base_url, token, data, query_name, reaction_name)
-                    .await;
+                return post_default_notification(
+                    client,
+                    base_url,
+                    token,
+                    notification,
+                    query_name,
+                    reaction_name,
+                )
+                .await;
             }
         }
     } else {
-        serde_json::to_string(&data)?
+        serde_json::to_string(notification)?
     };
 
     // Build headers (with optional auth) and render header value templates
@@ -179,8 +198,15 @@ pub(crate) async fn process_result(
                 warn!(
                     "[{reaction_name}] Header '{key}' template render failed for query '{query_name}' ({result_type}): {e} — falling back to /changes/{query_name}"
                 );
-                return fallback_post(client, base_url, token, data, query_name, reaction_name)
-                    .await;
+                return post_default_notification(
+                    client,
+                    base_url,
+                    token,
+                    notification,
+                    query_name,
+                    reaction_name,
+                )
+                .await;
             }
         };
         let header_value = HeaderValue::from_str(&rendered_value)?;
@@ -228,17 +254,20 @@ fn parse_method(method: &str) -> Method {
     }
 }
 
-async fn fallback_post(
+/// `POST {base_url}/changes/{query_name}` with the standard
+/// [`DefaultChangeNotification`] envelope as the JSON body. Used both by
+/// the no-template default delivery path and as the render-error fallback
+/// (URL/body/header template failure) so events are never dropped.
+pub(crate) async fn post_default_notification(
     client: &Client,
     base_url: &str,
     token: &Option<String>,
-    data: &Value,
+    notification: &DefaultChangeNotification,
     query_name: &str,
     reaction_name: &str,
 ) -> Result<()> {
-    let spec = synthesized_default_spec(query_name);
-    let full_url = format!("{base_url}{}", spec.extension.url);
-    let body = serde_json::to_string(data)?;
+    let full_url = format!("{base_url}/changes/{query_name}");
+    let body = serde_json::to_string(notification)?;
 
     let mut headers = HeaderMap::new();
     headers.insert("Content-Type", HeaderValue::from_static("application/json"));
@@ -249,7 +278,7 @@ async fn fallback_post(
         );
     }
 
-    debug!("[{reaction_name}] Fallback POST to {full_url}");
+    debug!("[{reaction_name}] Default-notification POST to {full_url}");
     let response = client
         .post(&full_url)
         .headers(headers)
@@ -264,7 +293,7 @@ async fn fallback_post(
             .await
             .unwrap_or_else(|_| "Unable to read response body".to_string());
         warn!(
-            "[{reaction_name}] Fallback HTTP request failed with status {}: {error_body}",
+            "[{reaction_name}] Default-notification HTTP request failed with status {}: {error_body}",
             status.as_u16()
         );
     }

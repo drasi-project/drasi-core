@@ -18,13 +18,12 @@ use handlebars::Handlebars;
 use log::{debug, error, info};
 use reqwest::Client;
 
-use drasi_lib::channels::{ComponentStatus, ResultDiff};
+use drasi_lib::channels::ComponentStatus;
 use drasi_lib::reactions::common::base::ReactionBase;
 
-use crate::config::{
-    synthesized_default_spec, HttpCallSpec, HttpReactionConfig, OperationType, TemplateRouting,
-};
-use crate::process::process_result;
+use crate::config::{HttpReactionConfig, TemplateRouting};
+use crate::output::DefaultChangeNotification;
+use crate::process::{post_default_notification, process_result};
 
 /// Run the standard (per-result) processing loop. Blocks until the
 /// shutdown signal fires or the queue is closed.
@@ -64,42 +63,48 @@ pub(crate) async fn run_standard_loop(
         );
 
         for result in &query_result.results {
-            let (op, op_str): (OperationType, &str) = match result {
-                ResultDiff::Add { .. } => (OperationType::Add, "ADD"),
-                ResultDiff::Delete { .. } => (OperationType::Delete, "DELETE"),
-                ResultDiff::Update { .. } | ResultDiff::Aggregation { .. } => {
-                    (OperationType::Update, "UPDATE")
-                }
-                ResultDiff::Noop => continue,
-            };
-
-            let spec_owned: HttpCallSpec;
-            let spec: &HttpCallSpec = match config.get_template_spec(query_name, op) {
-                Some(s) => s,
-                None => {
-                    spec_owned = synthesized_default_spec(query_name);
-                    &spec_owned
-                }
-            };
-
-            let data = match result {
-                ResultDiff::Add { data, .. } | ResultDiff::Delete { data, .. } => data.clone(),
-                _ => serde_json::to_value(result).expect("ResultDiff serialization should succeed"),
-            };
-
-            if let Err(e) = process_result(
-                &client,
-                &handlebars,
-                &config.base_url,
-                &config.token,
-                spec,
-                op_str,
-                &data,
+            let notification = match DefaultChangeNotification::from_diff(
                 query_name,
-                &reaction_name,
-            )
-            .await
+                query_result.timestamp,
+                result,
+            ) {
+                Some(n) => n,
+                // Noop variant: no notification, drop silently.
+                None => continue,
+            };
+
+            let outcome = match config.get_template_spec(query_name, notification.operation_type())
             {
+                Some(spec) => {
+                    let data = notification.handlebars_data();
+                    process_result(
+                        &client,
+                        &handlebars,
+                        &config.base_url,
+                        &config.token,
+                        spec,
+                        notification.op_str(),
+                        &data,
+                        &notification,
+                        query_name,
+                        &reaction_name,
+                    )
+                    .await
+                }
+                None => {
+                    post_default_notification(
+                        &client,
+                        &config.base_url,
+                        &config.token,
+                        &notification,
+                        query_name,
+                        &reaction_name,
+                    )
+                    .await
+                }
+            };
+
+            if let Err(e) = outcome {
                 error!("[{reaction_name}] Failed to process result: {e}");
             }
         }

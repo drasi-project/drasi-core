@@ -27,8 +27,8 @@ via `add_reaction(...)`. See [Examples](#examples).
 3. [Output templates and per-query routing](#output-templates-and-per-query-routing)
 4. [Templating](#templating)
 5. [Output payload schema](#output-payload-schema)
-   - [Single-notification payloads](#single-notification-payloads)
-   - [Batch payloads](#batch-payloads)
+   - [`DefaultChangeNotification` envelope (single-notification path)](#defaultchangenotification-envelope-single-notification-path)
+   - [`BatchResult` envelope (batch-endpoint path)](#batchresult-envelope-batch-endpoint-path)
 6. [Adaptive batching](#adaptive-batching)
 7. [Render-error fallback](#render-error-fallback)
 8. [Authentication](#authentication)
@@ -190,7 +190,7 @@ Builder-only settings (not stored on `HttpReactionConfig`):
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `template` | `String` | _empty_ | Handlebars template for the request body. When empty, the raw result JSON is sent. |
+| `template` | `String` | _empty_ | Handlebars template for the request body. When empty, the standard [`DefaultChangeNotification`](#defaultchangenotification-envelope-single-notification-path) envelope is sent. |
 | `extension.url` | `String` | _empty_ | Handlebars template for the URL. A relative value is appended to `base_url`; an absolute `http(s)://` value is allowed only if its host matches `base_url`'s host. |
 | `extension.method` | `String` | `POST` | HTTP method: `GET`, `POST`, `PUT`, `PATCH`, or `DELETE` (case-insensitive). |
 | `extension.headers` | `HashMap<String, String>` | _empty_ | Additional headers. Values support Handlebars templates. |
@@ -213,8 +213,9 @@ result, the reaction selects a template in this order:
 
 1. `output_templates.routes[<query_id>]` — a per-query override, if present.
 2. `output_templates.default_template` — a shared fallback, if present.
-3. A built-in default: `POST {base_url}/changes/{query_id}` with the raw result JSON as the
-   body (used when neither of the above matches the operation).
+3. A built-in default: `POST {base_url}/changes/{query_id}` with the standard
+   [`DefaultChangeNotification`](#defaultchangenotification-envelope-single-notification-path)
+   envelope as the body (used when neither of the above matches the operation).
 
 Within the selected `HttpQueryConfig`, the `added` / `updated` / `deleted` spec matching
 the result's operation is used. If that specific operation has no spec, the built-in
@@ -276,54 +277,104 @@ A `json` helper is registered for embedding a value as JSON:
 
 ## Output payload schema
 
-### Single-notification payloads
+Both shapes are formally defined as JSON Schema and committed at
+[`schema/output.schema.json`](./schema/output.schema.json). The file is regenerated from the
+Rust types in `src/output.rs` by `make update-schema`, and a CI test (`make schema`) fails
+if the file drifts from the types. Use it to generate clients or validate receiver behaviour.
+
+### `DefaultChangeNotification` envelope (single-notification path)
 
 In single-notification mode (and in adaptive mode without a `batch_endpoint`), each result
-is delivered by rendering its selected [`HttpCallSpec`](#httpcallspec):
+is delivered as a `DefaultChangeNotification` JSON object:
 
-- **Body** — the rendered `template`. When `template` is empty, the reaction sends raw JSON:
-  - For **added** and **deleted** results, the body is the row object (the result's `data`).
-  - For **updated** results, the body is the full result-diff object (see below).
-- **URL** — the rendered `url` appended to `base_url`, or `{base_url}/changes/{query_id}`
-  when no template applies.
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `operation` | `string` enum: `"ADD"` &#124; `"UPDATE"` &#124; `"DELETE"` | yes | What kind of change this notification represents. |
+| `queryId` | `string` | yes | The continuous query that produced the change. |
+| `timestamp` | `string` (RFC 3339) | yes | UTC timestamp of the originating query emission. |
+| `before` | object | no — omitted for `ADD` and for the first emission of an aggregation group | Row state before the change. |
+| `after` | object | no — omitted for `DELETE` | Row state after the change. |
+
+Mapping from the engine's `ResultDiff` variants:
+
+| `ResultDiff` variant | `operation` | `before` | `after` | HTTP request? |
+|---|---|---|---|---|
+| `Add { data }` | `"ADD"` | _omitted_ | `data` | yes |
+| `Delete { data }` | `"DELETE"` | `data` | _omitted_ | yes |
+| `Update { before, after }` | `"UPDATE"` | `before` | `after` | yes |
+| `Aggregation { before, after }` | `"UPDATE"` | `before` (omitted on first emission) | `after` | yes |
+| `Noop` | — | — | — | **no** (silently skipped) |
+
+Aggregation results are delivered using the `UPDATE` operation, matching the gRPC, Azure
+Storage, and RabbitMQ reactions. `Noop` results are dropped without emitting any request.
+
+#### Wire examples
+
+```http
+POST /changes/hot-sensors HTTP/1.1
+Content-Type: application/json
+
+{"operation":"ADD","queryId":"hot-sensors","timestamp":"2026-01-01T00:00:00+00:00","after":{"sensor_id":"s1","temperature":27.5}}
+```
+
+```http
+POST /changes/hot-sensors HTTP/1.1
+Content-Type: application/json
+
+{"operation":"DELETE","queryId":"hot-sensors","timestamp":"2026-01-01T00:00:00+00:00","before":{"sensor_id":"s1","temperature":27.5}}
+```
+
+```http
+POST /changes/hot-sensors HTTP/1.1
+Content-Type: application/json
+
+{"operation":"UPDATE","queryId":"hot-sensors","timestamp":"2026-01-01T00:00:00+00:00","before":{"sensor_id":"s1","temperature":25.0},"after":{"sensor_id":"s1","temperature":27.5}}
+```
+
+```http
+POST /changes/hot-sensors HTTP/1.1
+Content-Type: application/json
+
+{"operation":"UPDATE","queryId":"hot-sensors","timestamp":"2026-01-01T00:00:00+00:00","after":{"region":"north","count":1}}
+```
+*(Aggregation, first emission of a grouping key — note the omitted `before`.)*
+
+#### Delivery details
+
+- **URL** — the rendered template `url` appended to `base_url`, or `{base_url}/changes/{queryId}`
+  when no per-query template applies.
 - **Method** — the spec's `method` (default `POST`).
 - **Headers** — `Content-Type: application/json`, the optional bearer token, and any
   rendered custom headers.
+- **Body** — the rendered `template`. When the template is empty (including the synthesized
+  default), the body is the `DefaultChangeNotification` envelope shown above.
 
-The raw result-diff object has a `type` discriminator:
-
-```json
-{ "type": "ADD",    "data": { }, "row_signature": 0 }
-{ "type": "DELETE", "data": { }, "row_signature": 0 }
-{ "type": "UPDATE", "data": { }, "before": { }, "after": { }, "row_signature": 0 }
-```
-
-### Batch payloads
+### `BatchResult` envelope (batch-endpoint path)
 
 In adaptive mode **with** `batch_endpoint` set, each coalesced batch is POSTed to
-`{base_url}{batch_endpoint}` as a single JSON array. Each array element groups the results
-of one query in that batch:
+`{base_url}{batchEndpoint}` as a JSON array. Each array element is a `BatchResult` that
+groups the change notifications produced by one query in the batch:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `queryId` | `string` | The query whose notifications are in this group. |
+| `results` | array of `DefaultChangeNotification` | The coalesced change notifications for this query, in order. |
+| `timestamp` | `string` (RFC 3339) | When the batch was assembled. |
+| `count` | `number` | Number of entries in `results`. |
 
 ```json
 [
   {
-    "query_id": "orders-by-region",
+    "queryId": "orders-by-region",
     "results": [
-      { "type": "ADD",    "data": { }, "row_signature": 0 },
-      { "type": "UPDATE", "data": { }, "before": { }, "after": { }, "row_signature": 0 }
+      {"operation":"ADD","queryId":"orders-by-region","timestamp":"…","after":{"id":1}},
+      {"operation":"UPDATE","queryId":"orders-by-region","timestamp":"…","before":{"id":2},"after":{"id":2}}
     ],
     "timestamp": "2026-01-01T00:00:00+00:00",
     "count": 2
   }
 ]
 ```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `query_id` | `string` | The query whose results are in this group. |
-| `results` | `array` | The coalesced result diffs (same shape as the raw diff above). |
-| `timestamp` | `string` | RFC 3339 timestamp of when the batch was assembled. |
-| `count` | `number` | Number of results in `results`. |
 
 The batch endpoint must accept `POST`.
 
@@ -357,7 +408,8 @@ If a per-result template (URL, body, or header) fails to render — for example 
 references a field that is missing from the payload — the reaction:
 
 1. Logs a warning with the query id and the render error.
-2. POSTs the raw result JSON to `{base_url}/changes/{query_id}` instead.
+2. POSTs the standard [`DefaultChangeNotification`](#defaultchangenotification-envelope-single-notification-path)
+   envelope to `{base_url}/changes/{queryId}` instead.
 
 This guarantees changes are never silently dropped because of a template error. The
 behaviour is always on and cannot be disabled.
@@ -385,7 +437,8 @@ value (e.g. from `std::env`, a Drasi state store, or your application's secret m
 
 ### 1. Single notifications to the built-in default endpoint
 
-Each result POSTed as raw JSON to `https://example.com/api/changes/<query_id>`:
+Each result POSTed as a [`DefaultChangeNotification`](#defaultchangenotification-envelope-single-notification-path)
+envelope to `https://example.com/api/changes/<query_id>`:
 
 ```rust
 let reaction = HttpReactionBuilder::new("orders-webhook")
@@ -525,9 +578,11 @@ let reaction = HttpReactionBuilder::new("orders-authed")
 ## Plugin metadata
 
 The reaction also ships as a Drasi dynamic plugin. The plugin descriptor publishes named
-OpenAPI sub-schemas for `HttpReactionConfig`, `HttpOutputTemplates`, `HttpQueryConfig`,
-`HttpCallSpec`, and `AdaptiveBatchConfig`, plus `SchemaUiAnnotator` groupings so management
-UIs can render the configuration form.
+OpenAPI sub-schemas for the input config (`HttpReactionConfig`, `HttpOutputTemplates`,
+`HttpQueryConfig`, `HttpCallSpec`, and `AdaptiveBatchConfig`) plus `SchemaUiAnnotator`
+groupings so management UIs can render the configuration form. The wire-format **output**
+schemas (`DefaultChangeNotification`, `Operation`, `BatchResult`) are published as a
+standalone JSON Schema file at [`schema/output.schema.json`](./schema/output.schema.json).
 
 | Property | Value |
 |----------|-------|

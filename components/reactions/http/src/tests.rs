@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use drasi_lib::Reaction;
 
 use crate::config::{
-    synthesized_default_spec, AdaptiveBatchConfig, HttpCallExt, HttpOutputTemplates,
-    HttpQueryConfig, HttpReactionConfig, OperationType, TemplateRouting, TemplateSpec,
+    AdaptiveBatchConfig, HttpCallExt, HttpOutputTemplates, HttpQueryConfig, HttpReactionConfig,
+    OperationType, TemplateRouting, TemplateSpec,
 };
 use crate::{HttpReaction, HttpReactionBuilder};
 
@@ -265,14 +265,6 @@ fn template_routing_returns_none_without_templates() {
     assert!(cfg
         .get_template_spec("anything", OperationType::Add)
         .is_none());
-}
-
-#[test]
-fn synthesized_default_spec_uses_changes_path() {
-    let spec = synthesized_default_spec("my-query");
-    assert_eq!(spec.extension.url, "/changes/my-query");
-    assert_eq!(spec.extension.method, "POST");
-    assert!(spec.template.is_empty());
 }
 
 // ---------------------------------------------------------------------------

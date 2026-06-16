@@ -125,9 +125,6 @@ async fn standard_default_fallback_posts_to_changes_query() {
     assert!(!reqs.is_empty(), "expected at least one request");
     assert_eq!(reqs[0].url.path(), "/changes/q1");
     assert_eq!(reqs[0].method.as_str(), "POST");
-    // With no template, the body is the raw row JSON (Add data is the row payload).
-    let body = std::str::from_utf8(&reqs[0].body).unwrap();
-    assert_eq!(body, r#"{"id":1}"#);
     assert_eq!(
         reqs[0]
             .headers
@@ -135,6 +132,17 @@ async fn standard_default_fallback_posts_to_changes_query() {
             .map(|v| v.to_str().unwrap()),
         Some("application/json")
     );
+    // With no template, the body is the DefaultChangeNotification envelope.
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body.get("operation"), Some(&json!("ADD")));
+    assert_eq!(body.get("queryId"), Some(&json!("q1")));
+    assert_eq!(body.get("after"), Some(&json!({"id": 1})));
+    assert!(body.get("before").is_none(), "ADD must omit 'before'");
+    let ts = body
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .expect("timestamp must be present and a string");
+    chrono::DateTime::parse_from_rfc3339(ts).expect("timestamp must be RFC 3339");
 }
 
 #[tokio::test]
@@ -491,7 +499,11 @@ async fn adaptive_with_batch_endpoint_posts_to_batch_when_multi() {
     assert_eq!(arr.len(), 1, "expected a single coalesced query group");
 
     let group = &arr[0];
-    assert_eq!(group.get("query_id"), Some(&json!("q1")));
+    assert_eq!(group.get("queryId"), Some(&json!("q1")));
+    assert!(
+        group.get("query_id").is_none(),
+        "snake_case keys must be gone"
+    );
     assert_eq!(group.get("count"), Some(&json!(5)));
     let timestamp = group
         .get("timestamp")
@@ -505,11 +517,24 @@ async fn adaptive_with_batch_endpoint_posts_to_batch_when_multi() {
         .expect("results should be an array");
     assert_eq!(results.len(), 5);
     for (i, r) in results.iter().enumerate() {
-        assert_eq!(r.get("type"), Some(&json!("ADD")), "diff {i} should be ADD");
         assert_eq!(
-            r.get("data").and_then(|d| d.get("id")),
+            r.get("operation"),
+            Some(&json!("ADD")),
+            "diff {i} should be ADD"
+        );
+        assert_eq!(
+            r.get("queryId"),
+            Some(&json!("q1")),
+            "diff {i} should carry queryId"
+        );
+        assert_eq!(
+            r.get("after").and_then(|d| d.get("id")),
             Some(&json!(i as i64)),
-            "diff {i} should carry id={i}"
+            "diff {i} should carry after.id={i}"
+        );
+        assert!(
+            r.get("before").is_none(),
+            "diff {i} (ADD) should omit 'before'"
         );
     }
 }
@@ -562,8 +587,10 @@ async fn adaptive_flushes_partial_batch_on_timeout_below_min_size() {
         "the partial batch should be flushed exactly once"
     );
     assert_eq!(reqs[0].url.path(), "/changes/q1");
-    let body = std::str::from_utf8(&reqs[0].body).unwrap();
-    assert_eq!(body, r#"{"id":1}"#);
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body.get("operation"), Some(&json!("ADD")));
+    assert_eq!(body.get("queryId"), Some(&json!("q1")));
+    assert_eq!(body.get("after"), Some(&json!({"id": 1})));
 }
 
 // ---------------------------------------------------------------------------
@@ -652,4 +679,219 @@ async fn ssrf_guard_blocks_absolute_url_with_mismatched_host() {
         "SSRF request must be blocked; only the safe request should land"
     );
     assert_eq!(reqs[0].url.path(), "/safe");
+}
+
+// ---------------------------------------------------------------------------
+// Default-envelope coverage: DELETE / UPDATE / Aggregation / Noop
+// ---------------------------------------------------------------------------
+//
+// These tests lock down the shape of the DefaultChangeNotification envelope
+// (schema/output.schema.json) emitted by the default fallback path for every
+// ResultDiff variant. They are the wire-format counterpart to the unit tests
+// in src/output.rs and guard against silent regressions in standard_loop or
+// adaptive_loop.
+
+#[tokio::test]
+async fn default_envelope_delete_carries_before_only() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("default-delete")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_delete(&r, "q1", json!({"id": 7})).await;
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body.get("operation"), Some(&json!("DELETE")));
+    assert_eq!(body.get("queryId"), Some(&json!("q1")));
+    assert_eq!(body.get("before"), Some(&json!({"id": 7})));
+    assert!(body.get("after").is_none(), "DELETE must omit 'after'");
+}
+
+#[tokio::test]
+async fn default_envelope_update_carries_before_and_after() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("default-update")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_update(
+        &r,
+        "q1",
+        json!({"id": 1, "v": "old"}),
+        json!({"id": 1, "v": "new"}),
+    )
+    .await;
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body.get("operation"), Some(&json!("UPDATE")));
+    assert_eq!(body.get("queryId"), Some(&json!("q1")));
+    assert_eq!(body.get("before"), Some(&json!({"id": 1, "v": "old"})));
+    assert_eq!(body.get("after"), Some(&json!({"id": 1, "v": "new"})));
+}
+
+#[tokio::test]
+async fn default_envelope_aggregation_first_emission_maps_to_update_without_before() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("default-agg")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    // First emission of a grouping key (no prior value).
+    let qr = make_query_result(
+        "q1",
+        vec![ResultDiff::Aggregation {
+            before: None,
+            after: json!({"region": "north", "count": 1}),
+            row_signature: 0,
+        }],
+    );
+    r.enqueue_query_result(qr).await.expect("enqueue");
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    // Aggregation is delivered as UPDATE (matches gRPC, Azure Storage, RabbitMQ).
+    assert_eq!(body.get("operation"), Some(&json!("UPDATE")));
+    assert_eq!(body.get("queryId"), Some(&json!("q1")));
+    assert_eq!(
+        body.get("after"),
+        Some(&json!({"region": "north", "count": 1}))
+    );
+    assert!(
+        body.get("before").is_none(),
+        "first aggregation emission must omit 'before'"
+    );
+}
+
+#[tokio::test]
+async fn default_envelope_aggregation_change_carries_prior_aggregate_as_before() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("default-agg-change")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    let qr = make_query_result(
+        "q1",
+        vec![ResultDiff::Aggregation {
+            before: Some(json!({"region": "north", "count": 10})),
+            after: json!({"region": "north", "count": 11}),
+            row_signature: 0,
+        }],
+    );
+    r.enqueue_query_result(qr).await.expect("enqueue");
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body.get("operation"), Some(&json!("UPDATE")));
+    assert_eq!(
+        body.get("before"),
+        Some(&json!({"region": "north", "count": 10}))
+    );
+    assert_eq!(
+        body.get("after"),
+        Some(&json!({"region": "north", "count": 11}))
+    );
+}
+
+#[tokio::test]
+async fn noop_results_are_silently_dropped_without_emitting_requests() {
+    let server = mock_server::start().await;
+    // Only the safe ADD path is mounted. If Noops produced a request, it would
+    // 404 against this server but still appear in received_requests().
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("noop-skip")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    // Single QueryResult with a Noop followed by an Add. The standard loop
+    // iterates diffs in order; the trailing Add's request acts as the
+    // synchronization barrier proving the Noop has been processed
+    // (and skipped, since only one request lands).
+    let qr = make_query_result(
+        "q1",
+        vec![
+            ResultDiff::Noop,
+            ResultDiff::Add {
+                data: json!({"id": 1}),
+                row_signature: 0,
+            },
+        ],
+    );
+    r.enqueue_query_result(qr).await.expect("enqueue");
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs.len(),
+        1,
+        "Noop must produce no HTTP request; only the ADD should land"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body.get("operation"), Some(&json!("ADD")));
 }

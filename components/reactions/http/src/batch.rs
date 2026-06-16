@@ -14,6 +14,10 @@
 
 //! Coalesced batch delivery, used only when adaptive mode is enabled
 //! AND `batch_endpoint` is configured on the reaction.
+//!
+//! The wire payload is a JSON array of [`BatchResult`] values — one per
+//! query represented in the coalesced batch — each carrying its
+//! [`DefaultChangeNotification`] entries in order.
 
 use anyhow::Result;
 use log::{debug, warn};
@@ -21,19 +25,12 @@ use reqwest::{
     header::{HeaderMap, HeaderValue},
     Client,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use drasi_lib::channels::ResultDiff;
-
-/// Single entry in a coalesced batch POST body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BatchResult {
-    pub query_id: String,
-    pub results: Vec<ResultDiff>,
-    pub timestamp: String,
-    pub count: usize,
-}
+// Re-export the on-the-wire batch envelope from its canonical home in
+// `crate::output` so the public path `drasi_reaction_http::BatchResult`
+// continues to resolve.
+pub use crate::output::{BatchResult, DefaultChangeNotification};
 
 /// POST a coalesced batch to `{base_url}{batch_endpoint}` as a JSON array
 /// of [`BatchResult`].
@@ -42,7 +39,7 @@ pub(crate) async fn send_coalesced_batch(
     base_url: &str,
     batch_endpoint: &str,
     token: &Option<String>,
-    batches_by_query: HashMap<String, Vec<ResultDiff>>,
+    batches_by_query: HashMap<String, Vec<DefaultChangeNotification>>,
     reaction_name: &str,
 ) -> Result<()> {
     let batch_results: Vec<BatchResult> = batches_by_query

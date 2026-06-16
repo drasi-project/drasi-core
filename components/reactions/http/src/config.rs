@@ -159,18 +159,3 @@ impl TemplateRouting<HttpCallExt> for HttpReactionConfig {
             .and_then(|t| t.default_template.as_ref())
     }
 }
-
-/// Synthesize the today's hard-coded fallback call spec for a query:
-/// `POST {base_url}/changes/{query_id}` with the raw diff JSON as the
-/// body. Used inside `process_result` when no template matches and as
-/// the safety net for render errors.
-pub(crate) fn synthesized_default_spec(query_id: &str) -> HttpCallSpec {
-    HttpCallSpec {
-        template: String::new(),
-        extension: HttpCallExt {
-            url: format!("/changes/{query_id}"),
-            method: "POST".to_string(),
-            headers: HashMap::new(),
-        },
-    }
-}

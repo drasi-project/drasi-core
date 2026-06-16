@@ -1,0 +1,81 @@
+{
+  "$id": "https://drasi.io/schemas/reactions/http/output.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "components": {
+    "schemas": {
+      "BatchResult": {
+        "description": "One element of the coalesced batch array POSTed to a configured\n`batchEndpoint` in adaptive mode.\n\nEach element groups one query's results from the batch. The wire\npayload sent to the batch endpoint is a JSON array of these.",
+        "properties": {
+          "count": {
+            "description": "Number of entries in [`Self::results`].",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "queryId": {
+            "description": "The continuous query that produced the results in this group.",
+            "type": "string"
+          },
+          "results": {
+            "description": "The coalesced change notifications for this query, in order.",
+            "items": {
+              "$ref": "#/components/schemas/DefaultChangeNotification"
+            },
+            "type": "array"
+          },
+          "timestamp": {
+            "description": "RFC 3339 timestamp of when the batch was assembled.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "queryId",
+          "results",
+          "timestamp",
+          "count"
+        ],
+        "type": "object"
+      },
+      "DefaultChangeNotification": {
+        "description": "Default JSON envelope emitted by the HTTP reaction for a single\nquery-result change.\n\nSent as the request body to either the synthesized default endpoint\n(`POST {baseUrl}/changes/{queryId}`) or to a per-query route whose\ntemplate body is empty.\n\n# Field population\n\n| `ResultDiff` variant      | `operation` | `before`                              | `after`           |\n|---------------------------|-------------|---------------------------------------|-------------------|\n| `Add { data }`            | `ADD`       | omitted                               | `Some(data)`      |\n| `Delete { data }`         | `DELETE`    | `Some(data)`                          | omitted           |\n| `Update { before, after }`| `UPDATE`    | `Some(before)`                        | `Some(after)`     |\n| `Aggregation { before, after }` | `UPDATE` | `before` (omitted on first emission) | `Some(after)`     |\n| `Noop`                    | _no notification — caller skips_                                              |||",
+        "properties": {
+          "after": {
+            "description": "Row state **after** the change. Omitted for `DELETE`.",
+            "nullable": true
+          },
+          "before": {
+            "description": "Row state **before** the change.\nOmitted for `ADD` and for the first emission of an aggregation group.",
+            "nullable": true
+          },
+          "operation": {
+            "$ref": "#/components/schemas/Operation"
+          },
+          "queryId": {
+            "description": "The continuous query that produced the change.",
+            "type": "string"
+          },
+          "timestamp": {
+            "description": "RFC 3339 timestamp of the originating query emission (UTC).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "queryId",
+          "timestamp"
+        ],
+        "type": "object"
+      },
+      "Operation": {
+        "description": "The kind of change carried in a [`DefaultChangeNotification`].",
+        "enum": [
+          "ADD",
+          "UPDATE",
+          "DELETE"
+        ],
+        "type": "string"
+      }
+    }
+  },
+  "description": "JSON Schemas for the wire-format payloads emitted by drasi-reaction-http.",
+  "title": "Drasi HTTP Reaction — Default Output Schemas"
+}

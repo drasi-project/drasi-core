@@ -23,6 +23,7 @@ use utoipa::OpenApi;
 use crate::config::{
     AdaptiveBatchConfig, HttpCallExt, HttpOutputTemplates, HttpQueryConfig, HttpReactionConfig,
 };
+use crate::output::{BatchResult, DefaultChangeNotification, Operation};
 use crate::HttpReactionBuilder;
 
 // ---------------------------------------------------------------------------
@@ -243,6 +244,38 @@ impl From<&HttpReactionConfig> for HttpReactionConfigDto {
     AdaptiveBatchConfigDto,
 )))]
 struct HttpReactionSchemas;
+
+/// OpenAPI grouping for the **output** wire-format types emitted by the
+/// HTTP reaction (the [`DefaultChangeNotification`] envelope and the
+/// coalesced [`BatchResult`] entry). Generated as the source of truth
+/// for `schema/output.schema.json`.
+#[derive(OpenApi)]
+#[openapi(components(schemas(DefaultChangeNotification, Operation, BatchResult,)))]
+pub struct HttpReactionOutputSchemas;
+
+impl HttpReactionOutputSchemas {
+    /// Render the output schemas as a JSON Schema document — the same
+    /// shape that is committed to `schema/output.schema.json`. Top-level
+    /// object has a `$schema` declaration plus the `components.schemas`
+    /// map keyed by the `schema(as = ...)` names declared on each type.
+    pub fn as_json_schema() -> serde_json::Value {
+        let api = Self::openapi();
+        let schemas = serde_json::to_value(
+            &api.components
+                .as_ref()
+                .expect("OpenAPI components missing")
+                .schemas,
+        )
+        .expect("Failed to serialize output schemas");
+        serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "https://drasi.io/schemas/reactions/http/output.schema.json",
+            "title": "Drasi HTTP Reaction — Default Output Schemas",
+            "description": "JSON Schemas for the wire-format payloads emitted by drasi-reaction-http.",
+            "components": { "schemas": schemas },
+        })
+    }
+}
 
 /// Descriptor for the HTTP reaction plugin.
 pub struct HttpReactionDescriptor;

@@ -24,15 +24,14 @@ use handlebars::Handlebars;
 use log::{debug, error, info, warn};
 use reqwest::Client;
 
-use drasi_lib::channels::{ComponentStatus, ResultDiff};
+use drasi_lib::channels::ComponentStatus;
 use drasi_lib::reactions::common::base::ReactionBase;
 
 use crate::adaptive_batcher::{AdaptiveBatcher, AdaptiveBatcherConfig};
 use crate::batch::send_coalesced_batch;
-use crate::config::{
-    synthesized_default_spec, HttpCallSpec, HttpReactionConfig, OperationType, TemplateRouting,
-};
-use crate::process::process_result;
+use crate::config::{HttpReactionConfig, TemplateRouting};
+use crate::output::DefaultChangeNotification;
+use crate::process::{post_default_notification, process_result};
 
 /// Run the adaptive (coalesced) processing loop. Spawns an internal
 /// batcher task that lives for the lifetime of this loop.
@@ -48,7 +47,8 @@ pub(crate) async fn run_adaptive_loop(
 ) {
     let status_handle = base.status_handle();
     let capacity = runtime_adaptive.recommended_channel_capacity();
-    let (batch_tx, batch_rx) = tokio::sync::mpsc::channel::<(String, Vec<ResultDiff>)>(capacity);
+    let (batch_tx, batch_rx) =
+        tokio::sync::mpsc::channel::<(String, Vec<DefaultChangeNotification>)>(capacity);
 
     debug!(
         "[{reaction_name}] HttpReaction adaptive mode using batch channel capacity: {capacity} (max_batch_size: {})",
@@ -120,8 +120,27 @@ pub(crate) async fn run_adaptive_loop(
             continue;
         }
 
+        // Convert this QueryResult's diffs into the wire-format notifications
+        // up-front (dropping Noops). The batcher carries notifications, not
+        // raw `ResultDiff`s, so the timestamp from `query_result` is captured
+        // here and travels with each notification through coalescing.
+        let notifications: Vec<DefaultChangeNotification> = query_result
+            .results
+            .iter()
+            .filter_map(|d| {
+                DefaultChangeNotification::from_diff(
+                    &query_result.query_id,
+                    query_result.timestamp,
+                    d,
+                )
+            })
+            .collect();
+        if notifications.is_empty() {
+            continue;
+        }
+
         if batch_tx
-            .send((query_result.query_id.clone(), query_result.results.clone()))
+            .send((query_result.query_id.clone(), notifications))
             .await
             .is_err()
         {
@@ -157,12 +176,12 @@ async fn deliver_batch(
     handlebars: &Handlebars<'static>,
     config: &HttpReactionConfig,
     reaction_name: &str,
-    batch: Vec<(String, Vec<ResultDiff>)>,
+    batch: Vec<(String, Vec<DefaultChangeNotification>)>,
 ) -> anyhow::Result<()> {
     // Coalesce by query_id
-    let mut by_query: HashMap<String, Vec<ResultDiff>> = HashMap::new();
-    for (qid, results) in batch {
-        by_query.entry(qid).or_default().extend(results);
+    let mut by_query: HashMap<String, Vec<DefaultChangeNotification>> = HashMap::new();
+    for (qid, notifications) in batch {
+        by_query.entry(qid).or_default().extend(notifications);
     }
 
     // If a batch_endpoint is configured, POST every coalesced batch to it as
@@ -181,46 +200,39 @@ async fn deliver_batch(
     }
 
     // Otherwise, fan out per-result through the standard rendering path.
-    for (query_id, results) in by_query {
-        for result in results {
-            let (op, op_str): (OperationType, &str) = match &result {
-                ResultDiff::Add { .. } => (OperationType::Add, "ADD"),
-                ResultDiff::Delete { .. } => (OperationType::Delete, "DELETE"),
-                ResultDiff::Update { .. } | ResultDiff::Aggregation { .. } => {
-                    (OperationType::Update, "UPDATE")
+    for (query_id, notifications) in by_query {
+        for notification in notifications {
+            let outcome = match config.get_template_spec(&query_id, notification.operation_type()) {
+                Some(spec) => {
+                    let data = notification.handlebars_data();
+                    process_result(
+                        client,
+                        handlebars,
+                        &config.base_url,
+                        &config.token,
+                        spec,
+                        notification.op_str(),
+                        &data,
+                        &notification,
+                        &query_id,
+                        reaction_name,
+                    )
+                    .await
                 }
-                ResultDiff::Noop => continue,
-            };
-
-            let spec_owned: HttpCallSpec;
-            let spec: &HttpCallSpec = match config.get_template_spec(&query_id, op) {
-                Some(s) => s,
                 None => {
-                    spec_owned = synthesized_default_spec(&query_id);
-                    &spec_owned
+                    post_default_notification(
+                        client,
+                        &config.base_url,
+                        &config.token,
+                        &notification,
+                        &query_id,
+                        reaction_name,
+                    )
+                    .await
                 }
             };
 
-            let data = match &result {
-                ResultDiff::Add { data, .. } | ResultDiff::Delete { data, .. } => data.clone(),
-                _ => {
-                    serde_json::to_value(&result).expect("ResultDiff serialization should succeed")
-                }
-            };
-
-            if let Err(e) = process_result(
-                client,
-                handlebars,
-                &config.base_url,
-                &config.token,
-                spec,
-                op_str,
-                &data,
-                &query_id,
-                reaction_name,
-            )
-            .await
-            {
+            if let Err(e) = outcome {
                 error!("[{reaction_name}] Failed to process result in batch: {e}");
             }
         }
