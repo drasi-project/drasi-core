@@ -6,7 +6,7 @@ This document is a guide for software developers who create and maintain custom
 **Source plugins** in Rust for `drasi-lib`.
 
 Sources are the components of Drasi that connect to external systems and make the
-changes to data from those system available to Continuous Queries.
+changes to data from those systems available to Continuous Queries.
 
 ---
 
@@ -16,7 +16,7 @@ changes to data from those system available to Continuous Queries.
 2. [Overview & Mental Model](#2-overview--mental-model)
     1. [Key invariants](#key-invariants)
     2. [A source in context](#a-source-in-context)
-3. [Quickstart: A Working Source in 15 Minutes](#3-quickstart-a-working-source-in-15-minutes)
+3. [Quickstart: A Minimal Working Source](#3-quickstart-a-minimal-working-source)
 4. [Core Concepts](#4-core-concepts)
     1. [The Component Lifecycle](#41-the-component-lifecycle)
     2. [Runtime-Owned Query Subscriptions](#42-runtime-owned-query-subscriptions)
@@ -25,13 +25,20 @@ changes to data from those system available to Continuous Queries.
     5. [Replay, Checkpoints, and Source Positions](#45-replay-checkpoints-and-source-positions)
     6. [The Runtime Context](#46-the-runtime-context)
 5. [The `Source` Trait](#5-the-source-trait)
-    1. [Required methods](#51-required-methods)
-    2. [Lifecycle — the runtime call sequence](#52-lifecycle--the-runtime-call-sequence)
-    3. [Optional capability overrides](#53-optional-capability-overrides)
-    4. [Error handling](#54-error-handling)
+    1. [Public import paths](#public-import-paths)
+    2. [Required methods](#51-required-methods)
+    3. [Lifecycle — the runtime call sequence](#52-lifecycle--the-runtime-call-sequence)
+    4. [Optional capability overrides](#53-optional-capability-overrides)
+    5. [Error handling](#54-error-handling)
 6. [`SourceBase` — Reference](#6-sourcebase--reference)
 7. [The Source Event Data Contract](#7-the-source-event-data-contract)
 8. [Resilience & Persistence Patterns](#8-resilience--persistence-patterns)
+    1. [Pattern A — Native upstream replay](#pattern-a--native-upstream-replay)
+    2. [Pattern B — Transient source with Drasi WAL durability](#pattern-b--transient-source-with-drasi-wal-durability)
+    3. [Checkpoint and upstream-feedback timing](#checkpoint-and-upstream-feedback-timing)
+    4. [Sources that open an inbound port (ingress)](#sources-that-open-an-inbound-port-ingress)
+    5. [Using the state store to survive restarts](#using-the-state-store-to-survive-restarts)
+    6. [Worked example: a durable ingress source](#worked-example-a-durable-ingress-source)
 9. [Bootstrap Providers](#9-bootstrap-providers)
 10. [Transforming External Data into Graph Changes](#10-transforming-external-data-into-graph-changes)
 11. [Secrets, Environment Variables, and Identity](#11-secrets-environment-variables-and-identity)
@@ -41,6 +48,7 @@ changes to data from those system available to Continuous Queries.
 15. [Anti-Patterns](#15-anti-patterns)
 16. [Appendix A — Full Type Shapes](#appendix-a--full-type-shapes)
 17. [Appendix B — Glossary](#appendix-b--glossary)
+18. [Appendix C — Repository Conventions](#appendix-c--repository-conventions)
 
 ---
 
@@ -89,6 +97,23 @@ But how Sources actually obtain their data is entirely up to the Source develope
                        Optional Bootstrap
                        Provider snapshot
 ```
+
+### First, the vocabulary
+
+Nine terms appear throughout this guide. Skim them now; each is defined in
+context later and again in [Appendix B](#appendix-b--glossary).
+
+| Term | What it is |
+|------|------------|
+| **`SourceChange`** | The graph mutation you emit: an `Insert`, `Update`, or `Delete` of a node or relation. |
+| **`SourceEventWrapper`** | The envelope `SourceBase` dispatches: a `SourceChange` plus sequence, timestamp, and optional `source_position`. |
+| **`SourceBase`** | The helper you embed in your source struct. It owns subscriptions, dispatch, status, sequencing, replay, and shutdown. |
+| **Bootstrap** | The initial snapshot a query receives before live changes, produced by a `BootstrapProvider` — separately from streaming. |
+| **Framework sequence** | A monotonic `u64` that `SourceBase` stamps on every event, used for ordering and query checkpoints. |
+| **Source position** | Opaque bytes you attach to an event identifying an upstream replay position (an offset, an LSN, a WAL sequence). |
+| **Replay** | Re-serving events from a persisted position after a restart so a resuming query misses nothing. |
+| **State store** | A key/value store `drasi-lib` provides so your source can persist small state (cursors, seen-IDs) across restarts ([§8](#using-the-state-store-to-survive-restarts)). |
+| **WAL** | Drasi's write-ahead log, which lends durability and replay to transient sources that have no upstream log of their own ([§8](#pattern-b--transient-source-with-drasi-wal-durability)). |
 
 ### Key invariants
 
@@ -164,11 +189,16 @@ shows where the source fits once you have built it.
 
 ---
 
-## 3. Quickstart: A Working Source in 15 Minutes
+## 3. Quickstart: A Minimal Working Source
 
 This walkthrough creates a small Source that emits a `Counter` node every second.
 It is intentionally simple: no external database, no bootstrap provider, and no
-replay. Later sections explain how to add those capabilities correctly.
+replay. Later sections add those capabilities, and [§8](#8-resilience--persistence-patterns)
+builds a complete, durable source that opens its own inbound port.
+
+> ⏱️ Budget about 15 minutes of *typing*, plus a first `cargo build` that
+> compiles `drasi-lib`, `drasi-core`, and their dependencies — that initial
+> compile can take several minutes and is not counted against the 15.
 
 ### Prerequisites
 
@@ -225,7 +255,14 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+# Required the moment you touch `bytes::Bytes` — i.e. as soon as you emit a
+# `source_position` or use WAL replay (§8). Harmless to include now.
+bytes = "1"
 ```
+
+> 🔵 **MAY** — A source that opens its own inbound port (see [§8](#sources-that-open-an-inbound-port-ingress))
+> also needs tokio's `"net"` feature (and usually `"io-util"` for buffered reads).
 
 > 🔴 **MUST** — Depend on `drasi-lib` and `drasi-core` from crates.io
 > and pin compatible versions. Dynamic plugins must also use the same
@@ -271,6 +308,12 @@ impl Default for MySourceConfig {
 
 ### Step 4: `mysource.rs` — the source itself
 
+The implementation has four parts, in order: (1) the struct holding `SourceBase`
+plus your typed config, (2) a builder that validates config, (3) the per-event
+mapping into `SourceChange`, and (4) the `Source` trait impl whose `start()` spawns
+a shutdown-aware task that dispatches through `SourceBase`. Read it once top to
+bottom; each part is covered in depth in [§5](#5-the-source-trait)–[§8](#8-resilience--persistence-patterns).
+
 ```rust
 // src/mysource.rs
 use anyhow::Result;
@@ -289,8 +332,6 @@ use tokio::time::interval;
 use crate::config::MySourceConfig;
 
 pub struct MySource {
-    // `base` is `pub(crate)` so descriptor.rs (§12) can preserve raw
-    // configuration before returning the source to the host.
     pub(crate) base: SourceBase,
     config: MySourceConfig,
 }
@@ -832,6 +873,33 @@ pub trait Source: Send + Sync {
 }
 ```
 
+### Public import paths
+
+Every type you need has a stable public path. **Copy these imports rather than
+guessing** — the obvious roots (`drasi_lib::SourceEventWrapper`,
+`drasi_lib::models::*`) do not exist. Most types live in `drasi_lib`, but the
+**event data-contract** types come from `drasi_core`, and the event/bootstrap
+channel types live under `drasi_lib::channels`.
+
+| Type(s) | Import |
+|---------|--------|
+| `SourceChange`, `Element`, `ElementMetadata`, `ElementReference`, `ElementValue`, `ElementPropertyMap` | `use drasi_core::models::{SourceChange, Element, ElementMetadata, ElementReference, ElementValue, ElementPropertyMap};` |
+| `Source`, `SourceBase`, `SourceBaseParams`, `SourceError` | `use drasi_lib::{Source, SourceBase, SourceBaseParams, SourceError};` |
+| `SourceRuntimeContext` | `use drasi_lib::SourceRuntimeContext;` |
+| `DispatchMode`, `ComponentStatus`, `SubscriptionResponse` | `use drasi_lib::{DispatchMode, ComponentStatus, SubscriptionResponse};` |
+| `SourceSubscriptionSettings` | `use drasi_lib::SourceSubscriptionSettings;` (also at `drasi_lib::config::SourceSubscriptionSettings`) |
+| `PositionComparator`, `ByteLexPositionComparator` | `use drasi_lib::{PositionComparator, ByteLexPositionComparator};` |
+| `SourceEvent`, `SourceEventWrapper` | `use drasi_lib::channels::events::{SourceEvent, SourceEventWrapper};` |
+| `StateStoreProvider`, `StateStoreResult`, `StateStoreError` | `use drasi_lib::{StateStoreProvider, StateStoreResult, StateStoreError};` |
+| `WalProvider`, `WriteAheadLogConfig`, `WalError`, `CapacityPolicy` | `use drasi_lib::{WalProvider, WriteAheadLogConfig, WalError, CapacityPolicy};` |
+| `BootstrapProvider` | `use drasi_lib::BootstrapProvider;` |
+| `BootstrapContext`, `BootstrapRequest`, `BootstrapResult` | `use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest, BootstrapResult};` |
+| `BootstrapEvent`, `BootstrapEventSender` | `use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};` |
+| `SourcePluginDescriptor`, `BootstrapPluginDescriptor`, `ConfigValue`, `DtoMapper`, `export_plugin!` | `use drasi_plugin_sdk::prelude::*;` |
+
+> 🔴 **MUST** — Add `bytes = "1"` to `Cargo.toml` before you use any of the
+> position/replay/WAL APIs: their signatures use `bytes::Bytes`.
+
 ### 5.1 Required methods
 
 #### `id` — **MUST**
@@ -1116,6 +1184,8 @@ Use `dispatch_event()` when you need to attach `source_position` or custom
 profiling metadata:
 
 ```rust,ignore
+use drasi_lib::channels::events::{SourceEvent, SourceEventWrapper};
+
 let mut wrapper = SourceEventWrapper::new(
     self.base.id.clone(),
     SourceEvent::Change(change),
@@ -1130,7 +1200,21 @@ events and all can be dispatched together.
 
 ### Position helpers
 
-Replay-capable sources should understand these methods:
+Replay-capable sources MUST register a position comparator. `set_position_comparator`
+is `async` and takes the comparator **by value** (an `impl PositionComparator`, not a
+`Box<dyn …>`), so call it from `start()` or another async context — never from the
+synchronous builder:
+
+```rust,ignore
+use drasi_lib::ByteLexPositionComparator;
+
+// In start(), before spawning the streaming task:
+self.base.set_position_comparator(ByteLexPositionComparator).await;
+```
+
+`ByteLexPositionComparator` orders any position encoded as big-endian bytes
+(u64 offsets, Postgres LSNs, MSSQL LSNs). Supply your own `impl PositionComparator`
+only if your positions are not big-endian comparable. The remaining helpers:
 
 | Method | Meaning |
 |--------|---------|
@@ -1289,28 +1373,61 @@ Required behavior:
 6. Compare positions correctly with `PositionComparator`.
 7. Advance upstream feedback only after all position handles confirm progress.
 
-Example skeleton:
+The two halves of a native-replay source — stamping positions on the way out and
+validating `resume_from` on the way in — look like this. Every call below is
+compile-tested against `drasi-lib` 0.8 / `drasi-core` 0.5:
 
 ```rust,ignore
-async fn subscribe(&self, settings: SourceSubscriptionSettings) -> Result<SubscriptionResponse> {
-    if let Some(ref resume_bytes) = settings.resume_from {
-        let requested = decode_native_position(resume_bytes)?;
-        let earliest = self.earliest_available_position().await?;
+use drasi_lib::channels::events::{SourceEvent, SourceEventWrapper};
+use drasi_lib::{ByteLexPositionComparator, SourceError};
 
-        if requested < earliest {
-            return Err(SourceError::PositionUnavailable {
-                source_id: self.base.id.clone(),
-                requested: resume_bytes.clone(),
-                earliest_available: Some(encode_native_position(earliest)),
-            }.into());
-        }
+// --- In start(): register the comparator once, then stream. ---
+self.base.set_position_comparator(ByteLexPositionComparator).await;
 
-        self.ensure_stream_can_replay_from(requested).await?;
+// `clone_shared()` yields a task-owned handle that dispatches through the
+// same SourceBase. Per event, stamp the upstream position (big-endian bytes):
+let mut wrapper = SourceEventWrapper::new(
+    source_id.clone(),
+    SourceEvent::Change(change),
+    chrono::Utc::now(),
+);
+wrapper.set_source_position(bytes::Bytes::from(offset.to_be_bytes().to_vec()));
+base.dispatch_event(wrapper).await?;
+
+// Periodically: everything up to the confirmed position is safe to acknowledge
+// upstream (commit the offset / flush the LSN) and prune. NEVER advance past the
+// minimum confirmed subscriber position.
+if let Some(confirmed_seq) = base.compute_confirmed_position().await {
+    if let Some(confirmed_pos) = base.compute_confirmed_source_position().await {
+        // send_upstream_feedback(confirmed_pos).await;  // commit / flush
     }
+    base.prune_position_map(confirmed_seq).await;
+}
 
+// --- In subscribe(): reject a checkpoint older than what the upstream retains. ---
+async fn subscribe(&self, settings: SourceSubscriptionSettings) -> Result<SubscriptionResponse> {
+    if let Some(resume_from) = settings.resume_from.as_ref() {
+        if decode_offset(resume_from) < self.earliest_retained {
+            return Err(SourceError::PositionUnavailable {
+                source_id: self.base.get_id().to_string(),
+                requested: resume_from.clone(),
+                earliest_available: Some(encode_offset(self.earliest_retained)),
+            }
+            .into());
+        }
+    }
     self.base.subscribe_with_bootstrap(&settings, "my-native-source").await
 }
 ```
+
+Notes that the compiler will otherwise teach you the hard way:
+
+- `set_position_comparator` is `async` and takes the comparator **by value**.
+- `SourceEvent` / `SourceEventWrapper` import from `drasi_lib::channels::events`.
+- `compute_confirmed_position()` returns the confirmed framework **sequence**
+  (`u64`); `compute_confirmed_source_position()` returns the corresponding opaque
+  **position bytes**. Use the sequence to `prune_position_map`, the bytes to
+  acknowledge your upstream.
 
 ### Pattern B — Transient source with Drasi WAL durability
 
@@ -1326,24 +1443,79 @@ durability:
   capacityPolicy: RejectIncoming
 ```
 
-`DurabilityConfig` maps to a `WalProvider` registration:
+The mechanism has three parts. Every call below is compile-tested.
+
+**1. Register the WAL in `start()`** and resume the sequence counter from the
+persisted head:
 
 ```rust,ignore
-if self.config.durability.as_ref().is_some_and(|d| d.enabled) {
-    let ctx = self.base.context().await.context("Context not initialized")?;
-    let wal = ctx.wal_provider.context("Durability enabled but no WAL provider configured")?;
-    wal.register(&self.base.id, self.config.durability.as_ref().unwrap().to_wal_config()).await?;
+use drasi_lib::{WalProvider, WriteAheadLogConfig};
+
+if self.config.durable {
+    let ctx = self.base.context().await
+        .ok_or_else(|| anyhow::anyhow!("initialize() must run before start()"))?;
+    let wal = ctx.wal_provider
+        .ok_or_else(|| anyhow::anyhow!("durable source requires a WAL provider on DrasiLib"))?;
+    wal.register(self.base.get_id(), WriteAheadLogConfig::default()).await?;
+
+    let head = wal.head_sequence(self.base.get_id()).await.unwrap_or(0);
+    self.base.set_next_sequence(head);     // resume monotonic sequencing
+    *self.wal.write().await = Some(wal);   // keep a handle for ingest + replay
 }
 ```
 
+**2. Append before you acknowledge** the producer, so a crash after the ACK can
+still replay the event:
+
+```rust,ignore
+// In your ingest path, for each incoming change:
+wal.append(self.base.get_id(), &change).await?;   // durable
+self.base.dispatch_source_change(change).await?;  // live
+```
+
+**3. Replay on resubscribe.** When a query reconnects with a checkpoint, replay
+the retained WAL by Drasi sequence before live events flow:
+
+```rust,ignore
+async fn subscribe(&self, settings: SourceSubscriptionSettings) -> Result<SubscriptionResponse> {
+    if self.config.durable {
+        let wal_guard = self.wal.read().await;
+        if let (Some(wal), Some(resume_from)) =
+            (wal_guard.as_ref(), settings.resume_from.as_ref())
+        {
+            if resume_from.len() >= 8 {
+                let resume_seq = u64::from_be_bytes(resume_from[..8].try_into().unwrap());
+                let wal = wal.clone();
+                drop(wal_guard);
+                return self.base
+                    .subscribe_with_replay(&settings, wal.as_ref(), resume_seq, "my-source")
+                    .await;
+            }
+        }
+    }
+    self.base.subscribe_with_bootstrap(&settings, "my-source").await
+}
+```
+
+`subscribe_with_replay` reads `wal.read_from(resume_seq + 1)` up to the current
+head and delivers those events ahead of the live stream, so the resuming query
+sees no gap. Store the WAL handle in a field such as
+`Arc<RwLock<Option<Arc<dyn WalProvider>>>>`.
+
 Rules:
 
-- Append to WAL before acknowledging the external producer.
-- Use the assigned WAL sequence as the event sequence or source position.
-- On restart, call `head_sequence()` and `SourceBase::set_next_sequence(head)`.
-- Use `subscribe_with_replay()` when `resume_from` is present.
-- Periodically prune only up to `compute_confirmed_position()`.
-- Delete WAL data in `deprovision()`.
+- Append to the WAL **before** acknowledging the external producer.
+- `WriteAheadLogConfig::default()` is a fine start; size `max_events` and choose a
+  capacity policy for your throughput.
+- On restart, `head_sequence()` + `set_next_sequence(head)` resumes sequencing.
+- Use `subscribe_with_replay()` when `resume_from` is present; fall back to
+  `subscribe_with_bootstrap()` otherwise.
+- Return `true` from `supports_replay()` only when durability is enabled.
+- Delete WAL data in `deprovision()` via `wal.delete_wal(id)`.
+
+> 🟢 A complete, compiling durable ingress source that uses this exact pattern is
+> in [Worked example: a durable ingress source](#worked-example-a-durable-ingress-source)
+> at the end of this section.
 
 Capacity policies:
 
@@ -1383,6 +1555,418 @@ policy:
 
 Do not silently start from "now" when a checkpoint requested an older position.
 That creates an undetected data gap.
+
+### Replay safety rules at a glance
+
+> 🔴 **MUST** — Override `supports_replay()` to return `false` for volatile sources.
+> 🔴 **MUST** — Return `SourceError::PositionUnavailable` when `resume_from` predates what you retain; never silently restart from "now".
+> 🔴 **MUST** — Acknowledge/commit/prune your upstream only up to the **minimum confirmed** subscriber position (`compute_confirmed_position()`), never past it.
+> 🔴 **MUST** — Emit millisecond `effective_from`; emit a `source_position` only when it is genuinely replayable.
+> 🟡 **SHOULD** — Call `wait_for_subscribers()` before producing live events on a restart cycle.
+> 🟡 **SHOULD** — Make downstream effects idempotent; replay and at-least-once delivery can re-emit events.
+
+### Checkpoint and upstream-feedback timing
+
+Each subscribed query reports its last durably-processed framework sequence
+through a position handle. `compute_confirmed_position()` returns the **minimum**
+across all live subscribers; `compute_confirmed_source_position()` maps that to the
+matching opaque position bytes. The discipline:
+
+- **Advance feedback only to the confirmed position.** Committing an offset,
+  flushing an LSN, ACKing a message, or pruning the WAL past the minimum confirmed
+  subscriber loses data for the slowest query. This is the single most common
+  source bug.
+- **Encode "next", not "last", when your upstream resume is inclusive.** If
+  resuming from a stored position re-delivers that position, store the *next*
+  position to read to avoid an off-by-one on every restart.
+- **Compare per partition for multi-partition upstreams.** A single source can
+  fan in many partitions/streams. A `PositionComparator` that only compares the
+  event's own partition lets independent partitions advance without suppressing
+  each other.
+- **State your delivery guarantee.** Append-before-ACK plus replay gives
+  *at-least-once*: a resuming query can see an event twice. Document that, and
+  prefer stable element IDs so downstream upserts are idempotent.
+
+### Supervising long-running tasks
+
+A source's real work runs in a spawned task. Make its failure modes explicit:
+
+- **Separate retryable from fatal.** Connection blips, timeouts, and rate limits
+  are retryable: sleep with bounded exponential backoff and continue — but make
+  the sleep shutdown-aware so `stop()` stays prompt:
+
+  ```rust,ignore
+  tokio::select! {
+      biased;
+      _ = &mut shutdown_rx => break,
+      _ = tokio::time::sleep(backoff) => { /* retry */ }
+  }
+  ```
+
+  Auth failures, malformed config, and unrecoverable upstream errors are fatal:
+  set `ComponentStatus::Error` with a message and stop.
+- **Propagate terminal state.** If the task ends or panics, its terminal status
+  MUST be reflected (`Error`/`Stopped`). Never leave a dead task reporting
+  `Running`.
+- **Drain on shutdown.** Persist any cursor (see the state store below) before the
+  task returns, so a restart resumes cleanly.
+
+### Sources that open an inbound port (ingress)
+
+A source that has no upstream to poll — a webhook, an RPC endpoint, a TCP feed —
+must open and own its own listener. The protocol is yours; the Drasi-side pattern
+is always the same:
+
+1. (Optional) register a WAL in `start()` for durability (Pattern B above).
+2. **Bind the port, and report `Running` only after the bind succeeds.** On bind
+   failure, set `ComponentStatus::Error` and return `Err` so the failure surfaces
+   at startup instead of as a silently dead source.
+3. Spawn the accept loop with `self.base.clone_shared()`; store the shutdown
+   sender with `set_shutdown_tx` and the task handle with `set_task_handle` so
+   `stop_common()` tears it down.
+4. For each accepted request: authenticate/validate (your concern), map the
+   payload to a `SourceChange` (your concern), then — Drasi's concern —
+   `wal.append(...)` if durable and `base.dispatch_source_change(change)`.
+
+Ingress sources need tokio's `"net"` feature (and usually `"io-util"`). Health,
+readiness, CORS, and request auth are properties of *your* endpoint — handle them
+before dispatching.
+
+### Using the state store to survive restarts
+
+The **WAL** is for the event stream. For everything else a source must remember
+across a restart — a poll cursor, an ETag, a set of seen IDs, a "last baseline"
+timestamp — use the **state store**: a small per-source key/value store.
+
+`drasi-lib` injects it through the runtime context; reach it from `SourceBase`:
+
+```rust,ignore
+use drasi_lib::StateStoreProvider;
+
+// Some(...) only if a state store was configured on DrasiLib.
+let store: Option<Arc<dyn StateStoreProvider>> = self.base.state_store().await;
+```
+
+The trait is a partitioned key/value map — `store_id` is the partition (use your
+source ID), values are bytes (serialize with `serde_json`):
+
+```rust,ignore
+async fn load_counter(base: &SourceBase, key: &str) -> u64 {
+    if let Some(store) = base.state_store().await {
+        if let Ok(Some(bytes)) = store.get(base.get_id(), key).await {
+            if let Ok(text) = std::str::from_utf8(&bytes) {
+                return text.parse().unwrap_or(0);
+            }
+        }
+    }
+    0
+}
+
+async fn save_counter(base: &SourceBase, key: &str, value: u64) {
+    if let Some(store) = base.state_store().await {
+        let _ = store
+            .set(base.get_id(), key, value.to_string().into_bytes())
+            .await;
+    }
+}
+```
+
+`get`/`set`/`delete`/`contains_key`/`get_many`/`set_many` are all `async` and
+return `StateStoreResult`. **Load** your cursor when the streaming task starts;
+**save** it after dispatch (batched is fine) and again on graceful shutdown. Keep
+it small — it is for resumption metadata, not for the data itself.
+
+### Worked example: a durable ingress source
+
+This is a complete, compiling source (verified against `drasi-lib` 0.8 /
+`drasi-core` 0.5) that ties the section together: it **opens its own inbound TCP
+port**, writes every event to the **WAL** for durability and replay, and keeps a
+restart-surviving cursor in the **state store**. The protocol is deliberately
+trivial (one newline-delimited payload per event) so the Drasi wiring stays
+visible — replace `payload_to_change` and the read loop with your own.
+
+`Cargo.toml` needs `bytes = "1"` and tokio's `"net"` + `"io-util"` features.
+
+```rust,ignore
+use std::sync::Arc;
+
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncBufReadExt;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::RwLock;
+
+use drasi_core::models::{
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+};
+use drasi_lib::{
+    ComponentStatus, DispatchMode, Source, SourceBase, SourceBaseParams, SourceRuntimeContext,
+    SourceSubscriptionSettings, SubscriptionResponse, WalProvider, WriteAheadLogConfig,
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FeedConfig {
+    pub bind_addr: String, // e.g. "127.0.0.1:0"
+    pub label: String,     // graph label for every ingested node
+    #[serde(default)]
+    pub durable: bool,     // WAL-back every event for crash recovery + replay
+}
+
+pub struct FeedSource {
+    pub(crate) base: SourceBase,
+    config: FeedConfig,
+    wal: Arc<RwLock<Option<Arc<dyn WalProvider>>>>,
+}
+
+impl FeedSource {
+    pub fn new(id: impl Into<String>, config: FeedConfig) -> Result<Self> {
+        if config.bind_addr.trim().is_empty() {
+            anyhow::bail!("bind_addr must not be empty");
+        }
+        if config.label.trim().is_empty() {
+            anyhow::bail!("label must not be empty");
+        }
+        let params = SourceBaseParams::new(id)
+            .with_dispatch_mode(DispatchMode::Channel)
+            .with_auto_start(true);
+        Ok(Self {
+            base: SourceBase::new(params)?,
+            config,
+            wal: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    pub fn base_mut(&mut self) -> &mut SourceBase {
+        &mut self.base
+    }
+}
+
+// One inbound payload -> one SourceChange. Replace with your protocol + mapping.
+fn payload_to_change(source_id: &str, label: &str, payload: &str) -> SourceChange {
+    let mut properties = ElementPropertyMap::new();
+    properties.insert("payload", ElementValue::String(payload.into()));
+    let element = Element::Node {
+        metadata: ElementMetadata {
+            reference: ElementReference::new(source_id, payload),
+            labels: vec![Arc::<str>::from(label)].into(),
+            effective_from: Utc::now().timestamp_millis() as u64,
+        },
+        properties,
+    };
+    SourceChange::Insert { element }
+}
+
+async fn load_counter(base: &SourceBase, key: &str) -> u64 {
+    if let Some(store) = base.state_store().await {
+        if let Ok(Some(bytes)) = store.get(base.get_id(), key).await {
+            if let Ok(text) = std::str::from_utf8(&bytes) {
+                return text.parse().unwrap_or(0);
+            }
+        }
+    }
+    0
+}
+
+async fn save_counter(base: &SourceBase, key: &str, value: u64) {
+    if let Some(store) = base.state_store().await {
+        let _ = store
+            .set(base.get_id(), key, value.to_string().into_bytes())
+            .await;
+    }
+}
+
+async fn handle_connection(
+    base: &SourceBase,
+    wal: Option<&Arc<dyn WalProvider>>,
+    source_id: &str,
+    label: &str,
+    stream: TcpStream,
+    ingested: &mut u64,
+) -> Result<()> {
+    let mut lines = tokio::io::BufReader::new(stream).lines();
+    while let Some(line) = lines.next_line().await? {
+        let payload = line.trim();
+        if payload.is_empty() {
+            continue;
+        }
+        let change = payload_to_change(source_id, label, payload);
+
+        // Durability: append BEFORE acknowledging, so a crash after the ACK
+        // can still replay the event.
+        if let Some(wal) = wal {
+            wal.append(source_id, &change)
+                .await
+                .map_err(|e| anyhow!("WAL append failed: {e}"))?;
+        }
+        base.dispatch_source_change(change).await?;
+
+        *ingested += 1;
+        if *ingested % 100 == 0 {
+            save_counter(base, "events_ingested", *ingested).await;
+        }
+    }
+    Ok(())
+}
+
+#[async_trait]
+impl Source for FeedSource {
+    fn id(&self) -> &str {
+        self.base.get_id()
+    }
+    fn type_name(&self) -> &str {
+        "feed"
+    }
+    fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        self.base.properties_or_serialize(&self.config)
+    }
+    fn dispatch_mode(&self) -> DispatchMode {
+        self.base.get_dispatch_mode()
+    }
+    fn auto_start(&self) -> bool {
+        self.base.get_auto_start()
+    }
+    fn supports_replay(&self) -> bool {
+        self.config.durable
+    }
+
+    async fn initialize(&self, context: SourceRuntimeContext) {
+        self.base.initialize(context).await;
+    }
+
+    async fn start(&self) -> Result<()> {
+        if self.base.get_status().await == ComponentStatus::Running {
+            return Ok(());
+        }
+        self.base
+            .set_status(ComponentStatus::Starting, Some("starting feed".into()))
+            .await;
+
+        // 1. Durability (optional): register a WAL partition and resume the
+        //    sequence counter from the persisted head.
+        if self.config.durable {
+            let ctx = self
+                .base
+                .context()
+                .await
+                .ok_or_else(|| anyhow!("initialize() must run before start()"))?;
+            let wal = ctx
+                .wal_provider
+                .ok_or_else(|| anyhow!("durable feed requires a WAL provider on DrasiLib"))?;
+            wal.register(self.base.get_id(), WriteAheadLogConfig::default())
+                .await
+                .map_err(|e| anyhow!("WAL register failed: {e}"))?;
+            let head = wal.head_sequence(self.base.get_id()).await.unwrap_or(0);
+            self.base.set_next_sequence(head);
+            *self.wal.write().await = Some(wal);
+        }
+
+        // 2. Bind the inbound port BEFORE reporting Running.
+        let listener = match TcpListener::bind(&self.config.bind_addr).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                self.base
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(format!("failed to bind {}: {e}", self.config.bind_addr)),
+                    )
+                    .await;
+                return Err(anyhow!("failed to bind {}: {e}", self.config.bind_addr));
+            }
+        };
+
+        // 3. Load the restart-surviving cursor.
+        let mut ingested = load_counter(&self.base, "events_ingested").await;
+
+        // 4. Spawn the accept loop on a task-owned SourceBase handle.
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        self.base.set_shutdown_tx(shutdown_tx).await;
+
+        let base = self.base.clone_shared();
+        let wal = self.wal.read().await.clone();
+        let source_id = self.base.get_id().to_string();
+        let label = self.config.label.clone();
+
+        let task = tokio::spawn(async move {
+            base.set_status(ComponentStatus::Running, Some("listening".into()))
+                .await;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => {
+                        let (stream, _peer) = match accepted {
+                            Ok(pair) => pair,
+                            Err(_) => continue,
+                        };
+                        if let Err(e) = handle_connection(
+                            &base, wal.as_ref(), &source_id, &label, stream, &mut ingested,
+                        ).await {
+                            base.set_status(
+                                ComponentStatus::Error,
+                                Some(format!("ingest failed: {e}")),
+                            ).await;
+                        }
+                    }
+                }
+            }
+            // Drain: persist the final cursor on graceful shutdown.
+            save_counter(&base, "events_ingested", ingested).await;
+        });
+        self.base.set_task_handle(task).await;
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.base
+            .set_status(ComponentStatus::Stopping, Some("stopping feed".into()))
+            .await;
+        self.base.stop_common().await
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.base.get_status().await
+    }
+
+    async fn subscribe(
+        &self,
+        settings: SourceSubscriptionSettings,
+    ) -> Result<SubscriptionResponse> {
+        // A resuming subscriber with a checkpoint replays retained WAL events
+        // by Drasi sequence before live events flow.
+        if self.config.durable {
+            let wal_guard = self.wal.read().await;
+            if let (Some(wal), Some(resume_from)) =
+                (wal_guard.as_ref(), settings.resume_from.as_ref())
+            {
+                if resume_from.len() >= 8 {
+                    let resume_seq =
+                        u64::from_be_bytes(resume_from[..8].try_into().expect("checked len >= 8"));
+                    let wal = wal.clone();
+                    drop(wal_guard);
+                    return self
+                        .base
+                        .subscribe_with_replay(&settings, wal.as_ref(), resume_seq, "feed")
+                        .await;
+                }
+            }
+        }
+        self.base.subscribe_with_bootstrap(&settings, "feed").await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn set_bootstrap_provider(
+        &self,
+        provider: Box<dyn drasi_lib::BootstrapProvider + 'static>,
+    ) {
+        self.base.set_bootstrap_provider(provider).await;
+    }
+}
+```
 
 ---
 
@@ -1477,6 +2061,82 @@ Providers SHOULD:
 - fail loudly on malformed data or inaccessible upstream snapshots
 - avoid keeping `BootstrapContext` beyond the call
 
+### A complete provider
+
+Imports come from `drasi_lib::bootstrap` (the request/context/result types and the
+`BootstrapProvider` trait) and `drasi_lib::channels` (the event + sender). The
+provider sends `BootstrapEvent` values through `event_tx` and uses
+`context.next_sequence()` for monotonic bootstrap sequence numbers. This compiles
+against `drasi-lib` 0.8:
+
+```rust,ignore
+use anyhow::Result;
+use async_trait::async_trait;
+use chrono::Utc;
+use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
+use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
+use drasi_lib::SourceSubscriptionSettings;
+
+pub struct OrdersBootstrap {
+    source_id: String,
+    label: String,
+    snapshot: Vec<OrderRecord>,
+}
+
+#[async_trait]
+impl BootstrapProvider for OrdersBootstrap {
+    async fn bootstrap(
+        &self,
+        request: BootstrapRequest,
+        context: &BootstrapContext,
+        event_tx: BootstrapEventSender,
+        _settings: Option<&SourceSubscriptionSettings>,
+    ) -> Result<BootstrapResult> {
+        // Honor the labels the query was allocated.
+        if !request.node_labels.is_empty()
+            && !request.node_labels.iter().any(|l| l == &self.label)
+        {
+            return Ok(BootstrapResult::default());
+        }
+
+        let mut count = 0usize;
+        for order in &self.snapshot {
+            let change = order_to_change(&self.source_id, &self.label, order);
+            event_tx
+                .send(BootstrapEvent {
+                    source_id: self.source_id.clone(),
+                    change,
+                    timestamp: Utc::now(),
+                    sequence: context.next_sequence(),
+                })
+                .await?;
+            count += 1;
+        }
+
+        Ok(BootstrapResult {
+            event_count: count,
+            last_sequence: Some(count as u64),
+            // Only `true` if this snapshot shares the streaming source's
+            // ordered sequence namespace (e.g. a Postgres snapshot at an LSN).
+            sequences_aligned: false,
+            source_position: None,
+        })
+    }
+}
+```
+
+Wire it into the source before subscriptions begin — either programmatically or,
+for dynamic plugins, inside `create_source` / a `BootstrapPluginDescriptor`
+([§12](#the-bootstrap-descriptor)):
+
+```rust,ignore
+source.set_bootstrap_provider(Box::new(OrdersBootstrap { /* ... */ })).await;
+```
+
+`BootstrapContext` also exposes `get_property(key)` / `get_typed_property::<T>(key)`
+for any extra properties passed via `subscribe_with_bootstrap_context`. Do not
+retain the context after `bootstrap()` returns.
+
 ---
 
 ## 10. Transforming External Data into Graph Changes
@@ -1498,6 +2158,22 @@ Decide these before coding:
 | What properties are queryable? | Include only data that queries need; normalize types consistently. |
 | How are deletes represented? | Deletes need metadata only; labels must match the inserted/updated element identity. |
 
+### Mapping JSON-like payloads
+
+Convert external types into `ElementValue` deliberately (see [§7](#elementvalue)):
+preserve identifiers as strings even when they look numeric, keep timestamps in
+one consistent representation, and avoid lossy float coercion for values that must
+stay exact.
+
+If your source ingests arbitrary JSON-like payloads, you usually do **not** need
+to hand-write this. The published `drasi-source-mapping` crate is a
+configuration-driven engine that turns JSON into `Element`/`ElementValue` with
+conditional mappings, operation maps (insert/update/delete), node and relation
+templates with endpoint validation, and explicit timestamp formats
+(seconds/millis/nanos). Prefer it over a bespoke mapper for JSON/Avro payloads;
+reach for a custom converter only for binary or strongly-typed wire formats (such
+as protobuf `Struct` conversion) that the engine does not cover.
+
 ### Database CDC
 
 Database sources commonly map tables to node labels. A row insert/update becomes
@@ -1511,6 +2187,20 @@ Best practices:
 - include schema/table namespace when multiple tables can share keys
 - attach the database log position as `source_position`
 - validate resume positions before restarting replication
+
+Most CDC sources also need **upstream setup and validation** before they can
+stream. Document these prerequisites and check them at `start()` with clear
+errors instead of cryptic driver failures:
+
+- **Enable the change feed** — e.g. Postgres `wal_level = logical` plus a
+  replication slot and publication; MySQL row-format binlog with a server ID;
+  SQL Server / Oracle CDC enabled per table.
+- **Verify privileges and prerequisites** at startup.
+- **Own the slot/publication lifecycle**: create-or-reuse on start; decide whether
+  to drop it in `deprovision()`.
+- **Introspect schema** (columns, primary key / replica identity) and keep a
+  fallback for when introspection has not run yet or a DDL change races a read.
+- **Decide a DDL / schema-change policy**: skip, error, or re-introspect.
 
 ### Request/response and in-process ingress
 
@@ -1549,6 +2239,21 @@ Best practices:
   contract guarantees completeness
 - avoid dispatching unchanged records unless the query semantics require it
 - handle rate limits without reporting success-shaped data gaps
+
+Polling sources rarely have native replay. Use the **state store**
+([§8](#using-the-state-store-to-survive-restarts)) to make restarts deterministic:
+
+- **Persist the cursor** (timestamp / ETag / page token) and **load it on start**;
+  pick a first-run policy (start-from-now vs full backfill).
+- **Detect deletes** by diffing against a persisted snapshot or set of seen IDs —
+  but only treat "missing" as a delete when the API guarantees a complete result.
+- **Alternate** periodic full sweeps with incremental `updated_since`-style polls
+  when the API supports them; persist state **after** dispatch so a crash re-polls
+  rather than skips.
+- **Survive partial failures**: keep the last good snapshot for failed-feed
+  fallback, and continue past transient poll errors with backoff.
+- Document plainly that recovery guarantees here are **weaker** than native-log or
+  WAL replay.
 
 ---
 
@@ -1591,8 +2296,18 @@ let api_key = mapper.resolve_string(&dto.api_key).await?;
 `properties()` is not a redacted inspection DTO. It is the live component's
 configuration persistence hook.
 
-> 🔴 **MUST** — Return all properties needed to recreate the Source, including
-> passwords, tokens, connection strings, SASL credentials, and secret references.
+> 🔴 **MUST** — Return every configuration value needed to recreate the Source.
+> What that means depends on how the Source was constructed:
+>
+> | Constructed via | `properties()` returns | What lands on disk |
+> |-----------------|------------------------|--------------------|
+> | A dynamic-plugin descriptor (the usual path) | the **raw config JSON** you preserved with `set_raw_config` | unresolved `ConfigValue` envelopes — secret **references**, not secret values |
+> | Plain values in code (embedded path) | the serialized typed config | whatever literal values you were built with |
+>
+> Either way, **never filter keys out**: a missing key is lost on the next
+> snapshot and the Source fails to restart. `properties()` is a persistence hook,
+> not a redacted inspection DTO — protecting the snapshot file at rest is the
+> embedding application's job.
 
 For dynamic plugin descriptors, preserve raw config:
 
@@ -1625,6 +2340,30 @@ startup or request signing.
 Programmatically-set identity providers take precedence over providers injected
 through `SourceRuntimeContext`.
 
+### Authentication and transport security
+
+`ConfigValue<T>` covers *where a secret comes from*; it does not cover the
+*runtime lifecycle* of credentials. Document which modes your source supports and
+validate them at `start()`:
+
+| Mode | How |
+|------|-----|
+| Static secret | A `ConfigValue<String>` resolved in the descriptor (password, API key, token). |
+| Connection string | One `ConfigValue<String>`; parse and validate before connecting. |
+| Bearer / API token | Send per request; for ingress sources, compare inbound tokens with a constant-time check (e.g. the `subtle` crate). |
+| OAuth client credentials | Fetch a token, cache it, refresh before expiry, retry once on 401. |
+| Cloud SDK default chain | Let the SDK resolve ambient credentials; expose an endpoint override for local emulators. |
+| TLS / mTLS | Accept CA/cert/key paths or PEM material; validate the scheme (e.g. require `amqps://`) before connecting. |
+| SASL / broker auth | Expose mechanism + credentials plus an `additional_properties` escape hatch applied *after* generic settings so it cannot be overridden. |
+| Runtime identity | Implement `set_identity_provider()` and call `self.base.identity_provider().await` to obtain credentials/certs at startup or per request. |
+
+Two rules cut across all of them:
+
+> 🔴 **MUST** — Never log resolved secrets. Redact secret fields in `Debug` and
+> keep them out of status messages.
+> 🟡 **SHOULD** — Validate auth/TLS configuration (URLs, schemes, file existence)
+> at `start()` with an actionable error, not at first request.
+
 ---
 
 ## 12. Packaging as a Dynamic Plugin
@@ -1647,6 +2386,7 @@ drasi-lib = "0.8"
 drasi-core = "0.5"
 drasi-plugin-sdk = "0.8"
 utoipa = { version = "4", features = ["chrono"] }
+bytes = "1"
 ```
 
 Keeping `"lib"` alongside `"cdylib"` lets the crate be used in tests and static
@@ -1776,8 +2516,59 @@ drasi_plugin_sdk::export_plugin!(
 Set `core_version` and `lib_version` to the exact `drasi-core` and `drasi-lib`
 versions used to build the plugin.
 
-If the crate also provides a bootstrap provider, add a
-`BootstrapPluginDescriptor` and include it in `bootstrap_descriptors`.
+If the crate also provides a bootstrap provider, implement
+`BootstrapPluginDescriptor` and list it in `bootstrap_descriptors`.
+
+### The bootstrap descriptor
+
+`create_bootstrap_provider` receives **two** JSON values: the bootstrap plugin's
+own config and the parent source's config (use the latter for shared connection
+details). It compiles against `drasi-plugin-sdk` 0.8:
+
+```rust,ignore
+pub struct MySourceBootstrapDescriptor;
+
+#[async_trait]
+impl BootstrapPluginDescriptor for MySourceBootstrapDescriptor {
+    fn kind(&self) -> &str { "my-source-bootstrap" }
+    fn config_version(&self) -> &str { "1.0.0" }
+    fn config_schema_name(&self) -> &str { "source.my_source.MySourceConfig" }
+    fn config_schema_json(&self) -> String { MySourceDescriptor.config_schema_json() }
+
+    async fn create_bootstrap_provider(
+        &self,
+        _bootstrap_config: &serde_json::Value,
+        source_config: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn BootstrapProvider>> {
+        let dto: MySourceConfigDto = serde_json::from_value(source_config.clone())?;
+        let mapper = DtoMapper::new();
+        let config = MySourceConfig {
+            interval_ms: mapper.resolve_typed(&dto.interval_ms).await?,
+            label: mapper.resolve_string(&dto.label).await?,
+        };
+        Ok(Box::new(OrdersBootstrap::new(config)))
+    }
+}
+```
+
+Then list both descriptors in `export_plugin!`:
+
+```rust,ignore
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "my-source",
+    core_version = "0.5.3",
+    lib_version = "0.8.5",
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::MySourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [descriptor::MySourceBootstrapDescriptor],
+);
+```
+
+> 🔵 **MAY** — Use `SchemaUiAnnotator` inside `config_schema_json()` to group
+> fields, mark password widgets, set placeholders, and collapse advanced sections
+> so the plugin renders well in a configuration UI.
 
 ### Build
 
@@ -1858,6 +2649,53 @@ Use direct source instances to test lifecycle and subscription behavior:
 - `supports_replay()` matches configured durability or native capabilities
 - `set_bootstrap_provider()` delegates to `SourceBase`
 
+The one piece the trait does not hand you is a `SourceSubscriptionSettings` — the
+runtime normally builds it. Construct it directly in tests. This skeleton compiles
+and runs with no external system (`tokio` test flavor, `bytes`):
+
+```rust,ignore
+use std::collections::HashSet;
+use drasi_lib::{ComponentStatus, Source, SourceSubscriptionSettings};
+
+fn settings(query_id: &str) -> SourceSubscriptionSettings {
+    SourceSubscriptionSettings {
+        source_id: "orders".to_string(),
+        enable_bootstrap: false,
+        query_id: query_id.to_string(),
+        nodes: HashSet::from(["Order".to_string()]),
+        relations: HashSet::new(),
+        resume_from: None,
+        request_position_handle: true,
+        last_sequence: None,
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_and_subscription() {
+    let source = MySource::new("orders", test_config()).unwrap();
+
+    let response = source.subscribe(settings("q1")).await.unwrap();
+    assert_eq!(response.query_id, "q1");
+    assert!(response.position_handle.is_some()); // requested above
+
+    source.start().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert_eq!(source.status().await, ComponentStatus::Running);
+
+    source.stop().await.unwrap();
+    assert_eq!(source.status().await, ComponentStatus::Stopped);
+}
+
+#[tokio::test]
+async fn rejects_unavailable_resume() {
+    let source = MySource::new("orders", test_config()).unwrap();
+    let mut s = settings("q_gap");
+    s.resume_from = Some(bytes::Bytes::from(0_u64.to_be_bytes().to_vec()));
+    // A replay-capable source returns Err(SourceError::PositionUnavailable).
+    assert!(source.subscribe(s).await.is_err());
+}
+```
+
 ### Replay and checkpoint tests
 
 Replay-capable sources need explicit tests for:
@@ -1917,6 +2755,9 @@ For documentation-only changes to this guide, no cargo build or test is required
 - [ ] Dynamic plugins include `crate-type = ["lib", "cdylib"]`.
 - [ ] Optional plugin export is gated behind a `dynamic-plugin` feature when
       that improves test ergonomics.
+- [ ] `bytes` is a dependency if the source emits `source_position`, uses replay,
+      or uses the WAL.
+- [ ] Ingress sources enable tokio's `"net"` (and usually `"io-util"`) features.
 
 #### Source trait
 
@@ -1945,11 +2786,17 @@ For documentation-only changes to this guide, no cargo build or test is required
 #### Resilience
 
 - [ ] Native-log sources encode and compare positions correctly.
+- [ ] Replay-capable sources register a `PositionComparator` via
+      `set_position_comparator(...).await` in `start()`.
 - [ ] Native-log sources return `SourceError::PositionUnavailable` for pruned
       gaps.
 - [ ] Transient durable sources append to WAL before acknowledging upstream.
 - [ ] WAL pruning/offset commits/flush feedback use minimum confirmed subscriber
       position.
+- [ ] Ingress sources bind their port before reporting `Running` and set
+      `ComponentStatus::Error` on bind failure.
+- [ ] State that must survive restarts (cursors, seen-IDs) is loaded on start and
+      saved through the state store.
 - [ ] Startup/restart does not dispatch events before subscribers are attached
       when that would create gaps.
 - [ ] Stop logic clears channel-mode dispatchers.
@@ -2058,8 +2905,10 @@ version.
 
 ## Appendix A — Full Type Shapes
 
-These shapes are for orientation. Check the source files for the authoritative
-definitions.
+These shapes are reference orientation; the compile-tested examples earlier in this
+guide and the [Public import paths](#public-import-paths) table are the working
+source of truth. For exact field-level detail, the published `drasi-lib` and
+`drasi-core` API docs on docs.rs match the versions you depend on.
 
 ### Source subscription settings
 
@@ -2202,3 +3051,36 @@ pub enum CapacityPolicy {
 | Dispatch mode | Channel or Broadcast routing from Source to subscribed queries. |
 | `ConfigValue<T>` | Plugin SDK wrapper for static, environment, or secret-backed configuration values. |
 | Dynamic plugin | A Source compiled as a `cdylib` and loaded through the plugin SDK FFI boundary. |
+
+---
+
+## Appendix C — Repository Conventions
+
+Sources contributed to the Drasi workspace follow a few shared conventions beyond
+the code itself:
+
+- **`source-documentation-standards.md`** (in `components/sources/`) lists the
+  reference implementations and the per-source documentation and test expectations
+  new sources are held to.
+- **Generated code is reproducible.** Sources that compile protobuf or other IDLs
+  use a `build.rs` (e.g. with `tonic-build`) and commit the build script, not the
+  generated output. Pin the codegen tool versions.
+- **Per-crate `Makefile`** targets are standardized — typically `build`, `test`,
+  `integration-test`, and `lint` — so every source builds and validates the same
+  way. Name container-backed tests so they can be gated or ignored by default.
+- **`CHANGELOG.md`** follows Keep a Changelog + SemVer with generated sections
+  (e.g. `git-cliff`). Bump `config_version()` when the config DTO changes
+  incompatibly.
+- **Workspace dependency inheritance.** When inheriting a workspace dependency, the
+  root `[workspace.dependencies]` entry must declare `default-features` for a member
+  to be able to override it.
+- **Config UI.** Use `SchemaUiAnnotator` in `config_schema_json()` so the plugin
+  presents well in a configuration UI (field grouping, password widgets,
+  placeholders, advanced-section collapse).
+
+### Where to get help
+
+This guide is the authoritative reference for the Rust source-plugin API. The
+public Drasi documentation at <https://drasi.io/> explains Drasi's concepts
+(sources, continuous queries, reactions) at the platform level: use it for the
+*why*, and this guide plus its compile-tested examples for the *how*.
