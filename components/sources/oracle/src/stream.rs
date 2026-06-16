@@ -15,8 +15,8 @@
 //! Oracle LogMiner polling stream implementation.
 
 use crate::{
-    BootstrapSyncState, OracleConnection, OracleError, OracleErrorKind, OracleSourceConfig,
-    PrimaryKeyCache, Scn, StartPosition,
+    decode_scn_position, encode_scn_position, OracleConnection, OracleError, OracleErrorKind,
+    OracleSourceConfig, PrimaryKeyCache, Scn, StartPosition,
 };
 use anyhow::{anyhow, Result};
 use drasi_core::models::{
@@ -33,7 +33,7 @@ use oracle::Connection;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 
 const INITIAL_RECONNECT_DELAY_MS: u64 = 1_000;
 const MAX_RECONNECT_DELAY_MS: u64 = 60_000;
@@ -61,7 +61,6 @@ struct OracleChangeEvent {
 pub(crate) async fn run_logminer_stream(
     source_id: String,
     config: OracleSourceConfig,
-    bootstrap_sync: Arc<AsyncMutex<BootstrapSyncState>>,
     subscriber_resume_scns: Arc<RwLock<HashMap<String, Scn>>>,
     base: SourceBase,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -89,7 +88,6 @@ pub(crate) async fn run_logminer_stream(
         match run_stream_session(
             source_id.clone(),
             config.clone(),
-            bootstrap_sync.clone(),
             subscriber_resume_scns.clone(),
             base.clone_shared(),
             shutdown_rx.clone(),
@@ -134,7 +132,6 @@ pub(crate) async fn run_logminer_stream(
 async fn run_stream_session(
     source_id: String,
     config: OracleSourceConfig,
-    bootstrap_sync: Arc<AsyncMutex<BootstrapSyncState>>,
     subscriber_resume_scns: Arc<RwLock<HashMap<String, Scn>>>,
     base: SourceBase,
     shutdown_rx: watch::Receiver<bool>,
@@ -142,13 +139,14 @@ async fn run_stream_session(
     let (tx, mut rx) = mpsc::unbounded_channel::<(Vec<SourceChange>, Scn)>();
     let runtime = tokio::runtime::Handle::current();
     let source_id_for_worker = source_id.clone();
+    let base_for_worker = base.clone_shared();
 
     let worker = tokio::task::spawn_blocking(move || {
         run_logminer_poll_loop(
             source_id_for_worker,
             config,
-            bootstrap_sync,
             subscriber_resume_scns,
+            base_for_worker,
             shutdown_rx,
             tx,
             runtime,
@@ -178,7 +176,7 @@ async fn dispatch_batch(
         return Ok(());
     }
 
-    let position_bytes = bytes::Bytes::from(commit_scn.to_bytes());
+    let position_bytes = encode_scn_position(commit_scn);
     let events: Vec<SourceEventWrapper> = batch
         .into_iter()
         .map(|change| {
@@ -202,8 +200,8 @@ async fn dispatch_batch(
 fn run_logminer_poll_loop(
     source_id: String,
     config: OracleSourceConfig,
-    bootstrap_sync: Arc<AsyncMutex<BootstrapSyncState>>,
     subscriber_resume_scns: Arc<RwLock<HashMap<String, Scn>>>,
+    base: SourceBase,
     shutdown_rx: watch::Receiver<bool>,
     batch_tx: mpsc::UnboundedSender<(Vec<SourceChange>, Scn)>,
     runtime: tokio::runtime::Handle,
@@ -228,25 +226,44 @@ fn run_logminer_poll_loop(
             );
             min_scn
         } else {
+            let mut initial_scn = resolve_initial_scn(conn, config.start_position)?;
+            let boundary_position = runtime.block_on(async {
+                if let Some(position) = base.try_bootstrap_boundary() {
+                    Some(position)
+                } else {
+                    tokio::time::timeout(
+                        Duration::from_millis(config.poll_interval_ms),
+                        base.wait_for_bootstrap_boundary(),
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+                }
+            });
+            if let Some(boundary_bytes) = boundary_position {
+                let boundary_scn = decode_scn_position(&boundary_bytes)?;
+                log::info!(
+                    "Using bootstrap boundary SCN {boundary_scn} as LogMiner fence for '{source_id}'"
+                );
+                if boundary_scn > initial_scn {
+                    initial_scn = boundary_scn;
+                }
+            } else {
+                log::debug!(
+                    "No bootstrap boundary published for '{source_id}' before stream start"
+                );
+            }
+
             log::debug!(
                 "No subscriber resume positions; using configured start_position for '{source_id}'"
             );
-            resolve_initial_scn(conn, config.start_position)?
+            initial_scn
         }
     };
 
     loop {
         if *shutdown_rx.borrow() {
             return Ok(());
-        }
-
-        {
-            let mut bootstrap_state = bootstrap_sync.blocking_lock();
-            if let Some(pending_bootstrap_scn) = bootstrap_state.pending_scn.take() {
-                if pending_bootstrap_scn > current_checkpoint {
-                    current_checkpoint = pending_bootstrap_scn;
-                }
-            }
         }
 
         let current_scn = get_current_scn(conn)?;

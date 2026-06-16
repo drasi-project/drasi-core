@@ -18,16 +18,26 @@ mod mssql_helpers;
 
 use anyhow::{Context, Result};
 use drasi_bootstrap_mssql::MsSqlBootstrapProvider;
+use drasi_core::models::SourceChange;
 use drasi_lib::channels::ResultDiff;
+use drasi_lib::channels::SourceEvent;
+use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
-use drasi_lib::{DrasiLib, Query};
+use drasi_lib::{ComponentStatus, DrasiLib, Query, Source};
 use drasi_reaction_application::subscription::SubscriptionOptions;
 use drasi_reaction_application::ApplicationReaction;
 use drasi_source_mssql::{MsSqlSource, StartPosition};
 use mssql_helpers::{execute_sql, setup_mssql, MssqlConfig};
 use serde_json::Value;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
+
+/// Extract the trailing integer primary key from an element id of the form
+/// `table:pk` (e.g. `dbo.Products:42` → 42).
+fn element_id_int(element_id: &str) -> Option<i64> {
+    element_id.rsplit(':').next()?.parse::<i64>().ok()
+}
 
 const TEST_DB: &str = "DrasiTest";
 const TEST_TABLE: &str = "dbo.Products";
@@ -286,6 +296,233 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
     match result {
         Ok(inner) => inner?,
         Err(_) => anyhow::bail!("Integration test timed out after 180 seconds"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore]
+#[cfg(not(target_arch = "aarch64"))]
+async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let result = tokio::time::timeout(Duration::from_secs(300), async {
+        let mssql = setup_mssql()
+            .await
+            .context("Failed to start MSSQL container")?;
+        let db_config = prepare_database(mssql.config())
+            .await
+            .context("Failed to prepare MSSQL database")?;
+
+        // Seed rows BEFORE subscribing. They are part of the bootstrap snapshot
+        // (taken inside a SNAPSHOT-isolation tx that captures the CDC max LSN as
+        // the boundary) and must never be replayed by CDC after the boundary.
+        const SEED_COUNT: i64 = 100;
+        let mut client = db_config.connect().await?;
+        for chunk_start in (1..=SEED_COUNT).step_by(50) {
+            let chunk_end = (chunk_start + 49).min(SEED_COUNT);
+            let mut sql = String::new();
+            for id in chunk_start..=chunk_end {
+                sql.push_str(&format!(
+                    "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES ({id}, 'Seed{id}', 1.00);\n"
+                ));
+            }
+            execute_sql(&mut client, &sql).await?;
+        }
+        // Allow the CDC capture job to process the seed inserts so the captured
+        // max LSN (the boundary) is past them.
+        sleep(Duration::from_secs(5)).await;
+
+        let bootstrap_provider = MsSqlBootstrapProvider::builder()
+            .with_source_id(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_tables(vec![TEST_TABLE.to_string()])
+            .build()
+            .context("Failed to build MSSQL bootstrap provider")?;
+
+        let source = MsSqlSource::builder(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_table(TEST_TABLE)
+            .with_poll_interval_ms(250)
+            .with_start_position(StartPosition::Current)
+            .with_trust_server_certificate(true)
+            .with_bootstrap_provider(bootstrap_provider)
+            .build()
+            .context("Failed to build MSSQL source")?;
+
+        source.start().await.context("Failed to start MSSQL source")?;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(15) {
+            if source.status().await == ComponentStatus::Running {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        anyhow::ensure!(
+            source.status().await == ComponentStatus::Running,
+            "MSSQL source did not reach Running state"
+        );
+
+        // Subscribe directly to the source so we observe both the bootstrap
+        // snapshot and the CDC stream deterministically (a reaction subscription
+        // can miss bootstrap events delivered before it attaches).
+        let settings = SourceSubscriptionSettings {
+            source_id: SOURCE_ID.to_string(),
+            enable_bootstrap: true,
+            query_id: "q-handover".to_string(),
+            nodes: HashSet::from(["Products".to_string()]),
+            relations: HashSet::new(),
+            resume_from: None,
+            request_position_handle: true,
+        };
+        let response = source
+            .subscribe(settings)
+            .await
+            .context("Failed to subscribe to MSSQL source")?;
+        let mut bootstrap_rx = response
+            .bootstrap_receiver
+            .expect("bootstrap_receiver should be present when enable_bootstrap is true");
+        let mut cdc_rx = response.receiver;
+
+        // Drain the entire bootstrap snapshot. Bootstrap events stop (channel
+        // closes) once the snapshot completes and the boundary is published.
+        let mut bootstrap_ids: HashMap<i64, usize> = HashMap::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(60), bootstrap_rx.recv()).await {
+                Ok(Some(event)) => {
+                    if let SourceChange::Insert { element } = &event.change {
+                        if let Some(id) =
+                            element_id_int(element.get_reference().element_id.as_ref())
+                        {
+                            *bootstrap_ids.entry(id).or_default() += 1;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => anyhow::bail!("Timed out draining bootstrap snapshot"),
+            }
+        }
+
+        anyhow::ensure!(
+            bootstrap_ids.len() == SEED_COUNT as usize,
+            "bootstrap should snapshot every seed row exactly once (got {})",
+            bootstrap_ids.len()
+        );
+        for id in 1..=SEED_COUNT {
+            anyhow::ensure!(
+                bootstrap_ids.get(&id).copied().unwrap_or_default() == 1,
+                "seed row {id} missing or duplicated in bootstrap snapshot"
+            );
+        }
+
+        // Bootstrap is complete and the boundary is published. Mutations now are
+        // strictly after the boundary and must each be delivered exactly once by
+        // CDC, with no seed rows replayed.
+        let insert_id = SEED_COUNT + 1000;
+        execute_sql(
+            &mut client,
+            &format!(
+                "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES ({insert_id}, 'PostBoundary', 9.99);"
+            ),
+        )
+        .await?;
+        execute_sql(
+            &mut client,
+            "UPDATE dbo.Products SET Name = 'UpdatedDuringBootstrap' WHERE ProductId = 1;",
+        )
+        .await?;
+        execute_sql(&mut client, "DELETE FROM dbo.Products WHERE ProductId = 2;").await?;
+
+        let mut inserts: HashMap<i64, usize> = HashMap::new();
+        let mut updates: HashMap<i64, usize> = HashMap::new();
+        let mut deletes: HashMap<i64, usize> = HashMap::new();
+        let started = Instant::now();
+        let mut idle_since = Instant::now();
+        while started.elapsed() < Duration::from_secs(60) {
+            match tokio::time::timeout(Duration::from_millis(500), cdc_rx.recv()).await {
+                Ok(Ok(wrapper)) => {
+                    idle_since = Instant::now();
+                    if let SourceEvent::Change(change) = &wrapper.event {
+                        if let Some(id) =
+                            element_id_int(change.get_reference().element_id.as_ref())
+                        {
+                            match change {
+                                SourceChange::Insert { .. } => {
+                                    *inserts.entry(id).or_default() += 1
+                                }
+                                SourceChange::Update { .. } => {
+                                    *updates.entry(id).or_default() += 1
+                                }
+                                SourceChange::Delete { .. } => {
+                                    *deletes.entry(id).or_default() += 1
+                                }
+                                SourceChange::Future { .. } => {}
+                            }
+                        }
+                    }
+                }
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    let done = inserts.get(&insert_id) == Some(&1)
+                        && updates.get(&1) == Some(&1)
+                        && deletes.get(&2) == Some(&1);
+                    if done && idle_since.elapsed() >= Duration::from_secs(2) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // No gap: every post-boundary change delivered exactly once.
+        anyhow::ensure!(
+            inserts.get(&insert_id) == Some(&1),
+            "post-boundary insert missing or duplicated in CDC stream: {inserts:?}"
+        );
+        anyhow::ensure!(
+            updates.get(&1) == Some(&1),
+            "post-boundary update missing or duplicated in CDC stream: {updates:?}"
+        );
+        anyhow::ensure!(
+            deletes.get(&2) == Some(&1),
+            "post-boundary delete missing or duplicated in CDC stream: {deletes:?}"
+        );
+
+        // No overlap: CDC must not replay any pre-boundary seed row. The only
+        // change events permitted are the three post-boundary mutations.
+        anyhow::ensure!(
+            inserts.len() == 1,
+            "unexpected extra inserts (CDC replayed pre-boundary events): {inserts:?}"
+        );
+        anyhow::ensure!(
+            updates.len() == 1,
+            "unexpected extra updates (CDC replayed pre-boundary events): {updates:?}"
+        );
+        anyhow::ensure!(
+            deletes.len() == 1,
+            "unexpected extra deletes (CDC replayed pre-boundary events): {deletes:?}"
+        );
+
+        source.stop().await.context("Failed to stop MSSQL source")?;
+        mssql.cleanup().await;
+
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => anyhow::bail!("test_mssql_bootstrap_cdc_overlap_handover timed out"),
     }
 
     Ok(())
@@ -719,11 +956,7 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
         let (reaction, handle) = ApplicationReaction::builder("app-reaction-rt1")
             .with_query(QUERY_ID)
@@ -735,7 +968,7 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -876,11 +1109,7 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
         let (reaction, handle) = ApplicationReaction::builder("app-reaction-bs1")
             .with_query(QUERY_ID)
@@ -892,7 +1121,7 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -1039,11 +1268,7 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
         let (reaction, handle) = ApplicationReaction::builder("app-reaction-full-restart")
             .with_query(QUERY_ID)
@@ -1055,7 +1280,7 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -1145,8 +1370,14 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
 
 /// Two queries subscribe to the same source. After both process some CDC events,
 /// query2 is stopped and query1 advances further. On full restart the source
-/// rewinds to query2's (earlier) checkpoint. Position filtering must suppress
-/// the replayed events for query1 while delivering them to query2.
+/// rewinds to query2's (earlier) checkpoint. Position filtering must suppress the
+/// replayed events for query1 (so query1 does not re-emit an already-committed row
+/// at a new outbox sequence) while delivering them to query2.
+///
+/// Note: the ApplicationReaction used here is non-durable and replays its query
+/// outbox on restart, so query1's existing 602 entry may be re-delivered at the
+/// SAME sequence (at-least-once). The assertion below therefore tolerates a
+/// same-sequence replay and only fails on a 602 emitted at a NEW, higher sequence.
 #[tokio::test]
 #[ignore]
 #[cfg(not(target_arch = "aarch64"))]
@@ -1218,11 +1449,7 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: q1_dir.to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
 
         let query2 = Query::cypher(q2_id)
@@ -1235,11 +1462,7 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: q2_dir.to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
 
         let (reaction1, handle1) = ApplicationReaction::builder("mq-reaction1")
@@ -1258,7 +1481,7 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
             .with_query(query2)
             .with_reaction(reaction1)
             .with_reaction(reaction2)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -1309,11 +1532,26 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
         )
         .await?;
 
-        wait_for_change(&mut sub1, 15, |e| {
-            matches_change(e, "ADD", &[("id", "602"), ("name", "OnlyQ1")])
-        })
-        .await
-        .context("query1 did not see row 602")?;
+        // Capture the outbox sequence at which query1 emits row 602. A non-durable
+        // reaction (ApplicationReaction) replays its query outbox on restart, so this
+        // exact entry MAY be re-delivered later at the SAME sequence — that is an
+        // acceptable at-least-once re-delivery. What must NOT happen is the source
+        // re-dispatching the already-committed row 602 to query1, which would cause a
+        // NEW emission at a HIGHER sequence.
+        let mut q1_602_seq: Option<u64> = None;
+        for _ in 0..15 {
+            if let Some(result) = sub1.recv().await {
+                if result
+                    .results
+                    .iter()
+                    .any(|e| matches_change(e, "ADD", &[("id", "602"), ("name", "OnlyQ1")]))
+                {
+                    q1_602_seq = Some(result.sequence);
+                    break;
+                }
+            }
+        }
+        let q1_602_seq = q1_602_seq.context("query1 did not see row 602")?;
 
         // Let checkpoint persist for query1
         sleep(Duration::from_secs(2)).await;
@@ -1332,7 +1570,10 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
 
         // --- Phase 4: Full restart ---
         // Source rewinds to min(query1_cp, query2_cp) = query2's earlier checkpoint.
-        // Row 602 will be replayed but should be filtered for query1 (already committed).
+        // Row 602 is replayed by the source but must be filtered for query1 (already
+        // committed), so query1 must not RE-EMIT 602 at a new outbox sequence. The
+        // non-durable reaction may still re-deliver query1's existing 602 outbox entry
+        // (same sequence) as an at-least-once replay, which is acceptable.
         core.start().await.context("Failed to restart")?;
 
         // The original subscription stays valid across stop/start since the
@@ -1351,15 +1592,20 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
         .await
         .context("query2 did not see row 603")?;
 
-        // query1 should see row 603 but NOT a duplicate of 602
-        // We wait for 603 and check that 602 doesn't appear again.
-        let mut saw_602_duplicate = false;
+        // query1 must see the new row 603. It MAY see row 602 again as an at-least-once
+        // replay of its existing outbox entry (same sequence) — acceptable for a
+        // non-durable reaction. It must NOT see 602 at a NEW (higher) outbox sequence,
+        // which would mean the source re-delivered an already-committed row to query1
+        // and query1 re-emitted it (position-filter failure).
+        let mut saw_602_new_emission = false;
         let mut saw_603 = false;
         for _ in 0..20 {
             if let Some(result) = sub1.recv().await {
                 for entry in &result.results {
-                    if matches_change(entry, "ADD", &[("id", "602")]) {
-                        saw_602_duplicate = true;
+                    if matches_change(entry, "ADD", &[("id", "602")])
+                        && result.sequence > q1_602_seq
+                    {
+                        saw_602_new_emission = true;
                     }
                     if matches_change(entry, "ADD", &[("id", "603"), ("name", "WhileStopped")]) {
                         saw_603 = true;
@@ -1376,8 +1622,9 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
             "query1 should see the new row 603 inserted while stopped"
         );
         assert!(
-            !saw_602_duplicate,
-            "query1 should NOT see row 602 again — position filtering must suppress it"
+            !saw_602_new_emission,
+            "query1 saw row 602 at a NEW outbox sequence (> {q1_602_seq}) after restart — \
+             the source position filter must suppress already-committed rows for query1"
         );
 
         core.stop().await.context("Failed to stop DrasiLib")?;
@@ -1560,11 +1807,7 @@ async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
         let (reaction, handle) = ApplicationReaction::builder("app-reaction-ffi-restart")
             .with_query(QUERY_ID)
@@ -1575,7 +1818,7 @@ async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .context("Failed to build DrasiLib with FFI plugins")?;

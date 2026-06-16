@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use anyhow::{anyhow, Result};
-use bytes::Bytes;
 use chrono::Utc;
 use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
@@ -90,18 +89,18 @@ impl ReplicationStream {
 
     pub async fn run(
         &mut self,
-        ready_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
+        startup_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
     ) -> Result<()> {
         info!("Starting replication stream for source {}", self.source_id);
 
         // Connect and setup replication
         if let Err(error) = self.connect_and_setup().await {
-            if let Some(tx) = ready_tx {
+            if let Some(tx) = startup_tx {
                 let _ = tx.send(Err(format!("{error:#}")));
             }
             return Err(error);
         }
-        if let Some(tx) = ready_tx {
+        if let Some(tx) = startup_tx {
             let _ = tx.send(Ok(()));
         }
 
@@ -730,7 +729,7 @@ impl ReplicationStream {
         );
 
         // Attach the WAL LSN as opaque source_position bytes for checkpoint/recovery
-        wrapper.set_source_position(Bytes::from(lsn.to_be_bytes().to_vec()));
+        wrapper.set_source_position(super::connection::lsn_to_position_bytes(lsn));
 
         // Use dispatch_event() which stamps the monotonic sequence
         if let Err(e) = self.base.dispatch_event(wrapper).await {

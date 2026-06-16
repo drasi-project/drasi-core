@@ -77,7 +77,7 @@ pub trait CheckpointStore: Send + Sync {
     /// Whether this store persists checkpoints across process restarts.
     ///
     /// The orchestration layer uses this to decide whether to propagate
-    /// `resume_from` and `last_sequence` to sources on restart. Volatile
+    /// `resume_from` to sources on restart. Volatile
     /// (in-memory) stores return `false`; persistent stores (RocksDB, Garnet)
     /// return `true`.
     fn is_persistent(&self) -> bool;
