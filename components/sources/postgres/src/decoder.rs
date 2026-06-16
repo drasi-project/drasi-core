@@ -903,8 +903,7 @@ mod tests {
             other => panic!("Expected ZonedDateTime, got {other:?}"),
         }
     }
-          
-          
+
     fn test_decode_timestamptz_text_short_offset() {
         // PostgreSQL logical replication sends the short-form timezone offset.
         let decoder = PgOutputDecoder::new();
@@ -951,7 +950,7 @@ mod tests {
             }
         }
     }
-  
+
     fn test_decode_timestamptz_text_short_negative_offset() {
         let decoder = PgOutputDecoder::new();
         let value = decoder
