@@ -114,6 +114,8 @@ impl Decoder {
             ElementValue::String(_) => "String",
             ElementValue::List(_) => "List",
             ElementValue::Object(_) => "Object",
+            ElementValue::LocalDateTime(_) => "LocalDateTime",
+            ElementValue::ZonedDateTime(_) => "ZonedDateTime",
         }
     }
 
