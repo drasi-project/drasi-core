@@ -146,17 +146,47 @@ impl BatchingConfig {
     }
 }
 
+/// Output payload mode for the gRPC reaction.
+///
+/// `canonicalJson` keeps a guide-aligned canonical payload in every
+/// `QueryResultItem.payload` while the protobuf fields continue to expose the
+/// typed gRPC contract. `proto` omits that payload unless a body template is
+/// configured for an item.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, utoipa::ToSchema)]
+#[schema(as = reaction::grpc::OutputFormat)]
+#[serde(rename_all = "camelCase")]
+pub enum OutputFormat {
+    #[default]
+    CanonicalJson,
+    Proto,
+}
+
+/// Per-template gRPC extension fields.
+///
+/// Metadata entries are rendered through Handlebars with the same standard
+/// context as the body template, then merged with top-level request metadata
+/// for the outbound RPC. This lets headers vary per query/operation/row while
+/// preserving the fixed gRPC service endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GrpcTemplateExtension {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, String>,
+}
+
+pub type GrpcQueryConfig = QueryConfig<GrpcTemplateExtension>;
+
 /// Optional Handlebars-based output template configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct OutputTemplates {
     /// Default template applied when no per-query override matches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_template: Option<QueryConfig>,
+    pub default_template: Option<GrpcQueryConfig>,
 
     /// Per-query overrides keyed by query id.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub routes: HashMap<String, QueryConfig>,
+    pub routes: HashMap<String, GrpcQueryConfig>,
 }
 
 impl OutputTemplates {
@@ -164,11 +194,11 @@ impl OutputTemplates {
     /// (either in the default template or any per-query route). Used to avoid
     /// allocating a Handlebars engine when no template would ever render.
     pub(crate) fn has_renderable_templates(&self) -> bool {
-        fn has_nonempty(qc: &QueryConfig) -> bool {
+        fn has_nonempty(qc: &GrpcQueryConfig) -> bool {
             [qc.added.as_ref(), qc.updated.as_ref(), qc.deleted.as_ref()]
                 .into_iter()
                 .flatten()
-                .any(|spec| !spec.template.trim().is_empty())
+                .any(|spec| !spec.template.trim().is_empty() || !spec.extension.metadata.is_empty())
         }
         self.default_template.as_ref().is_some_and(has_nonempty)
             || self.routes.values().any(has_nonempty)
@@ -197,12 +227,18 @@ impl OutputTemplates {
 }
 
 /// Compile-check every template in a `QueryConfig` (added / updated / deleted).
-fn validate_query_config(qc: &QueryConfig) -> anyhow::Result<()> {
+fn validate_query_config(qc: &GrpcQueryConfig) -> anyhow::Result<()> {
     for spec in [qc.added.as_ref(), qc.updated.as_ref(), qc.deleted.as_ref()]
         .into_iter()
         .flatten()
     {
         crate::templates::validate_template(&spec.template)?;
+        for (key, value_template) in &spec.extension.metadata {
+            if key.trim().is_empty() {
+                anyhow::bail!("metadata template key must not be empty");
+            }
+            crate::templates::validate_template(value_template)?;
+        }
     }
     Ok(())
 }
@@ -241,6 +277,9 @@ pub struct GrpcReactionConfig {
     #[serde(default)]
     pub batching: BatchingConfig,
 
+    #[serde(default)]
+    pub output_format: OutputFormat,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_templates: Option<OutputTemplates>,
 }
@@ -255,6 +294,7 @@ impl Default for GrpcReactionConfig {
             initial_connection_timeout_ms: default_initial_connection_timeout_ms(),
             metadata: HashMap::new(),
             batching: BatchingConfig::default(),
+            output_format: OutputFormat::default(),
             output_templates: None,
         }
     }
@@ -266,6 +306,38 @@ impl GrpcReactionConfig {
     /// query id (or its last dotted segment), so a misconfiguration fails at
     /// `build()` rather than per-event at dispatch.
     pub fn validate(&self, query_ids: &[String]) -> anyhow::Result<()> {
+        validate_endpoint(&self.endpoint)?;
+        validate_positive(self.timeout_ms, "timeoutMs")?;
+        validate_positive(
+            self.initial_connection_timeout_ms,
+            "initialConnectionTimeoutMs",
+        )?;
+        match self.batching {
+            BatchingConfig::Fixed {
+                batch_size,
+                batch_flush_timeout_ms,
+            } => {
+                validate_positive(batch_size, "batching.batchSize")?;
+                validate_positive(batch_flush_timeout_ms, "batching.batchFlushTimeoutMs")?;
+            }
+            BatchingConfig::Adaptive {
+                adaptive_min_batch_size,
+                adaptive_max_batch_size,
+                adaptive_window_size,
+                adaptive_batch_timeout_ms,
+            } => {
+                validate_positive(adaptive_min_batch_size, "batching.adaptiveMinBatchSize")?;
+                validate_positive(adaptive_max_batch_size, "batching.adaptiveMaxBatchSize")?;
+                validate_positive(adaptive_window_size, "batching.adaptiveWindowSize")?;
+                validate_positive(adaptive_batch_timeout_ms, "batching.adaptiveBatchTimeoutMs")?;
+                if adaptive_min_batch_size > adaptive_max_batch_size {
+                    anyhow::bail!(
+                        "batching.adaptiveMinBatchSize ({adaptive_min_batch_size}) must be <= \
+                         batching.adaptiveMaxBatchSize ({adaptive_max_batch_size})"
+                    );
+                }
+            }
+        }
         if let Some(templates) = self.output_templates.as_ref() {
             templates.validate(query_ids)?;
         }
@@ -273,20 +345,38 @@ impl GrpcReactionConfig {
     }
 }
 
-fn empty_routes() -> &'static HashMap<String, QueryConfig> {
-    static EMPTY: std::sync::OnceLock<HashMap<String, QueryConfig>> = std::sync::OnceLock::new();
+fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
+    let http_endpoint = endpoint.replace("grpc://", "http://");
+    tonic::transport::Endpoint::from_shared(http_endpoint)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("invalid endpoint '{endpoint}': {e}"))
+}
+
+fn validate_positive<T>(value: T, field: &str) -> anyhow::Result<()>
+where
+    T: PartialEq + From<u8> + std::fmt::Display,
+{
+    if value == T::from(0) {
+        anyhow::bail!("{field} must be greater than 0");
+    }
+    Ok(())
+}
+
+fn empty_routes() -> &'static HashMap<String, GrpcQueryConfig> {
+    static EMPTY: std::sync::OnceLock<HashMap<String, GrpcQueryConfig>> =
+        std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
 }
 
-impl TemplateRouting<()> for GrpcReactionConfig {
-    fn routes(&self) -> &HashMap<String, QueryConfig> {
+impl TemplateRouting<GrpcTemplateExtension> for GrpcReactionConfig {
+    fn routes(&self) -> &HashMap<String, GrpcQueryConfig> {
         match self.output_templates.as_ref() {
             Some(t) => &t.routes,
             None => empty_routes(),
         }
     }
 
-    fn default_template(&self) -> Option<&QueryConfig> {
+    fn default_template(&self) -> Option<&GrpcQueryConfig> {
         self.output_templates
             .as_ref()
             .and_then(|t| t.default_template.as_ref())
@@ -296,11 +386,11 @@ impl TemplateRouting<()> for GrpcReactionConfig {
 #[cfg(test)]
 mod validation_tests {
     use super::*;
-    use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
+    use drasi_lib::reactions::common::TemplateSpec;
 
     fn with_templates(
-        default: Option<QueryConfig>,
-        routes: HashMap<String, QueryConfig>,
+        default: Option<GrpcQueryConfig>,
+        routes: HashMap<String, GrpcQueryConfig>,
     ) -> GrpcReactionConfig {
         GrpcReactionConfig {
             output_templates: Some(OutputTemplates {
@@ -311,9 +401,12 @@ mod validation_tests {
         }
     }
 
-    fn qc_added(template: &str) -> QueryConfig {
+    fn qc_added(template: &str) -> GrpcQueryConfig {
         QueryConfig {
-            added: Some(TemplateSpec::new(template)),
+            added: Some(TemplateSpec::with_extension(
+                template,
+                GrpcTemplateExtension::default(),
+            )),
             updated: None,
             deleted: None,
         }
@@ -381,5 +474,43 @@ mod validation_tests {
             msg.contains("q1") && msg.contains("template"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_invalid_endpoint() {
+        let cfg = GrpcReactionConfig {
+            endpoint: "not a uri".to_string(),
+            ..Default::default()
+        };
+        let err = cfg.validate(&[]).unwrap_err();
+        assert!(err.to_string().contains("invalid endpoint"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_fixed_batch_size() {
+        let cfg = GrpcReactionConfig {
+            batching: BatchingConfig::Fixed {
+                batch_size: 0,
+                batch_flush_timeout_ms: 1000,
+            },
+            ..Default::default()
+        };
+        let err = cfg.validate(&[]).unwrap_err();
+        assert!(err.to_string().contains("batchSize"));
+    }
+
+    #[test]
+    fn validate_rejects_inverted_adaptive_bounds() {
+        let cfg = GrpcReactionConfig {
+            batching: BatchingConfig::Adaptive {
+                adaptive_min_batch_size: 10,
+                adaptive_max_batch_size: 1,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 1000,
+            },
+            ..Default::default()
+        };
+        let err = cfg.validate(&[]).unwrap_err();
+        assert!(err.to_string().contains("adaptiveMinBatchSize"));
     }
 }

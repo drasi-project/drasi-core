@@ -33,7 +33,7 @@ service ReactionService {
 }
 
 // One ProcessResults call. Carries a single-query batch in `results`
-// plus per-call entries in `metadata`.
+// plus configured per-call request metadata in `metadata`.
 //
 // The reaction sends `metadata` entries both here as a body field and
 // as actual gRPC request headers via `tonic::Request::metadata_mut()`,
@@ -52,8 +52,10 @@ message ProcessResultsResponse {
 }
 
 // One coalesced batch of result-change items for a single continuous
-// query. Multiple query ids in the same batching window arrive as
-// separate `ProcessResultsRequest` RPCs — `query_id` is singular.
+// query. Multiple query ids or per-template metadata values in the same
+// batching window arrive as separate `ProcessResultsRequest` RPCs —
+// `query_id` is singular. `timestamp` is the latest event timestamp in
+// `results`; the item-level timestamp is authoritative.
 message QueryResult {
     string query_id = 1;
     repeated QueryResultItem results = 2;
@@ -91,15 +93,25 @@ enum QueryResultItemType {
 // given side, that field carries the raw row state. Events are never
 // dropped because of a render failure.
 //
+// `timestamp` is the original event timestamp from the `QueryResult`
+// this item originated from. `metadata` is the query-result metadata
+// supplied by Drasi for that emission. `payload` carries the canonical
+// guide-aligned JSON payload (or rendered body template output) as a
+// protobuf Struct when configured.
+//
 // `sequence` is the monotonic per-query emission number of the
 // `QueryResult` this item originated from. Because one
 // `ProcessResultsRequest` may coalesce items from several emissions of
 // the same query, the sequence is carried per item rather than on the
-// envelope. Receivers can use it to order or de-duplicate emissions.
+// envelope. Receivers can use sequence + timestamp to order or
+// de-duplicate emissions.
 message QueryResultItem {
     QueryResultItemType item_type = 1;
     uint64 row_signature = 2;
     google.protobuf.Struct before = 3;
     google.protobuf.Struct after  = 4;
     uint64 sequence = 5;
+    google.protobuf.Timestamp timestamp = 6;
+    google.protobuf.Struct metadata = 7;
+    google.protobuf.Struct payload = 8;
 }

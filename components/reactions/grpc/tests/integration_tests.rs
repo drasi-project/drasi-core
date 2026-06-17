@@ -34,9 +34,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use drasi_lib::channels::{QueryResult, ResultDiff};
-use drasi_lib::reactions::common::{AdaptiveBatchConfig, QueryConfig, TemplateSpec};
+use drasi_lib::reactions::common::{AdaptiveBatchConfig, TemplateSpec};
 use drasi_lib::{DrasiLib, Query, Reaction};
-use drasi_reaction_grpc::{GrpcReaction, OutputTemplates};
+use drasi_reaction_grpc::{GrpcQueryConfig, GrpcReaction, GrpcTemplateExtension, OutputTemplates};
 use serde_json::json;
 
 use crate::mock_server::struct_to_json;
@@ -100,27 +100,46 @@ fn make_query_result_seq(query_id: &str, sequence: u64, diffs: Vec<ResultDiff>) 
     )
 }
 
-fn template_added(template: &str) -> QueryConfig {
-    QueryConfig {
-        added: Some(TemplateSpec::new(template)),
+fn make_query_result_full(
+    query_id: &str,
+    sequence: u64,
+    timestamp: chrono::DateTime<Utc>,
+    diffs: Vec<ResultDiff>,
+    metadata: HashMap<String, serde_json::Value>,
+) -> QueryResult {
+    QueryResult::new(query_id.to_string(), sequence, timestamp, diffs, metadata)
+}
+
+fn template_added(template: &str) -> GrpcQueryConfig {
+    GrpcQueryConfig {
+        added: Some(TemplateSpec::with_extension(
+            template,
+            GrpcTemplateExtension::default(),
+        )),
         updated: None,
         deleted: None,
     }
 }
 
-fn template_updated(template: &str) -> QueryConfig {
-    QueryConfig {
+fn template_updated(template: &str) -> GrpcQueryConfig {
+    GrpcQueryConfig {
         added: None,
-        updated: Some(TemplateSpec::new(template)),
+        updated: Some(TemplateSpec::with_extension(
+            template,
+            GrpcTemplateExtension::default(),
+        )),
         deleted: None,
     }
 }
 
-fn template_deleted(template: &str) -> QueryConfig {
-    QueryConfig {
+fn template_deleted(template: &str) -> GrpcQueryConfig {
+    GrpcQueryConfig {
         added: None,
         updated: None,
-        deleted: Some(TemplateSpec::new(template)),
+        deleted: Some(TemplateSpec::with_extension(
+            template,
+            GrpcTemplateExtension::default(),
+        )),
     }
 }
 
@@ -178,7 +197,7 @@ async fn fixed_add_no_template_emits_raw_row_in_after_and_no_before() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fixed_add_with_template_renders_into_after() {
+async fn fixed_add_with_template_renders_into_payload() {
     let server = mock_server::start().await;
     let templates = OutputTemplates {
         default_template: Some(template_added(r#"{"event":"created","id":"{{row.id}}"}"#)),
@@ -210,8 +229,13 @@ async fn fixed_add_with_template_renders_into_after() {
     assert_eq!(item.item_type, ITEM_TYPE_ADD);
     assert_eq!(
         item.after.as_ref().map(struct_to_json),
+        Some(json!({"id": "abc", "extra": "ignored"})),
+        "ADD's typed `after` field remains the raw row"
+    );
+    assert_eq!(
+        item.payload.as_ref().map(struct_to_json),
         Some(json!({"event": "created", "id": "abc"})),
-        "ADD's `after` must carry the rendered template output, not the raw row"
+        "ADD body template output must be emitted in `payload`"
     );
     assert!(item.before.is_none(), "ADD never populates `before`");
 
@@ -261,7 +285,7 @@ async fn fixed_delete_no_template_emits_raw_row_in_before_and_no_after() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fixed_delete_with_template_renders_into_before() {
+async fn fixed_delete_with_template_renders_into_payload() {
     let server = mock_server::start().await;
     let templates = OutputTemplates {
         default_template: Some(template_deleted(r#"{"removed":"{{row.id}}"}"#)),
@@ -293,8 +317,13 @@ async fn fixed_delete_with_template_renders_into_before() {
     assert_eq!(item.item_type, ITEM_TYPE_DELETE);
     assert_eq!(
         item.before.as_ref().map(struct_to_json),
+        Some(json!({"id": "x42"})),
+        "DELETE's typed `before` field remains the raw row"
+    );
+    assert_eq!(
+        item.payload.as_ref().map(struct_to_json),
         Some(json!({"removed": "x42"})),
-        "DELETE's `before` must carry the rendered template output"
+        "DELETE body template output must be emitted in `payload`"
     );
     assert!(item.after.is_none());
 
@@ -347,13 +376,12 @@ async fn fixed_update_no_template_emits_raw_before_and_after() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fixed_update_template_renders_both_before_and_after_independently() {
-    // The single `updated` template is applied independently to the
-    // before-row and the after-row. Each rendered output lands in its
-    // corresponding proto field.
+async fn fixed_update_template_renders_body_payload() {
     let server = mock_server::start().await;
     let templates = OutputTemplates {
-        default_template: Some(template_updated(r#"{"value":"{{row.v}}"}"#)),
+        default_template: Some(template_updated(
+            r#"{"before":"{{before.v}}","after":"{{after.v}}"}"#,
+        )),
         routes: HashMap::new(),
     };
     let reaction = GrpcReaction::builder("test-fixed-upd-tmpl")
@@ -383,13 +411,18 @@ async fn fixed_update_template_renders_both_before_and_after_independently() {
     assert_eq!(item.row_signature, 99);
     assert_eq!(
         item.before.as_ref().map(struct_to_json),
-        Some(json!({"value": "old"})),
-        "`before` must be rendered from the before-row"
+        Some(json!({"v": "old"})),
+        "`before` remains the raw before-row"
     );
     assert_eq!(
         item.after.as_ref().map(struct_to_json),
-        Some(json!({"value": "new"})),
-        "`after` must be rendered from the after-row"
+        Some(json!({"v": "new"})),
+        "`after` remains the raw after-row"
+    );
+    assert_eq!(
+        item.payload.as_ref().map(struct_to_json),
+        Some(json!({"before": "old", "after": "new"})),
+        "UPDATE body template output must be emitted in `payload`"
     );
 
     shutdown(&reaction).await;
@@ -397,10 +430,12 @@ async fn fixed_update_template_renders_both_before_and_after_independently() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fixed_update_template_sees_side_variable_differently_per_render() {
+async fn fixed_update_template_sees_standard_before_after_keys() {
     let server = mock_server::start().await;
     let templates = OutputTemplates {
-        default_template: Some(template_updated(r#"{"v":"{{row.v}}","s":"{{side}}"}"#)),
+        default_template: Some(template_updated(
+            r#"{"old":"{{before.v}}","new":"{{after.v}}","op":"{{operation}}"}"#,
+        )),
         routes: HashMap::new(),
     };
     let reaction = GrpcReaction::builder("test-fixed-upd-side")
@@ -428,11 +463,15 @@ async fn fixed_update_template_sees_side_variable_differently_per_render() {
     let item = &batches[0].items[0];
     assert_eq!(
         item.before.as_ref().map(struct_to_json),
-        Some(json!({"v": "old", "s": "before"}))
+        Some(json!({"v": "old"}))
     );
     assert_eq!(
         item.after.as_ref().map(struct_to_json),
-        Some(json!({"v": "new", "s": "after"}))
+        Some(json!({"v": "new"}))
+    );
+    assert_eq!(
+        item.payload.as_ref().map(struct_to_json),
+        Some(json!({"old": "old", "new": "new", "op": "UPDATE"}))
     );
 
     shutdown(&reaction).await;
@@ -444,7 +483,7 @@ async fn fixed_update_template_sees_side_variable_differently_per_render() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fixed_template_render_failure_falls_back_to_raw_row_state() {
+async fn fixed_template_render_failure_falls_back_to_canonical_payload() {
     let server = mock_server::start().await;
     let templates = OutputTemplates {
         default_template: Some(template_added("plain text {{row.id}}")),
@@ -478,8 +517,16 @@ async fn fixed_template_render_failure_falls_back_to_raw_row_state() {
     assert_eq!(
         item.after.as_ref().map(struct_to_json),
         Some(json!({"id": 99})),
-        "render failure must fall back to the raw row state in `after`"
+        "typed `after` field remains the raw row"
     );
+    let payload = item
+        .payload
+        .as_ref()
+        .map(struct_to_json)
+        .expect("render failure falls back to canonical payload");
+    assert_eq!(payload.get("operation"), Some(&json!("ADD")));
+    assert_eq!(payload.get("after"), Some(&json!({"id": 99})));
+    assert_eq!(payload.get("queryId"), Some(&json!("q1")));
 
     shutdown(&reaction).await;
     server.shutdown().await;
@@ -493,7 +540,7 @@ async fn fixed_template_render_failure_falls_back_to_raw_row_state() {
 async fn aggregation_emits_as_update_on_the_wire_with_both_sides_templated() {
     let server = mock_server::start().await;
     let templates = OutputTemplates {
-        default_template: Some(template_updated(r#"{"sum":{{row.sum}}}"#)),
+        default_template: Some(template_updated(r#"{"sum":{{after.sum}}}"#)),
         routes: HashMap::new(),
     };
     let reaction = GrpcReaction::builder("test-agg")
@@ -529,6 +576,10 @@ async fn aggregation_emits_as_update_on_the_wire_with_both_sides_templated() {
     );
     assert_eq!(
         item.after.as_ref().map(struct_to_json),
+        Some(json!({"sum": 5}))
+    );
+    assert_eq!(
+        item.payload.as_ref().map(struct_to_json),
         Some(json!({"sum": 5}))
     );
 
@@ -618,6 +669,51 @@ async fn metadata_is_propagated_as_grpc_headers_end_to_end() {
     server.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn template_extension_metadata_is_rendered_as_grpc_headers() {
+    let server = mock_server::start().await;
+    let mut rendered_metadata = HashMap::new();
+    rendered_metadata.insert("x-query".to_string(), "{{query_id}}".to_string());
+    rendered_metadata.insert("x-op".to_string(), "{{operation}}".to_string());
+    let templates = OutputTemplates {
+        default_template: Some(GrpcQueryConfig {
+            added: Some(TemplateSpec::with_extension(
+                r#"{"id":"{{after.id}}"}"#,
+                GrpcTemplateExtension {
+                    metadata: rendered_metadata,
+                },
+            )),
+            ..Default::default()
+        }),
+        routes: HashMap::new(),
+    };
+    let reaction = GrpcReaction::builder("test-template-meta")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        .with_fixed_batching(1, 10_000)
+        .with_output_templates(templates)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 0)]))
+        .await
+        .expect("enqueue");
+
+    server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(5))
+        .await;
+    let batches = server.recorder.batches().await;
+    let observed = &batches[0].metadata_headers;
+    assert_eq!(observed.get("x-query").map(String::as_str), Some("q1"));
+    assert_eq!(observed.get("x-op").map(String::as_str), Some("ADD"));
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // Sequence, portable template keys, and descriptor secret resolution
 // ---------------------------------------------------------------------------
@@ -656,6 +752,63 @@ async fn sequence_is_propagated_on_the_wire() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn event_timestamp_and_query_metadata_are_propagated_on_the_wire() {
+    let server = mock_server::start().await;
+    let reaction = GrpcReaction::builder("test-ts-meta")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        .with_fixed_batching(1, 10_000)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    let timestamp = chrono::DateTime::parse_from_rfc3339("2026-06-17T01:02:03Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut metadata = HashMap::new();
+    metadata.insert("tenant".to_string(), json!("acme"));
+    reaction
+        .enqueue_query_result(make_query_result_full(
+            "q1",
+            88,
+            timestamp,
+            vec![add(json!({"id": 1}), 9)],
+            metadata,
+        ))
+        .await
+        .expect("enqueue");
+
+    server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(5))
+        .await;
+    let batches = server.recorder.batches().await;
+    let item = &batches[0].items[0];
+    assert_eq!(
+        item.timestamp.as_ref().map(|t| (t.seconds, t.nanos)),
+        Some((
+            timestamp.timestamp(),
+            timestamp.timestamp_subsec_nanos() as i32
+        )),
+        "item timestamp must be the originating QueryResult timestamp"
+    );
+    assert_eq!(
+        item.metadata.as_ref().map(struct_to_json),
+        Some(json!({"tenant": "acme"})),
+        "query-result metadata must be preserved separately from request headers"
+    );
+    let payload = item.payload.as_ref().map(struct_to_json).expect("payload");
+    assert_eq!(
+        payload.get("timestamp"),
+        Some(&json!("2026-06-17T01:02:03+00:00"))
+    );
+    assert_eq!(payload.get("metadata"), Some(&json!({"tenant": "acme"})));
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn template_uses_portable_standard_keys_end_to_end() {
     // Templates written with the portable cross-reaction keys
     // (`{{after.id}}`, `{{operation}}`) render correctly here too.
@@ -687,9 +840,9 @@ async fn template_uses_portable_standard_keys_end_to_end() {
     let batches = server.recorder.batches().await;
     let item = &batches[0].items[0];
     assert_eq!(
-        item.after.as_ref().map(struct_to_json),
+        item.payload.as_ref().map(struct_to_json),
         Some(json!({"id": "abc", "op": "ADD"})),
-        "portable `after`/`operation` template keys must render"
+        "portable `after`/`operation` template keys must render into payload"
     );
 
     shutdown(&reaction).await;
@@ -790,7 +943,7 @@ async fn adaptive_delivers_steady_load() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn adaptive_flushes_buffered_batch_on_shutdown_drain() {
+async fn adaptive_flushes_low_volume_batch_after_timeout() {
     let server = mock_server::start().await;
     let reaction = GrpcReaction::builder("test-adaptive-drain")
         .with_endpoint(server.endpoint.clone())
@@ -810,27 +963,16 @@ async fn adaptive_flushes_buffered_batch_on_shutdown_drain() {
         .await
         .expect("enqueue");
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        server.recorder.total_items().await,
-        0,
-        "single buffered item must not be flushed before drain"
-    );
-
-    let stop_start = std::time::Instant::now();
-    reaction.stop().await.expect("stop");
-    let stop_elapsed = stop_start.elapsed();
-    assert!(
-        stop_elapsed < Duration::from_secs(3),
-        "drain must complete promptly (< 3 s); took {stop_elapsed:?}"
-    );
-
     let total = server
         .recorder
-        .wait_for_items(1, Duration::from_secs(2))
+        .wait_for_items(1, Duration::from_secs(5))
         .await;
-    assert_eq!(total, 1, "drain must flush the buffered batch");
+    assert_eq!(
+        total, 1,
+        "adaptive timeout must flush a low-volume single-query item without waiting for shutdown"
+    );
 
+    reaction.stop().await.expect("stop");
     server.shutdown().await;
 }
 

@@ -13,12 +13,6 @@
 // limitations under the License.
 
 //! Adaptive batching runner.
-//!
-//! Uses the throughput-aware [`crate::adaptive_batcher::AdaptiveBatcher`]
-//! to size batches dynamically between configured minimum and maximum
-//! bounds. Items are forwarded through an mpsc channel to a dedicated
-//! batcher task that emits ready-to-send batches as soon as either the
-//! adaptive size or wait-time criteria are met.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -31,11 +25,14 @@ use drasi_lib::channels::ComponentStatus;
 use drasi_lib::reactions::common::{base::ReactionBase, AdaptiveBatchConfig};
 
 use crate::adaptive_batcher::{AdaptiveBatcher, AdaptiveBatcherConfig};
+use crate::batch::{merge_metadata, BatchKey};
 use crate::config::GrpcReactionConfig;
 use crate::connection::create_client_with_retry;
 use crate::proto::{ProtoQueryResultItem, ReactionServiceClient};
 use crate::send::send_batch_with_retry;
 use crate::templates::{build_proto_item, QueryEmissionContext, TemplateEngine};
+
+type BatcherItem = (BatchKey, ProtoQueryResultItem);
 
 pub(crate) struct AdaptiveRunnerParams {
     pub reaction_name: String,
@@ -55,46 +52,43 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
     } = params;
 
     let endpoint = config.endpoint.clone();
-    let metadata = config.metadata.clone();
+    let base_metadata = config.metadata.clone();
     let max_retries = config.max_retries;
     let timeout_ms = config.timeout_ms;
     let initial_connection_timeout_ms = config.initial_connection_timeout_ms;
     let connection_retry_attempts = config.connection_retry_attempts;
     let status_handle = base.status_handle();
 
-    // Convert the public lib config into the runtime batcher config.
     let runtime_cfg = AdaptiveBatcherConfig {
         min_batch_size: adaptive.adaptive_min_batch_size,
         max_batch_size: adaptive.adaptive_max_batch_size,
         throughput_window: Duration::from_millis(adaptive.adaptive_window_size as u64 * 100),
         max_wait_time: Duration::from_millis(adaptive.adaptive_batch_timeout_ms),
-        min_wait_time: Duration::from_millis(100),
+        min_wait_time: Duration::from_millis(100)
+            .min(Duration::from_millis(adaptive.adaptive_batch_timeout_ms)),
         adaptive_enabled: true,
     };
 
     let batch_channel_capacity = runtime_cfg.recommended_channel_capacity();
-    let (batch_tx, batch_rx) = mpsc::channel(batch_channel_capacity);
+    let (batch_tx, batch_rx) = mpsc::channel::<BatcherItem>(batch_channel_capacity);
     debug!(
         "Adaptive runner using batch channel capacity: {} (max_batch_size: {} × 5)",
         batch_channel_capacity, runtime_cfg.max_batch_size
     );
 
     let batcher_endpoint = endpoint.clone();
-    let batcher_metadata = metadata.clone();
     let batcher_name = reaction_name.clone();
+    let batcher_status = status_handle.clone();
 
-    // Sender task: consume `ResultDiff`s from the priority queue, render
-    // proto items, group by query, and ship to the batcher channel.
     let template_engine = config
         .output_templates
         .as_ref()
         .filter(|t| t.has_renderable_templates())
         .map(|_| TemplateEngine::new());
 
-    let batcher_handle = tokio::spawn(async move {
+    let mut batcher_handle = tokio::spawn(async move {
         let mut batcher = AdaptiveBatcher::new(batch_rx, runtime_cfg);
         let mut client: Option<ReactionServiceClient<Channel>> = None;
-        let mut consecutive_failures = 0u32;
         let mut successful_sends = 0u64;
         let mut failed_sends = 0u64;
 
@@ -118,34 +112,35 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                     Ok(c) => {
                         info!("Successfully created gRPC client for endpoint: {batcher_endpoint}");
                         client = Some(c);
-                        consecutive_failures = 0;
                     }
                     Err(e) => {
-                        consecutive_failures += 1;
-                        error!("Failed to create client (attempt {consecutive_failures}): {e}");
-                        let backoff =
-                            Duration::from_millis(100 * 2u64.pow(consecutive_failures.min(10)));
-                        tokio::time::sleep(backoff).await;
-                        continue;
+                        failed_sends += 1;
+                        let msg = format!("Failed to create gRPC client: {e}");
+                        error!("[{batcher_name}] {msg}");
+                        batcher_status
+                            .set_status(ComponentStatus::Error, Some(msg))
+                            .await;
+                        return;
                     }
                 }
             }
 
-            // Group items by query_id
-            let mut batches_by_query: HashMap<String, Vec<ProtoQueryResultItem>> = HashMap::new();
-            for (query_id, items) in batch {
-                batches_by_query.entry(query_id).or_default().extend(items);
+            let mut batches_by_key: HashMap<BatchKey, Vec<ProtoQueryResultItem>> = HashMap::new();
+            for (key, item) in batch {
+                batches_by_key.entry(key).or_default().push(item);
             }
 
-            for (query_id, items) in batches_by_query.into_iter() {
-                let mut needs_swap = false;
+            for (key, items) in batches_by_key.into_iter() {
+                let mut retry_swaps = 0u32;
                 loop {
-                    let Some(c) = client.as_mut() else { break };
+                    let Some(c) = client.as_mut() else {
+                        break;
+                    };
                     match send_batch_with_retry(
                         c,
                         items.clone(),
-                        &query_id,
-                        &batcher_metadata,
+                        &key.query_id,
+                        &key.metadata_map(),
                         max_retries,
                         &batcher_endpoint,
                         timeout_ms,
@@ -156,34 +151,46 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                             if needs_new_client {
                                 if let Some(nc) = new_client {
                                     client = Some(nc);
-                                    consecutive_failures = 0;
-                                    continue;
+                                    retry_swaps += 1;
+                                    if retry_swaps <= 2 {
+                                        continue;
+                                    }
                                 } else {
-                                    needs_swap = true;
-                                    break;
+                                    client = None;
                                 }
-                            } else {
-                                successful_sends += 1;
-                                if successful_sends % 100 == 0 {
-                                    info!(
-                                        "Adaptive metrics - Successful: {successful_sends}, Failed: {failed_sends}"
-                                    );
-                                }
-                                break;
+                                failed_sends += 1;
+                                let msg = format!(
+                                    "Failed to send adaptive batch for query '{}'",
+                                    key.query_id
+                                );
+                                error!("[{batcher_name}] {msg}");
+                                batcher_status
+                                    .set_status(ComponentStatus::Error, Some(msg))
+                                    .await;
+                                return;
                             }
+
+                            successful_sends += 1;
+                            if successful_sends % 100 == 0 {
+                                info!(
+                                    "Adaptive metrics - Successful: {successful_sends}, Failed: {failed_sends}"
+                                );
+                            }
+                            break;
                         }
                         Err(e) => {
                             failed_sends += 1;
-                            warn!(
-                                "[{batcher_name}] Failed to send adaptive batch for query '{query_id}': {e}"
+                            let msg = format!(
+                                "Failed to send adaptive batch for query '{}': {e}",
+                                key.query_id
                             );
-                            needs_swap = true;
-                            break;
+                            error!("[{batcher_name}] {msg}");
+                            batcher_status
+                                .set_status(ComponentStatus::Error, Some(msg))
+                                .await;
+                            return;
                         }
                     }
-                }
-                if needs_swap {
-                    client = None;
                 }
             }
         }
@@ -196,8 +203,6 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
     let priority_queue = base.priority_queue.clone();
     let cfg_for_loop = config;
     let engine_for_loop = template_engine;
-    let mut last_query_id = String::new();
-    let mut current_batch: Vec<ProtoQueryResultItem> = Vec::new();
 
     loop {
         let query_result = tokio::select! {
@@ -213,7 +218,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
             info!(
                 "[{reaction_name}] Reaction status changed to non-running, exiting adaptive loop"
             );
-            break;
+            return;
         }
 
         if query_result.results.is_empty() {
@@ -222,72 +227,46 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
         }
 
         let query_id = query_result.query_id.clone();
-
-        if !last_query_id.is_empty()
-            && last_query_id != query_id
-            && !current_batch.is_empty()
-            && batch_tx
-                .send((last_query_id.clone(), std::mem::take(&mut current_batch)))
-                .await
-                .is_err()
-        {
-            error!("[{reaction_name}] Failed to send batch to adaptive batcher");
-            break;
-        }
-        last_query_id = query_id.clone();
-
-        let timestamp = query_result.timestamp.to_rfc3339();
         let emission = QueryEmissionContext {
             query_id: &query_id,
             sequence: query_result.sequence,
-            timestamp: &timestamp,
+            timestamp: query_result.timestamp,
             metadata: &query_result.metadata,
         };
 
         for diff in &query_result.results {
-            // Noop diffs are filtered at the runner so they never reach
-            // the wire — matches the established Drasi convention
-            // (rabbitmq.rs:724-726, azure-storage reaction.rs:440).
             if matches!(diff, drasi_lib::channels::ResultDiff::Noop) {
                 debug!("[{reaction_name}] Ignoring noop result");
                 continue;
             }
-            let Some(proto_item) =
+            let Some(built) =
                 build_proto_item(&cfg_for_loop, engine_for_loop.as_ref(), &emission, diff)
             else {
                 continue;
             };
-            current_batch.push(proto_item);
+            let effective_metadata = merge_metadata(&base_metadata, &built.request_metadata);
+            let key = BatchKey::new(query_id.clone(), effective_metadata);
+            if batch_tx.send((key, built.item)).await.is_err() {
+                let msg = "failed to send item to adaptive batcher".to_string();
+                error!("[{reaction_name}] {msg}");
+                status_handle
+                    .set_status(ComponentStatus::Error, Some(msg))
+                    .await;
+                return;
+            }
         }
-
-        // Forward early if we accumulated a lot for a single query.
-        if current_batch.len() >= 100
-            && batch_tx
-                .send((last_query_id.clone(), std::mem::take(&mut current_batch)))
-                .await
-                .is_err()
-        {
-            error!("[{reaction_name}] Failed to send batch to adaptive batcher");
-            break;
-        }
-    }
-
-    if !current_batch.is_empty() && !last_query_id.is_empty() {
-        let _ = batch_tx.send((last_query_id, current_batch)).await;
     }
 
     drop(batch_tx);
-    // Bound the drain: send_batch_with_retry can loop up to 60 s, so an
-    // in-flight batch must not block stop() indefinitely. Matches the
-    // pattern HTTP adopted in adaptive_loop.rs:134-139 (PR #485 review).
-    if tokio::time::timeout(Duration::from_secs(5), batcher_handle)
+    if tokio::time::timeout(Duration::from_millis(1500), &mut batcher_handle)
         .await
         .is_err()
     {
         warn!(
-            "[{reaction_name}] Adaptive batcher did not finish within the 5 s shutdown window — \
+            "[{reaction_name}] Adaptive batcher did not finish within the shutdown window — \
              in-flight batch abandoned"
         );
+        batcher_handle.abort();
     }
 
     info!("[{reaction_name}] Adaptive gRPC reaction completed");

@@ -25,7 +25,10 @@ use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
 
-pub use super::config::{BatchingConfig, GrpcReactionConfig, OutputTemplates};
+pub use super::config::{
+    BatchingConfig, GrpcQueryConfig, GrpcReactionConfig, GrpcTemplateExtension, OutputFormat,
+    OutputTemplates,
+};
 use super::GrpcReactionBuilder;
 use crate::runner_adaptive::{self, AdaptiveRunnerParams};
 use crate::runner_fixed::{self, FixedRunnerParams};
@@ -40,13 +43,18 @@ impl GrpcReaction {
         GrpcReactionBuilder::new(id)
     }
 
-    pub fn new(id: impl Into<String>, queries: Vec<String>, config: GrpcReactionConfig) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        queries: Vec<String>,
+        config: GrpcReactionConfig,
+    ) -> anyhow::Result<Self> {
+        config.validate(&queries)?;
         let id = id.into();
         let params = ReactionBaseParams::new(id, queries);
-        Self {
+        Ok(Self {
             base: ReactionBase::new(params),
             config,
-        }
+        })
     }
 
     pub fn with_priority_queue_capacity(
@@ -54,14 +62,15 @@ impl GrpcReaction {
         queries: Vec<String>,
         config: GrpcReactionConfig,
         priority_queue_capacity: usize,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        config.validate(&queries)?;
         let id = id.into();
         let params = ReactionBaseParams::new(id, queries)
             .with_priority_queue_capacity(priority_queue_capacity);
-        Self {
+        Ok(Self {
             base: ReactionBase::new(params),
             config,
-        }
+        })
     }
 
     pub(crate) fn from_builder(

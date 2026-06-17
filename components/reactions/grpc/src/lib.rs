@@ -25,6 +25,7 @@
 //! wire unchanged so receivers always recover the change.
 
 pub(crate) mod adaptive_batcher;
+pub(crate) mod batch;
 pub mod config;
 pub mod connection;
 pub mod descriptor;
@@ -36,7 +37,10 @@ mod runner_fixed;
 mod send;
 mod templates;
 
-pub use config::{BatchingConfig, GrpcReactionConfig, OutputTemplates};
+pub use config::{
+    BatchingConfig, GrpcQueryConfig, GrpcReactionConfig, GrpcTemplateExtension, OutputFormat,
+    OutputTemplates,
+};
 pub use grpc::GrpcReaction;
 
 pub use helpers::convert_json_to_proto_struct;
@@ -120,6 +124,11 @@ impl GrpcReactionBuilder {
 
     pub fn with_batching(mut self, batching: BatchingConfig) -> Self {
         self.config.batching = batching;
+        self
+    }
+
+    pub fn with_output_format(mut self, output_format: OutputFormat) -> Self {
+        self.config.output_format = output_format;
         self
     }
 

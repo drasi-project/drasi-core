@@ -9,67 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
-- **Proto file cleanup.** `proto/drasi/v1/common.proto` is removed and
-  `proto/drasi/v1/reaction.proto` is now the single source-of-truth
-  proto file for the reaction. All source-side message types (`Element`,
-  `Node`, `Relation`, `SourceChange`, `ChangeType`, `BootstrapRequest`,
-  `BootstrapResponse`, `ElementReference`, `ElementMetadata`) and the
-  unused `ReactionService` RPCs (`StreamResults`, `Subscribe`,
-  `HealthCheck`) along with their request / response messages have been
-  removed — they were never referenced by the reaction. The retained
-  surface is `service ReactionService` with the single `ProcessResults`
-  RPC plus the `ProcessResultsRequest`, `ProcessResultsResponse`,
-  `QueryResult`, `QueryResultItem`, and `QueryResultItemType` messages.
-- **Proto envelope reshape.** `QueryResultItem` is now
-  `{ item_type, row_signature, before, after, sequence }`:
-  - Removed the string `type` field and the `data` field. `data` was a
-    duplicate of `after` / `before` for ADD/UPDATE/DELETE; on the wire
-    the row state is carried directly by `before` and `after`.
-  - Added `item_type` (`QueryResultItemType` enum) replacing the string
-    `type`. Eliminates the prior `"ADD"` / `"aggregation"` casing
-    inconsistency on the wire.
-  - Added `row_signature` (uint64) as a first-class field on every item.
-  - Added `sequence` (uint64) — the monotonic per-query emission number
-    of the originating `QueryResult`, carried per item so receivers can
-    order or de-duplicate.
-  - `before` and `after` carry the row state on either side of the
-    change: `ADD` → only `after`; `DELETE` → only `before`; `UPDATE`
-    → both.
-- **Enum surface narrowed to 3 ops.** `QueryResultItemType` no longer
-  has `AGGREGATION` or `NOOP` variants:
-  - Aggregation results surface as `item_type == UPDATE` on the wire
-    (matches the RabbitMQ and Azure Storage reactions).
-  - Noop results are dropped at the runner level and never appear in
-    `QueryResult.results`.
-- **Templating model redesigned to per-row.** Templates reshape the row
-  content that lands in `before` / `after`, replacing the previous
-  separate `payload` field (which has been removed):
-  - The `added` template runs once on the new row for ADD → output goes
-    into `after`.
-  - The `deleted` template runs once on the old row for DELETE → output
-    goes into `before`.
-  - The `updated` template runs **twice**, independently, for UPDATE —
-    once with the before-row → `before`, once with the after-row →
-    `after`. Aggregation reuses the same path.
-  - Template context variables: the standard cross-reaction keys
-    `query_id`, `query_name`, `operation`, `timestamp`, `metadata`,
-    `before`, `after`, `data`, plus the reaction-specific `row` (the row
-    being rendered) and `side` (`"before"` or `"after"`). Templates
-    written with the portable keys (e.g. `{{after.id}}`) work unchanged.
-  - Render failure (template parse error, non-JSON output, missing
-    field) falls back to the **raw row state** for that field. Events
-    are never dropped.
-- **`config_version` bumps from `2.0.0` to `3.0.0`** and the crate
-  version bumps to `0.4.0`. Receivers compiled against the prior schema
-  must regenerate their stubs.
-- **Configured `metadata` is now also propagated as gRPC request
-  headers.** Previously the configured `metadata` map only populated
-  `ProcessResultsRequest.metadata` (a body field). It is now
-  additionally set via `tonic::Request::metadata_mut().insert(...)`,
-  matching the README's "authentication or routing headers" framing.
-  The body field is preserved. Entries with invalid header names /
-  values are skipped from the headers with a warning and still ride
-  in the body field.
+- **Proto envelope expanded for guide-aligned output.** `QueryResultItem`
+  carries typed gRPC fields plus `timestamp`, `metadata`, and `payload`.
+  `timestamp` is the original Drasi event timestamp, `metadata` preserves
+  inbound query-result metadata, and `payload` carries either the canonical
+  JSON item or rendered body-template output as a protobuf `Struct`.
+- **Templating model is body-payload based.** Templates render once per item
+  into `QueryResultItem.payload`. Raw typed row state remains in `before` /
+  `after`, and render failures fall back to the canonical payload.
+- **Public direct constructors are fallible.** `GrpcReaction::new` and
+  `GrpcReaction::with_priority_queue_capacity` validate configuration and
+  return `anyhow::Result<GrpcReaction>`.
+- **`config_version` is `3.0.0`** and the crate version is `0.4.0`.
 
 ### Features
 
@@ -77,67 +28,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   using the shared `AdaptiveBatchConfig`.
 - Added optional **Handlebars output templates** via `outputTemplates`
   (`defaultTemplate` + per-query `routes`), with `added`/`updated`/`deleted`
-  template specs. Rendered output replaces the raw row content in the
-  corresponding `before` / `after` field; render failures fall back to the
-  raw row state.
-- Output templates are **validated at construction** — every template is
-  compiled and every route key is checked against the subscribed query list, so
-  a misconfiguration fails at `build()` instead of per-event at dispatch.
+  template specs and gRPC-specific per-template `metadata` extension fields.
+- Added `outputFormat` (`canonicalJson` by default, or `proto`) to control
+  whether the canonical payload is emitted when no template applies.
+- Output templates are **validated at construction** — every body template,
+  every per-template metadata value template, and every route key is checked.
 - Template route resolution falls back to the **last dotted segment** of the
   wire query id, so a route keyed `my_query` matches a wire id `source.my_query`.
 - `metadata` values accept `ConfigValue<String>` via descriptor config, so
   authentication headers can reference environment variables or secrets resolved
   at construction time.
+- Endpoint and batching invariants are validated at construction, including
+  positive fixed/adaptive batch sizes and adaptive min/max ordering.
+- Fixed batching isolates pending batches by `(query_id, metadata)` and marks the
+  reaction `Error` on exhausted delivery failures to avoid data misattribution.
+- Adaptive batching forwards items to the adaptive batcher immediately, so
+  low-volume single-query items flush after the configured wait window.
 - New typed builder API (`GrpcReaction::builder(...)`) with
   `with_fixed_batching`, `with_adaptive_batching`, `with_output_templates`,
-  per-field adaptive setters (`with_min_batch_size`, `with_max_batch_size`,
-  `with_window_size`, `with_batch_timeout_ms`), and `with_metadata`
-  convenience methods.
+  `with_output_format`, per-field adaptive setters (`with_min_batch_size`,
+  `with_max_batch_size`, `with_window_size`, `with_batch_timeout_ms`), and
+  `with_metadata` convenience methods.
 - OpenAPI descriptor (`config_version = "3.0.0"`) with named sub-schemas for
-  `BatchingConfig`, `OutputTemplates`, `QueryConfig`, and `TemplateSpec`, plus
-  `SchemaUiAnnotator` groupings for management UIs.
+  `BatchingConfig`, `OutputFormat`, `OutputTemplates`, `QueryConfig`, and
+  `TemplateSpec`, plus `SchemaUiAnnotator` groupings for management UIs.
 
 ### Miscellaneous Tasks
 
 - Refreshed copyright headers to 2026.
-- Expanded `src/tests.rs`, `src/config.rs`, and `src/templates.rs` test
-  coverage with per-op raw-vs-templated assertions, UPDATE
-  both-sides-rendered assertions, Aggregation-as-UPDATE assertion, a
-  Noop-returns-None contract, route resolution (exact / dotted-suffix /
-  default), template-validation success and failure cases,
-  standard-context-key assertions, and `row_signature` / `sequence`
-  propagation tests.
-- Added `tests/mock_server.rs`, `tests/mock_source.rs`, and
-  `tests/integration_tests.rs` with end-to-end scenarios that push real
-  `QueryResult` events through the reaction to an in-process tonic mock
-  `ReactionService` (asserting exact wire shape of every
-  `QueryResultItem` plus gRPC headers and `sequence`), descriptor-resolved
-  `ConfigValue` metadata, and a full `DrasiLib` source → query → reaction
-  path.
-- Unified `drasi-reaction-grpc` and the previously separate
-  `drasi-reaction-grpc-adaptive` crate into a single reaction. The
-  `grpc-adaptive` crate has been removed from the workspace.
-
-<!-- generated by git-cliff -->
-
-## [0.4.0] - 2026-05-22
-
-### Breaking Changes
-
-- Unified `drasi-reaction-grpc` and the previously separate `drasi-reaction-grpc-adaptive` crate into a single reaction. The `grpc-adaptive` crate has been removed from the workspace.
-- Configuration schema redesigned: top-level fields are now camelCase, and the batching strategy is selected via a discriminated `batching: { mode: "fixed" | "adaptive", ... }` block. There is no backward compatibility with the previous configuration shape.
-
-### Features
-
-- Added throughput-aware **adaptive batching** mode (`batching.mode: "adaptive"`) using the shared `AdaptiveBatchConfig`.
-- Added optional **Handlebars output templates** via `outputTemplates` (`defaultTemplate` + per-query `routes`), with `added`/`updated`/`deleted` template specs. Render failures fall back to the raw payload — events are never dropped.
-- New typed builder API (`GrpcReaction::builder(...)`) with `with_fixed_batching`, `with_adaptive_batching`, `with_output_templates`, and `with_metadata` convenience methods.
-- OpenAPI descriptor (`config_version = "2.0.0"`) with named sub-schemas for `BatchingConfig`, `OutputTemplates`, `QueryConfig`, and `TemplateSpec`.
-
-### Miscellaneous Tasks
-
-- Refreshed copyright headers to 2026.
-- Added `src/tests.rs` covering builder defaults, custom values, YAML round-trips for both batching modes, and descriptor schema bundling.
+- Expanded unit and integration coverage with config validation failures,
+  canonical payload assertions, Aggregation-as-UPDATE assertions, route
+  resolution, template-validation success and failure cases, standard-context
+  assertions, per-template metadata rendering, and `row_signature` / `sequence`
+  / timestamp / metadata propagation tests.
 
 <!-- generated by git-cliff -->
 

@@ -47,10 +47,33 @@ pub(crate) async fn send_batch_with_retry(
     endpoint: &str,
     timeout_ms: u64,
 ) -> Result<(bool, Option<ReactionServiceClient<Channel>>)> {
+    send_batch_with_retry_with_limit(
+        client,
+        batch,
+        query_id,
+        metadata,
+        max_retries,
+        endpoint,
+        timeout_ms,
+        Duration::from_secs(60),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_batch_with_retry_with_limit(
+    client: &mut ReactionServiceClient<Channel>,
+    batch: Vec<ProtoQueryResultItem>,
+    query_id: &str,
+    metadata: &HashMap<String, String>,
+    max_retries: u32,
+    endpoint: &str,
+    timeout_ms: u64,
+    max_retry_duration: Duration,
+) -> Result<(bool, Option<ReactionServiceClient<Channel>>)> {
     let mut retries = 0;
     let mut backoff = Duration::from_millis(100);
     let start_time = std::time::Instant::now();
-    let max_retry_duration = Duration::from_secs(60);
 
     debug!(
         "send_batch_with_retry called - batch_size: {}, query_id: {}, endpoint: {}, max_retries: {}, timeout_ms: {}",
@@ -78,7 +101,7 @@ pub(crate) async fn send_batch_with_retry(
             results: Some(ProtoQueryResult {
                 query_id: query_id.to_string(),
                 results: batch.clone(),
-                timestamp: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+                timestamp: latest_item_timestamp(&batch),
             }),
             metadata: metadata.clone(),
         });
@@ -297,6 +320,17 @@ fn categorize_error(error_str_lower: &str) -> &'static str {
     } else {
         "Unknown"
     }
+}
+
+fn latest_item_timestamp(batch: &[ProtoQueryResultItem]) -> Option<prost_types::Timestamp> {
+    batch
+        .iter()
+        .filter_map(|item| item.timestamp.clone())
+        .max_by(|a, b| {
+            a.seconds
+                .cmp(&b.seconds)
+                .then_with(|| a.nanos.cmp(&b.nanos))
+        })
 }
 
 #[cfg(test)]

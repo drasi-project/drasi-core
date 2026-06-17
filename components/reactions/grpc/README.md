@@ -17,10 +17,13 @@ Changes can be delivered two ways:
   trading a small amount of latency for higher throughput on bursty workloads.
   Enabled by configuring `batching.mode = "adaptive"`.
 
-Both modes support [Handlebars](https://handlebarsjs.com/) output templates that
-reshape the row content emitted in the `before` / `after` fields of every result
-item. When no template is configured (or a template fails to render) the raw row
-state is emitted on the wire so receivers can always recover the change.
+Both modes support [Handlebars](https://handlebarsjs.com/) body templates that
+populate the `payload` field of every result item. The typed gRPC fields
+(`before`, `after`, `itemType`, `sequence`, `timestamp`, `metadata`) continue to
+carry the raw Drasi change contract so receivers can always recover the change.
+When no template is configured, the default `canonicalJson` output mode places
+the guide-aligned canonical item in `payload`; render failures fall back to that
+same canonical payload.
 
 The reaction is built in Rust with `GrpcReaction::builder()` and added to a running
 `DrasiLib` via `add_reaction(...)`. See [Examples](#examples).
@@ -127,9 +130,9 @@ async fn main() -> Result<()> {
 }
 ```
 
-With no `output_templates` configured, each result change is delivered with raw
-`before` / `after` row state; see [Output schema](#output-schema). To switch the
-same reaction to adaptive batched delivery, replace the fixed batching with an
+With no `outputTemplates` configured, each result change is delivered with raw
+`before` / `after` row state and a canonical JSON `payload`; see
+[Output schema](#output-schema). To switch the same reaction to adaptive batched delivery, replace the fixed batching with an
 adaptive config:
 
 ```rust,ignore
@@ -165,7 +168,8 @@ serialize and deserialize in `camelCase` when supplied via descriptor configurat
 | `initialConnectionTimeoutMs` | `u64` | `10000` | `with_initial_connection_timeout_ms` | Timeout for each connection attempt. |
 | `metadata` | `Map<String,String>` | `{}` | `with_metadata(k, v)` / `with_all_metadata(map)` | Sent on every call **both** as `ProcessResultsRequest.metadata` (a body field on the proto) **and** as actual gRPC request headers (`tonic::Request::metadata_mut()`). ASCII-only; entries with invalid header names/values are skipped from the headers with a warning and still ride in the body field. Via descriptor configuration each value is a `ConfigValue<String>` and may reference an environment variable or secret — see [Authentication](#authentication). |
 | `batching` | `BatchingConfig` | `Fixed { batchSize: 100, batchFlushTimeoutMs: 1000 }` | `with_fixed_batching`, `with_adaptive_batching`, or the per-field adaptive setters | Batching strategy — see [Adaptive batching](#adaptive-batching). |
-| `outputTemplates` | `Option<OutputTemplates>` | `None` | `with_output_templates` | Optional Handlebars output templates — see [Output templates and per-query routing](#output-templates-and-per-query-routing). When present but containing neither a `defaultTemplate` nor any `routes` entry, a warning is logged at startup (the configuration is a no-op). |
+| `outputFormat` | `OutputFormat` | `canonicalJson` | `with_output_format` | Controls default `payload` behavior when no body template applies: `canonicalJson` emits the canonical JSON item in `payload`; `proto` omits `payload` unless a template applies. |
+| `outputTemplates` | `Option<OutputTemplates>` | `None` | `with_output_templates` | Optional Handlebars body templates and per-template metadata extensions — see [Output templates and per-query routing](#output-templates-and-per-query-routing). When present but containing neither a `defaultTemplate` nor any `routes` entry, a warning is logged at startup (the configuration is a no-op). |
 
 Builder-only settings (not stored on `GrpcReactionConfig`):
 
@@ -203,7 +207,7 @@ currently fixed, populating the remaining adaptive fields from
 | Field | Type | Description |
 |-------|------|-------------|
 | `defaultTemplate` | `Option<QueryConfig>` | Applied to any query without a matching `routes` entry. |
-| `routes` | `HashMap<String, QueryConfig>` | Per-query overrides keyed by **exact query id** (no suffix-fallback). |
+| `routes` | `HashMap<String, QueryConfig>` | Per-query overrides keyed by exact query id or by the last dotted segment of a query id. Exact query ids win over suffix matches. |
 
 ### `QueryConfig`
 
@@ -213,45 +217,52 @@ currently fixed, populating the remaining adaptive fields from
 | `updated` | `Option<TemplateSpec>` | Template used when a result row is updated. |
 | `deleted` | `Option<TemplateSpec>` | Template used when a result row is deleted. |
 
-`TemplateSpec` is a Handlebars body `template` string (the gRPC reaction uses
-`TemplateSpec<()>` — there is no per-template HTTP-style extension data because gRPC
-sends every batch on the same `ProcessResults` RPC).
+`TemplateSpec` is a Handlebars body `template` string plus gRPC-specific extension
+fields. The `metadata` extension is a `Map<String,String>`; each value is rendered
+through Handlebars with the standard template context, merged over the top-level
+configured `metadata`, and sent as request metadata/headers for the batch. Items
+with different rendered metadata values are sent in separate RPCs.
 
 ---
 
 ## Output templates and per-query routing
 
-`outputTemplates` lets each query customise the **content** of `before` / `after` on each emitted `QueryResultItem`. For each result, the reaction selects a template in this order:
+`outputTemplates` lets each query customise the body `payload` on each emitted `QueryResultItem`. For each result, the reaction selects a template in this order:
 
 1. `outputTemplates.routes[<query_id>]` — a per-query override matched by the
    exact wire query id.
 2. `outputTemplates.routes[<last dotted segment>]` — so a route keyed `my_query`
    matches a wire id `source.my_query`.
 3. `outputTemplates.defaultTemplate` — a shared fallback, if present.
-4. **No template** — the item is emitted with the **raw row state** in whichever
-   of `before` / `after` is present for the op.
+4. **No template** — `payload` uses the canonical JSON item when `outputFormat`
+   is `canonicalJson`, or is omitted when `outputFormat` is `proto`.
 
-Within the selected `QueryConfig`, the `added` / `updated` / `deleted` spec matching the result's operation is used. Each present row state is rendered through that spec **independently**:
+Within the selected `QueryConfig`, the `added` / `updated` / `deleted` spec matching the result's operation is used:
 
-- `ADD` runs the `added` template once on the new row → output goes into `after`.
-- `DELETE` runs the `deleted` template once on the old row → output goes into `before`.
-- `UPDATE` runs the `updated` template **twice** — once on the before-row → `before`, once on the after-row → `after`.
+- `ADD` runs the `added` template once with `after` populated.
+- `DELETE` runs the `deleted` template once with `before` populated.
+- `UPDATE` runs the `updated` template once with both `before` and `after` populated.
 
-Operations without a matching spec emit the field's raw row state. Aggregation surfaces as UPDATE (matches RabbitMQ and Azure Storage); Noop is dropped at the runner.
+Operations without a matching spec use the configured default `outputFormat`.
+Aggregation surfaces as UPDATE; Noop is dropped at the runner.
 
 ```rust,ignore
 use std::collections::HashMap;
-use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
-use drasi_reaction_grpc::OutputTemplates;
+use drasi_lib::reactions::common::TemplateSpec;
+use drasi_reaction_grpc::{GrpcQueryConfig, GrpcTemplateExtension, OutputTemplates};
 
-let orders = QueryConfig {
-    added: Some(TemplateSpec::new(
+fn tpl(s: &str) -> TemplateSpec<GrpcTemplateExtension> {
+    TemplateSpec::with_extension(s, GrpcTemplateExtension::default())
+}
+
+let orders = GrpcQueryConfig {
+    added: Some(tpl(
         r#"{"event":"created","order":{{json row}}}"#,
     )),
-    updated: Some(TemplateSpec::new(
-        r#"{"event":"updated","order":{{json row}}}"#,
+    updated: Some(tpl(
+        r#"{"event":"updated","before":{{json before}},"after":{{json after}}}"#,
     )),
-    deleted: Some(TemplateSpec::new(
+    deleted: Some(tpl(
         r#"{"event":"cancelled","orderId":"{{row.id}}"}"#,
     )),
 };
@@ -269,7 +280,7 @@ let templates = OutputTemplates {
 
 ## Templating
 
-Templates use [Handlebars](https://handlebarsjs.com/) syntax. Each render produces a single JSON object that replaces the raw row state in one proto field. Alongside the row being rendered, every render receives the standard cross-reaction template keys so templates are portable with the other Drasi reactions:
+Templates use [Handlebars](https://handlebarsjs.com/) syntax. Each render produces JSON for the `payload` field. Every render receives the standard cross-reaction template keys so templates are portable with the other Drasi reactions:
 
 | Variable | Meaning |
 |----------|---------|
@@ -280,8 +291,9 @@ Templates use [Handlebars](https://handlebarsjs.com/) syntax. Each render produc
 | `before` | The before-row (present for UPDATE and DELETE). |
 | `after` | The after-row (present for ADD and UPDATE). |
 | `data` | The raw `data` payload of an UPDATE diff. |
-| `row` | The single row being rendered (the before-row for `Side::Before`, the after-row for `Side::After`). A reaction-specific convenience. |
-| `side` | `"before"` or `"after"`. A reaction-specific convenience for an `updated` template that differentiates per side. For ADD it is `"after"`; for DELETE it is `"before"`. |
+| `sequence_id` | The per-query emission sequence number. |
+| `row_signature` | The row signature for this item. |
+| `row` | Convenience alias for the primary row (`after` for ADD/UPDATE, `before` for DELETE). |
 
 A `json` helper is registered for embedding a nested object or array as JSON:
 
@@ -289,12 +301,11 @@ A `json` helper is registered for embedding a nested object or array as JSON:
 {
   "query": "{{query_id}}",
   "operation": "{{operation}}",
-  "side": "{{side}}",
   "row": {{json row}}
 }
 ```
 
-The template **must render to valid JSON**. If it does not (or fails to render at all), the reaction logs a warning and falls back to the **raw row state** for that field — see [Render-error fallback](#render-error-fallback). If the JSON rendered is not a top-level object, the framework wraps it as `{"value": ...}` before encoding into the proto `Struct`.
+The template **must render to valid JSON**. Missing fields are render errors. If a template does not render or renders invalid JSON, the reaction logs a warning and falls back to the canonical payload for that item — see [Render-error fallback](#render-error-fallback). If the JSON rendered is not a top-level object, the framework wraps it as `{"value": ...}` before encoding into the proto `Struct`.
 
 ---
 
@@ -334,6 +345,9 @@ message QueryResultItem {
     google.protobuf.Struct before = 3;   // populated for UPDATE and DELETE
     google.protobuf.Struct after  = 4;   // populated for ADD and UPDATE
     uint64 sequence = 5;                  // per-query emission sequence number
+    google.protobuf.Timestamp timestamp = 6; // original QueryResult timestamp
+    google.protobuf.Struct metadata = 7;  // QueryResult.metadata, omitted when empty
+    google.protobuf.Struct payload = 8;   // canonical payload or rendered body template
 }
 
 message ProcessResultsResponse {
@@ -346,18 +360,20 @@ message ProcessResultsResponse {
 
 How the per-variant fields are populated:
 
-| `item_type` | `before`            | `after`             | Behavior with a template configured                      |
+| `item_type` | `before`            | `after`             | `payload` behavior                                      |
 |-------------|---------------------|---------------------|----------------------------------------------------------|
-| `ADD`       | _absent_            | new row             | `after` carries the rendered `added` template output     |
-| `DELETE`    | previous row        | _absent_            | `before` carries the rendered `deleted` template output  |
-| `UPDATE`    | previous row        | new row             | both fields carry **independently** rendered output of the `updated` template (run twice, once per side) |
+| `ADD`       | _absent_            | new row             | rendered `added` template, else canonical ADD item      |
+| `DELETE`    | previous row        | _absent_            | rendered `deleted` template, else canonical DELETE item |
+| `UPDATE`    | previous row        | new row             | rendered `updated` template, else canonical UPDATE item |
 
 Notes:
 
-- **Aggregation** results surface as `item_type == UPDATE` on the wire (matches the RabbitMQ and Azure Storage reactions). When the diff carries a `before` value, both sides are templated; otherwise only `after` is templated.
+- **Aggregation** results surface as `item_type == UPDATE` on the wire. When the diff carries a `before` value, it is present in both the typed field and canonical payload; otherwise only `after` is present.
 - **Noop** results are dropped at the runner level — they never appear in `QueryResult.results`.
-- When **no template** is configured for the op, the field carries the raw row state.
-- On **render failure** (template syntax error, non-JSON output, missing field reference, etc.), the reaction logs a warning and falls back to the raw row state for that field. Events are never dropped.
+- `timestamp` is the original `QueryResult.timestamp` for the item. The envelope-level `QueryResult.timestamp` is the latest item timestamp in the request; item timestamps are authoritative.
+- `metadata` preserves inbound `QueryResult.metadata` and is distinct from configured request metadata/headers.
+- When **no template** is configured for the op, `payload` contains the canonical item in `canonicalJson` mode or is omitted in `proto` mode.
+- On **render failure** (template syntax error, non-JSON output, missing field reference, etc.), the reaction logs a warning and falls back to the canonical payload. Events are never dropped.
 - `row_signature` is the row's identity across emissions and is set on every item. Receivers can use it to correlate or de-duplicate without parsing the row.
 - `sequence` is the monotonic per-query emission number of the originating `QueryResult`, set on every item so receivers can order or de-duplicate emissions. Because one `ProcessResultsRequest` may coalesce items from several emissions of the same query, the sequence is carried per item rather than on the envelope.
 - `before` / `after` are structurally `google.protobuf.Struct` (JSON-equivalent). If a template renders a non-object top-level value, it is wrapped as `{"value": ...}` before encoding.
@@ -369,28 +385,21 @@ One `ProcessResultsRequest` carries one `QueryResult` (a single `query_id` + N i
 ## Adaptive batching
 
 Switching `batching.mode` to `"adaptive"` (or calling any per-field setter on the
-builder) puts the reaction behind an internal batcher that scales batch size based
-on observed throughput between `adaptiveMinBatchSize` and `adaptiveMaxBatchSize`,
-flushing a partial batch after `adaptiveBatchTimeoutMs`.
-
-Internally the gRPC adaptive runner has a two-stage pipeline:
-
-1. **Per-query buffering in the runner** — incoming results accumulate per
-   `query_id`. The runner releases the buffered batch to the downstream
-   `AdaptiveBatcher` when (a) a different `query_id` arrives or (b) the buffer
-   reaches 100 items.
-2. **Throughput-aware batching by the `AdaptiveBatcher`** — re-coalesces batches by
-   `query_id` and emits them either when its size threshold is reached or when
-   `adaptiveBatchTimeoutMs` elapses.
+builder) puts items directly behind an internal batcher that scales batch size
+based on observed throughput between `adaptiveMinBatchSize` and
+`adaptiveMaxBatchSize`, flushing a partial batch after the configured wait
+window. Low-volume single-query items do not wait for a query change or shutdown.
+When items for multiple query IDs or different rendered metadata values are batched
+together, the sender splits them into one RPC per `(query_id, metadata)` key
+because the proto envelope is single-query.
 
 This shape favours single-query throughput (one RPC per (query, time-window)). For
 low-latency single-query workloads, prefer fixed batching with `batchSize: 1` and a
 small `batchFlushTimeoutMs`.
 
-On shutdown the runner drains the in-flight batch through the batcher, then bounds
-the batcher join to **5 seconds** via `tokio::time::timeout` — so a stuck downstream
-cannot block `stop()` indefinitely. A warning is logged if the drain does not
-complete in time and the in-flight batch is abandoned.
+On shutdown the runner drains the in-flight batch through the batcher on a
+best-effort basis within the reaction stop window. A warning is logged if the drain
+does not complete in time and the in-flight batch is abandoned.
 
 ---
 
@@ -400,16 +409,14 @@ If an output template fails to render — for example because it references a fi
 missing from the row, or because the rendered string is not valid JSON — the
 reaction:
 
-1. Logs a warning with the query id, operation, side, and the render error.
-2. **Falls back to the raw row state** for that field.
+1. Logs a warning with the query id, operation, and the render error.
+2. **Falls back to the canonical payload** for that item.
 3. Still emits the item with the correct `item_type` / `row_signature` and any
-   successfully-rendered sibling field (e.g., for an `UPDATE` where only the
-   before-side render failed, `before` carries the raw row while `after` carries
-   the templated output).
+   raw typed `before` / `after` fields.
 
 Render failures never drop events. Receivers always read `before` / `after` for the
-op — the contract is "if a template is configured and rendered, this is the
-template output; otherwise this is the raw row state".
+raw typed row state and `payload` for either the rendered body template or the
+canonical item.
 
 ---
 
@@ -460,18 +467,24 @@ Reshape each ADD into a domain event placed in `after`:
 
 ```rust,ignore
 use std::collections::HashMap;
-use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
-use drasi_reaction_grpc::{GrpcReaction, OutputTemplates};
+use drasi_lib::reactions::common::TemplateSpec;
+use drasi_reaction_grpc::{
+    GrpcQueryConfig, GrpcReaction, GrpcTemplateExtension, OutputTemplates,
+};
+
+fn tpl(s: &str) -> TemplateSpec<GrpcTemplateExtension> {
+    TemplateSpec::with_extension(s, GrpcTemplateExtension::default())
+}
 
 let mut routes = HashMap::new();
 routes.insert(
     "orders-by-region".to_string(),
-    QueryConfig {
-        added: Some(TemplateSpec::new(
+    GrpcQueryConfig {
+        added: Some(tpl(
             r#"{"event":"OrderCreated","id":"{{row.id}}","total":{{row.total}}}"#,
         )),
         updated: None,
-        deleted: Some(TemplateSpec::new(
+        deleted: Some(tpl(
             r#"{"event":"OrderCancelled","id":"{{row.id}}"}"#,
         )),
     },
@@ -509,14 +522,20 @@ let reaction = GrpcReaction::builder("metrics-grpc")
 ### 4. Adaptive batching with a default template
 
 ```rust,ignore
-use drasi_lib::reactions::common::{AdaptiveBatchConfig, QueryConfig, TemplateSpec};
-use drasi_reaction_grpc::{GrpcReaction, OutputTemplates};
+use drasi_lib::reactions::common::{AdaptiveBatchConfig, TemplateSpec};
+use drasi_reaction_grpc::{
+    GrpcQueryConfig, GrpcReaction, GrpcTemplateExtension, OutputTemplates,
+};
+
+fn tpl(s: &str) -> TemplateSpec<GrpcTemplateExtension> {
+    TemplateSpec::with_extension(s, GrpcTemplateExtension::default())
+}
 
 let templates = OutputTemplates {
-    default_template: Some(QueryConfig {
-        added: Some(TemplateSpec::new(r#"{"op":"add","row":{{json row}}}"#)),
-        updated: Some(TemplateSpec::new(r#"{"op":"upd","row":{{json row}}}"#)),
-        deleted: Some(TemplateSpec::new(r#"{"op":"del","row":{{json row}}}"#)),
+    default_template: Some(GrpcQueryConfig {
+        added: Some(tpl(r#"{"op":"add","row":{{json row}}}"#)),
+        updated: Some(tpl(r#"{"op":"upd","before":{{json before}},"after":{{json after}}}"#)),
+        deleted: Some(tpl(r#"{"op":"del","row":{{json row}}}"#)),
     }),
     routes: std::collections::HashMap::new(),
 };
@@ -556,6 +575,14 @@ named OpenAPI sub-schemas for `GrpcReactionConfig`, `BatchingConfig`,
 groupings (`Connection`, `Reliability`, `Auth`, `Batching`, `Templates`) so
 management UIs can render the configuration form.
 
+> **Development note:** This crate currently uses workspace dependencies for
+> `drasi-lib`, `drasi-plugin-sdk`, `utoipa`, and the `drasi-core` dev-dependency.
+> That is intentionally left non-compliant with the reaction developer guide's
+> crates.io dependency guidance while this reaction lives inside the
+> `drasi-core` repository, because it keeps local builds, tests, and plugin
+> publishing convenient. Track the future switch to pinned crates.io dependencies
+> in [drasi-project/drasi-core#575](https://github.com/drasi-project/drasi-core/issues/575).
+
 | Property | Value |
 |----------|-------|
 | Plugin kind | `grpc` |
@@ -580,24 +607,27 @@ cargo test -p drasi-reaction-grpc
 ```
 
 Unit tests cover config defaults, builder semantics (including per-field adaptive
-setters), template validation at construction, route resolution (exact,
-dotted-suffix, default), template render success/failure, and `build_proto_item`
-field population for every variant.
+setters), endpoint/batching validation, template validation at construction, route
+resolution (exact, dotted-suffix, default), template render success/failure,
+per-template metadata rendering, and `build_proto_item` field population for every
+variant.
 
 Integration tests in `tests/integration_tests.rs` use an in-process tonic mock
 `ReactionService` server bound to an ephemeral loopback port to exercise:
 
 - Fixed batching end-to-end (round-trip; verify `item_type`, `row_signature`,
   `before`/`after`, and `sequence`).
-- Fixed batching with a template (verify the rendered output lands in `before` /
-  `after`).
+- Fixed batching with a template (verify the rendered output lands in `payload`
+  while raw row state remains in `before` / `after`).
 - Render-error fallback: a non-JSON template output triggers a warning and the
-  field carries the raw row state — events are never dropped.
+  item carries the canonical payload — events are never dropped.
 - `UPDATE` and `DELETE` template context (before / after population) and the
   portable standard keys (`after`, `operation`).
-- Per-query emission `sequence` propagated on the wire.
+- Per-query emission `sequence`, event timestamp, and query-result metadata
+  propagated on the wire.
 - Per-call metadata propagated as actual gRPC request headers, including
-  descriptor-resolved `ConfigValue` (environment-variable) metadata.
+  descriptor-resolved `ConfigValue` (environment-variable) metadata and
+  per-template rendered metadata.
 - Adaptive batching steady-state delivery with `row_signature` round-trip.
 - End-to-end through `DrasiLib` (mock source → query → reaction).
 - Bounded shutdown drain (the 5 s `tokio::time::timeout` wrap on the batcher join).

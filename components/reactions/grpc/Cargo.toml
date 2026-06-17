@@ -30,6 +30,12 @@ workspace = true
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
+# FIXME(#575): The reaction developer guide says plugin crates should depend on
+# drasi-lib / drasi-plugin-sdk / utoipa from crates.io with pinned versions.
+# This crate intentionally uses workspace dependencies for now so repository-local
+# builds, tests, and plugin publishing stay convenient while it lives inside
+# drasi-core. Switch to published crates before treating this as the standalone
+# plugin dependency model.
 drasi-lib.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
@@ -54,6 +60,9 @@ utoipa = { workspace = true }
 serde_yaml = "0.9"
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
 tokio-stream = { version = "0.1", features = ["net"] }
+# FIXME(#575): This local dev-dependency is also non-compliant with standalone
+# plugin guidance. It is kept for in-repo integration tests until those tests can
+# use matching published crates or avoid direct drasi-core type dependencies.
 drasi-core.workspace = true
 
 [build-dependencies]

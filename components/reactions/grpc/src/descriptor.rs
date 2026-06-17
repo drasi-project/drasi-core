@@ -21,7 +21,9 @@ use drasi_lib::reactions::Reaction;
 use drasi_plugin_sdk::prelude::*;
 use utoipa::OpenApi;
 
-use crate::config::{BatchingConfig, GrpcReactionConfig, OutputTemplates};
+use crate::config::{
+    BatchingConfig, GrpcReactionConfig, GrpcTemplateExtension, OutputFormat, OutputTemplates,
+};
 use crate::GrpcReactionBuilder;
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -63,6 +65,9 @@ pub enum BatchingConfigDto {
 #[serde(rename_all = "camelCase")]
 pub struct TemplateSpecDto {
     pub template: String,
+
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema, Default)]
@@ -115,6 +120,9 @@ pub struct GrpcReactionConfigDto {
     pub metadata: HashMap<String, ConfigValue<String>>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormat>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batching: Option<BatchingConfigDto>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -136,6 +144,7 @@ impl From<&GrpcReactionConfig> for GrpcReactionConfigDto {
                 .iter()
                 .map(|(k, v)| (k.clone(), ConfigValue::Static(v.clone())))
                 .collect(),
+            output_format: Some(cfg.output_format),
             batching: Some(BatchingConfigDto::from(&cfg.batching)),
             output_templates: cfg.output_templates.as_ref().map(OutputTemplatesDto::from),
         }
@@ -180,8 +189,8 @@ impl From<&OutputTemplates> for OutputTemplatesDto {
     }
 }
 
-impl From<&QueryConfig> for QueryConfigDto {
-    fn from(q: &QueryConfig) -> Self {
+impl From<&QueryConfig<GrpcTemplateExtension>> for QueryConfigDto {
+    fn from(q: &QueryConfig<GrpcTemplateExtension>) -> Self {
         Self {
             added: q.added.as_ref().map(TemplateSpecDto::from),
             updated: q.updated.as_ref().map(TemplateSpecDto::from),
@@ -190,21 +199,27 @@ impl From<&QueryConfig> for QueryConfigDto {
     }
 }
 
-impl From<&TemplateSpec> for TemplateSpecDto {
-    fn from(s: &TemplateSpec) -> Self {
+impl From<&TemplateSpec<GrpcTemplateExtension>> for TemplateSpecDto {
+    fn from(s: &TemplateSpec<GrpcTemplateExtension>) -> Self {
         Self {
             template: s.template.clone(),
+            metadata: s.extension.metadata.clone(),
         }
     }
 }
 
-impl From<&TemplateSpecDto> for TemplateSpec {
+impl From<&TemplateSpecDto> for TemplateSpec<GrpcTemplateExtension> {
     fn from(s: &TemplateSpecDto) -> Self {
-        TemplateSpec::new(s.template.clone())
+        TemplateSpec::with_extension(
+            s.template.clone(),
+            GrpcTemplateExtension {
+                metadata: s.metadata.clone(),
+            },
+        )
     }
 }
 
-impl From<&QueryConfigDto> for QueryConfig {
+impl From<&QueryConfigDto> for QueryConfig<GrpcTemplateExtension> {
     fn from(q: &QueryConfigDto) -> Self {
         QueryConfig {
             added: q.added.as_ref().map(TemplateSpec::from),
@@ -230,6 +245,7 @@ impl From<&OutputTemplatesDto> for OutputTemplates {
 #[derive(OpenApi)]
 #[openapi(components(schemas(
     GrpcReactionConfigDto,
+    OutputFormat,
     BatchingConfigDto,
     OutputTemplatesDto,
     QueryConfigDto,
@@ -285,6 +301,9 @@ impl ReactionPluginDescriptor for GrpcReactionDescriptor {
             })
             .field("metadata", |f| f.group("Auth").order(20))
             .field("batching", |f| f.group("Batching").order(30))
+            .field("outputFormat", |f| {
+                f.group("Output").order(35).placeholder("canonicalJson")
+            })
             .field("outputTemplates", |f| f.group("Templates").order(40))
             .annotate()
     }
@@ -318,6 +337,10 @@ impl ReactionPluginDescriptor for GrpcReactionDescriptor {
         }
         for (key, value) in &dto.metadata {
             builder = builder.with_metadata(key, mapper.resolve_string(value).await?);
+        }
+
+        if let Some(output_format) = dto.output_format {
+            builder = builder.with_output_format(output_format);
         }
 
         if let Some(ref batching) = dto.batching {

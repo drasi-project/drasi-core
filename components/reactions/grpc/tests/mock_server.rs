@@ -47,6 +47,9 @@ pub struct RecordedItem {
     pub before: Option<Struct>,
     pub after: Option<Struct>,
     pub sequence: u64,
+    pub timestamp: Option<prost_types::Timestamp>,
+    pub metadata: Option<Struct>,
+    pub payload: Option<Struct>,
 }
 
 /// One `ProcessResults` invocation, with full per-item detail and the
@@ -162,6 +165,9 @@ impl ReactionService for MockReactionService {
                 before: it.before,
                 after: it.after,
                 sequence: it.sequence,
+                timestamp: it.timestamp,
+                metadata: it.metadata,
+                payload: it.payload,
             })
             .collect();
         let item_count = items.len();

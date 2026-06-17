@@ -63,7 +63,8 @@ fn test_grpc_builder_custom_values() {
 #[test]
 fn test_grpc_new_constructor() {
     let config = GrpcReactionConfig::default();
-    let reaction = GrpcReaction::new("test-reaction", vec!["query1".to_string()], config);
+    let reaction = GrpcReaction::new("test-reaction", vec!["query1".to_string()], config)
+        .expect("valid config");
     assert_eq!(reaction.id(), "test-reaction");
     assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
 }
@@ -268,7 +269,10 @@ fn test_builder_rejects_invalid_template_at_construction() {
 
     let templates = OutputTemplates {
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("{{")),
+            added: Some(TemplateSpec::with_extension(
+                "{{",
+                crate::config::GrpcTemplateExtension::default(),
+            )),
             ..Default::default()
         }),
         routes: std::collections::HashMap::new(),
@@ -296,7 +300,10 @@ fn test_builder_rejects_unknown_route_key_at_construction() {
     routes.insert(
         "not-subscribed".to_string(),
         QueryConfig {
-            added: Some(TemplateSpec::new(r#"{"id":"{{after.id}}"}"#)),
+            added: Some(TemplateSpec::with_extension(
+                r#"{"id":"{{after.id}}"}"#,
+                crate::config::GrpcTemplateExtension::default(),
+            )),
             ..Default::default()
         },
     );
@@ -363,6 +370,9 @@ mod integration {
             before: None,
             after: None,
             sequence: 0,
+            timestamp: None,
+            metadata: None,
+            payload: None,
         }
     }
 
