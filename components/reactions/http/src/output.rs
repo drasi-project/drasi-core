@@ -25,17 +25,16 @@
 //!   change when no per-query body template applies. Used both for
 //!   the synthesized default endpoint (`POST {baseUrl}/changes/{queryId}`)
 //!   and as the render-error fallback when a user template fails.
-//! * [`BatchResult`] — the JSON array element posted to a configured
-//!   `batchEndpoint` in adaptive mode. Each element groups one query's
-//!   coalesced [`DefaultChangeNotification`]s.
+//! * [`BatchEnvelope`] — the Pattern C batch container POSTed to a
+//!   configured `batchEndpoint` in adaptive mode. Its `batch` field is a
+//!   JSON array of [`DefaultChangeNotification`] items.
 //!
 //! `ResultDiff::Aggregation` is folded into [`Operation::Update`] (matching
 //! the gRPC, Azure Storage, and RabbitMQ reactions). `ResultDiff::Noop`
 //! produces no notification; the caller skips it without emitting a
 //! request.
 
-use chrono::{DateTime, Utc};
-use drasi_lib::channels::ResultDiff;
+use drasi_lib::channels::{QueryResult, ResultDiff};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -76,6 +75,8 @@ pub struct DefaultChangeNotification {
     pub operation: Operation,
     /// The continuous query that produced the change.
     pub query_id: String,
+    /// Monotonic per-query sequence number identifying this emission.
+    pub sequence_id: u64,
     /// RFC 3339 timestamp of the originating query emission (UTC).
     pub timestamp: String,
     /// Row state **before** the change.
@@ -85,45 +86,58 @@ pub struct DefaultChangeNotification {
     /// Row state **after** the change. Omitted for `DELETE`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub after: Option<serde_json::Value>,
+    /// Source/query metadata carried by the originating `QueryResult`.
+    /// Omitted when empty.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub metadata: Option<serde_json::Value>,
+    /// Raw `data` payload of an `Update` diff, retained solely to populate
+    /// the `data` template-context key. Never serialized on the wire.
+    #[serde(skip)]
+    pub(crate) raw_data: Option<serde_json::Value>,
 }
 
 impl DefaultChangeNotification {
-    /// Build a notification from a `ResultDiff`. Returns `None` for
-    /// `ResultDiff::Noop` so callers can drop it without emitting a
-    /// request.
-    pub fn from_diff(query_id: &str, timestamp: DateTime<Utc>, diff: &ResultDiff) -> Option<Self> {
-        let ts = timestamp.to_rfc3339();
-        match diff {
-            ResultDiff::Add { data, .. } => Some(Self {
-                operation: Operation::Add,
-                query_id: query_id.to_string(),
-                timestamp: ts,
-                before: None,
-                after: Some(data.clone()),
-            }),
-            ResultDiff::Delete { data, .. } => Some(Self {
-                operation: Operation::Delete,
-                query_id: query_id.to_string(),
-                timestamp: ts,
-                before: Some(data.clone()),
-                after: None,
-            }),
-            ResultDiff::Update { before, after, .. } => Some(Self {
-                operation: Operation::Update,
-                query_id: query_id.to_string(),
-                timestamp: ts,
-                before: Some(before.clone()),
-                after: Some(after.clone()),
-            }),
-            ResultDiff::Aggregation { before, after, .. } => Some(Self {
-                operation: Operation::Update,
-                query_id: query_id.to_string(),
-                timestamp: ts,
-                before: before.clone(),
-                after: Some(after.clone()),
-            }),
-            ResultDiff::Noop => None,
-        }
+    /// Build a notification from a `QueryResult` and one of its diffs.
+    /// Returns `None` for `ResultDiff::Noop` so callers can drop it
+    /// without emitting a request.
+    pub fn from_diff(query_result: &QueryResult, diff: &ResultDiff) -> Option<Self> {
+        let timestamp = query_result.timestamp.to_rfc3339();
+        let metadata = if query_result.metadata.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(
+                query_result.metadata.clone().into_iter().collect(),
+            ))
+        };
+        let (operation, before, after, raw_data) = match diff {
+            ResultDiff::Add { data, .. } => (Operation::Add, None, Some(data.clone()), None),
+            ResultDiff::Delete { data, .. } => (Operation::Delete, Some(data.clone()), None, None),
+            ResultDiff::Update {
+                data,
+                before,
+                after,
+                ..
+            } => (
+                Operation::Update,
+                Some(before.clone()),
+                Some(after.clone()),
+                Some(data.clone()),
+            ),
+            ResultDiff::Aggregation { before, after, .. } => {
+                (Operation::Update, before.clone(), Some(after.clone()), None)
+            }
+            ResultDiff::Noop => return None,
+        };
+        Some(Self {
+            operation,
+            query_id: query_result.query_id.clone(),
+            sequence_id: query_result.sequence,
+            timestamp,
+            before,
+            after,
+            metadata,
+            raw_data,
+        })
     }
 
     /// String form of the operation as used by the Handlebars context
@@ -137,7 +151,7 @@ impl DefaultChangeNotification {
     }
 
     /// Map to the internal [`OperationType`] used by the template router
-    /// (`HttpReactionConfig::get_template_spec`).
+    /// (`HttpReactionConfig::resolve_call_spec`).
     pub(crate) fn operation_type(&self) -> OperationType {
         match self.operation {
             Operation::Add => OperationType::Add,
@@ -145,46 +159,20 @@ impl DefaultChangeNotification {
             Operation::Delete => OperationType::Delete,
         }
     }
-
-    /// Value passed as `data` to [`crate::process::process_result`] so that
-    /// the Handlebars context (`{{after}}` / `{{before}}` / `{{data}}`)
-    /// resolves consistently with the operation. ADD exposes the row as
-    /// `after`; DELETE exposes the row as `before`; UPDATE/Aggregation
-    /// exposes `{ before, after }`.
-    pub(crate) fn handlebars_data(&self) -> serde_json::Value {
-        match self.operation {
-            Operation::Add => self.after.clone().unwrap_or(serde_json::Value::Null),
-            Operation::Delete => self.before.clone().unwrap_or(serde_json::Value::Null),
-            Operation::Update => {
-                let mut obj = serde_json::Map::new();
-                if let Some(b) = &self.before {
-                    obj.insert("before".to_string(), b.clone());
-                }
-                if let Some(a) = &self.after {
-                    obj.insert("after".to_string(), a.clone());
-                }
-                serde_json::Value::Object(obj)
-            }
-        }
-    }
 }
 
-/// One element of the coalesced batch array POSTed to a configured
-/// `batchEndpoint` in adaptive mode.
+/// Wire payload POSTed to a configured `batchEndpoint` in adaptive mode.
 ///
-/// Each element groups one query's results from the batch. The wire
-/// payload sent to the batch endpoint is a JSON array of these.
+/// Pattern C (batched envelopes) from the reaction developer guide: a
+/// single container object whose `batch` field is a JSON array of
+/// [`DefaultChangeNotification`] items (Pattern A items), each carrying
+/// its own `queryId` / `sequenceId` / `timestamp`. The array is always
+/// present even when it holds a single item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct BatchResult {
-    /// The continuous query that produced the results in this group.
-    pub query_id: String,
-    /// The coalesced change notifications for this query, in order.
-    pub results: Vec<DefaultChangeNotification>,
-    /// RFC 3339 timestamp of when the batch was assembled.
-    pub timestamp: String,
-    /// Number of entries in [`Self::results`].
-    pub count: usize,
+pub struct BatchEnvelope {
+    /// The coalesced change notifications, in order.
+    pub batch: Vec<DefaultChangeNotification>,
 }
 
 #[cfg(test)]
@@ -192,35 +180,58 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use serde_json::json;
+    use std::collections::HashMap;
 
-    fn fixed_ts() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
+    fn fixed_ts() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
+    }
+
+    fn qr_with(
+        sequence: u64,
+        metadata: HashMap<String, serde_json::Value>,
+        diff: ResultDiff,
+    ) -> QueryResult {
+        QueryResult::new("q".to_string(), sequence, fixed_ts(), vec![diff], metadata)
+    }
+
+    fn single(diff: ResultDiff) -> QueryResult {
+        qr_with(0, HashMap::new(), diff)
     }
 
     #[test]
     fn add_maps_to_add_with_after_only() {
-        let diff = ResultDiff::Add {
+        let qr = single(ResultDiff::Add {
             data: json!({"id": 1}),
             row_signature: 0,
-        };
-        let n = DefaultChangeNotification::from_diff("q", fixed_ts(), &diff).unwrap();
+        });
+        let n = DefaultChangeNotification::from_diff(&qr, &qr.results[0]).unwrap();
         assert_eq!(n.operation, Operation::Add);
         assert_eq!(n.before, None);
         assert_eq!(n.after, Some(json!({"id": 1})));
+        assert_eq!(n.raw_data, None);
         // Serialization omits absent fields.
         let v = serde_json::to_value(&n).unwrap();
         assert!(v.get("before").is_none(), "before should be omitted");
         assert_eq!(v.get("operation"), Some(&json!("ADD")));
         assert_eq!(v.get("queryId"), Some(&json!("q")));
+        assert_eq!(v.get("sequenceId"), Some(&json!(0)));
+        assert!(
+            v.get("metadata").is_none(),
+            "empty metadata should be omitted"
+        );
+        assert!(
+            v.get("raw_data").is_none() && v.get("rawData").is_none(),
+            "raw_data must never serialize on the wire"
+        );
     }
 
     #[test]
     fn delete_maps_to_delete_with_before_only() {
-        let diff = ResultDiff::Delete {
+        let qr = single(ResultDiff::Delete {
             data: json!({"id": 1}),
             row_signature: 0,
-        };
-        let n = DefaultChangeNotification::from_diff("q", fixed_ts(), &diff).unwrap();
+        });
+        let n = DefaultChangeNotification::from_diff(&qr, &qr.results[0]).unwrap();
         assert_eq!(n.operation, Operation::Delete);
         assert_eq!(n.before, Some(json!({"id": 1})));
         assert_eq!(n.after, None);
@@ -230,28 +241,30 @@ mod tests {
     }
 
     #[test]
-    fn update_maps_to_update_with_before_and_after() {
-        let diff = ResultDiff::Update {
-            data: json!({}),
+    fn update_maps_to_update_with_before_after_and_raw_data() {
+        let qr = single(ResultDiff::Update {
+            data: json!({"d": 1}),
             before: json!({"v": 1}),
             after: json!({"v": 2}),
             grouping_keys: None,
             row_signature: 0,
-        };
-        let n = DefaultChangeNotification::from_diff("q", fixed_ts(), &diff).unwrap();
+        });
+        let n = DefaultChangeNotification::from_diff(&qr, &qr.results[0]).unwrap();
         assert_eq!(n.operation, Operation::Update);
         assert_eq!(n.before, Some(json!({"v": 1})));
         assert_eq!(n.after, Some(json!({"v": 2})));
+        // The raw Update `data` is retained for the `{{data}}` context key.
+        assert_eq!(n.raw_data, Some(json!({"d": 1})));
     }
 
     #[test]
     fn aggregation_maps_to_update_carrying_optional_before() {
-        let first = ResultDiff::Aggregation {
+        let first = single(ResultDiff::Aggregation {
             before: None,
             after: json!({"count": 1}),
             row_signature: 0,
-        };
-        let n = DefaultChangeNotification::from_diff("q", fixed_ts(), &first).unwrap();
+        });
+        let n = DefaultChangeNotification::from_diff(&first, &first.results[0]).unwrap();
         assert_eq!(n.operation, Operation::Update);
         assert_eq!(n.before, None);
         let v = serde_json::to_value(&n).unwrap();
@@ -260,12 +273,12 @@ mod tests {
             "first aggregation emission omits before"
         );
 
-        let change = ResultDiff::Aggregation {
+        let change = single(ResultDiff::Aggregation {
             before: Some(json!({"count": 1})),
             after: json!({"count": 2}),
             row_signature: 0,
-        };
-        let n = DefaultChangeNotification::from_diff("q", fixed_ts(), &change).unwrap();
+        });
+        let n = DefaultChangeNotification::from_diff(&change, &change.results[0]).unwrap();
         assert_eq!(n.operation, Operation::Update);
         assert_eq!(n.before, Some(json!({"count": 1})));
         assert_eq!(n.after, Some(json!({"count": 2})));
@@ -273,23 +286,47 @@ mod tests {
 
     #[test]
     fn noop_yields_none() {
-        let diff = ResultDiff::Noop;
-        assert!(DefaultChangeNotification::from_diff("q", fixed_ts(), &diff).is_none());
+        let qr = single(ResultDiff::Noop);
+        assert!(DefaultChangeNotification::from_diff(&qr, &qr.results[0]).is_none());
     }
 
     #[test]
-    fn batch_result_serializes_with_camelcase_keys() {
-        let br = BatchResult {
-            query_id: "q1".into(),
-            results: vec![],
-            timestamp: "2026-01-01T00:00:00+00:00".into(),
-            count: 0,
-        };
-        let v = serde_json::to_value(&br).unwrap();
-        assert!(v.get("queryId").is_some());
-        assert!(v.get("results").is_some());
-        assert!(v.get("timestamp").is_some());
-        assert!(v.get("count").is_some());
-        assert!(v.get("query_id").is_none(), "snake_case keys must be gone");
+    fn sequence_and_metadata_are_threaded_onto_the_envelope() {
+        let mut metadata = HashMap::new();
+        metadata.insert("source".to_string(), json!("sensors"));
+        let qr = qr_with(
+            42,
+            metadata,
+            ResultDiff::Add {
+                data: json!({"id": 1}),
+                row_signature: 0,
+            },
+        );
+        let n = DefaultChangeNotification::from_diff(&qr, &qr.results[0]).unwrap();
+        assert_eq!(n.sequence_id, 42);
+        assert_eq!(n.metadata, Some(json!({"source": "sensors"})));
+        let v = serde_json::to_value(&n).unwrap();
+        assert_eq!(v.get("sequenceId"), Some(&json!(42)));
+        assert_eq!(v.get("metadata"), Some(&json!({"source": "sensors"})));
+    }
+
+    #[test]
+    fn batch_envelope_serializes_with_batch_array() {
+        let qr = single(ResultDiff::Add {
+            data: json!({"id": 1}),
+            row_signature: 0,
+        });
+        let n = DefaultChangeNotification::from_diff(&qr, &qr.results[0]).unwrap();
+        let env = BatchEnvelope { batch: vec![n] };
+        let v = serde_json::to_value(&env).unwrap();
+        let batch = v.get("batch").and_then(|b| b.as_array());
+        assert!(batch.is_some(), "batch must be a JSON array");
+        assert_eq!(batch.unwrap().len(), 1);
+        assert_eq!(v["batch"][0].get("operation"), Some(&json!("ADD")));
+        assert_eq!(
+            v.as_object().map(|o| o.len()),
+            Some(1),
+            "the container has only the 'batch' key"
+        );
     }
 }

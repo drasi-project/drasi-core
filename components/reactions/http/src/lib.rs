@@ -70,13 +70,12 @@ pub(crate) mod standard_loop;
 #[cfg(test)]
 mod tests;
 
-pub use batch::BatchResult;
 pub use config::{
     AdaptiveBatchConfig, HttpCallExt, HttpCallSpec, HttpOutputTemplates, HttpQueryConfig,
     HttpReactionConfig, OperationType, QueryConfig, TemplateRouting, TemplateSpec,
 };
 pub use http::HttpReaction;
-pub use output::{DefaultChangeNotification, Operation};
+pub use output::{BatchEnvelope, DefaultChangeNotification, Operation};
 
 /// Builder for the HTTP reaction.
 ///
@@ -108,6 +107,13 @@ impl HttpReactionBuilder {
     }
 
     pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
+        self.queries.push(query_id.into());
+        self
+    }
+
+    /// Alias of [`with_query`](Self::with_query); reads naturally at call
+    /// sites (e.g. `…from_query("orders")…`).
+    pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
         self.queries.push(query_id.into());
         self
     }
@@ -234,13 +240,13 @@ impl HttpReactionBuilder {
     }
 
     /// Set the batch endpoint path. Coalesced batches are POSTed to
-    /// `{baseUrl}{endpoint}` as a single payload.
+    /// `{baseUrl}{endpoint}` as a single [`BatchEnvelope`] payload.
     ///
     /// Requires adaptive mode (enable it via [`with_adaptive`](Self::with_adaptive)
     /// or one of the `with_*_batch_*` tuning methods). If a batch endpoint is
-    /// set without adaptive mode, [`HttpReaction::start`](crate::HttpReaction)
-    /// fails fast at startup: it logs an error, sets the reaction status to
-    /// `Stopped`, and returns an error.
+    /// set without adaptive mode, [`build`](Self::build) fails fast: the
+    /// configuration is rejected at construction time by
+    /// [`HttpReactionConfig::validate`].
     pub fn with_batch_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.config.batch_endpoint = Some(endpoint.into());
         self
@@ -253,6 +259,7 @@ impl HttpReactionBuilder {
     }
 
     pub fn build(self) -> anyhow::Result<HttpReaction> {
+        self.config.validate(&self.queries)?;
         Ok(HttpReaction::from_builder(
             self.id,
             self.queries,

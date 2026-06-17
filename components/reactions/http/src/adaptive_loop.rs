@@ -17,7 +17,6 @@
 //! single payload (when `batch_endpoint` is set) or fans the batch back
 //! out through the per-route [`process_result`] path.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use handlebars::Handlebars;
@@ -29,7 +28,7 @@ use drasi_lib::reactions::common::base::ReactionBase;
 
 use crate::adaptive_batcher::{AdaptiveBatcher, AdaptiveBatcherConfig};
 use crate::batch::send_coalesced_batch;
-use crate::config::{HttpReactionConfig, TemplateRouting};
+use crate::config::HttpReactionConfig;
 use crate::output::DefaultChangeNotification;
 use crate::process::{post_default_notification, process_result};
 
@@ -122,18 +121,13 @@ pub(crate) async fn run_adaptive_loop(
 
         // Convert this QueryResult's diffs into the wire-format notifications
         // up-front (dropping Noops). The batcher carries notifications, not
-        // raw `ResultDiff`s, so the timestamp from `query_result` is captured
-        // here and travels with each notification through coalescing.
+        // raw `ResultDiff`s, so the sequence/timestamp/metadata from
+        // `query_result` are captured here and travel with each notification
+        // through coalescing.
         let notifications: Vec<DefaultChangeNotification> = query_result
             .results
             .iter()
-            .filter_map(|d| {
-                DefaultChangeNotification::from_diff(
-                    &query_result.query_id,
-                    query_result.timestamp,
-                    d,
-                )
-            })
+            .filter_map(|d| DefaultChangeNotification::from_diff(query_result, d))
             .collect();
         if notifications.is_empty() {
             continue;
@@ -169,8 +163,9 @@ pub(crate) async fn run_adaptive_loop(
         .await;
 }
 
-/// Either POST the whole batch to the configured `batch_endpoint`, or
-/// fan the batch out and call [`process_result`] for each diff.
+/// Either POST the whole batch to the configured `batch_endpoint` as a
+/// single Pattern C [`crate::output::BatchEnvelope`], or fan the batch out
+/// and call [`process_result`] for each notification.
 async fn deliver_batch(
     client: &Client,
     handlebars: &Handlebars<'static>,
@@ -178,41 +173,36 @@ async fn deliver_batch(
     reaction_name: &str,
     batch: Vec<(String, Vec<DefaultChangeNotification>)>,
 ) -> anyhow::Result<()> {
-    // Coalesce by query_id
-    let mut by_query: HashMap<String, Vec<DefaultChangeNotification>> = HashMap::new();
-    for (qid, notifications) in batch {
-        by_query.entry(qid).or_default().extend(notifications);
-    }
-
     // If a batch_endpoint is configured, POST every coalesced batch to it as
     // a single payload — regardless of per-query result counts. An operator
     // who configures a batch endpoint expects all adaptive-mode traffic there.
+    // Flatten preserving arrival order; each notification carries its own
+    // queryId/sequenceId/timestamp so grouping is not lost.
     if let Some(batch_endpoint) = config.batch_endpoint.as_ref() {
+        let notifications: Vec<DefaultChangeNotification> =
+            batch.into_iter().flat_map(|(_, n)| n).collect();
         return send_coalesced_batch(
             client,
             &config.base_url,
             batch_endpoint,
             &config.token,
-            by_query,
+            notifications,
             reaction_name,
         )
         .await;
     }
 
     // Otherwise, fan out per-result through the standard rendering path.
-    for (query_id, notifications) in by_query {
+    for (query_id, notifications) in batch {
         for notification in notifications {
-            let outcome = match config.get_template_spec(&query_id, notification.operation_type()) {
+            let outcome = match config.resolve_call_spec(&query_id, notification.operation_type()) {
                 Some(spec) => {
-                    let data = notification.handlebars_data();
                     process_result(
                         client,
                         handlebars,
                         &config.base_url,
                         &config.token,
                         spec,
-                        notification.op_str(),
-                        &data,
                         &notification,
                         &query_id,
                         reaction_name,

@@ -19,6 +19,6 @@ schema:
 	cargo test -p drasi-reaction-http --test output_schema
 
 # Regenerate schema/output.schema.json from src/output.rs. Run this any
-# time DefaultChangeNotification / Operation / BatchResult changes.
+# time DefaultChangeNotification / Operation / BatchEnvelope changes.
 update-schema:
 	DRASI_UPDATE_SCHEMA=1 cargo test -p drasi-reaction-http --test output_schema -- --nocapture

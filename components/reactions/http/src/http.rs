@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use log::{error, info};
 use reqwest::Client;
@@ -156,20 +156,6 @@ impl Reaction for HttpReaction {
             self.base.id, self.config.base_url
         );
 
-        if self.config.batch_endpoint.is_some() && self.config.adaptive.is_none() {
-            let msg = format!(
-                "[{}] `batchEndpoint` is configured but `adaptive` is not enabled — \
-                 batchEndpoint requires adaptive (coalesced batch) mode. Set `adaptive` \
-                 to enable batch delivery.",
-                self.base.id
-            );
-            error!("{msg}");
-            self.base
-                .set_status(ComponentStatus::Stopped, Some(msg.clone()))
-                .await;
-            return Err(anyhow!(msg));
-        }
-
         self.base
             .set_status(
                 ComponentStatus::Starting,
@@ -231,15 +217,7 @@ impl Reaction for HttpReaction {
     }
 
     async fn stop(&self) -> Result<()> {
-        self.base.stop_common().await?;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        self.base
-            .set_status(
-                ComponentStatus::Stopped,
-                Some("HTTP reaction stopped successfully".to_string()),
-            )
-            .await;
-        Ok(())
+        self.base.stop_common().await
     }
 
     async fn status(&self) -> ComponentStatus {

@@ -494,47 +494,46 @@ async fn adaptive_with_batch_endpoint_posts_to_batch_when_multi() {
     );
 
     let body: serde_json::Value = serde_json::from_slice(&batch_request.body).unwrap();
-    let arr = body.as_array().expect("batch body should be an array");
-    // One QueryResult with 5 diffs → one channel message → one BatchResult group.
-    assert_eq!(arr.len(), 1, "expected a single coalesced query group");
-
-    let group = &arr[0];
-    assert_eq!(group.get("queryId"), Some(&json!("q1")));
+    let batch = body
+        .get("batch")
+        .and_then(|b| b.as_array())
+        .expect("batch body should be a { \"batch\": [...] } container (Pattern C)");
+    // One QueryResult with 5 diffs → one channel message → 5 flattened
+    // Pattern A items inside the single batch container.
+    assert_eq!(batch.len(), 5, "expected 5 coalesced items");
     assert!(
-        group.get("query_id").is_none(),
-        "snake_case keys must be gone"
+        body.get("queryId").is_none() && body.get("results").is_none(),
+        "the Pattern C container has only the 'batch' key"
     );
-    assert_eq!(group.get("count"), Some(&json!(5)));
-    let timestamp = group
-        .get("timestamp")
-        .and_then(|t| t.as_str())
-        .expect("timestamp field should be a string");
-    chrono::DateTime::parse_from_rfc3339(timestamp).expect("timestamp should be RFC 3339");
 
-    let results = group
-        .get("results")
-        .and_then(|r| r.as_array())
-        .expect("results should be an array");
-    assert_eq!(results.len(), 5);
-    for (i, r) in results.iter().enumerate() {
+    for (i, item) in batch.iter().enumerate() {
         assert_eq!(
-            r.get("operation"),
+            item.get("operation"),
             Some(&json!("ADD")),
-            "diff {i} should be ADD"
+            "item {i} should be ADD"
         );
         assert_eq!(
-            r.get("queryId"),
+            item.get("queryId"),
             Some(&json!("q1")),
-            "diff {i} should carry queryId"
+            "item {i} should carry queryId"
         );
         assert_eq!(
-            r.get("after").and_then(|d| d.get("id")),
+            item.get("sequenceId"),
+            Some(&json!(0)),
+            "item {i} should carry sequenceId"
+        );
+        assert_eq!(
+            item.get("after").and_then(|d| d.get("id")),
             Some(&json!(i as i64)),
-            "diff {i} should carry after.id={i}"
+            "item {i} should carry after.id={i}"
         );
         assert!(
-            r.get("before").is_none(),
-            "diff {i} (ADD) should omit 'before'"
+            item.get("before").is_none(),
+            "item {i} (ADD) should omit 'before'"
+        );
+        assert!(
+            item.get("query_id").is_none(),
+            "snake_case keys must be gone"
         );
     }
 }
@@ -894,4 +893,159 @@ async fn noop_results_are_silently_dropped_without_emitting_requests() {
     );
     let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
     assert_eq!(body.get("operation"), Some(&json!("ADD")));
+}
+
+// ---------------------------------------------------------------------------
+// Default-envelope: sequenceId + metadata threading
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn default_envelope_carries_sequence_id_and_metadata() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("default-seq-meta")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    let mut metadata = HashMap::new();
+    metadata.insert("source".to_string(), json!("sensors"));
+    let qr = QueryResult::new(
+        "q1".to_string(),
+        99,
+        Utc::now(),
+        vec![ResultDiff::Add {
+            data: json!({"id": 1}),
+            row_signature: 0,
+        }],
+        metadata,
+    );
+    r.enqueue_query_result(qr).await.expect("enqueue");
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body.get("sequenceId"), Some(&json!(99)));
+    assert_eq!(body.get("metadata"), Some(&json!({"source": "sensors"})));
+}
+
+// ---------------------------------------------------------------------------
+// Templating: required context keys are available end-to-end
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn template_context_exposes_query_id_metadata_and_operation() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/ingest"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let spec = TemplateSpec {
+        template: r#"{"q":"{{query_id}}","src":"{{metadata.source}}","op":"{{operation}}"}"#
+            .to_string(),
+        extension: HttpCallExt {
+            url: "/ingest".to_string(),
+            method: "POST".to_string(),
+            headers: HashMap::new(),
+        },
+    };
+    let r = Arc::new(
+        HttpReaction::builder("ctx")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_query_template(
+                "q1",
+                HttpQueryConfig {
+                    added: Some(spec),
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    let mut metadata = HashMap::new();
+    metadata.insert("source".to_string(), json!("sensors"));
+    let qr = QueryResult::new(
+        "q1".to_string(),
+        1,
+        Utc::now(),
+        vec![ResultDiff::Add {
+            data: json!({"id": 1}),
+            row_signature: 0,
+        }],
+        metadata,
+    );
+    r.enqueue_query_result(qr).await.expect("enqueue");
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body.get("q"), Some(&json!("q1")));
+    assert_eq!(body.get("src"), Some(&json!("sensors")));
+    assert_eq!(body.get("op"), Some(&json!("ADD")));
+}
+
+// ---------------------------------------------------------------------------
+// Templating: per-query route resolves via the last dotted segment
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn route_resolves_via_last_dotted_segment() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/seg"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    // Route keyed by the bare segment "orders"; the wire query id is dotted.
+    let spec = TemplateSpec {
+        template: r#"{"ok":true}"#.to_string(),
+        extension: HttpCallExt {
+            url: "/seg".to_string(),
+            method: "POST".to_string(),
+            headers: HashMap::new(),
+        },
+    };
+    let r = Arc::new(
+        HttpReaction::builder("seg")
+            .with_base_url(server.uri())
+            .with_query("source.orders")
+            .with_query_template(
+                "orders",
+                HttpQueryConfig {
+                    added: Some(spec),
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "source.orders", json!({"id": 1})).await;
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(
+        reqs[0].url.path(),
+        "/seg",
+        "the segment-keyed route should have matched the dotted query id"
+    );
 }

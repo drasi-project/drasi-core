@@ -24,7 +24,7 @@ use reqwest::{
 use serde_json::{Map, Value};
 
 use crate::config::HttpCallSpec;
-use crate::output::DefaultChangeNotification;
+use crate::output::{DefaultChangeNotification, Operation};
 
 /// Build a [`Handlebars`] registry pre-loaded with the `json` helper used
 /// across all HTTP templates.
@@ -51,44 +51,56 @@ pub(crate) fn build_handlebars() -> Handlebars<'static> {
     handlebars
 }
 
-fn build_context(result_type: &str, data: &Value, query_name: &str) -> Map<String, Value> {
+/// Build the Handlebars render context from a notification.
+///
+/// Populates the developer-guide-required keys for every render:
+/// `query_name`, `query_id`, `operation`, `timestamp`, and `metadata`,
+/// plus `before` / `after` / `data` as applicable to the operation.
+fn build_context(notification: &DefaultChangeNotification) -> Map<String, Value> {
     let mut context = Map::new();
 
-    match result_type {
-        "ADD" => {
-            context.insert("after".to_string(), data.clone());
-        }
-        "UPDATE" => {
-            if let Some(obj) = data.as_object() {
-                if let Some(before) = obj.get("before") {
-                    context.insert("before".to_string(), before.clone());
-                }
-                if let Some(after) = obj.get("after") {
-                    context.insert("after".to_string(), after.clone());
-                }
-                if let Some(data_field) = obj.get("data") {
-                    context.insert("data".to_string(), data_field.clone());
-                }
-            } else {
-                context.insert("after".to_string(), data.clone());
-            }
-        }
-        "DELETE" => {
-            context.insert("before".to_string(), data.clone());
-        }
-        _ => {
-            context.insert("data".to_string(), data.clone());
-        }
-    }
-
-    context.insert(
-        "query_name".to_string(),
-        Value::String(query_name.to_string()),
-    );
+    let query_name = Value::String(notification.query_id.clone());
+    context.insert("query_name".to_string(), query_name.clone());
+    context.insert("query_id".to_string(), query_name);
     context.insert(
         "operation".to_string(),
-        Value::String(result_type.to_string()),
+        Value::String(notification.op_str().to_string()),
     );
+    context.insert(
+        "timestamp".to_string(),
+        Value::String(notification.timestamp.clone()),
+    );
+    context.insert(
+        "metadata".to_string(),
+        notification
+            .metadata
+            .clone()
+            .unwrap_or_else(|| Value::Object(Map::new())),
+    );
+
+    match notification.operation {
+        Operation::Add => {
+            if let Some(after) = &notification.after {
+                context.insert("after".to_string(), after.clone());
+            }
+        }
+        Operation::Delete => {
+            if let Some(before) = &notification.before {
+                context.insert("before".to_string(), before.clone());
+            }
+        }
+        Operation::Update => {
+            if let Some(before) = &notification.before {
+                context.insert("before".to_string(), before.clone());
+            }
+            if let Some(after) = &notification.after {
+                context.insert("after".to_string(), after.clone());
+            }
+            if let Some(data) = &notification.raw_data {
+                context.insert("data".to_string(), data.clone());
+            }
+        }
+    }
 
     context
 }
@@ -107,13 +119,12 @@ pub(crate) async fn process_result(
     base_url: &str,
     token: &Option<String>,
     call_spec: &HttpCallSpec,
-    result_type: &str,
-    data: &Value,
     notification: &DefaultChangeNotification,
     query_name: &str,
     reaction_name: &str,
 ) -> Result<()> {
-    let context = build_context(result_type, data, query_name);
+    let result_type = notification.op_str();
+    let context = build_context(notification);
 
     // Render the URL; on failure fall back to the default change-notification endpoint.
     let rendered_spec_url = match handlebars.render_template(&call_spec.extension.url, &context) {
@@ -299,4 +310,102 @@ pub(crate) async fn post_default_notification(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::output::DefaultChangeNotification;
+    use chrono::TimeZone;
+    use drasi_lib::channels::{QueryResult, ResultDiff};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn notification(
+        metadata: HashMap<String, Value>,
+        diff: ResultDiff,
+    ) -> DefaultChangeNotification {
+        let ts = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let qr = QueryResult::new("source.q1".to_string(), 7, ts, vec![diff], metadata);
+        DefaultChangeNotification::from_diff(&qr, &qr.results[0]).unwrap()
+    }
+
+    #[test]
+    fn context_for_add_has_required_keys_and_after() {
+        let n = notification(
+            HashMap::new(),
+            ResultDiff::Add {
+                data: json!({"id": 1}),
+                row_signature: 0,
+            },
+        );
+        let ctx = build_context(&n);
+        assert_eq!(ctx.get("query_name"), Some(&json!("source.q1")));
+        assert_eq!(ctx.get("query_id"), Some(&json!("source.q1")));
+        assert_eq!(ctx.get("operation"), Some(&json!("ADD")));
+        assert!(ctx.get("timestamp").and_then(|t| t.as_str()).is_some());
+        assert_eq!(ctx.get("metadata"), Some(&json!({})));
+        assert_eq!(ctx.get("after"), Some(&json!({"id": 1})));
+        assert!(ctx.get("before").is_none(), "ADD has no before");
+        assert!(ctx.get("data").is_none(), "ADD has no data key");
+    }
+
+    #[test]
+    fn context_for_delete_has_before_only() {
+        let n = notification(
+            HashMap::new(),
+            ResultDiff::Delete {
+                data: json!({"id": 2}),
+                row_signature: 0,
+            },
+        );
+        let ctx = build_context(&n);
+        assert_eq!(ctx.get("operation"), Some(&json!("DELETE")));
+        assert_eq!(ctx.get("before"), Some(&json!({"id": 2})));
+        assert!(ctx.get("after").is_none(), "DELETE has no after");
+    }
+
+    #[test]
+    fn context_for_update_has_before_after_and_data() {
+        let n = notification(
+            HashMap::new(),
+            ResultDiff::Update {
+                data: json!({"raw": true}),
+                before: json!({"v": 1}),
+                after: json!({"v": 2}),
+                grouping_keys: None,
+                row_signature: 0,
+            },
+        );
+        let ctx = build_context(&n);
+        assert_eq!(ctx.get("operation"), Some(&json!("UPDATE")));
+        assert_eq!(ctx.get("before"), Some(&json!({"v": 1})));
+        assert_eq!(ctx.get("after"), Some(&json!({"v": 2})));
+        assert_eq!(ctx.get("data"), Some(&json!({"raw": true})));
+    }
+
+    #[test]
+    fn context_carries_non_empty_metadata() {
+        let mut metadata = HashMap::new();
+        metadata.insert("source".to_string(), json!("sensors"));
+        let n = notification(
+            metadata,
+            ResultDiff::Add {
+                data: json!({"id": 1}),
+                row_signature: 0,
+            },
+        );
+        let ctx = build_context(&n);
+        assert_eq!(ctx.get("metadata"), Some(&json!({"source": "sensors"})));
+    }
+
+    #[test]
+    fn parse_method_is_case_insensitive_and_defaults_to_post() {
+        assert_eq!(parse_method("get"), Method::GET);
+        assert_eq!(parse_method("Put"), Method::PUT);
+        assert_eq!(parse_method("PATCH"), Method::PATCH);
+        assert_eq!(parse_method("delete"), Method::DELETE);
+        assert_eq!(parse_method("nonsense"), Method::POST);
+        assert_eq!(parse_method(""), Method::POST);
+    }
 }

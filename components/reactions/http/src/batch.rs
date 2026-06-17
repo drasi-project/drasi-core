@@ -15,9 +15,9 @@
 //! Coalesced batch delivery, used only when adaptive mode is enabled
 //! AND `batch_endpoint` is configured on the reaction.
 //!
-//! The wire payload is a JSON array of [`BatchResult`] values — one per
-//! query represented in the coalesced batch — each carrying its
-//! [`DefaultChangeNotification`] entries in order.
+//! The wire payload is a single Pattern C [`BatchEnvelope`] whose `batch`
+//! field is a JSON array of [`DefaultChangeNotification`] items, each
+//! carrying its own `queryId` / `sequenceId` / `timestamp`.
 
 use anyhow::Result;
 use log::{debug, warn};
@@ -25,35 +25,26 @@ use reqwest::{
     header::{HeaderMap, HeaderValue},
     Client,
 };
-use std::collections::HashMap;
 
-// Re-export the on-the-wire batch envelope from its canonical home in
-// `crate::output` so the public path `drasi_reaction_http::BatchResult`
-// continues to resolve.
-pub use crate::output::{BatchResult, DefaultChangeNotification};
+use crate::output::{BatchEnvelope, DefaultChangeNotification};
 
-/// POST a coalesced batch to `{base_url}{batch_endpoint}` as a JSON array
-/// of [`BatchResult`].
+/// POST a coalesced batch to `{base_url}{batch_endpoint}` as a single
+/// [`BatchEnvelope`] (`{ "batch": [ … ] }`).
 pub(crate) async fn send_coalesced_batch(
     client: &Client,
     base_url: &str,
     batch_endpoint: &str,
     token: &Option<String>,
-    batches_by_query: HashMap<String, Vec<DefaultChangeNotification>>,
+    notifications: Vec<DefaultChangeNotification>,
     reaction_name: &str,
 ) -> Result<()> {
-    let batch_results: Vec<BatchResult> = batches_by_query
-        .into_iter()
-        .map(|(query_id, results)| BatchResult {
-            count: results.len(),
-            query_id,
-            results,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        })
-        .collect();
+    let total = notifications.len();
+    let envelope = BatchEnvelope {
+        batch: notifications,
+    };
 
     let batch_url = format!("{base_url}{batch_endpoint}");
-    let body = serde_json::to_string(&batch_results)?;
+    let body = serde_json::to_string(&envelope)?;
 
     let mut headers = HeaderMap::new();
     headers.insert("Content-Type", HeaderValue::from_static("application/json"));
@@ -64,7 +55,6 @@ pub(crate) async fn send_coalesced_batch(
         );
     }
 
-    let total: usize = batch_results.iter().map(|b| b.count).sum();
     debug!("[{reaction_name}] Sending coalesced batch of {total} results to {batch_url}");
 
     let response = client

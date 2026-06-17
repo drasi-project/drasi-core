@@ -21,7 +21,7 @@ use reqwest::Client;
 use drasi_lib::channels::ComponentStatus;
 use drasi_lib::reactions::common::base::ReactionBase;
 
-use crate::config::{HttpReactionConfig, TemplateRouting};
+use crate::config::HttpReactionConfig;
 use crate::output::DefaultChangeNotification;
 use crate::process::{post_default_notification, process_result};
 
@@ -63,28 +63,21 @@ pub(crate) async fn run_standard_loop(
         );
 
         for result in &query_result.results {
-            let notification = match DefaultChangeNotification::from_diff(
-                query_name,
-                query_result.timestamp,
-                result,
-            ) {
+            let notification = match DefaultChangeNotification::from_diff(query_result, result) {
                 Some(n) => n,
                 // Noop variant: no notification, drop silently.
                 None => continue,
             };
 
-            let outcome = match config.get_template_spec(query_name, notification.operation_type())
+            let outcome = match config.resolve_call_spec(query_name, notification.operation_type())
             {
                 Some(spec) => {
-                    let data = notification.handlebars_data();
                     process_result(
                         &client,
                         &handlebars,
                         &config.base_url,
                         &config.token,
                         spec,
-                        notification.op_str(),
-                        &data,
                         &notification,
                         query_name,
                         &reaction_name,

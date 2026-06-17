@@ -28,7 +28,7 @@ via `add_reaction(...)`. See [Examples](#examples).
 4. [Templating](#templating)
 5. [Output payload schema](#output-payload-schema)
    - [`DefaultChangeNotification` envelope (single-notification path)](#defaultchangenotification-envelope-single-notification-path)
-   - [`BatchResult` envelope (batch-endpoint path)](#batchresult-envelope-batch-endpoint-path)
+   - [`BatchEnvelope` (batch-endpoint path)](#batchenvelope-batch-endpoint-path)
 6. [Adaptive batching](#adaptive-batching)
 7. [Render-error fallback](#render-error-fallback)
 8. [Authentication](#authentication)
@@ -259,9 +259,12 @@ Templates use [Handlebars](https://handlebarsjs.com/) syntax and apply to the bo
 |----------|---------------|---------|
 | `after` | added, updated | The new / current row payload. |
 | `before` | updated, deleted | The previous row payload. |
-| `data` | updated, and non-row results | The raw diff payload. |
+| `data` | updated | The raw `data` payload of the update diff. |
 | `query_name` | all | The query identifier. |
+| `query_id` | all | Alias of `query_name`. |
 | `operation` | all | The operation: `ADD`, `UPDATE`, or `DELETE`. |
+| `timestamp` | all | RFC 3339 timestamp of the query emission. |
+| `metadata` | all | The query result's metadata map (an object; may be empty). |
 
 A `json` helper is registered for embedding a value as JSON:
 
@@ -291,9 +294,11 @@ is delivered as a `DefaultChangeNotification` JSON object:
 |-------|------|----------|-------------|
 | `operation` | `string` enum: `"ADD"` &#124; `"UPDATE"` &#124; `"DELETE"` | yes | What kind of change this notification represents. |
 | `queryId` | `string` | yes | The continuous query that produced the change. |
+| `sequenceId` | `number` | yes | Monotonic per-query sequence number identifying this emission. |
 | `timestamp` | `string` (RFC 3339) | yes | UTC timestamp of the originating query emission. |
 | `before` | object | no — omitted for `ADD` and for the first emission of an aggregation group | Row state before the change. |
 | `after` | object | no — omitted for `DELETE` | Row state after the change. |
+| `metadata` | object | no — omitted when empty | Source/query metadata carried by the originating result. |
 
 Mapping from the engine's `ResultDiff` variants:
 
@@ -314,28 +319,28 @@ Storage, and RabbitMQ reactions. `Noop` results are dropped without emitting any
 POST /changes/hot-sensors HTTP/1.1
 Content-Type: application/json
 
-{"operation":"ADD","queryId":"hot-sensors","timestamp":"2026-01-01T00:00:00+00:00","after":{"sensor_id":"s1","temperature":27.5}}
+{"operation":"ADD","queryId":"hot-sensors","sequenceId":42,"timestamp":"2026-01-01T00:00:00+00:00","after":{"sensor_id":"s1","temperature":27.5}}
 ```
 
 ```http
 POST /changes/hot-sensors HTTP/1.1
 Content-Type: application/json
 
-{"operation":"DELETE","queryId":"hot-sensors","timestamp":"2026-01-01T00:00:00+00:00","before":{"sensor_id":"s1","temperature":27.5}}
+{"operation":"DELETE","queryId":"hot-sensors","sequenceId":43,"timestamp":"2026-01-01T00:00:00+00:00","before":{"sensor_id":"s1","temperature":27.5}}
 ```
 
 ```http
 POST /changes/hot-sensors HTTP/1.1
 Content-Type: application/json
 
-{"operation":"UPDATE","queryId":"hot-sensors","timestamp":"2026-01-01T00:00:00+00:00","before":{"sensor_id":"s1","temperature":25.0},"after":{"sensor_id":"s1","temperature":27.5}}
+{"operation":"UPDATE","queryId":"hot-sensors","sequenceId":44,"timestamp":"2026-01-01T00:00:00+00:00","before":{"sensor_id":"s1","temperature":25.0},"after":{"sensor_id":"s1","temperature":27.5}}
 ```
 
 ```http
 POST /changes/hot-sensors HTTP/1.1
 Content-Type: application/json
 
-{"operation":"UPDATE","queryId":"hot-sensors","timestamp":"2026-01-01T00:00:00+00:00","after":{"region":"north","count":1}}
+{"operation":"UPDATE","queryId":"hot-sensors","sequenceId":45,"timestamp":"2026-01-01T00:00:00+00:00","after":{"region":"north","count":1}}
 ```
 *(Aggregation, first emission of a grouping key — note the omitted `before`.)*
 
@@ -349,31 +354,25 @@ Content-Type: application/json
 - **Body** — the rendered `template`. When the template is empty (including the synthesized
   default), the body is the `DefaultChangeNotification` envelope shown above.
 
-### `BatchResult` envelope (batch-endpoint path)
+### `BatchEnvelope` (batch-endpoint path)
 
 In adaptive mode **with** `batch_endpoint` set, each coalesced batch is POSTed to
-`{base_url}{batchEndpoint}` as a JSON array. Each array element is a `BatchResult` that
-groups the change notifications produced by one query in the batch:
+`{base_url}{batchEndpoint}` as a single JSON object (the canonical Pattern C container)
+whose `batch` field is an array of `DefaultChangeNotification` items. Each item carries its
+own `queryId`, `sequenceId`, and `timestamp`, so a single batch may interleave items from
+several queries:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `queryId` | `string` | The query whose notifications are in this group. |
-| `results` | array of `DefaultChangeNotification` | The coalesced change notifications for this query, in order. |
-| `timestamp` | `string` (RFC 3339) | When the batch was assembled. |
-| `count` | `number` | Number of entries in `results`. |
+| `batch` | array of `DefaultChangeNotification` | The coalesced change notifications, in order. Always an array, even for a single item. |
 
 ```json
-[
-  {
-    "queryId": "orders-by-region",
-    "results": [
-      {"operation":"ADD","queryId":"orders-by-region","timestamp":"…","after":{"id":1}},
-      {"operation":"UPDATE","queryId":"orders-by-region","timestamp":"…","before":{"id":2},"after":{"id":2}}
-    ],
-    "timestamp": "2026-01-01T00:00:00+00:00",
-    "count": 2
-  }
-]
+{
+  "batch": [
+    {"operation":"ADD","queryId":"orders-by-region","sequenceId":100,"timestamp":"…","after":{"id":1}},
+    {"operation":"UPDATE","queryId":"orders-by-region","sequenceId":101,"timestamp":"…","before":{"id":2},"after":{"id":2}}
+  ]
+}
 ```
 
 The batch endpoint must accept `POST`.
@@ -581,7 +580,7 @@ The reaction also ships as a Drasi dynamic plugin. The plugin descriptor publish
 OpenAPI sub-schemas for the input config (`HttpReactionConfig`, `HttpOutputTemplates`,
 `HttpQueryConfig`, `HttpCallSpec`, and `AdaptiveBatchConfig`) plus `SchemaUiAnnotator`
 groupings so management UIs can render the configuration form. The wire-format **output**
-schemas (`DefaultChangeNotification`, `Operation`, `BatchResult`) are published as a
+schemas (`DefaultChangeNotification`, `Operation`, `BatchEnvelope`) are published as a
 standalone JSON Schema file at [`schema/output.schema.json`](./schema/output.schema.json).
 
 | Property | Value |

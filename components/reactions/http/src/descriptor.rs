@@ -23,7 +23,7 @@ use utoipa::OpenApi;
 use crate::config::{
     AdaptiveBatchConfig, HttpCallExt, HttpOutputTemplates, HttpQueryConfig, HttpReactionConfig,
 };
-use crate::output::{BatchResult, DefaultChangeNotification, Operation};
+use crate::output::{BatchEnvelope, DefaultChangeNotification, Operation};
 use crate::HttpReactionBuilder;
 
 // ---------------------------------------------------------------------------
@@ -36,7 +36,8 @@ use crate::HttpReactionBuilder;
 #[schema(as = reaction::http::HttpCallSpec)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HttpCallSpecDto {
-    /// Request body as a Handlebars template. Empty = raw diff JSON.
+    /// Request body as a Handlebars template. Empty = the default
+    /// `DefaultChangeNotification` envelope.
     #[serde(default)]
     pub template: String,
 
@@ -247,10 +248,10 @@ struct HttpReactionSchemas;
 
 /// OpenAPI grouping for the **output** wire-format types emitted by the
 /// HTTP reaction (the [`DefaultChangeNotification`] envelope and the
-/// coalesced [`BatchResult`] entry). Generated as the source of truth
-/// for `schema/output.schema.json`.
+/// Pattern C [`BatchEnvelope`] container). Generated as the source of
+/// truth for `schema/output.schema.json`.
 #[derive(OpenApi)]
-#[openapi(components(schemas(DefaultChangeNotification, Operation, BatchResult,)))]
+#[openapi(components(schemas(DefaultChangeNotification, Operation, BatchEnvelope,)))]
 pub struct HttpReactionOutputSchemas;
 
 impl HttpReactionOutputSchemas {

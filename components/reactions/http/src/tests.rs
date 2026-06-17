@@ -112,6 +112,7 @@ fn builder_with_output_templates_round_trip() {
         routes,
     };
     let r = HttpReaction::builder("r")
+        .with_query("q1")
         .with_output_templates(templates)
         .build()
         .unwrap();
@@ -129,6 +130,7 @@ fn builder_with_output_templates_round_trip() {
 #[test]
 fn builder_with_query_template_adds_to_routes() {
     let r = HttpReaction::builder("r")
+        .with_query("q1")
         .with_query_template(
             "q1",
             HttpQueryConfig {
@@ -405,4 +407,198 @@ async fn lifecycle_start_stop_adaptive() {
         status,
         drasi_lib::channels::ComponentStatus::Stopped
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Builder: from_query alias
+// ---------------------------------------------------------------------------
+
+#[test]
+fn from_query_is_alias_for_with_query() {
+    let r = HttpReaction::builder("r")
+        .from_query("a")
+        .from_query("b")
+        .build()
+        .unwrap();
+    assert_eq!(r.query_ids(), vec!["a", "b"]);
+}
+
+// ---------------------------------------------------------------------------
+// Construction-time validation (build())
+// ---------------------------------------------------------------------------
+
+fn spec_with(url: &str, template: &str, headers: HashMap<String, String>) -> HttpQueryConfig {
+    HttpQueryConfig {
+        added: Some(TemplateSpec {
+            template: template.to_string(),
+            extension: HttpCallExt {
+                url: url.to_string(),
+                method: "POST".to_string(),
+                headers,
+            },
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn build_fails_when_batch_endpoint_set_without_adaptive() {
+    let err = HttpReaction::builder("r")
+        .with_query("q1")
+        .with_batch_endpoint("/batch")
+        .build()
+        .err()
+        .expect("build should fail");
+    assert!(
+        err.to_string().contains("batchEndpoint"),
+        "error should mention batchEndpoint: {err}"
+    );
+}
+
+#[test]
+fn build_succeeds_when_batch_endpoint_set_with_adaptive() {
+    let r = HttpReaction::builder("r")
+        .with_query("q1")
+        .with_adaptive_defaults()
+        .with_batch_endpoint("/batch")
+        .build();
+    assert!(r.is_ok(), "batchEndpoint with adaptive must build");
+}
+
+#[test]
+fn build_fails_on_invalid_body_template() {
+    // Unclosed block helper → Handlebars compile error.
+    let bad = spec_with("/x", "{{#if cond}}", HashMap::new());
+    let err = HttpReaction::builder("r")
+        .with_query("q1")
+        .with_query_template("q1", bad)
+        .build()
+        .err()
+        .expect("build should fail");
+    assert!(
+        format!("{err:#}").contains("template"),
+        "error should mention the template: {err:#}"
+    );
+}
+
+#[test]
+fn build_fails_on_invalid_header_template() {
+    let mut headers = HashMap::new();
+    headers.insert("X-Bad".to_string(), "{{#if cond}}".to_string());
+    let bad = spec_with("/x/{{after.id}}", "", headers);
+    let err = HttpReaction::builder("r")
+        .with_query("q1")
+        .with_query_template("q1", bad)
+        .build()
+        .err()
+        .expect("build should fail");
+    assert!(
+        format!("{err:#}").contains("header"),
+        "error should mention the header template: {err:#}"
+    );
+}
+
+#[test]
+fn build_fails_on_unknown_route_key() {
+    let spec = spec_with("/x", "", HashMap::new());
+    let err = HttpReaction::builder("r")
+        .with_query("subscribed")
+        .with_query_template("not-subscribed", spec)
+        .build()
+        .err()
+        .expect("build should fail");
+    assert!(
+        err.to_string().contains("not-subscribed"),
+        "error should name the offending route: {err}"
+    );
+}
+
+#[test]
+fn build_accepts_route_key_matching_last_dotted_segment() {
+    let spec = spec_with("/x", "", HashMap::new());
+    let r = HttpReaction::builder("r")
+        .with_query("source.orders")
+        .with_query_template("orders", spec)
+        .build();
+    assert!(
+        r.is_ok(),
+        "a route keyed by the last dotted segment must be accepted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// resolve_call_spec resolution order
+// ---------------------------------------------------------------------------
+
+fn cfg_with_routes(
+    default_template: Option<HttpQueryConfig>,
+    routes: HashMap<String, HttpQueryConfig>,
+) -> HttpReactionConfig {
+    HttpReactionConfig {
+        output_templates: Some(HttpOutputTemplates {
+            default_template,
+            routes,
+        }),
+        ..Default::default()
+    }
+}
+
+fn added_template(template: &str) -> HttpQueryConfig {
+    HttpQueryConfig {
+        added: Some(TemplateSpec {
+            template: template.to_string(),
+            extension: HttpCallExt::default(),
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn resolve_call_spec_matches_full_query_id() {
+    let mut routes = HashMap::new();
+    routes.insert("source.q1".to_string(), added_template("full"));
+    let cfg = cfg_with_routes(None, routes);
+    let s = cfg
+        .resolve_call_spec("source.q1", OperationType::Add)
+        .unwrap();
+    assert_eq!(s.template, "full");
+}
+
+#[test]
+fn resolve_call_spec_falls_back_to_last_dotted_segment() {
+    let mut routes = HashMap::new();
+    routes.insert("q1".to_string(), added_template("segment"));
+    let cfg = cfg_with_routes(None, routes);
+    // Full id "source.q1" not present; resolves via last segment "q1".
+    let s = cfg
+        .resolve_call_spec("source.q1", OperationType::Add)
+        .unwrap();
+    assert_eq!(s.template, "segment");
+}
+
+#[test]
+fn resolve_call_spec_prefers_full_id_over_segment() {
+    let mut routes = HashMap::new();
+    routes.insert("source.q1".to_string(), added_template("full"));
+    routes.insert("q1".to_string(), added_template("segment"));
+    let cfg = cfg_with_routes(None, routes);
+    let s = cfg
+        .resolve_call_spec("source.q1", OperationType::Add)
+        .unwrap();
+    assert_eq!(s.template, "full");
+}
+
+#[test]
+fn resolve_call_spec_falls_back_to_default_template() {
+    let cfg = cfg_with_routes(Some(added_template("default")), HashMap::new());
+    let s = cfg
+        .resolve_call_spec("anything", OperationType::Add)
+        .unwrap();
+    assert_eq!(s.template, "default");
+}
+
+#[test]
+fn resolve_call_spec_returns_none_without_templates() {
+    let cfg = HttpReactionConfig::default();
+    assert!(cfg.resolve_call_spec("q1", OperationType::Add).is_none());
 }

@@ -20,6 +20,7 @@
 //! inherited from [`TemplateSpec`] is the HTTP request body; `url`,
 //! `method`, and `headers` come from the flattened [`HttpCallExt`].
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -71,8 +72,8 @@ pub type HttpQueryConfig = QueryConfig<HttpCallExt>;
 pub struct HttpOutputTemplates {
     /// Fallback template used when no per-query route matches.
     /// When neither this nor a matching `routes` entry exists, the
-    /// reaction synthesizes a `POST {baseUrl}/changes/{queryId}` call
-    /// with the raw diff JSON as the body.
+    /// reaction posts the [`crate::output::DefaultChangeNotification`]
+    /// envelope to `POST {baseUrl}/changes/{queryId}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_template: Option<HttpQueryConfig>,
 
@@ -115,11 +116,11 @@ pub struct HttpReactionConfig {
     /// Path appended to `base_url` for coalesced batch POSTs.
     ///
     /// Requires `adaptive` to be `Some(...)`. If `batch_endpoint` is set
-    /// while `adaptive` is `None`, the reaction fails fast at startup
-    /// (logs an error, sets status to `Stopped`, and returns an error)
-    /// rather than silently ignoring it. Under adaptive mode with
-    /// `batch_endpoint` set to `None`, coalesced batches are still
-    /// delivered per-route rather than via a single batch endpoint.
+    /// while `adaptive` is `None`, [`HttpReactionConfig::validate`]
+    /// rejects the configuration so the builder's `build()` fails fast.
+    /// Under adaptive mode with `batch_endpoint` set to `None`, coalesced
+    /// batches are still delivered per-route rather than via a single
+    /// batch endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_endpoint: Option<String>,
 }
@@ -157,5 +158,121 @@ impl TemplateRouting<HttpCallExt> for HttpReactionConfig {
         self.output_templates
             .as_ref()
             .and_then(|t| t.default_template.as_ref())
+    }
+}
+
+/// Last dotted segment of a query id (`source.q1` → `q1`).
+fn last_segment(query_id: &str) -> &str {
+    query_id.rsplit('.').next().unwrap_or(query_id)
+}
+
+/// Select the [`HttpCallSpec`] for `operation` from a per-query config.
+fn op_spec(qc: &HttpQueryConfig, operation: OperationType) -> Option<&HttpCallSpec> {
+    match operation {
+        OperationType::Add => qc.added.as_ref(),
+        OperationType::Update => qc.updated.as_ref(),
+        OperationType::Delete => qc.deleted.as_ref(),
+    }
+}
+
+/// Compile a single template string, treating empty as valid (no template).
+fn validate_template_str(s: &str) -> anyhow::Result<()> {
+    if s.is_empty() {
+        return Ok(());
+    }
+    handlebars::Template::compile(s)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("invalid Handlebars template: {e}"))
+}
+
+/// Compile every templatable string in a call spec (body, URL, headers).
+fn validate_call_spec(spec: &HttpCallSpec) -> anyhow::Result<()> {
+    validate_template_str(&spec.template).context("body template")?;
+    validate_template_str(&spec.extension.url).context("url template")?;
+    for (key, value) in &spec.extension.headers {
+        validate_template_str(value).with_context(|| format!("header '{key}' template"))?;
+    }
+    Ok(())
+}
+
+/// Compile every template in a per-query config.
+fn validate_query_config(qc: &HttpQueryConfig) -> anyhow::Result<()> {
+    if let Some(spec) = &qc.added {
+        validate_call_spec(spec).context("'added' template")?;
+    }
+    if let Some(spec) = &qc.updated {
+        validate_call_spec(spec).context("'updated' template")?;
+    }
+    if let Some(spec) = &qc.deleted {
+        validate_call_spec(spec).context("'deleted' template")?;
+    }
+    Ok(())
+}
+
+impl HttpReactionConfig {
+    /// Resolve the call spec for a `(query_id, operation)` pair following
+    /// the developer-guide resolution order:
+    ///
+    /// 1. per-query route keyed by the **full** query id,
+    /// 2. per-query route keyed by the **last dotted segment**,
+    /// 3. the shared `default_template`.
+    ///
+    /// Returns `None` when no template applies — the caller then posts the
+    /// default [`crate::output::DefaultChangeNotification`] envelope.
+    pub(crate) fn resolve_call_spec(
+        &self,
+        query_id: &str,
+        operation: OperationType,
+    ) -> Option<&HttpCallSpec> {
+        let routes = self.routes();
+
+        if let Some(spec) = routes.get(query_id).and_then(|qc| op_spec(qc, operation)) {
+            return Some(spec);
+        }
+
+        let segment = last_segment(query_id);
+        if segment != query_id {
+            if let Some(spec) = routes.get(segment).and_then(|qc| op_spec(qc, operation)) {
+                return Some(spec);
+            }
+        }
+
+        self.default_template()
+            .and_then(|qc| op_spec(qc, operation))
+    }
+
+    /// Validate the configuration against the reaction's subscribed
+    /// `query_ids`. Called by the builder's `build()` so misconfiguration
+    /// fails at construction rather than at dispatch.
+    ///
+    /// Checks:
+    /// 1. `batch_endpoint` is only set when `adaptive` is enabled.
+    /// 2. Every body / URL / header template compiles.
+    /// 3. Every `routes` key matches a subscribed query id (or its last
+    ///    dotted segment).
+    pub fn validate(&self, query_ids: &[String]) -> anyhow::Result<()> {
+        if self.batch_endpoint.is_some() && self.adaptive.is_none() {
+            anyhow::bail!(
+                "`batchEndpoint` requires `adaptive` (coalesced batch) mode; \
+                 set `adaptive` to enable batch delivery"
+            );
+        }
+
+        if let Some(templates) = &self.output_templates {
+            if let Some(default) = &templates.default_template {
+                validate_query_config(default).context("default template")?;
+            }
+            for (key, qc) in &templates.routes {
+                validate_query_config(qc).with_context(|| format!("route '{key}'"))?;
+                let matches = query_ids.iter().any(|q| q == key || last_segment(q) == key);
+                if !matches {
+                    anyhow::bail!(
+                        "output template route '{key}' does not match any subscribed query id"
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 }
