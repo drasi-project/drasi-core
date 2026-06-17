@@ -24,7 +24,9 @@ use reqwest::{
 use serde_json::{Map, Value};
 use std::time::Duration;
 
-use crate::config::{parse_http_method, resolve_http_url, HttpCallSpec};
+use crate::config::{
+    parse_http_method, resolve_http_url, HttpCallSpec, HttpReactionConfig, TemplateRouting,
+};
 use crate::output::{DefaultChangeNotification, Operation};
 
 const MAX_DELIVERY_ATTEMPTS: usize = 3;
@@ -107,6 +109,58 @@ fn build_context(notification: &DefaultChangeNotification) -> Map<String, Value>
     }
 
     context
+}
+
+/// Render a single batch item for adaptive (coalesced) delivery.
+///
+/// Resolves the body template for this notification (per-query route → last
+/// dotted segment → default template) and renders it to a JSON value. When no
+/// body template applies, or rendering produces invalid JSON, falls back to the
+/// default [`DefaultChangeNotification`] envelope so an item is never dropped.
+///
+/// Only the body template applies in batch mode: a coalesced batch is a single
+/// POST to the configured `batch_endpoint`, so per-item `url` / `method` /
+/// `headers` are not used.
+pub(crate) fn render_batch_item(
+    handlebars: &Handlebars<'static>,
+    config: &HttpReactionConfig,
+    notification: &DefaultChangeNotification,
+    reaction_name: &str,
+) -> Value {
+    let query_name = &notification.query_id;
+    let spec = config.get_template_spec(query_name, notification.operation_type());
+
+    let template = match spec {
+        Some(spec) if !spec.template.is_empty() => &spec.template,
+        _ => return default_item(notification),
+    };
+
+    let context = build_context(notification);
+    match handlebars.render_template(template, &context) {
+        Ok(rendered) => match serde_json::from_str::<Value>(&rendered) {
+            Ok(value) => value,
+            Err(e) => {
+                warn!(
+                    "[{reaction_name}] Batch body template for query '{query_name}' ({}) rendered invalid JSON: {e} — using default envelope",
+                    notification.op_str()
+                );
+                default_item(notification)
+            }
+        },
+        Err(e) => {
+            warn!(
+                "[{reaction_name}] Batch body template render failed for query '{query_name}' ({}): {e} — using default envelope",
+                notification.op_str()
+            );
+            default_item(notification)
+        }
+    }
+}
+
+/// Serialize the default change-notification envelope as a JSON value (the
+/// batch-item fallback shape).
+fn default_item(notification: &DefaultChangeNotification) -> Value {
+    serde_json::to_value(notification).unwrap_or(Value::Null)
 }
 
 /// Render `call_spec` against `data` and POST/PUT/etc. it to `{base_url}{url}`.

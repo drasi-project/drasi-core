@@ -604,6 +604,85 @@ async fn adaptive_with_batch_endpoint_posts_to_batch_when_multi() {
 }
 
 // ---------------------------------------------------------------------------
+// Adaptive + output template: batch items are rendered bodies
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn adaptive_with_output_template_renders_batch_items() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/batch"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let template = HttpQueryConfig {
+        added: Some(TemplateSpec {
+            template: r#"{"event":"created","id":"{{after.id}}"}"#.to_string(),
+            extension: HttpCallExt::default(),
+        }),
+        ..Default::default()
+    };
+
+    let r = Arc::new(
+        HttpReaction::builder("adaptive-templated")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_query_template("q1", template)
+            .with_adaptive(AdaptiveBatchConfig {
+                adaptive_min_batch_size: 3,
+                adaptive_max_batch_size: 16,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 100,
+            })
+            .with_batch_endpoint("/batch")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    let qr = make_query_result(
+        "q1",
+        (0..3)
+            .map(|i| ResultDiff::Add {
+                data: json!({"id": i}),
+                row_signature: 0,
+            })
+            .collect(),
+    );
+    r.enqueue_query_result(qr).await.expect("enqueue");
+
+    wait_for_requests(&server, 1, 3000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1, "expected exactly one batch POST");
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    let batch = body
+        .get("batch")
+        .and_then(|b| b.as_array())
+        .expect("batch body should be a { \"batch\": [...] } container");
+    assert_eq!(batch.len(), 3, "expected 3 coalesced items");
+    for (i, item) in batch.iter().enumerate() {
+        // Each item is the *rendered* template body, not the default envelope.
+        assert_eq!(
+            item.get("event"),
+            Some(&json!("created")),
+            "item {i} should be the rendered template body"
+        );
+        assert_eq!(
+            item.get("id"),
+            Some(&json!(i.to_string())),
+            "item {i} should carry the templated id"
+        );
+        assert!(
+            item.get("operation").is_none() && item.get("queryId").is_none(),
+            "a templated item must not carry default-envelope keys"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Adaptive partial-batch flush on timeout
 // ---------------------------------------------------------------------------
 

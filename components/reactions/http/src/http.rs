@@ -48,23 +48,14 @@ impl HttpReaction {
     }
 
     /// Create a new HTTP reaction.
+    ///
+    /// This convenience constructor does **not** validate `config`; use
+    /// [`HttpReaction::builder`] (whose `build()` validates) for construction
+    /// that fails fast on misconfiguration. Config passed here is still
+    /// re-validated at [`start`](HttpReaction::start), which sets the reaction
+    /// to `Error` rather than running when it is invalid.
     pub fn new(id: impl Into<String>, queries: Vec<String>, config: HttpReactionConfig) -> Self {
         let params = ReactionBaseParams::new(id.into(), queries);
-        Self {
-            base: ReactionBase::new(params),
-            config,
-        }
-    }
-
-    /// Create a new HTTP reaction with a custom priority queue capacity.
-    pub fn with_priority_queue_capacity(
-        id: impl Into<String>,
-        queries: Vec<String>,
-        config: HttpReactionConfig,
-        priority_queue_capacity: usize,
-    ) -> Self {
-        let params = ReactionBaseParams::new(id.into(), queries)
-            .with_priority_queue_capacity(priority_queue_capacity);
         Self {
             base: ReactionBase::new(params),
             config,
@@ -241,9 +232,5 @@ impl Reaction for HttpReaction {
 
     async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) -> Result<()> {
         self.base.enqueue_query_result(result).await
-    }
-
-    async fn deprovision(&self) -> Result<()> {
-        self.base.deprovision_common().await
     }
 }

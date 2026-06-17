@@ -109,6 +109,12 @@ pub struct HttpReactionConfig {
     pub timeout_ms: u64,
 
     /// Optional per-query and default-template overrides.
+    ///
+    /// In standard (per-result) mode the `url`, `method`, `headers`, and body
+    /// `template` all apply. In adaptive (batch) mode only the body `template`
+    /// is used to render each item placed in the
+    /// [`crate::output::BatchEnvelope`]; `url`/`method`/`headers` do not apply
+    /// because a batch is a single POST to `batch_endpoint`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_templates: Option<HttpOutputTemplates>,
 
@@ -233,20 +239,46 @@ impl TemplateRouting<HttpCallExt> for HttpReactionConfig {
             .as_ref()
             .and_then(|t| t.default_template.as_ref())
     }
+
+    /// Resolve the call spec for a `(query_id, operation)` pair following the
+    /// developer-guide resolution order:
+    ///
+    /// 1. per-query route keyed by the **full** query id,
+    /// 2. per-query route keyed by the **last dotted segment**,
+    /// 3. the shared `default_template`.
+    ///
+    /// Overrides the trait default (which only does steps 1 and 3) so the
+    /// public routing API matches what the reaction uses at dispatch time.
+    /// Returns `None` when no template applies — the caller then posts the
+    /// default [`crate::output::DefaultChangeNotification`] envelope.
+    fn get_template_spec(&self, query_id: &str, operation: OperationType) -> Option<&HttpCallSpec> {
+        let routes = self.routes();
+
+        if let Some(spec) = routes
+            .get(query_id)
+            .and_then(|qc| Self::get_spec_from_config(qc, operation))
+        {
+            return Some(spec);
+        }
+
+        let segment = last_segment(query_id);
+        if segment != query_id {
+            if let Some(spec) = routes
+                .get(segment)
+                .and_then(|qc| Self::get_spec_from_config(qc, operation))
+            {
+                return Some(spec);
+            }
+        }
+
+        self.default_template()
+            .and_then(|qc| Self::get_spec_from_config(qc, operation))
+    }
 }
 
 /// Last dotted segment of a query id (`source.q1` → `q1`).
 fn last_segment(query_id: &str) -> &str {
     query_id.rsplit('.').next().unwrap_or(query_id)
-}
-
-/// Select the [`HttpCallSpec`] for `operation` from a per-query config.
-fn op_spec(qc: &HttpQueryConfig, operation: OperationType) -> Option<&HttpCallSpec> {
-    match operation {
-        OperationType::Add => qc.added.as_ref(),
-        OperationType::Update => qc.updated.as_ref(),
-        OperationType::Delete => qc.deleted.as_ref(),
-    }
 }
 
 /// Compile a single template string, treating empty as valid (no template).
@@ -291,37 +323,6 @@ fn validate_query_config(qc: &HttpQueryConfig) -> anyhow::Result<()> {
 }
 
 impl HttpReactionConfig {
-    /// Resolve the call spec for a `(query_id, operation)` pair following
-    /// the developer-guide resolution order:
-    ///
-    /// 1. per-query route keyed by the **full** query id,
-    /// 2. per-query route keyed by the **last dotted segment**,
-    /// 3. the shared `default_template`.
-    ///
-    /// Returns `None` when no template applies — the caller then posts the
-    /// default [`crate::output::DefaultChangeNotification`] envelope.
-    pub(crate) fn resolve_call_spec(
-        &self,
-        query_id: &str,
-        operation: OperationType,
-    ) -> Option<&HttpCallSpec> {
-        let routes = self.routes();
-
-        if let Some(spec) = routes.get(query_id).and_then(|qc| op_spec(qc, operation)) {
-            return Some(spec);
-        }
-
-        let segment = last_segment(query_id);
-        if segment != query_id {
-            if let Some(spec) = routes.get(segment).and_then(|qc| op_spec(qc, operation)) {
-                return Some(spec);
-            }
-        }
-
-        self.default_template()
-            .and_then(|qc| op_spec(qc, operation))
-    }
-
     /// Validate the configuration against the reaction's subscribed
     /// `query_ids`. Called by the builder's `build()` so misconfiguration
     /// fails at construction rather than at dispatch.
@@ -369,12 +370,6 @@ impl HttpReactionConfig {
 
         if let Some(adaptive) = &self.adaptive {
             validate_adaptive(adaptive).context("adaptive")?;
-            if self.output_templates.is_some() {
-                anyhow::bail!(
-                    "`outputTemplates` cannot be combined with `adaptive` batchEndpoint mode; \
-                     batched HTTP delivery emits the canonical BatchEnvelope"
-                );
-            }
         }
 
         if let Some(templates) = &self.output_templates {

@@ -11,11 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Config schema `config_version` is `2.0.0`. The dynamic plugin DTO uses camelCase top-level fields: `baseUrl`, `timeoutMs`, `outputTemplates`, `batchEndpoint`, `adaptive`, and `token`.
 - Adaptive mode requires both an `adaptive` block and `batchEndpoint`. Batched delivery always emits the canonical Pattern C `BatchEnvelope` to that endpoint.
-- `outputTemplates` apply to single-notification delivery only. Adaptive batch delivery is mutually exclusive with per-result templates.
 
 ### Features
 
-- Adaptive mode opts in via the `adaptive` config block (`adaptiveMinBatchSize`, `adaptiveMaxBatchSize`, `adaptiveWindowSize`, `adaptiveBatchTimeoutMs`) and coalesces `DefaultChangeNotification` items into `BatchEnvelope` payloads.
+- Adaptive mode opts in via the `adaptive` config block (`adaptiveMinBatchSize`, `adaptiveMaxBatchSize`, `adaptiveWindowSize`, `adaptiveBatchTimeoutMs`) and coalesces items into `BatchEnvelope` payloads. Each batch item is a rendered per-query body template, or the default `DefaultChangeNotification` envelope when no body template applies; `outputTemplates` may be combined with adaptive batch mode (only the body template applies to batched items, since a batch is a single POST).
 - Configuration is validated at construction: `HttpReactionBuilder::build()` validates base URL, timeout, adaptive ranges, batch endpoint path, HTTP methods, headers, templates, and route keys.
 - Per-query routes resolve by full query id, then by the **last dotted segment** of the query id (`routes.my_query` matches a wire id of `source.my_query`), then by the shared default template.
 - Template render context includes `query_id`, `query_name`, `timestamp`, `metadata`, `operation`, and the applicable `before`, `after`, and `data` values.

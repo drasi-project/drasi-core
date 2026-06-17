@@ -4,13 +4,11 @@
   "components": {
     "schemas": {
       "BatchEnvelope": {
-        "description": "Wire payload POSTed to a configured `batchEndpoint` in adaptive mode.\n\nPattern C (batched envelopes) from the reaction developer guide: a\nsingle container object whose `batch` field is a JSON array of\n[`DefaultChangeNotification`] items (Pattern A items), each carrying\nits own `queryId` / `sequenceId` / `timestamp`. The array is always\npresent even when it holds a single item.",
+        "description": "Wire payload POSTed to a configured `batchEndpoint` in adaptive mode.\n\nPattern C (batched envelopes) from the reaction developer guide: a single\ncontainer object whose `batch` field is a JSON array of items, in order. The\narray is always present even when it holds a single item.\n\nEach item is either a **rendered per-query body template**, or — when no body\ntemplate applies (or rendering fails) — the default\n[`DefaultChangeNotification`] envelope (a Pattern A item carrying its own\n`queryId` / `sequenceId` / `timestamp`).",
         "properties": {
           "batch": {
-            "description": "The coalesced change notifications, in order.",
-            "items": {
-              "$ref": "#/components/schemas/DefaultChangeNotification"
-            },
+            "description": "The coalesced batch items, in order. Each item is arbitrary JSON: a\nrendered body template, or the default change-notification envelope.",
+            "items": {},
             "type": "array"
           }
         },

@@ -151,7 +151,7 @@ impl DefaultChangeNotification {
     }
 
     /// Map to the internal [`OperationType`] used by the template router
-    /// (`HttpReactionConfig::resolve_call_spec`).
+    /// (`HttpReactionConfig::get_template_spec`).
     pub(crate) fn operation_type(&self) -> OperationType {
         match self.operation {
             Operation::Add => OperationType::Add,
@@ -163,16 +163,20 @@ impl DefaultChangeNotification {
 
 /// Wire payload POSTed to a configured `batchEndpoint` in adaptive mode.
 ///
-/// Pattern C (batched envelopes) from the reaction developer guide: a
-/// single container object whose `batch` field is a JSON array of
-/// [`DefaultChangeNotification`] items (Pattern A items), each carrying
-/// its own `queryId` / `sequenceId` / `timestamp`. The array is always
-/// present even when it holds a single item.
+/// Pattern C (batched envelopes) from the reaction developer guide: a single
+/// container object whose `batch` field is a JSON array of items, in order. The
+/// array is always present even when it holds a single item.
+///
+/// Each item is either a **rendered per-query body template**, or — when no body
+/// template applies (or rendering fails) — the default
+/// [`DefaultChangeNotification`] envelope (a Pattern A item carrying its own
+/// `queryId` / `sequenceId` / `timestamp`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchEnvelope {
-    /// The coalesced change notifications, in order.
-    pub batch: Vec<DefaultChangeNotification>,
+    /// The coalesced batch items, in order. Each item is arbitrary JSON: a
+    /// rendered body template, or the default change-notification envelope.
+    pub batch: Vec<serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -317,7 +321,9 @@ mod tests {
             row_signature: 0,
         });
         let n = DefaultChangeNotification::from_diff(&qr, &qr.results[0]).unwrap();
-        let env = BatchEnvelope { batch: vec![n] };
+        let env = BatchEnvelope {
+            batch: vec![serde_json::to_value(&n).unwrap()],
+        };
         let v = serde_json::to_value(&env).unwrap();
         let batch = v.get("batch").and_then(|b| b.as_array());
         assert!(batch.is_some(), "batch must be a JSON array");

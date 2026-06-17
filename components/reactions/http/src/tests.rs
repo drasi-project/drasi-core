@@ -16,12 +16,15 @@
 
 use std::collections::HashMap;
 
+use drasi_lib::channels::{QueryResult, ResultDiff};
 use drasi_lib::Reaction;
 
 use crate::config::{
     AdaptiveBatchConfig, HttpCallExt, HttpOutputTemplates, HttpQueryConfig, HttpReactionConfig,
     OperationType, TemplateRouting, TemplateSpec,
 };
+use crate::output::DefaultChangeNotification;
+use crate::process::{build_handlebars, render_batch_item};
 use crate::{HttpReaction, HttpReactionBuilder};
 
 // ---------------------------------------------------------------------------
@@ -536,19 +539,20 @@ fn build_fails_when_adaptive_set_without_batch_endpoint() {
 }
 
 #[test]
-fn build_fails_when_adaptive_combined_with_output_templates() {
-    let spec = spec_with("/x", "", HashMap::new());
-    let err = HttpReaction::builder("r")
+fn build_succeeds_when_adaptive_combined_with_output_templates() {
+    // Per-item body templating is supported in adaptive (batch) mode; the
+    // url/method/headers simply do not apply to the single batch endpoint.
+    let spec = spec_with("", r#"{"id":"{{after.id}}"}"#, HashMap::new());
+    let r = HttpReaction::builder("r")
         .with_query("q1")
         .with_query_template("q1", spec)
         .with_adaptive_defaults()
         .with_batch_endpoint("/batch")
-        .build()
-        .err()
-        .expect("build should fail");
+        .build();
     assert!(
-        err.to_string().contains("outputTemplates"),
-        "error should mention outputTemplates: {err}"
+        r.is_ok(),
+        "adaptive + outputTemplates must build: {:?}",
+        r.err()
     );
 }
 
@@ -706,7 +710,7 @@ fn build_accepts_route_key_matching_last_dotted_segment() {
 }
 
 // ---------------------------------------------------------------------------
-// resolve_call_spec resolution order
+// get_template_spec resolution order
 // ---------------------------------------------------------------------------
 
 fn cfg_with_routes(
@@ -733,51 +737,133 @@ fn added_template(template: &str) -> HttpQueryConfig {
 }
 
 #[test]
-fn resolve_call_spec_matches_full_query_id() {
+fn get_template_spec_matches_full_query_id() {
     let mut routes = HashMap::new();
     routes.insert("source.q1".to_string(), added_template("full"));
     let cfg = cfg_with_routes(None, routes);
     let s = cfg
-        .resolve_call_spec("source.q1", OperationType::Add)
+        .get_template_spec("source.q1", OperationType::Add)
         .unwrap();
     assert_eq!(s.template, "full");
 }
 
 #[test]
-fn resolve_call_spec_falls_back_to_last_dotted_segment() {
+fn get_template_spec_falls_back_to_last_dotted_segment() {
     let mut routes = HashMap::new();
     routes.insert("q1".to_string(), added_template("segment"));
     let cfg = cfg_with_routes(None, routes);
     // Full id "source.q1" not present; resolves via last segment "q1".
     let s = cfg
-        .resolve_call_spec("source.q1", OperationType::Add)
+        .get_template_spec("source.q1", OperationType::Add)
         .unwrap();
     assert_eq!(s.template, "segment");
 }
 
 #[test]
-fn resolve_call_spec_prefers_full_id_over_segment() {
+fn get_template_spec_prefers_full_id_over_segment() {
     let mut routes = HashMap::new();
     routes.insert("source.q1".to_string(), added_template("full"));
     routes.insert("q1".to_string(), added_template("segment"));
     let cfg = cfg_with_routes(None, routes);
     let s = cfg
-        .resolve_call_spec("source.q1", OperationType::Add)
+        .get_template_spec("source.q1", OperationType::Add)
         .unwrap();
     assert_eq!(s.template, "full");
 }
 
 #[test]
-fn resolve_call_spec_falls_back_to_default_template() {
+fn get_template_spec_falls_back_to_default_template() {
     let cfg = cfg_with_routes(Some(added_template("default")), HashMap::new());
     let s = cfg
-        .resolve_call_spec("anything", OperationType::Add)
+        .get_template_spec("anything", OperationType::Add)
         .unwrap();
     assert_eq!(s.template, "default");
 }
 
 #[test]
-fn resolve_call_spec_returns_none_without_templates() {
+fn get_template_spec_returns_none_without_templates() {
     let cfg = HttpReactionConfig::default();
-    assert!(cfg.resolve_call_spec("q1", OperationType::Add).is_none());
+    assert!(cfg.get_template_spec("q1", OperationType::Add).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive batch-item rendering (per-item body templating)
+// ---------------------------------------------------------------------------
+
+fn add_notification(
+    query_id: &str,
+    seq: u64,
+    data: serde_json::Value,
+) -> DefaultChangeNotification {
+    use chrono::TimeZone;
+    let ts = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let qr = QueryResult::new(
+        query_id.to_string(),
+        seq,
+        ts,
+        vec![ResultDiff::Add {
+            data,
+            row_signature: 0,
+        }],
+        HashMap::new(),
+    );
+    DefaultChangeNotification::from_diff(&qr, &qr.results[0]).unwrap()
+}
+
+#[test]
+fn render_batch_item_uses_body_template_when_present() {
+    let cfg = cfg_with_routes(
+        None,
+        HashMap::from([(
+            "q1".to_string(),
+            HttpQueryConfig {
+                added: Some(TemplateSpec {
+                    template: r#"{"id":"{{after.id}}","kind":"templated"}"#.to_string(),
+                    extension: HttpCallExt::default(),
+                }),
+                ..Default::default()
+            },
+        )]),
+    );
+    let n = add_notification("q1", 1, serde_json::json!({"id": "x"}));
+    let hb = build_handlebars();
+    let item = render_batch_item(&hb, &cfg, &n, "r");
+    assert_eq!(item, serde_json::json!({"id": "x", "kind": "templated"}));
+}
+
+#[test]
+fn render_batch_item_falls_back_to_default_envelope_without_template() {
+    let cfg = HttpReactionConfig::default();
+    let n = add_notification("q1", 7, serde_json::json!({"id": "x"}));
+    let hb = build_handlebars();
+    let item = render_batch_item(&hb, &cfg, &n, "r");
+    // Default change-notification envelope (Pattern A item) shape.
+    assert_eq!(item.get("operation"), Some(&serde_json::json!("ADD")));
+    assert_eq!(item.get("queryId"), Some(&serde_json::json!("q1")));
+    assert_eq!(item.get("sequenceId"), Some(&serde_json::json!(7)));
+    assert_eq!(item.get("after"), Some(&serde_json::json!({"id": "x"})));
+}
+
+#[test]
+fn render_batch_item_falls_back_when_template_renders_invalid_json() {
+    // Template renders text that is not valid JSON → fall back to the default
+    // envelope rather than producing a malformed batch item.
+    let cfg = cfg_with_routes(
+        None,
+        HashMap::from([(
+            "q1".to_string(),
+            HttpQueryConfig {
+                added: Some(TemplateSpec {
+                    template: "not-json {{after.id}}".to_string(),
+                    extension: HttpCallExt::default(),
+                }),
+                ..Default::default()
+            },
+        )]),
+    );
+    let n = add_notification("q1", 3, serde_json::json!({"id": "x"}));
+    let hb = build_handlebars();
+    let item = render_batch_item(&hb, &cfg, &n, "r");
+    assert_eq!(item.get("operation"), Some(&serde_json::json!("ADD")));
+    assert_eq!(item.get("after"), Some(&serde_json::json!({"id": "x"})));
 }

@@ -28,6 +28,7 @@ use crate::adaptive_batcher::{AdaptiveBatcher, AdaptiveBatcherConfig};
 use crate::batch::send_coalesced_batch;
 use crate::config::HttpReactionConfig;
 use crate::output::DefaultChangeNotification;
+use crate::process::{build_handlebars, render_batch_item};
 
 /// Run the adaptive (coalesced) processing loop. Spawns an internal
 /// batcher task that lives for the lifetime of this loop.
@@ -42,7 +43,7 @@ pub(crate) async fn run_adaptive_loop(
 ) {
     let status_handle = base.status_handle();
     let capacity = runtime_adaptive.recommended_channel_capacity();
-    let (batch_tx, batch_rx) = tokio::sync::mpsc::channel::<DefaultChangeNotification>(capacity);
+    let (batch_tx, batch_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(capacity);
 
     debug!(
         "[{reaction_name}] HttpReaction adaptive mode using batch channel capacity: {capacity} (max_batch_size: {})",
@@ -91,7 +92,11 @@ pub(crate) async fn run_adaptive_loop(
         })
     };
 
-    // Main: pull from priority queue, forward to batcher
+    // Render templates once, off the delivery path; the batcher then only
+    // coalesces already-rendered items.
+    let handlebars = build_handlebars();
+
+    // Main: pull from priority queue, render each item, forward to batcher
     loop {
         let query_result_arc = tokio::select! {
             biased;
@@ -103,18 +108,15 @@ pub(crate) async fn run_adaptive_loop(
         };
         let query_result = query_result_arc.as_ref();
 
-        if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
-            break;
-        }
-
         if query_result.results.is_empty() {
             continue;
         }
 
-        // Convert this QueryResult's diffs into wire-format notifications
-        // up-front (dropping Noops). The batcher unit is one emitted
-        // DefaultChangeNotification, so adaptive_max_batch_size caps the
-        // number of payload items in each BatchEnvelope.
+        // Convert this QueryResult's diffs into rendered batch items up-front
+        // (dropping Noops). The batcher unit is one rendered item, so
+        // adaptive_max_batch_size caps the number of payload items in each
+        // BatchEnvelope. When a per-query body template applies it is rendered
+        // here; otherwise the default change-notification envelope is used.
         let notifications = query_result
             .results
             .iter()
@@ -122,7 +124,8 @@ pub(crate) async fn run_adaptive_loop(
 
         let mut batcher_closed = false;
         for notification in notifications {
-            if batch_tx.send(notification).await.is_err() {
+            let item = render_batch_item(&handlebars, &config, &notification, &reaction_name);
+            if batch_tx.send(item).await.is_err() {
                 error!("[{reaction_name}] Failed to send to batch channel — batcher exited");
                 batcher_closed = true;
                 break;
@@ -164,7 +167,7 @@ async fn deliver_batch(
     client: &Client,
     config: &HttpReactionConfig,
     reaction_name: &str,
-    batch: Vec<DefaultChangeNotification>,
+    batch: Vec<serde_json::Value>,
 ) -> anyhow::Result<()> {
     let Some(batch_endpoint) = config.batch_endpoint.as_ref() else {
         anyhow::bail!("adaptive HTTP delivery requires batchEndpoint");

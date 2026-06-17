@@ -21,7 +21,7 @@ use reqwest::Client;
 use drasi_lib::channels::ComponentStatus;
 use drasi_lib::reactions::common::base::ReactionBase;
 
-use crate::config::HttpReactionConfig;
+use crate::config::{HttpReactionConfig, TemplateRouting};
 use crate::output::DefaultChangeNotification;
 use crate::process::{post_default_notification, process_result};
 
@@ -48,10 +48,6 @@ pub(crate) async fn run_standard_loop(
         };
         let query_result = query_result_arc.as_ref();
 
-        if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
-            break;
-        }
-
         if query_result.results.is_empty() {
             continue;
         }
@@ -69,7 +65,7 @@ pub(crate) async fn run_standard_loop(
                 None => continue,
             };
 
-            let outcome = match config.resolve_call_spec(query_name, notification.operation_type())
+            let outcome = match config.get_template_spec(query_name, notification.operation_type())
             {
                 Some(spec) => {
                     process_result(

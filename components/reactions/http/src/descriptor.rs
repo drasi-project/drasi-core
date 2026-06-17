@@ -215,6 +215,13 @@ fn dto_adaptive(a: &AdaptiveBatchConfig) -> AdaptiveBatchConfigDto {
     }
 }
 
+/// Domain → DTO conversion used by `properties()` on the **embedded**
+/// (non-descriptor) construction path. `priority_queue_capacity` is a
+/// `ReactionBase` parameter rather than a field of `HttpReactionConfig`, so it
+/// cannot be recovered here and is emitted as `None`. This is lossless on the
+/// descriptor path, where `properties()` returns the original raw config JSON
+/// (preserved via `set_raw_config`) including any operator-supplied
+/// `priorityQueueCapacity`.
 impl From<&HttpReactionConfig> for HttpReactionConfigDto {
     fn from(c: &HttpReactionConfig) -> Self {
         Self {

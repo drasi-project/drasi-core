@@ -15,7 +15,9 @@ Changes can be distributed two ways:
 
 Single-notification mode supports [Handlebars](https://handlebarsjs.com/) templating of
 the request URL, body, and headers, plus per-query routing and bearer-token authentication.
-Adaptive batch mode sends the canonical `BatchEnvelope` to `batchEndpoint`.
+Adaptive batch mode coalesces changes into a canonical `BatchEnvelope` POSTed to
+`batchEndpoint`; per-query **body** templates still apply to each item (the URL, method, and
+headers do not, because a batch is a single request).
 
 The reaction is built in Rust with `HttpReactionBuilder` and added to a running `DrasiLib`
 via `add_reaction(...)`. See [Examples](#examples).
@@ -159,7 +161,7 @@ optional unless noted; defaults are applied by the builder.
 | `base_url` | `String` | `http://localhost` | `with_base_url` | Base URL prepended to every relative per-call URL. |
 | `token` | `Option<String>` | `None` | `with_token` | Bearer token sent as `Authorization: Bearer <token>` on every request. |
 | `timeout_ms` | `u64` | `5000` | `with_timeout_ms` | Per-request HTTP timeout in milliseconds. |
-| `output_templates` | `Option<HttpOutputTemplates>` | `None` | `with_default_template`, `with_query_template`, `with_output_templates` | Per-query and default templates for the URL, body, and headers in single-notification mode. See [Output templates](#output-templates-and-per-query-routing). |
+| `output_templates` | `Option<HttpOutputTemplates>` | `None` | `with_default_template`, `with_query_template`, `with_output_templates` | Per-query and default templates. In single-notification mode the URL, body, and headers are templated; in adaptive mode only the per-query **body** template applies to each batched item. See [Output templates](#output-templates-and-per-query-routing). |
 | `adaptive` | `Option<AdaptiveBatchConfig>` | `None` | `with_adaptive` | When `Some`, enables [adaptive batching](#adaptive-batching) and requires `batch_endpoint`. When `None`, the reaction delivers one HTTP request per result. |
 | `batch_endpoint` | `Option<String>` | `None` | `with_batch_endpoint` | Path appended to `base_url`. Required with `adaptive`; every coalesced batch is POSTed to `{base_url}{batch_endpoint}` as a single payload. Invalid combinations fail at `build()` time. |
 
@@ -366,13 +368,14 @@ Content-Type: application/json
 
 In adaptive mode **with** `batch_endpoint` set, each coalesced batch is POSTed to
 `{base_url}{batchEndpoint}` as a single JSON object (the canonical Pattern C container)
-whose `batch` field is an array of `DefaultChangeNotification` items. Each item carries its
-own `queryId`, `sequenceId`, and `timestamp`, so a single batch may interleave items from
-several queries:
+whose `batch` field is an array of items. Each item is either a rendered per-query **body**
+template or — when no body template applies — the default `DefaultChangeNotification`
+envelope (carrying its own `queryId`, `sequenceId`, and `timestamp`), so a single batch may
+interleave items from several queries:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `batch` | array of `DefaultChangeNotification` | The coalesced change notifications, in order. Always an array, even for a single item. |
+| `batch` | array of items | The coalesced items, in order: rendered body templates or `DefaultChangeNotification` envelopes. Always an array, even for a single item. |
 
 ```json
 {
@@ -394,15 +397,17 @@ an internal batcher that coalesces result changes and scales batch size based on
 throughput. The batcher:
 
 1. Pulls query results off the internal queue.
-2. Groups individual `DefaultChangeNotification` items into batches whose size adapts
-   between `adaptive_min_batch_size` and
+2. Renders each change to a batch item — a rendered per-query **body** template, or the
+   default `DefaultChangeNotification` envelope when no body template applies — and groups
+   items into batches whose size adapts between `adaptive_min_batch_size` and
    `adaptive_max_batch_size` according to recent throughput, flushing a partial batch
    after `adaptive_batch_timeout_ms`.
 3. Delivers each batch to `batch_endpoint` as one request.
 
 Use adaptive batching when your receiver can accept many changes in one request and the
-per-request overhead is the bottleneck. If each change must go to its own templated
-endpoint, use single-notification mode.
+per-request overhead is the bottleneck. Per-query **body** templates still apply to each
+batched item; if each change must go to its own templated URL/method/headers, use
+single-notification mode instead.
 
 ---
 

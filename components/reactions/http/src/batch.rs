@@ -16,8 +16,9 @@
 //! AND `batch_endpoint` is configured on the reaction.
 //!
 //! The wire payload is a single Pattern C [`BatchEnvelope`] whose `batch`
-//! field is a JSON array of [`DefaultChangeNotification`] items, each
-//! carrying its own `queryId` / `sequenceId` / `timestamp`.
+//! field is a JSON array of rendered items — either a per-query body template
+//! rendered for each change, or the default change-notification envelope when
+//! no body template applies.
 
 use anyhow::Result;
 use log::debug;
@@ -26,7 +27,7 @@ use reqwest::{
     Client, Method,
 };
 
-use crate::output::{BatchEnvelope, DefaultChangeNotification};
+use crate::output::BatchEnvelope;
 use crate::process::send_with_retry;
 
 /// POST a coalesced batch to `{base_url}{batch_endpoint}` as a single
@@ -36,13 +37,11 @@ pub(crate) async fn send_coalesced_batch(
     base_url: &str,
     batch_endpoint: &str,
     token: &Option<String>,
-    notifications: Vec<DefaultChangeNotification>,
+    items: Vec<serde_json::Value>,
     reaction_name: &str,
 ) -> Result<()> {
-    let total = notifications.len();
-    let envelope = BatchEnvelope {
-        batch: notifications,
-    };
+    let total = items.len();
+    let envelope = BatchEnvelope { batch: items };
 
     let batch_url = format!("{base_url}{batch_endpoint}");
     let body = serde_json::to_string(&envelope)?;
