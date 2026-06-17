@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.0] - Unreleased
+## [0.4.0] - Unreleased
 
 ### Breaking Changes
 
@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RPC plus the `ProcessResultsRequest`, `ProcessResultsResponse`,
   `QueryResult`, `QueryResultItem`, and `QueryResultItemType` messages.
 - **Proto envelope reshape.** `QueryResultItem` is now
-  `{ item_type, row_signature, before, after }`:
+  `{ item_type, row_signature, before, after, sequence }`:
   - Removed the string `type` field and the `data` field. `data` was a
     duplicate of `after` / `before` for ADD/UPDATE/DELETE; on the wire
     the row state is carried directly by `before` and `after`.
@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `type`. Eliminates the prior `"ADD"` / `"aggregation"` casing
     inconsistency on the wire.
   - Added `row_signature` (uint64) as a first-class field on every item.
+  - Added `sequence` (uint64) — the monotonic per-query emission number
+    of the originating `QueryResult`, carried per item so receivers can
+    order or de-duplicate.
   - `before` and `after` carry the row state on either side of the
     change: `ADD` → only `after`; `DELETE` → only `before`; `UPDATE`
     → both.
@@ -48,14 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The `updated` template runs **twice**, independently, for UPDATE —
     once with the before-row → `before`, once with the after-row →
     `after`. Aggregation reuses the same path.
-  - New template context variables: `row` (the row being rendered),
-    `query_id`, `operation`, `side` (`"before"` or `"after"`). The
-    previous `before` / `after` / `data` context variables are removed.
+  - Template context variables: the standard cross-reaction keys
+    `query_id`, `query_name`, `operation`, `timestamp`, `metadata`,
+    `before`, `after`, `data`, plus the reaction-specific `row` (the row
+    being rendered) and `side` (`"before"` or `"after"`). Templates
+    written with the portable keys (e.g. `{{after.id}}`) work unchanged.
   - Render failure (template parse error, non-JSON output, missing
     field) falls back to the **raw row state** for that field. Events
     are never dropped.
 - **`config_version` bumps from `2.0.0` to `3.0.0`** and the crate
-  version bumps to `0.5.0`. Receivers compiled against the prior schema
+  version bumps to `0.4.0`. Receivers compiled against the prior schema
   must regenerate their stubs.
 - **Configured `metadata` is now also propagated as gRPC request
   headers.** Previously the configured `metadata` map only populated
@@ -75,6 +80,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template specs. Rendered output replaces the raw row content in the
   corresponding `before` / `after` field; render failures fall back to the
   raw row state.
+- Output templates are **validated at construction** — every template is
+  compiled and every route key is checked against the subscribed query list, so
+  a misconfiguration fails at `build()` instead of per-event at dispatch.
+- Template route resolution falls back to the **last dotted segment** of the
+  wire query id, so a route keyed `my_query` matches a wire id `source.my_query`.
+- `metadata` values accept `ConfigValue<String>` via descriptor config, so
+  authentication headers can reference environment variables or secrets resolved
+  at construction time.
 - New typed builder API (`GrpcReaction::builder(...)`) with
   `with_fixed_batching`, `with_adaptive_batching`, `with_output_templates`,
   per-field adaptive setters (`with_min_batch_size`, `with_max_batch_size`,
@@ -87,15 +100,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Miscellaneous Tasks
 
 - Refreshed copyright headers to 2026.
-- Expanded `src/tests.rs` and `src/templates.rs` test coverage with
-  per-op raw-vs-templated assertions, UPDATE both-sides-rendered
-  assertions, Aggregation-as-UPDATE assertion, Noop-unreachable
-  contract pin, exact-id routing regression guard, and `row_signature`
+- Expanded `src/tests.rs`, `src/config.rs`, and `src/templates.rs` test
+  coverage with per-op raw-vs-templated assertions, UPDATE
+  both-sides-rendered assertions, Aggregation-as-UPDATE assertion, a
+  Noop-returns-None contract, route resolution (exact / dotted-suffix /
+  default), template-validation success and failure cases,
+  standard-context-key assertions, and `row_signature` / `sequence`
   propagation tests.
-- Added `tests/mock_server.rs` and `tests/integration_tests.rs` with 14
-  end-to-end scenarios that push real `QueryResult` events through the
-  reaction to an in-process tonic mock `ReactionService`, asserting
-  exact wire shape of every `QueryResultItem` plus gRPC headers.
+- Added `tests/mock_server.rs`, `tests/mock_source.rs`, and
+  `tests/integration_tests.rs` with end-to-end scenarios that push real
+  `QueryResult` events through the reaction to an in-process tonic mock
+  `ReactionService` (asserting exact wire shape of every
+  `QueryResultItem` plus gRPC headers and `sequence`), descriptor-resolved
+  `ConfigValue` metadata, and a full `DrasiLib` source → query → reaction
+  path.
 - Unified `drasi-reaction-grpc` and the previously separate
   `drasi-reaction-grpc-adaptive` crate into a single reaction. The
   `grpc-adaptive` crate has been removed from the workspace.

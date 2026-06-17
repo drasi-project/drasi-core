@@ -26,18 +26,21 @@
 //!    propagated as gRPC headers.
 
 mod mock_server;
+mod mock_source;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use drasi_lib::channels::{QueryResult, ResultDiff};
 use drasi_lib::reactions::common::{AdaptiveBatchConfig, QueryConfig, TemplateSpec};
-use drasi_lib::Reaction;
+use drasi_lib::{DrasiLib, Query, Reaction};
 use drasi_reaction_grpc::{GrpcReaction, OutputTemplates};
 use serde_json::json;
 
 use crate::mock_server::struct_to_json;
+use crate::mock_source::{MockSource, PropertyMapBuilder};
 
 // Mirrors of the prost-generated QueryResultItemType numeric tags so
 // integration assertions don't need to import generated proto code.
@@ -85,6 +88,16 @@ fn aggregation(
 
 fn make_query_result(query_id: &str, diffs: Vec<ResultDiff>) -> QueryResult {
     QueryResult::new(query_id.to_string(), 0, Utc::now(), diffs, HashMap::new())
+}
+
+fn make_query_result_seq(query_id: &str, sequence: u64, diffs: Vec<ResultDiff>) -> QueryResult {
+    QueryResult::new(
+        query_id.to_string(),
+        sequence,
+        Utc::now(),
+        diffs,
+        HashMap::new(),
+    )
 }
 
 fn template_added(template: &str) -> QueryConfig {
@@ -447,10 +460,7 @@ async fn fixed_template_render_failure_falls_back_to_raw_row_state() {
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result(
-            "q1",
-            vec![add(json!({"id": 99}), 0)],
-        ))
+        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 99}), 0)]))
         .await
         .expect("enqueue");
 
@@ -458,7 +468,10 @@ async fn fixed_template_render_failure_falls_back_to_raw_row_state() {
         .recorder
         .wait_for_items(1, Duration::from_secs(5))
         .await;
-    assert_eq!(total, 1, "event must still be delivered after render failure");
+    assert_eq!(
+        total, 1,
+        "event must still be delivered after render failure"
+    );
 
     let batches = server.recorder.batches().await;
     let item = &batches[0].items[0];
@@ -541,11 +554,7 @@ async fn noop_results_are_not_emitted_on_the_wire() {
     reaction
         .enqueue_query_result(make_query_result(
             "q1",
-            vec![
-                ResultDiff::Noop,
-                add(json!({"id": 1}), 0),
-                ResultDiff::Noop,
-            ],
+            vec![ResultDiff::Noop, add(json!({"id": 1}), 0), ResultDiff::Noop],
         ))
         .await
         .expect("enqueue");
@@ -586,10 +595,7 @@ async fn metadata_is_propagated_as_grpc_headers_end_to_end() {
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result(
-            "q1",
-            vec![add(json!({"id": 1}), 0)],
-        ))
+        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 0)]))
         .await
         .expect("enqueue");
 
@@ -613,6 +619,128 @@ async fn metadata_is_propagated_as_grpc_headers_end_to_end() {
 }
 
 // ---------------------------------------------------------------------------
+// Sequence, portable template keys, and descriptor secret resolution
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sequence_is_propagated_on_the_wire() {
+    let server = mock_server::start().await;
+    let reaction = GrpcReaction::builder("test-seq")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        .with_fixed_batching(1, 10_000)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result_seq(
+            "q1",
+            777,
+            vec![add(json!({"id": 1}), 9)],
+        ))
+        .await
+        .expect("enqueue");
+
+    server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(5))
+        .await;
+    let batches = server.recorder.batches().await;
+    let item = &batches[0].items[0];
+    assert_eq!(item.sequence, 777, "item must carry the emission sequence");
+    assert_eq!(item.row_signature, 9);
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn template_uses_portable_standard_keys_end_to_end() {
+    // Templates written with the portable cross-reaction keys
+    // (`{{after.id}}`, `{{operation}}`) render correctly here too.
+    let server = mock_server::start().await;
+    let templates = OutputTemplates {
+        default_template: Some(template_added(
+            r#"{"id":"{{after.id}}","op":"{{operation}}"}"#,
+        )),
+        routes: HashMap::new(),
+    };
+    let reaction = GrpcReaction::builder("test-portable")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        .with_fixed_batching(1, 10_000)
+        .with_output_templates(templates)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": "abc"}), 0)]))
+        .await
+        .expect("enqueue");
+
+    server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(5))
+        .await;
+    let batches = server.recorder.batches().await;
+    let item = &batches[0].items[0];
+    assert_eq!(
+        item.after.as_ref().map(struct_to_json),
+        Some(json!({"id": "abc", "op": "ADD"})),
+        "portable `after`/`operation` template keys must render"
+    );
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn descriptor_resolves_metadata_config_value_to_header() {
+    use drasi_plugin_sdk::prelude::ReactionPluginDescriptor;
+    use drasi_reaction_grpc::descriptor::GrpcReactionDescriptor;
+
+    std::env::set_var("GRPC_IT_METADATA_TOKEN", "Bearer resolved-9");
+    let server = mock_server::start().await;
+    let cfg = json!({
+        "endpoint": server.endpoint.clone(),
+        "batching": { "mode": "fixed", "batchSize": 1, "batchFlushTimeoutMs": 10000 },
+        "metadata": {
+            "authorization": { "kind": "EnvironmentVariable", "name": "GRPC_IT_METADATA_TOKEN" }
+        }
+    });
+    let descriptor = GrpcReactionDescriptor;
+    let reaction = descriptor
+        .create_reaction("test-desc-meta", vec!["q1".into()], &cfg, true)
+        .await
+        .expect("create_reaction resolves metadata ConfigValues");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 0)]))
+        .await
+        .expect("enqueue");
+
+    server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(5))
+        .await;
+    let batches = server.recorder.batches().await;
+    assert_eq!(
+        batches[0]
+            .metadata_headers
+            .get("authorization")
+            .map(String::as_str),
+        Some("Bearer resolved-9"),
+        "env-var metadata ConfigValue must resolve and ride as a gRPC header"
+    );
+
+    reaction.stop().await.expect("stop");
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
 // Adaptive batching
 // ---------------------------------------------------------------------------
 
@@ -632,10 +760,7 @@ async fn adaptive_delivers_steady_load() {
     for i in 0..10 {
         let q = if i % 2 == 0 { "q1" } else { "q2" };
         reaction
-            .enqueue_query_result(make_query_result(
-                q,
-                vec![add(json!({"id": i}), i as u64)],
-            ))
+            .enqueue_query_result(make_query_result(q, vec![add(json!({"id": i}), i as u64)]))
             .await
             .expect("enqueue");
     }
@@ -681,10 +806,7 @@ async fn adaptive_flushes_buffered_batch_on_shutdown_drain() {
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result(
-            "q1",
-            vec![add(json!({"id": 1}), 0)],
-        ))
+        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 0)]))
         .await
         .expect("enqueue");
 
@@ -729,10 +851,7 @@ async fn adaptive_shutdown_completes_within_bounded_window() {
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result(
-            "q1",
-            vec![add(json!({"id": 1}), 0)],
-        ))
+        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 0)]))
         .await
         .expect("enqueue");
 
@@ -749,5 +868,78 @@ async fn adaptive_shutdown_completes_within_bounded_window() {
         "stop() must complete promptly; took {stop_elapsed:?}"
     );
 
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end through DrasiLib (source -> query -> reaction)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn end_to_end_through_drasilib_delivers_to_grpc_server() {
+    // Wire a mock source, a Cypher query, and the gRPC reaction through
+    // `DrasiLib::builder()` so the runtime owns the query subscription, then
+    // assert the change reaches the downstream gRPC server.
+    let server = mock_server::start().await;
+    let (mock_source, handle) = MockSource::new("e2e-source").expect("mock source");
+
+    let query = Query::cypher("e2e-query")
+        .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+        .from_source("e2e-source")
+        .auto_start(true)
+        .build();
+
+    let reaction = GrpcReaction::builder("e2e-grpc")
+        .with_endpoint(server.endpoint.clone())
+        .from_query("e2e-query")
+        .with_fixed_batching(1, 500)
+        .build()
+        .expect("reaction builder");
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("e2e-core")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .build()
+            .await
+            .expect("build core"),
+    );
+    core.start().await.expect("start core");
+
+    // Let the runtime wire up the query subscription before emitting.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let props = PropertyMapBuilder::new()
+        .with_string("name", "Alice")
+        .with_integer("age", 30)
+        .build();
+    handle
+        .send_node_insert("person-1", vec!["Person"], props)
+        .await
+        .expect("send node insert");
+
+    let total = server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(10))
+        .await;
+    assert_eq!(total, 1, "expected one item delivered through DrasiLib");
+
+    let batches = server.recorder.batches().await;
+    let item = &batches[0].items[0];
+    assert_eq!(item.item_type, ITEM_TYPE_ADD);
+    let after = item
+        .after
+        .as_ref()
+        .map(struct_to_json)
+        .expect("ADD carries the row in `after`");
+    assert_eq!(
+        after.get("name"),
+        Some(&json!("Alice")),
+        "the query result row must reach the gRPC server"
+    );
+
+    core.stop().await.expect("stop core");
     server.shutdown().await;
 }

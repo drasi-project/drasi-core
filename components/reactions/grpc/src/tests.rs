@@ -248,6 +248,96 @@ async fn test_descriptor_creates_reaction_with_templates() {
     assert_eq!(reaction.id(), "test-id");
 }
 
+#[test]
+fn test_from_query_alias_appends_queries() {
+    let reaction = GrpcReaction::builder("t")
+        .from_query("q1")
+        .from_query("q2")
+        .build()
+        .unwrap();
+    assert_eq!(
+        reaction.query_ids(),
+        vec!["q1".to_string(), "q2".to_string()]
+    );
+}
+
+#[test]
+fn test_builder_rejects_invalid_template_at_construction() {
+    use crate::config::OutputTemplates;
+    use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
+
+    let templates = OutputTemplates {
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("{{")),
+            ..Default::default()
+        }),
+        routes: std::collections::HashMap::new(),
+    };
+    let err = match GrpcReaction::builder("t")
+        .with_query("q1")
+        .with_output_templates(templates)
+        .build()
+    {
+        Ok(_) => panic!("expected build to reject the invalid template"),
+        Err(e) => e,
+    };
+    assert!(
+        format!("{err:#}").contains("template"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn test_builder_rejects_unknown_route_key_at_construction() {
+    use crate::config::OutputTemplates;
+    use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
+
+    let mut routes = std::collections::HashMap::new();
+    routes.insert(
+        "not-subscribed".to_string(),
+        QueryConfig {
+            added: Some(TemplateSpec::new(r#"{"id":"{{after.id}}"}"#)),
+            ..Default::default()
+        },
+    );
+    let templates = OutputTemplates {
+        default_template: None,
+        routes,
+    };
+    let err = match GrpcReaction::builder("t")
+        .with_query("q1")
+        .with_output_templates(templates)
+        .build()
+    {
+        Ok(_) => panic!("expected build to reject the unknown route key"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("not-subscribed"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_dto_metadata_accepts_static_and_env_config_values() {
+    use crate::descriptor::GrpcReactionConfigDto;
+
+    let cfg = json!({
+        "endpoint": "grpc://example:50052",
+        "metadata": {
+            "x-tenant": "tenant-9",
+            "authorization": { "kind": "EnvironmentVariable", "name": "SOME_TOKEN_ENV" }
+        }
+    });
+    let dto: GrpcReactionConfigDto = serde_json::from_value(cfg).unwrap();
+    assert_eq!(
+        dto.metadata.len(),
+        2,
+        "both metadata forms must deserialize"
+    );
+    assert!(dto.metadata.contains_key("authorization"));
+}
+
 /// Send-path and runner behavioral tests that exercise the gRPC client/runner
 /// loops against an in-process mock `ReactionService` server.
 mod integration {
@@ -272,6 +362,7 @@ mod integration {
             row_signature: 0,
             before: None,
             after: None,
+            sequence: 0,
         }
     }
 

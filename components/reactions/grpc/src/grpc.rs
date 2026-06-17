@@ -84,6 +84,12 @@ impl GrpcReaction {
     pub fn config(&self) -> &GrpcReactionConfig {
         &self.config
     }
+
+    /// Mutable access to the underlying [`ReactionBase`]. The dynamic-plugin
+    /// descriptor uses this to call `set_raw_config` after construction.
+    pub fn base_mut(&mut self) -> &mut ReactionBase {
+        &mut self.base
+    }
 }
 
 #[async_trait]
@@ -127,16 +133,18 @@ impl Reaction for GrpcReaction {
         );
 
         // Warn on a no-op `outputTemplates` block — present but with no
-        // default template and no routes. Items will emit with no `payload`
-        // field, which is the same outcome as omitting `outputTemplates`
-        // entirely; surface this so a misconfiguration doesn't silently
-        // disable the templating path. Non-fatal.
+        // default template and no routes. Items will emit carrying only the
+        // raw `before` / `after` row state, which is the same outcome as
+        // omitting `outputTemplates` entirely; surface this so a
+        // misconfiguration doesn't silently disable the templating path.
+        // Non-fatal.
         if let Some(ref t) = self.config.output_templates {
             if t.default_template.is_none() && t.routes.is_empty() {
                 log::warn!(
                     "[{}] `outputTemplates` is configured but contains no `defaultTemplate` and \
-                     no `routes` — reaction will emit items with no `payload` field. Either add \
-                     a template or omit the `outputTemplates` block entirely.",
+                     no `routes` — reaction will emit items carrying only the raw `before` / \
+                     `after` row state. Either add a template or omit the `outputTemplates` \
+                     block entirely.",
                     self.base.id
                 );
             }
@@ -146,12 +154,6 @@ impl Reaction for GrpcReaction {
             .set_status(
                 ComponentStatus::Starting,
                 Some("Starting gRPC reaction".to_string()),
-            )
-            .await;
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some("gRPC reaction started".to_string()),
             )
             .await;
 
@@ -188,19 +190,18 @@ impl Reaction for GrpcReaction {
         };
 
         self.base.set_processing_task(handle).await;
+
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("gRPC reaction started".to_string()),
+            )
+            .await;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        self.base.stop_common().await?;
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        self.base
-            .set_status(
-                ComponentStatus::Stopped,
-                Some("gRPC reaction stopped successfully".to_string()),
-            )
-            .await;
-        Ok(())
+        self.base.stop_common().await
     }
 
     async fn status(&self) -> ComponentStatus {

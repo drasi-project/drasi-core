@@ -19,7 +19,7 @@
 //! tests of the send/runner loops), this mock captures the **full**
 //! `ProtoQueryResultItem` for every received call, so integration tests
 //! can make wire-level assertions on `item_type`, `row_signature`,
-//! `before`, `after`, and `payload`.
+//! `before`, `after`, and `sequence`.
 //!
 //! ASCII gRPC metadata headers on the inbound request are also captured
 //! so tests can verify the D3 metadata-as-headers propagation.
@@ -46,6 +46,7 @@ pub struct RecordedItem {
     pub row_signature: u64,
     pub before: Option<Struct>,
     pub after: Option<Struct>,
+    pub sequence: u64,
 }
 
 /// One `ProcessResults` invocation, with full per-item detail and the
@@ -160,6 +161,7 @@ impl ReactionService for MockReactionService {
                 row_signature: it.row_signature,
                 before: it.before,
                 after: it.after,
+                sequence: it.sequence,
             })
             .collect();
         let item_count = items.len();

@@ -35,7 +35,7 @@ use crate::config::GrpcReactionConfig;
 use crate::connection::create_client_with_retry;
 use crate::proto::{ProtoQueryResultItem, ReactionServiceClient};
 use crate::send::send_batch_with_retry;
-use crate::templates::{build_proto_item, TemplateEngine};
+use crate::templates::{build_proto_item, QueryEmissionContext, TemplateEngine};
 
 pub(crate) struct AdaptiveRunnerParams {
     pub reaction_name: String,
@@ -236,6 +236,14 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
         }
         last_query_id = query_id.clone();
 
+        let timestamp = query_result.timestamp.to_rfc3339();
+        let emission = QueryEmissionContext {
+            query_id: &query_id,
+            sequence: query_result.sequence,
+            timestamp: &timestamp,
+            metadata: &query_result.metadata,
+        };
+
         for diff in &query_result.results {
             // Noop diffs are filtered at the runner so they never reach
             // the wire — matches the established Drasi convention
@@ -244,8 +252,11 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                 debug!("[{reaction_name}] Ignoring noop result");
                 continue;
             }
-            let proto_item =
-                build_proto_item(&cfg_for_loop, engine_for_loop.as_ref(), &query_id, diff);
+            let Some(proto_item) =
+                build_proto_item(&cfg_for_loop, engine_for_loop.as_ref(), &emission, diff)
+            else {
+                continue;
+            };
             current_batch.push(proto_item);
         }
 

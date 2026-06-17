@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-grpc"
-version = "0.3.4"
+version = "0.4.0"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "gRPC reaction plugin for Drasi (configurable fixed and adaptive batching, with Handlebars output templating)"
@@ -54,6 +54,7 @@ utoipa = { workspace = true }
 serde_yaml = "0.9"
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
 tokio-stream = { version = "0.1", features = ["net"] }
+drasi-core.workspace = true
 
 [build-dependencies]
 tonic-build = "0.11"

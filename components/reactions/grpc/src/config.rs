@@ -173,9 +173,50 @@ impl OutputTemplates {
         self.default_template.as_ref().is_some_and(has_nonempty)
             || self.routes.values().any(has_nonempty)
     }
+
+    /// Compile every configured template and check that every route key
+    /// matches a subscribed query id (or its last dotted segment). Called
+    /// at construction time so misconfiguration fails fast.
+    pub(crate) fn validate(&self, query_ids: &[String]) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        if let Some(qc) = self.default_template.as_ref() {
+            validate_query_config(qc).context("invalid defaultTemplate")?;
+        }
+        for (key, qc) in &self.routes {
+            validate_query_config(qc)
+                .with_context(|| format!("invalid outputTemplates route '{key}'"))?;
+            if !route_key_matches(key, query_ids) {
+                anyhow::bail!(
+                    "outputTemplates route key '{key}' does not match any subscribed query id \
+                     (or its last dotted segment)"
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
-/// Unified gRPC reaction configuration.
+/// Compile-check every template in a `QueryConfig` (added / updated / deleted).
+fn validate_query_config(qc: &QueryConfig) -> anyhow::Result<()> {
+    for spec in [qc.added.as_ref(), qc.updated.as_ref(), qc.deleted.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        crate::templates::validate_template(&spec.template)?;
+    }
+    Ok(())
+}
+
+/// A route key is valid if it matches a subscribed query id exactly or
+/// matches the last dotted segment of one (the `source.my_query` → `my_query`
+/// fallback used during resolution).
+fn route_key_matches(key: &str, query_ids: &[String]) -> bool {
+    query_ids
+        .iter()
+        .any(|q| q == key || q.rsplit('.').next() == Some(key))
+}
+
+/// gRPC reaction configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GrpcReactionConfig {
@@ -219,6 +260,19 @@ impl Default for GrpcReactionConfig {
     }
 }
 
+impl GrpcReactionConfig {
+    /// Validate the configuration at construction time. Compiles every
+    /// output template and checks that every route key matches a subscribed
+    /// query id (or its last dotted segment), so a misconfiguration fails at
+    /// `build()` rather than per-event at dispatch.
+    pub fn validate(&self, query_ids: &[String]) -> anyhow::Result<()> {
+        if let Some(templates) = self.output_templates.as_ref() {
+            templates.validate(query_ids)?;
+        }
+        Ok(())
+    }
+}
+
 fn empty_routes() -> &'static HashMap<String, QueryConfig> {
     static EMPTY: std::sync::OnceLock<HashMap<String, QueryConfig>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
@@ -236,5 +290,96 @@ impl TemplateRouting<()> for GrpcReactionConfig {
         self.output_templates
             .as_ref()
             .and_then(|t| t.default_template.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
+
+    fn with_templates(
+        default: Option<QueryConfig>,
+        routes: HashMap<String, QueryConfig>,
+    ) -> GrpcReactionConfig {
+        GrpcReactionConfig {
+            output_templates: Some(OutputTemplates {
+                default_template: default,
+                routes,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn qc_added(template: &str) -> QueryConfig {
+        QueryConfig {
+            added: Some(TemplateSpec::new(template)),
+            updated: None,
+            deleted: None,
+        }
+    }
+
+    #[test]
+    fn validate_is_noop_without_templates() {
+        GrpcReactionConfig::default().validate(&[]).unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_valid_default_template() {
+        let cfg = with_templates(Some(qc_added(r#"{"id":"{{after.id}}"}"#)), HashMap::new());
+        cfg.validate(&["q1".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_invalid_template_syntax() {
+        let cfg = with_templates(Some(qc_added("{{")), HashMap::new());
+        let err = cfg.validate(&["q1".to_string()]).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("defaultTemplate") && msg.contains("template"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_route_key_matching_query_id() {
+        let mut routes = HashMap::new();
+        routes.insert("q1".to_string(), qc_added(r#"{"id":"{{after.id}}"}"#));
+        with_templates(None, routes)
+            .validate(&["q1".to_string()])
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_route_key_matching_last_dotted_segment() {
+        let mut routes = HashMap::new();
+        routes.insert("orders".to_string(), qc_added(r#"{"id":"{{after.id}}"}"#));
+        with_templates(None, routes)
+            .validate(&["source.orders".to_string()])
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_route_key_not_matching_any_query() {
+        let mut routes = HashMap::new();
+        routes.insert("ghost".to_string(), qc_added(r#"{"id":"{{after.id}}"}"#));
+        let err = with_templates(None, routes)
+            .validate(&["q1".to_string()])
+            .unwrap_err();
+        assert!(err.to_string().contains("ghost"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_route_template() {
+        let mut routes = HashMap::new();
+        routes.insert("q1".to_string(), qc_added("{{#if}}"));
+        let err = with_templates(None, routes)
+            .validate(&["q1".to_string()])
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("q1") && msg.contains("template"),
+            "unexpected error: {msg}"
+        );
     }
 }

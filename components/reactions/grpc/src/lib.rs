@@ -20,8 +20,9 @@
 //! the `ReactionService.ProcessResults` RPC, either with **fixed-size
 //! batching** (default) or **adaptive batching** that scales batch size with
 //! observed throughput. An optional Handlebars-based output template engine
-//! can reshape each result into a user-defined `payload` while always
-//! preserving the raw `before` / `after` row state on the wire.
+//! can reshape the row content emitted in the `before` / `after` fields; when
+//! no template applies (or a render fails) the raw row state is sent on the
+//! wire unchanged so receivers always recover the change.
 
 pub(crate) mod adaptive_batcher;
 pub mod config;
@@ -71,6 +72,13 @@ impl GrpcReactionBuilder {
     }
 
     pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
+        self.queries.push(query_id.into());
+        self
+    }
+
+    /// Alias of [`with_query`](Self::with_query); reads naturally at call
+    /// sites (e.g. `…from_query("orders")…`).
+    pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
         self.queries.push(query_id.into());
         self
     }
@@ -219,6 +227,7 @@ impl GrpcReactionBuilder {
     }
 
     pub fn build(self) -> anyhow::Result<GrpcReaction> {
+        self.config.validate(&self.queries)?;
         Ok(GrpcReaction::from_builder(
             self.id,
             self.queries,

@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Shared `send_batch_with_retry` helper used by both batching modes.
+//! Shared `send_batch_with_retry` helper used by both batching runners.
 //!
-//! Extracted verbatim from the previous `GrpcReaction::send_batch_with_retry`
-//! implementation so the fixed and adaptive runners share the same robust
-//! retry / connection-recovery semantics.
+//! Owns the retry and connection-recovery semantics so the fixed and adaptive
+//! runners deliver batches the same way.
 
 use std::collections::HashMap;
 use std::time::Duration;

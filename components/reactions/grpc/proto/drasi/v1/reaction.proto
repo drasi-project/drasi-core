@@ -90,9 +90,16 @@ enum QueryResultItemType {
 // field. When no template is configured or rendering fails for a
 // given side, that field carries the raw row state. Events are never
 // dropped because of a render failure.
+//
+// `sequence` is the monotonic per-query emission number of the
+// `QueryResult` this item originated from. Because one
+// `ProcessResultsRequest` may coalesce items from several emissions of
+// the same query, the sequence is carried per item rather than on the
+// envelope. Receivers can use it to order or de-duplicate emissions.
 message QueryResultItem {
     QueryResultItemType item_type = 1;
     uint64 row_signature = 2;
     google.protobuf.Struct before = 3;
     google.protobuf.Struct after  = 4;
+    uint64 sequence = 5;
 }

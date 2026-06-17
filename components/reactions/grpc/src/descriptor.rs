@@ -112,7 +112,7 @@ pub struct GrpcReactionConfigDto {
     pub initial_connection_timeout_ms: Option<ConfigValue<u64>>,
 
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub metadata: HashMap<String, String>,
+    pub metadata: HashMap<String, ConfigValue<String>>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batching: Option<BatchingConfigDto>,
@@ -131,7 +131,11 @@ impl From<&GrpcReactionConfig> for GrpcReactionConfigDto {
             initial_connection_timeout_ms: Some(ConfigValue::Static(
                 cfg.initial_connection_timeout_ms,
             )),
-            metadata: cfg.metadata.clone(),
+            metadata: cfg
+                .metadata
+                .iter()
+                .map(|(k, v)| (k.clone(), ConfigValue::Static(v.clone())))
+                .collect(),
             batching: Some(BatchingConfigDto::from(&cfg.batching)),
             output_templates: cfg.output_templates.as_ref().map(OutputTemplatesDto::from),
         }
@@ -313,7 +317,7 @@ impl ReactionPluginDescriptor for GrpcReactionDescriptor {
             builder = builder.with_initial_connection_timeout_ms(mapper.resolve_typed(v).await?);
         }
         for (key, value) in &dto.metadata {
-            builder = builder.with_metadata(key, value);
+            builder = builder.with_metadata(key, mapper.resolve_string(value).await?);
         }
 
         if let Some(ref batching) = dto.batching {
@@ -326,7 +330,7 @@ impl ReactionPluginDescriptor for GrpcReactionDescriptor {
         }
 
         let mut reaction = builder.build()?;
-        reaction.base.set_raw_config(config_json.clone());
+        reaction.base_mut().set_raw_config(config_json.clone());
 
         Ok(Box::new(reaction))
     }

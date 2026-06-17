@@ -179,7 +179,7 @@ drasi-source-hyperliquid = { version = "0.1.3", path = "components/sources/hyper
 drasi-source-cloudflare-radar = { version = "0.1.2", path = "components/sources/cloudflare-radar" }
 drasi-bootstrap-application = { version = "0.2.7", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.2.4", path = "components/reactions/http" }
-drasi-reaction-grpc = { version = "0.3.4", path = "components/reactions/grpc" }
+drasi-reaction-grpc = { version = "0.4.0", path = "components/reactions/grpc" }
 drasi-reaction-file = { version = "0.1.0", path = "components/reactions/file" }
 drasi-reaction-aws-sqs = { version = "0.1.0", path = "components/reactions/aws-sqs" }
 drasi-mssql-common = { version = "0.2.5", path = "components/mssql-common" }
