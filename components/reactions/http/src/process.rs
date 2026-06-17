@@ -481,4 +481,20 @@ mod tests {
         assert_eq!(parse_http_method("").unwrap(), Method::POST);
         assert!(parse_http_method("nonsense").is_err());
     }
+
+    #[test]
+    fn retryable_status_classification() {
+        for code in [500u16, 502, 503, 504, 408, 409, 425, 429] {
+            assert!(
+                is_retryable_status(StatusCode::from_u16(code).unwrap()),
+                "{code} should be retryable"
+            );
+        }
+        for code in [200u16, 201, 204, 400, 401, 403, 404, 422] {
+            assert!(
+                !is_retryable_status(StatusCode::from_u16(code).unwrap()),
+                "{code} should NOT be retryable"
+            );
+        }
+    }
 }

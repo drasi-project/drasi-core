@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use drasi_lib::channels::{QueryResult, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::Reaction;
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_http::{
@@ -1198,4 +1198,454 @@ async fn route_resolves_via_last_dotted_segment() {
         "/seg",
         "the segment-keyed route should have matched the dotted query id"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Standard mode: delivery failure handling, URL/header edges, multi-query
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn standard_retries_transient_failure_then_succeeds() {
+    let server = mock_server::start().await;
+    // First matching request gets 503 (retryable), then 200.
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("retry-then-ok")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    wait_for_requests(&server, 2, 3000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs.len(),
+        2,
+        "one failed (503) attempt followed by one successful retry"
+    );
+}
+
+#[tokio::test]
+async fn standard_drops_permanent_4xx_and_continues() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("perm-4xx")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    // Two separate events: a permanent 4xx must be dropped (not retried) and
+    // processing must continue to the next event.
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(&r, "q1", json!({"id": 2})).await;
+    wait_for_requests(&server, 2, 3000).await;
+    // Allow time for any (incorrect) retries to surface before asserting.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs.len(),
+        2,
+        "permanent 4xx must be attempted exactly once each (no retries)"
+    );
+    assert!(matches!(r.status().await, ComponentStatus::Running));
+    r.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn standard_absolute_url_matching_base_is_allowed() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/abs"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    // An absolute URL whose scheme/host/port match base_url is permitted.
+    let absolute = format!("{}/abs", server.uri());
+    let spec = TemplateSpec {
+        template: r#"{}"#.to_string(),
+        extension: HttpCallExt {
+            url: absolute,
+            method: "POST".to_string(),
+            headers: HashMap::new(),
+        },
+    };
+    let r = Arc::new(
+        HttpReaction::builder("abs-ok")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_query_template(
+                "q1",
+                HttpQueryConfig {
+                    added: Some(spec),
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].url.path(), "/abs");
+}
+
+#[tokio::test]
+async fn standard_url_render_failure_falls_back_to_changes_endpoint() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    // The URL template references an unregistered helper → render fails at
+    // dispatch → the reaction falls back to POST /changes/{query}.
+    let spec = TemplateSpec {
+        template: r#"{}"#.to_string(),
+        extension: HttpCallExt {
+            url: "/items/{{badhelper after.id}}".to_string(),
+            method: "POST".to_string(),
+            headers: HashMap::new(),
+        },
+    };
+    let r = Arc::new(
+        HttpReaction::builder("url-fallback")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_query_template(
+                "q1",
+                HttpQueryConfig {
+                    added: Some(spec),
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(reqs[0].url.path(), "/changes/q1");
+}
+
+#[tokio::test]
+async fn standard_header_render_failure_drops_only_that_header() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/h"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let mut headers = HashMap::new();
+    headers.insert("X-Good".to_string(), "static-value".to_string());
+    headers.insert("X-Bad".to_string(), "{{badhelper after.id}}".to_string());
+    let spec = TemplateSpec {
+        template: r#"{}"#.to_string(),
+        extension: HttpCallExt {
+            url: "/h".to_string(),
+            method: "POST".to_string(),
+            headers,
+        },
+    };
+    let r = Arc::new(
+        HttpReaction::builder("hdr-drop")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_query_template(
+                "q1",
+                HttpQueryConfig {
+                    added: Some(spec),
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs[0].headers.get("x-good").map(|v| v.to_str().unwrap()),
+        Some("static-value")
+    );
+    assert!(
+        reqs[0].headers.get("x-bad").is_none(),
+        "the header whose template failed must be dropped, others kept"
+    );
+}
+
+#[tokio::test]
+async fn standard_routes_two_queries_to_distinct_endpoints() {
+    let server = mock_server::start().await;
+    for p in ["/orders", "/shipments"] {
+        Mock::given(method("POST"))
+            .and(path(p))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+    }
+
+    let route = |url: &str| HttpQueryConfig {
+        added: Some(TemplateSpec {
+            template: r#"{}"#.to_string(),
+            extension: HttpCallExt {
+                url: url.to_string(),
+                method: "POST".to_string(),
+                headers: HashMap::new(),
+            },
+        }),
+        ..Default::default()
+    };
+    let r = Arc::new(
+        HttpReaction::builder("multi-route")
+            .with_base_url(server.uri())
+            .with_query("orders")
+            .with_query("shipments")
+            .with_query_template("orders", route("/orders"))
+            .with_query_template("shipments", route("/shipments"))
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "orders", json!({"id": 1})).await;
+    enqueue_add(&r, "shipments", json!({"id": 2})).await;
+    wait_for_requests(&server, 2, 3000).await;
+    r.stop().await.unwrap();
+
+    let paths: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_string())
+        .collect();
+    assert!(paths.contains(&"/orders".to_string()), "got {paths:?}");
+    assert!(paths.contains(&"/shipments".to_string()), "got {paths:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive mode: auth, batch-size cap, end-to-end through DrasiLib
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn adaptive_sends_bearer_token_on_batch() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/batch"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("adaptive-auth")
+            .with_base_url(server.uri())
+            .with_token("sk-123")
+            .with_query("q1")
+            .with_adaptive(AdaptiveBatchConfig {
+                adaptive_min_batch_size: 1,
+                adaptive_max_batch_size: 16,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 100,
+            })
+            .with_batch_endpoint("/batch")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    wait_for_requests(&server, 1, 3000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs[0]
+            .headers
+            .get("authorization")
+            .map(|v| v.to_str().unwrap()),
+        Some("Bearer sk-123")
+    );
+}
+
+#[tokio::test]
+async fn adaptive_never_exceeds_max_batch_size() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/batch"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("adaptive-cap")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_adaptive(AdaptiveBatchConfig {
+                adaptive_min_batch_size: 1,
+                adaptive_max_batch_size: 2,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 50,
+            })
+            .with_batch_endpoint("/batch")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    // One QueryResult expands to 5 items; with max_batch_size = 2 they must be
+    // split across multiple batches, none larger than 2.
+    let qr = make_query_result(
+        "q1",
+        (0..5)
+            .map(|i| ResultDiff::Add {
+                data: json!({ "id": i }),
+                row_signature: 0,
+            })
+            .collect(),
+    );
+    r.enqueue_query_result(qr).await.expect("enqueue");
+
+    // Wait until all 5 items have been delivered across batches.
+    let deadline = std::time::Instant::now() + Duration::from_millis(3000);
+    loop {
+        let delivered: usize = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|req| serde_json::from_slice::<serde_json::Value>(&req.body).ok())
+            .filter_map(|b| b.get("batch").and_then(|x| x.as_array()).map(|a| a.len()))
+            .sum();
+        if delivered >= 5 {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("timed out waiting for 5 items; delivered {delivered}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    let mut total = 0usize;
+    for req in &reqs {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        let batch = body.get("batch").and_then(|b| b.as_array()).unwrap();
+        assert!(
+            batch.len() <= 2,
+            "no batch may exceed adaptive_max_batch_size = 2 (saw {})",
+            batch.len()
+        );
+        total += batch.len();
+    }
+    assert_eq!(total, 5, "every item must be delivered exactly once");
+}
+
+#[tokio::test]
+async fn adaptive_end_to_end_through_drasilib_delivers_batch() -> Result<()> {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/batch"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let (mock_source, handle) = MockSource::new("batch-source")?;
+    let query = Query::cypher("people-query")
+        .query(
+            r#"
+            MATCH (p:Person)
+            RETURN p.name AS name, p.age AS age
+            "#,
+        )
+        .from_source("batch-source")
+        .auto_start(true)
+        .build();
+    let reaction = HttpReaction::builder("http-batch-e2e")
+        .with_base_url(server.uri())
+        .with_query("people-query")
+        .with_adaptive(AdaptiveBatchConfig {
+            adaptive_min_batch_size: 1,
+            adaptive_max_batch_size: 16,
+            adaptive_window_size: 10,
+            adaptive_batch_timeout_ms: 100,
+        })
+        .with_batch_endpoint("/batch")
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("http-batch-e2e-core")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let props = PropertyMapBuilder::new()
+        .with_string("name", "Grace")
+        .with_integer("age", 45)
+        .build();
+    handle
+        .send_node_insert("person-1", vec!["Person"], props)
+        .await?;
+
+    wait_for_requests(&server, 1, 5000).await;
+    core.stop().await?;
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs[0].url.path(), "/batch");
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    let batch = body
+        .get("batch")
+        .and_then(|b| b.as_array())
+        .expect("Pattern C batch container");
+    assert!(!batch.is_empty(), "batch must contain the delivered change");
+    assert_eq!(batch[0].get("operation"), Some(&json!("ADD")));
+    assert_eq!(batch[0].get("queryId"), Some(&json!("people-query")));
+    assert_eq!(
+        batch[0].get("after").and_then(|a| a.get("name")),
+        Some(&json!("Grace"))
+    );
+    Ok(())
 }

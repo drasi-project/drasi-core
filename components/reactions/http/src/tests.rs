@@ -16,12 +16,13 @@
 
 use std::collections::HashMap;
 
-use drasi_lib::channels::{QueryResult, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
+use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::Reaction;
 
 use crate::config::{
-    AdaptiveBatchConfig, HttpCallExt, HttpOutputTemplates, HttpQueryConfig, HttpReactionConfig,
-    OperationType, TemplateRouting, TemplateSpec,
+    resolve_http_url, AdaptiveBatchConfig, HttpCallExt, HttpOutputTemplates, HttpQueryConfig,
+    HttpReactionConfig, OperationType, TemplateRouting, TemplateSpec,
 };
 use crate::output::DefaultChangeNotification;
 use crate::process::{build_handlebars, render_batch_item};
@@ -866,4 +867,585 @@ fn render_batch_item_falls_back_when_template_renders_invalid_json() {
     let item = render_batch_item(&hb, &cfg, &n, "r");
     assert_eq!(item.get("operation"), Some(&serde_json::json!("ADD")));
     assert_eq!(item.get("after"), Some(&serde_json::json!({"id": "x"})));
+}
+
+#[test]
+fn render_batch_item_resolves_default_template_and_last_segment() {
+    // Default template applies when no route matches.
+    let cfg = cfg_with_routes(
+        Some(added_template(r#"{"d":"{{after.id}}"}"#)),
+        HashMap::new(),
+    );
+    let n = add_notification("src.q1", 1, serde_json::json!({"id": "z"}));
+    let hb = build_handlebars();
+    assert_eq!(
+        render_batch_item(&hb, &cfg, &n, "r"),
+        serde_json::json!({"d": "z"})
+    );
+
+    // A route keyed by the last dotted segment is used for a dotted query id.
+    let cfg = cfg_with_routes(
+        None,
+        HashMap::from([(
+            "q1".to_string(),
+            added_template(r#"{"seg":"{{after.id}}"}"#),
+        )]),
+    );
+    assert_eq!(
+        render_batch_item(&hb, &cfg, &n, "r"),
+        serde_json::json!({"seg": "z"})
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HttpReactionConfig::validate — base URL branch coverage
+// ---------------------------------------------------------------------------
+
+fn cfg_with_base_url(base_url: &str) -> HttpReactionConfig {
+    HttpReactionConfig {
+        base_url: base_url.to_string(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn validate_accepts_http_and_https_base_urls() {
+    assert!(cfg_with_base_url("http://localhost")
+        .validate(&[], None)
+        .is_ok());
+    assert!(cfg_with_base_url("https://api.example.com/v1")
+        .validate(&[], None)
+        .is_ok());
+}
+
+#[test]
+fn validate_rejects_non_http_scheme() {
+    let err = cfg_with_base_url("ftp://example.com")
+        .validate(&[], None)
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("baseUrl"), "{err:#}");
+}
+
+#[test]
+fn validate_rejects_base_url_with_query_string() {
+    assert!(cfg_with_base_url("http://localhost/p?x=1")
+        .validate(&[], None)
+        .is_err());
+}
+
+#[test]
+fn validate_rejects_base_url_with_fragment() {
+    assert!(cfg_with_base_url("http://localhost/p#frag")
+        .validate(&[], None)
+        .is_err());
+}
+
+#[test]
+fn validate_rejects_unparseable_base_url() {
+    assert!(cfg_with_base_url("not a url").validate(&[], None).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// HttpReactionConfig::validate — batch endpoint branch coverage
+// ---------------------------------------------------------------------------
+
+fn cfg_adaptive_with_batch(endpoint: &str) -> HttpReactionConfig {
+    HttpReactionConfig {
+        adaptive: Some(AdaptiveBatchConfig::default()),
+        batch_endpoint: Some(endpoint.to_string()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn validate_accepts_valid_batch_endpoint() {
+    assert!(cfg_adaptive_with_batch("/events/batch")
+        .validate(&[], None)
+        .is_ok());
+}
+
+#[test]
+fn validate_rejects_empty_batch_endpoint() {
+    assert!(cfg_adaptive_with_batch("").validate(&[], None).is_err());
+}
+
+#[test]
+fn validate_rejects_batch_endpoint_without_leading_slash() {
+    assert!(cfg_adaptive_with_batch("batch")
+        .validate(&[], None)
+        .is_err());
+}
+
+#[test]
+fn validate_rejects_batch_endpoint_with_double_slash() {
+    assert!(cfg_adaptive_with_batch("//batch")
+        .validate(&[], None)
+        .is_err());
+}
+
+#[test]
+fn validate_rejects_batch_endpoint_absolute_url() {
+    assert!(cfg_adaptive_with_batch("http://evil.example.com/batch")
+        .validate(&[], None)
+        .is_err());
+}
+
+#[test]
+fn validate_rejects_batch_endpoint_with_template() {
+    assert!(cfg_adaptive_with_batch("/batch/{{after.id}}")
+        .validate(&[], None)
+        .is_err());
+}
+
+// ---------------------------------------------------------------------------
+// HttpReactionConfig::validate — adaptive range branch coverage
+// ---------------------------------------------------------------------------
+
+fn cfg_with_adaptive(adaptive: AdaptiveBatchConfig) -> HttpReactionConfig {
+    HttpReactionConfig {
+        adaptive: Some(adaptive),
+        batch_endpoint: Some("/b".to_string()),
+        ..Default::default()
+    }
+}
+
+fn valid_adaptive() -> AdaptiveBatchConfig {
+    AdaptiveBatchConfig {
+        adaptive_min_batch_size: 1,
+        adaptive_max_batch_size: 100,
+        adaptive_window_size: 10,
+        adaptive_batch_timeout_ms: 1000,
+    }
+}
+
+#[test]
+fn validate_rejects_zero_min_batch_size() {
+    let a = AdaptiveBatchConfig {
+        adaptive_min_batch_size: 0,
+        ..valid_adaptive()
+    };
+    assert!(cfg_with_adaptive(a).validate(&[], None).is_err());
+}
+
+#[test]
+fn validate_rejects_zero_max_batch_size() {
+    let a = AdaptiveBatchConfig {
+        adaptive_max_batch_size: 0,
+        ..valid_adaptive()
+    };
+    assert!(cfg_with_adaptive(a).validate(&[], None).is_err());
+}
+
+#[test]
+fn validate_rejects_window_size_out_of_range() {
+    let zero = AdaptiveBatchConfig {
+        adaptive_window_size: 0,
+        ..valid_adaptive()
+    };
+    assert!(cfg_with_adaptive(zero).validate(&[], None).is_err());
+    let too_big = AdaptiveBatchConfig {
+        adaptive_window_size: 256,
+        ..valid_adaptive()
+    };
+    assert!(cfg_with_adaptive(too_big).validate(&[], None).is_err());
+}
+
+#[test]
+fn validate_accepts_window_size_boundaries() {
+    for w in [1usize, 255] {
+        let a = AdaptiveBatchConfig {
+            adaptive_window_size: w,
+            ..valid_adaptive()
+        };
+        assert!(
+            cfg_with_adaptive(a).validate(&[], None).is_ok(),
+            "window size {w} should be valid"
+        );
+    }
+}
+
+#[test]
+fn validate_rejects_zero_batch_timeout() {
+    let a = AdaptiveBatchConfig {
+        adaptive_batch_timeout_ms: 0,
+        ..valid_adaptive()
+    };
+    assert!(cfg_with_adaptive(a).validate(&[], None).is_err());
+}
+
+#[test]
+fn validate_rejects_invalid_url_template_in_route() {
+    let mut routes = HashMap::new();
+    routes.insert(
+        "q1".to_string(),
+        HttpQueryConfig {
+            added: Some(TemplateSpec {
+                template: String::new(),
+                extension: HttpCallExt {
+                    url: "/x/{{#if}}".to_string(), // unclosed block → compile error
+                    method: "POST".to_string(),
+                    headers: HashMap::new(),
+                },
+            }),
+            ..Default::default()
+        },
+    );
+    let cfg = cfg_with_routes(None, routes);
+    let err = cfg.validate(&["q1".to_string()], None).unwrap_err();
+    assert!(format!("{err:#}").contains("url"), "{err:#}");
+}
+
+// ---------------------------------------------------------------------------
+// resolve_http_url
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolve_http_url_appends_relative_path() {
+    assert_eq!(
+        resolve_http_url("http://host:8080", "/p/q").unwrap(),
+        "http://host:8080/p/q"
+    );
+}
+
+#[test]
+fn resolve_http_url_allows_absolute_url_matching_base() {
+    assert_eq!(
+        resolve_http_url("http://host:8080", "http://host:8080/p").unwrap(),
+        "http://host:8080/p"
+    );
+}
+
+#[test]
+fn resolve_http_url_rejects_mismatched_host() {
+    assert!(resolve_http_url("http://host:8080", "http://other:8080/p").is_err());
+}
+
+#[test]
+fn resolve_http_url_rejects_mismatched_scheme() {
+    assert!(resolve_http_url("http://host:8080", "https://host:8080/p").is_err());
+}
+
+#[test]
+fn resolve_http_url_rejects_mismatched_port() {
+    assert!(resolve_http_url("http://host:8080", "http://host:9090/p").is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Config serde: round-trips and partial adaptive defaults
+// ---------------------------------------------------------------------------
+
+#[test]
+fn config_json_round_trip_preserves_all_fields() {
+    let mut routes = HashMap::new();
+    routes.insert("q1".to_string(), added_template(r#"{"id":"{{after.id}}"}"#));
+    let cfg = HttpReactionConfig {
+        base_url: "https://api.example.com".to_string(),
+        token: Some("secret".to_string()),
+        timeout_ms: 1234,
+        output_templates: Some(HttpOutputTemplates {
+            default_template: Some(added_template("d")),
+            routes,
+        }),
+        adaptive: Some(valid_adaptive()),
+        batch_endpoint: Some("/b".to_string()),
+    };
+    let json = serde_json::to_value(&cfg).unwrap();
+    let back: HttpReactionConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(cfg, back);
+}
+
+#[test]
+fn adaptive_partial_config_fills_remaining_defaults() {
+    let json = serde_json::json!({
+        "baseUrl": "http://example.com",
+        "adaptive": { "adaptiveMaxBatchSize": 500 },
+        "batchEndpoint": "/b"
+    });
+    let c: HttpReactionConfig = serde_json::from_value(json).unwrap();
+    let a = c.adaptive.unwrap();
+    let d = AdaptiveBatchConfig::default();
+    assert_eq!(a.adaptive_max_batch_size, 500);
+    assert_eq!(a.adaptive_min_batch_size, d.adaptive_min_batch_size);
+    assert_eq!(a.adaptive_window_size, d.adaptive_window_size);
+    assert_eq!(a.adaptive_batch_timeout_ms, d.adaptive_batch_timeout_ms);
+}
+
+// ---------------------------------------------------------------------------
+// Builder API surface
+// ---------------------------------------------------------------------------
+
+#[test]
+fn builder_with_config_replaces_entire_config() {
+    let cfg = HttpReactionConfig {
+        base_url: "https://x.example.com".to_string(),
+        timeout_ms: 9999,
+        ..Default::default()
+    };
+    let r = HttpReaction::builder("r")
+        .with_query("q1")
+        .with_config(cfg)
+        .build()
+        .unwrap();
+    assert_eq!(r.config.base_url, "https://x.example.com");
+    assert_eq!(r.config.timeout_ms, 9999);
+}
+
+#[test]
+fn builder_with_default_template_appears_in_properties() {
+    let r = HttpReaction::builder("r")
+        .with_query("q1")
+        .with_default_template(added_template(r#"{"id":"{{after.id}}"}"#))
+        .build()
+        .unwrap();
+    let p = r.properties();
+    assert!(p
+        .get("outputTemplates")
+        .and_then(|t| t.get("defaultTemplate"))
+        .is_some());
+}
+
+#[test]
+fn builder_with_recovery_policy_builds() {
+    assert!(HttpReaction::builder("r")
+        .with_query("q1")
+        .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap)
+        .build()
+        .is_ok());
+}
+
+#[test]
+fn builder_with_priority_queue_capacity_builds() {
+    assert!(HttpReaction::builder("r")
+        .with_query("q1")
+        .with_priority_queue_capacity(250)
+        .build()
+        .is_ok());
+}
+
+#[test]
+fn auto_start_defaults_true_and_is_overridable() {
+    let on = HttpReaction::builder("r").with_query("q1").build().unwrap();
+    assert!(on.auto_start());
+    let off = HttpReaction::builder("r")
+        .with_query("q1")
+        .with_auto_start(false)
+        .build()
+        .unwrap();
+    assert!(!off.auto_start());
+}
+
+#[test]
+fn token_is_included_in_properties_for_persistence() {
+    let r = HttpReaction::builder("r")
+        .with_query("q1")
+        .with_token("sekret")
+        .build()
+        .unwrap();
+    assert_eq!(
+        r.properties().get("token"),
+        Some(&serde_json::Value::String("sekret".to_string()))
+    );
+}
+
+#[test]
+fn type_name_is_http() {
+    let r = HttpReaction::builder("r").with_query("q1").build().unwrap();
+    assert_eq!(r.type_name(), "http");
+}
+
+#[test]
+fn handlebars_json_helper_serializes_value() {
+    let hb = build_handlebars();
+    let ctx = serde_json::json!({ "after": { "id": 7, "name": "x" } });
+    let out = hb
+        .render_template(r#"{"row":{{json after}}}"#, &ctx)
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v, serde_json::json!({"row": {"id": 7, "name": "x"}}));
+}
+
+// ---------------------------------------------------------------------------
+// HttpReaction::new and start-time re-validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn new_constructs_without_validating() {
+    // An invalid base URL would fail build(); new() does not validate.
+    let cfg = HttpReactionConfig {
+        base_url: "ftp://nope".to_string(),
+        ..Default::default()
+    };
+    let r = HttpReaction::new("r", vec!["q1".to_string()], cfg);
+    assert_eq!(r.id(), "r");
+    assert_eq!(r.query_ids(), vec!["q1".to_string()]);
+}
+
+#[tokio::test]
+async fn start_revalidates_and_sets_error_on_invalid_config() {
+    let cfg = HttpReactionConfig {
+        base_url: "ftp://nope".to_string(),
+        ..Default::default()
+    };
+    let r = HttpReaction::new("r", vec!["q1".to_string()], cfg);
+    assert!(r.start().await.is_err(), "start must reject invalid config");
+    assert!(matches!(r.status().await, ComponentStatus::Error));
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle: idempotent stop, and full initialize → start → enqueue → stop
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn stop_is_safe_without_a_prior_start() {
+    let r = HttpReaction::builder("r")
+        .with_base_url("http://127.0.0.1:1")
+        .with_query("q1")
+        .build()
+        .unwrap();
+    r.stop().await.unwrap();
+    assert!(matches!(r.status().await, ComponentStatus::Stopped));
+}
+
+#[tokio::test]
+async fn stop_is_idempotent() {
+    let r = HttpReaction::builder("r")
+        .with_base_url("http://127.0.0.1:1")
+        .with_query("q1")
+        .build()
+        .unwrap();
+    r.start().await.unwrap();
+    r.stop().await.unwrap();
+    r.stop().await.unwrap();
+    assert!(matches!(r.status().await, ComponentStatus::Stopped));
+}
+
+#[tokio::test]
+async fn full_lifecycle_with_runtime_context() {
+    use drasi_lib::component_graph::ComponentUpdate;
+    use drasi_lib::context::ReactionRuntimeContext;
+    use tokio::sync::mpsc;
+
+    let r = HttpReaction::builder("rxn")
+        .with_base_url("http://127.0.0.1:1") // unreachable; delivery fails silently
+        .with_query("q1")
+        .build()
+        .unwrap();
+
+    let (tx, _rx) = mpsc::channel::<ComponentUpdate>(16);
+    let ctx = ReactionRuntimeContext::new("inst", "rxn", None, tx, None);
+    r.initialize(ctx).await;
+
+    r.start().await.unwrap();
+    assert!(matches!(r.status().await, ComponentStatus::Running));
+
+    let qr = QueryResult::new(
+        "q1".to_string(),
+        1,
+        chrono::Utc::now(),
+        vec![ResultDiff::Add {
+            data: serde_json::json!({"id": "x"}),
+            row_signature: 0,
+        }],
+        HashMap::new(),
+    );
+    r.enqueue_query_result(qr).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    r.stop().await.unwrap();
+    assert!(matches!(r.status().await, ComponentStatus::Stopped));
+}
+
+// ---------------------------------------------------------------------------
+// Descriptor: ConfigValue resolution, raw-config round-trip, mappings
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn descriptor_preserves_raw_config_for_lossless_properties() {
+    use drasi_plugin_sdk::ReactionPluginDescriptor;
+    let d = crate::descriptor::HttpReactionDescriptor;
+    let cfg = serde_json::json!({
+        "baseUrl": "http://example.com",
+        "token": "raw-secret",
+        "timeoutMs": 1500,
+        "priorityQueueCapacity": 250
+    });
+    let r = d
+        .create_reaction("r", vec!["q1".to_string()], &cfg, true)
+        .await
+        .unwrap();
+    let p = r.properties();
+    // properties() returns the raw config JSON verbatim (set_raw_config), so
+    // every field — including priorityQueueCapacity, which is not a config
+    // field — round-trips losslessly.
+    assert_eq!(
+        p.get("baseUrl"),
+        Some(&serde_json::json!("http://example.com"))
+    );
+    assert_eq!(p.get("token"), Some(&serde_json::json!("raw-secret")));
+    assert_eq!(p.get("timeoutMs"), Some(&serde_json::json!(1500)));
+    assert_eq!(
+        p.get("priorityQueueCapacity"),
+        Some(&serde_json::json!(250))
+    );
+}
+
+#[tokio::test]
+async fn descriptor_resolves_env_var_config_value_with_default() {
+    use drasi_plugin_sdk::ReactionPluginDescriptor;
+    let d = crate::descriptor::HttpReactionDescriptor;
+    // Unset env var with a default → resolves to the default and builds.
+    let cfg = serde_json::json!({
+        "baseUrl": "${DRASI_TEST_HTTP_BASE_UNSET:-https://resolved-default.example.com}"
+    });
+    let r = d
+        .create_reaction("r", vec!["q1".to_string()], &cfg, true)
+        .await;
+    assert!(
+        r.is_ok(),
+        "env-var ConfigValue with default must resolve: {:?}",
+        r.err()
+    );
+}
+
+#[tokio::test]
+async fn descriptor_creates_reaction_with_output_templates() {
+    use drasi_plugin_sdk::ReactionPluginDescriptor;
+    let d = crate::descriptor::HttpReactionDescriptor;
+    let cfg = serde_json::json!({
+        "baseUrl": "http://example.com",
+        "outputTemplates": {
+            "defaultTemplate": { "added": { "template": "{{after.id}}" } },
+            "routes": {
+                "q1": { "added": { "template": "{{after.id}}", "url": "/added", "method": "POST" } }
+            }
+        }
+    });
+    let r = d
+        .create_reaction("r", vec!["q1".to_string()], &cfg, true)
+        .await
+        .unwrap();
+    let p = r.properties();
+    let templates = p.get("outputTemplates").expect("outputTemplates present");
+    assert!(templates
+        .get("routes")
+        .and_then(|r| r.as_object())
+        .map(|o| o.contains_key("q1"))
+        .unwrap_or(false));
+    assert!(templates.get("defaultTemplate").is_some());
+}
+
+#[tokio::test]
+async fn descriptor_rejects_route_key_not_matching_a_query() {
+    use drasi_plugin_sdk::ReactionPluginDescriptor;
+    let d = crate::descriptor::HttpReactionDescriptor;
+    let cfg = serde_json::json!({
+        "baseUrl": "http://example.com",
+        "outputTemplates": { "routes": { "nope": { "added": { "template": "x" } } } }
+    });
+    let err = d
+        .create_reaction("r", vec!["q1".to_string()], &cfg, true)
+        .await
+        .err()
+        .expect("unknown route key must be rejected");
+    assert!(err.to_string().contains("nope"), "{err}");
 }
