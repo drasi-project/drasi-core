@@ -90,6 +90,8 @@ pub fn value_to_string(value: &ElementValue) -> String {
         ElementValue::Float(value) => value.to_string(),
         ElementValue::Integer(value) => value.to_string(),
         ElementValue::String(value) => value.to_string(),
+        ElementValue::LocalDateTime(value) => value.to_string(),
+        ElementValue::ZonedDateTime(value) => value.to_rfc3339(),
         ElementValue::List(value) => format!("{value:?}"),
         ElementValue::Object(value) => format!("{value:?}"),
     }
@@ -164,6 +166,16 @@ mod tests {
         assert_eq!(value_to_string(&ElementValue::Integer(42)), "42");
         assert_eq!(value_to_string(&ElementValue::Bool(true)), "true");
         assert_eq!(value_to_string(&ElementValue::Null), "null");
+        let local_dt = "2024-06-15T10:30:45".parse().unwrap();
+        assert_eq!(
+            value_to_string(&ElementValue::LocalDateTime(local_dt)),
+            "2024-06-15 10:30:45"
+        );
+        let zoned_dt = "2024-06-15T10:30:45+01:00".parse().unwrap();
+        assert_eq!(
+            value_to_string(&ElementValue::ZonedDateTime(zoned_dt)),
+            "2024-06-15T10:30:45+01:00"
+        );
     }
 
     #[test]

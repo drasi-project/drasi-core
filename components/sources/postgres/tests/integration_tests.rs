@@ -32,9 +32,9 @@ use drasi_source_postgres::{
 };
 use postgres_helpers::{
     create_decimal_test_table, create_logical_replication_slot, create_publication,
-    create_test_table, create_test_table_replica_identity_default, delete_test_row,
-    grant_replication, grant_table_access, insert_decimal_test_row, insert_test_row,
-    setup_replication_postgres, update_test_row,
+    create_test_table, create_test_table_replica_identity_default, create_timestamptz_test_table,
+    delete_test_row, grant_replication, grant_table_access, insert_decimal_test_row,
+    insert_test_row, insert_timestamptz_test_row, setup_replication_postgres, update_test_row,
 };
 use serial_test::serial;
 use std::collections::{HashMap, HashSet};
@@ -808,6 +808,125 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
         }
 
         true
+    })
+    .await?;
+
+    core.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
+/// End-to-end regression test for timestamptz decoding over logical
+/// replication. PostgreSQL's pgoutput text protocol emits the timezone offset
+/// in short form (e.g. `+00`) rather than the full `+00:00` ISO 8601 form.
+/// Before the decoder fix this caused the CDC change to fail to decode, so the
+/// inserted row never reached query results. This test inserts a timestamptz
+/// row via CDC and asserts it surfaces with the correct instant.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_timestamptz_short_offset_serialization() -> Result<()> {
+    init_logging();
+
+    const TS_TABLE: &str = "events";
+    const TS_PUBLICATION: &str = "drasi_ts_pub";
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_timestamptz_test_table(&client, TS_TABLE).await?;
+    grant_table_access(&client, TS_TABLE, "postgres").await?;
+    create_publication(&client, TS_PUBLICATION, &[TS_TABLE.to_string()]).await?;
+
+    let slot_name = slot_name();
+    create_logical_replication_slot(&client, &slot_name).await?;
+
+    let source_config = PostgresSourceConfig {
+        host: pg.config().host.clone(),
+        port: pg.config().port,
+        database: pg.config().database.clone(),
+        user: pg.config().user.clone(),
+        password: pg.config().password.clone(),
+        tables: vec![TS_TABLE.to_string()],
+        slot_name: slot_name.clone(),
+        publication_name: TS_PUBLICATION.to_string(),
+        ssl_mode: SslMode::Disable,
+        table_keys: vec![TableKeyConfig {
+            table: TS_TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+
+    let source = PostgresReplicationSource::builder("pg-ts-test-source")
+        .with_config(source_config)
+        .build()?;
+
+    let query = Query::cypher("ts-test-query")
+        .query(
+            r#"
+            MATCH (e:events)
+            RETURN e.id AS id, e.created_at AS created_at
+            "#,
+        )
+        .from_source("pg-ts-test-source")
+        .auto_start(true)
+        .enable_bootstrap(true)
+        .build();
+
+    let (reaction, _handle) = ApplicationReaction::builder("ts-test-reaction")
+        .with_query("ts-test-query")
+        .build();
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("pg-ts-test-core")
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+
+    // Insert a timestamptz row. The value is stored in UTC; the logical
+    // replication walsender (server `timezone` GUC = UTC) emits it in text
+    // form with a short-form `+00` offset, which is exactly the case the
+    // decoder fix addresses.
+    let expected = chrono::DateTime::parse_from_rfc3339("2026-05-13T22:03:45.423627+00:00")
+        .expect("static timestamp literal should parse")
+        .with_timezone(&chrono::Utc);
+    insert_timestamptz_test_row(&client, TS_TABLE, 1, expected).await?;
+
+    wait_for_query_results(&core, "ts-test-query", move |results| {
+        if results.is_empty() {
+            return false;
+        }
+
+        let row = &results[0];
+        let created_at = match row.get("created_at").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                log::error!("created_at field missing or not a string: {row:?}");
+                return false;
+            }
+        };
+
+        match chrono::DateTime::parse_from_rfc3339(created_at) {
+            Ok(parsed) => {
+                if parsed.with_timezone(&chrono::Utc) != expected {
+                    log::error!("created_at instant mismatch: expected {expected}, got {parsed}");
+                    return false;
+                }
+                true
+            }
+            Err(e) => {
+                log::error!("created_at is not valid rfc3339 ('{created_at}'): {e}");
+                false
+            }
+        }
     })
     .await?;
 

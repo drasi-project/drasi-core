@@ -28,3 +28,5 @@ entit = "entit"
 Unter = "Unter"
 # Method name in mysql binlog library (TableMapEvent::get_tme)
 tme = "tme"
+unparseable = "unparseable"
+

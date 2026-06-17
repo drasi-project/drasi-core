@@ -290,6 +290,8 @@ fn value_to_id_fragment(value: &ElementValue) -> String {
         ElementValue::Float(v) => v.to_string(),
         ElementValue::Integer(v) => v.to_string(),
         ElementValue::String(v) => v.to_string(),
+        ElementValue::LocalDateTime(v) => v.to_string(),
+        ElementValue::ZonedDateTime(v) => v.to_rfc3339(),
         ElementValue::List(v) => format!("{v:?}").replace(':', "%3A"),
         ElementValue::Object(v) => format!("{v:?}").replace(':', "%3A"),
     }
