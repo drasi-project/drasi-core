@@ -513,4 +513,289 @@ mod validation_tests {
         let err = cfg.validate(&[]).unwrap_err();
         assert!(err.to_string().contains("adaptiveMinBatchSize"));
     }
+
+    #[test]
+    fn validate_rejects_zero_timeout_ms() {
+        let cfg = GrpcReactionConfig {
+            timeout_ms: 0,
+            ..Default::default()
+        };
+        let err = cfg.validate(&[]).unwrap_err();
+        assert!(err.to_string().contains("timeoutMs"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_zero_initial_connection_timeout_ms() {
+        let cfg = GrpcReactionConfig {
+            initial_connection_timeout_ms: 0,
+            ..Default::default()
+        };
+        let err = cfg.validate(&[]).unwrap_err();
+        assert!(
+            err.to_string().contains("initialConnectionTimeoutMs"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_fixed_flush_timeout() {
+        let cfg = GrpcReactionConfig {
+            batching: BatchingConfig::Fixed {
+                batch_size: 10,
+                batch_flush_timeout_ms: 0,
+            },
+            ..Default::default()
+        };
+        let err = cfg.validate(&[]).unwrap_err();
+        assert!(
+            err.to_string().contains("batchFlushTimeoutMs"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_adaptive_fields() {
+        for (cfg, needle) in [
+            (
+                BatchingConfig::Adaptive {
+                    adaptive_min_batch_size: 0,
+                    adaptive_max_batch_size: 10,
+                    adaptive_window_size: 10,
+                    adaptive_batch_timeout_ms: 100,
+                },
+                "adaptiveMinBatchSize",
+            ),
+            (
+                BatchingConfig::Adaptive {
+                    adaptive_min_batch_size: 1,
+                    adaptive_max_batch_size: 0,
+                    adaptive_window_size: 10,
+                    adaptive_batch_timeout_ms: 100,
+                },
+                "adaptiveMaxBatchSize",
+            ),
+            (
+                BatchingConfig::Adaptive {
+                    adaptive_min_batch_size: 1,
+                    adaptive_max_batch_size: 10,
+                    adaptive_window_size: 0,
+                    adaptive_batch_timeout_ms: 100,
+                },
+                "adaptiveWindowSize",
+            ),
+            (
+                BatchingConfig::Adaptive {
+                    adaptive_min_batch_size: 1,
+                    adaptive_max_batch_size: 10,
+                    adaptive_window_size: 10,
+                    adaptive_batch_timeout_ms: 0,
+                },
+                "adaptiveBatchTimeoutMs",
+            ),
+        ] {
+            let reaction = GrpcReactionConfig {
+                batching: cfg,
+                ..Default::default()
+            };
+            let err = reaction.validate(&[]).unwrap_err();
+            assert!(err.to_string().contains(needle), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_equal_adaptive_bounds() {
+        let cfg = GrpcReactionConfig {
+            batching: BatchingConfig::Adaptive {
+                adaptive_min_batch_size: 7,
+                adaptive_max_batch_size: 7,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 100,
+            },
+            ..Default::default()
+        };
+        cfg.validate(&[]).expect("min == max is allowed");
+    }
+}
+
+#[cfg(test)]
+mod behavior_tests {
+    use super::*;
+    use drasi_lib::reactions::common::TemplateSpec;
+
+    fn qc(template: &str, metadata: HashMap<String, String>) -> GrpcQueryConfig {
+        QueryConfig {
+            added: Some(TemplateSpec::with_extension(
+                template,
+                GrpcTemplateExtension { metadata },
+            )),
+            updated: None,
+            deleted: None,
+        }
+    }
+
+    #[test]
+    fn default_batching_is_fixed_with_documented_defaults() {
+        match BatchingConfig::default() {
+            BatchingConfig::Fixed {
+                batch_size,
+                batch_flush_timeout_ms,
+            } => {
+                assert_eq!(batch_size, default_batch_size());
+                assert_eq!(batch_flush_timeout_ms, default_batch_flush_timeout_ms());
+            }
+            _ => panic!("default batching must be fixed"),
+        }
+    }
+
+    #[test]
+    fn as_adaptive_config_is_none_for_fixed_and_some_for_adaptive() {
+        assert!(BatchingConfig::default().as_adaptive_config().is_none());
+
+        let original = AdaptiveBatchConfig {
+            adaptive_min_batch_size: 3,
+            adaptive_max_batch_size: 30,
+            adaptive_window_size: 6,
+            adaptive_batch_timeout_ms: 250,
+        };
+        let round_trip = BatchingConfig::adaptive(original.clone())
+            .as_adaptive_config()
+            .expect("adaptive variant yields its config");
+        assert_eq!(round_trip.adaptive_min_batch_size, 3);
+        assert_eq!(round_trip.adaptive_max_batch_size, 30);
+        assert_eq!(round_trip.adaptive_window_size, 6);
+        assert_eq!(round_trip.adaptive_batch_timeout_ms, 250);
+    }
+
+    #[test]
+    fn has_renderable_templates_is_false_for_empty_or_whitespace() {
+        assert!(!OutputTemplates::default().has_renderable_templates());
+
+        let only_whitespace = OutputTemplates {
+            default_template: Some(qc("   ", HashMap::new())),
+            routes: HashMap::new(),
+        };
+        assert!(
+            !only_whitespace.has_renderable_templates(),
+            "a whitespace-only template with no metadata is not renderable"
+        );
+    }
+
+    #[test]
+    fn has_renderable_templates_is_true_for_body_route_or_metadata() {
+        let default_body = OutputTemplates {
+            default_template: Some(qc(r#"{"id":1}"#, HashMap::new())),
+            routes: HashMap::new(),
+        };
+        assert!(default_body.has_renderable_templates());
+
+        let mut routes = HashMap::new();
+        routes.insert("q1".to_string(), qc(r#"{"id":1}"#, HashMap::new()));
+        let route_body = OutputTemplates {
+            default_template: None,
+            routes,
+        };
+        assert!(route_body.has_renderable_templates());
+
+        // Metadata-only (empty body) still counts as renderable because the
+        // extension metadata must be rendered through Handlebars.
+        let mut md = HashMap::new();
+        md.insert("x-op".to_string(), "{{operation}}".to_string());
+        let metadata_only = OutputTemplates {
+            default_template: Some(qc("", md)),
+            routes: HashMap::new(),
+        };
+        assert!(metadata_only.has_renderable_templates());
+    }
+
+    #[test]
+    fn template_routing_exposes_routes_and_default_template() {
+        // No outputTemplates → empty routes and no default template.
+        let empty = GrpcReactionConfig::default();
+        assert!(empty.routes().is_empty());
+        assert!(empty.default_template().is_none());
+
+        let mut routes = HashMap::new();
+        routes.insert("q1".to_string(), qc(r#"{"id":1}"#, HashMap::new()));
+        let cfg = GrpcReactionConfig {
+            output_templates: Some(OutputTemplates {
+                default_template: Some(qc(r#"{"d":1}"#, HashMap::new())),
+                routes,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(cfg.routes().len(), 1);
+        assert!(cfg.routes().contains_key("q1"));
+        assert!(cfg.default_template().is_some());
+    }
+
+    #[test]
+    fn output_format_serializes_camel_case_and_defaults_to_canonical() {
+        assert_eq!(OutputFormat::default(), OutputFormat::CanonicalJson);
+        assert_eq!(
+            serde_json::to_value(OutputFormat::CanonicalJson).unwrap(),
+            serde_json::json!("canonicalJson")
+        );
+        assert_eq!(
+            serde_json::to_value(OutputFormat::Proto).unwrap(),
+            serde_json::json!("proto")
+        );
+        let parsed: OutputFormat = serde_json::from_value(serde_json::json!("proto")).unwrap();
+        assert_eq!(parsed, OutputFormat::Proto);
+    }
+
+    #[test]
+    fn config_defaults_match_default_helpers() {
+        let cfg = GrpcReactionConfig::default();
+        assert_eq!(cfg.endpoint, default_grpc_endpoint());
+        assert_eq!(cfg.timeout_ms, default_timeout_ms());
+        assert_eq!(cfg.max_retries, default_max_retries());
+        assert_eq!(
+            cfg.connection_retry_attempts,
+            default_connection_retry_attempts()
+        );
+        assert_eq!(
+            cfg.initial_connection_timeout_ms,
+            default_initial_connection_timeout_ms()
+        );
+        assert!(cfg.metadata.is_empty());
+        assert_eq!(cfg.output_format, OutputFormat::CanonicalJson);
+        assert!(cfg.output_templates.is_none());
+    }
+
+    #[test]
+    fn config_serde_round_trip_preserves_all_fields() {
+        let mut metadata = HashMap::new();
+        metadata.insert("authorization".to_string(), "Bearer t".to_string());
+        let cfg = GrpcReactionConfig {
+            endpoint: "grpc://host:1".to_string(),
+            timeout_ms: 1234,
+            max_retries: 9,
+            connection_retry_attempts: 8,
+            initial_connection_timeout_ms: 4321,
+            metadata,
+            batching: BatchingConfig::Fixed {
+                batch_size: 64,
+                batch_flush_timeout_ms: 32,
+            },
+            output_format: OutputFormat::Proto,
+            output_templates: None,
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        // camelCase keys on the wire.
+        assert!(json.get("timeoutMs").is_some());
+        assert!(json.get("maxRetries").is_some());
+        assert!(json.get("connectionRetryAttempts").is_some());
+        assert_eq!(json.get("outputFormat"), Some(&serde_json::json!("proto")));
+        // `outputTemplates` is skipped when None.
+        assert!(json.get("outputTemplates").is_none());
+
+        let back: GrpcReactionConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn config_deserializes_from_minimal_json_using_defaults() {
+        let cfg: GrpcReactionConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(cfg, GrpcReactionConfig::default());
+    }
 }

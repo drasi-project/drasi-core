@@ -32,29 +32,49 @@ use crate::GrpcReactionBuilder;
 pub enum BatchingConfigDto {
     #[serde(rename = "fixed")]
     Fixed {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default, rename = "batchSize", skip_serializing_if = "Option::is_none")]
         #[schema(value_type = Option<ConfigValueUsize>)]
         batch_size: Option<ConfigValue<usize>>,
 
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "batchFlushTimeoutMs",
+            skip_serializing_if = "Option::is_none"
+        )]
         #[schema(value_type = Option<ConfigValueU64>)]
         batch_flush_timeout_ms: Option<ConfigValue<u64>>,
     },
     #[serde(rename = "adaptive")]
     Adaptive {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "adaptiveMinBatchSize",
+            skip_serializing_if = "Option::is_none"
+        )]
         #[schema(value_type = Option<ConfigValueUsize>)]
         adaptive_min_batch_size: Option<ConfigValue<usize>>,
 
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "adaptiveMaxBatchSize",
+            skip_serializing_if = "Option::is_none"
+        )]
         #[schema(value_type = Option<ConfigValueUsize>)]
         adaptive_max_batch_size: Option<ConfigValue<usize>>,
 
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "adaptiveWindowSize",
+            skip_serializing_if = "Option::is_none"
+        )]
         #[schema(value_type = Option<ConfigValueUsize>)]
         adaptive_window_size: Option<ConfigValue<usize>>,
 
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "adaptiveBatchTimeoutMs",
+            skip_serializing_if = "Option::is_none"
+        )]
         #[schema(value_type = Option<ConfigValueU64>)]
         adaptive_batch_timeout_ms: Option<ConfigValue<u64>>,
     },
@@ -427,5 +447,338 @@ async fn resolve_batching(
                 adaptive_batch_timeout_ms: timeout,
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_plugin_sdk::prelude::ReactionPluginDescriptor;
+
+    // ---- resolve_batching ------------------------------------------------
+
+    #[tokio::test]
+    async fn resolve_batching_fixed_uses_provided_values() {
+        let mapper = DtoMapper::new();
+        let dto = BatchingConfigDto::Fixed {
+            batch_size: Some(ConfigValue::Static(7)),
+            batch_flush_timeout_ms: Some(ConfigValue::Static(8)),
+        };
+        let resolved = resolve_batching(&mapper, &dto).await.unwrap();
+        assert_eq!(
+            resolved,
+            BatchingConfig::Fixed {
+                batch_size: 7,
+                batch_flush_timeout_ms: 8
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_batching_fixed_fills_missing_fields_with_defaults() {
+        let mapper = DtoMapper::new();
+        let dto = BatchingConfigDto::Fixed {
+            batch_size: None,
+            batch_flush_timeout_ms: None,
+        };
+        let resolved = resolve_batching(&mapper, &dto).await.unwrap();
+        assert_eq!(
+            resolved,
+            BatchingConfig::Fixed {
+                batch_size: crate::config::default_batch_size(),
+                batch_flush_timeout_ms: crate::config::default_batch_flush_timeout_ms(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_batching_adaptive_uses_provided_values() {
+        let mapper = DtoMapper::new();
+        let dto = BatchingConfigDto::Adaptive {
+            adaptive_min_batch_size: Some(ConfigValue::Static(2)),
+            adaptive_max_batch_size: Some(ConfigValue::Static(20)),
+            adaptive_window_size: Some(ConfigValue::Static(3)),
+            adaptive_batch_timeout_ms: Some(ConfigValue::Static(30)),
+        };
+        let resolved = resolve_batching(&mapper, &dto).await.unwrap();
+        assert_eq!(
+            resolved,
+            BatchingConfig::Adaptive {
+                adaptive_min_batch_size: 2,
+                adaptive_max_batch_size: 20,
+                adaptive_window_size: 3,
+                adaptive_batch_timeout_ms: 30,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_batching_adaptive_fills_missing_fields_with_defaults() {
+        let mapper = DtoMapper::new();
+        let dto = BatchingConfigDto::Adaptive {
+            adaptive_min_batch_size: None,
+            adaptive_max_batch_size: None,
+            adaptive_window_size: None,
+            adaptive_batch_timeout_ms: None,
+        };
+        let resolved = resolve_batching(&mapper, &dto).await.unwrap();
+        assert_eq!(
+            resolved,
+            BatchingConfig::adaptive(AdaptiveBatchConfig::default())
+        );
+    }
+
+    // ---- DTO conversions -------------------------------------------------
+
+    #[test]
+    fn dto_from_config_preserves_scalar_fields() {
+        let mut metadata = HashMap::new();
+        metadata.insert("k".to_string(), "v".to_string());
+        let cfg = GrpcReactionConfig {
+            endpoint: "grpc://h:1".to_string(),
+            timeout_ms: 11,
+            max_retries: 2,
+            connection_retry_attempts: 3,
+            initial_connection_timeout_ms: 44,
+            metadata,
+            batching: BatchingConfig::Fixed {
+                batch_size: 5,
+                batch_flush_timeout_ms: 6,
+            },
+            output_format: OutputFormat::Proto,
+            output_templates: None,
+        };
+        let json = serde_json::to_value(GrpcReactionConfigDto::from(&cfg)).unwrap();
+        assert_eq!(json["endpoint"], serde_json::json!("grpc://h:1"));
+        assert_eq!(json["timeoutMs"], serde_json::json!(11));
+        assert_eq!(json["maxRetries"], serde_json::json!(2));
+        assert_eq!(json["connectionRetryAttempts"], serde_json::json!(3));
+        assert_eq!(json["initialConnectionTimeoutMs"], serde_json::json!(44));
+        assert_eq!(json["outputFormat"], serde_json::json!("proto"));
+        assert_eq!(json["batching"]["mode"], serde_json::json!("fixed"));
+        assert_eq!(json["batching"]["batchSize"], serde_json::json!(5));
+        assert_eq!(json["metadata"]["k"], serde_json::json!("v"));
+    }
+
+    #[test]
+    fn dto_from_adaptive_batching_preserves_fields() {
+        let dto = BatchingConfigDto::from(&BatchingConfig::Adaptive {
+            adaptive_min_batch_size: 4,
+            adaptive_max_batch_size: 40,
+            adaptive_window_size: 5,
+            adaptive_batch_timeout_ms: 50,
+        });
+        let json = serde_json::to_value(dto).unwrap();
+        assert_eq!(json["mode"], serde_json::json!("adaptive"));
+        assert_eq!(json["adaptiveMinBatchSize"], serde_json::json!(4));
+        assert_eq!(json["adaptiveMaxBatchSize"], serde_json::json!(40));
+        assert_eq!(json["adaptiveWindowSize"], serde_json::json!(5));
+        assert_eq!(json["adaptiveBatchTimeoutMs"], serde_json::json!(50));
+    }
+
+    #[test]
+    fn batching_dto_deserializes_camel_case_keys() {
+        // Regression: batching fields must accept the camelCase keys used by the
+        // runtime BatchingConfig, the generated schema, and the docs. Before the
+        // per-field renames, `rename_all` on the enum did not reach struct-variant
+        // fields, so camelCase input was silently dropped to defaults.
+        let dto: BatchingConfigDto = serde_json::from_value(serde_json::json!({
+            "mode": "fixed", "batchSize": 50, "batchFlushTimeoutMs": 250
+        }))
+        .unwrap();
+        match dto {
+            BatchingConfigDto::Fixed {
+                batch_size,
+                batch_flush_timeout_ms,
+            } => {
+                assert!(
+                    batch_size.is_some(),
+                    "batchSize must populate the DTO field"
+                );
+                assert!(batch_flush_timeout_ms.is_some());
+            }
+            _ => panic!("expected fixed"),
+        }
+
+        let dto: BatchingConfigDto = serde_json::from_value(serde_json::json!({
+            "mode": "adaptive",
+            "adaptiveMinBatchSize": 2,
+            "adaptiveMaxBatchSize": 20,
+            "adaptiveWindowSize": 3,
+            "adaptiveBatchTimeoutMs": 30
+        }))
+        .unwrap();
+        match dto {
+            BatchingConfigDto::Adaptive {
+                adaptive_min_batch_size,
+                adaptive_max_batch_size,
+                adaptive_window_size,
+                adaptive_batch_timeout_ms,
+            } => {
+                assert!(adaptive_min_batch_size.is_some());
+                assert!(adaptive_max_batch_size.is_some());
+                assert!(adaptive_window_size.is_some());
+                assert!(adaptive_batch_timeout_ms.is_some());
+            }
+            _ => panic!("expected adaptive"),
+        }
+    }
+
+    #[test]
+    fn descriptor_schema_uses_camel_case_batching_keys() {
+        let schema = GrpcReactionDescriptor.config_schema_json();
+        for key in [
+            "batchSize",
+            "batchFlushTimeoutMs",
+            "adaptiveMinBatchSize",
+            "adaptiveMaxBatchSize",
+            "adaptiveWindowSize",
+            "adaptiveBatchTimeoutMs",
+        ] {
+            assert!(
+                schema.contains(key),
+                "schema must advertise camelCase batching key {key}"
+            );
+        }
+        assert!(
+            !schema.contains("batch_size"),
+            "schema must not leak snake_case batching keys"
+        );
+    }
+
+    #[test]
+    fn template_spec_dto_round_trip_preserves_metadata() {
+        let mut metadata = HashMap::new();
+        metadata.insert("x".to_string(), "{{operation}}".to_string());
+        let spec = TemplateSpec::with_extension(
+            r#"{"id":1}"#,
+            GrpcTemplateExtension {
+                metadata: metadata.clone(),
+            },
+        );
+        let dto = TemplateSpecDto::from(&spec);
+        assert_eq!(dto.template, r#"{"id":1}"#);
+        assert_eq!(dto.metadata, metadata);
+
+        let back = TemplateSpec::<GrpcTemplateExtension>::from(&dto);
+        assert_eq!(back.template, spec.template);
+        assert_eq!(back.extension.metadata, metadata);
+    }
+
+    #[test]
+    fn output_templates_dto_round_trips_through_domain_type() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "q1".to_string(),
+            QueryConfig {
+                added: Some(TemplateSpec::with_extension(
+                    r#"{"a":1}"#,
+                    GrpcTemplateExtension::default(),
+                )),
+                updated: None,
+                deleted: None,
+            },
+        );
+        let templates = OutputTemplates {
+            default_template: Some(QueryConfig {
+                added: None,
+                updated: Some(TemplateSpec::with_extension(
+                    r#"{"u":1}"#,
+                    GrpcTemplateExtension::default(),
+                )),
+                deleted: None,
+            }),
+            routes,
+        };
+        let dto = OutputTemplatesDto::from(&templates);
+        let back = OutputTemplates::from(&dto);
+        assert_eq!(back, templates);
+    }
+
+    // ---- public descriptor surface --------------------------------------
+
+    #[test]
+    fn descriptor_metadata_surface_is_stable() {
+        let d = GrpcReactionDescriptor;
+        assert_eq!(d.kind(), "grpc");
+        assert_eq!(d.config_version(), "3.0.0");
+        assert_eq!(d.display_name(), "gRPC");
+        assert!(d.display_description().to_lowercase().contains("grpc"));
+        assert_eq!(d.config_schema_name(), "reaction.grpc.GrpcReactionConfig");
+    }
+
+    #[test]
+    fn descriptor_schema_json_carries_ui_group_annotations() {
+        let schema = GrpcReactionDescriptor.config_schema_json();
+        for group in [
+            "Connection",
+            "Reliability",
+            "Auth",
+            "Batching",
+            "Output",
+            "Templates",
+        ] {
+            assert!(schema.contains(group), "schema missing UI group {group}");
+        }
+    }
+
+    // ---- create_reaction -------------------------------------------------
+
+    #[tokio::test]
+    async fn create_reaction_resolves_adaptive_batching() {
+        let cfg = serde_json::json!({
+            "endpoint": "grpc://h:1",
+            "batching": { "mode": "adaptive", "adaptiveMinBatchSize": 2, "adaptiveMaxBatchSize": 20 }
+        });
+        let reaction = GrpcReactionDescriptor
+            .create_reaction("id", vec![], &cfg, true)
+            .await
+            .expect("adaptive create_reaction succeeds");
+        // raw_config drives properties(), so the input batching mode is echoed
+        // back — confirming the adaptive config was accepted and validated.
+        let props = reaction.properties();
+        assert_eq!(props["batching"]["mode"], serde_json::json!("adaptive"));
+    }
+
+    #[tokio::test]
+    async fn create_reaction_minimal_config_uses_defaults_and_auto_start_flag() {
+        let cfg = serde_json::json!({ "endpoint": "grpc://h:1" });
+        let reaction = GrpcReactionDescriptor
+            .create_reaction("id", vec![], &cfg, false)
+            .await
+            .expect("minimal create_reaction succeeds");
+        assert_eq!(reaction.id(), "id");
+        assert!(!reaction.auto_start(), "auto_start flag must be honored");
+        assert_eq!(reaction.type_name(), "grpc");
+    }
+
+    #[tokio::test]
+    async fn create_reaction_rejects_invalid_template() {
+        let cfg = serde_json::json!({
+            "endpoint": "grpc://h:1",
+            "outputTemplates": { "defaultTemplate": { "added": { "template": "{{" } } }
+        });
+        let result = GrpcReactionDescriptor
+            .create_reaction("id", vec!["q1".into()], &cfg, true)
+            .await;
+        assert!(
+            result.is_err(),
+            "an invalid template must fail create_reaction"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_reaction_rejects_route_key_not_matching_a_query() {
+        let cfg = serde_json::json!({
+            "endpoint": "grpc://h:1",
+            "outputTemplates": { "routes": { "ghost": { "added": { "template": "{\"id\":1}" } } } }
+        });
+        let result = GrpcReactionDescriptor
+            .create_reaction("id", vec!["q1".into()], &cfg, true)
+            .await;
+        assert!(
+            result.is_err(),
+            "a route key matching no subscribed query must fail create_reaction"
+        );
     }
 }

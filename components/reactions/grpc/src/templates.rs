@@ -721,4 +721,202 @@ mod tests {
         let emission = TestEmission::new("q");
         assert!(build_proto_item(&cfg, None, &emission.ctx(), &ResultDiff::Noop).is_none());
     }
+
+    #[test]
+    fn json_helper_embeds_nested_object_as_raw_json() {
+        // The `json` helper writes raw (unescaped) JSON, so it must be used to
+        // splice an object/array into a body template.
+        let cfg = config_with(
+            Some(query_config(
+                Some(spec(r#"{"copy":{{json after}}}"#)),
+                None,
+                None,
+            )),
+            HashMap::new(),
+        );
+        let engine = TemplateEngine::new();
+        let built = item_for(&cfg, Some(&engine), "q", &add(json!({"id": 1, "n": "x"})));
+        assert_eq!(
+            struct_field(&built.item.payload),
+            Some(json!({"copy": {"id": 1, "n": "x"}}))
+        );
+    }
+
+    #[test]
+    fn proto_output_with_template_still_emits_rendered_payload() {
+        let cfg = GrpcReactionConfig {
+            output_format: OutputFormat::Proto,
+            output_templates: Some(OutputTemplates {
+                default_template: Some(query_config(
+                    Some(spec(r#"{"id":"{{after.id}}"}"#)),
+                    None,
+                    None,
+                )),
+                routes: HashMap::new(),
+            }),
+            ..GrpcReactionConfig::default()
+        };
+        let engine = TemplateEngine::new();
+        let built = item_for(&cfg, Some(&engine), "q", &add(json!({"id": "a"})));
+        assert_eq!(
+            struct_field(&built.item.payload),
+            Some(json!({"id": "a"})),
+            "proto format keeps a templated payload even though it omits the canonical one"
+        );
+    }
+
+    #[test]
+    fn proto_output_update_without_template_omits_payload_but_keeps_raw_sides() {
+        let cfg = GrpcReactionConfig {
+            output_format: OutputFormat::Proto,
+            ..GrpcReactionConfig::default()
+        };
+        let built = item_for(
+            &cfg,
+            None,
+            "q",
+            &update(json!({"v": "old"}), json!({"v": "new"})),
+        );
+        assert!(built.item.payload.is_none());
+        assert_eq!(struct_field(&built.item.before), Some(json!({"v": "old"})));
+        assert_eq!(struct_field(&built.item.after), Some(json!({"v": "new"})));
+    }
+
+    #[test]
+    fn template_context_exposes_standard_query_level_keys() {
+        let cfg = config_with(
+            Some(query_config(
+                Some(spec(
+                    r#"{"q":"{{query_name}}","seq":{{sequence_id}},"sig":{{row_signature}},"op":"{{operation}}","ts":"{{timestamp}}"}"#,
+                )),
+                None,
+                None,
+            )),
+            HashMap::new(),
+        );
+        let engine = TemplateEngine::new();
+        let built = item_for(&cfg, Some(&engine), "q", &add(json!({"id": 1})));
+        assert_eq!(
+            struct_field(&built.item.payload),
+            Some(json!({
+                "q": "q",
+                "seq": 4242,
+                "sig": 11,
+                "op": "ADD",
+                "ts": "2026-06-16T00:00:00+00:00"
+            }))
+        );
+    }
+
+    #[test]
+    fn template_context_exposes_data_for_update_diffs() {
+        // The `data` key is only populated for UPDATE diffs (raw diff payload).
+        let cfg = config_with(
+            Some(query_config(
+                None,
+                Some(spec(r#"{"raw":{{data.raw}}}"#)),
+                None,
+            )),
+            HashMap::new(),
+        );
+        let engine = TemplateEngine::new();
+        let built = item_for(
+            &cfg,
+            Some(&engine),
+            "q",
+            &update(json!({"v": "o"}), json!({"v": "n"})),
+        );
+        assert_eq!(
+            struct_field(&built.item.payload),
+            Some(json!({"raw": true}))
+        );
+    }
+
+    #[test]
+    fn delete_template_row_alias_resolves_to_before_row() {
+        let cfg = config_with(
+            Some(query_config(
+                None,
+                None,
+                Some(spec(r#"{"id":"{{row.id}}"}"#)),
+            )),
+            HashMap::new(),
+        );
+        let engine = TemplateEngine::new();
+        let built = item_for(&cfg, Some(&engine), "q", &delete(json!({"id": "d1"})));
+        assert_eq!(struct_field(&built.item.payload), Some(json!({"id": "d1"})));
+    }
+
+    #[test]
+    fn non_object_template_output_is_wrapped_under_value_key() {
+        let cfg = config_with(
+            Some(query_config(Some(spec(r#"[1,2,3]"#)), None, None)),
+            HashMap::new(),
+        );
+        let engine = TemplateEngine::new();
+        let built = item_for(&cfg, Some(&engine), "q", &add(json!({})));
+        assert_eq!(
+            struct_field(&built.item.payload),
+            Some(json!({"value": [1, 2, 3]})),
+            "a non-object JSON payload is wrapped before proto encoding"
+        );
+    }
+
+    #[test]
+    fn canonical_delete_payload_carries_before_and_delete_operation() {
+        let cfg = GrpcReactionConfig::default();
+        let built = item_for(&cfg, None, "q", &delete(json!({"id": 7})));
+        let payload = struct_field(&built.item.payload).expect("canonical payload");
+        assert_eq!(payload.get("operation"), Some(&json!("DELETE")));
+        assert_eq!(payload.get("before"), Some(&json!({"id": 7})));
+        assert!(payload.get("after").is_none(), "DELETE has no after row");
+        assert_eq!(payload.get("rowSignature"), Some(&json!(22)));
+    }
+
+    #[test]
+    fn empty_query_metadata_yields_no_metadata_struct() {
+        let cfg = GrpcReactionConfig::default();
+        let built = item_for(&cfg, None, "q", &add(json!({"id": 1})));
+        assert!(
+            built.item.metadata.is_none(),
+            "no query metadata -> the proto metadata field stays empty"
+        );
+    }
+
+    #[test]
+    fn failed_metadata_template_entry_is_omitted_but_others_render() {
+        let mut md = HashMap::new();
+        md.insert("x-good".to_string(), "{{operation}}".to_string());
+        md.insert("x-bad".to_string(), "{{nonexistent.field}}".to_string());
+        let cfg = config_with(
+            Some(query_config(
+                Some(spec_with_metadata(r#"{"id":"{{after.id}}"}"#, md)),
+                None,
+                None,
+            )),
+            HashMap::new(),
+        );
+        let engine = TemplateEngine::new();
+        let built = item_for(&cfg, Some(&engine), "q", &add(json!({"id": 1})));
+        assert_eq!(
+            built.request_metadata.get("x-good").map(String::as_str),
+            Some("ADD")
+        );
+        assert!(
+            !built.request_metadata.contains_key("x-bad"),
+            "a metadata entry whose template fails strict-mode rendering is dropped"
+        );
+    }
+
+    #[test]
+    fn validate_template_accepts_empty_and_valid_rejects_malformed() {
+        assert!(validate_template("").is_ok(), "empty template is a no-op");
+        assert!(
+            validate_template("   ").is_ok(),
+            "whitespace template is a no-op"
+        );
+        assert!(validate_template(r#"{"id":"{{after.id}}"}"#).is_ok());
+        assert!(validate_template("{{").is_err());
+        assert!(validate_template("{{#if}}").is_err());
+    }
 }

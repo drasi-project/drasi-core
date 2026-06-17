@@ -36,7 +36,9 @@ use chrono::Utc;
 use drasi_lib::channels::{QueryResult, ResultDiff};
 use drasi_lib::reactions::common::{AdaptiveBatchConfig, TemplateSpec};
 use drasi_lib::{DrasiLib, Query, Reaction};
-use drasi_reaction_grpc::{GrpcQueryConfig, GrpcReaction, GrpcTemplateExtension, OutputTemplates};
+use drasi_reaction_grpc::{
+    GrpcQueryConfig, GrpcReaction, GrpcTemplateExtension, OutputFormat, OutputTemplates,
+};
 use serde_json::json;
 
 use crate::mock_server::struct_to_json;
@@ -1083,5 +1085,281 @@ async fn end_to_end_through_drasilib_delivers_to_grpc_server() {
     );
 
     core.stop().await.expect("stop core");
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Output format = proto
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proto_output_without_template_omits_payload_but_keeps_raw_after() {
+    let server = mock_server::start().await;
+    let reaction = GrpcReaction::builder("test-proto-raw")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        .with_fixed_batching(1, 10_000)
+        .with_output_format(OutputFormat::Proto)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 5}), 1)]))
+        .await
+        .expect("enqueue");
+
+    server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(5))
+        .await;
+    let batches = server.recorder.batches().await;
+    let item = &batches[0].items[0];
+    assert!(
+        item.payload.is_none(),
+        "proto output format must omit payload when no template applies"
+    );
+    assert_eq!(
+        item.after.as_ref().map(struct_to_json),
+        Some(json!({"id": 5})),
+        "the typed `after` field still carries the raw row"
+    );
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proto_output_with_template_still_emits_rendered_payload() {
+    let server = mock_server::start().await;
+    let templates = OutputTemplates {
+        default_template: Some(template_added(r#"{"id":"{{after.id}}"}"#)),
+        routes: HashMap::new(),
+    };
+    let reaction = GrpcReaction::builder("test-proto-tmpl")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        .with_fixed_batching(1, 10_000)
+        .with_output_format(OutputFormat::Proto)
+        .with_output_templates(templates)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 5}), 1)]))
+        .await
+        .expect("enqueue");
+
+    server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(5))
+        .await;
+    let batches = server.recorder.batches().await;
+    let item = &batches[0].items[0];
+    assert_eq!(
+        item.payload.as_ref().map(struct_to_json),
+        Some(json!({"id": "5"})),
+        "proto output format keeps a templated payload"
+    );
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Batching: multi-item single RPC, empty results, metadata-keyed splitting
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multiple_items_fill_a_single_rpc_preserving_order() {
+    let server = mock_server::start().await;
+    let reaction = GrpcReaction::builder("test-multi")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        // batch_size == item count, so all three flush together in one RPC.
+        .with_fixed_batching(3, 10_000)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result(
+            "q1",
+            vec![
+                add(json!({"id": 0}), 0),
+                add(json!({"id": 1}), 1),
+                add(json!({"id": 2}), 2),
+            ],
+        ))
+        .await
+        .expect("enqueue");
+
+    server
+        .recorder
+        .wait_for_items(3, Duration::from_secs(5))
+        .await;
+    let batches = server.recorder.batches().await;
+    assert_eq!(batches.len(), 1, "a full batch must be sent as one RPC");
+    let signatures: Vec<u64> = batches[0].items.iter().map(|i| i.row_signature).collect();
+    assert_eq!(signatures, vec![0, 1, 2], "item order must be preserved");
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_query_result_produces_no_rpc() {
+    let server = mock_server::start().await;
+    let reaction = GrpcReaction::builder("test-empty")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        .with_fixed_batching(1, 10_000)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    // An empty result set must be skipped entirely.
+    reaction
+        .enqueue_query_result(make_query_result("q1", vec![]))
+        .await
+        .expect("enqueue empty");
+    // A subsequent real event proves the runner kept running.
+    reaction
+        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 1)]))
+        .await
+        .expect("enqueue real");
+
+    let total = server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(5))
+        .await;
+    assert_eq!(total, 1, "only the non-empty result is delivered");
+    assert_eq!(
+        server.recorder.batch_count().await,
+        1,
+        "the empty result must not trigger an RPC"
+    );
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn items_with_distinct_rendered_metadata_split_into_separate_batches() {
+    let server = mock_server::start().await;
+    // The same default template renders a per-operation `x-op` header, so an
+    // ADD and a DELETE in one result get different batch keys and therefore
+    // separate RPCs.
+    let mut metadata = HashMap::new();
+    metadata.insert("x-op".to_string(), "{{operation}}".to_string());
+    let templates = OutputTemplates {
+        default_template: Some(GrpcQueryConfig {
+            added: Some(TemplateSpec::with_extension(
+                r#"{"id":"{{after.id}}"}"#,
+                GrpcTemplateExtension {
+                    metadata: metadata.clone(),
+                },
+            )),
+            updated: None,
+            deleted: Some(TemplateSpec::with_extension(
+                r#"{"id":"{{before.id}}"}"#,
+                GrpcTemplateExtension { metadata },
+            )),
+        }),
+        routes: HashMap::new(),
+    };
+    let reaction = GrpcReaction::builder("test-meta-split")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        // Large batch size with a short flush so the trailing batch drains via
+        // the timer rather than on size.
+        .with_fixed_batching(100, 200)
+        .with_output_templates(templates)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result(
+            "q1",
+            vec![add(json!({"id": 1}), 1), delete(json!({"id": 2}), 2)],
+        ))
+        .await
+        .expect("enqueue");
+
+    server
+        .recorder
+        .wait_for_items(2, Duration::from_secs(5))
+        .await;
+    let batches = server.recorder.batches().await;
+    assert_eq!(
+        batches.len(),
+        2,
+        "distinct rendered metadata must split items into separate batches"
+    );
+    assert!(batches.iter().all(|b| b.items.len() == 1));
+    let mut ops: Vec<String> = batches
+        .iter()
+        .filter_map(|b| b.metadata_headers.get("x-op").cloned())
+        .collect();
+    ops.sort();
+    assert_eq!(ops, vec!["ADD".to_string(), "DELETE".to_string()]);
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Descriptor path honors camelCase batching keys (regression)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn descriptor_honors_camel_case_batch_size_end_to_end() {
+    use drasi_plugin_sdk::prelude::ReactionPluginDescriptor;
+    use drasi_reaction_grpc::descriptor::GrpcReactionDescriptor;
+
+    let server = mock_server::start().await;
+    // batchSize=2 with a long flush timeout: four items must arrive as exactly
+    // two RPCs of two. If the camelCase batching keys were ignored (the prior
+    // bug), batchSize would default to 100 and the four items would never flush
+    // within the wait window — failing this test.
+    let cfg = json!({
+        "endpoint": server.endpoint.clone(),
+        "batching": { "mode": "fixed", "batchSize": 2, "batchFlushTimeoutMs": 10000 }
+    });
+    let reaction = GrpcReactionDescriptor
+        .create_reaction("desc-batch", vec!["q1".into()], &cfg, true)
+        .await
+        .expect("create_reaction");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result(
+            "q1",
+            vec![
+                add(json!({"id": 0}), 0),
+                add(json!({"id": 1}), 1),
+                add(json!({"id": 2}), 2),
+                add(json!({"id": 3}), 3),
+            ],
+        ))
+        .await
+        .expect("enqueue");
+
+    let total = server
+        .recorder
+        .wait_for_items(4, Duration::from_secs(5))
+        .await;
+    assert_eq!(total, 4, "all four items must be delivered");
+    let batches = server.recorder.batches().await;
+    assert_eq!(
+        batches.len(),
+        2,
+        "batchSize=2 must split four items into two RPCs (camelCase batching honored)"
+    );
+    assert!(batches.iter().all(|b| b.items.len() == 2));
+
+    reaction.stop().await.expect("stop");
     server.shutdown().await;
 }

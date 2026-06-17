@@ -388,4 +388,57 @@ mod tests {
             assert!(!is_connection, "{tag} should not be connection");
         }
     }
+
+    use super::latest_item_timestamp;
+    use crate::proto::drasi_v1::QueryResultItemType;
+    use crate::proto::ProtoQueryResultItem;
+
+    fn item_at(ts: Option<(i64, i32)>) -> ProtoQueryResultItem {
+        ProtoQueryResultItem {
+            item_type: QueryResultItemType::Add as i32,
+            row_signature: 0,
+            before: None,
+            after: None,
+            sequence: 0,
+            timestamp: ts.map(|(seconds, nanos)| prost_types::Timestamp { seconds, nanos }),
+            metadata: None,
+            payload: None,
+        }
+    }
+
+    #[test]
+    fn latest_item_timestamp_is_none_for_empty_batch() {
+        assert!(latest_item_timestamp(&[]).is_none());
+    }
+
+    #[test]
+    fn latest_item_timestamp_is_none_when_no_item_has_a_timestamp() {
+        let batch = vec![item_at(None), item_at(None)];
+        assert!(latest_item_timestamp(&batch).is_none());
+    }
+
+    #[test]
+    fn latest_item_timestamp_picks_max_seconds() {
+        let batch = vec![
+            item_at(Some((10, 0))),
+            item_at(Some((30, 0))),
+            item_at(Some((20, 0))),
+        ];
+        let latest = latest_item_timestamp(&batch).expect("a timestamp");
+        assert_eq!(latest.seconds, 30);
+    }
+
+    #[test]
+    fn latest_item_timestamp_breaks_seconds_tie_on_nanos() {
+        let batch = vec![item_at(Some((5, 100))), item_at(Some((5, 900)))];
+        let latest = latest_item_timestamp(&batch).expect("a timestamp");
+        assert_eq!((latest.seconds, latest.nanos), (5, 900));
+    }
+
+    #[test]
+    fn latest_item_timestamp_ignores_items_without_timestamps() {
+        let batch = vec![item_at(None), item_at(Some((7, 0))), item_at(None)];
+        let latest = latest_item_timestamp(&batch).expect("a timestamp");
+        assert_eq!(latest.seconds, 7);
+    }
 }

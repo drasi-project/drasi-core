@@ -436,4 +436,81 @@ mod tests {
         let batch2 = batcher.next_batch().await.unwrap();
         assert!(batch2.len() >= batch1.len()); // Should batch same or larger after observing burst
     }
+
+    #[test]
+    fn throughput_monitor_reports_zero_rate_when_idle() {
+        let monitor = ThroughputMonitor::new(Duration::from_secs(1));
+        assert_eq!(monitor.get_messages_per_second(), 0.0);
+        assert_eq!(monitor.get_throughput_level(), ThroughputLevel::Idle);
+    }
+
+    #[test]
+    fn throughput_monitor_classifies_medium_high_and_burst() {
+        // Window of 1s makes msgs/sec equal to the recorded batch size.
+        let mut medium = ThroughputMonitor::new(Duration::from_secs(1));
+        medium.record_batch(150);
+        assert_eq!(medium.get_throughput_level(), ThroughputLevel::Medium);
+
+        let mut high = ThroughputMonitor::new(Duration::from_secs(1));
+        high.record_batch(1_000);
+        assert_eq!(high.get_throughput_level(), ThroughputLevel::High);
+
+        let mut burst = ThroughputMonitor::new(Duration::from_secs(1));
+        burst.record_batch(10_001);
+        assert_eq!(burst.get_throughput_level(), ThroughputLevel::Burst);
+        assert!(burst.get_messages_per_second() >= 10_000.0);
+    }
+
+    #[tokio::test]
+    async fn next_batch_returns_none_when_channel_closed_before_any_item() {
+        let (tx, rx) = mpsc::channel::<u32>(4);
+        drop(tx);
+        let mut batcher = AdaptiveBatcher::new(rx, AdaptiveBatcherConfig::default());
+        assert!(
+            batcher.next_batch().await.is_none(),
+            "a closed empty channel must terminate the batch stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn next_batch_drains_buffered_items_then_terminates() {
+        let (tx, rx) = mpsc::channel::<u32>(4);
+        tx.send(1).await.unwrap();
+        tx.send(2).await.unwrap();
+        drop(tx);
+        let mut batcher = AdaptiveBatcher::new(rx, AdaptiveBatcherConfig::default());
+
+        let batch = batcher
+            .next_batch()
+            .await
+            .expect("buffered items form a batch");
+        assert_eq!(batch, vec![1, 2]);
+        assert!(
+            batcher.next_batch().await.is_none(),
+            "stream ends once the closed channel is drained"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_adaptive_mode_caps_batch_at_initial_min_size() {
+        // With adaptation disabled the batch size stays pinned at min_batch_size
+        // even when many items are immediately available.
+        let (tx, rx) = mpsc::channel::<u32>(64);
+        for i in 0..20 {
+            tx.send(i).await.unwrap();
+        }
+        let config = AdaptiveBatcherConfig {
+            min_batch_size: 3,
+            max_batch_size: 100,
+            adaptive_enabled: false,
+            ..Default::default()
+        };
+        let mut batcher = AdaptiveBatcher::new(rx, config);
+        let batch = batcher.next_batch().await.unwrap();
+        assert_eq!(
+            batch.len(),
+            3,
+            "non-adaptive batcher must not grow past the fixed min batch size"
+        );
+    }
 }

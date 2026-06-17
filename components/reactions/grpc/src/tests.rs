@@ -368,6 +368,205 @@ fn test_dto_metadata_accepts_static_and_env_config_values() {
     assert!(dto.metadata.contains_key("authorization"));
 }
 
+#[test]
+fn test_builder_sets_connection_and_retry_fields() {
+    let reaction = GrpcReaction::builder("conn")
+        .with_endpoint("grpc://host:9")
+        .with_timeout_ms(1111)
+        .with_max_retries(7)
+        .with_connection_retry_attempts(4)
+        .with_initial_connection_timeout_ms(2222)
+        .build()
+        .unwrap();
+    let cfg = reaction.config();
+    assert_eq!(cfg.endpoint, "grpc://host:9");
+    assert_eq!(cfg.timeout_ms, 1111);
+    assert_eq!(cfg.max_retries, 7);
+    assert_eq!(cfg.connection_retry_attempts, 4);
+    assert_eq!(cfg.initial_connection_timeout_ms, 2222);
+}
+
+#[test]
+fn test_builder_metadata_accumulates_then_replaces() {
+    let reaction = GrpcReaction::builder("meta")
+        .with_metadata("a", "1")
+        .with_metadata("b", "2")
+        .build()
+        .unwrap();
+    assert_eq!(reaction.config().metadata.len(), 2);
+
+    let mut replacement = std::collections::HashMap::new();
+    replacement.insert("only".to_string(), "x".to_string());
+    let reaction = GrpcReaction::builder("meta2")
+        .with_metadata("dropped", "y")
+        .with_all_metadata(replacement)
+        .build()
+        .unwrap();
+    assert_eq!(reaction.config().metadata.len(), 1);
+    assert_eq!(
+        reaction.config().metadata.get("only").map(String::as_str),
+        Some("x")
+    );
+    assert!(
+        !reaction.config().metadata.contains_key("dropped"),
+        "with_all_metadata replaces the whole map"
+    );
+}
+
+#[test]
+fn test_builder_sets_output_format() {
+    let reaction = GrpcReaction::builder("of")
+        .with_output_format(OutputFormat::Proto)
+        .build()
+        .unwrap();
+    assert_eq!(reaction.config().output_format, OutputFormat::Proto);
+}
+
+#[test]
+fn test_builder_min_batch_size_switches_fixed_to_adaptive() {
+    // Documented side-effect: calling an adaptive setter on a builder that
+    // still holds the default Fixed config flips it to Adaptive, taking
+    // defaults for the unset adaptive fields.
+    let reaction = GrpcReaction::builder("adapt-side")
+        .with_min_batch_size(5)
+        .build()
+        .unwrap();
+    match reaction.config().batching {
+        BatchingConfig::Adaptive {
+            adaptive_min_batch_size,
+            adaptive_max_batch_size,
+            adaptive_window_size,
+            adaptive_batch_timeout_ms,
+        } => {
+            assert_eq!(adaptive_min_batch_size, 5);
+            assert_eq!(adaptive_max_batch_size, 100, "default max preserved");
+            assert_eq!(adaptive_window_size, 10, "default window preserved");
+            assert_eq!(adaptive_batch_timeout_ms, 1000, "default timeout preserved");
+        }
+        _ => panic!("with_min_batch_size must enable adaptive mode"),
+    }
+}
+
+#[test]
+fn test_builder_adaptive_setters_accumulate_on_same_config() {
+    let reaction = GrpcReaction::builder("adapt-chain")
+        .with_min_batch_size(5)
+        .with_max_batch_size(50)
+        .with_window_size(12)
+        .with_batch_timeout_ms(250)
+        .build()
+        .unwrap();
+    match reaction.config().batching {
+        BatchingConfig::Adaptive {
+            adaptive_min_batch_size,
+            adaptive_max_batch_size,
+            adaptive_window_size,
+            adaptive_batch_timeout_ms,
+        } => {
+            assert_eq!(adaptive_min_batch_size, 5);
+            assert_eq!(adaptive_max_batch_size, 50);
+            assert_eq!(adaptive_window_size, 12);
+            assert_eq!(adaptive_batch_timeout_ms, 250);
+        }
+        _ => panic!("expected adaptive batching"),
+    }
+}
+
+#[test]
+fn test_builder_with_adaptive_defaults() {
+    let reaction = GrpcReaction::builder("adapt-def")
+        .with_adaptive_defaults()
+        .build()
+        .unwrap();
+    assert!(matches!(
+        reaction.config().batching,
+        BatchingConfig::Adaptive { .. }
+    ));
+}
+
+#[test]
+fn test_builder_with_config_replaces_entire_config() {
+    let custom = GrpcReactionConfig {
+        endpoint: "grpc://replaced:1".to_string(),
+        timeout_ms: 4242,
+        ..Default::default()
+    };
+    let reaction = GrpcReaction::builder("cfg")
+        .with_endpoint("grpc://will-be-overwritten:2")
+        .with_config(custom)
+        .build()
+        .unwrap();
+    assert_eq!(reaction.config().endpoint, "grpc://replaced:1");
+    assert_eq!(reaction.config().timeout_ms, 4242);
+}
+
+#[test]
+fn test_builder_with_fixed_batching_helper() {
+    let reaction = GrpcReaction::builder("fixed")
+        .with_fixed_batching(33, 44)
+        .build()
+        .unwrap();
+    assert_eq!(
+        reaction.config().batching,
+        BatchingConfig::Fixed {
+            batch_size: 33,
+            batch_flush_timeout_ms: 44
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_builder_with_priority_queue_capacity_builds() {
+    let reaction = GrpcReaction::builder("pq")
+        .from_query("q1")
+        .with_priority_queue_capacity(256)
+        .build()
+        .unwrap();
+    assert_eq!(reaction.id(), "pq");
+    assert_eq!(
+        reaction.status().await,
+        drasi_lib::channels::ComponentStatus::Stopped
+    );
+}
+
+#[test]
+fn test_with_priority_queue_capacity_constructor() {
+    let reaction = GrpcReaction::with_priority_queue_capacity(
+        "pqc",
+        vec!["q1".to_string()],
+        GrpcReactionConfig::default(),
+        128,
+    )
+    .expect("valid config");
+    assert_eq!(reaction.id(), "pqc");
+    assert_eq!(reaction.query_ids(), vec!["q1".to_string()]);
+}
+
+#[test]
+fn test_new_constructor_rejects_invalid_endpoint() {
+    let config = GrpcReactionConfig {
+        endpoint: "not a uri".to_string(),
+        ..Default::default()
+    };
+    let err = match GrpcReaction::new("bad", vec![], config) {
+        Ok(_) => panic!("expected new() to reject the invalid endpoint"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("invalid endpoint"), "got: {err}");
+}
+
+#[test]
+fn test_builder_rejects_invalid_endpoint_at_build() {
+    let err = match GrpcReaction::builder("bad")
+        .with_endpoint("not a uri")
+        .build()
+    {
+        Ok(_) => panic!("expected build() to reject the invalid endpoint"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("invalid endpoint"), "got: {err}");
+}
+
 /// Send-path and runner behavioral tests that exercise the gRPC client/runner
 /// loops against an in-process mock `ReactionService` server.
 mod integration {
