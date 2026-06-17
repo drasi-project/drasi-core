@@ -14,6 +14,23 @@
 // limitations under the License.
 
 //! File reaction plugin for Drasi.
+//!
+//! `FileReaction` subscribes to one or more continuous queries and writes their
+//! result diffs (`ADD`, `UPDATE`, `DELETE`, and aggregation updates) to the
+//! filesystem. Each diff is rendered with an optional Handlebars template and
+//! persisted according to the configured [`WriteMode`]:
+//!
+//! - [`WriteMode::Append`] — append each record to a per-query file.
+//! - [`WriteMode::Overwrite`] — atomically replace a file with the latest record.
+//! - [`WriteMode::PerChange`] — write each record to a unique file.
+//!
+//! When no template applies, the reaction emits the canonical camelCase output
+//! envelope (`queryId`, `sequenceId`, `timestamp`, `operation`, `before`/`after`,
+//! `metadata`). Filenames are also templated and sanitized for filesystem safety.
+//!
+//! Construct instances with [`FileReaction::builder`] and configure them through
+//! [`FileReactionConfig`]. See the crate `README.md` for the full configuration
+//! reference and template context keys.
 
 mod config;
 pub mod descriptor;
