@@ -24,6 +24,8 @@ pub fn format_value_for_key(value: &ElementValue) -> String {
         ElementValue::Float(f) => f.to_string(),
         ElementValue::Integer(i) => i.to_string(),
         ElementValue::String(s) => s.to_string(),
+        ElementValue::LocalDateTime(dt) => dt.to_string(),
+        ElementValue::ZonedDateTime(dt) => dt.to_string(),
         ElementValue::List(l) => l
             .iter()
             .map(format_value_for_key)
