@@ -86,8 +86,8 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                 break;
             }
             _ = flush_timer.tick() => {
-                if pending.is_some()
-                    && !flush_pending(
+                if pending.is_some() {
+                    flush_pending(
                         &reaction_name,
                         &endpoint,
                         timeout_ms,
@@ -103,10 +103,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                         &mut pending,
                         None,
                     )
-                    .await
-                {
-                    set_error(&status_handle, &reaction_name, "failed to flush fixed batch").await;
-                    return;
+                    .await;
                 }
                 continue;
             }
@@ -154,7 +151,8 @@ pub(crate) async fn run(params: FixedRunnerParams) {
             if pending
                 .as_ref()
                 .is_some_and(|batch| !batch.can_accept(&key))
-                && !flush_pending(
+            {
+                flush_pending(
                     &reaction_name,
                     &endpoint,
                     timeout_ms,
@@ -170,15 +168,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                     &mut pending,
                     None,
                 )
-                .await
-            {
-                set_error(
-                    &status_handle,
-                    &reaction_name,
-                    "failed to flush fixed batch before switching batch key",
-                )
                 .await;
-                return;
             }
 
             match pending.as_mut() {
@@ -189,7 +179,8 @@ pub(crate) async fn run(params: FixedRunnerParams) {
             if pending
                 .as_ref()
                 .is_some_and(|batch| batch.items.len() >= batch_size)
-                && !flush_pending(
+            {
+                flush_pending(
                     &reaction_name,
                     &endpoint,
                     timeout_ms,
@@ -205,22 +196,14 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                     &mut pending,
                     None,
                 )
-                .await
-            {
-                set_error(
-                    &status_handle,
-                    &reaction_name,
-                    "failed to flush full fixed batch",
-                )
                 .await;
-                return;
             }
         }
     }
 
     if pending.is_some() {
         info!("[{reaction_name}] Sending final fixed batch before shutdown");
-        if !flush_pending(
+        flush_pending(
             &reaction_name,
             &endpoint,
             timeout_ms,
@@ -236,10 +219,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
             &mut pending,
             Some(Duration::from_millis(1500)),
         )
-        .await
-        {
-            warn!("[{reaction_name}] Final fixed batch was not delivered before shutdown deadline");
-        }
+        .await;
     }
 
     finish(&reaction_name, &status_handle).await;
@@ -255,17 +235,6 @@ async fn finish(
             ComponentStatus::Stopped,
             Some("gRPC reaction processing task stopped".to_string()),
         )
-        .await;
-}
-
-async fn set_error(
-    status_handle: &drasi_lib::component_graph::ComponentStatusHandle,
-    reaction_name: &str,
-    message: &str,
-) {
-    error!("[{reaction_name}] {message}");
-    status_handle
-        .set_status(ComponentStatus::Error, Some(message.to_string()))
         .await;
 }
 
@@ -285,10 +254,13 @@ async fn flush_pending(
     max_backoff: Duration,
     pending: &mut Option<PendingBatch>,
     retry_limit: Option<Duration>,
-) -> bool {
+) {
     let Some(batch) = pending.as_ref() else {
-        return true;
+        return;
     };
+    let item_count = batch.items.len();
+    let query_id = batch.key.query_id.clone();
+
     ensure_client(
         client,
         connection_state,
@@ -303,7 +275,16 @@ async fn flush_pending(
     .await;
 
     if client.is_none() {
-        return false;
+        // No connection could be (re)established within the current backoff
+        // window. Drop the batch and keep running; ensure_client retries the
+        // connection on the next flush. Favors uptime over completeness for
+        // this fire-and-forget streaming reaction.
+        warn!(
+            "[{reaction_name}] No gRPC connection available; dropping batch of {item_count} \
+             item(s) for query '{query_id}' and continuing (will reconnect on the next batch)"
+        );
+        *pending = None;
+        return;
     }
 
     let sent = send_with_swap(
@@ -321,10 +302,20 @@ async fn flush_pending(
         retry_limit,
     )
     .await;
-    if sent {
-        *pending = None;
+
+    if !sent {
+        // Delivery exhausted its retry/reconnect budget (transient outage) or
+        // the downstream rejected the batch (permanent). Either way, drop the
+        // batch and keep running rather than stopping the reaction.
+        warn!(
+            "[{reaction_name}] Failed to deliver batch of {item_count} item(s) for query \
+             '{query_id}' after retries; dropping batch and continuing"
+        );
     }
-    sent
+
+    // Drop-and-continue: clear the pending batch whether it was delivered or
+    // dropped, so a stuck downstream cannot grow `pending` without bound.
+    *pending = None;
 }
 
 #[allow(clippy::too_many_arguments)]

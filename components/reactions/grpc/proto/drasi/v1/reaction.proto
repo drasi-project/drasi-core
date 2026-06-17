@@ -85,19 +85,20 @@ enum QueryResultItemType {
 //   DELETE  — only `before` set (the row no longer exists).
 //   UPDATE  — both set (row content changed).
 //
-// When an output template is configured for the `(query_id, op)` pair,
-// each present row state is rendered through it independently — once
-// for ADD/DELETE, twice for UPDATE (once per side). The rendered
-// content replaces the raw row state in the corresponding Struct
-// field. When no template is configured or rendering fails for a
-// given side, that field carries the raw row state. Events are never
-// dropped because of a render failure.
+// `before` and `after` always carry the unmodified raw row state for
+// the change regardless of templating, so receivers can always recover
+// the change. Output templates do not rewrite `before` / `after`; when
+// a body template matches the item's `(query_id, op)` it is rendered
+// once into `payload` (see below). Events are never dropped because of
+// a render failure.
 //
 // `timestamp` is the original event timestamp from the `QueryResult`
 // this item originated from. `metadata` is the query-result metadata
 // supplied by Drasi for that emission. `payload` carries the canonical
-// guide-aligned JSON payload (or rendered body template output) as a
-// protobuf Struct when configured.
+// guide-aligned JSON payload, or — when a body template matches the
+// item — the rendered template output, as a protobuf Struct. On render
+// failure `payload` falls back to the canonical item. In `proto`
+// output mode `payload` is omitted unless a body template applies.
 //
 // `sequence` is the monotonic per-query emission number of the
 // `QueryResult` this item originated from. Because one

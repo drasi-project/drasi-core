@@ -40,8 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at construction time.
 - Endpoint and batching invariants are validated at construction, including
   positive fixed/adaptive batch sizes and adaptive min/max ordering.
-- Fixed batching isolates pending batches by `(query_id, metadata)` and marks the
-  reaction `Error` on exhausted delivery failures to avoid data misattribution.
+- Fixed batching isolates pending batches by `(query_id, metadata)` to avoid data
+  misattribution. On exhausted delivery the batch is logged and dropped and the
+  reaction keeps running (reconnecting on the next batch) rather than transitioning
+  to `Error`.
 - Adaptive batching forwards items to the adaptive batcher immediately, so
   low-volume single-query items flush after the configured wait window.
 - New typed builder API (`GrpcReaction::builder(...)`) with

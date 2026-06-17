@@ -78,7 +78,6 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
 
     let batcher_endpoint = endpoint.clone();
     let batcher_name = reaction_name.clone();
-    let batcher_status = status_handle.clone();
 
     let template_engine = config
         .output_templates
@@ -114,13 +113,16 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                         client = Some(c);
                     }
                     Err(e) => {
+                        // Could not establish a connection. Drop this batch and
+                        // keep running; the connection is retried on the next
+                        // batch. Favors uptime over completeness.
                         failed_sends += 1;
-                        let msg = format!("Failed to create gRPC client: {e}");
-                        error!("[{batcher_name}] {msg}");
-                        batcher_status
-                            .set_status(ComponentStatus::Error, Some(msg))
-                            .await;
-                        return;
+                        warn!(
+                            "[{batcher_name}] Failed to create gRPC client: {e}; dropping {} \
+                             batched item(s) and continuing (will retry on the next batch)",
+                            batch.len()
+                        );
+                        continue;
                     }
                 }
             }
@@ -158,16 +160,17 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                                 } else {
                                     client = None;
                                 }
+                                // Transient delivery failure: drop this sub-batch
+                                // and keep running. The connection is retried on
+                                // the next batch.
                                 failed_sends += 1;
-                                let msg = format!(
-                                    "Failed to send adaptive batch for query '{}'",
+                                warn!(
+                                    "[{batcher_name}] Failed to deliver adaptive batch of {} \
+                                     item(s) for query '{}' after retries; dropping and continuing",
+                                    items.len(),
                                     key.query_id
                                 );
-                                error!("[{batcher_name}] {msg}");
-                                batcher_status
-                                    .set_status(ComponentStatus::Error, Some(msg))
-                                    .await;
-                                return;
+                                break;
                             }
 
                             successful_sends += 1;
@@ -179,16 +182,16 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                             break;
                         }
                         Err(e) => {
+                            // Permanent delivery failure (downstream rejected the
+                            // batch after retries): drop this sub-batch and keep
+                            // running rather than stopping the reaction.
                             failed_sends += 1;
-                            let msg = format!(
-                                "Failed to send adaptive batch for query '{}': {e}",
+                            error!(
+                                "[{batcher_name}] Failed to deliver adaptive batch for query \
+                                 '{}': {e}; dropping and continuing",
                                 key.query_id
                             );
-                            error!("[{batcher_name}] {msg}");
-                            batcher_status
-                                .set_status(ComponentStatus::Error, Some(msg))
-                                .await;
-                            return;
+                            break;
                         }
                     }
                 }

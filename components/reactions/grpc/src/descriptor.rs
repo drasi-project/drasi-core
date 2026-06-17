@@ -265,6 +265,16 @@ impl ReactionPluginDescriptor for GrpcReactionDescriptor {
         "3.0.0"
     }
 
+    fn display_name(&self) -> &str {
+        "gRPC"
+    }
+
+    fn display_description(&self) -> &str {
+        "Forwards continuous query result changes to a downstream gRPC service via \
+         the ReactionService.ProcessResults RPC, with fixed or adaptive batching and \
+         optional Handlebars output templates."
+    }
+
     fn config_schema_name(&self) -> &str {
         "reaction.grpc.GrpcReactionConfig"
     }

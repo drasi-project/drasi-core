@@ -69,6 +69,29 @@ fn test_grpc_new_constructor() {
     assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
 }
 
+#[tokio::test]
+async fn test_grpc_trait_surface() {
+    use drasi_lib::channels::ComponentStatus;
+
+    let reaction = GrpcReaction::builder("surface")
+        .from_query("q1")
+        .build()
+        .unwrap();
+    assert_eq!(reaction.type_name(), "grpc");
+    // auto_start defaults to true.
+    assert!(reaction.auto_start());
+    // A freshly built reaction is Stopped until the runtime starts it.
+    assert_eq!(reaction.status().await, ComponentStatus::Stopped);
+
+    // auto_start is controllable through the builder.
+    let no_auto = GrpcReaction::builder("surface-no-auto")
+        .from_query("q1")
+        .with_auto_start(false)
+        .build()
+        .unwrap();
+    assert!(!no_auto.auto_start());
+}
+
 #[test]
 fn test_adaptive_builder() {
     let reaction = GrpcReaction::builder("adaptive-reaction")
@@ -674,6 +697,63 @@ mod integration {
         server.shutdown().await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fixed_runner_drops_batch_and_stays_running_on_delivery_failure() {
+        // Drop-and-continue (A2/A3): when delivery exhausts its retry budget the
+        // batch is dropped and the reaction MUST stay Running rather than going
+        // to Error. The server rejects the first 4 requests — exactly what the
+        // first batch consumes with max_retries=3 (4 attempts) — then accepts,
+        // so a later batch is still delivered, proving the reaction kept running.
+        let server = test_server::start_with_failures(4).await;
+        let base = running_base();
+        set_running(&base).await;
+
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        let config = config_for(
+            server.endpoint.clone(),
+            BatchingConfig::Fixed {
+                batch_size: 1,
+                batch_flush_timeout_ms: 10_000,
+            },
+        );
+        let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
+            reaction_name: "test-grpc".to_string(),
+            batch_size: 1,
+            batch_flush_timeout_ms: 10_000,
+            base: base.clone_shared(),
+            config,
+            shutdown_rx: sd_rx,
+        }));
+
+        // First batch: the server rejects every retry, so the batch is dropped.
+        base.enqueue_query_result(query_result("q1", 1))
+            .await
+            .unwrap();
+        // Wait past the retry/backoff window so the failed flush resolves.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            base.get_status().await,
+            ComponentStatus::Running,
+            "reaction must stay Running after a dropped batch (drop-and-continue)"
+        );
+
+        // Later batch: the server now accepts, so it is delivered — proof the
+        // reaction kept running after dropping the first batch.
+        base.enqueue_query_result(query_result("q1", 1))
+            .await
+            .unwrap();
+        let total = server
+            .recorder
+            .wait_for_items(1, Duration::from_secs(5))
+            .await;
+        assert_eq!(total, 1, "a later batch is delivered after continuing");
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
+
+        let _ = sd_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        server.shutdown().await;
+    }
+
     // ---- adaptive runner (#21) ------------------------------------------
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -745,6 +825,56 @@ mod integration {
             total >= 3,
             "query-a batch should be forwarded on query change"
         );
+
+        let _ = sd_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adaptive_runner_drops_batch_and_stays_running_on_delivery_failure() {
+        // Drop-and-continue (A2/A3) for the adaptive runner: a delivery that
+        // exhausts its retry budget drops the batch and the reaction stays
+        // Running. The server rejects the first 4 requests (what one batch
+        // consumes with max_retries=3) then accepts.
+        let server = test_server::start_with_failures(4).await;
+        let base = running_base();
+        set_running(&base).await;
+
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        let config = config_for(
+            server.endpoint.clone(),
+            BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
+        );
+        let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
+            reaction_name: "test-grpc".to_string(),
+            adaptive: AdaptiveBatchConfig::default(),
+            base: base.clone_shared(),
+            config,
+            shutdown_rx: sd_rx,
+        }));
+
+        // First item: every retry is rejected, so the batch is dropped.
+        base.enqueue_query_result(query_result("q1", 1))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            base.get_status().await,
+            ComponentStatus::Running,
+            "adaptive reaction must stay Running after a dropped batch"
+        );
+
+        // Later item: the server now accepts, proving the reaction kept running.
+        base.enqueue_query_result(query_result("q1", 1))
+            .await
+            .unwrap();
+        let total = server
+            .recorder
+            .wait_for_items(1, Duration::from_secs(5))
+            .await;
+        assert_eq!(total, 1);
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
 
         let _ = sd_tx.send(());
         let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;

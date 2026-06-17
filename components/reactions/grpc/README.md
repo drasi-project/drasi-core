@@ -163,7 +163,7 @@ serialize and deserialize in `camelCase` when supplied via descriptor configurat
 |-------|------|---------|----------------|-------------|
 | `endpoint` | `String` | `grpc://localhost:50052` | `with_endpoint` | gRPC server endpoint to connect to. |
 | `timeoutMs` | `u64` | `5000` | `with_timeout_ms` | Per-RPC timeout in milliseconds. |
-| `maxRetries` | `u32` | `3` | `with_max_retries` | Maximum retry attempts per batch on transient send errors. Batches that exhaust retries are logged and dropped; the client reconnects before the next batch. |
+| `maxRetries` | `u32` | `3` | `with_max_retries` | Maximum retry attempts per batch on send errors. When a batch still cannot be delivered after retries — a transient outage beyond the retry/reconnect window, or a downstream rejection — it is logged and dropped and **the reaction keeps running** (it reconnects and continues with the next batch rather than transitioning to `Error`). Favors uptime over completeness, appropriate for a fire-and-forget streaming reaction. |
 | `connectionRetryAttempts` | `u32` | `5` | `with_connection_retry_attempts` | Maximum attempts when (re)establishing the channel after a connection-level error. |
 | `initialConnectionTimeoutMs` | `u64` | `10000` | `with_initial_connection_timeout_ms` | Timeout for each connection attempt. |
 | `metadata` | `Map<String,String>` | `{}` | `with_metadata(k, v)` / `with_all_metadata(map)` | Sent on every call **both** as `ProcessResultsRequest.metadata` (a body field on the proto) **and** as actual gRPC request headers (`tonic::Request::metadata_mut()`). ASCII-only; entries with invalid header names/values are skipped from the headers with a warning and still ride in the body field. Via descriptor configuration each value is a `ConfigValue<String>` and may reference an environment variable or secret — see [Authentication](#authentication). |
@@ -417,6 +417,12 @@ reaction:
 Render failures never drop events. Receivers always read `before` / `after` for the
 raw typed row state and `payload` for either the rendered body template or the
 canonical item.
+
+A per-template `metadata` value is rendered through Handlebars independently of the
+body template. If a `metadata` value fails to render, that single entry is omitted
+from the request metadata/headers (logged at `warn`) and the item is still delivered
+with the remaining metadata — the failure of one header never drops the item or the
+other entries.
 
 ---
 

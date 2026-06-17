@@ -316,7 +316,6 @@ impl<T> AdaptiveBatcher<T> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
