@@ -20,7 +20,7 @@
 //! **single notifications per result** (default) or **batched** using an
 //! **adaptive batching** strategy that scales batch sizes to incoming load
 //! for greater throughput and reduced network traffic. Batching is enabled
-//! by adding an optional [`config::AdaptiveBatchConfig`]. See
+//! by adding [`config::AdaptiveBatchConfig`] and a batch endpoint. See
 //! [`config::HttpReactionConfig`] for the full configuration shape and the
 //! crate `README.md` for examples.
 //!
@@ -74,6 +74,7 @@ pub use config::{
     AdaptiveBatchConfig, HttpCallExt, HttpCallSpec, HttpOutputTemplates, HttpQueryConfig,
     HttpReactionConfig, OperationType, QueryConfig, TemplateRouting, TemplateSpec,
 };
+use drasi_lib::recovery::ReactionRecoveryPolicy;
 pub use http::HttpReaction;
 pub use output::{BatchEnvelope, DefaultChangeNotification, Operation};
 
@@ -88,6 +89,7 @@ pub struct HttpReactionBuilder {
     config: HttpReactionConfig,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
+    recovery_policy: Option<ReactionRecoveryPolicy>,
 }
 
 impl HttpReactionBuilder {
@@ -98,6 +100,7 @@ impl HttpReactionBuilder {
             config: HttpReactionConfig::default(),
             priority_queue_capacity: None,
             auto_start: true,
+            recovery_policy: None,
         }
     }
 
@@ -143,6 +146,11 @@ impl HttpReactionBuilder {
         self
     }
 
+    pub fn with_recovery_policy(mut self, policy: ReactionRecoveryPolicy) -> Self {
+        self.recovery_policy = Some(policy);
+        self
+    }
+
     /// Replace the default fallback template applied to every query that
     /// has no explicit route.
     pub fn with_default_template(mut self, template: HttpQueryConfig) -> Self {
@@ -185,68 +193,12 @@ impl HttpReactionBuilder {
         self.with_adaptive(AdaptiveBatchConfig::default())
     }
 
-    /// Set the minimum adaptive batch size.
-    ///
-    /// **Side effect:** calling this enables adaptive mode if it is not
-    /// already enabled (creating a default [`AdaptiveBatchConfig`]). To
-    /// configure tuning without surprises, prefer
-    /// [`with_adaptive`](Self::with_adaptive) with an explicit config.
-    pub fn with_min_batch_size(mut self, n: usize) -> Self {
-        let a = self
-            .config
-            .adaptive
-            .get_or_insert_with(AdaptiveBatchConfig::default);
-        a.adaptive_min_batch_size = n;
-        self
-    }
-
-    /// Set the maximum adaptive batch size.
-    ///
-    /// **Side effect:** calling this enables adaptive mode if it is not
-    /// already enabled (creating a default [`AdaptiveBatchConfig`]).
-    pub fn with_max_batch_size(mut self, n: usize) -> Self {
-        let a = self
-            .config
-            .adaptive
-            .get_or_insert_with(AdaptiveBatchConfig::default);
-        a.adaptive_max_batch_size = n;
-        self
-    }
-
-    /// Set the adaptive throughput window size (in 100 ms units).
-    ///
-    /// **Side effect:** calling this enables adaptive mode if it is not
-    /// already enabled (creating a default [`AdaptiveBatchConfig`]).
-    pub fn with_window_size(mut self, n: usize) -> Self {
-        let a = self
-            .config
-            .adaptive
-            .get_or_insert_with(AdaptiveBatchConfig::default);
-        a.adaptive_window_size = n;
-        self
-    }
-
-    /// Set the adaptive batch flush timeout (milliseconds).
-    ///
-    /// **Side effect:** calling this enables adaptive mode if it is not
-    /// already enabled (creating a default [`AdaptiveBatchConfig`]).
-    pub fn with_batch_timeout_ms(mut self, ms: u64) -> Self {
-        let a = self
-            .config
-            .adaptive
-            .get_or_insert_with(AdaptiveBatchConfig::default);
-        a.adaptive_batch_timeout_ms = ms;
-        self
-    }
-
     /// Set the batch endpoint path. Coalesced batches are POSTed to
     /// `{baseUrl}{endpoint}` as a single [`BatchEnvelope`] payload.
     ///
-    /// Requires adaptive mode (enable it via [`with_adaptive`](Self::with_adaptive)
-    /// or one of the `with_*_batch_*` tuning methods). If a batch endpoint is
-    /// set without adaptive mode, [`build`](Self::build) fails fast: the
-    /// configuration is rejected at construction time by
-    /// [`HttpReactionConfig::validate`].
+    /// Requires adaptive mode (enable it via [`with_adaptive`](Self::with_adaptive)).
+    /// If a batch endpoint is set without adaptive mode, [`build`](Self::build)
+    /// fails fast.
     pub fn with_batch_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.config.batch_endpoint = Some(endpoint.into());
         self
@@ -259,13 +211,15 @@ impl HttpReactionBuilder {
     }
 
     pub fn build(self) -> anyhow::Result<HttpReaction> {
-        self.config.validate(&self.queries)?;
+        self.config
+            .validate(&self.queries, self.priority_queue_capacity)?;
         Ok(HttpReaction::from_builder(
             self.id,
             self.queries,
             self.config,
             self.priority_queue_capacity,
             self.auto_start,
+            self.recovery_policy,
         ))
     }
 }

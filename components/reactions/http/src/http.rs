@@ -26,6 +26,7 @@ use reqwest::Client;
 use drasi_lib::channels::ComponentStatus;
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::Reaction;
 
 use crate::adaptive_batcher::AdaptiveBatcherConfig;
@@ -76,10 +77,14 @@ impl HttpReaction {
         config: HttpReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
+        recovery_policy: Option<ReactionRecoveryPolicy>,
     ) -> Self {
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
+        }
+        if let Some(policy) = recovery_policy {
+            params = params.with_recovery_policy(policy);
         }
         Self {
             base: ReactionBase::new(params),
@@ -106,12 +111,13 @@ impl HttpReaction {
 /// config / serialization) to the runtime `AdaptiveBatchConfig` used by
 /// the batcher (`Duration`-based + enable flag).
 pub(crate) fn to_runtime_adaptive(cfg: &AdaptiveBatchConfig) -> AdaptiveBatcherConfig {
+    let max_wait_time = Duration::from_millis(cfg.adaptive_batch_timeout_ms);
     AdaptiveBatcherConfig {
         min_batch_size: cfg.adaptive_min_batch_size,
         max_batch_size: cfg.adaptive_max_batch_size,
         throughput_window: Duration::from_millis(cfg.adaptive_window_size as u64 * 100),
-        max_wait_time: Duration::from_millis(cfg.adaptive_batch_timeout_ms),
-        min_wait_time: Duration::from_millis(100),
+        max_wait_time,
+        min_wait_time: Duration::from_millis(1).min(max_wait_time),
         adaptive_enabled: true,
     }
 }
@@ -156,6 +162,17 @@ impl Reaction for HttpReaction {
             self.base.id, self.config.base_url
         );
 
+        if let Err(e) = self.config.validate(&self.base.queries, None) {
+            error!("[{}] Invalid HTTP reaction config: {e:#}", self.base.id);
+            self.base
+                .set_status(
+                    ComponentStatus::Error,
+                    Some(format!("Invalid HTTP reaction config: {e:#}")),
+                )
+                .await;
+            return Err(e);
+        }
+
         self.base
             .set_status(
                 ComponentStatus::Starting,
@@ -169,7 +186,7 @@ impl Reaction for HttpReaction {
                 error!("[{}] Failed to create HTTP client: {e}", self.base.id);
                 self.base
                     .set_status(
-                        ComponentStatus::Stopped,
+                        ComponentStatus::Error,
                         Some(format!("Failed to create HTTP client: {e}")),
                     )
                     .await;
@@ -177,18 +194,10 @@ impl Reaction for HttpReaction {
             }
         };
 
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some(format!("HTTP reaction running ({mode} mode)")),
-            )
-            .await;
-
         let shutdown_rx = self.base.create_shutdown_channel().await;
         let reaction_name = self.base.id.clone();
         let base = self.base.clone_shared();
         let config = self.config.clone();
-        let handlebars = build_handlebars();
 
         let handle = if let Some(adaptive_cfg) = self.config.adaptive.as_ref() {
             let runtime_adaptive = to_runtime_adaptive(adaptive_cfg);
@@ -198,10 +207,10 @@ impl Reaction for HttpReaction {
                 config,
                 runtime_adaptive,
                 client,
-                handlebars,
                 shutdown_rx,
             ))
         } else {
+            let handlebars = build_handlebars();
             tokio::spawn(run_standard_loop(
                 reaction_name,
                 base,
@@ -213,6 +222,12 @@ impl Reaction for HttpReaction {
         };
 
         self.base.set_processing_task(handle).await;
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some(format!("HTTP reaction running ({mode} mode)")),
+            )
+            .await;
         Ok(())
     }
 

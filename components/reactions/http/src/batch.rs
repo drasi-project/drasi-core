@@ -20,13 +20,14 @@
 //! carrying its own `queryId` / `sequenceId` / `timestamp`.
 
 use anyhow::Result;
-use log::{debug, warn};
+use log::debug;
 use reqwest::{
     header::{HeaderMap, HeaderValue},
-    Client,
+    Client, Method,
 };
 
 use crate::output::{BatchEnvelope, DefaultChangeNotification};
+use crate::process::send_with_retry;
 
 /// POST a coalesced batch to `{base_url}{batch_endpoint}` as a single
 /// [`BatchEnvelope`] (`{ "batch": [ … ] }`).
@@ -57,26 +58,17 @@ pub(crate) async fn send_coalesced_batch(
 
     debug!("[{reaction_name}] Sending coalesced batch of {total} results to {batch_url}");
 
-    let response = client
-        .post(&batch_url)
-        .headers(headers)
-        .body(body)
-        .send()
-        .await?;
+    send_with_retry(
+        client,
+        Method::POST,
+        batch_url,
+        headers,
+        body,
+        reaction_name,
+        "batch HTTP request",
+    )
+    .await?;
 
-    let status = response.status();
-    if !status.is_success() {
-        let error_body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unable to read response body".to_string());
-        warn!(
-            "[{reaction_name}] Batch HTTP request failed with status {}: {error_body}",
-            status.as_u16()
-        );
-    } else {
-        debug!("[{reaction_name}] Batch sent successfully");
-    }
-
+    debug!("[{reaction_name}] Batch sent successfully");
     Ok(())
 }

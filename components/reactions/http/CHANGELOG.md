@@ -9,25 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
-- **Unified `drasi-reaction-http` and `drasi-reaction-http-adaptive`.** The `drasi-reaction-http-adaptive` crate and the `http-adaptive` plugin kind have been removed. All adaptive batching functionality is now provided by `drasi-reaction-http` and is enabled by adding an `adaptive` block to its configuration.
-- **Config schema is now camelCase end-to-end** and bumps `config_version` to `2.0.0`. Top-level fields are `baseUrl`, `timeoutMs`, `outputTemplates`, `batchEndpoint`, `adaptive`, `queries`, `token`.
-- **`body` is renamed to `template`** for per-operation HTTP request templates, matching the shared template primitives used by `dashboard` and other newer reactions.
-- **Per-call HTTP fields are now nested inside each template** (`url`, `method`, `headers`) instead of living at the route root.
-- The legacy `routes` map is replaced by `queries` (a list with explicit `queryId`) and an optional shared `outputTemplates` block; per-query overrides live under `queries[*].outputTemplates`.
-- The always-on HTTP client is now HTTP/2 with connection pooling enabled by default.
-- **Default output payload is a typed `DefaultChangeNotification` envelope** instead of the raw row data / internal `ResultDiff` enum. When no per-query body template applies — i.e. for the default endpoint (`POST {baseUrl}/changes/{queryId}`), for routes whose body `template` is empty, and for the render-error fallback path — the body is now a `{operation, queryId, sequenceId, timestamp, before, after, metadata}` JSON object. `operation` is one of `"ADD"` / `"UPDATE"` / `"DELETE"`; `sequenceId` is the monotonic per-query emission number; `metadata` is omitted when empty. `Aggregation` is delivered as `UPDATE` (matching gRPC / Azure Storage / RabbitMQ), and `Noop` produces no HTTP request. The full schema is published at [`schema/output.schema.json`](./schema/output.schema.json). This replaces the previous behaviour where ADD/DELETE were indistinguishable (both posted as the raw row) and UPDATE/Aggregation exposed internal `ResultDiff` field names like `row_signature` and `grouping_keys`.
-- **Batch delivery uses a Pattern C envelope.** With `batchEndpoint` set, a coalesced batch is POSTed as a single `{ "batch": [ … ] }` object whose array holds `DefaultChangeNotification` items (each carrying its own `queryId` / `sequenceId` / `timestamp`), replacing the previous bare JSON array of per-query `{queryId, results, timestamp, count}` groups.
+- Config schema `config_version` is `2.0.0`. The dynamic plugin DTO uses camelCase top-level fields: `baseUrl`, `timeoutMs`, `outputTemplates`, `batchEndpoint`, `adaptive`, and `token`.
+- Adaptive mode requires both an `adaptive` block and `batchEndpoint`. Batched delivery always emits the canonical Pattern C `BatchEnvelope` to that endpoint.
+- `outputTemplates` apply to single-notification delivery only. Adaptive batch delivery is mutually exclusive with per-result templates.
 
 ### Features
 
-- Adaptive mode opts in via the `adaptive` config block (`adaptive_min_batch_size`, `adaptive_max_batch_size`, `adaptive_window_size`, `adaptive_batch_timeout_ms`).
-- Optional `batchEndpoint` allows the adaptive loop to coalesce multi-result batches into a single POST instead of fanning out per route.
-- Configuration is validated at construction: `HttpReactionBuilder::build()` compiles every body / URL / header template, verifies each `outputTemplates` route key matches a subscribed query id (or its last dotted segment), and rejects `batchEndpoint` without `adaptive` — failures now surface at build time rather than at dispatch.
+- Adaptive mode opts in via the `adaptive` config block (`adaptiveMinBatchSize`, `adaptiveMaxBatchSize`, `adaptiveWindowSize`, `adaptiveBatchTimeoutMs`) and coalesces `DefaultChangeNotification` items into `BatchEnvelope` payloads.
+- Configuration is validated at construction: `HttpReactionBuilder::build()` validates base URL, timeout, adaptive ranges, batch endpoint path, HTTP methods, headers, templates, and route keys.
 - Per-query routes resolve by full query id, then by the **last dotted segment** of the query id (`routes.my_query` matches a wire id of `source.my_query`), then by the shared default template.
-- Template render context now includes `query_id`, `timestamp`, `metadata`, and (for updates) `data`, alongside the existing `query_name`, `operation`, `before`, and `after`.
+- Template render context includes `query_id`, `query_name`, `timestamp`, `metadata`, `operation`, and the applicable `before`, `after`, and `data` values.
 - New `from_query` builder alias for `with_query`.
-- Render-error fallback: if a per-result template fails to render, the standard `DefaultChangeNotification` envelope is POSTed to `/changes/{queryId}` so events are not dropped.
-- New `HttpReactionBuilder` helpers: `with_default_template`, `with_query_template`, `with_output_templates`, `with_adaptive`, `with_batch_endpoint`, `with_min_batch_size`, `with_max_batch_size`, `with_window_size`, `with_batch_timeout_ms`.
+- Render-error fallback is per template kind: URL failures use `/changes/{queryId}`, body failures use the default envelope on the configured route, and invalid header values drop only that header.
+- HTTP delivery retries transient failures up to three attempts and logs permanent HTTP failures before continuing.
+- New `HttpReactionBuilder` helpers: `with_default_template`, `with_query_template`, `with_output_templates`, `with_adaptive`, `with_batch_endpoint`, and `with_recovery_policy`.
 - Descriptor exposes named OpenAPI sub-schemas and `SchemaUiAnnotator` groupings for the config.
 - Output wire format published as a standalone JSON Schema at `schema/output.schema.json`, generated from the Rust types in `src/output.rs` and kept in sync by `make schema` (verify) / `make update-schema` (regenerate).
 

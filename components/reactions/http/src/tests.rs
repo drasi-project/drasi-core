@@ -173,7 +173,7 @@ fn config_default_camel_case() {
 }
 
 #[test]
-fn config_deserialize_with_output_templates_and_adaptive() {
+fn config_deserialize_with_output_templates() {
     let json = serde_json::json!({
         "baseUrl": "http://example.com",
         "outputTemplates": {
@@ -193,27 +193,38 @@ fn config_deserialize_with_output_templates_and_adaptive() {
                     }
                 }
             }
-        },
+        }
+    });
+
+    let c: HttpReactionConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(c.base_url, "http://example.com");
+    assert!(c.output_templates.is_some());
+    let templates = c.output_templates.unwrap();
+    assert!(templates.default_template.is_some());
+    assert!(templates.routes.contains_key("q1"));
+}
+
+#[test]
+fn config_deserialize_with_adaptive_camel_case() {
+    let json = serde_json::json!({
+        "baseUrl": "http://example.com",
         "adaptive": {
-            "adaptive_min_batch_size": 5,
-            "adaptive_max_batch_size": 500,
-            "adaptive_window_size": 20,
-            "adaptive_batch_timeout_ms": 250
+            "adaptiveMinBatchSize": 5,
+            "adaptiveMaxBatchSize": 500,
+            "adaptiveWindowSize": 20,
+            "adaptiveBatchTimeoutMs": 250
         },
         "batchEndpoint": "/batch"
     });
 
     let c: HttpReactionConfig = serde_json::from_value(json).unwrap();
     assert_eq!(c.base_url, "http://example.com");
-    assert!(c.adaptive.is_some());
-    let a = c.adaptive.unwrap();
+    let a = c.adaptive.expect("adaptive should be present");
     assert_eq!(a.adaptive_min_batch_size, 5);
     assert_eq!(a.adaptive_max_batch_size, 500);
+    assert_eq!(a.adaptive_window_size, 20);
+    assert_eq!(a.adaptive_batch_timeout_ms, 250);
     assert_eq!(c.batch_endpoint.as_deref(), Some("/batch"));
-    assert!(c.output_templates.is_some());
-    let templates = c.output_templates.unwrap();
-    assert!(templates.default_template.is_some());
-    assert!(templates.routes.contains_key("q1"));
 }
 
 #[test]
@@ -286,7 +297,7 @@ fn adaptive_runtime_conversion_uses_window_x_100ms() {
     assert_eq!(runtime.max_batch_size, 30);
     assert_eq!(runtime.throughput_window.as_millis(), 5000);
     assert_eq!(runtime.max_wait_time.as_millis(), 1234);
-    assert_eq!(runtime.min_wait_time.as_millis(), 100);
+    assert_eq!(runtime.min_wait_time.as_millis(), 1);
     assert!(runtime.adaptive_enabled);
 }
 
@@ -315,6 +326,9 @@ fn descriptor_kind_and_version() {
     assert_eq!(d.kind(), "http");
     assert_eq!(d.config_version(), "2.0.0");
     assert_eq!(d.config_schema_name(), "reaction.http.HttpReactionConfig");
+    assert_eq!(d.display_name(), "HTTP");
+    assert!(!d.display_description().is_empty());
+    assert_eq!(d.display_icon(), "http");
     // Schema must serialize and include our root type plus sub-types
     let schema = d.config_schema_json();
     assert!(schema.contains("HttpReactionConfig"));
@@ -322,6 +336,47 @@ fn descriptor_kind_and_version() {
     assert!(schema.contains("HttpQueryConfig"));
     assert!(schema.contains("HttpCallSpec"));
     assert!(schema.contains("AdaptiveBatchConfig"));
+}
+
+#[tokio::test]
+async fn descriptor_rejects_unknown_top_level_fields() {
+    use drasi_plugin_sdk::ReactionPluginDescriptor;
+    let d = crate::descriptor::HttpReactionDescriptor;
+    let cfg = serde_json::json!({
+        "baseUrl": "http://example.com",
+        "routes": {}
+    });
+    let err = d
+        .create_reaction("my-r", vec!["q1".to_string()], &cfg, true)
+        .await
+        .err()
+        .expect("descriptor should reject unknown fields");
+    assert!(
+        err.to_string().contains("unknown field"),
+        "error should reject unknown fields: {err}"
+    );
+}
+
+#[tokio::test]
+async fn descriptor_rejects_unknown_adaptive_fields() {
+    use drasi_plugin_sdk::ReactionPluginDescriptor;
+    let d = crate::descriptor::HttpReactionDescriptor;
+    let cfg = serde_json::json!({
+        "baseUrl": "http://example.com",
+        "adaptive": {
+            "adaptive_min_batch_size": 2
+        },
+        "batchEndpoint": "/batch"
+    });
+    let err = d
+        .create_reaction("my-r", vec!["q1".to_string()], &cfg, true)
+        .await
+        .err()
+        .expect("descriptor should reject snake_case adaptive fields");
+    assert!(
+        err.to_string().contains("unknown field"),
+        "error should reject unknown fields: {err}"
+    );
 }
 
 #[tokio::test]
@@ -397,6 +452,7 @@ async fn lifecycle_start_stop_adaptive() {
     let r = HttpReaction::builder("test-lifecycle-a")
         .with_base_url("http://127.0.0.1:1")
         .with_adaptive_defaults()
+        .with_batch_endpoint("/batch")
         .build()
         .unwrap();
     r.start().await.unwrap();
@@ -463,6 +519,129 @@ fn build_succeeds_when_batch_endpoint_set_with_adaptive() {
         .with_batch_endpoint("/batch")
         .build();
     assert!(r.is_ok(), "batchEndpoint with adaptive must build");
+}
+
+#[test]
+fn build_fails_when_adaptive_set_without_batch_endpoint() {
+    let err = HttpReaction::builder("r")
+        .with_query("q1")
+        .with_adaptive_defaults()
+        .build()
+        .err()
+        .expect("build should fail");
+    assert!(
+        err.to_string().contains("batchEndpoint"),
+        "error should mention batchEndpoint: {err}"
+    );
+}
+
+#[test]
+fn build_fails_when_adaptive_combined_with_output_templates() {
+    let spec = spec_with("/x", "", HashMap::new());
+    let err = HttpReaction::builder("r")
+        .with_query("q1")
+        .with_query_template("q1", spec)
+        .with_adaptive_defaults()
+        .with_batch_endpoint("/batch")
+        .build()
+        .err()
+        .expect("build should fail");
+    assert!(
+        err.to_string().contains("outputTemplates"),
+        "error should mention outputTemplates: {err}"
+    );
+}
+
+#[test]
+fn build_fails_on_invalid_base_url() {
+    let err = HttpReaction::builder("r")
+        .with_base_url("ftp://example.com")
+        .build()
+        .err()
+        .expect("build should fail");
+    assert!(
+        format!("{err:#}").contains("baseUrl"),
+        "error should mention baseUrl: {err:#}"
+    );
+}
+
+#[test]
+fn build_fails_on_zero_timeout() {
+    let err = HttpReaction::builder("r")
+        .with_timeout_ms(0)
+        .build()
+        .err()
+        .expect("build should fail");
+    assert!(
+        err.to_string().contains("timeoutMs"),
+        "error should mention timeoutMs: {err}"
+    );
+}
+
+#[test]
+fn build_fails_on_zero_priority_queue_capacity() {
+    let err = HttpReaction::builder("r")
+        .with_priority_queue_capacity(0)
+        .build()
+        .err()
+        .expect("build should fail");
+    assert!(
+        err.to_string().contains("priorityQueueCapacity"),
+        "error should mention priorityQueueCapacity: {err}"
+    );
+}
+
+#[test]
+fn build_fails_on_invalid_http_method() {
+    let mut qc = spec_with("/x", "", HashMap::new());
+    qc.added.as_mut().unwrap().extension.method = "TRACE".to_string();
+    let err = HttpReaction::builder("r")
+        .with_query("q1")
+        .with_query_template("q1", qc)
+        .build()
+        .err()
+        .expect("build should fail");
+    assert!(
+        format!("{err:#}").contains("HTTP method"),
+        "error should mention HTTP method: {err:#}"
+    );
+}
+
+#[test]
+fn build_fails_on_invalid_header_name() {
+    let mut headers = HashMap::new();
+    headers.insert("bad header".to_string(), "value".to_string());
+    let bad = spec_with("/x", "", headers);
+    let err = HttpReaction::builder("r")
+        .with_query("q1")
+        .with_query_template("q1", bad)
+        .build()
+        .err()
+        .expect("build should fail");
+    assert!(
+        format!("{err:#}").contains("header"),
+        "error should mention header: {err:#}"
+    );
+}
+
+#[test]
+fn build_fails_on_invalid_adaptive_ranges() {
+    let err = HttpReaction::builder("r")
+        .with_query("q1")
+        .with_adaptive(AdaptiveBatchConfig {
+            adaptive_min_batch_size: 10,
+            adaptive_max_batch_size: 1,
+            adaptive_window_size: 10,
+            adaptive_batch_timeout_ms: 100,
+        })
+        .with_batch_endpoint("/batch")
+        .build()
+        .err()
+        .expect("build should fail");
+    assert!(
+        format!("{err:#}").contains("adaptiveMinBatchSize"),
+        "error should mention adaptiveMinBatchSize: {err:#}"
+    );
 }
 
 #[test]

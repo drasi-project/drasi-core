@@ -10,10 +10,12 @@ Changes can be distributed two ways:
   as its own HTTP request.
 - **Adaptive batching** (optional) — result changes are coalesced into batches whose size
   scales automatically with incoming load, trading a small amount of latency for higher
-  throughput and reduced network traffic. Enabled by adding an `AdaptiveBatchConfig`.
+  throughput and reduced network traffic. Enabled by adding an `AdaptiveBatchConfig` and
+  a `batchEndpoint`.
 
-Both modes support [Handlebars](https://handlebarsjs.com/) templating of the request URL,
-method, body, and headers, plus per-query routing and bearer-token authentication.
+Single-notification mode supports [Handlebars](https://handlebarsjs.com/) templating of
+the request URL, body, and headers, plus per-query routing and bearer-token authentication.
+Adaptive batch mode sends the canonical `BatchEnvelope` to `batchEndpoint`.
 
 The reaction is built in Rust with `HttpReactionBuilder` and added to a running `DrasiLib`
 via `add_reaction(...)`. See [Examples](#examples).
@@ -31,11 +33,12 @@ via `add_reaction(...)`. See [Examples](#examples).
    - [`BatchEnvelope` (batch-endpoint path)](#batchenvelope-batch-endpoint-path)
 6. [Adaptive batching](#adaptive-batching)
 7. [Render-error fallback](#render-error-fallback)
-8. [Authentication](#authentication)
-9. [Examples](#examples)
-10. [Plugin metadata](#plugin-metadata)
-11. [Testing](#testing)
-12. [Changelog](#changelog)
+8. [Delivery failure handling](#delivery-failure-handling)
+9. [Authentication](#authentication)
+10. [Examples](#examples)
+11. [Plugin metadata](#plugin-metadata)
+12. [Testing](#testing)
+13. [Changelog](#changelog)
 
 ---
 
@@ -156,9 +159,9 @@ optional unless noted; defaults are applied by the builder.
 | `base_url` | `String` | `http://localhost` | `with_base_url` | Base URL prepended to every relative per-call URL. |
 | `token` | `Option<String>` | `None` | `with_token` | Bearer token sent as `Authorization: Bearer <token>` on every request. |
 | `timeout_ms` | `u64` | `5000` | `with_timeout_ms` | Per-request HTTP timeout in milliseconds. |
-| `output_templates` | `Option<HttpOutputTemplates>` | `None` | `with_default_template`, `with_query_template`, `with_output_templates` | Per-query and default templates for the URL, method, body, and headers. See [Output templates](#output-templates-and-per-query-routing). |
-| `adaptive` | `Option<AdaptiveBatchConfig>` | `None` | `with_adaptive` (or `with_min_batch_size` / `with_max_batch_size` / `with_window_size` / `with_batch_timeout_ms`) | When `Some`, enables [adaptive batching](#adaptive-batching). When `None`, the reaction delivers one HTTP request per result. |
-| `batch_endpoint` | `Option<String>` | `None` | `with_batch_endpoint` | Path appended to `base_url`. When set, every coalesced batch is POSTed to `{base_url}{batch_endpoint}` as a single payload. **Requires `adaptive`** — if set without `adaptive`, the reaction fails to start (logs an error, sets status to `Stopped`, and returns an error). |
+| `output_templates` | `Option<HttpOutputTemplates>` | `None` | `with_default_template`, `with_query_template`, `with_output_templates` | Per-query and default templates for the URL, body, and headers in single-notification mode. See [Output templates](#output-templates-and-per-query-routing). |
+| `adaptive` | `Option<AdaptiveBatchConfig>` | `None` | `with_adaptive` | When `Some`, enables [adaptive batching](#adaptive-batching) and requires `batch_endpoint`. When `None`, the reaction delivers one HTTP request per result. |
+| `batch_endpoint` | `Option<String>` | `None` | `with_batch_endpoint` | Path appended to `base_url`. Required with `adaptive`; every coalesced batch is POSTed to `{base_url}{batch_endpoint}` as a single payload. Invalid combinations fail at `build()` time. |
 
 Builder-only settings (not stored on `HttpReactionConfig`):
 
@@ -167,6 +170,7 @@ Builder-only settings (not stored on `HttpReactionConfig`):
 | `with_queries(Vec<String>)` / `with_query(...)` | _empty_ | Query IDs this reaction subscribes to. |
 | `with_priority_queue_capacity(usize)` | runtime default | Capacity of the inbound queue that buffers query results before processing. Tune for high-throughput sources. |
 | `with_auto_start(bool)` | `true` | Whether the reaction starts automatically when `DrasiLib` is running. |
+| `with_recovery_policy(ReactionRecoveryPolicy)` | `Strict` | Override the recovery policy used by the runtime for this reaction instance. |
 
 ### `HttpOutputTemplates`
 
@@ -191,7 +195,7 @@ Builder-only settings (not stored on `HttpReactionConfig`):
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `template` | `String` | _empty_ | Handlebars template for the request body. When empty, the standard [`DefaultChangeNotification`](#defaultchangenotification-envelope-single-notification-path) envelope is sent. |
-| `extension.url` | `String` | _empty_ | Handlebars template for the URL. A relative value is appended to `base_url`; an absolute `http(s)://` value is allowed only if its host matches `base_url`'s host. |
+| `extension.url` | `String` | _empty_ | Handlebars template for the URL. A relative value is appended to `base_url`; an absolute `http(s)://` value is allowed only if its scheme, host, and port match `base_url`. |
 | `extension.method` | `String` | `POST` | HTTP method: `GET`, `POST`, `PUT`, `PATCH`, or `DELETE` (case-insensitive). |
 | `extension.headers` | `HashMap<String, String>` | _empty_ | Additional headers. Values support Handlebars templates. |
 
@@ -211,9 +215,11 @@ Builder-only settings (not stored on `HttpReactionConfig`):
 `output_templates` lets each query customise how its result changes are delivered. For each
 result, the reaction selects a template in this order:
 
-1. `output_templates.routes[<query_id>]` — a per-query override, if present.
-2. `output_templates.default_template` — a shared fallback, if present.
-3. A built-in default: `POST {base_url}/changes/{query_id}` with the standard
+1. `output_templates.routes[<query_id>]` — a per-query override keyed by the full query id.
+2. `output_templates.routes[<last dotted segment>]` — for a query id such as `source.orders`,
+   `routes.orders` is accepted when no full-id route matches.
+3. `output_templates.default_template` — a shared fallback, if present.
+4. A built-in default: `POST {base_url}/changes/{query_id}` with the standard
    [`DefaultChangeNotification`](#defaultchangenotification-envelope-single-notification-path)
    envelope as the body (used when neither of the above matches the operation).
 
@@ -246,14 +252,16 @@ let orders = HttpQueryConfig {
 };
 ```
 
-Route keys are matched against the full query id.
+Route keys are validated at build time against the subscribed query ids and their last
+dotted segments.
 
 ---
 
 ## Templating
 
 Templates use [Handlebars](https://handlebarsjs.com/) syntax and apply to the body
-`template`, the `url`, and header values. The render context depends on the operation:
+`template`, the `url`, and header values. HTTP methods are static and validated at build
+time. The render context depends on the operation:
 
 | Variable | Available for | Meaning |
 |----------|---------------|---------|
@@ -287,8 +295,8 @@ if the file drifts from the types. Use it to generate clients or validate receiv
 
 ### `DefaultChangeNotification` envelope (single-notification path)
 
-In single-notification mode (and in adaptive mode without a `batch_endpoint`), each result
-is delivered as a `DefaultChangeNotification` JSON object:
+In single-notification mode, each result is delivered as a `DefaultChangeNotification`
+JSON object:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -386,32 +394,42 @@ an internal batcher that coalesces result changes and scales batch size based on
 throughput. The batcher:
 
 1. Pulls query results off the internal queue.
-2. Groups them into batches whose size adapts between `adaptive_min_batch_size` and
+2. Groups individual `DefaultChangeNotification` items into batches whose size adapts
+   between `adaptive_min_batch_size` and
    `adaptive_max_batch_size` according to recent throughput, flushing a partial batch
    after `adaptive_batch_timeout_ms`.
-3. Delivers each batch either:
-   - **coalesced** to `batch_endpoint` as one request (when `batch_endpoint` is set), or
-   - **fanned out** per result using the same [templating and routing](#output-templates-and-per-query-routing)
-     rules as single-notification mode (when `batch_endpoint` is not set).
+3. Delivers each batch to `batch_endpoint` as one request.
 
-Use a coalesced `batch_endpoint` when your receiver can accept many changes in one
-request — this is the configuration that most reduces network traffic. Use adaptive without
-a `batch_endpoint` when you want the batcher's throughput smoothing but still need each
-change delivered to its own templated endpoint.
+Use adaptive batching when your receiver can accept many changes in one request and the
+per-request overhead is the bottleneck. If each change must go to its own templated
+endpoint, use single-notification mode.
 
 ---
 
 ## Render-error fallback
 
-If a per-result template (URL, body, or header) fails to render — for example because it
-references a field that is missing from the payload — the reaction:
+If a per-result template fails to render — for example because it references a field that
+is missing from the payload — the reaction handles the failure by template kind:
 
-1. Logs a warning with the query id and the render error.
-2. POSTs the standard [`DefaultChangeNotification`](#defaultchangenotification-envelope-single-notification-path)
-   envelope to `{base_url}/changes/{queryId}` instead.
+1. URL render failure: logs a warning and uses the default `/changes/{queryId}` URL.
+2. Body render failure: logs a warning and sends the standard
+   [`DefaultChangeNotification`](#defaultchangenotification-envelope-single-notification-path)
+   envelope as the body on the configured route.
+3. Header render failure or invalid rendered header value: logs a warning and drops only
+   that header.
 
 This guarantees changes are never silently dropped because of a template error. The
 behaviour is always on and cannot be disabled.
+
+---
+
+## Delivery failure handling
+
+The HTTP reaction is fire-and-forget: it does not persist delivery checkpoints or replay
+requests after process failure. Each outbound request is attempted up to three times for
+transient failures (network errors, 408, 409, 425, 429, and 5xx responses) with short
+exponential backoff. Non-retryable HTTP failures are logged as permanent failures and the
+reaction continues processing later events.
 
 ---
 
@@ -427,8 +445,10 @@ let reaction = HttpReactionBuilder::new("my-http-reaction")
     .build()?;
 ```
 
-The reaction does not resolve secret-store references itself; supply the resolved token
-value (e.g. from `std::env`, a Drasi state store, or your application's secret manager).
+Embedded builder callers supply the resolved token value (for example from `std::env` or
+their application's secret manager). Dynamic-plugin config accepts `ConfigValue` forms for
+connection fields, including environment-variable and secret references, and resolves them
+through the plugin SDK's configured resolver.
 
 ---
 
@@ -507,42 +527,7 @@ let reaction = HttpReactionBuilder::new("orders-batched")
     .build()?;
 ```
 
-### 4. Adaptive batching, fanned out per result (no batch endpoint)
-
-Throughput smoothing while still delivering each change to its templated endpoint:
-
-```rust
-use std::collections::HashMap;
-use drasi_reaction_http::{
-    AdaptiveBatchConfig, HttpCallExt, HttpQueryConfig, HttpReactionBuilder, TemplateSpec,
-};
-
-let default_tmpl = HttpQueryConfig {
-    added: Some(TemplateSpec {
-        template: r#"{{json after}}"#.to_string(),
-        extension: HttpCallExt {
-            url: "/events".to_string(),
-            method: "POST".to_string(),
-            headers: HashMap::new(),
-        },
-    }),
-    ..Default::default()
-};
-
-let reaction = HttpReactionBuilder::new("orders-smoothed")
-    .with_queries(vec!["orders-by-region".to_string()])
-    .with_base_url("https://example.com/api")
-    .with_default_template(default_tmpl)
-    .with_adaptive(AdaptiveBatchConfig {
-        adaptive_min_batch_size: 1,
-        adaptive_max_batch_size: 200,
-        adaptive_window_size: 30,        // 3 s throughput window
-        adaptive_batch_timeout_ms: 50,
-    })
-    .build()?;
-```
-
-### 5. Authenticated requests with custom headers
+### 4. Authenticated requests with custom headers
 
 ```rust
 use std::collections::HashMap;
@@ -596,6 +581,14 @@ Build as a dynamic plugin:
 cargo build -p drasi-reaction-http --features dynamic-plugin
 ```
 
+> **Packaging note:** `Cargo.toml` currently uses workspace-inherited Drasi dependencies
+> for convenience while this reaction lives inside the `drasi-core` repository. That is
+> intentionally left uncompliant with the standalone reaction-plugin packaging guidance
+> for now. Before publishing or building this reaction outside the workspace, update it
+> to depend on pinned crates.io versions of `drasi-lib`, `drasi-plugin-sdk`, and related
+> Drasi crates. Tracked by
+> [drasi-project/drasi-core#574](https://github.com/drasi-project/drasi-core/issues/574).
+
 ---
 
 ## Testing
@@ -613,7 +606,7 @@ exercise:
 - Render-error fallback to `/changes/{query_id}`.
 - Default fallback when no template matches.
 - Adaptive mode with `batch_endpoint` set — coalesced batch POST.
-- Adaptive mode without `batch_endpoint` — per-result fan-out.
+- DrasiLib end-to-end wiring through a mock source and Cypher query.
 
 ---
 

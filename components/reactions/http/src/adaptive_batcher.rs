@@ -167,13 +167,20 @@ pub struct AdaptiveBatcher<T> {
 impl<T> AdaptiveBatcher<T> {
     pub fn new(receiver: mpsc::Receiver<T>, config: AdaptiveBatcherConfig) -> Self {
         let monitor = ThroughputMonitor::new(config.throughput_window);
+        let initial_wait = config.min_wait_time.min(config.max_wait_time);
         Self {
             receiver,
             current_batch_size: config.min_batch_size,
-            current_wait_time: config.min_wait_time,
+            current_wait_time: initial_wait,
             monitor,
             config,
         }
+    }
+
+    fn bounded_wait(&self, candidate: Duration) -> Duration {
+        candidate
+            .max(self.config.min_wait_time)
+            .min(self.config.max_wait_time)
     }
 
     /// Adjust batching parameters based on current throughput
@@ -189,13 +196,13 @@ impl<T> AdaptiveBatcher<T> {
             ThroughputLevel::Idle => {
                 // Optimize for latency - send immediately
                 self.current_batch_size = self.config.min_batch_size;
-                self.current_wait_time = self.config.min_wait_time;
+                self.current_wait_time = self.bounded_wait(self.config.min_wait_time);
             }
             ThroughputLevel::Low => {
                 // Small batches, minimal wait
                 self.current_batch_size =
                     (self.config.min_batch_size * 2).min(self.config.max_batch_size);
-                self.current_wait_time = Duration::from_millis(1).max(self.config.min_wait_time);
+                self.current_wait_time = self.bounded_wait(Duration::from_millis(1));
             }
             ThroughputLevel::Medium => {
                 // Moderate batching
@@ -203,9 +210,7 @@ impl<T> AdaptiveBatcher<T> {
                     ((self.config.max_batch_size - self.config.min_batch_size) / 4
                         + self.config.min_batch_size)
                         .min(self.config.max_batch_size);
-                self.current_wait_time = Duration::from_millis(10)
-                    .max(self.config.min_wait_time)
-                    .min(self.config.max_wait_time);
+                self.current_wait_time = self.bounded_wait(Duration::from_millis(10));
             }
             ThroughputLevel::High => {
                 // Larger batches for efficiency
@@ -213,16 +218,12 @@ impl<T> AdaptiveBatcher<T> {
                     ((self.config.max_batch_size - self.config.min_batch_size) / 2
                         + self.config.min_batch_size)
                         .min(self.config.max_batch_size);
-                self.current_wait_time = Duration::from_millis(25)
-                    .max(self.config.min_wait_time)
-                    .min(self.config.max_wait_time);
+                self.current_wait_time = self.bounded_wait(Duration::from_millis(25));
             }
             ThroughputLevel::Burst => {
                 // Maximum throughput mode
                 self.current_batch_size = self.config.max_batch_size;
-                self.current_wait_time = Duration::from_millis(50)
-                    .max(self.config.min_wait_time)
-                    .min(self.config.max_wait_time);
+                self.current_wait_time = self.bounded_wait(Duration::from_millis(50));
             }
         }
 

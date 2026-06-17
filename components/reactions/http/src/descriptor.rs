@@ -82,7 +82,7 @@ pub struct HttpOutputTemplatesDto {
 /// DTO mirroring [`AdaptiveBatchConfig`].
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = reaction::http::AdaptiveBatchConfig)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AdaptiveBatchConfigDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueU64>)]
@@ -104,7 +104,7 @@ pub struct AdaptiveBatchConfigDto {
 /// Top-level HTTP reaction config DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = reaction::http::HttpReactionConfig)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HttpReactionConfigDto {
     /// Base URL for HTTP requests.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -293,6 +293,18 @@ impl ReactionPluginDescriptor for HttpReactionDescriptor {
 
     fn config_schema_name(&self) -> &str {
         "reaction.http.HttpReactionConfig"
+    }
+
+    fn display_name(&self) -> &str {
+        "HTTP"
+    }
+
+    fn display_description(&self) -> &str {
+        "Delivers Drasi query-result changes to HTTP endpoints."
+    }
+
+    fn display_icon(&self) -> &str {
+        "http"
     }
 
     fn config_schema_json(&self) -> String {

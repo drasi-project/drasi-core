@@ -21,6 +21,10 @@
 //! `method`, and `headers` come from the flattened [`HttpCallExt`].
 
 use anyhow::Context;
+use reqwest::{
+    header::{HeaderName, HeaderValue},
+    Method, Url,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -39,7 +43,7 @@ fn default_timeout_ms() -> u64 {
 /// HTTP-specific extension flattened next to the shared [`TemplateSpec`]'s
 /// `template` (request body) field.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HttpCallExt {
     /// URL path (appended to `base_url`) or absolute URL.
     /// Supports Handlebars template syntax.
@@ -68,7 +72,7 @@ pub type HttpQueryConfig = QueryConfig<HttpCallExt>;
 /// Grouped under `outputTemplates` for symmetry with the gRPC reaction
 /// and the [`TemplateRouting`] trait shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HttpOutputTemplates {
     /// Fallback template used when no per-query route matches.
     /// When neither this nor a matching `routes` entry exists, the
@@ -84,13 +88,13 @@ pub struct HttpOutputTemplates {
 
 /// HTTP reaction configuration.
 ///
-/// Drives both the standard (per-result) and adaptive (coalesced)
-/// runtime paths. Setting [`HttpReactionConfig::adaptive`] to
-/// `Some(...)` enables adaptive batching; setting
-/// [`HttpReactionConfig::batch_endpoint`] additionally routes any
-/// coalesced batch with multi-diff queries to `{baseUrl}{batchEndpoint}`.
+/// Drives either the standard (per-result) runtime path or the adaptive
+/// coalesced batch path. Setting [`HttpReactionConfig::adaptive`] to
+/// `Some(...)` enables adaptive batching and requires
+/// [`HttpReactionConfig::batch_endpoint`] so every adaptive batch has one
+/// downstream POST target.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HttpReactionConfig {
     /// Base URL for HTTP requests.
     #[serde(default = "default_base_url")]
@@ -110,19 +114,89 @@ pub struct HttpReactionConfig {
 
     /// When `Some`, the reaction batches diffs through the adaptive
     /// batcher. When `None`, behaves as per-result delivery.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "adaptive_config_serde"
+    )]
     pub adaptive: Option<AdaptiveBatchConfig>,
 
     /// Path appended to `base_url` for coalesced batch POSTs.
     ///
-    /// Requires `adaptive` to be `Some(...)`. If `batch_endpoint` is set
-    /// while `adaptive` is `None`, [`HttpReactionConfig::validate`]
-    /// rejects the configuration so the builder's `build()` fails fast.
-    /// Under adaptive mode with `batch_endpoint` set to `None`, coalesced
-    /// batches are still delivered per-route rather than via a single
-    /// batch endpoint.
+    /// Requires `adaptive` to be `Some(...)`; adaptive mode also requires
+    /// this field so batched delivery is an explicit HTTP contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_endpoint: Option<String>,
+}
+
+mod adaptive_config_serde {
+    use super::AdaptiveBatchConfig;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "camelCase")]
+    struct AdaptiveBatchConfigWire {
+        #[serde(default)]
+        adaptive_min_batch_size: Option<usize>,
+        #[serde(default)]
+        adaptive_max_batch_size: Option<usize>,
+        #[serde(default)]
+        adaptive_window_size: Option<usize>,
+        #[serde(default)]
+        adaptive_batch_timeout_ms: Option<u64>,
+    }
+
+    impl From<&AdaptiveBatchConfig> for AdaptiveBatchConfigWire {
+        fn from(value: &AdaptiveBatchConfig) -> Self {
+            Self {
+                adaptive_min_batch_size: Some(value.adaptive_min_batch_size),
+                adaptive_max_batch_size: Some(value.adaptive_max_batch_size),
+                adaptive_window_size: Some(value.adaptive_window_size),
+                adaptive_batch_timeout_ms: Some(value.adaptive_batch_timeout_ms),
+            }
+        }
+    }
+
+    impl From<AdaptiveBatchConfigWire> for AdaptiveBatchConfig {
+        fn from(value: AdaptiveBatchConfigWire) -> Self {
+            let defaults = AdaptiveBatchConfig::default();
+            Self {
+                adaptive_min_batch_size: value
+                    .adaptive_min_batch_size
+                    .unwrap_or(defaults.adaptive_min_batch_size),
+                adaptive_max_batch_size: value
+                    .adaptive_max_batch_size
+                    .unwrap_or(defaults.adaptive_max_batch_size),
+                adaptive_window_size: value
+                    .adaptive_window_size
+                    .unwrap_or(defaults.adaptive_window_size),
+                adaptive_batch_timeout_ms: value
+                    .adaptive_batch_timeout_ms
+                    .unwrap_or(defaults.adaptive_batch_timeout_ms),
+            }
+        }
+    }
+
+    pub fn serialize<S>(
+        value: &Option<AdaptiveBatchConfig>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value
+            .as_ref()
+            .map(AdaptiveBatchConfigWire::from)
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<AdaptiveBatchConfig>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<AdaptiveBatchConfigWire>::deserialize(deserializer)
+            .map(|value| value.map(AdaptiveBatchConfig::from))
+    }
 }
 
 impl Default for HttpReactionConfig {
@@ -189,8 +263,15 @@ fn validate_template_str(s: &str) -> anyhow::Result<()> {
 fn validate_call_spec(spec: &HttpCallSpec) -> anyhow::Result<()> {
     validate_template_str(&spec.template).context("body template")?;
     validate_template_str(&spec.extension.url).context("url template")?;
+    parse_http_method(&spec.extension.method).context("HTTP method")?;
     for (key, value) in &spec.extension.headers {
+        HeaderName::from_bytes(key.as_bytes())
+            .with_context(|| format!("invalid HTTP header name '{key}'"))?;
         validate_template_str(value).with_context(|| format!("header '{key}' template"))?;
+        if !value.contains("{{") {
+            HeaderValue::from_str(value)
+                .with_context(|| format!("invalid static value for HTTP header '{key}'"))?;
+        }
     }
     Ok(())
 }
@@ -246,16 +327,54 @@ impl HttpReactionConfig {
     /// fails at construction rather than at dispatch.
     ///
     /// Checks:
-    /// 1. `batch_endpoint` is only set when `adaptive` is enabled.
+    /// 1. URL, timeout, adaptive, and batch-endpoint invariants.
     /// 2. Every body / URL / header template compiles.
-    /// 3. Every `routes` key matches a subscribed query id (or its last
+    /// 3. Every static HTTP method and header is valid.
+    /// 4. Every `routes` key matches a subscribed query id (or its last
     ///    dotted segment).
-    pub fn validate(&self, query_ids: &[String]) -> anyhow::Result<()> {
-        if self.batch_endpoint.is_some() && self.adaptive.is_none() {
-            anyhow::bail!(
-                "`batchEndpoint` requires `adaptive` (coalesced batch) mode; \
-                 set `adaptive` to enable batch delivery"
-            );
+    pub fn validate(
+        &self,
+        query_ids: &[String],
+        priority_queue_capacity: Option<usize>,
+    ) -> anyhow::Result<()> {
+        validate_base_url(&self.base_url).context("baseUrl")?;
+
+        if self.timeout_ms == 0 {
+            anyhow::bail!("`timeoutMs` must be greater than 0");
+        }
+
+        if matches!(priority_queue_capacity, Some(0)) {
+            anyhow::bail!("`priorityQueueCapacity` must be greater than 0");
+        }
+
+        match (&self.adaptive, &self.batch_endpoint) {
+            (None, Some(_)) => {
+                anyhow::bail!(
+                    "`batchEndpoint` requires `adaptive` (coalesced batch) mode; \
+                     set `adaptive` to enable batch delivery"
+                );
+            }
+            (Some(_), None) => {
+                anyhow::bail!(
+                    "`adaptive` mode requires `batchEndpoint`; HTTP adaptive delivery \
+                     sends coalesced batches to a single endpoint"
+                );
+            }
+            _ => {}
+        }
+
+        if let Some(batch_endpoint) = &self.batch_endpoint {
+            validate_batch_endpoint(batch_endpoint).context("batchEndpoint")?;
+        }
+
+        if let Some(adaptive) = &self.adaptive {
+            validate_adaptive(adaptive).context("adaptive")?;
+            if self.output_templates.is_some() {
+                anyhow::bail!(
+                    "`outputTemplates` cannot be combined with `adaptive` batchEndpoint mode; \
+                     batched HTTP delivery emits the canonical BatchEnvelope"
+                );
+            }
         }
 
         if let Some(templates) = &self.output_templates {
@@ -274,5 +393,86 @@ impl HttpReactionConfig {
         }
 
         Ok(())
+    }
+}
+
+fn validate_base_url(base_url: &str) -> anyhow::Result<()> {
+    let url = Url::parse(base_url).context("invalid URL")?;
+    match url.scheme() {
+        "http" | "https" => {}
+        scheme => anyhow::bail!("unsupported URL scheme '{scheme}'; expected http or https"),
+    }
+    if url.host_str().is_none() {
+        anyhow::bail!("URL must include a host");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        anyhow::bail!("URL must not include a query string or fragment");
+    }
+    Ok(())
+}
+
+fn validate_batch_endpoint(endpoint: &str) -> anyhow::Result<()> {
+    if endpoint.is_empty() {
+        anyhow::bail!("must not be empty");
+    }
+    if !endpoint.starts_with('/') || endpoint.starts_with("//") {
+        anyhow::bail!("must be an absolute path beginning with a single '/'");
+    }
+    if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        anyhow::bail!("must be a path, not an absolute URL");
+    }
+    if endpoint.contains("{{") {
+        anyhow::bail!("does not support Handlebars templates");
+    }
+    Ok(())
+}
+
+fn validate_adaptive(adaptive: &AdaptiveBatchConfig) -> anyhow::Result<()> {
+    if adaptive.adaptive_min_batch_size == 0 {
+        anyhow::bail!("`adaptiveMinBatchSize` must be greater than 0");
+    }
+    if adaptive.adaptive_max_batch_size == 0 {
+        anyhow::bail!("`adaptiveMaxBatchSize` must be greater than 0");
+    }
+    if adaptive.adaptive_min_batch_size > adaptive.adaptive_max_batch_size {
+        anyhow::bail!("`adaptiveMinBatchSize` must be <= `adaptiveMaxBatchSize`");
+    }
+    if !(1..=255).contains(&adaptive.adaptive_window_size) {
+        anyhow::bail!("`adaptiveWindowSize` must be in the range 1..=255");
+    }
+    if adaptive.adaptive_batch_timeout_ms == 0 {
+        anyhow::bail!("`adaptiveBatchTimeoutMs` must be greater than 0");
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_http_method(method: &str) -> anyhow::Result<Method> {
+    match method.trim().to_ascii_uppercase().as_str() {
+        "" | "POST" => Ok(Method::POST),
+        "GET" => Ok(Method::GET),
+        "PUT" => Ok(Method::PUT),
+        "DELETE" => Ok(Method::DELETE),
+        "PATCH" => Ok(Method::PATCH),
+        other => anyhow::bail!(
+            "unsupported HTTP method '{other}'; expected GET, POST, PUT, PATCH, or DELETE"
+        ),
+    }
+}
+
+pub(crate) fn resolve_http_url(base_url: &str, rendered_url: &str) -> anyhow::Result<String> {
+    if rendered_url.starts_with("http://") || rendered_url.starts_with("https://") {
+        let base = Url::parse(base_url).context("invalid baseUrl")?;
+        let resolved = Url::parse(rendered_url).context("invalid rendered URL")?;
+        if base.scheme() != resolved.scheme()
+            || base.host_str() != resolved.host_str()
+            || base.port_or_known_default() != resolved.port_or_known_default()
+        {
+            anyhow::bail!(
+                "rendered URL '{rendered_url}' must match baseUrl scheme, host, and port"
+            );
+        }
+        Ok(rendered_url.to_string())
+    } else {
+        Ok(format!("{base_url}{rendered_url}"))
     }
 }

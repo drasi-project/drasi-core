@@ -13,13 +13,11 @@
 // limitations under the License.
 
 //! Adaptive coalesced delivery loop. Forwards inbound diffs to the
-//! [`AdaptiveBatcher`], then either POSTs each coalesced batch as a
-//! single payload (when `batch_endpoint` is set) or fans the batch back
-//! out through the per-route [`process_result`] path.
+//! [`AdaptiveBatcher`], then POSTs each coalesced batch as a single
+//! Pattern C payload to the configured `batch_endpoint`.
 
 use std::time::Duration;
 
-use handlebars::Handlebars;
 use log::{debug, error, info, warn};
 use reqwest::Client;
 
@@ -30,7 +28,6 @@ use crate::adaptive_batcher::{AdaptiveBatcher, AdaptiveBatcherConfig};
 use crate::batch::send_coalesced_batch;
 use crate::config::HttpReactionConfig;
 use crate::output::DefaultChangeNotification;
-use crate::process::{post_default_notification, process_result};
 
 /// Run the adaptive (coalesced) processing loop. Spawns an internal
 /// batcher task that lives for the lifetime of this loop.
@@ -41,13 +38,11 @@ pub(crate) async fn run_adaptive_loop(
     config: HttpReactionConfig,
     runtime_adaptive: AdaptiveBatcherConfig,
     client: Client,
-    handlebars: Handlebars<'static>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let status_handle = base.status_handle();
     let capacity = runtime_adaptive.recommended_channel_capacity();
-    let (batch_tx, batch_rx) =
-        tokio::sync::mpsc::channel::<(String, Vec<DefaultChangeNotification>)>(capacity);
+    let (batch_tx, batch_rx) = tokio::sync::mpsc::channel::<DefaultChangeNotification>(capacity);
 
     debug!(
         "[{reaction_name}] HttpReaction adaptive mode using batch channel capacity: {capacity} (max_batch_size: {})",
@@ -55,10 +50,9 @@ pub(crate) async fn run_adaptive_loop(
     );
 
     // Spawn batcher task. It owns the rx and exits when batch_tx is dropped.
-    let batcher_handle = {
+    let mut batcher_handle = {
         let reaction_name = reaction_name.clone();
         let client = client.clone();
-        let handlebars = handlebars.clone();
         let config = config.clone();
         let runtime_adaptive = runtime_adaptive.clone();
         tokio::spawn(async move {
@@ -73,15 +67,13 @@ pub(crate) async fn run_adaptive_loop(
                     continue;
                 }
 
-                let batch_size: usize = batch.iter().map(|(_, v)| v.len()).sum();
+                let batch_size = batch.len();
                 total_results += batch_size as u64;
                 total_batches += 1;
 
                 debug!("[{reaction_name}] Processing adaptive batch of {batch_size} results");
 
-                if let Err(e) =
-                    deliver_batch(&client, &handlebars, &config, &reaction_name, batch).await
-                {
+                if let Err(e) = deliver_batch(&client, &config, &reaction_name, batch).await {
                     error!("[{reaction_name}] Failed to deliver batch: {e}");
                 }
 
@@ -119,39 +111,42 @@ pub(crate) async fn run_adaptive_loop(
             continue;
         }
 
-        // Convert this QueryResult's diffs into the wire-format notifications
-        // up-front (dropping Noops). The batcher carries notifications, not
-        // raw `ResultDiff`s, so the sequence/timestamp/metadata from
-        // `query_result` are captured here and travel with each notification
-        // through coalescing.
-        let notifications: Vec<DefaultChangeNotification> = query_result
+        // Convert this QueryResult's diffs into wire-format notifications
+        // up-front (dropping Noops). The batcher unit is one emitted
+        // DefaultChangeNotification, so adaptive_max_batch_size caps the
+        // number of payload items in each BatchEnvelope.
+        let notifications = query_result
             .results
             .iter()
-            .filter_map(|d| DefaultChangeNotification::from_diff(query_result, d))
-            .collect();
-        if notifications.is_empty() {
-            continue;
-        }
+            .filter_map(|d| DefaultChangeNotification::from_diff(query_result, d));
 
-        if batch_tx
-            .send((query_result.query_id.clone(), notifications))
-            .await
-            .is_err()
-        {
-            error!("[{reaction_name}] Failed to send to batch channel — batcher exited");
+        let mut batcher_closed = false;
+        for notification in notifications {
+            if batch_tx.send(notification).await.is_err() {
+                error!("[{reaction_name}] Failed to send to batch channel — batcher exited");
+                batcher_closed = true;
+                break;
+            }
+        }
+        if batcher_closed {
             break;
         }
     }
 
     drop(batch_tx);
-    if tokio::time::timeout(Duration::from_secs(5), batcher_handle)
-        .await
-        .is_err()
-    {
-        warn!(
-            "[{reaction_name}] Adaptive batcher did not finish within the 5 s shutdown window — \
-             in-flight batches may have been dropped"
-        );
+    match tokio::time::timeout(Duration::from_millis(1500), &mut batcher_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            warn!("[{reaction_name}] Adaptive batcher task ended unexpectedly: {e}");
+        }
+        Err(_) => {
+            warn!(
+                "[{reaction_name}] Adaptive batcher did not finish within the 1.5 s shutdown window — \
+                 aborting in-flight delivery"
+            );
+            batcher_handle.abort();
+            let _ = batcher_handle.await;
+        }
     }
 
     info!("[{reaction_name}] HTTP adaptive loop stopped");
@@ -163,70 +158,25 @@ pub(crate) async fn run_adaptive_loop(
         .await;
 }
 
-/// Either POST the whole batch to the configured `batch_endpoint` as a
-/// single Pattern C [`crate::output::BatchEnvelope`], or fan the batch out
-/// and call [`process_result`] for each notification.
+/// POST the whole batch to the configured `batch_endpoint` as a single
+/// Pattern C [`crate::output::BatchEnvelope`].
 async fn deliver_batch(
     client: &Client,
-    handlebars: &Handlebars<'static>,
     config: &HttpReactionConfig,
     reaction_name: &str,
-    batch: Vec<(String, Vec<DefaultChangeNotification>)>,
+    batch: Vec<DefaultChangeNotification>,
 ) -> anyhow::Result<()> {
-    // If a batch_endpoint is configured, POST every coalesced batch to it as
-    // a single payload — regardless of per-query result counts. An operator
-    // who configures a batch endpoint expects all adaptive-mode traffic there.
-    // Flatten preserving arrival order; each notification carries its own
-    // queryId/sequenceId/timestamp so grouping is not lost.
-    if let Some(batch_endpoint) = config.batch_endpoint.as_ref() {
-        let notifications: Vec<DefaultChangeNotification> =
-            batch.into_iter().flat_map(|(_, n)| n).collect();
-        return send_coalesced_batch(
-            client,
-            &config.base_url,
-            batch_endpoint,
-            &config.token,
-            notifications,
-            reaction_name,
-        )
-        .await;
-    }
+    let Some(batch_endpoint) = config.batch_endpoint.as_ref() else {
+        anyhow::bail!("adaptive HTTP delivery requires batchEndpoint");
+    };
 
-    // Otherwise, fan out per-result through the standard rendering path.
-    for (query_id, notifications) in batch {
-        for notification in notifications {
-            let outcome = match config.resolve_call_spec(&query_id, notification.operation_type()) {
-                Some(spec) => {
-                    process_result(
-                        client,
-                        handlebars,
-                        &config.base_url,
-                        &config.token,
-                        spec,
-                        &notification,
-                        &query_id,
-                        reaction_name,
-                    )
-                    .await
-                }
-                None => {
-                    post_default_notification(
-                        client,
-                        &config.base_url,
-                        &config.token,
-                        &notification,
-                        &query_id,
-                        reaction_name,
-                    )
-                    .await
-                }
-            };
-
-            if let Err(e) = outcome {
-                error!("[{reaction_name}] Failed to process result in batch: {e}");
-            }
-        }
-    }
-
-    Ok(())
+    send_coalesced_batch(
+        client,
+        &config.base_url,
+        batch_endpoint,
+        &config.token,
+        batch,
+        reaction_name,
+    )
+    .await
 }

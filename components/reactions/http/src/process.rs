@@ -14,17 +14,21 @@
 
 //! Per-result HTTP delivery used by both standard and adaptive runtime loops.
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, Context, Result};
 use handlebars::Handlebars;
-use log::{debug, warn};
+use log::{debug, error, warn};
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
-    Client, Method,
+    Client, Method, StatusCode,
 };
 use serde_json::{Map, Value};
+use std::time::Duration;
 
-use crate::config::HttpCallSpec;
+use crate::config::{parse_http_method, resolve_http_url, HttpCallSpec};
 use crate::output::{DefaultChangeNotification, Operation};
+
+const MAX_DELIVERY_ATTEMPTS: usize = 3;
+const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Build a [`Handlebars`] registry pre-loaded with the `json` helper used
 /// across all HTTP templates.
@@ -107,11 +111,10 @@ fn build_context(notification: &DefaultChangeNotification) -> Map<String, Value>
 
 /// Render `call_spec` against `data` and POST/PUT/etc. it to `{base_url}{url}`.
 ///
-/// On any render error (URL, body, or header), falls back to a `POST
-/// {base_url}/changes/{query_name}` carrying `notification` as the body —
-/// events are **never dropped** because a template failed. The same
-/// notification is also sent as the body when `call_spec.template` is
-/// empty (i.e., the caller did not specify a body template).
+/// Runtime render failures are handled by template kind: URL failures use
+/// the documented default `/changes/{query_name}` URL, body failures keep
+/// the route but use the default notification envelope as the body, and
+/// header value failures drop only that header.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_result(
     client: &Client,
@@ -126,45 +129,21 @@ pub(crate) async fn process_result(
     let result_type = notification.op_str();
     let context = build_context(notification);
 
-    // Render the URL; on failure fall back to the default change-notification endpoint.
+    // Render the URL; on failure fall back to the default change-notification URL.
     let rendered_spec_url = match handlebars.render_template(&call_spec.extension.url, &context) {
         Ok(u) => u,
         Err(e) => {
             warn!(
-                "[{reaction_name}] URL template render failed for query '{query_name}' ({result_type}): {e} — falling back to /changes/{query_name}"
+                "[{reaction_name}] URL template render failed for query '{query_name}' ({result_type}): {e} — using /changes/{query_name}"
             );
-            return post_default_notification(
-                client,
-                base_url,
-                token,
-                notification,
-                query_name,
-                reaction_name,
-            )
-            .await;
+            format!("/changes/{query_name}")
         }
     };
-    let full_url =
-        if rendered_spec_url.starts_with("http://") || rendered_spec_url.starts_with("https://") {
-            // SSRF guard: a rendered absolute URL may incorporate graph-data
-            // fields. Only allow it when its host matches the configured
-            // base_url host; otherwise reject the event.
-            let base_host = reqwest::Url::parse(base_url)
-                .ok()
-                .and_then(|u| u.host_str().map(str::to_owned));
-            let resolved_host = reqwest::Url::parse(&rendered_spec_url)
-                .ok()
-                .and_then(|u| u.host_str().map(str::to_owned));
-            if base_host.is_none() || base_host != resolved_host {
-                bail!(
-                    "[{reaction_name}] Rendered URL '{rendered_spec_url}' host does not match \
-                     base_url '{base_url}' host for query '{query_name}' — rejecting request"
-                );
-            }
-            rendered_spec_url
-        } else {
-            format!("{base_url}{rendered_spec_url}")
-        };
+    let full_url = resolve_http_url(base_url, &rendered_spec_url).with_context(|| {
+        format!(
+            "[{reaction_name}] rejecting rendered URL '{rendered_spec_url}' for query '{query_name}'"
+        )
+    })?;
 
     // Render body. Empty template => emit the standard change-notification envelope.
     let body = if !call_spec.template.is_empty() {
@@ -175,17 +154,9 @@ pub(crate) async fn process_result(
             Ok(b) => b,
             Err(e) => {
                 warn!(
-                    "[{reaction_name}] Body template render failed for query '{query_name}' ({result_type}): {e} — falling back to /changes/{query_name}"
+                    "[{reaction_name}] Body template render failed for query '{query_name}' ({result_type}): {e} — using default notification envelope"
                 );
-                return post_default_notification(
-                    client,
-                    base_url,
-                    token,
-                    notification,
-                    query_name,
-                    reaction_name,
-                )
-                .await;
+                serde_json::to_string(notification)?
             }
         }
     } else {
@@ -207,68 +178,40 @@ pub(crate) async fn process_result(
             Ok(v) => v,
             Err(e) => {
                 warn!(
-                    "[{reaction_name}] Header '{key}' template render failed for query '{query_name}' ({result_type}): {e} — falling back to /changes/{query_name}"
+                    "[{reaction_name}] Header '{key}' template render failed for query '{query_name}' ({result_type}): {e} — dropping header"
                 );
-                return post_default_notification(
-                    client,
-                    base_url,
-                    token,
-                    notification,
-                    query_name,
-                    reaction_name,
-                )
-                .await;
+                continue;
             }
         };
-        let header_value = HeaderValue::from_str(&rendered_value)?;
+        let header_value = match HeaderValue::from_str(&rendered_value) {
+            Ok(value) => value,
+            Err(e) => {
+                warn!(
+                    "[{reaction_name}] Header '{key}' rendered an invalid value for query '{query_name}' ({result_type}): {e} — dropping header"
+                );
+                continue;
+            }
+        };
         headers.insert(header_name, header_value);
     }
 
-    let method = parse_method(&call_spec.extension.method);
+    let method = parse_http_method(&call_spec.extension.method)?;
 
     debug!("[{reaction_name}] Sending {method} request to {full_url}");
-    let response = client
-        .request(method.clone(), &full_url)
-        .headers(headers)
-        .body(body)
-        .send()
-        .await?;
-
-    let status = response.status();
-    debug!(
-        "[{reaction_name}] HTTP {method} {full_url} - Status: {}",
-        status.as_u16()
-    );
-
-    if !status.is_success() {
-        let error_body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unable to read response body".to_string());
-        warn!(
-            "[{reaction_name}] HTTP request failed with status {}: {error_body}",
-            status.as_u16()
-        );
-    }
-
-    Ok(())
-}
-
-fn parse_method(method: &str) -> Method {
-    match method.to_uppercase().as_str() {
-        "GET" => Method::GET,
-        "POST" => Method::POST,
-        "PUT" => Method::PUT,
-        "DELETE" => Method::DELETE,
-        "PATCH" => Method::PATCH,
-        _ => Method::POST,
-    }
+    send_with_retry(
+        client,
+        method,
+        full_url,
+        headers,
+        body,
+        reaction_name,
+        "HTTP request",
+    )
+    .await
 }
 
 /// `POST {base_url}/changes/{query_name}` with the standard
-/// [`DefaultChangeNotification`] envelope as the JSON body. Used both by
-/// the no-template default delivery path and as the render-error fallback
-/// (URL/body/header template failure) so events are never dropped.
+/// [`DefaultChangeNotification`] envelope as the JSON body.
 pub(crate) async fn post_default_notification(
     client: &Client,
     base_url: &str,
@@ -290,26 +233,102 @@ pub(crate) async fn post_default_notification(
     }
 
     debug!("[{reaction_name}] Default-notification POST to {full_url}");
-    let response = client
-        .post(&full_url)
-        .headers(headers)
-        .body(body)
-        .send()
-        .await?;
+    send_with_retry(
+        client,
+        Method::POST,
+        full_url,
+        headers,
+        body,
+        reaction_name,
+        "default-notification HTTP request",
+    )
+    .await
+}
 
-    let status = response.status();
-    if !status.is_success() {
-        let error_body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unable to read response body".to_string());
-        warn!(
-            "[{reaction_name}] Default-notification HTTP request failed with status {}: {error_body}",
-            status.as_u16()
-        );
+pub(crate) async fn send_with_retry(
+    client: &Client,
+    method: Method,
+    url: String,
+    headers: HeaderMap,
+    body: String,
+    reaction_name: &str,
+    description: &str,
+) -> Result<()> {
+    let mut backoff = INITIAL_RETRY_BACKOFF;
+
+    for attempt in 1..=MAX_DELIVERY_ATTEMPTS {
+        let response = client
+            .request(method.clone(), &url)
+            .headers(headers.clone())
+            .body(body.clone())
+            .send()
+            .await;
+
+        match response {
+            Ok(response) => {
+                let status = response.status();
+                debug!(
+                    "[{reaction_name}] {description} {method} {url} attempt {attempt} - Status: {}",
+                    status.as_u16()
+                );
+
+                if status.is_success() {
+                    return Ok(());
+                }
+
+                let error_body = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unable to read response body".to_string());
+
+                if is_retryable_status(status) && attempt < MAX_DELIVERY_ATTEMPTS {
+                    warn!(
+                        "[{reaction_name}] Transient {description} failure with status {} on attempt {attempt}: {error_body}; retrying",
+                        status.as_u16()
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2);
+                    continue;
+                }
+
+                if is_retryable_status(status) {
+                    return Err(anyhow!(
+                        "{description} failed after {MAX_DELIVERY_ATTEMPTS} attempts with status {}: {error_body}",
+                        status.as_u16()
+                    ));
+                }
+
+                error!(
+                    "[{reaction_name}] Permanent {description} failure with status {}: {error_body}; dropping event",
+                    status.as_u16()
+                );
+                return Ok(());
+            }
+            Err(e) if attempt < MAX_DELIVERY_ATTEMPTS => {
+                warn!(
+                    "[{reaction_name}] Transient {description} send error on attempt {attempt}: {e}; retrying"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = backoff.saturating_mul(2);
+            }
+            Err(e) => {
+                return Err(anyhow!(
+                    "{description} failed after {MAX_DELIVERY_ATTEMPTS} attempts: {e}"
+                ));
+            }
+        }
     }
 
-    Ok(())
+    unreachable!("retry loop always returns")
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    status.is_server_error()
+        || status.as_u16() == 425
+        || matches!(
+            status,
+            StatusCode::REQUEST_TIMEOUT | StatusCode::CONFLICT | StatusCode::TOO_MANY_REQUESTS
+        )
 }
 
 #[cfg(test)]
@@ -400,12 +419,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_method_is_case_insensitive_and_defaults_to_post() {
-        assert_eq!(parse_method("get"), Method::GET);
-        assert_eq!(parse_method("Put"), Method::PUT);
-        assert_eq!(parse_method("PATCH"), Method::PATCH);
-        assert_eq!(parse_method("delete"), Method::DELETE);
-        assert_eq!(parse_method("nonsense"), Method::POST);
-        assert_eq!(parse_method(""), Method::POST);
+    fn parse_method_is_case_insensitive_and_empty_defaults_to_post() {
+        assert_eq!(parse_http_method("get").unwrap(), Method::GET);
+        assert_eq!(parse_http_method("Put").unwrap(), Method::PUT);
+        assert_eq!(parse_http_method("PATCH").unwrap(), Method::PATCH);
+        assert_eq!(parse_http_method("delete").unwrap(), Method::DELETE);
+        assert_eq!(parse_http_method("").unwrap(), Method::POST);
+        assert!(parse_http_method("nonsense").is_err());
     }
 }

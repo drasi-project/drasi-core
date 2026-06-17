@@ -17,7 +17,9 @@
 //! coalesced batching, including the render-error fallback path.
 
 mod mock_server;
+mod mock_source;
 
+use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,9 +27,11 @@ use std::time::Duration;
 use chrono::Utc;
 use drasi_lib::channels::{QueryResult, ResultDiff};
 use drasi_lib::Reaction;
+use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_http::{
     AdaptiveBatchConfig, HttpCallExt, HttpQueryConfig, HttpReaction, TemplateSpec,
 };
+use mock_source::{MockSource, PropertyMapBuilder};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
@@ -94,6 +98,68 @@ async fn wait_for_requests(server: &wiremock::MockServer, expected: usize, max_m
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+#[tokio::test]
+async fn end_to_end_through_drasilib_delivers_to_http_server() -> Result<()> {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/changes/people-query"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let (mock_source, handle) = MockSource::new("test-source")?;
+    let query = Query::cypher("people-query")
+        .query(
+            r#"
+            MATCH (p:Person)
+            RETURN p.name AS name, p.age AS age
+            "#,
+        )
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+    let reaction = HttpReaction::builder("http-e2e")
+        .with_base_url(server.uri())
+        .with_query("people-query")
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("http-e2e-core")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let props = PropertyMapBuilder::new()
+        .with_string("name", "Ada")
+        .with_integer("age", 36)
+        .build();
+    handle
+        .send_node_insert("person-1", vec!["Person"], props)
+        .await?;
+
+    wait_for_requests(&server, 1, 5000).await;
+    core.stop().await?;
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs[0].url.path(), "/changes/people-query");
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body.get("operation"), Some(&json!("ADD")));
+    assert_eq!(body.get("queryId"), Some(&json!("people-query")));
+    assert_eq!(
+        body.get("after").and_then(|a| a.get("name")),
+        Some(&json!("Ada"))
+    );
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -195,10 +261,10 @@ async fn standard_uses_per_query_template() {
 }
 
 #[tokio::test]
-async fn standard_render_error_falls_back_to_changes_query() {
+async fn standard_body_render_error_uses_default_envelope_on_configured_route() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path("/items"))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
@@ -233,7 +299,14 @@ async fn standard_render_error_falls_back_to_changes_query() {
 
     let reqs = server.received_requests().await.unwrap();
     assert!(!reqs.is_empty(), "fallback should have produced a request");
-    assert_eq!(reqs[0].url.path(), "/changes/q1");
+    assert_eq!(
+        reqs[0].url.path(),
+        "/items",
+        "body render failure keeps the configured URL"
+    );
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body.get("operation"), Some(&json!("ADD")));
+    assert_eq!(body.get("queryId"), Some(&json!("q1")));
 }
 
 #[tokio::test]
@@ -392,13 +465,18 @@ async fn standard_continues_after_server_error_response() {
 
     // A second result must still be delivered (the loop did not exit).
     enqueue_add(&r, "q1", json!({"id": 2})).await;
-    wait_for_requests(&server, 2, 2000).await;
+    wait_for_requests(&server, 4, 3000).await;
     r.stop().await.unwrap();
 
     let reqs = server.received_requests().await.unwrap();
     assert!(
-        reqs.len() >= 2,
-        "reaction should keep processing after a 5xx response, got {} requests",
+        reqs.iter().any(|req| {
+            serde_json::from_slice::<serde_json::Value>(&req.body)
+                .ok()
+                .and_then(|body| body.get("after").and_then(|after| after.get("id")).cloned())
+                == Some(json!(2))
+        }),
+        "reaction should process the second event after a 5xx response, got {} requests",
         reqs.len()
     );
 }
@@ -408,36 +486,23 @@ async fn standard_continues_after_server_error_response() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn adaptive_without_batch_endpoint_uses_per_route_delivery() {
-    let server = mock_server::start().await;
-    Mock::given(method("POST"))
-        .and(path("/changes/q1"))
-        .respond_with(ResponseTemplate::new(200))
-        .mount(&server)
-        .await;
-
-    let r = Arc::new(
-        HttpReaction::builder("adaptive-no-batch")
-            .with_base_url(server.uri())
-            .with_query("q1")
-            .with_adaptive(AdaptiveBatchConfig {
-                adaptive_min_batch_size: 1,
-                adaptive_max_batch_size: 16,
-                adaptive_window_size: 10,
-                adaptive_batch_timeout_ms: 50,
-            })
-            .build()
-            .unwrap(),
+async fn adaptive_without_batch_endpoint_is_rejected() {
+    let err = HttpReaction::builder("adaptive-no-batch")
+        .with_base_url("http://localhost")
+        .with_query("q1")
+        .with_adaptive(AdaptiveBatchConfig {
+            adaptive_min_batch_size: 1,
+            adaptive_max_batch_size: 16,
+            adaptive_window_size: 10,
+            adaptive_batch_timeout_ms: 50,
+        })
+        .build()
+        .err()
+        .expect("adaptive mode should require batchEndpoint");
+    assert!(
+        err.to_string().contains("batchEndpoint"),
+        "error should mention batchEndpoint: {err}"
     );
-    r.start().await.unwrap();
-    for i in 0..3 {
-        enqueue_add(&r, "q1", json!({"id": i})).await;
-    }
-    wait_for_requests(&server, 3, 3000).await;
-    r.stop().await.unwrap();
-
-    let reqs = server.received_requests().await.unwrap();
-    assert!(reqs.len() >= 3, "expected at least 3 per-route requests");
 }
 
 #[tokio::test]
@@ -454,7 +519,7 @@ async fn adaptive_with_batch_endpoint_posts_to_batch_when_multi() {
             .with_base_url(server.uri())
             .with_query("q1")
             .with_adaptive(AdaptiveBatchConfig {
-                adaptive_min_batch_size: 3,
+                adaptive_min_batch_size: 5,
                 adaptive_max_batch_size: 16,
                 adaptive_window_size: 10,
                 adaptive_batch_timeout_ms: 100,
@@ -498,8 +563,8 @@ async fn adaptive_with_batch_endpoint_posts_to_batch_when_multi() {
         .get("batch")
         .and_then(|b| b.as_array())
         .expect("batch body should be a { \"batch\": [...] } container (Pattern C)");
-    // One QueryResult with 5 diffs → one channel message → 5 flattened
-    // Pattern A items inside the single batch container.
+    // One QueryResult with 5 diffs → 5 Pattern A items inside the single
+    // batch container.
     assert_eq!(batch.len(), 5, "expected 5 coalesced items");
     assert!(
         body.get("queryId").is_none() && body.get("results").is_none(),
@@ -550,7 +615,7 @@ async fn adaptive_with_batch_endpoint_posts_to_batch_when_multi() {
 async fn adaptive_flushes_partial_batch_on_timeout_below_min_size() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
-        .and(path("/changes/q1"))
+        .and(path("/batch"))
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
@@ -567,6 +632,7 @@ async fn adaptive_flushes_partial_batch_on_timeout_below_min_size() {
                 adaptive_window_size: 10,
                 adaptive_batch_timeout_ms: 100,
             })
+            .with_batch_endpoint("/batch")
             .build()
             .unwrap(),
     );
@@ -585,11 +651,16 @@ async fn adaptive_flushes_partial_batch_on_timeout_below_min_size() {
         1,
         "the partial batch should be flushed exactly once"
     );
-    assert_eq!(reqs[0].url.path(), "/changes/q1");
+    assert_eq!(reqs[0].url.path(), "/batch");
     let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
-    assert_eq!(body.get("operation"), Some(&json!("ADD")));
-    assert_eq!(body.get("queryId"), Some(&json!("q1")));
-    assert_eq!(body.get("after"), Some(&json!({"id": 1})));
+    let batch = body
+        .get("batch")
+        .and_then(|b| b.as_array())
+        .expect("partial flush should still use BatchEnvelope");
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0].get("operation"), Some(&json!("ADD")));
+    assert_eq!(batch[0].get("queryId"), Some(&json!("q1")));
+    assert_eq!(batch[0].get("after"), Some(&json!({"id": 1})));
 }
 
 // ---------------------------------------------------------------------------
