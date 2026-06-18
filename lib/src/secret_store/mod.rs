@@ -215,7 +215,10 @@ mod tests {
     fn test_memory_store_default() {
         let store = MemorySecretStoreProvider::default();
         // Should be empty
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         assert!(rt.block_on(store.get_secret("anything")).is_err());
     }
 }

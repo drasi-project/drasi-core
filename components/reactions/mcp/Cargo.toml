@@ -20,7 +20,7 @@ authors = ["Drasi Project"]
 description = "MCP reaction plugin for Drasi"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "reaction", "mcp", "model-context-protocol"]
+keywords = ["drasi", "plugin", "reaction", "mcp", "model-context"]
 categories = ["network-programming"]
 
 [lints]
