@@ -381,7 +381,7 @@ mod event_generation {
     use drasi_lib::Source;
     use std::collections::HashSet;
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_counter_data_generation() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -389,7 +389,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-counter", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         // Start the source
         let result = source.start().await;
@@ -415,7 +415,7 @@ mod event_generation {
         source.stop().await.unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_counter_generates_correct_schema() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -423,7 +423,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-counter-schema", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -469,7 +469,7 @@ mod event_generation {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_counter_values_are_sequential() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -477,7 +477,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-counter-seq", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -509,7 +509,7 @@ mod event_generation {
         assert_eq!(values[2], 3);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_counter_always_generates_insert_events() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -517,7 +517,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-counter-insert", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -539,7 +539,7 @@ mod event_generation {
         source.stop().await.unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_sensor_data_generation() {
         let config = MockSourceConfig {
             data_type: DataType::sensor_reading(5),
@@ -547,7 +547,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-sensor", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         // Start the source
         source.start().await.unwrap();
@@ -571,7 +571,7 @@ mod event_generation {
         source.stop().await.unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_sensor_generates_correct_schema() {
         let config = MockSourceConfig {
             data_type: DataType::sensor_reading(5),
@@ -579,7 +579,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-sensor-schema", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -653,7 +653,7 @@ mod event_generation {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_sensor_insert_then_update_behavior() {
         // Use only 2 sensors to increase chance of seeing same sensor twice
         let config = MockSourceConfig {
@@ -662,7 +662,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-sensor-update", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -706,7 +706,7 @@ mod event_generation {
         assert!(seen_update, "Should have seen at least one Update");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_sensor_respects_sensor_count() {
         let sensor_count = 3u32;
         let config = MockSourceConfig {
@@ -715,7 +715,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-sensor-count", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -759,7 +759,7 @@ mod event_generation {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_generic_data_generation() {
         let config = MockSourceConfig {
             data_type: DataType::Generic,
@@ -767,7 +767,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-generic", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         // Start the source
         source.start().await.unwrap();
@@ -791,7 +791,7 @@ mod event_generation {
         source.stop().await.unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_generic_generates_correct_schema() {
         let config = MockSourceConfig {
             data_type: DataType::Generic,
@@ -799,7 +799,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-generic-schema", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -856,7 +856,7 @@ mod event_generation {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_generic_always_generates_insert_events() {
         let config = MockSourceConfig {
             data_type: DataType::Generic,
@@ -864,7 +864,7 @@ mod event_generation {
         };
 
         let source = MockSource::new("test-generic-insert", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         source.start().await.unwrap();
 
@@ -1069,7 +1069,7 @@ mod inject_event {
     use drasi_lib::Source;
     use std::sync::Arc;
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_inject_event_delivers_to_subscribers() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -1077,7 +1077,7 @@ mod inject_event {
         };
 
         let source = MockSource::new("test-inject", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         // Create a custom element to inject
         let element_id = "custom_injected_1";
@@ -1126,7 +1126,7 @@ mod inject_event {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_inject_update_event() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -1134,7 +1134,7 @@ mod inject_event {
         };
 
         let source = MockSource::new("test-inject-update", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         // Create an Update event
         let reference = ElementReference::new("test-inject-update", "updated_element");
@@ -1175,7 +1175,7 @@ mod inject_event {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_inject_delete_event() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -1183,7 +1183,7 @@ mod inject_event {
         };
 
         let source = MockSource::new("test-inject-delete", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         // Create a Delete event (Delete only takes metadata, not element)
         let reference = ElementReference::new("test-inject-delete", "deleted_element");
@@ -1378,7 +1378,7 @@ mod lifecycle_advanced {
         assert_eq!(source.status().await, ComponentStatus::Stopped);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_data_generation_stops_after_stop() {
         let config = MockSourceConfig {
             data_type: DataType::Counter,
@@ -1386,7 +1386,7 @@ mod lifecycle_advanced {
         };
 
         let source = MockSource::new("test-gen-stops", config).unwrap();
-        let mut rx = source.test_subscribe();
+        let mut rx = source.test_subscribe().await;
 
         // Start and collect some events
         source.start().await.unwrap();
