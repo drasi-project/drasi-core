@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-kubernetes-common"
-version = "0.1.2"
+version = "0.1.4"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Shared types for Kubernetes source and bootstrap plugins"

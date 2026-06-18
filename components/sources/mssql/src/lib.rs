@@ -357,6 +357,7 @@ impl Source for MsSqlSource {
         }
 
         self.base.set_status(ComponentStatus::Starting, None).await;
+        self.base.reset_bootstrap_boundary();
         log::info!("Starting MS SQL CDC source: {}", self.base.id);
 
         // Create a brand-new shutdown channel so the CDC task gets a pristine

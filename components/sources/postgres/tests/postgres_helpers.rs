@@ -272,6 +272,37 @@ pub async fn create_decimal_test_table(client: &Client, table_name: &str) -> Res
     Ok(())
 }
 
+pub async fn create_timestamptz_test_table(client: &Client, table_name: &str) -> Result<()> {
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS {table_name} (\n    id INTEGER PRIMARY KEY,\n    created_at TIMESTAMPTZ NOT NULL\n)"
+    );
+    execute_sql(client, &create_sql).await?;
+
+    let replica_sql = format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL");
+    execute_sql(client, &replica_sql).await?;
+
+    Ok(())
+}
+
+/// Insert a row with the given `created_at` UTC instant via a parameterized
+/// query, consistent with the other insert helpers. PostgreSQL stores
+/// `timestamptz` as a UTC instant regardless of the INSERT syntax, and its
+/// pgoutput text protocol emits the offset in short form (e.g. `+00` rather
+/// than `+00:00`); this is what the decoder under test must parse.
+pub async fn insert_timestamptz_test_row(
+    client: &Client,
+    table: &str,
+    id: i32,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let sql = format!(
+        "INSERT INTO {} (id, created_at) VALUES ($1, $2)",
+        quote_ident(table)
+    );
+    client.execute(&sql, &[&id, &created_at]).await?;
+    Ok(())
+}
+
 pub async fn insert_decimal_test_row(
     client: &Client,
     table: &str,

@@ -232,8 +232,8 @@ pub mod schema_ui;
 // Top-level re-exports for convenience
 pub use config_value::ConfigValue;
 pub use descriptor::{
-    BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
-    SourcePluginDescriptor,
+    BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, IndexBackendPluginDescriptor,
+    ReactionPluginDescriptor, SourcePluginDescriptor,
 };
 pub use mapper::{DtoMapper, MappingError};
 pub use registration::{PluginRegistration, SDK_VERSION};

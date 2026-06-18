@@ -469,8 +469,6 @@ impl BootstrapProvider for CloudflareRadarBootstrapProvider {
 
         Ok(BootstrapResult {
             event_count: total_events,
-            last_sequence: None,
-            sequences_aligned: false,
             source_position: None,
         })
     }

@@ -212,8 +212,6 @@ impl BootstrapProvider for ComponentGraphBootstrapProvider {
         );
         Ok(BootstrapResult {
             event_count: count as usize,
-            last_sequence: None,
-            sequences_aligned: false,
             source_position: None,
         })
     }

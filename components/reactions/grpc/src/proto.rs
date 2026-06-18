@@ -17,6 +17,9 @@
 //! This module includes the generated protobuf code from the drasi.v1 package.
 
 /// Generated protobuf code for drasi.v1
+// Allow unwrap in generated proto code — tonic generates server code with
+// unwrap() for HTTP response building.
+#[allow(clippy::unwrap_used)]
 pub mod drasi_v1 {
     tonic::include_proto!("drasi.v1");
 }

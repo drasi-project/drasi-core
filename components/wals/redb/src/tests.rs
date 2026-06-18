@@ -809,6 +809,10 @@ async fn test_dto_roundtrip() {
                     ElementValue::Float(ordered_float::OrderedFloat(0.95)),
                 );
                 props.insert("active", ElementValue::Bool(true));
+                let local_dt = "2024-06-15T10:30:45".parse().unwrap();
+                props.insert("local_dt", ElementValue::LocalDateTime(local_dt));
+                let zoned_dt = "2024-06-15T10:30:45+01:00".parse().unwrap();
+                props.insert("zoned_dt", ElementValue::ZonedDateTime(zoned_dt));
                 props.insert(
                     "tags",
                     ElementValue::List(vec![

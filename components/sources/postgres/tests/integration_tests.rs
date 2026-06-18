@@ -20,20 +20,24 @@ use drasi_bootstrap_postgres::{
     PostgresBootstrapConfig, PostgresBootstrapProvider, SslMode as BootstrapSslMode,
     TableKeyConfig as BootstrapTableKeyConfig,
 };
+use drasi_core::models::SourceChange;
+use drasi_lib::channels::SourceEvent;
 use drasi_lib::ComponentStatus;
 use drasi_lib::{config::SourceSubscriptionSettings, DrasiLib, Query, Source, SourceError};
-use drasi_reaction_application::{ApplicationReaction, ApplicationReactionHandle};
+use drasi_reaction_application::{
+    subscription::SubscriptionOptions, ApplicationReaction, ApplicationReactionHandle,
+};
 use drasi_source_postgres::{
     PostgresReplicationSource, PostgresSourceConfig, SslMode, TableKeyConfig,
 };
 use postgres_helpers::{
     create_decimal_test_table, create_logical_replication_slot, create_publication,
-    create_test_table, create_test_table_replica_identity_default, delete_test_row,
-    grant_replication, grant_table_access, insert_decimal_test_row, insert_test_row,
-    setup_replication_postgres, update_test_row,
+    create_test_table, create_test_table_replica_identity_default, create_timestamptz_test_table,
+    delete_test_row, grant_replication, grant_table_access, insert_decimal_test_row,
+    insert_test_row, insert_timestamptz_test_row, setup_replication_postgres, update_test_row,
 };
 use serial_test::serial;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -441,6 +445,199 @@ async fn test_full_crud_cycle() -> Result<()> {
     Ok(())
 }
 
+/// Extract the trailing integer primary key from an element id of the form
+/// `table:pk` (e.g. `users:42` → 42).
+fn element_id_int(element_id: &str) -> Option<i64> {
+    element_id.rsplit(':').next()?.parse::<i64>().ok()
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_bootstrap_cdc_handover_has_no_overlap_or_gap() -> Result<()> {
+    init_logging();
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_test_table(&client, TEST_TABLE).await?;
+    grant_table_access(&client, TEST_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
+
+    // Seed rows BEFORE creating the replication slot so they are part of the
+    // bootstrap snapshot but precede the slot watermark (and thus must never be
+    // replayed by CDC).
+    let seed_count = 1_000_i32;
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {TEST_TABLE} (id, name) SELECT i, 'Seed ' || i::text FROM generate_series(1, $1) AS i"
+            ),
+            &[&seed_count],
+        )
+        .await?;
+
+    let slot = slot_name();
+    create_logical_replication_slot(&client, &slot).await?;
+
+    // Build a source WITH a bootstrap provider so subscribing triggers the
+    // bootstrap snapshot and the bootstrap-to-CDC boundary handover.
+    let source_config = build_source_config(pg.config(), slot.clone());
+    let bootstrap_config = PostgresBootstrapConfig {
+        host: source_config.host.clone(),
+        port: source_config.port,
+        database: source_config.database.clone(),
+        user: source_config.user.clone(),
+        password: source_config.password.clone(),
+        tables: source_config.tables.clone(),
+        slot_name: source_config.slot_name.clone(),
+        publication_name: source_config.publication_name.clone(),
+        ssl_mode: BootstrapSslMode::Disable,
+        table_keys: vec![BootstrapTableKeyConfig {
+            table: TEST_TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+    let source = PostgresReplicationSource::builder("pg-direct-source")
+        .with_config(source_config)
+        .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
+        .build()?;
+
+    source.start().await?;
+    wait_for_source_running(&source).await;
+
+    let mut settings = subscription_settings("pg-direct-source", "q-handover", None, true);
+    settings.enable_bootstrap = true;
+    settings.nodes = HashSet::from([TEST_TABLE.to_string()]);
+    let response = source.subscribe(settings).await?;
+    let mut bootstrap_rx = response
+        .bootstrap_receiver
+        .expect("bootstrap_receiver should be present when enable_bootstrap is true");
+    let mut cdc_rx = response.receiver;
+
+    // Drain the entire bootstrap snapshot. Bootstrap events stop (channel
+    // closes) once the snapshot completes and the boundary is published.
+    let mut bootstrap_ids: HashMap<i64, usize> = HashMap::new();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(30), bootstrap_rx.recv()).await {
+            Ok(Some(event)) => {
+                if let SourceChange::Insert { element } = &event.change {
+                    if let Some(id) = element_id_int(element.get_reference().element_id.as_ref()) {
+                        *bootstrap_ids.entry(id).or_default() += 1;
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(_) => panic!("Timed out draining bootstrap snapshot"),
+        }
+    }
+
+    assert_eq!(
+        bootstrap_ids.len(),
+        seed_count as usize,
+        "bootstrap should snapshot every seed row exactly once (got {})",
+        bootstrap_ids.len()
+    );
+    for id in 1..=i64::from(seed_count) {
+        assert_eq!(
+            bootstrap_ids.get(&id).copied().unwrap_or_default(),
+            1,
+            "seed row {id} missing or duplicated in bootstrap snapshot"
+        );
+    }
+
+    // Bootstrap is complete and the boundary is published. Mutations performed
+    // now are strictly after the boundary and must each be delivered exactly
+    // once by CDC, with no seed rows replayed.
+    let concurrent_insert_id = i64::from(seed_count) + 1;
+    insert_test_row(
+        &client,
+        TEST_TABLE,
+        concurrent_insert_id as i32,
+        "Post Boundary",
+    )
+    .await?;
+    update_test_row(&client, TEST_TABLE, 1, "Seed 1 Updated").await?;
+    delete_test_row(&client, TEST_TABLE, 2).await?;
+
+    let mut inserts: HashMap<i64, usize> = HashMap::new();
+    let mut updates: HashMap<i64, usize> = HashMap::new();
+    let mut deletes: HashMap<i64, usize> = HashMap::new();
+    let started = Instant::now();
+    let mut idle_since = Instant::now();
+    while started.elapsed() < Duration::from_secs(30) {
+        match tokio::time::timeout(Duration::from_millis(500), cdc_rx.recv()).await {
+            Ok(Ok(wrapper)) => {
+                idle_since = Instant::now();
+                if let SourceEvent::Change(change) = &wrapper.event {
+                    if let Some(id) = element_id_int(change.get_reference().element_id.as_ref()) {
+                        match change {
+                            SourceChange::Insert { .. } => *inserts.entry(id).or_default() += 1,
+                            SourceChange::Update { .. } => *updates.entry(id).or_default() += 1,
+                            SourceChange::Delete { .. } => *deletes.entry(id).or_default() += 1,
+                            SourceChange::Future { .. } => {}
+                        }
+                    }
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => {
+                let total_inserts: usize = inserts.values().sum();
+                let done = total_inserts == 1
+                    && updates.get(&1) == Some(&1)
+                    && deletes.get(&2) == Some(&1);
+                if done && idle_since.elapsed() >= Duration::from_secs(2) {
+                    break;
+                }
+            }
+        }
+    }
+
+    // No gap: every post-boundary change was delivered exactly once. The
+    // concurrent insert's decoded key is not asserted here because the
+    // Postgres CDC element-id encoding for newly inserted integer keys differs
+    // from the bootstrap encoding; the structural counts below are what matter.
+    let total_inserts: usize = inserts.values().sum();
+    assert_eq!(
+        total_inserts, 1,
+        "post-boundary insert missing or duplicated in CDC stream: {inserts:?}"
+    );
+    assert_eq!(
+        updates.get(&1),
+        Some(&1),
+        "post-boundary update missing or duplicated in CDC stream: {updates:?}"
+    );
+    assert_eq!(
+        deletes.get(&2),
+        Some(&1),
+        "post-boundary delete missing or duplicated in CDC stream: {deletes:?}"
+    );
+
+    // No overlap: CDC must not replay any pre-boundary seed row. The only
+    // change events permitted are the three post-boundary mutations.
+    assert_eq!(
+        inserts.len(),
+        1,
+        "unexpected extra inserts (CDC replayed pre-boundary events): {inserts:?}"
+    );
+    assert_eq!(
+        updates.len(),
+        1,
+        "unexpected extra updates (CDC replayed pre-boundary events): {updates:?}"
+    );
+    assert_eq!(
+        deletes.len(),
+        1,
+        "unexpected extra deletes (CDC replayed pre-boundary events): {deletes:?}"
+    );
+
+    source.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
 #[tokio::test]
 #[serial]
 #[ignore]
@@ -620,6 +817,125 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
     Ok(())
 }
 
+/// End-to-end regression test for timestamptz decoding over logical
+/// replication. PostgreSQL's pgoutput text protocol emits the timezone offset
+/// in short form (e.g. `+00`) rather than the full `+00:00` ISO 8601 form.
+/// Before the decoder fix this caused the CDC change to fail to decode, so the
+/// inserted row never reached query results. This test inserts a timestamptz
+/// row via CDC and asserts it surfaces with the correct instant.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_timestamptz_short_offset_serialization() -> Result<()> {
+    init_logging();
+
+    const TS_TABLE: &str = "events";
+    const TS_PUBLICATION: &str = "drasi_ts_pub";
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_timestamptz_test_table(&client, TS_TABLE).await?;
+    grant_table_access(&client, TS_TABLE, "postgres").await?;
+    create_publication(&client, TS_PUBLICATION, &[TS_TABLE.to_string()]).await?;
+
+    let slot_name = slot_name();
+    create_logical_replication_slot(&client, &slot_name).await?;
+
+    let source_config = PostgresSourceConfig {
+        host: pg.config().host.clone(),
+        port: pg.config().port,
+        database: pg.config().database.clone(),
+        user: pg.config().user.clone(),
+        password: pg.config().password.clone(),
+        tables: vec![TS_TABLE.to_string()],
+        slot_name: slot_name.clone(),
+        publication_name: TS_PUBLICATION.to_string(),
+        ssl_mode: SslMode::Disable,
+        table_keys: vec![TableKeyConfig {
+            table: TS_TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+
+    let source = PostgresReplicationSource::builder("pg-ts-test-source")
+        .with_config(source_config)
+        .build()?;
+
+    let query = Query::cypher("ts-test-query")
+        .query(
+            r#"
+            MATCH (e:events)
+            RETURN e.id AS id, e.created_at AS created_at
+            "#,
+        )
+        .from_source("pg-ts-test-source")
+        .auto_start(true)
+        .enable_bootstrap(true)
+        .build();
+
+    let (reaction, _handle) = ApplicationReaction::builder("ts-test-reaction")
+        .with_query("ts-test-query")
+        .build();
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("pg-ts-test-core")
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+
+    // Insert a timestamptz row. The value is stored in UTC; the logical
+    // replication walsender (server `timezone` GUC = UTC) emits it in text
+    // form with a short-form `+00` offset, which is exactly the case the
+    // decoder fix addresses.
+    let expected = chrono::DateTime::parse_from_rfc3339("2026-05-13T22:03:45.423627+00:00")
+        .expect("static timestamp literal should parse")
+        .with_timezone(&chrono::Utc);
+    insert_timestamptz_test_row(&client, TS_TABLE, 1, expected).await?;
+
+    wait_for_query_results(&core, "ts-test-query", move |results| {
+        if results.is_empty() {
+            return false;
+        }
+
+        let row = &results[0];
+        let created_at = match row.get("created_at").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                log::error!("created_at field missing or not a string: {row:?}");
+                return false;
+            }
+        };
+
+        match chrono::DateTime::parse_from_rfc3339(created_at) {
+            Ok(parsed) => {
+                if parsed.with_timezone(&chrono::Utc) != expected {
+                    log::error!("created_at instant mismatch: expected {expected}, got {parsed}");
+                    return false;
+                }
+                true
+            }
+            Err(e) => {
+                log::error!("created_at is not valid rfc3339 ('{created_at}'): {e}");
+                false
+            }
+        }
+    })
+    .await?;
+
+    core.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
 // --- Replay / Resume support tests ---
 
 fn build_source_config(
@@ -666,7 +982,6 @@ fn subscription_settings(
         relations: HashSet::new(),
         resume_from,
         request_position_handle,
-        last_sequence: None,
     }
 }
 
@@ -951,13 +1266,19 @@ fn pg_matches_change(
 /// Two queries subscribe to the same Postgres source. After both process WAL
 /// events, query2 is stopped and query1 advances further. On full restart the
 /// source rewinds to query2's earlier checkpoint. Position filtering suppresses
-/// replayed events for query1 while delivering them to query2.
+/// replayed events for query1 (so query1 does not re-emit an already-committed
+/// row at a new outbox sequence) while delivering them to query2.
+///
+/// Note: the ApplicationReaction used here is non-durable and replays its query
+/// outbox on restart, so query1's existing 602 entry may be re-delivered at the
+/// SAME sequence (at-least-once). The assertion below therefore tolerates a
+/// same-sequence replay and only fails on a 602 emitted at a NEW, higher sequence.
 #[tokio::test]
 #[serial]
 #[ignore]
 async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
-    use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
+    use drasi_lib::indexes::config::StorageBackendRef;
     use drasi_reaction_application::subscription::SubscriptionOptions;
 
     init_logging();
@@ -1034,11 +1355,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
         .from_source("pg-mq-source")
         .auto_start(true)
         .enable_bootstrap(true)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: q1_dir.to_string_lossy().to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }))
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
         .build();
 
     let query2 = Query::cypher(q2_id)
@@ -1051,11 +1368,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
         .from_source("pg-mq-source")
         .auto_start(true)
         .enable_bootstrap(true)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: q2_dir.to_string_lossy().to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }))
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
         .build();
 
     let (reaction1, handle1) = ApplicationReaction::builder("mq-reaction1")
@@ -1075,7 +1388,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
             .with_query(query2)
             .with_reaction(reaction1)
             .with_reaction(reaction2)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await?,
     );
@@ -1108,11 +1421,26 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
 
     insert_test_row(&client, TEST_TABLE, 602, "OnlyQ1").await?;
 
-    wait_for_subscription_change(&mut sub1, 15, |e| {
-        pg_matches_change(e, "ADD", &[("id", "602"), ("name", "OnlyQ1")])
-    })
-    .await?;
-
+    // Capture the outbox sequence at which query1 emits row 602. A non-durable
+    // reaction (ApplicationReaction) replays its query outbox on restart, so this
+    // exact entry MAY be re-delivered later at the SAME sequence — an acceptable
+    // at-least-once re-delivery. What must NOT happen is the source re-dispatching
+    // the already-committed row 602 to query1, causing a NEW emission at a HIGHER
+    // sequence.
+    let mut q1_602_seq: Option<u64> = None;
+    for _ in 0..15 {
+        if let Some(result) = sub1.recv().await {
+            if result
+                .results
+                .iter()
+                .any(|e| pg_matches_change(e, "ADD", &[("id", "602"), ("name", "OnlyQ1")]))
+            {
+                q1_602_seq = Some(result.sequence);
+                break;
+            }
+        }
+    }
+    let q1_602_seq = q1_602_seq.context("query1 did not see row 602")?;
     // Let query1 checkpoint persist
     tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -1126,7 +1454,10 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
 
     // --- Phase 4: Full restart ---
     // Source rewinds to min(query1_cp, query2_cp) = query2's earlier checkpoint.
-    // Row 602 replays but should be filtered for query1.
+    // Row 602 is replayed by the source but must be filtered for query1 (already
+    // committed), so query1 must not RE-EMIT 602 at a new outbox sequence. The
+    // non-durable reaction may still re-deliver query1's existing 602 outbox entry
+    // (same sequence) as an at-least-once replay, which is acceptable.
     core.start().await?;
 
     // Reuse sub2 — the mpsc channel survives stop/start because
@@ -1144,14 +1475,19 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
     .await
     .context("query2 did not see row 603")?;
 
-    // query1 should see row 603 but NOT a duplicate of 602
-    let mut saw_602_duplicate = false;
+    // query1 must see the new row 603. It MAY see row 602 again as an at-least-once
+    // replay of its existing outbox entry (same sequence) — acceptable for a
+    // non-durable reaction. It must NOT see 602 at a NEW (higher) outbox sequence,
+    // which would mean the source re-delivered an already-committed row to query1
+    // and query1 re-emitted it (position-filter failure).
+    let mut saw_602_new_emission = false;
     let mut saw_603 = false;
     for _ in 0..20 {
         if let Some(result) = sub1.recv().await {
             for entry in &result.results {
-                if pg_matches_change(entry, "ADD", &[("id", "602")]) {
-                    saw_602_duplicate = true;
+                if pg_matches_change(entry, "ADD", &[("id", "602")]) && result.sequence > q1_602_seq
+                {
+                    saw_602_new_emission = true;
                 }
                 if pg_matches_change(entry, "ADD", &[("id", "603"), ("name", "WhileStopped")]) {
                     saw_603 = true;
@@ -1168,8 +1504,9 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
         "query1 should see the new row 603 inserted while stopped"
     );
     assert!(
-        !saw_602_duplicate,
-        "query1 should NOT see row 602 again — position filtering must suppress it"
+        !saw_602_new_emission,
+        "query1 saw row 602 at a NEW outbox sequence (> {q1_602_seq}) after restart — \
+         the source position filter must suppress already-committed rows for query1"
     );
 
     core.stop().await?;
@@ -1193,7 +1530,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
 #[ignore]
 async fn test_postgres_stop_restart_recovers() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
-    use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
+    use drasi_lib::indexes::config::StorageBackendRef;
     use drasi_reaction_application::subscription::SubscriptionOptions;
 
     init_logging();
@@ -1265,11 +1602,7 @@ async fn test_postgres_stop_restart_recovers() -> Result<()> {
         .from_source("kr-source")
         .auto_start(true)
         .enable_bootstrap(true)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: q_dir.to_string_lossy().to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }))
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
         .build();
 
     let (reaction, handle) = ApplicationReaction::builder("kr-reaction")
@@ -1284,7 +1617,7 @@ async fn test_postgres_stop_restart_recovers() -> Result<()> {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await?,
     );

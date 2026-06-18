@@ -35,7 +35,7 @@ use std::sync::Arc;
 /// A WAL record with a different version is treated as a decode failure; in
 /// practice the WAL is ephemeral and is expected to be pruned or cleared on
 /// version changes.
-pub(crate) const WAL_FORMAT_VERSION: u32 = 1;
+pub(crate) const WAL_FORMAT_VERSION: u32 = 2;
 
 /// Envelope around every persisted event — carries the format version.
 #[derive(Debug, Serialize, Deserialize)]
@@ -87,6 +87,8 @@ pub(crate) enum ElementValueDto {
     Float(f64),
     Integer(i64),
     String(String),
+    LocalDateTime(String),
+    ZonedDateTime(String),
     List(Vec<ElementValueDto>),
     Object(PropertyMapDto),
 }
@@ -175,6 +177,10 @@ impl From<&ElementValue> for ElementValueDto {
             ElementValue::Float(f) => ElementValueDto::Float(f.into_inner()),
             ElementValue::Integer(i) => ElementValueDto::Integer(*i),
             ElementValue::String(s) => ElementValueDto::String(s.to_string()),
+            ElementValue::LocalDateTime(dt) => {
+                ElementValueDto::LocalDateTime(dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string())
+            }
+            ElementValue::ZonedDateTime(dt) => ElementValueDto::ZonedDateTime(dt.to_rfc3339()),
             ElementValue::List(items) => {
                 ElementValueDto::List(items.iter().map(Into::into).collect())
             }
@@ -261,6 +267,14 @@ impl From<ElementValueDto> for ElementValue {
             ElementValueDto::Float(f) => ElementValue::Float(OrderedFloat(f)),
             ElementValueDto::Integer(i) => ElementValue::Integer(i),
             ElementValueDto::String(s) => ElementValue::String(Arc::from(s)),
+            ElementValueDto::LocalDateTime(s) => s
+                .parse()
+                .map(ElementValue::LocalDateTime)
+                .unwrap_or_else(|_| ElementValue::String(Arc::from(s))),
+            ElementValueDto::ZonedDateTime(s) => s
+                .parse()
+                .map(ElementValue::ZonedDateTime)
+                .unwrap_or_else(|_| ElementValue::String(Arc::from(s))),
             ElementValueDto::List(items) => {
                 ElementValue::List(items.into_iter().map(Into::into).collect())
             }
