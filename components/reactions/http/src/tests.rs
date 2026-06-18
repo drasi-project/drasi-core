@@ -1449,3 +1449,53 @@ async fn descriptor_rejects_route_key_not_matching_a_query() {
         .expect("unknown route key must be rejected");
     assert!(err.to_string().contains("nope"), "{err}");
 }
+
+// ---------------------------------------------------------------------------
+// README accuracy: the declarative (dynamic-plugin) JSON examples deserialize
+// against the real config DTO (camelCase field names, no unknown fields,
+// valid nested structure). Guards the README examples against drift.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn readme_declarative_single_notification_example_is_valid() {
+    let json = serde_json::json!({
+        "baseUrl": "https://example.com/api",
+        "token": "${ORDERS_API_TOKEN}",
+        "timeoutMs": 5000,
+        "outputTemplates": {
+            "routes": {
+                "orders-by-region": {
+                    "added":   { "template": "{{json after}}", "url": "/orders", "method": "POST" },
+                    "updated": { "template": "{{json after}}", "url": "/orders/{{after.id}}", "method": "PUT" },
+                    "deleted": { "url": "/orders/{{before.id}}", "method": "DELETE" }
+                }
+            }
+        }
+    });
+    let dto: Result<crate::descriptor::HttpReactionConfigDto, _> = serde_json::from_value(json);
+    assert!(
+        dto.is_ok(),
+        "README declarative single-notification example must deserialize: {:?}",
+        dto.err()
+    );
+}
+
+#[test]
+fn readme_declarative_adaptive_example_is_valid() {
+    let json = serde_json::json!({
+        "baseUrl": "https://example.com/api",
+        "adaptive": {
+            "adaptiveMinBatchSize": 50,
+            "adaptiveMaxBatchSize": 2000,
+            "adaptiveWindowSize": 100,
+            "adaptiveBatchTimeoutMs": 500
+        },
+        "batchEndpoint": "/events/batch"
+    });
+    let dto: Result<crate::descriptor::HttpReactionConfigDto, _> = serde_json::from_value(json);
+    assert!(
+        dto.is_ok(),
+        "README declarative adaptive example must deserialize: {:?}",
+        dto.err()
+    );
+}
