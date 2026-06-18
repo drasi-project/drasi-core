@@ -8,6 +8,14 @@ continuous queries to a downstream gRPC service via the
 intentionally narrow — it carries only the reaction's wire contract; no source,
 bootstrap, streaming, or subscription types.
 
+**When to use it.** Reach for this reaction when a downstream consumer should
+receive Drasi continuous-query changes over gRPC — for example to drive a
+microservice, an event/stream pipeline, or a metrics collector that already speaks
+gRPC — and you want a typed, schema-checked wire contract (rather than JSON over
+HTTP or SSE) with built-in batching, per-RPC timeouts, retries, and automatic
+reconnection. If your consumer only speaks HTTP, or you need server-sent events to a
+browser, prefer the HTTP or SSE reactions instead.
+
 Changes can be delivered two ways:
 
 - **Fixed batching** (default) — items accumulate until either `batchSize` items have
@@ -25,8 +33,11 @@ When no template is configured, the default `canonicalJson` output mode places
 the guide-aligned canonical item in `payload`; render failures fall back to that
 same canonical payload.
 
-The reaction is built in Rust with `GrpcReaction::builder()` and added to a running
-`DrasiLib` via `add_reaction(...)`. See [Examples](#examples).
+The reaction is built in Rust with `GrpcReaction::builder()` and registered with a
+`DrasiLib` instance either **at build time** via
+`DrasiLib::builder().with_reaction(reaction)`, or **on an already-running instance**
+via `core.add_reaction(reaction).await?`. Both paths are shown below — see
+[Quick start](#quick-start) and [Examples](#examples).
 
 ---
 
@@ -380,6 +391,29 @@ Notes:
 
 One `ProcessResultsRequest` carries one `QueryResult` (a single `query_id` + N items + timestamp). When items for multiple query IDs are batched together by the adaptive runner, the batcher splits them and sends one RPC per query — the proto envelope itself is single-query.
 
+### Canonical `payload` (default `canonicalJson` mode)
+
+When no body template applies and `outputFormat` is `canonicalJson` (the default),
+`payload` carries the guide-aligned canonical item as a `google.protobuf.Struct`:
+
+```json
+{
+  "queryId": "hot-sensors",
+  "sequenceId": 42,
+  "timestamp": "2026-06-17T01:02:03+00:00",
+  "operation": "ADD",
+  "rowSignature": 1234,
+  "after": { "sensor_id": "s1", "temperature": 26.4 }
+}
+```
+
+The `before` / `after` keys follow the operation (`ADD` → `after`; `DELETE` →
+`before`; `UPDATE` → both), and `metadata` is included only when the originating
+`QueryResult.metadata` is non-empty. A matching body template **replaces this
+object** with the template's rendered JSON (wrapped as `{"value": ...}` if it is not
+a top-level object); the typed `before` / `after` fields are never rewritten. Set
+`outputFormat: proto` to omit `payload` entirely unless a template applies.
+
 ---
 
 ## Adaptive batching
@@ -576,9 +610,9 @@ let reaction = GrpcReaction::builder("orders-authed")
 ## Plugin metadata
 
 The reaction also ships as a Drasi dynamic plugin. The plugin descriptor publishes
-named OpenAPI sub-schemas for `GrpcReactionConfig`, `BatchingConfig`,
+named OpenAPI sub-schemas for `GrpcReactionConfig`, `OutputFormat`, `BatchingConfig`,
 `OutputTemplates`, `QueryConfig`, and `TemplateSpec`, plus `SchemaUiAnnotator`
-groupings (`Connection`, `Reliability`, `Auth`, `Batching`, `Templates`) so
+groupings (`Connection`, `Reliability`, `Auth`, `Batching`, `Output`, `Templates`) so
 management UIs can render the configuration form.
 
 > **Development note:** This crate currently uses workspace dependencies for
@@ -629,14 +663,21 @@ Integration tests in `tests/integration_tests.rs` use an in-process tonic mock
   item carries the canonical payload — events are never dropped.
 - `UPDATE` and `DELETE` template context (before / after population) and the
   portable standard keys (`after`, `operation`).
+- Per-query route resolution over the wire (exact id, last dotted segment, and
+  default fallthrough) and the `{{json}}` helper embedding a nested row.
+- Output format `proto` (payload omitted without a template; rendered payload
+  retained when one applies).
 - Per-query emission `sequence`, event timestamp, and query-result metadata
   propagated on the wire.
 - Per-call metadata propagated as actual gRPC request headers, including
   descriptor-resolved `ConfigValue` (environment-variable) metadata and
   per-template rendered metadata.
+- Metadata-keyed batch splitting, multi-item single-RPC ordering, and
+  empty-result suppression.
 - Adaptive batching steady-state delivery with `row_signature` round-trip.
-- End-to-end through `DrasiLib` (mock source → query → reaction).
-- Bounded shutdown drain (the 5 s `tokio::time::timeout` wrap on the batcher join).
+- End-to-end through `DrasiLib` (mock source → query → reaction), and a
+  descriptor-created reaction honoring camelCase `batchSize`.
+- Bounded shutdown drain (the 1.5 s `tokio::time::timeout` wrap on the batcher join).
 
 ---
 
