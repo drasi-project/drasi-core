@@ -1363,3 +1363,124 @@ async fn descriptor_honors_camel_case_batch_size_end_to_end() {
     reaction.stop().await.expect("stop");
     server.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Per-query routes + dotted-suffix resolution over the wire
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_query_routes_select_templates_over_the_wire() {
+    let server = mock_server::start().await;
+    // A per-query route keyed `orders` plus a fallback default template. The
+    // reaction subscribes to a dotted wire id (`source.orders`) so this also
+    // exercises the last-dotted-segment route resolution over the socket.
+    let mut routes = HashMap::new();
+    routes.insert(
+        "orders".to_string(),
+        template_added(r#"{"kind":"order","id":"{{after.id}}"}"#),
+    );
+    let templates = OutputTemplates {
+        default_template: Some(template_added(r#"{"kind":"default","id":"{{after.id}}"}"#)),
+        routes,
+    };
+    let reaction = GrpcReaction::builder("test-routes")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["source.orders".into(), "widgets".into()])
+        .with_fixed_batching(1, 10_000)
+        .with_output_templates(templates)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    // `source.orders` resolves to the `orders` route via last-segment fallback.
+    reaction
+        .enqueue_query_result(make_query_result(
+            "source.orders",
+            vec![add(json!({"id": "o1"}), 1)],
+        ))
+        .await
+        .expect("enqueue order");
+    // `widgets` has no matching route and falls through to the default template.
+    reaction
+        .enqueue_query_result(make_query_result(
+            "widgets",
+            vec![add(json!({"id": "w1"}), 2)],
+        ))
+        .await
+        .expect("enqueue widget");
+
+    server
+        .recorder
+        .wait_for_items(2, Duration::from_secs(5))
+        .await;
+    let batches = server.recorder.batches().await;
+
+    let order_batch = batches
+        .iter()
+        .find(|b| b.query_id == "source.orders")
+        .expect("order batch delivered");
+    assert_eq!(
+        order_batch.items[0].payload.as_ref().map(struct_to_json),
+        Some(json!({"kind": "order", "id": "o1"})),
+        "dotted wire id must resolve to the per-query route template"
+    );
+
+    let widget_batch = batches
+        .iter()
+        .find(|b| b.query_id == "widgets")
+        .expect("widget batch delivered");
+    assert_eq!(
+        widget_batch.items[0].payload.as_ref().map(struct_to_json),
+        Some(json!({"kind": "default", "id": "w1"})),
+        "an unrouted query must fall through to the default template"
+    );
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// `json` helper renders a nested object over the wire
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn json_helper_embeds_nested_row_over_the_wire() {
+    let server = mock_server::start().await;
+    let templates = OutputTemplates {
+        default_template: Some(template_added(
+            r#"{"event":"created","row":{{json after}}}"#,
+        )),
+        routes: HashMap::new(),
+    };
+    let reaction = GrpcReaction::builder("test-json-helper")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        .with_fixed_batching(1, 10_000)
+        .with_output_templates(templates)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result(
+            "q1",
+            vec![add(json!({"id": 7, "name": "alice"}), 1)],
+        ))
+        .await
+        .expect("enqueue");
+
+    server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(5))
+        .await;
+    let batches = server.recorder.batches().await;
+    let item = &batches[0].items[0];
+    assert_eq!(
+        item.payload.as_ref().map(struct_to_json),
+        Some(json!({"event": "created", "row": {"id": 7, "name": "alice"}})),
+        "the `json` helper must splice the raw row object into the rendered payload"
+    );
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}

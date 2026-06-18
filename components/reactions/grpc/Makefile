@@ -5,7 +5,7 @@ test:
 	cargo test -p drasi-reaction-grpc
 
 integration-test:
-	cargo test -p drasi-reaction-grpc -- --ignored --nocapture
+	cargo test -p drasi-reaction-grpc --test integration_tests -- --include-ignored --nocapture
 
 lint:
 	cargo clippy -p drasi-reaction-grpc --all-targets -- -D warnings
