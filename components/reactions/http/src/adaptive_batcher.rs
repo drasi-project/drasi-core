@@ -1,4 +1,4 @@
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@ pub enum ThroughputLevel {
 
 /// Configuration for adaptive batching
 #[derive(Debug, Clone)]
-pub struct AdaptiveBatchConfig {
+pub struct AdaptiveBatcherConfig {
     /// Maximum number of items in a batch
     pub max_batch_size: usize,
     /// Minimum number of items to consider efficient batching
@@ -44,7 +44,7 @@ pub struct AdaptiveBatchConfig {
     pub adaptive_enabled: bool,
 }
 
-impl Default for AdaptiveBatchConfig {
+impl Default for AdaptiveBatcherConfig {
     fn default() -> Self {
         Self {
             max_batch_size: 1000,
@@ -57,7 +57,7 @@ impl Default for AdaptiveBatchConfig {
     }
 }
 
-impl AdaptiveBatchConfig {
+impl AdaptiveBatcherConfig {
     /// Calculate recommended channel capacity for the internal batching channel
     ///
     /// Returns `max_batch_size × 5` to provide sufficient buffering for:
@@ -158,22 +158,29 @@ impl ThroughputMonitor {
 /// Adaptive batcher that adjusts batch size and timing based on throughput
 pub struct AdaptiveBatcher<T> {
     receiver: mpsc::Receiver<T>,
-    config: AdaptiveBatchConfig,
+    config: AdaptiveBatcherConfig,
     monitor: ThroughputMonitor,
     current_batch_size: usize,
     current_wait_time: Duration,
 }
 
 impl<T> AdaptiveBatcher<T> {
-    pub fn new(receiver: mpsc::Receiver<T>, config: AdaptiveBatchConfig) -> Self {
+    pub fn new(receiver: mpsc::Receiver<T>, config: AdaptiveBatcherConfig) -> Self {
         let monitor = ThroughputMonitor::new(config.throughput_window);
+        let initial_wait = config.min_wait_time.min(config.max_wait_time);
         Self {
             receiver,
             current_batch_size: config.min_batch_size,
-            current_wait_time: config.min_wait_time,
+            current_wait_time: initial_wait,
             monitor,
             config,
         }
+    }
+
+    fn bounded_wait(&self, candidate: Duration) -> Duration {
+        candidate
+            .max(self.config.min_wait_time)
+            .min(self.config.max_wait_time)
     }
 
     /// Adjust batching parameters based on current throughput
@@ -189,13 +196,13 @@ impl<T> AdaptiveBatcher<T> {
             ThroughputLevel::Idle => {
                 // Optimize for latency - send immediately
                 self.current_batch_size = self.config.min_batch_size;
-                self.current_wait_time = self.config.min_wait_time;
+                self.current_wait_time = self.bounded_wait(self.config.min_wait_time);
             }
             ThroughputLevel::Low => {
                 // Small batches, minimal wait
                 self.current_batch_size =
                     (self.config.min_batch_size * 2).min(self.config.max_batch_size);
-                self.current_wait_time = Duration::from_millis(1).max(self.config.min_wait_time);
+                self.current_wait_time = self.bounded_wait(Duration::from_millis(1));
             }
             ThroughputLevel::Medium => {
                 // Moderate batching
@@ -203,9 +210,7 @@ impl<T> AdaptiveBatcher<T> {
                     ((self.config.max_batch_size - self.config.min_batch_size) / 4
                         + self.config.min_batch_size)
                         .min(self.config.max_batch_size);
-                self.current_wait_time = Duration::from_millis(10)
-                    .max(self.config.min_wait_time)
-                    .min(self.config.max_wait_time);
+                self.current_wait_time = self.bounded_wait(Duration::from_millis(10));
             }
             ThroughputLevel::High => {
                 // Larger batches for efficiency
@@ -213,16 +218,12 @@ impl<T> AdaptiveBatcher<T> {
                     ((self.config.max_batch_size - self.config.min_batch_size) / 2
                         + self.config.min_batch_size)
                         .min(self.config.max_batch_size);
-                self.current_wait_time = Duration::from_millis(25)
-                    .max(self.config.min_wait_time)
-                    .min(self.config.max_wait_time);
+                self.current_wait_time = self.bounded_wait(Duration::from_millis(25));
             }
             ThroughputLevel::Burst => {
                 // Maximum throughput mode
                 self.current_batch_size = self.config.max_batch_size;
-                self.current_wait_time = Duration::from_millis(50)
-                    .max(self.config.min_wait_time)
-                    .min(self.config.max_wait_time);
+                self.current_wait_time = self.bounded_wait(Duration::from_millis(50));
             }
         }
 
@@ -232,7 +233,12 @@ impl<T> AdaptiveBatcher<T> {
         );
     }
 
-    /// Collect the next batch of items
+    /// Collect the next batch of items.
+    ///
+    /// Note on shutdown handling: Per the Developer Guide, reactions must not block shutdown.
+    /// This inner task safely omits a `tokio::select!` on the shutdown receiver because the
+    /// parent loop (`adaptive_loop.rs`) holds the `shutdown_rx`. When shutdown fires, the parent
+    /// loop drops the `Sender`, causing `self.receiver.recv()` to safely return `None` (channel closed).
     pub async fn next_batch(&mut self) -> Option<Vec<T>> {
         let mut batch = Vec::new();
 
@@ -316,54 +322,6 @@ impl<T> AdaptiveBatcher<T> {
     }
 }
 
-/// Simple non-adaptive batcher for comparison/fallback
-#[allow(dead_code)]
-pub struct FixedBatcher<T> {
-    receiver: mpsc::Receiver<T>,
-    batch_size: usize,
-    timeout: Duration,
-}
-
-#[allow(dead_code)]
-impl<T> FixedBatcher<T> {
-    pub fn new(receiver: mpsc::Receiver<T>, batch_size: usize, timeout: Duration) -> Self {
-        Self {
-            receiver,
-            batch_size,
-            timeout,
-        }
-    }
-
-    pub async fn next_batch(&mut self) -> Option<Vec<T>> {
-        let mut batch = Vec::new();
-        let deadline = Instant::now() + self.timeout;
-
-        while batch.len() < self.batch_size {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() && !batch.is_empty() {
-                break;
-            }
-
-            match timeout(remaining, self.receiver.recv()).await {
-                Ok(Some(item)) => batch.push(item),
-                Ok(None) => {
-                    if batch.is_empty() {
-                        return None;
-                    }
-                    break;
-                }
-                Err(_) => break,
-            }
-        }
-
-        if batch.is_empty() {
-            None
-        } else {
-            Some(batch)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,7 +330,7 @@ mod tests {
     #[test]
     fn test_recommended_channel_capacity() {
         // Default config: max_batch_size = 1000
-        let config = AdaptiveBatchConfig::default();
+        let config = AdaptiveBatcherConfig::default();
         assert_eq!(
             config.recommended_channel_capacity(),
             5000,
@@ -380,7 +338,7 @@ mod tests {
         );
 
         // Small batch size
-        let small_config = AdaptiveBatchConfig {
+        let small_config = AdaptiveBatcherConfig {
             max_batch_size: 100,
             min_batch_size: 10,
             max_wait_time: Duration::from_millis(100),
@@ -395,7 +353,7 @@ mod tests {
         );
 
         // Large batch size
-        let large_config = AdaptiveBatchConfig {
+        let large_config = AdaptiveBatcherConfig {
             max_batch_size: 5000,
             min_batch_size: 100,
             max_wait_time: Duration::from_millis(500),
@@ -410,7 +368,7 @@ mod tests {
         );
 
         // Very small batch
-        let tiny_config = AdaptiveBatchConfig {
+        let tiny_config = AdaptiveBatcherConfig {
             max_batch_size: 10,
             min_batch_size: 1,
             max_wait_time: Duration::from_millis(10),
@@ -444,7 +402,7 @@ mod tests {
     #[tokio::test]
     async fn test_adaptive_batcher_low_traffic() {
         let (tx, rx) = mpsc::channel(100);
-        let config = AdaptiveBatchConfig::default();
+        let config = AdaptiveBatcherConfig::default();
         let mut batcher = AdaptiveBatcher::new(rx, config);
 
         // Send a few messages slowly
@@ -459,7 +417,7 @@ mod tests {
     async fn test_adaptive_batcher_burst() {
         let (tx, rx) = mpsc::channel(1000);
         // Start with slightly higher defaults for testing
-        let config = AdaptiveBatchConfig {
+        let config = AdaptiveBatcherConfig {
             min_batch_size: 20,
             max_batch_size: 100,
             ..Default::default()
