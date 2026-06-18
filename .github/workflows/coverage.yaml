@@ -32,6 +32,7 @@ env:
   # (target/debug/incremental) are large, change on every build, and bloat the
   # cached `target` directory, which can exhaust runner disk space on extraction.
   CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 permissions:
   contents: read
