@@ -196,6 +196,32 @@ impl Source for SourceProxy {
 }
 ```
 
+### Cross-cdylib Ownership Contract (Shared System Allocator)
+
+Many rich Rust types are transferred across the cdylib boundary as owned `Box`es:
+the producing side calls `Box::into_raw`, and the consuming side reclaims and frees
+them with `Box::from_raw`. This happens in **both directions** — plugin-allocated types
+freed by the host, and host-allocated types freed by the plugin — and covers event
+envelopes (`FfiSourceEvent`), subscription response structures, the vtables themselves,
+and the plugin registration structs.
+
+For this to be sound, the allocator that produced a pointer on one side must be
+ABI-compatible with the `dealloc` performed on the other side. This holds **only**
+because no crate in the workspace sets `#[global_allocator]`: every allocation routes
+through the default **System** allocator, which is process-global `libc`
+`malloc`/`free` on all supported targets.
+
+> **Requirement:** Plugins and the host **must** share the default System allocator.
+> A plugin (or the host) that installs a custom global allocator — `jemalloc`,
+> `mimalloc`, `tcmalloc`, `snmalloc`, etc., via `#[global_allocator]` — turns every
+> cross-boundary `Box::from_raw` into **silent heap corruption**. The failure mode is
+> arbitrary corruption, not a clean crash.
+
+This constraint is enforced at build time by a `cargo-deny` `[bans]` rule (see the
+workspace `deny.toml` and `.github/workflows/cargo-deny.yml`) that rejects any crate
+pulling in a known custom-allocator crate transitively. See issue
+[#378](https://github.com/drasi-project/drasi-core/issues/378) for background.
+
 ### Reverse Vtables (Host → Plugin)
 
 Some services flow from host to plugin:
