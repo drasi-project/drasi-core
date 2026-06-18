@@ -28,6 +28,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Disable incremental compilation in CI. Incremental artifacts
+  # (target/debug/incremental) are large, change on every build, and bloat the
+  # cached `target` directory, which can exhaust runner disk space on extraction.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 permissions:
   contents: read
@@ -79,6 +84,12 @@ jobs:
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-index-
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android "/opt/hostedtoolcache/CodeQL"
+          sudo docker image prune --all --force || true
+          df -h
 
       - name: Cache Cargo build
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -169,6 +180,12 @@ jobs:
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-index-
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android "/opt/hostedtoolcache/CodeQL"
+          sudo docker image prune --all --force || true
+          df -h
 
       - name: Cache Cargo build
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
