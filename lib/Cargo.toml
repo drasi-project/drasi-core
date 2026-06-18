@@ -105,7 +105,9 @@ drasi-index-rocksdb = { path = "../components/indexes/rocksdb", features = [
 ] }
 # Mirrors how drasi-server depends on the plugin SDK to drive index backends
 # through their descriptor/DTO when statically linking a backend crate.
-drasi-plugin-sdk = { workspace = true }
+# Path-only (no version) so Cargo strips this dev-dependency when packaging,
+# breaking the publish-time cycle with drasi-plugin-sdk (which depends on drasi-lib).
+drasi-plugin-sdk = { path = "../components/plugin-sdk" }
 
 # Additional testing dependencies
 rstest = "0.18"
