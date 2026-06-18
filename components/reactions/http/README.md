@@ -224,6 +224,12 @@ queries yourself.
 `HttpReactionConfig` is the struct populated by `HttpReactionBuilder`. All fields are
 optional unless noted; defaults are applied by the builder.
 
+> The `Field` column below uses the **Rust** struct/builder field names (snake_case). In
+> **declarative** (JSON/YAML) plugin config these same fields are **camelCase**
+> (`baseUrl`, `timeoutMs`, `outputTemplates`, `batchEndpoint`, plus the declarative-only
+> `priorityQueueCapacity`) — see
+> [Declarative (dynamic-plugin) configuration](#declarative-dynamic-plugin-configuration).
+
 | Field | Type | Default | Builder setter | Description |
 |-------|------|---------|----------------|-------------|
 | `base_url` | `String` | `http://localhost` | `with_base_url` | Base URL prepended to every relative per-call URL. |
