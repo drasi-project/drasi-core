@@ -121,8 +121,81 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
             }
             serde_json::Value::Object(result)
         }
+        VariableValue::Date(d) => serde_json::Value::String(d.to_string()),
+        VariableValue::LocalTime(t) => serde_json::Value::String(t.to_string()),
+        VariableValue::ZonedTime(t) => serde_json::Value::String(t.to_string()),
+        // Query/reaction output uses plain strings for temporal values.
+        // The tagged datetime envelope in ElementValue JSON is internal-only.
+        VariableValue::LocalDateTime(dt) => serde_json::Value::String(dt.to_string()),
+        VariableValue::ZonedDateTime(dt) => serde_json::Value::String(dt.datetime().to_rfc3339()),
+        VariableValue::Duration(d) => serde_json::Value::String(d.to_string()),
         // For complex types, convert to string representation
         _ => serde_json::Value::String(format!("{value:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::convert_variable_value_to_json;
+    use chrono::{Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveTime, TimeZone};
+    use drasi_core::evaluation::variable_value::{
+        duration::Duration as VarDuration, zoned_datetime::ZonedDateTime as VarZonedDateTime,
+        zoned_time::ZonedTime as VarZonedTime, VariableValue,
+    };
+
+    #[test]
+    fn temporal_values_serialize_as_plain_strings() {
+        let date = NaiveDate::from_ymd_opt(2024, 6, 15).expect("valid date");
+        let local_time = NaiveTime::from_hms_micro_opt(10, 30, 45, 123_456).expect("valid time");
+        let offset = FixedOffset::east_opt(3600).expect("valid fixed offset");
+        let zoned_time = VarZonedTime::new(local_time, offset);
+        let local_datetime = date
+            .and_hms_micro_opt(10, 30, 45, 123_456)
+            .expect("valid local datetime");
+        let zoned_datetime = VarZonedDateTime::new(
+            offset
+                .with_ymd_and_hms(2024, 6, 15, 10, 30, 45)
+                .single()
+                .expect("valid zoned datetime"),
+            Some("Europe/Berlin".to_string()),
+        );
+        let duration = VarDuration::new(ChronoDuration::seconds(90), 0, 0);
+
+        let date_json = convert_variable_value_to_json(&VariableValue::Date(date));
+        assert_eq!(date_json, serde_json::Value::String(date.to_string()));
+
+        let local_time_json = convert_variable_value_to_json(&VariableValue::LocalTime(local_time));
+        assert_eq!(
+            local_time_json,
+            serde_json::Value::String(local_time.to_string())
+        );
+
+        let zoned_time_json = convert_variable_value_to_json(&VariableValue::ZonedTime(zoned_time));
+        assert_eq!(
+            zoned_time_json,
+            serde_json::Value::String(zoned_time.to_string())
+        );
+
+        let local_datetime_json =
+            convert_variable_value_to_json(&VariableValue::LocalDateTime(local_datetime));
+        assert_eq!(
+            local_datetime_json,
+            serde_json::Value::String(local_datetime.to_string())
+        );
+
+        let zoned_datetime_json =
+            convert_variable_value_to_json(&VariableValue::ZonedDateTime(zoned_datetime.clone()));
+        assert_eq!(
+            zoned_datetime_json,
+            serde_json::Value::String(zoned_datetime.datetime().to_rfc3339())
+        );
+
+        let duration_json =
+            convert_variable_value_to_json(&VariableValue::Duration(duration.clone()));
+        assert_eq!(
+            duration_json,
+            serde_json::Value::String(duration.to_string())
+        );
     }
 }
 
