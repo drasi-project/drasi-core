@@ -1,4 +1,4 @@
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@ pub enum ThroughputLevel {
 
 /// Configuration for adaptive batching
 #[derive(Debug, Clone)]
-pub struct AdaptiveBatchConfig {
+pub struct AdaptiveBatcherConfig {
     /// Maximum number of items in a batch
     pub max_batch_size: usize,
     /// Minimum number of items to consider efficient batching
@@ -44,7 +44,7 @@ pub struct AdaptiveBatchConfig {
     pub adaptive_enabled: bool,
 }
 
-impl Default for AdaptiveBatchConfig {
+impl Default for AdaptiveBatcherConfig {
     fn default() -> Self {
         Self {
             max_batch_size: 1000,
@@ -57,7 +57,7 @@ impl Default for AdaptiveBatchConfig {
     }
 }
 
-impl AdaptiveBatchConfig {
+impl AdaptiveBatcherConfig {
     /// Calculate recommended channel capacity for the internal batching channel
     ///
     /// Returns `max_batch_size × 5` to provide sufficient buffering for:
@@ -158,14 +158,14 @@ impl ThroughputMonitor {
 /// Adaptive batcher that adjusts batch size and timing based on throughput
 pub struct AdaptiveBatcher<T> {
     receiver: mpsc::Receiver<T>,
-    config: AdaptiveBatchConfig,
+    config: AdaptiveBatcherConfig,
     monitor: ThroughputMonitor,
     current_batch_size: usize,
     current_wait_time: Duration,
 }
 
 impl<T> AdaptiveBatcher<T> {
-    pub fn new(receiver: mpsc::Receiver<T>, config: AdaptiveBatchConfig) -> Self {
+    pub fn new(receiver: mpsc::Receiver<T>, config: AdaptiveBatcherConfig) -> Self {
         let monitor = ThroughputMonitor::new(config.throughput_window);
         Self {
             receiver,
@@ -316,54 +316,6 @@ impl<T> AdaptiveBatcher<T> {
     }
 }
 
-/// Simple non-adaptive batcher for comparison/fallback
-#[allow(dead_code)]
-pub struct FixedBatcher<T> {
-    receiver: mpsc::Receiver<T>,
-    batch_size: usize,
-    timeout: Duration,
-}
-
-#[allow(dead_code)]
-impl<T> FixedBatcher<T> {
-    pub fn new(receiver: mpsc::Receiver<T>, batch_size: usize, timeout: Duration) -> Self {
-        Self {
-            receiver,
-            batch_size,
-            timeout,
-        }
-    }
-
-    pub async fn next_batch(&mut self) -> Option<Vec<T>> {
-        let mut batch = Vec::new();
-        let deadline = Instant::now() + self.timeout;
-
-        while batch.len() < self.batch_size {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() && !batch.is_empty() {
-                break;
-            }
-
-            match timeout(remaining, self.receiver.recv()).await {
-                Ok(Some(item)) => batch.push(item),
-                Ok(None) => {
-                    if batch.is_empty() {
-                        return None;
-                    }
-                    break;
-                }
-                Err(_) => break,
-            }
-        }
-
-        if batch.is_empty() {
-            None
-        } else {
-            Some(batch)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,7 +324,7 @@ mod tests {
     #[test]
     fn test_recommended_channel_capacity() {
         // Default config: max_batch_size = 1000
-        let config = AdaptiveBatchConfig::default();
+        let config = AdaptiveBatcherConfig::default();
         assert_eq!(
             config.recommended_channel_capacity(),
             5000,
@@ -380,7 +332,7 @@ mod tests {
         );
 
         // Small batch size
-        let small_config = AdaptiveBatchConfig {
+        let small_config = AdaptiveBatcherConfig {
             max_batch_size: 100,
             min_batch_size: 10,
             max_wait_time: Duration::from_millis(100),
@@ -395,7 +347,7 @@ mod tests {
         );
 
         // Large batch size
-        let large_config = AdaptiveBatchConfig {
+        let large_config = AdaptiveBatcherConfig {
             max_batch_size: 5000,
             min_batch_size: 100,
             max_wait_time: Duration::from_millis(500),
@@ -410,7 +362,7 @@ mod tests {
         );
 
         // Very small batch
-        let tiny_config = AdaptiveBatchConfig {
+        let tiny_config = AdaptiveBatcherConfig {
             max_batch_size: 10,
             min_batch_size: 1,
             max_wait_time: Duration::from_millis(10),
@@ -444,7 +396,7 @@ mod tests {
     #[tokio::test]
     async fn test_adaptive_batcher_low_traffic() {
         let (tx, rx) = mpsc::channel(100);
-        let config = AdaptiveBatchConfig::default();
+        let config = AdaptiveBatcherConfig::default();
         let mut batcher = AdaptiveBatcher::new(rx, config);
 
         // Send a few messages slowly
@@ -459,7 +411,7 @@ mod tests {
     async fn test_adaptive_batcher_burst() {
         let (tx, rx) = mpsc::channel(1000);
         // Start with slightly higher defaults for testing
-        let config = AdaptiveBatchConfig {
+        let config = AdaptiveBatcherConfig {
             min_batch_size: 20,
             max_batch_size: 100,
             ..Default::default()
@@ -483,5 +435,82 @@ mod tests {
         // Second batch should adapt to burst pattern
         let batch2 = batcher.next_batch().await.unwrap();
         assert!(batch2.len() >= batch1.len()); // Should batch same or larger after observing burst
+    }
+
+    #[test]
+    fn throughput_monitor_reports_zero_rate_when_idle() {
+        let monitor = ThroughputMonitor::new(Duration::from_secs(1));
+        assert_eq!(monitor.get_messages_per_second(), 0.0);
+        assert_eq!(monitor.get_throughput_level(), ThroughputLevel::Idle);
+    }
+
+    #[test]
+    fn throughput_monitor_classifies_medium_high_and_burst() {
+        // Window of 1s makes msgs/sec equal to the recorded batch size.
+        let mut medium = ThroughputMonitor::new(Duration::from_secs(1));
+        medium.record_batch(150);
+        assert_eq!(medium.get_throughput_level(), ThroughputLevel::Medium);
+
+        let mut high = ThroughputMonitor::new(Duration::from_secs(1));
+        high.record_batch(1_000);
+        assert_eq!(high.get_throughput_level(), ThroughputLevel::High);
+
+        let mut burst = ThroughputMonitor::new(Duration::from_secs(1));
+        burst.record_batch(10_001);
+        assert_eq!(burst.get_throughput_level(), ThroughputLevel::Burst);
+        assert!(burst.get_messages_per_second() >= 10_000.0);
+    }
+
+    #[tokio::test]
+    async fn next_batch_returns_none_when_channel_closed_before_any_item() {
+        let (tx, rx) = mpsc::channel::<u32>(4);
+        drop(tx);
+        let mut batcher = AdaptiveBatcher::new(rx, AdaptiveBatcherConfig::default());
+        assert!(
+            batcher.next_batch().await.is_none(),
+            "a closed empty channel must terminate the batch stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn next_batch_drains_buffered_items_then_terminates() {
+        let (tx, rx) = mpsc::channel::<u32>(4);
+        tx.send(1).await.unwrap();
+        tx.send(2).await.unwrap();
+        drop(tx);
+        let mut batcher = AdaptiveBatcher::new(rx, AdaptiveBatcherConfig::default());
+
+        let batch = batcher
+            .next_batch()
+            .await
+            .expect("buffered items form a batch");
+        assert_eq!(batch, vec![1, 2]);
+        assert!(
+            batcher.next_batch().await.is_none(),
+            "stream ends once the closed channel is drained"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_adaptive_mode_caps_batch_at_initial_min_size() {
+        // With adaptation disabled the batch size stays pinned at min_batch_size
+        // even when many items are immediately available.
+        let (tx, rx) = mpsc::channel::<u32>(64);
+        for i in 0..20 {
+            tx.send(i).await.unwrap();
+        }
+        let config = AdaptiveBatcherConfig {
+            min_batch_size: 3,
+            max_batch_size: 100,
+            adaptive_enabled: false,
+            ..Default::default()
+        };
+        let mut batcher = AdaptiveBatcher::new(rx, config);
+        let batch = batcher.next_batch().await.unwrap();
+        assert_eq!(
+            batch.len(),
+            3,
+            "non-adaptive batcher must not grow past the fixed min batch size"
+        );
     }
 }

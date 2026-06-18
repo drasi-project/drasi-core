@@ -14,14 +14,10 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
-        .build_server(false)
+        // Server stubs are generated so in-crate tests can stand up a mock
+        // gRPC server; production code only uses the client.
+        .build_server(true)
         .build_client(true)
-        .compile(
-            &[
-                "proto/drasi/v1/reaction.proto",
-                "proto/drasi/v1/common.proto",
-            ],
-            &["proto"],
-        )?;
+        .compile(&["proto/drasi/v1/reaction.proto"], &["proto"])?;
     Ok(())
 }
