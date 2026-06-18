@@ -1,4 +1,4 @@
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(test)]
-mod tests {
-    // Tests for http_adaptive module
-    // Currently empty - tests will be added as needed
+//! Shared wiremock helpers for HTTP reaction integration tests.
+
+use wiremock::MockServer;
+
+/// Spawn a fresh wiremock server and return it. Tests own its lifetime.
+pub async fn start() -> MockServer {
+    MockServer::start().await
 }
