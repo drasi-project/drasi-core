@@ -1,4 +1,4 @@
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,34 +14,35 @@
 
 #![allow(unexpected_cfgs)]
 
-//! gRPC reaction plugin for Drasi
+//! gRPC reaction plugin for Drasi.
 //!
-//! This plugin implements gRPC reactions for Drasi.
-//!
-//! # Example
-//!
-//! ```rust,ignore
-//! use drasi_reaction_grpc::GrpcReaction;
-//!
-//! let reaction = GrpcReaction::builder("my-grpc-reaction")
-//!     .with_queries(vec!["query1".to_string()])
-//!     .with_endpoint("grpc://localhost:50052")
-//!     .with_batch_size(200)
-//!     .with_timeout_ms(10000)
-//!     .build()?;
-//! ```
+//! Forwards continuous query result changes to a downstream gRPC service via
+//! the `ReactionService.ProcessResults` RPC, either with **fixed-size
+//! batching** (default) or **adaptive batching** that scales batch size with
+//! observed throughput. An optional Handlebars-based output template engine
+//! can reshape the row content emitted in the `before` / `after` fields; when
+//! no template applies (or a render fails) the raw row state is sent on the
+//! wire unchanged so receivers always recover the change.
 
+pub(crate) mod adaptive_batcher;
+pub(crate) mod batch;
 pub mod config;
 pub mod connection;
 pub mod descriptor;
 pub mod grpc;
 pub mod helpers;
 pub mod proto;
+mod runner_adaptive;
+mod runner_fixed;
+mod send;
+mod templates;
 
-pub use config::GrpcReactionConfig;
+pub use config::{
+    BatchingConfig, GrpcQueryConfig, GrpcReactionConfig, GrpcTemplateExtension, OutputFormat,
+    OutputTemplates,
+};
 pub use grpc::GrpcReaction;
 
-// Re-export types for plugin-grpc-adaptive
 pub use helpers::convert_json_to_proto_struct;
 pub use proto::{
     ProcessResultsRequest, ProtoQueryResult, ProtoQueryResultItem, ReactionServiceClient,
@@ -49,145 +50,197 @@ pub use proto::{
 
 use std::collections::HashMap;
 
-/// Builder for gRPC reaction
-///
-/// Creates a GrpcReaction instance with a fluent API.
+/// Builder for [`GrpcReaction`].
 pub struct GrpcReactionBuilder {
     id: String,
     queries: Vec<String>,
-    endpoint: String,
-    timeout_ms: u64,
-    batch_size: usize,
-    batch_flush_timeout_ms: u64,
-    max_retries: u32,
-    connection_retry_attempts: u32,
-    initial_connection_timeout_ms: u64,
-    metadata: HashMap<String, String>,
+    config: GrpcReactionConfig,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
 }
 
 impl GrpcReactionBuilder {
-    /// Create a new gRPC reaction builder with the given ID
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             queries: Vec::new(),
-            endpoint: "grpc://localhost:50052".to_string(),
-            timeout_ms: 5000,
-            batch_size: 100,
-            batch_flush_timeout_ms: 1000,
-            max_retries: 3,
-            connection_retry_attempts: 5,
-            initial_connection_timeout_ms: 10000,
-            metadata: HashMap::new(),
+            config: GrpcReactionConfig::default(),
             priority_queue_capacity: None,
             auto_start: true,
         }
     }
 
-    /// Set the query IDs to subscribe to
     pub fn with_queries(mut self, queries: Vec<String>) -> Self {
         self.queries = queries;
         self
     }
 
-    /// Add a query ID to subscribe to
     pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
         self.queries.push(query_id.into());
         self
     }
 
-    /// Set the gRPC endpoint
+    /// Alias of [`with_query`](Self::with_query); reads naturally at call
+    /// sites (e.g. `…from_query("orders")…`).
+    pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
+        self.queries.push(query_id.into());
+        self
+    }
+
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
-        self.endpoint = endpoint.into();
+        self.config.endpoint = endpoint.into();
         self
     }
 
-    /// Set the request timeout in milliseconds
     pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
-        self.timeout_ms = timeout_ms;
+        self.config.timeout_ms = timeout_ms;
         self
     }
 
-    /// Set the batch size
-    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
-        self.batch_size = batch_size;
-        self
-    }
-
-    /// Set the batch flush timeout in milliseconds
-    pub fn with_batch_flush_timeout_ms(mut self, timeout_ms: u64) -> Self {
-        self.batch_flush_timeout_ms = timeout_ms;
-        self
-    }
-
-    /// Set the maximum number of retries for failed requests
     pub fn with_max_retries(mut self, retries: u32) -> Self {
-        self.max_retries = retries;
+        self.config.max_retries = retries;
         self
     }
 
-    /// Set the number of connection retry attempts
     pub fn with_connection_retry_attempts(mut self, attempts: u32) -> Self {
-        self.connection_retry_attempts = attempts;
+        self.config.connection_retry_attempts = attempts;
         self
     }
 
-    /// Set the initial connection timeout in milliseconds
     pub fn with_initial_connection_timeout_ms(mut self, timeout_ms: u64) -> Self {
-        self.initial_connection_timeout_ms = timeout_ms;
+        self.config.initial_connection_timeout_ms = timeout_ms;
         self
     }
 
-    /// Add metadata header
     pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.metadata.insert(key.into(), value.into());
+        self.config.metadata.insert(key.into(), value.into());
         self
     }
 
-    /// Set the priority queue capacity
+    pub fn with_all_metadata(mut self, metadata: HashMap<String, String>) -> Self {
+        self.config.metadata = metadata;
+        self
+    }
+
+    pub fn with_batching(mut self, batching: BatchingConfig) -> Self {
+        self.config.batching = batching;
+        self
+    }
+
+    pub fn with_output_format(mut self, output_format: OutputFormat) -> Self {
+        self.config.output_format = output_format;
+        self
+    }
+
+    pub fn with_fixed_batching(self, batch_size: usize, batch_flush_timeout_ms: u64) -> Self {
+        self.with_batching(BatchingConfig::Fixed {
+            batch_size,
+            batch_flush_timeout_ms,
+        })
+    }
+
+    pub fn with_adaptive_batching(
+        self,
+        adaptive: drasi_lib::reactions::common::AdaptiveBatchConfig,
+    ) -> Self {
+        self.with_batching(BatchingConfig::adaptive(adaptive))
+    }
+
+    /// Convenience: enable adaptive batching with default tuning.
+    pub fn with_adaptive_defaults(self) -> Self {
+        self.with_adaptive_batching(drasi_lib::reactions::common::AdaptiveBatchConfig::default())
+    }
+
+    /// Set the minimum adaptive batch size.
+    ///
+    /// **Side effect:** calling this enables adaptive mode if the builder
+    /// currently has `BatchingConfig::Fixed` (replacing it with an adaptive
+    /// config whose other fields take their defaults). For explicit control
+    /// over all adaptive parameters, prefer
+    /// [`with_adaptive_batching`](Self::with_adaptive_batching) with a full
+    /// `AdaptiveBatchConfig`.
+    pub fn with_min_batch_size(mut self, n: usize) -> Self {
+        let mut cfg = self
+            .config
+            .batching
+            .as_adaptive_config()
+            .unwrap_or_default();
+        cfg.adaptive_min_batch_size = n;
+        self.config.batching = BatchingConfig::adaptive(cfg);
+        self
+    }
+
+    /// Set the maximum adaptive batch size.
+    ///
+    /// **Side effect:** calling this enables adaptive mode if the builder
+    /// currently has `BatchingConfig::Fixed`.
+    pub fn with_max_batch_size(mut self, n: usize) -> Self {
+        let mut cfg = self
+            .config
+            .batching
+            .as_adaptive_config()
+            .unwrap_or_default();
+        cfg.adaptive_max_batch_size = n;
+        self.config.batching = BatchingConfig::adaptive(cfg);
+        self
+    }
+
+    /// Set the adaptive throughput window size (in 100 ms units; `10` = 1 s).
+    ///
+    /// **Side effect:** calling this enables adaptive mode if the builder
+    /// currently has `BatchingConfig::Fixed`.
+    pub fn with_window_size(mut self, n: usize) -> Self {
+        let mut cfg = self
+            .config
+            .batching
+            .as_adaptive_config()
+            .unwrap_or_default();
+        cfg.adaptive_window_size = n;
+        self.config.batching = BatchingConfig::adaptive(cfg);
+        self
+    }
+
+    /// Set the adaptive batch flush timeout in milliseconds.
+    ///
+    /// **Side effect:** calling this enables adaptive mode if the builder
+    /// currently has `BatchingConfig::Fixed`.
+    pub fn with_batch_timeout_ms(mut self, ms: u64) -> Self {
+        let mut cfg = self
+            .config
+            .batching
+            .as_adaptive_config()
+            .unwrap_or_default();
+        cfg.adaptive_batch_timeout_ms = ms;
+        self.config.batching = BatchingConfig::adaptive(cfg);
+        self
+    }
+
+    pub fn with_output_templates(mut self, templates: OutputTemplates) -> Self {
+        self.config.output_templates = Some(templates);
+        self
+    }
+
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
         self
     }
 
-    /// Set whether the reaction should auto-start
     pub fn with_auto_start(mut self, auto_start: bool) -> Self {
         self.auto_start = auto_start;
         self
     }
 
-    /// Set the full configuration at once
     pub fn with_config(mut self, config: GrpcReactionConfig) -> Self {
-        self.endpoint = config.endpoint;
-        self.timeout_ms = config.timeout_ms;
-        self.batch_size = config.batch_size;
-        self.batch_flush_timeout_ms = config.batch_flush_timeout_ms;
-        self.max_retries = config.max_retries;
-        self.connection_retry_attempts = config.connection_retry_attempts;
-        self.initial_connection_timeout_ms = config.initial_connection_timeout_ms;
-        self.metadata = config.metadata;
+        self.config = config;
         self
     }
 
-    /// Build the gRPC reaction
     pub fn build(self) -> anyhow::Result<GrpcReaction> {
-        let config = GrpcReactionConfig {
-            endpoint: self.endpoint,
-            timeout_ms: self.timeout_ms,
-            batch_size: self.batch_size,
-            batch_flush_timeout_ms: self.batch_flush_timeout_ms,
-            max_retries: self.max_retries,
-            connection_retry_attempts: self.connection_retry_attempts,
-            initial_connection_timeout_ms: self.initial_connection_timeout_ms,
-            metadata: self.metadata,
-        };
-
+        self.config.validate(&self.queries)?;
         Ok(GrpcReaction::from_builder(
             self.id,
             self.queries,
-            config,
+            self.config,
             self.priority_queue_capacity,
             self.auto_start,
         ))
@@ -195,54 +248,11 @@ impl GrpcReactionBuilder {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use drasi_lib::Reaction;
+mod test_server;
 
-    #[test]
-    fn test_grpc_builder_defaults() {
-        let reaction = GrpcReactionBuilder::new("test-reaction").build().unwrap();
-        assert_eq!(reaction.id(), "test-reaction");
-        let props = reaction.properties();
-        assert_eq!(
-            props.get("endpoint"),
-            Some(&serde_json::Value::String(
-                "grpc://localhost:50052".to_string()
-            ))
-        );
-        assert_eq!(
-            props.get("batchSize"),
-            Some(&serde_json::Value::Number(100.into()))
-        );
-    }
+#[cfg(test)]
+mod tests;
 
-    #[test]
-    fn test_grpc_builder_custom_values() {
-        let reaction = GrpcReaction::builder("test-reaction")
-            .with_endpoint("grpc://api.example.com:50052")
-            .with_timeout_ms(10000)
-            .with_batch_size(200)
-            .with_queries(vec!["query1".to_string()])
-            .build()
-            .unwrap();
-
-        assert_eq!(reaction.id(), "test-reaction");
-        assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
-    }
-
-    #[test]
-    fn test_grpc_new_constructor() {
-        let config = GrpcReactionConfig::default();
-
-        let reaction = GrpcReaction::new("test-reaction", vec!["query1".to_string()], config);
-
-        assert_eq!(reaction.id(), "test-reaction");
-        assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
-    }
-}
-
-/// Dynamic plugin entry point.
-///
 /// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(

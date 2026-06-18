@@ -32,10 +32,11 @@ fn default_adaptive_batch_timeout_ms() -> u64 {
     1000
 }
 
-/// Adaptive batching configuration shared by adaptive reactions
+/// Adaptive batching configuration shared by reactions that support adaptive batching.
 ///
-/// This configuration is used by both HTTP Adaptive and gRPC Adaptive reactions to
-/// dynamically adjust batch size and timing based on throughput patterns.
+/// This configuration is used by reactions that offer an adaptive batching mode
+/// (currently the HTTP and gRPC reactions) to dynamically adjust batch size and
+/// timing based on throughput patterns.
 ///
 /// # Adaptive Algorithm
 ///
