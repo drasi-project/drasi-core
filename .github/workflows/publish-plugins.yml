@@ -74,7 +74,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq libjq-dev protobuf-compiler cmake libcurl4-openssl-dev
+          sudo apt-get install -y jq libjq-dev protobuf-compiler cmake
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
@@ -119,6 +119,11 @@ jobs:
         run: echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Build plugins
+        env:
+          # Constrain the bundled librdkafka CMake build so it does not
+          # auto-detect host curl/zstd/openssl (see ci/cmake/librdkafka-features.cmake).
+          # Applies to native builds; `cross` targets get this via their Dockerfiles.
+          CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/ci/cmake/librdkafka-features.cmake
         run: cargo run -p xtask -- build-plugins --release --target ${{ matrix.target }}
 
       - name: Publish plugins (per-architecture tag)

@@ -29,3 +29,8 @@ ENV ONIG_LIB_DIR=/usr/local/jq/lib
 ENV JQ_INCLUDE_DIR=/usr/local/jq/include
 ENV LIBJQ_STATIC=1
 ENV LIBONIG_STATIC=1
+
+# Constrain the bundled librdkafka CMake build (rdkafka/cmake-build) so it does
+# not auto-detect host curl/zstd/openssl. cross mounts the workspace at /project.
+# See ci/cmake/librdkafka-features.cmake.
+ENV CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu=/project/ci/cmake/librdkafka-features.cmake

@@ -59,3 +59,8 @@ ENV BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_gnu="--sysroot=/usr/x86_64-w64-mi
 
 # Disable QUIC in vendored OpenSSL (mingw headers lack SIO_UDP_NETRESET)
 ENV OPENSSL_CONFIGURE_ARGS="no-quic"
+
+# Constrain the bundled librdkafka CMake build (rdkafka/cmake-build) so it does
+# not auto-detect host curl/zstd/openssl. cross mounts the workspace at /project.
+# See ci/cmake/librdkafka-features.cmake.
+ENV CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_gnu=/project/ci/cmake/librdkafka-features.cmake
