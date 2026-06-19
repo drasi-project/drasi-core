@@ -17,7 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates gcc g++ libc6-dev pkg-config \
     gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-    perl make autoconf automake libtool \
+    perl make autoconf automake libtool cmake \
     protobuf-compiler libprotobuf-dev \
     libclang-dev \
     && rm -rf /var/lib/apt/lists/*

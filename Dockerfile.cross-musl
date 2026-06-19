@@ -12,7 +12,7 @@ COPY --from=toolchain /usr/local/ /usr/local/
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates gcc libc6-dev \
-    perl make autoconf automake libtool \
+    perl make autoconf automake libtool cmake \
     protobuf-compiler libprotobuf-dev \
     libclang-dev \
     && rm -rf /var/lib/apt/lists/*
