@@ -13,7 +13,7 @@ COPY --from=toolchain /usr/x86_64-w64-mingw32/ /usr/x86_64-w64-mingw32/
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates gcc g++ libc6-dev pkg-config \
-    perl make autoconf automake libtool \
+    perl make autoconf automake libtool cmake \
     protobuf-compiler libprotobuf-dev \
     gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 libclang-dev \
     && rm -rf /var/lib/apt/lists/* \
