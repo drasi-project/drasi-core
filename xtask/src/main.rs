@@ -157,10 +157,19 @@ fn discover_dynamic_plugins() -> DiscoveryResult {
         .map(|p| p.version.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
+    // TEMPORARY: exclude the Kafka plugins from build/publish. Their bundled
+    // `librdkafka` cross-compilation (via `rdkafka/cmake-build`) is currently
+    // broken on the release targets (libcurl/OIDC auto-detection pulls in
+    // `curl/curl.h` which isn't present in the cross sysroots). Excluding them
+    // here unblocks publishing of the remaining plugins. Remove this filter
+    // once the librdkafka cross-build is fixed.
+    const TEMP_EXCLUDED_PLUGINS: &[&str] = &["drasi-source-kafka", "drasi-bootstrap-kafka"];
+
     let plugins = metadata
         .packages
         .into_iter()
         .filter(|p| p.features.contains_key("dynamic-plugin"))
+        .filter(|p| !TEMP_EXCLUDED_PLUGINS.contains(&p.name.as_str()))
         .filter_map(|p| {
             let (plugin_type, kind) = parse_plugin_type_kind(&p.name)?;
             Some(PluginInfo {
