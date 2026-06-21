@@ -175,8 +175,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          REGISTRY="${{ inputs.registry }}"
-          ORG="${REGISTRY#*/}"
+          ORG="drasi-project"
 
           FAILED=0
 
@@ -199,8 +198,8 @@ jobs:
           # Set each plugin package to public. list-plugins prints plugin lines
           # as "  <type>/<kind> v<version> (<path>)"; match only those so the
           # indented "SDK: ..." summary line is excluded.
-          PLUGINS=$(cargo run -p xtask -- list-plugins 2>/dev/null \
-            | grep -E '^[[:space:]]+[a-z-]+/[^[:space:]]+ v[0-9]' \
+          PLUGINS=$(cargo run -p xtask -- list-plugins \
+            | { grep -E '^[[:space:]]+[a-z-]+/[^[:space:]]+ v[0-9]' || true; } \
             | awk '{print $1}')
           for PLUGIN in $PLUGINS; do
             set_public "$PLUGIN"
