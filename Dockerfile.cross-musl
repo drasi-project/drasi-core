@@ -60,3 +60,10 @@ ENV CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
 ENV CXX_x86_64_unknown_linux_musl=x86_64-linux-musl-g++
 ENV AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar
 ENV BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_musl="--sysroot=/usr/local/x86_64-linux-musl"
+
+# Toolchain file for the bundled librdkafka (rdkafka-sys cmake-build). It defines
+# the musl cross compiler AND disables curl/openssl/zstd detection so librdkafka
+# honors rdkafka-sys's WITH_*=0 intent (no curl.h dependency, no undefined symbols).
+# cross mounts the workspace at /project. See the toolchain file for the rationale.
+ENV LIBRDKAFKA_MUSL_TRIPLE=x86_64-linux-musl
+ENV CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_musl=/project/ci/cmake/librdkafka-cross-musl-toolchain.cmake
