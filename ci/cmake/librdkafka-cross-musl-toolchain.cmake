@@ -9,10 +9,11 @@
 # those `WITH_*` defaults from `find_package(...)`, and under CMP0077 OLD
 # (rdkafka-sys also passes `-DCMAKE_POLICY_VERSION_MINIMUM=3.5`) `option()`
 # OVERRIDES the uninitialized `-DWITH_*=0` with whatever it detected in the build
-# image. In the musl cross images curl/openssl are discoverable, so WITH_CURL and
-# WITH_SSL flip ON, enabling WITH_OAUTHBEARER_OIDC whose sources do
-# `#include <curl/curl.h>`. That fails the build (there is no musl curl header),
-# and even if it compiled, rdkafka-sys would not link libcurl/openssl.
+# image. In the musl cross images openssl (built from source under
+# /usr/local/musl-ssl) is discoverable, so WITH_SSL flips ON; if curl were also
+# found WITH_CURL would too, enabling WITH_OAUTHBEARER_OIDC and pulling curl/ssl
+# symbols into the static archive that rdkafka-sys never links -> undefined
+# symbols at final plugin link.
 #
 # We cannot suppress that detection with a plain environment variable, and merely
 # pointing `CMAKE_TOOLCHAIN_FILE` at a feature-only fragment makes the `cmake`
@@ -20,8 +21,22 @@
 # which then breaks the build differently. So this toolchain file does BOTH:
 #   1. defines the musl cross compiler (so cmake builds for the right target), and
 #   2. disables find_package for curl/openssl/zstd so the WITH_*=0 intent is
-#      honored, yielding a minimal static librdkafka (zlib + bundled lz4) with no
-#      curl/ssl symbols and therefore no undefined symbols at plugin link time.
+#      honored, yielding a minimal static librdkafka (zlib + bundled lz4) with
+#      WITH_OAUTHBEARER_OIDC=0 and no curl/ssl symbols (no undefined symbols at
+#      plugin link time).
+#
+# IMPORTANT (separate upstream bug -> still need curl HEADERS, not the library):
+# librdkafka 2.12.1's packaging/cmake/config.h.in declares
+# `#cmakedefine01 WITH_OAUTHBEARER_OIDC`, which ALWAYS emits a `#define`
+# (`... 0` or `... 1`). But src/rdkafka_conf.c guards its curl include with
+# `#ifdef WITH_OAUTHBEARER_OIDC` (should be `#if`). So `#include <curl/curl.h>`
+# is compiled UNCONDITIONALLY in every cmake build, even with WITH_*=0. Since
+# WITH_OAUTHBEARER_OIDC=0 means no curl FUNCTIONS are referenced (OIDC sources
+# aren't compiled and the curl call sites are `#if`-guarded), we only need
+# curl/curl.h to be present on the include path -- NOT libcurl. The musl
+# Dockerfiles therefore copy the curl headers into the musl sysroot's include
+# dir. This is why the native linux-gnu build "works": its curl headers are
+# already present.
 #
 # The musl triple is provided via the LIBRDKAFKA_MUSL_TRIPLE environment variable
 # set in the corresponding cross Dockerfile (e.g. `x86_64-linux-musl`).

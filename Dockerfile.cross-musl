@@ -15,7 +15,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     perl make autoconf automake libtool cmake \
     protobuf-compiler libprotobuf-dev \
     libclang-dev \
+    libcurl4-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# librdkafka 2.12.1 has a cmake-build bug: config.h.in uses
+# `#cmakedefine01 WITH_OAUTHBEARER_OIDC` (always emits a #define) but
+# rdkafka_conf.c guards `#include <curl/curl.h>` with `#ifdef` instead of `#if`,
+# so curl/curl.h is included even when WITH_CURL=0/WITH_OAUTHBEARER_OIDC=0. Since
+# no curl FUNCTIONS are referenced in that configuration, we only need the curl
+# HEADERS (not libcurl) on the musl compiler's include path. Copy them into the
+# musl sysroot. See ci/cmake/librdkafka-cross-musl-toolchain.cmake.
+RUN set -eux; \
+    if [ -d /usr/include/x86_64-linux-gnu/curl ]; then SRC=/usr/include/x86_64-linux-gnu/curl; \
+    else SRC=/usr/include/curl; fi; \
+    cp -r "$SRC" /usr/local/x86_64-linux-musl/include/
 
 # Build OpenSSL from source for musl
 ENV OPENSSL_VERSION=3.3.1
