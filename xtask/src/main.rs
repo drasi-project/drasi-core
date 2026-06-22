@@ -157,15 +157,10 @@ fn discover_dynamic_plugins() -> DiscoveryResult {
         .map(|p| p.version.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // TEMPORARY HARDCODED ALLOWLIST: restrict builds/publishes to only the
-    // Kafka plugins. REVERT THIS once the Kafka plugins have been published.
-    let plugin_filter: &[&str] = &["drasi-source-kafka", "drasi-bootstrap-kafka"];
-
     let plugins = metadata
         .packages
         .into_iter()
         .filter(|p| p.features.contains_key("dynamic-plugin"))
-        .filter(|p| plugin_filter.contains(&p.name.as_str()))
         .filter_map(|p| {
             let (plugin_type, kind) = parse_plugin_type_kind(&p.name)?;
             Some(PluginInfo {
