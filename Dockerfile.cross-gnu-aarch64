@@ -61,7 +61,3 @@ ENV BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu="--sysroot=/usr/aarch64-l
 ENV PKG_CONFIG_PATH_aarch64_unknown_linux_gnu=/usr/lib/aarch64-linux-gnu/pkgconfig
 ENV PKG_CONFIG_ALLOW_CROSS_aarch64_unknown_linux_gnu=1
 
-# Constrain the bundled librdkafka CMake build (rdkafka/cmake-build) so it does
-# not auto-detect host curl/zstd/openssl. cross mounts the workspace at /project.
-# See ci/cmake/librdkafka-features.cmake.
-ENV CMAKE_TOOLCHAIN_FILE_aarch64_unknown_linux_gnu=/project/ci/cmake/librdkafka-features.cmake

@@ -5,13 +5,18 @@ FROM ubuntu:20.04
 # Copy runner scripts from the cross image
 COPY --from=toolchain /linux-runner /linux-runner
 
-# Install build dependencies
+# Install build dependencies.
+# libcurl4-openssl-dev: this container targets x86_64-linux-gnu (same arch as the
+# container), so librdkafka's find_package(CURL) matches the host curl and enables
+# WITH_CURL (+ WITH_OAUTHBEARER_OIDC together with libssl-dev), whose sources
+# #include <curl/curl.h>. We must provide the curl dev headers (the `curl` CLI only
+# brings the runtime lib). This mirrors the native CI runner, which also installs it.
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates gcc g++ libc6-dev pkg-config \
     perl make autoconf automake libtool cmake \
     protobuf-compiler libprotobuf-dev \
-    libclang-dev libssl-dev \
+    libclang-dev libssl-dev libcurl4-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Build libjq from source (with bundled oniguruma) for static linking
@@ -29,8 +34,3 @@ ENV ONIG_LIB_DIR=/usr/local/jq/lib
 ENV JQ_INCLUDE_DIR=/usr/local/jq/include
 ENV LIBJQ_STATIC=1
 ENV LIBONIG_STATIC=1
-
-# Constrain the bundled librdkafka CMake build (rdkafka/cmake-build) so it does
-# not auto-detect host curl/zstd/openssl. cross mounts the workspace at /project.
-# See ci/cmake/librdkafka-features.cmake.
-ENV CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu=/project/ci/cmake/librdkafka-features.cmake
