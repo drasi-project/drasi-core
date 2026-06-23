@@ -39,9 +39,8 @@ jobs:
             os: ubuntu-latest-8-cores
             arch_suffix: linux-amd64
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest-8-cores
+            os: ubuntu-24.04-arm
             arch_suffix: linux-arm64
-            cross: true
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest-8-cores
             arch_suffix: linux-musl-amd64
@@ -74,18 +73,25 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq libjq-dev protobuf-compiler
+          # libcurl4-openssl-dev: the native librdkafka build (used by the Kafka
+          # bootstrap/source plugins) detects the host's curl/openssl on the
+          # native linux-gnu runners (amd64 and arm64) and enables
+          # WITH_OAUTHBEARER_OIDC, which #include <curl/curl.h>. The cross targets
+          # (musl, windows-gnu) build in a sysroot without curl/openssl so they
+          # don't need this.
+          sudo apt-get install -y jq libjq-dev protobuf-compiler cmake libcurl4-openssl-dev
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install jq protobuf
+          brew install jq protobuf cmake
 
       - name: Install system dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install protoc -y
+          choco install cmake -y --installargs 'ADD_CMAKE_TO_PATH=System'
           vcpkg install openssl:x64-windows-static-md
           echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
           echo "OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md" >> $env:GITHUB_ENV
@@ -93,7 +99,9 @@ jobs:
 
       - name: Set JQ_LIB_DIR (Linux)
         if: runner.os == 'Linux'
-        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+        # $(uname -m) is x86_64 on amd64 runners and aarch64 on arm64 runners,
+        # which matches the Debian multiarch lib path on both.
+        run: echo "JQ_LIB_DIR=/usr/lib/$(uname -m)-linux-gnu" >> $GITHUB_ENV
 
       - name: Set JQ_LIB_DIR (macOS)
         if: runner.os == 'macOS'
