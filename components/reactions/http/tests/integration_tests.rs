@@ -1320,6 +1320,45 @@ async fn standard_drops_permanent_4xx_and_continues() {
 }
 
 #[tokio::test]
+async fn standard_auth_rejection_fail_stops_and_does_not_drop_event() {
+    // An expired/invalid credential surfaces as 401. Unlike a genuinely
+    // permanent 4xx, an auth failure must NOT silently drop the event (it can be
+    // fixed by refreshing the credential and replaying). Under the default
+    // Strict policy the reaction fail-stops so the un-acked event survives.
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("auth-401")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+
+    let mut errored = false;
+    for _ in 0..50 {
+        if matches!(r.status().await, ComponentStatus::Error) {
+            errored = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        errored,
+        "a 401 auth rejection must fail-stop (Error) under Strict, not drop the event"
+    );
+    r.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn standard_absolute_url_matching_base_is_allowed() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))

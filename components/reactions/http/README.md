@@ -248,7 +248,7 @@ Builder-only settings (not stored on `HttpReactionConfig`):
 | `with_query(...)` / `from_query(...)` | _empty_ | Append one subscribed query id (`from_query` is an alias that reads naturally at call sites). |
 | `with_priority_queue_capacity(usize)` | `10000` | Capacity of the inbound queue that buffers query results before processing. Tune for high-throughput sources. |
 | `with_auto_start(bool)` | `true` | Whether the reaction starts automatically when `DrasiLib` is running. |
-| `with_recovery_policy(ReactionRecoveryPolicy)` | `Strict` | Recovery policy for this reaction instance. The HTTP reaction maintains a per-query checkpoint advanced on successful (acked) delivery for at-least-once semantics. Under `Strict` (default) a sustained delivery failure fail-stops the reaction so the un-acked work replays from the query outbox on restart; under `AutoSkipGap` the failed batch is skipped and the reaction keeps running. Permanent per-item failures (4xx, SSRF-blocked/unresolvable URLs, invalid method/header) are dropped and never fail-stop. |
+| `with_recovery_policy(ReactionRecoveryPolicy)` | `Strict` | Recovery policy for this reaction instance. The HTTP reaction maintains a per-query checkpoint advanced on successful (acked) delivery for at-least-once semantics. Under `Strict` (default) a sustained delivery failure fail-stops the reaction so the un-acked work replays from the query outbox on restart; under `AutoSkipGap` the failed batch is skipped and the reaction keeps running. Auth/permission rejections (401/403/407) are treated as sustained failures (subject to the policy), **not** dropped — an expired or rotated credential cannot silently lose events. Only genuinely permanent failures (other 4xx such as 400/404/405/422, SSRF-blocked/unresolvable URLs, invalid method/auth-token config) are dropped and never fail-stop. |
 | `with_config(HttpReactionConfig)` | — | Replace the entire runtime config in one call. |
 | `with_adaptive_defaults()` | — | Convenience for `with_adaptive(AdaptiveBatchConfig::default())`; still requires `with_batch_endpoint(...)`. |
 
@@ -751,8 +751,8 @@ endpoint to exercise, among others:
 - Single-notification delivery: default fallback, per-query templates (URL / method /
   headers / body), and the per-operation render-error fallbacks.
 - Bearer-token injection and the SSRF guard for absolute URLs.
-- Delivery failure handling: transient-retry-then-success, retry exhaustion, and permanent
-  4xx drop-and-continue.
+- Delivery failure handling: transient-retry-then-success, retry exhaustion, auth-rejection
+  fail-stop (401/403/407), and permanent-4xx drop-and-continue.
 - Adaptive mode: coalesced batch POSTs, per-item body templating, partial-batch flush, and
   the max-batch-size cap.
 - `DrasiLib` end-to-end wiring (source → query → reaction) for both single and batched

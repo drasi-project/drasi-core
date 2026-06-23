@@ -34,10 +34,13 @@ const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Outcome of attempting to deliver a single result to its HTTP target.
 ///
-/// `Err` is reserved for **transient/sustained** failures (5xx after retries,
-/// connection errors) that warrant the reaction's recovery policy. Permanent
-/// "poison" conditions (4xx, SSRF-blocked or unresolvable URLs, invalid
-/// method/header config) resolve to `Ok(Dropped)`: they can never succeed on
+/// `Err` is reserved for **transient/sustained** failures that warrant the
+/// reaction's recovery policy: 5xx and other retryable statuses after the retry
+/// budget is exhausted, connection errors, and **auth/permission rejections**
+/// (401/403/407 — recoverable by refreshing a credential, so the event must
+/// replay rather than be lost). Only genuinely **permanent "poison"** conditions
+/// (most 4xx — 400/404/405/422/…, SSRF-blocked or unresolvable URLs, invalid
+/// method/auth-token config) resolve to `Ok(Dropped)`: they can never succeed on
 /// replay, so the event is dropped and the checkpoint advances past it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeliveryOutcome {
@@ -388,28 +391,43 @@ pub(crate) async fn send_with_retry(
                     .await
                     .unwrap_or_else(|_| "Unable to read response body".to_string());
 
-                if is_retryable_status(status) && attempt < MAX_DELIVERY_ATTEMPTS {
-                    warn!(
-                        "[{reaction_name}] Transient {description} failure with status {} on attempt {attempt}: {error_body}; retrying",
-                        status.as_u16()
-                    );
-                    tokio::time::sleep(backoff).await;
-                    backoff = backoff.saturating_mul(2);
-                    continue;
+                match classify_status(status) {
+                    StatusClass::Retryable if attempt < MAX_DELIVERY_ATTEMPTS => {
+                        warn!(
+                            "[{reaction_name}] Transient {description} failure with status {} on attempt {attempt}: {error_body}; retrying",
+                            status.as_u16()
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = backoff.saturating_mul(2);
+                        continue;
+                    }
+                    StatusClass::Retryable => {
+                        return Err(anyhow!(
+                            "{description} failed after {MAX_DELIVERY_ATTEMPTS} attempts with status {}: {error_body}",
+                            status.as_u16()
+                        ));
+                    }
+                    StatusClass::AuthReject => {
+                        // Auth/permission rejection (401/403/407). Retrying the
+                        // same request in place won't help, but the event must
+                        // NOT be dropped: the credential can be refreshed and the
+                        // event replayed from the outbox. Surface as a sustained
+                        // failure so the reaction's recovery policy applies
+                        // (Strict fail-stops; AutoSkipGap skips).
+                        return Err(anyhow!(
+                            "{description} rejected with status {} ({error_body}); auth/permission \
+                             failure — applying recovery policy rather than dropping the event",
+                            status.as_u16()
+                        ));
+                    }
+                    StatusClass::Permanent => {
+                        error!(
+                            "[{reaction_name}] Permanent {description} failure with status {}: {error_body}; dropping event",
+                            status.as_u16()
+                        );
+                        return Ok(DeliveryOutcome::Dropped);
+                    }
                 }
-
-                if is_retryable_status(status) {
-                    return Err(anyhow!(
-                        "{description} failed after {MAX_DELIVERY_ATTEMPTS} attempts with status {}: {error_body}",
-                        status.as_u16()
-                    ));
-                }
-
-                error!(
-                    "[{reaction_name}] Permanent {description} failure with status {}: {error_body}; dropping event",
-                    status.as_u16()
-                );
-                return Ok(DeliveryOutcome::Dropped);
             }
             Err(e) if attempt < MAX_DELIVERY_ATTEMPTS => {
                 warn!(
@@ -427,6 +445,37 @@ pub(crate) async fn send_with_retry(
     }
 
     unreachable!("retry loop always returns")
+}
+
+/// How a non-2xx HTTP response status should be handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusClass {
+    /// Transient — retry in place, then surface as a sustained failure if the
+    /// retry budget is exhausted (5xx, 408, 409, 425, 429).
+    Retryable,
+    /// Auth/permission rejection (401, 403, 407). Retrying the same request in
+    /// place won't help, but the event must not be dropped — refreshing the
+    /// credential and replaying fixes it. Surfaced as a sustained failure so the
+    /// recovery policy applies.
+    AuthReject,
+    /// Genuinely permanent for this event (other 4xx — 400/404/405/422/…). The
+    /// event is poison: dropped, with the checkpoint advancing past it.
+    Permanent,
+}
+
+fn classify_status(status: StatusCode) -> StatusClass {
+    if is_retryable_status(status) {
+        StatusClass::Retryable
+    } else if matches!(
+        status,
+        StatusCode::UNAUTHORIZED
+            | StatusCode::FORBIDDEN
+            | StatusCode::PROXY_AUTHENTICATION_REQUIRED
+    ) {
+        StatusClass::AuthReject
+    } else {
+        StatusClass::Permanent
+    }
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
@@ -547,6 +596,34 @@ mod tests {
             assert!(
                 !is_retryable_status(StatusCode::from_u16(code).unwrap()),
                 "{code} should NOT be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn status_class_separates_retryable_auth_and_permanent() {
+        // Transient → retried, then sustained failure.
+        for code in [500u16, 503, 408, 409, 425, 429] {
+            assert_eq!(
+                classify_status(StatusCode::from_u16(code).unwrap()),
+                StatusClass::Retryable,
+                "{code} should be Retryable"
+            );
+        }
+        // Auth/permission → sustained failure (recovery policy), NOT dropped.
+        for code in [401u16, 403, 407] {
+            assert_eq!(
+                classify_status(StatusCode::from_u16(code).unwrap()),
+                StatusClass::AuthReject,
+                "{code} should be AuthReject (an expired token must not silently drop events)"
+            );
+        }
+        // Everything else 4xx → permanent poison (dropped).
+        for code in [400u16, 404, 405, 410, 422] {
+            assert_eq!(
+                classify_status(StatusCode::from_u16(code).unwrap()),
+                StatusClass::Permanent,
+                "{code} should be Permanent"
             );
         }
     }
