@@ -50,9 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acked, so a result split across batches is never partially advanced. On
   restart the host `ReactionManager` forwarder skips results at or below the
   persisted checkpoint, so the reaction only persists checkpoints and relies on
-  the framework for dedup. The reaction declares its archetype via
-  `is_durable=false`, `needs_snapshot_on_fresh_start=false`, and a default
-  `Strict` recovery policy.
+  the framework for dedup.
 - **Recovery policy** is configurable per instance via
   `GrpcReactionBuilder::with_recovery_policy` or the descriptor `recoveryPolicy`
   field (`strict` | `auto_skip_gap`). Under `strict` (default) a sustained

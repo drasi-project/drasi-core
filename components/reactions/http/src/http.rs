@@ -244,7 +244,7 @@ impl Reaction for HttpReaction {
         self.base.enqueue_query_result(result).await
     }
 
-    /// The HTTP reaction is a stateless **trigger** reaction (design archetype 2a):
+    /// The HTTP reaction is a stateless **trigger** reaction:
     /// it fires per-change side effects and does not require a durable state store.
     fn is_durable(&self) -> bool {
         false
