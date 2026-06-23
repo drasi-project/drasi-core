@@ -2209,7 +2209,7 @@ async fn start_intermittent_truncating_server(request_count: Arc<AtomicU64>) -> 
                 .unwrap();
 
                 // Truncate on even-numbered requests (0th, 2nd, etc.)
-                let body = if count % 2 == 0 {
+                let body = if count.is_multiple_of(2) {
                     full_body[..full_body.len() / 2].to_string()
                 } else {
                     full_body.clone()
