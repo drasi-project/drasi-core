@@ -26,7 +26,6 @@
 
 pub(crate) mod adaptive_batcher;
 pub(crate) mod batch;
-pub(crate) mod checkpoint;
 pub mod config;
 pub mod connection;
 pub mod descriptor;

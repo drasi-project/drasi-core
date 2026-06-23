@@ -29,12 +29,12 @@ use drasi_lib::ReactionRecoveryPolicy;
 
 use crate::adaptive_batcher::{AdaptiveBatcher, AdaptiveBatcherConfig};
 use crate::batch::{merge_metadata, BatchKey};
-use crate::checkpoint::{batch_checkpoint_candidates, CheckpointState, FailureAction};
 use crate::config::GrpcReactionConfig;
 use crate::connection::create_client_with_retry;
 use crate::proto::{ProtoQueryResultItem, ReactionServiceClient};
 use crate::send::send_batch_with_retry;
 use crate::templates::{build_proto_item, QueryEmissionContext, TemplateEngine};
+use drasi_lib::reactions::common::{batch_checkpoint_candidates, CheckpointState, FailureAction};
 
 /// A batcher item: routing key, proto payload, and whether this item is the
 /// terminal (last) item of its originating `QueryResult`. The terminal flag

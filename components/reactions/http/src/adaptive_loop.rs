@@ -30,10 +30,10 @@ use drasi_lib::ReactionRecoveryPolicy;
 
 use crate::adaptive_batcher::{AdaptiveBatcher, AdaptiveBatcherConfig};
 use crate::batch::send_coalesced_batch;
-use crate::checkpoint::{batch_checkpoint_candidates, CheckpointState, FailureAction};
 use crate::config::HttpReactionConfig;
 use crate::output::DefaultChangeNotification;
 use crate::process::{build_handlebars, render_batch_item};
+use drasi_lib::reactions::common::{batch_checkpoint_candidates, CheckpointState, FailureAction};
 
 /// One coalesced batch item: the rendered wire payload plus the identity needed
 /// to drive checkpoint advancement (`query_id`, `sequence`) and the

@@ -12,28 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Per-query checkpoint persistence for the HTTP reaction.
+//! Shared checkpoint-advance helpers for reactions that want at-least-once
+//! delivery.
 //!
-//! Implements the at-least-once contract from the Reaction Recovery design: a
-//! per-query `(sequence, config_hash)` checkpoint is advanced **only after a
-//! batch of results has been successfully delivered (acked)**. A crash between
-//! send and ack leaves the checkpoint behind, so the un-acked results replay
-//! from the query outbox on restart.
+//! These build on the [`ReactionBase`] checkpoint primitives
+//! (`read_checkpoint` / `write_checkpoint` / `read_all_checkpoints`) and the
+//! [`ReactionRecoveryPolicy`] enum to provide the orchestration that every
+//! durable reaction needs but that the framework does not impose via a fixed
+//! loop: advance a per-query `(sequence, config_hash)` checkpoint **only after a
+//! batch of results has been successfully delivered (acked)**.
 //!
 //! Deduplication of replayed events is **not** done here — the host
 //! `ReactionManager` forwarder already filters events with
 //! `sequence <= checkpoint.sequence` (seeded from the persisted checkpoint at
-//! startup) before they reach the reaction's priority queue. This helper only
-//! persists checkpoints, which the forwarder deliberately does not do.
+//! startup) before they reach a reaction's priority queue. These helpers only
+//! persist checkpoints, which the forwarder deliberately does not do.
 //!
-//! Checkpoints are persisted only when a state store is configured. The HTTP
-//! reaction is non-durable (`is_durable() = false`), so without a store it is a
-//! no-op and the reaction reprocesses from the start on restart.
+//! Reactions that follow the simple per-event pattern can use
+//! [`ReactionBase::run_standard_loop`](crate::reactions::common::base::ReactionBase::run_standard_loop)
+//! instead; these helpers target reactions with their own batching/timer loops
+//! (e.g. the HTTP and gRPC reactions).
 
 use std::collections::HashMap;
 
-use drasi_lib::reactions::common::base::ReactionBase;
-use drasi_lib::ReactionCheckpoint;
+use crate::reactions::checkpoint::ReactionCheckpoint;
+use crate::reactions::common::base::ReactionBase;
+use crate::recovery::ReactionRecoveryPolicy;
 
 /// Tracks the last persisted `(sequence, config_hash)` per query so checkpoint
 /// advances move forward monotonically and preserve `config_hash`.
@@ -45,7 +49,11 @@ use drasi_lib::ReactionCheckpoint;
 /// would clobber the seed — causing a false `config_hash` mismatch (and
 /// recovery) on the next restart. Seeding lazily, after the bootstrap gate has
 /// opened, picks up the correct value.
-pub(crate) struct CheckpointState {
+///
+/// Checkpoints are persisted only when a state store is configured. A
+/// non-durable reaction (`is_durable() == false`) without a store advances its
+/// in-memory view only and reprocesses from the start on restart.
+pub struct CheckpointState {
     /// Cache of the last known checkpoint per query, seeded lazily from the store.
     checkpoints: HashMap<String, ReactionCheckpoint>,
     has_store: bool,
@@ -54,7 +62,7 @@ pub(crate) struct CheckpointState {
 impl CheckpointState {
     /// Capture whether a durable store is configured. Checkpoints are seeded
     /// lazily on first advance (see the struct docs).
-    pub(crate) async fn load(base: &ReactionBase) -> Self {
+    pub async fn load(base: &ReactionBase) -> Self {
         let has_store = base.state_store().await.is_some();
         Self {
             checkpoints: HashMap::new(),
@@ -87,7 +95,7 @@ impl CheckpointState {
     /// persisting it if a store is configured and preserving the host-seeded
     /// `config_hash`. Returns `Err` only when the durable write fails so the
     /// caller can apply the reaction's recovery policy.
-    pub(crate) async fn advance(
+    pub async fn advance(
         &mut self,
         base: &ReactionBase,
         query_id: &str,
@@ -112,15 +120,15 @@ impl CheckpointState {
 
 /// Per-query checkpoint candidates for one delivered batch.
 ///
-/// * `completed` — the max sequence whose **terminal** item (the last item of
-///   its originating `QueryResult`) is in the batch. Safe to checkpoint once the
-///   batch is acked: a `QueryResult` split across batches only advances once the
-///   batch holding its terminal item lands.
+/// Each input item is `(query_id, sequence, is_terminal)`, where `is_terminal`
+/// marks the last item of its originating `QueryResult`. Returns two maps:
+///
+/// * `completed` — the max sequence whose **terminal** item is in the batch.
+///   Safe to checkpoint once the batch is acked: a `QueryResult` split across
+///   batches only advances once the batch holding its terminal item lands.
 /// * `seen` — the max sequence of **any** item, used only to advance past a
 ///   dropped batch under the `AutoSkipGap` policy (which accepts loss).
-pub(crate) fn batch_checkpoint_candidates<I>(
-    items: I,
-) -> (HashMap<String, u64>, HashMap<String, u64>)
+pub fn batch_checkpoint_candidates<I>(items: I) -> (HashMap<String, u64>, HashMap<String, u64>)
 where
     I: IntoIterator<Item = (String, u64, bool)>,
 {
@@ -141,7 +149,7 @@ where
 /// (i.e. after the send retry/reconnect budget is exhausted), per the
 /// reaction's recovery policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FailureAction {
+pub enum FailureAction {
     /// Fail-stop: set the reaction to `Error` and stop without advancing the
     /// checkpoint, so the un-acked batch replays from the outbox on restart.
     Stop,
@@ -150,11 +158,13 @@ pub(crate) enum FailureAction {
 }
 
 impl FailureAction {
-    pub(crate) fn from_policy(policy: drasi_lib::ReactionRecoveryPolicy) -> Self {
+    /// Map a recovery policy to the action a custom processing loop should take
+    /// on a sustained delivery failure.
+    pub fn from_policy(policy: ReactionRecoveryPolicy) -> Self {
         match policy {
             // Skip the gap and keep running, accepting potential loss.
-            drasi_lib::ReactionRecoveryPolicy::AutoSkipGap => FailureAction::SkipAndContinue,
-            // Strict — and AutoReset, which startup validation rejects for these
+            ReactionRecoveryPolicy::AutoSkipGap => FailureAction::SkipAndContinue,
+            // Strict — and AutoReset, which startup validation rejects for
             // non-snapshot reactions — fail-stop to preserve at-least-once.
             _ => FailureAction::Stop,
         }
@@ -164,13 +174,14 @@ impl FailureAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use drasi_lib::reactions::common::base::ReactionBaseParams;
+    use crate::reactions::common::base::ReactionBaseParams;
+    use std::sync::Arc;
 
     async fn store_backed_base(id: &str) -> ReactionBase {
         let base = ReactionBase::new(ReactionBaseParams::new(id, vec!["q1".to_string()]));
-        let store = std::sync::Arc::new(drasi_lib::MemoryStateStoreProvider::new());
-        let (graph, _rx) = drasi_lib::component_graph::ComponentGraph::new("inst");
-        let ctx = drasi_lib::context::ReactionRuntimeContext::new(
+        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("inst");
+        let ctx = crate::context::ReactionRuntimeContext::new(
             "inst",
             id,
             Some(store),
@@ -258,5 +269,21 @@ mod tests {
         assert_eq!(completed.get("q2"), Some(&11));
         assert_eq!(seen.get("q1"), Some(&5));
         assert_eq!(seen.get("q2"), Some(&11));
+    }
+
+    #[test]
+    fn failure_action_maps_policy() {
+        assert_eq!(
+            FailureAction::from_policy(ReactionRecoveryPolicy::Strict),
+            FailureAction::Stop
+        );
+        assert_eq!(
+            FailureAction::from_policy(ReactionRecoveryPolicy::AutoReset),
+            FailureAction::Stop
+        );
+        assert_eq!(
+            FailureAction::from_policy(ReactionRecoveryPolicy::AutoSkipGap),
+            FailureAction::SkipAndContinue
+        );
     }
 }

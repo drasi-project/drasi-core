@@ -22,10 +22,10 @@ use drasi_lib::channels::ComponentStatus;
 use drasi_lib::reactions::common::base::ReactionBase;
 use drasi_lib::ReactionRecoveryPolicy;
 
-use crate::checkpoint::{CheckpointState, FailureAction};
 use crate::config::{HttpReactionConfig, TemplateRouting};
 use crate::output::DefaultChangeNotification;
 use crate::process::{post_default_notification, process_result};
+use drasi_lib::reactions::common::{CheckpointState, FailureAction};
 
 /// Run the standard (per-result) processing loop. Blocks until the
 /// shutdown signal fires or the queue is closed.

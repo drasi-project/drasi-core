@@ -23,6 +23,7 @@ use log::info;
 use drasi_lib::channels::ComponentStatus;
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::reactions::common::CheckpointState;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::Reaction;
 
@@ -173,7 +174,7 @@ impl Reaction for GrpcReaction {
 
         let shutdown_rx = self.base.create_shutdown_channel().await;
         let reaction_name = self.base.id.clone();
-        let checkpoints = crate::checkpoint::CheckpointState::load(&self.base).await;
+        let checkpoints = CheckpointState::load(&self.base).await;
         let policy = self
             .base
             .recovery_policy

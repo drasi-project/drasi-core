@@ -606,7 +606,7 @@ mod integration {
     use crate::test_server;
     use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
     use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-    use drasi_lib::reactions::common::AdaptiveBatchConfig;
+    use drasi_lib::reactions::common::{AdaptiveBatchConfig, CheckpointState};
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -857,7 +857,7 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
-            checkpoints: crate::checkpoint::CheckpointState::load(&base).await,
+            checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
@@ -904,7 +904,7 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
-            checkpoints: crate::checkpoint::CheckpointState::load(&base).await,
+            checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
@@ -990,7 +990,7 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
-            checkpoints: crate::checkpoint::CheckpointState::load(&base).await,
+            checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
@@ -1030,7 +1030,7 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
-            checkpoints: crate::checkpoint::CheckpointState::load(&base).await,
+            checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
@@ -1071,7 +1071,7 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
-            checkpoints: crate::checkpoint::CheckpointState::load(&base).await,
+            checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
@@ -1125,7 +1125,7 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
-            checkpoints: crate::checkpoint::CheckpointState::load(&base).await,
+            checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::AutoSkipGap,
         }));
 
@@ -1182,7 +1182,7 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
-            checkpoints: crate::checkpoint::CheckpointState::load(&base).await,
+            checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
@@ -1221,7 +1221,7 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
-            checkpoints: crate::checkpoint::CheckpointState::load(&base).await,
+            checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
@@ -1258,7 +1258,7 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
-            checkpoints: crate::checkpoint::CheckpointState::load(&base).await,
+            checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
@@ -1304,7 +1304,7 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
-            checkpoints: crate::checkpoint::CheckpointState::load(&base).await,
+            checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::AutoSkipGap,
         }));
 
@@ -1354,7 +1354,7 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
-            checkpoints: crate::checkpoint::CheckpointState::load(&base).await,
+            checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 

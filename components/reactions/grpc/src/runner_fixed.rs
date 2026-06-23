@@ -25,12 +25,12 @@ use drasi_lib::reactions::common::base::ReactionBase;
 use drasi_lib::ReactionRecoveryPolicy;
 
 use crate::batch::{merge_metadata, BatchKey, PendingBatch};
-use crate::checkpoint::{CheckpointState, FailureAction};
 use crate::config::GrpcReactionConfig;
 use crate::connection::{create_client_with_retry, ConnectionState};
 use crate::proto::ReactionServiceClient;
 use crate::send::{send_batch_with_retry, send_batch_with_retry_with_limit};
 use crate::templates::{build_proto_item, QueryEmissionContext, TemplateEngine};
+use drasi_lib::reactions::common::{CheckpointState, FailureAction};
 
 pub(crate) struct FixedRunnerParams {
     pub reaction_name: String,
