@@ -156,17 +156,19 @@ pub struct GrpcReactionConfigDto {
 
 /// Recovery policy as exposed in declarative (JSON/YAML) config.
 ///
+/// Only the two variants valid for this reaction are exposed; `AutoReset` is
+/// omitted because it requires a fresh-start snapshot, which a trigger reaction
+/// (`needs_snapshot_on_fresh_start = false`) does not have — the host rejects
+/// that combination at startup, so the schema disallows it up front.
+///
 /// * `strict` (default) — fail-stop on sustained delivery failure; the un-acked
 ///   batch replays from the query outbox on restart.
 /// * `auto_skip_gap` — drop the failed batch and continue (favor uptime).
-/// * `auto_reset` — re-bootstrap from a snapshot (not valid for this reaction,
-///   which has no snapshot; rejected at startup).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = reaction::grpc::RecoveryPolicy)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryPolicyDto {
     Strict,
-    AutoReset,
     AutoSkipGap,
 }
 
@@ -174,7 +176,6 @@ impl From<RecoveryPolicyDto> for drasi_lib::recovery::ReactionRecoveryPolicy {
     fn from(dto: RecoveryPolicyDto) -> Self {
         match dto {
             RecoveryPolicyDto::Strict => Self::Strict,
-            RecoveryPolicyDto::AutoReset => Self::AutoReset,
             RecoveryPolicyDto::AutoSkipGap => Self::AutoSkipGap,
         }
     }
@@ -839,6 +840,14 @@ mod tests {
         let dto: GrpcReactionConfigDto =
             serde_json::from_value(serde_json::json!({ "endpoint": "grpc://h:1" })).unwrap();
         assert_eq!(dto.recovery_policy, None);
+
+        // `auto_reset` is not valid for this (non-snapshot) reaction, so the
+        // schema rejects it up front rather than deferring to a startup failure.
+        assert!(serde_json::from_value::<GrpcReactionConfigDto>(serde_json::json!({
+            "endpoint": "grpc://h:1",
+            "recoveryPolicy": "auto_reset"
+        }))
+        .is_err());
     }
 
     #[tokio::test]

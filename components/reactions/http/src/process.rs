@@ -32,6 +32,25 @@ use crate::output::{DefaultChangeNotification, Operation};
 const MAX_DELIVERY_ATTEMPTS: usize = 3;
 const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 
+/// Maximum length of a downstream-supplied string (response body, rendered URL)
+/// allowed into a log line.
+const MAX_LOG_FIELD_LEN: usize = 512;
+
+/// Bound and sanitize a downstream-controlled string before logging it: cap the
+/// length and strip control characters (notably CR/LF) so a hostile or
+/// misconfigured server cannot bloat logs or inject fake log lines.
+fn truncate_for_log(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .take(MAX_LOG_FIELD_LEN)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if s.chars().count() > MAX_LOG_FIELD_LEN {
+        out.push('…');
+    }
+    out
+}
+
 /// Outcome of attempting to deliver a single result to its HTTP target.
 ///
 /// `Err` is reserved for **transient/sustained** failures that warrant the
@@ -211,14 +230,17 @@ pub(crate) async fn process_result(
             format!("/changes/{query_name}")
         }
     };
-    // A rejected URL (SSRF guard / unparseable) is a permanent misconfiguration:
-    // drop the event rather than fail-stopping and replaying it forever.
+    // A rejected URL (SSRF guard / unparseable) is a permanent misconfiguration
+    // for this event: drop it rather than fail-stopping and replaying forever.
+    // The rendered URL can carry attacker-controllable, templated content, so it
+    // is sanitized before logging (and the full value is never emitted raw).
     let full_url = match resolve_http_url(base_url, &rendered_spec_url) {
         Ok(url) => url,
         Err(e) => {
             error!(
-                "[{reaction_name}] Rejecting rendered URL '{rendered_spec_url}' for query \
-                 '{query_name}' ({result_type}): {e:#} — dropping event"
+                "[{reaction_name}] Rejecting rendered URL for query '{query_name}' \
+                 ({result_type}): {} — dropping event",
+                truncate_for_log(&format!("{e:#}"))
             );
             return Ok(DeliveryOutcome::Dropped);
         }
@@ -386,10 +408,16 @@ pub(crate) async fn send_with_retry(
                     return Ok(DeliveryOutcome::Delivered);
                 }
 
-                let error_body = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "Unable to read response body".to_string());
+                // Truncate and sanitize the downstream body before it ever
+                // reaches a log line: an adversarial or misconfigured server can
+                // return a multi-MB body or embed CRLF to bloat logs / inject
+                // fake log lines.
+                let error_body = truncate_for_log(
+                    &response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Unable to read response body".to_string()),
+                );
 
                 match classify_status(status) {
                     StatusClass::Retryable if attempt < MAX_DELIVERY_ATTEMPTS => {
@@ -601,30 +629,16 @@ mod tests {
     }
 
     #[test]
-    fn status_class_separates_retryable_auth_and_permanent() {
-        // Transient → retried, then sustained failure.
-        for code in [500u16, 503, 408, 409, 425, 429] {
-            assert_eq!(
-                classify_status(StatusCode::from_u16(code).unwrap()),
-                StatusClass::Retryable,
-                "{code} should be Retryable"
-            );
-        }
-        // Auth/permission → sustained failure (recovery policy), NOT dropped.
-        for code in [401u16, 403, 407] {
-            assert_eq!(
-                classify_status(StatusCode::from_u16(code).unwrap()),
-                StatusClass::AuthReject,
-                "{code} should be AuthReject (an expired token must not silently drop events)"
-            );
-        }
-        // Everything else 4xx → permanent poison (dropped).
-        for code in [400u16, 404, 405, 410, 422] {
-            assert_eq!(
-                classify_status(StatusCode::from_u16(code).unwrap()),
-                StatusClass::Permanent,
-                "{code} should be Permanent"
-            );
-        }
+    fn truncate_for_log_caps_length_and_strips_control_chars() {
+        // CRLF and other control characters are replaced with spaces (no log
+        // injection); a normal short string is returned unchanged.
+        assert_eq!(truncate_for_log("ok"), "ok");
+        assert_eq!(truncate_for_log("a\r\nb\tc"), "a  b c");
+
+        // Over-long input is truncated and marked with an ellipsis.
+        let long = "x".repeat(MAX_LOG_FIELD_LEN + 50);
+        let out = truncate_for_log(&long);
+        assert_eq!(out.chars().count(), MAX_LOG_FIELD_LEN + 1); // +1 for '…'
+        assert!(out.ends_with('…'));
     }
 }

@@ -102,7 +102,10 @@ impl CheckpointState {
         sequence: u64,
     ) -> anyhow::Result<()> {
         self.ensure_seeded(base, query_id).await?;
-        let current = &self.checkpoints[query_id];
+        let current = self
+            .checkpoints
+            .get(query_id)
+            .expect("checkpoint present after ensure_seeded");
         if sequence <= current.sequence {
             return Ok(());
         }

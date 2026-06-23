@@ -285,6 +285,11 @@ async fn fail_stop(base: &ReactionBase, errored: &Arc<AtomicBool>, reaction_name
 
 /// POST the whole batch to the configured `batch_endpoint` as a single
 /// Pattern C [`crate::output::BatchEnvelope`].
+///
+/// A permanent server rejection (poison) resolves to `Ok(())` — the batch is
+/// dropped and the checkpoint advances, with the drop logged inside
+/// [`send_coalesced_batch`]. Only transient/sustained failures surface as `Err`
+/// (subject to the recovery policy).
 async fn deliver_batch(
     client: &Client,
     config: &HttpReactionConfig,
@@ -304,4 +309,5 @@ async fn deliver_batch(
         reaction_name,
     )
     .await
+    .map(|_outcome| ())
 }
