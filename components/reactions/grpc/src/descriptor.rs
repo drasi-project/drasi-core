@@ -843,11 +843,13 @@ mod tests {
 
         // `auto_reset` is not valid for this (non-snapshot) reaction, so the
         // schema rejects it up front rather than deferring to a startup failure.
-        assert!(serde_json::from_value::<GrpcReactionConfigDto>(serde_json::json!({
-            "endpoint": "grpc://h:1",
-            "recoveryPolicy": "auto_reset"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<GrpcReactionConfigDto>(serde_json::json!({
+                "endpoint": "grpc://h:1",
+                "recoveryPolicy": "auto_reset"
+            }))
+            .is_err()
+        );
     }
 
     #[tokio::test]

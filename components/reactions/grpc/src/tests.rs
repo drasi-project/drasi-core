@@ -929,6 +929,100 @@ mod integration {
         server.shutdown().await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adaptive_runner_persists_checkpoint_after_delivery() {
+        let server = test_server::start().await;
+        let base = running_base_with_store().await;
+
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        let config = config_for(
+            server.endpoint.clone(),
+            BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
+        );
+        let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
+            reaction_name: "test-grpc".to_string(),
+            adaptive: AdaptiveBatchConfig::default(),
+            base: base.clone_shared(),
+            config,
+            shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
+        }));
+
+        // A result at sequence 7 with two diffs is delivered as a coalesced batch.
+        base.enqueue_query_result(query_result_seq("q1", 2, 7))
+            .await
+            .unwrap();
+        let total = server
+            .recorder
+            .wait_for_items(2, Duration::from_secs(5))
+            .await;
+        assert_eq!(total, 2);
+
+        // The batcher advances the checkpoint to the acked sequence.
+        let cp = wait_for_checkpoint(&base, "q1", 7, Duration::from_secs(5)).await;
+        assert_eq!(
+            cp,
+            Some(7),
+            "adaptive runner must persist the acked sequence"
+        );
+
+        let _ = sd_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adaptive_runner_does_not_advance_checkpoint_for_split_result_tail() {
+        // A 3-diff result with adaptive_max_batch_size = 2 can be coalesced into
+        // more than one batch. Terminal-item tracking must ensure the checkpoint
+        // only reaches the result's sequence once the batch carrying its terminal
+        // item is acked — never a partial/over-advanced value.
+        let server = test_server::start().await;
+        let base = running_base_with_store().await;
+
+        let adaptive = AdaptiveBatchConfig {
+            adaptive_min_batch_size: 1,
+            adaptive_max_batch_size: 2,
+            adaptive_window_size: 10,
+            adaptive_batch_timeout_ms: 50,
+        };
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        let config = config_for(
+            server.endpoint.clone(),
+            BatchingConfig::adaptive(adaptive.clone()),
+        );
+        let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
+            reaction_name: "test-grpc".to_string(),
+            adaptive,
+            base: base.clone_shared(),
+            config,
+            shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
+        }));
+
+        base.enqueue_query_result(query_result_seq("q1", 3, 9))
+            .await
+            .unwrap();
+
+        // All three items are delivered (possibly across two coalesced batches).
+        let total = server
+            .recorder
+            .wait_for_items(3, Duration::from_secs(5))
+            .await;
+        assert_eq!(total, 3);
+
+        // The final checkpoint reaches exactly 9 — proving the terminal item's
+        // sequence was the one checkpointed, not an intermediate value.
+        let cp = wait_for_checkpoint(&base, "q1", 9, Duration::from_secs(5)).await;
+        assert_eq!(cp, Some(9));
+
+        let _ = sd_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        server.shutdown().await;
+    }
+
     /// Poll the persisted checkpoint until it reaches `expected` or times out.
     async fn wait_for_checkpoint(
         base: &ReactionBase,

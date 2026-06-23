@@ -125,6 +125,30 @@ fn sorted(mut v: Vec<String>) -> Vec<String> {
     v
 }
 
+/// Assert that the delivered-name count never exceeds `expected` for the whole
+/// `settle` window, polling continuously and failing fast on the first excess.
+///
+/// This is the no-duplicate guard: `stop_reaction_and_wait` only returns once the
+/// reaction reaches `Stopped`, by which point its final checkpoint is persisted,
+/// so the post-restart forwarder dedups every already-acked sequence and a
+/// duplicate cannot occur in a correct implementation. Polling fail-fast (rather
+/// than sleeping then checking once) catches a stray duplicate whenever it lands.
+async fn assert_no_extra_deliveries(server: &MockServer, expected: usize, settle: Duration) {
+    let deadline = tokio::time::Instant::now() + settle;
+    loop {
+        let n = names_received(server).await.len();
+        assert!(
+            n <= expected,
+            "unexpected extra delivery: saw {n}, expected at most {expected} — {:?}",
+            names_received(server).await
+        );
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn wait_for_reaction_status(
     core: &DrasiLib,
     status: ComponentStatus,
@@ -201,7 +225,8 @@ async fn at_least_once_replays_unacked_events_after_restart() {
             .await,
         4
     );
-    tokio::time::sleep(Duration::from_millis(300)).await; // catch any erroneous extra deliveries
+    // No fifth (duplicate) delivery may arrive during the settle window.
+    assert_no_extra_deliveries(&server, 4, Duration::from_millis(500)).await;
 
     // Assert: every event delivered exactly once — the missed two replayed, the
     // first two were not re-sent.
@@ -247,7 +272,8 @@ async fn clean_restart_does_not_redeliver_acked_events() {
     assert!(
         wait_for_reaction_status(&core, ComponentStatus::Running, Duration::from_secs(5)).await
     );
-    tokio::time::sleep(Duration::from_millis(500)).await; // give any spurious replay a chance
+    // No duplicate may arrive at any point in the settle window.
+    assert_no_extra_deliveries(&server, 2, Duration::from_millis(750)).await;
 
     assert_eq!(
         sorted(names_received(&server).await),

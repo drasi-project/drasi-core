@@ -171,6 +171,31 @@ async fn wait_for_name_count(server: &MockServer, target: usize, timeout: Durati
     }
 }
 
+/// Assert that the delivered-name count never exceeds `expected` for the whole
+/// `settle` window, polling continuously and failing fast on the first excess.
+///
+/// This is the no-duplicate guard: `stop_reaction_and_wait` only returns once the
+/// reaction reaches `Stopped`, by which point its final checkpoint is persisted,
+/// so the post-restart forwarder dedups every already-acked sequence and a
+/// duplicate cannot occur in a correct implementation. Polling fail-fast (rather
+/// than sleeping then checking once) catches a stray duplicate whenever it lands
+/// in the window instead of only at the end.
+async fn assert_no_extra_deliveries(server: &MockServer, expected: usize, settle: Duration) {
+    let deadline = tokio::time::Instant::now() + settle;
+    loop {
+        let n = names_received(server).await.len();
+        assert!(
+            n <= expected,
+            "unexpected extra delivery: saw {n}, expected at most {expected} — {:?}",
+            names_received(server).await
+        );
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn wait_for_reaction_status(
     core: &DrasiLib,
     status: ComponentStatus,
@@ -237,7 +262,8 @@ async fn at_least_once_replays_unacked_events_after_restart() {
         wait_for_name_count(&server, 4, Duration::from_secs(10)).await,
         4
     );
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // No fifth (duplicate) delivery may arrive during the settle window.
+    assert_no_extra_deliveries(&server, 4, Duration::from_millis(500)).await;
 
     assert_eq!(
         sorted(names_received(&server).await),
@@ -273,12 +299,70 @@ async fn clean_restart_does_not_redeliver_acked_events() {
     assert!(
         wait_for_reaction_status(&core, ComponentStatus::Running, Duration::from_secs(5)).await
     );
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // No duplicate may arrive at any point in the settle window.
+    assert_no_extra_deliveries(&server, 2, Duration::from_millis(750)).await;
 
     assert_eq!(
         sorted(names_received(&server).await),
         vec!["Alice", "Bob"],
         "a clean restart must not re-deliver acked events"
+    );
+
+    core.stop().await.expect("stop core");
+}
+
+/// A permanently-rejected (poison) event is dropped **and its sequence is
+/// checkpointed**, so it is not replayed on restart — proving the standard
+/// loop's `Dropped` outcome advances the checkpoint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn permanent_4xx_event_is_dropped_and_not_replayed_after_restart() {
+    let server = mock_server::start().await;
+    // The downstream permanently rejects every request with a 404 (poison).
+    Mock::given(method("POST"))
+        .and(path("/changes/e2e-query"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let store = Arc::new(MemoryStateStoreProvider::new());
+    let (core, handle) =
+        build_core(server.uri(), store, ReactionRecoveryPolicy::Strict, false).await;
+    core.start().await.expect("start core");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Alice is attempted, rejected with 404, dropped as poison; the reaction
+    // stays up and advances its checkpoint past Alice's sequence.
+    insert_person(&handle, "p1", "Alice").await;
+    assert_eq!(
+        wait_for_name_count(&server, 1, Duration::from_secs(10)).await,
+        1,
+        "Alice's request reached the server (and was 404'd)"
+    );
+    assert!(
+        wait_for_reaction_status(&core, ComponentStatus::Running, Duration::from_secs(2)).await,
+        "a permanent 4xx must not fail-stop the reaction (it is dropped as poison)"
+    );
+
+    // Switch the endpoint to healthy and CLEAR the request log, so any Alice
+    // request seen from here on can only be a replay.
+    respond_with(&server, "/changes/e2e-query", 200).await;
+
+    // Restart: if the dropped event's sequence had NOT been checkpointed, the
+    // forwarder would replay Alice from the outbox. It must not.
+    stop_reaction_and_wait(&core).await;
+    core.start_reaction(REACTION)
+        .await
+        .expect("restart reaction");
+    insert_person(&handle, "p2", "Bob").await;
+
+    assert_eq!(
+        wait_for_name_count(&server, 1, Duration::from_secs(10)).await,
+        1
+    );
+    assert_no_extra_deliveries(&server, 1, Duration::from_millis(750)).await;
+    assert_eq!(
+        names_received(&server).await,
+        vec!["Bob"],
+        "the dropped event's sequence was checkpointed, so Alice is not replayed"
     );
 
     core.stop().await.expect("stop core");
