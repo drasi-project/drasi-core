@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-bootstrap-postgres"
-version = "0.2.5"
+version = "0.2.9"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "PostgreSQL bootstrap plugin for Drasi"
@@ -36,6 +36,7 @@ drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
+bytes = "1.0"
 log = "0.4"
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 chrono = { version = "0.4", features = ["serde"] }

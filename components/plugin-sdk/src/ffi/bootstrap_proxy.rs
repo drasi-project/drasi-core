@@ -155,13 +155,8 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
             }
         });
 
-        let (last_sequence, sequences_aligned, source_position) = if let Some(ref r) = ffi_result {
-            let last_seq = if r.last_sequence >= 0 {
-                Some(r.last_sequence as u64)
-            } else {
-                None
-            };
-            let pos = if !r.source_position_ptr.is_null() && r.source_position_len > 0 {
+        let source_position = if let Some(ref r) = ffi_result {
+            if !r.source_position_ptr.is_null() && r.source_position_len > 0 {
                 let bytes = unsafe {
                     std::slice::from_raw_parts(r.source_position_ptr, r.source_position_len)
                 };
@@ -173,8 +168,7 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
                 Some(owned)
             } else {
                 None
-            };
-            (last_seq, r.sequences_aligned, pos)
+            }
         } else {
             return Err(anyhow::anyhow!(
                 "Bootstrap provider returned null result (plugin-side bootstrap failed)"
@@ -183,8 +177,6 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
 
         Ok(BootstrapResult {
             event_count: count,
-            last_sequence,
-            sequences_aligned,
             source_position,
         })
     }

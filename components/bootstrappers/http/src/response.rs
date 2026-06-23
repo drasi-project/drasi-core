@@ -26,7 +26,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::config::{ElementMappingConfig, ElementType};
+use crate::config::{ElementMappingConfig, ElementType, OperationType};
 use crate::pagination;
 use crate::template_engine::{TemplateContext, TemplateEngine};
 
@@ -47,13 +47,24 @@ pub fn extract_items(body: &JsonValue, items_path: &str) -> Result<Vec<JsonValue
     }
 }
 
+/// A mapped change result representing the operation to emit for an item.
+pub enum MappedChange {
+    /// Insert or Update — carries the full element.
+    Upsert {
+        element: Element,
+        operation: OperationType,
+    },
+    /// Delete — only metadata (id + labels) is needed.
+    Delete { metadata: ElementMetadata },
+}
+
 /// Map a list of items to Drasi graph elements using the configured mappings.
 pub fn map_items_to_elements(
     items: &[JsonValue],
     mappings: &[ElementMappingConfig],
     source_id: &str,
     engine: &TemplateEngine,
-) -> Vec<Result<Element>> {
+) -> Vec<Result<MappedChange>> {
     let mut elements = Vec::new();
 
     for (index, item) in items.iter().enumerate() {
@@ -72,14 +83,15 @@ pub fn map_items_to_elements(
     elements
 }
 
-/// Map a single item to a Drasi Element.
+/// Map a single item to a `MappedChange`.
 fn map_single_item(
     context: &TemplateContext,
     mapping: &ElementMappingConfig,
     source_id: &str,
     engine: &TemplateEngine,
-) -> Result<Element> {
+) -> Result<MappedChange> {
     let template = &mapping.template;
+    let is_delete = mapping.operation == OperationType::Delete;
 
     // Render ID
     let id = engine
@@ -101,6 +113,17 @@ fn map_single_item(
         }
     }
 
+    // For Delete operations, only metadata (id + labels) is needed — skip
+    // property and relation endpoint rendering.
+    if is_delete {
+        let metadata = ElementMetadata {
+            reference: ElementReference::new(source_id, &id),
+            labels: labels.into(),
+            effective_from: 0,
+        };
+        return Ok(MappedChange::Delete { metadata });
+    }
+
     // Render properties
     let properties = if let Some(ref props) = template.properties {
         let rendered = engine
@@ -112,17 +135,17 @@ fn map_single_item(
     };
 
     // Create element based on type
-    match mapping.element_type {
+    let element = match mapping.element_type {
         ElementType::Node => {
             let metadata = ElementMetadata {
                 reference: ElementReference::new(source_id, &id),
                 labels: labels.into(),
                 effective_from: 0,
             };
-            Ok(Element::Node {
+            Element::Node {
                 metadata,
                 properties,
-            })
+            }
         }
         ElementType::Relation => {
             let from_id = template
@@ -147,14 +170,19 @@ fn map_single_item(
                 effective_from: 0,
             };
 
-            Ok(Element::Relation {
+            Element::Relation {
                 metadata,
                 properties,
                 in_node: ElementReference::new(source_id, &from_rendered),
                 out_node: ElementReference::new(source_id, &to_rendered),
-            })
+            }
         }
-    }
+    };
+
+    Ok(MappedChange::Upsert {
+        element,
+        operation: mapping.operation.clone(),
+    })
 }
 
 /// Convert a HashMap<String, JsonValue> to ElementPropertyMap.
@@ -233,6 +261,7 @@ mod tests {
 
         let mappings = vec![ElementMappingConfig {
             element_type: ElementType::Node,
+            operation: Default::default(),
             template: crate::config::ElementTemplate {
                 id: "{{item.id}}".to_string(),
                 labels: vec!["User".to_string()],
@@ -246,14 +275,17 @@ mod tests {
         let results = map_items_to_elements(&items, &mappings, "test-source", &engine);
         assert_eq!(results.len(), 2);
 
-        let elem = results[0].as_ref().unwrap();
-        match elem {
-            Element::Node { metadata, .. } => {
-                assert_eq!(&*metadata.reference.element_id, "1");
-                assert_eq!(metadata.labels.len(), 1);
-                assert_eq!(&*metadata.labels[0], "User");
-            }
-            _ => panic!("Expected Node"),
+        let mapped = results[0].as_ref().unwrap();
+        match mapped {
+            MappedChange::Upsert { element, .. } => match element {
+                Element::Node { metadata, .. } => {
+                    assert_eq!(&*metadata.reference.element_id, "1");
+                    assert_eq!(metadata.labels.len(), 1);
+                    assert_eq!(&*metadata.labels[0], "User");
+                }
+                _ => panic!("Expected Node"),
+            },
+            _ => panic!("Expected Upsert"),
         }
     }
 
@@ -263,6 +295,7 @@ mod tests {
 
         let mappings = vec![ElementMappingConfig {
             element_type: ElementType::Relation,
+            operation: Default::default(),
             template: crate::config::ElementTemplate {
                 id: "{{item.id}}".to_string(),
                 labels: vec!["{{item.type}}".to_string()],
@@ -276,19 +309,22 @@ mod tests {
         let results = map_items_to_elements(&items, &mappings, "test-source", &engine);
         assert_eq!(results.len(), 1);
 
-        let elem = results[0].as_ref().unwrap();
-        match elem {
-            Element::Relation {
-                metadata,
-                in_node,
-                out_node,
-                ..
-            } => {
-                assert_eq!(&*metadata.reference.element_id, "r1");
-                assert_eq!(&*in_node.element_id, "n1");
-                assert_eq!(&*out_node.element_id, "n2");
-            }
-            _ => panic!("Expected Relation"),
+        let mapped = results[0].as_ref().unwrap();
+        match mapped {
+            MappedChange::Upsert { element, .. } => match element {
+                Element::Relation {
+                    metadata,
+                    in_node,
+                    out_node,
+                    ..
+                } => {
+                    assert_eq!(&*metadata.reference.element_id, "r1");
+                    assert_eq!(&*in_node.element_id, "n1");
+                    assert_eq!(&*out_node.element_id, "n2");
+                }
+                _ => panic!("Expected Relation"),
+            },
+            _ => panic!("Expected Upsert"),
         }
     }
 }

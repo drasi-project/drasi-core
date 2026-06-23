@@ -14,3 +14,8 @@ permissions:
 jobs:
   lint:
     uses: drasi-project/.github/.github/workflows/rust-lint.yaml@rust195
+    with:
+      install-jq: true
+      clippy-command: >-
+        cargo clippy --workspace --all-targets
+        --features "drasi-middleware/all,drasi-host-sdk/registry,drasi-host-sdk/fetcher,drasi-host-sdk/watcher,drasi-lib/middleware-jq"

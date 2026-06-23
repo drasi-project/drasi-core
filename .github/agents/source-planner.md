@@ -76,18 +76,44 @@ Before designing custom authentication logic, review the shared identity abstrac
 1. Determine which `Credentials` variant the target system needs (token, password, or certificate).
 2. Check if an existing provider (e.g., `AzureIdentityProvider`) already covers the auth flow.
 3. Design the source to accept `Option<Box<dyn IdentityProvider>>` via a `with_identity_provider()` builder method.
-4. Fall back to config-based credentials (client_id/secret, connection string, etc.) when no identity provider is set.
-5. Only implement custom auth logic if no existing provider fits.
+4. Implement `set_identity_provider()` on the `Source` trait to delegate to `self.base.set_identity_provider(provider).await` — this enables DrasiLib to inject identity providers after construction.
+5. Fall back to config-based credentials (client_id/secret, connection string, etc.) when no identity provider is set.
+6. Only implement custom auth logic if no existing provider fits.
 
 **Reference implementations:** See how `storedproc-postgres` and `storedproc-mssql` reactions use `with_identity_provider()`, and how the Dataverse source (`components/sources/dataverse/src/lib.rs`) constructs an `AzureIdentityProvider` (via `with_default_credentials` or `with_client_secret`) and passes it to the HTTP client — extend `AzureIdentityProvider` rather than reimplementing OAuth2/CLI flows.
 
-### 4. Determine Data Mapping Strategies
+### 4. Evaluate Replay & Recovery Capabilities
+
+The framework now supports **checkpoint-based recovery** for continuous queries. Sources that back a persistent log can resume from a checkpointed position instead of re-bootstrapping on restart. The planner must evaluate:
+
+1. **`source_position` encoding** — Each streamed event can carry an opaque `Option<Bytes>` position (e.g., CDC LSN, Kafka offset, change-feed continuation token). Determine what the target system's native position type is and how to encode it as bytes (e.g., 8-byte big-endian `u64` for LSN).
+
+2. **`supports_replay()`** — The `Source` trait defaults to `true`. If the target system has a replayable log (WAL, CDC stream, event store), keep the default. If it is volatile/push-only (e.g., a metrics collector, pure webhook receiver), the source must override to return `false`.
+
+3. **`resume_from` handling** — When `supports_replay()` is `true`, the framework may pass a `resume_from: Option<Bytes>` position in `SourceSubscriptionSettings` during `subscribe()`. The source must be able to rewind its stream to the given position. Determine:
+   - Can the target system seek to an arbitrary position?
+   - What is the latency/cost of a rewind?
+   - Is there a "pause current stream, start new stream from position" pattern (like Postgres) or a simple seek (like Kafka)?
+
+4. **`SourceError::PositionUnavailable`** — If the target system has limited retention (e.g., WAL that gets vacuumed, CDC with a retention window), the source should return this error when the requested position has expired. Determine:
+   - How to detect whether a position is still available
+   - What the `earliest_available` position is (if the system exposes it)
+
+5. **`BootstrapResult.source_position`** — Bootstrap providers can now return a snapshot position for checkpoint seeding. Determine if the target system supports capturing a consistent snapshot position during bootstrap (e.g., `SELECT pg_current_wal_lsn()` for Postgres, snapshot LSN for MSSQL).
+
+6. **`PositionComparator`** — `SourceBase` only filters replayed events during replay when a position comparator is configured. Determine:
+   - Is the native position encoding byte-sortable in big-endian? If so, use the built-in `ByteLexPositionComparator`.
+   - If positions are not lexicographically comparable (e.g., multi-part keys), a custom `PositionComparator` implementation is needed.
+
+**Reference implementations:** See `components/sources/postgres/src/lib.rs` for full replay support (ReplayState, pause/rewind/resume in subscribe) and `components/sources/mssql/src/lib.rs` for CDC-based replay.
+
+### 5. Determine Data Mapping Strategies
 
 - Decide how to map source data to Drasi's graph data model
 - If multiple strategies are possible, outline pros/cons of each
 - Consider data types, structures, and necessary transformations
 
-### 5. Create Implementation Plan
+### 6. Create Implementation Plan
 
 Write a comprehensive plan in markdown format with the following sections:
 
@@ -130,11 +156,26 @@ Write a comprehensive plan in markdown format with the following sections:
 - Configuration fields
 - State management approach
 - Change detection implementation
+- Dispatch mode: Channel (default, backpressure, zero loss) or Broadcast (shared channel, possible loss)
 
 ### Bootstrap Component
 - Initial data loading strategy
 - Configuration requirements
 - Data retrieval approach
+- `source_position` capture: can the bootstrap capture a snapshot position? (e.g., LSN, offset)
+
+## 5.5. Replay & Recovery Design
+
+- **source_position encoding**: [e.g., 8-byte big-endian u64 LSN, Kafka offset bytes, or None for volatile sources]
+- **Position comparator**: `ByteLexPositionComparator` (if encoding is byte-sortable in big-endian) or custom `PositionComparator` implementation
+- **`supports_replay()`**: true/false (rationale — does the target system have a replayable log?)
+- **`resume_from` flow**: How `subscribe()` will handle the `resume_from: Option<Bytes>` parameter:
+  - [e.g., pause current stream → create new subscriber from requested position → resume]
+  - [e.g., seek CDC cursor to requested offset]
+- **`PositionUnavailable` handling**: How to detect expired positions and what `earliest_available` to report
+- **`BootstrapResult.source_position`**: Whether bootstrap can return a snapshot position for checkpoint seeding
+- **`on_subscriptions_complete()`**: Whether the source needs startup fencing (e.g., hold back WAL feedback until all queries have subscribed)
+- **`deprovision()`**: Whether the source manages external state that needs cleanup on removal (e.g., replication slots, CDC cursors)
 
 ## 6. Testing Strategy
 
@@ -221,17 +262,26 @@ For sources that receive data via protocol or monitor local environment:
 - How to verify changes are detected
 - Troubleshooting common issues
 
-## 7. State Management
+## 7. State Management & Recovery
+
+**Important distinction — two layers of state persistence:**
+
+1. **Framework checkpoints** (automatic): The framework automatically tracks `(sequence, source_position)` per event via `SourceBase::dispatch_event()`. Sources do NOT manage this themselves — they just set `source_position` on events and the framework handles persistence, dedup, and recovery.
+
+2. **`StateStore`** (source-internal): For source-specific state that the framework doesn't track — e.g., custom cursors, subscription metadata, configuration state, poll intervals.
 
 **StateStore Integration:**
 - Builder field: `state_store: Option<StateStoreProvider>`
 - Builder method: `with_state_store()`
-- How cursor/position will be persisted
+- What source-internal state will be persisted (if any, beyond framework checkpoints)
+
+**Initial Cursor Behavior** (source-level, not framework-level):
 - Config option for initial cursor behavior:
   - `start_from_beginning`
   - `start_from_now`
   - `start_from_timestamp(i64)`
 - Default behavior
+- Note: on recovery, `resume_from` takes precedence over initial cursor config
 
 ## 8. Implementation Phases
 
@@ -266,6 +316,9 @@ For sources that receive data via protocol or monitor local environment:
 5. ✅ **PERSONALLY VERIFIED** runtime behavior with actual output
 6. ✅ All runtime issues **FIXED** (not documented as TODO)
 7. ✅ No TODOs or placeholders in core functionality
+8. ✅ `supports_replay()` correctly reflects the source's capabilities
+9. ✅ `source_position` set on dispatched events (if `supports_replay()` is true)
+10. ✅ `subscribe()` handles `resume_from` (if `supports_replay()` is true)
 
 **⚠️ "Compiles successfully" ≠ "Works correctly"**
 
@@ -297,8 +350,10 @@ Your plan must:
 - ✅ Define concrete test assertions
 - ✅ Reference actual library APIs (not assumptions)
 - ✅ Include all required helper scripts
-- ✅ Define state management approach
+- ✅ Define state management approach (distinguish StateStore from framework checkpoints)
 - ✅ Specify initial cursor behavior options
+- ✅ Evaluate replay & recovery capabilities (`supports_replay`, `source_position` encoding, `resume_from` handling)
+- ✅ Document `BootstrapResult.source_position` capability
 - ✅ Be actionable without additional research
 - ✅ Include realistic timing estimates
 
@@ -312,6 +367,9 @@ Do NOT create plans that:
 - ❌ Skip client harness design (for Protocol/Local sources)
 - ❌ Skip state management details
 - ❌ Include placeholders like "TODO" or "TBD" in critical sections
+- ❌ Confuse StateStore (source-internal) with framework checkpoints (automatic)
+- ❌ Omit replay/recovery evaluation for sources backed by persistent logs
+- ❌ Default `supports_replay()` to `true` without verifying the source can actually replay
 
 ## Delivery
 

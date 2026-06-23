@@ -1,4 +1,4 @@
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,8 +21,8 @@ use std::collections::BTreeMap;
 
 /// Convert JSON value to protobuf Struct
 ///
-/// This is a public utility that can be used by gRPC-based reactions
-/// (including grpc_adaptive) to convert JSON data to Protocol Buffer format.
+/// Shared helper used by the gRPC reaction runners and the dynamic-plugin
+/// descriptor when building `ProtoQueryResultItem.data`.
 ///
 /// # Arguments
 /// * `value` - JSON value to convert
@@ -81,4 +81,112 @@ pub fn convert_json_to_proto_value(value: &serde_json::Value) -> prost_types::Va
     };
 
     Value { kind: Some(kind) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost_types::value::Kind;
+    use serde_json::json;
+
+    fn kind(value: &prost_types::Value) -> &Kind {
+        value.kind.as_ref().expect("proto value carries a kind")
+    }
+
+    #[test]
+    fn object_maps_to_struct_fields_one_to_one() {
+        let s = convert_json_to_proto_struct(&json!({"a": 1, "b": "two"}));
+        assert_eq!(s.fields.len(), 2);
+        assert!(matches!(kind(&s.fields["a"]), Kind::NumberValue(n) if *n == 1.0));
+        assert!(matches!(kind(&s.fields["b"]), Kind::StringValue(v) if v == "two"));
+    }
+
+    #[test]
+    fn empty_object_maps_to_empty_struct() {
+        let s = convert_json_to_proto_struct(&json!({}));
+        assert!(s.fields.is_empty());
+    }
+
+    #[test]
+    fn scalar_is_wrapped_under_value_key() {
+        // Non-object inputs are wrapped as `{"value": <scalar>}` so the result
+        // is always a proto Struct.
+        for input in [
+            json!(42),
+            json!("hi"),
+            json!(true),
+            json!(null),
+            json!([1, 2]),
+        ] {
+            let s = convert_json_to_proto_struct(&input);
+            assert_eq!(s.fields.len(), 1, "scalar must wrap into a single field");
+            assert!(
+                s.fields.contains_key("value"),
+                "wrapper key must be `value`"
+            );
+        }
+    }
+
+    #[test]
+    fn null_bool_string_number_values_convert() {
+        assert!(matches!(
+            kind(&convert_json_to_proto_value(&json!(null))),
+            Kind::NullValue(0)
+        ));
+        assert!(matches!(
+            kind(&convert_json_to_proto_value(&json!(true))),
+            Kind::BoolValue(true)
+        ));
+        assert!(matches!(
+            kind(&convert_json_to_proto_value(&json!("x"))),
+            Kind::StringValue(s) if s == "x"
+        ));
+        assert!(matches!(
+            kind(&convert_json_to_proto_value(&json!(-3.5))),
+            Kind::NumberValue(n) if *n == -3.5
+        ));
+    }
+
+    #[test]
+    fn integer_numbers_become_f64_number_values() {
+        // serde_json integers convert through `as_f64`, so they arrive on the
+        // wire as proto NumberValue (f64), not strings.
+        assert!(matches!(
+            kind(&convert_json_to_proto_value(&json!(7))),
+            Kind::NumberValue(n) if *n == 7.0
+        ));
+        assert!(matches!(
+            kind(&convert_json_to_proto_value(&json!(u64::MAX))),
+            Kind::NumberValue(_)
+        ));
+    }
+
+    #[test]
+    fn arrays_convert_to_list_values_preserving_order() {
+        let v = convert_json_to_proto_value(&json!([1, "a", true]));
+        let Kind::ListValue(list) = kind(&v) else {
+            panic!("expected a ListValue");
+        };
+        assert_eq!(list.values.len(), 3);
+        assert!(matches!(kind(&list.values[0]), Kind::NumberValue(n) if *n == 1.0));
+        assert!(matches!(kind(&list.values[1]), Kind::StringValue(s) if s == "a"));
+        assert!(matches!(kind(&list.values[2]), Kind::BoolValue(true)));
+    }
+
+    #[test]
+    fn nested_objects_and_arrays_convert_recursively() {
+        let s = convert_json_to_proto_struct(&json!({
+            "outer": {"inner": [ {"k": "v"} ]}
+        }));
+        let Kind::StructValue(outer) = kind(&s.fields["outer"]) else {
+            panic!("expected nested StructValue");
+        };
+        let Kind::ListValue(list) = kind(&outer.fields["inner"]) else {
+            panic!("expected nested ListValue");
+        };
+        let Kind::StructValue(elem) = kind(&list.values[0]) else {
+            panic!("expected struct element inside the list");
+        };
+        assert!(matches!(kind(&elem.fields["k"]), Kind::StringValue(s) if s == "v"));
+    }
 }

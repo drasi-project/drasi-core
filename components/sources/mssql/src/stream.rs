@@ -21,7 +21,7 @@ use crate::error::{ConnectionError, MsSqlError, MsSqlErrorKind};
 use crate::keys::PrimaryKeyCache;
 use crate::lsn::Lsn;
 use crate::types::extract_properties_from_cdc_row;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::SourceEventWrapper;
 use drasi_lib::sources::base::SourceBase;
@@ -177,13 +177,45 @@ async fn run_cdc_polling_loop(
     // Use the minimum subscriber resume position as the CDC start point.
     // This must happen AFTER wait_for_subscribers because subscriber_resume_lsns is
     // populated during subscribe(), which triggers the subscriber notification.
-    {
+    let has_resume_checkpoint = {
         let resume_guard = subscriber_resume_lsns.read().await;
         if let Some(resume_lsn) = resume_guard.values().copied().min() {
             info!("Using minimum subscriber resume LSN {resume_lsn} as CDC start position");
             current_lsn = Some(resume_lsn);
+            true
         } else {
-            debug!("No subscriber resume positions; will use configured start_position");
+            false
+        }
+    };
+
+    if !has_resume_checkpoint && base.take_pending_initial_bootstrap() {
+        // Initial bootstrap handover: wait until the bootstrapper publishes the
+        // snapshot CDC boundary, then start strictly after it. Resume/crash
+        // recovery skips this path and continues to use subscriber checkpoints.
+        // Streaming-only subscriptions (no bootstrap requested) also skip it so
+        // they don't block waiting for a boundary that is never published.
+        let boundary_bytes = tokio::select! {
+            boundary = base.wait_for_bootstrap_boundary() => boundary,
+            _ = shutdown_rx.wait_for(|v| *v) => {
+                info!("CDC polling loop for source '{source_id}' shutdown while waiting for bootstrap boundary");
+                return Ok(());
+            }
+        };
+
+        if let Some(boundary_bytes) = boundary_bytes {
+            let boundary_lsn = Lsn::from_bytes(&boundary_bytes)
+                .context("Failed to decode MSSQL bootstrap boundary LSN")?;
+            let start_lsn = boundary_lsn
+                .increment()
+                .context("MSSQL bootstrap boundary LSN cannot be incremented")?;
+            info!(
+                "Using bootstrap boundary LSN {} as CDC start position {}",
+                boundary_lsn.to_hex(),
+                start_lsn.to_hex()
+            );
+            current_lsn = Some(start_lsn);
+        } else {
+            debug!("Bootstrap boundary channel closed; will use configured start_position");
         }
     }
 

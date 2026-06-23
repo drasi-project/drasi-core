@@ -698,8 +698,6 @@ pub fn build_source_vtable<T: Source + 'static>(
         relations_json: FfiStr,
         resume_from_ptr: *const u8,
         resume_from_len: u32,
-        has_last_sequence: bool,
-        last_sequence: u64,
         request_position_handle: bool,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
@@ -733,11 +731,6 @@ pub fn build_source_vtable<T: Source + 'static>(
             relations,
             resume_from,
             request_position_handle,
-            last_sequence: if has_last_sequence {
-                Some(last_sequence)
-            } else {
-                None
-            },
         };
 
         let handle = (w.runtime_handle)().handle().clone();
@@ -1095,8 +1088,6 @@ pub fn build_source_vtable_from_boxed(
         relations_json: FfiStr,
         resume_from_ptr: *const u8,
         resume_from_len: u32,
-        has_last_sequence: bool,
-        last_sequence: u64,
         request_position_handle: bool,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
@@ -1130,11 +1121,6 @@ pub fn build_source_vtable_from_boxed(
             relations,
             resume_from,
             request_position_handle,
-            last_sequence: if has_last_sequence {
-                Some(last_sequence)
-            } else {
-                None
-            },
         };
 
         let handle = (w.runtime_handle)().handle().clone();
@@ -2188,38 +2174,27 @@ pub fn build_bootstrap_provider_vtable(
             }
         };
 
-        // Build the FFI result with full handover metadata
-        let (
-            last_sequence,
-            sequences_aligned,
-            source_position_ptr,
-            source_position_len,
-            source_position_drop_fn,
-        ) = if let Some(ref br) = provider_result {
-            let last_seq = br.last_sequence.map(|s| s as i64).unwrap_or(-1);
-            let aligned = br.sequences_aligned;
-            if let Some(ref pos) = br.source_position {
-                let pos_vec = pos.to_vec();
-                let len = pos_vec.len();
-                let leaked = Box::into_raw(pos_vec.into_boxed_slice());
-                (
-                    last_seq,
-                    aligned,
-                    leaked as *const u8,
-                    len,
-                    Some(ffi_drop_position_bytes as extern "C" fn(*mut u8, usize)),
-                )
+        // Build the FFI result with the source_position handover boundary
+        let (source_position_ptr, source_position_len, source_position_drop_fn) =
+            if let Some(ref br) = provider_result {
+                if let Some(ref pos) = br.source_position {
+                    let pos_vec = pos.to_vec();
+                    let len = pos_vec.len();
+                    let leaked = Box::into_raw(pos_vec.into_boxed_slice());
+                    (
+                        leaked as *const u8,
+                        len,
+                        Some(ffi_drop_position_bytes as extern "C" fn(*mut u8, usize)),
+                    )
+                } else {
+                    (std::ptr::null(), 0, None)
+                }
             } else {
-                (last_seq, aligned, std::ptr::null(), 0, None)
-            }
-        } else {
-            (-1i64, false, std::ptr::null(), 0, None)
-        };
+                (std::ptr::null(), 0, None)
+            };
 
         let ffi_result = Box::new(FfiBootstrapResult {
             event_count: count as i64,
-            last_sequence,
-            sequences_aligned,
             source_position_ptr,
             source_position_len,
             source_position_drop_fn,
@@ -2693,12 +2668,23 @@ fn build_source_runtime_context(
     // In the plugin-side context, status updates flow through the FFI lifecycle callback,
     // not through this channel. The receiver is returned so it stays alive.
     let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
+
+    let wal_provider: Option<Arc<dyn drasi_lib::wal::WalProvider>> =
+        if ffi_ctx.wal_provider.is_null() {
+            None
+        } else {
+            Some(Arc::new(super::wal_provider_proxy::FfiWalProviderProxy {
+                vtable: ffi_ctx.wal_provider,
+            }))
+        };
+
     let ctx = SourceRuntimeContext {
         instance_id,
         source_id: component_id,
         update_tx,
         state_store,
         identity_provider,
+        wal_provider,
     };
     (ctx, status_rx)
 }
@@ -3113,10 +3099,6 @@ fn wrap_subscription_response(
                     if let Some(rx) = rx {
                         match rx.await {
                             Ok(Ok(result)) => {
-                                let last_sequence =
-                                    result.last_sequence.map(|s| s as i64).unwrap_or(-1);
-                                let sequences_aligned = result.sequences_aligned;
-
                                 let (
                                     source_position_ptr,
                                     source_position_len,
@@ -3139,8 +3121,6 @@ fn wrap_subscription_response(
 
                                 let ffi_result = Box::into_raw(Box::new(FfiBootstrapResult {
                                     event_count: result.event_count as i64,
-                                    last_sequence,
-                                    sequences_aligned,
                                     source_position_ptr,
                                     source_position_len,
                                     source_position_drop_fn,
@@ -3156,8 +3136,6 @@ fn wrap_subscription_response(
                                 log::error!("Bootstrap result error: {e}");
                                 let ffi_result = Box::into_raw(Box::new(FfiBootstrapResult {
                                     event_count: -1,
-                                    last_sequence: -1,
-                                    sequences_aligned: false,
                                     source_position_ptr: std::ptr::null(),
                                     source_position_len: 0,
                                     source_position_drop_fn: None,

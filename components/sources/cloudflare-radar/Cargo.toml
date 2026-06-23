@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-cloudflare-radar"
-version = "0.1.0"
+version = "0.1.4"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Cloudflare Radar source plugin for Drasi"

@@ -1,4 +1,4 @@
-# Copyright 2025 The Drasi Authors.
+# Copyright 2026 The Drasi Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +14,10 @@
 
 [package]
 name = "drasi-reaction-grpc"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "gRPC reaction plugin for Drasi"
+description = "gRPC reaction plugin for Drasi (configurable fixed and adaptive batching, with Handlebars output templating)"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi", "plugin", "reaction", "grpc"]
@@ -30,6 +30,12 @@ workspace = true
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
+# FIXME(#575): The reaction developer guide says plugin crates should depend on
+# drasi-lib / drasi-plugin-sdk / utoipa from crates.io with pinned versions.
+# This crate intentionally uses workspace dependencies for now so repository-local
+# builds, tests, and plugin publishing stay convenient while it lives inside
+# drasi-core. Switch to published crates before treating this as the standalone
+# plugin dependency model.
 drasi-lib.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
@@ -45,9 +51,19 @@ chrono = "0.4"
 uuid = { version = "1.0", features = ["v4"] }
 prost-types = "0.12"
 ordered-float = "3.0"
+handlebars = "5.1"
 
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = "0.9"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+# FIXME(#575): This local dev-dependency is also non-compliant with standalone
+# plugin guidance. It is kept for in-repo integration tests until those tests can
+# use matching published crates or avoid direct drasi-core type dependencies.
+drasi-core.workspace = true
 
 [build-dependencies]
 tonic-build = "0.11"

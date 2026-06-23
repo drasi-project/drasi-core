@@ -772,6 +772,66 @@ impl InspectionAPI {
             .await
             .ok_or_else(|| DrasiError::component_not_found("reaction", id))
     }
+
+    // ============================================================================
+    // Metrics Inspection Methods
+    // ============================================================================
+
+    /// Get per-query output metrics for a specific query.
+    ///
+    /// # Errors
+    /// Returns `DrasiError::ComponentNotFound` if the query does not exist or
+    /// has no metrics attached.
+    /// Returns `DrasiError::InvalidState` if the system is not initialized.
+    pub async fn get_query_output_metrics(
+        &self,
+        query_id: &str,
+    ) -> crate::error::Result<crate::metrics::QueryOutputMetricsSnapshot> {
+        self.state_guard.require_initialized()?;
+        let instance = self.query_manager.get_query_instance(query_id).await.ok();
+        match instance {
+            Some(q) => match q.output_metrics() {
+                Some(m) => Ok(m.snapshot()),
+                None => Err(crate::error::DrasiError::component_not_found(
+                    "query", query_id,
+                )),
+            },
+            None => Err(crate::error::DrasiError::component_not_found(
+                "query", query_id,
+            )),
+        }
+    }
+
+    /// Get per-reaction metrics for a specific reaction.
+    ///
+    /// Returns a map from query_id to its `ReactionMetricsSnapshot`.
+    ///
+    /// # Errors
+    /// Returns `DrasiError::ComponentNotFound` if the reaction does not exist.
+    /// Returns `DrasiError::InvalidState` if the system is not initialized.
+    pub async fn get_reaction_metrics(
+        &self,
+        reaction_id: &str,
+    ) -> crate::error::Result<
+        std::collections::HashMap<String, crate::metrics::ReactionMetricsSnapshot>,
+    > {
+        self.state_guard.require_initialized()?;
+        self.reaction_manager
+            .get_reaction_metrics(reaction_id)
+            .await
+            .map_err(|_| crate::error::DrasiError::component_not_found("reaction", reaction_id))
+    }
+
+    /// Get global lifecycle metrics.
+    ///
+    /// # Errors
+    /// Returns `DrasiError::InvalidState` if the system is not initialized.
+    pub async fn get_lifecycle_metrics(
+        &self,
+    ) -> crate::error::Result<crate::metrics::LifecycleMetricsSnapshot> {
+        self.state_guard.require_initialized()?;
+        Ok(self.reaction_manager.lifecycle_metrics().snapshot())
+    }
 }
 
 #[cfg(test)]

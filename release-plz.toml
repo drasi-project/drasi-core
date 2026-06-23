@@ -40,3 +40,12 @@ publish = false
 changelog_update = false
 git_release_enable = false
 release = false
+
+# Temporarily excluded due to rustc 1.91+ requirement in transitive AWS SDK dependencies
+# TODO: Update AWS SDK versions when compatible versions are available
+[[package]]
+name = "drasi-reaction-aws-sqs"
+publish = false
+changelog_update = false
+git_release_enable = false
+release = false

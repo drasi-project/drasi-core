@@ -203,10 +203,6 @@ unsafe impl Sync for FfiBootstrapSender {}
 pub struct FfiBootstrapResult {
     /// Number of events sent (>= 0), or -1 on error.
     pub event_count: i64,
-    /// Last sequence number, or -1 if not available.
-    pub last_sequence: i64,
-    /// Whether bootstrap/stream sequences are aligned for dedup.
-    pub sequences_aligned: bool,
     /// Pointer to source position bytes (null if not available).
     /// Callee owns the allocation; caller must free via `source_position_drop_fn`.
     pub source_position_ptr: *const u8,
@@ -244,6 +240,8 @@ pub struct FfiRuntimeContext {
     pub identity_provider: *const super::identity::IdentityProviderVtable,
     /// Nullable — snapshot fetcher for on-demand query snapshot access.
     pub snapshot_fetcher: *const SnapshotFetcherVtable,
+    /// Nullable — WAL provider for transient source durability.
+    pub wal_provider: *const WalProviderVtable,
 }
 
 // Safety: FfiRuntimeContext contains raw pointers that point to thread-safe data.
@@ -281,10 +279,9 @@ drasi_ffi_primitives::ffi_vtable! {
         fn initialize_fn(state: *mut, ctx: *const FfiRuntimeContext),
 
         // Subscriptions
-        /// Subscribe with query_id, node_labels JSON, relation_labels JSON,
-        /// optional resume_from position bytes, and optional last_sequence
-        /// for sequence counter recovery.
-        fn subscribe_fn(state: *mut, source_id: FfiStr, enable_bootstrap: bool, query_id: FfiStr, nodes_json: FfiStr, relations_json: FfiStr, resume_from_ptr: *const u8, resume_from_len: u32, has_last_sequence: bool, last_sequence: u64, request_position_handle: bool) -> *mut FfiSubscriptionResponse,
+        /// Subscribe with query_id, node_labels JSON, relation_labels JSON, and
+        /// optional resume_from position bytes.
+        fn subscribe_fn(state: *mut, source_id: FfiStr, enable_bootstrap: bool, query_id: FfiStr, nodes_json: FfiStr, relations_json: FfiStr, resume_from_ptr: *const u8, resume_from_len: u32, request_position_handle: bool) -> *mut FfiSubscriptionResponse,
 
         /// Host calls this to inject an external bootstrap provider (from another plugin).
         fn set_bootstrap_provider_fn(state: *mut, provider: *mut BootstrapProviderVtable),
@@ -596,6 +593,87 @@ pub struct StateStoreVtable {
 
 unsafe impl Send for StateStoreVtable {}
 unsafe impl Sync for StateStoreVtable {}
+
+// ============================================================================
+// WAL provider vtable — host creates and provides to plugins for durable
+// event persistence (write-ahead log) in transient sources.
+// ============================================================================
+
+use super::types::{
+    FfiWalAppendResult, FfiWalEntry, FfiWalOptionalU64Result, FfiWalReadResult, FfiWalU64Result,
+};
+
+/// WAL provider vtable — host creates and provides to plugins.
+///
+/// Plugins call these function pointers to persist events before ACKing callers,
+/// enabling crash recovery and replay for transient sources.
+///
+/// Follows the same ownership pattern as [`StateStoreVtable`]:
+/// - Host `Box::into_raw`s an `Arc<dyn WalProvider>` into `state`
+/// - Plugin calls vtable functions with `state` and source/event parameters
+/// - `drop_fn` reclaims the `Arc` when the plugin drops the proxy
+///
+/// # Serialization
+///
+/// `SourceChange` is passed as an opaque `*const c_void` pointer because both
+/// the host and plugin statically link the same `drasi-core` crate, guaranteeing
+/// identical memory layout. The host dereferences the pointer directly.
+///
+/// For `read_from`, the host allocates `FfiWalEntry` buffers containing
+/// `Box::into_raw(Box::new(SourceChange))` pointers that the plugin takes ownership of.
+#[repr(C)]
+pub struct WalProviderVtable {
+    pub state: *mut c_void,
+
+    /// Register a source with the WAL.
+    /// `max_events`: capacity limit; `capacity_policy`: 0 = RejectIncoming, 1 = OverwriteOldest.
+    pub register_fn: extern "C" fn(
+        state: *mut c_void,
+        source_id: FfiStr,
+        max_events: u64,
+        capacity_policy: u8,
+    ) -> FfiResult,
+
+    /// Append an event to the WAL. `event` is a `*const SourceChange` (borrowed).
+    pub append_fn: extern "C" fn(
+        state: *mut c_void,
+        source_id: FfiStr,
+        event: *const c_void,
+    ) -> FfiWalAppendResult,
+
+    /// Read events from `sequence` (inclusive) to head.
+    /// Returns a buffer of `FfiWalEntry` that the caller must free via `free_read_result_fn`.
+    pub read_from_fn:
+        extern "C" fn(state: *mut c_void, source_id: FfiStr, sequence: u64) -> FfiWalReadResult,
+
+    /// Prune events up to `sequence` (inclusive). Returns count of pruned events.
+    pub prune_up_to_fn:
+        extern "C" fn(state: *mut c_void, source_id: FfiStr, sequence: u64) -> FfiWalU64Result,
+
+    /// Get the highest allocated sequence number.
+    pub head_sequence_fn: extern "C" fn(state: *mut c_void, source_id: FfiStr) -> FfiWalU64Result,
+
+    /// Get the oldest retained sequence number (None if WAL is empty).
+    pub oldest_sequence_fn:
+        extern "C" fn(state: *mut c_void, source_id: FfiStr) -> FfiWalOptionalU64Result,
+
+    /// Get the number of events currently in the WAL.
+    pub event_count_fn: extern "C" fn(state: *mut c_void, source_id: FfiStr) -> FfiWalU64Result,
+
+    /// Delete all WAL data for a source.
+    pub delete_wal_fn: extern "C" fn(state: *mut c_void, source_id: FfiStr) -> FfiResult,
+
+    /// Free a read result buffer returned by `read_from_fn`.
+    /// The plugin MUST call this after consuming the entries.
+    pub free_read_result_fn:
+        extern "C" fn(entries: *mut FfiWalEntry, count: usize, capacity: usize),
+
+    /// Drop the vtable state (called when plugin no longer needs WAL access).
+    pub drop_fn: extern "C" fn(state: *mut c_void),
+}
+
+unsafe impl Send for WalProviderVtable {}
+unsafe impl Sync for WalProviderVtable {}
 
 // ============================================================================
 // Snapshot fetcher vtable — host creates and provides to plugins for on-demand

@@ -44,6 +44,7 @@ use crate::managers::{
     log_component_error, log_component_start, log_component_stop, ComponentLogKey,
     ComponentLogRegistry,
 };
+use crate::metrics::QueryOutputMetrics;
 use crate::queries::label_extractor::{LabelExtractor, QueryLabels};
 use crate::queries::output_state::{
     FetchError, OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse,
@@ -120,8 +121,81 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
             }
             serde_json::Value::Object(result)
         }
+        VariableValue::Date(d) => serde_json::Value::String(d.to_string()),
+        VariableValue::LocalTime(t) => serde_json::Value::String(t.to_string()),
+        VariableValue::ZonedTime(t) => serde_json::Value::String(t.to_string()),
+        // Query/reaction output uses plain strings for temporal values.
+        // The tagged datetime envelope in ElementValue JSON is internal-only.
+        VariableValue::LocalDateTime(dt) => serde_json::Value::String(dt.to_string()),
+        VariableValue::ZonedDateTime(dt) => serde_json::Value::String(dt.datetime().to_rfc3339()),
+        VariableValue::Duration(d) => serde_json::Value::String(d.to_string()),
         // For complex types, convert to string representation
         _ => serde_json::Value::String(format!("{value:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::convert_variable_value_to_json;
+    use chrono::{Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveTime, TimeZone};
+    use drasi_core::evaluation::variable_value::{
+        duration::Duration as VarDuration, zoned_datetime::ZonedDateTime as VarZonedDateTime,
+        zoned_time::ZonedTime as VarZonedTime, VariableValue,
+    };
+
+    #[test]
+    fn temporal_values_serialize_as_plain_strings() {
+        let date = NaiveDate::from_ymd_opt(2024, 6, 15).expect("valid date");
+        let local_time = NaiveTime::from_hms_micro_opt(10, 30, 45, 123_456).expect("valid time");
+        let offset = FixedOffset::east_opt(3600).expect("valid fixed offset");
+        let zoned_time = VarZonedTime::new(local_time, offset);
+        let local_datetime = date
+            .and_hms_micro_opt(10, 30, 45, 123_456)
+            .expect("valid local datetime");
+        let zoned_datetime = VarZonedDateTime::new(
+            offset
+                .with_ymd_and_hms(2024, 6, 15, 10, 30, 45)
+                .single()
+                .expect("valid zoned datetime"),
+            Some("Europe/Berlin".to_string()),
+        );
+        let duration = VarDuration::new(ChronoDuration::seconds(90), 0, 0);
+
+        let date_json = convert_variable_value_to_json(&VariableValue::Date(date));
+        assert_eq!(date_json, serde_json::Value::String(date.to_string()));
+
+        let local_time_json = convert_variable_value_to_json(&VariableValue::LocalTime(local_time));
+        assert_eq!(
+            local_time_json,
+            serde_json::Value::String(local_time.to_string())
+        );
+
+        let zoned_time_json = convert_variable_value_to_json(&VariableValue::ZonedTime(zoned_time));
+        assert_eq!(
+            zoned_time_json,
+            serde_json::Value::String(zoned_time.to_string())
+        );
+
+        let local_datetime_json =
+            convert_variable_value_to_json(&VariableValue::LocalDateTime(local_datetime));
+        assert_eq!(
+            local_datetime_json,
+            serde_json::Value::String(local_datetime.to_string())
+        );
+
+        let zoned_datetime_json =
+            convert_variable_value_to_json(&VariableValue::ZonedDateTime(zoned_datetime.clone()));
+        assert_eq!(
+            zoned_datetime_json,
+            serde_json::Value::String(zoned_datetime.datetime().to_rfc3339())
+        );
+
+        let duration_json =
+            convert_variable_value_to_json(&VariableValue::Duration(duration.clone()));
+        assert_eq!(
+            duration_json,
+            serde_json::Value::String(duration.to_string())
+        );
     }
 }
 
@@ -161,6 +235,13 @@ pub trait Query: Send + Sync {
     /// Blocks until bootstrap completes, with the same timeout/error semantics as
     /// `fetch_snapshot`.
     async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError>;
+
+    /// Get the query's output metrics (outbox health, sequence rate, snapshot tracking).
+    ///
+    /// Returns `None` for query implementations that don't support metrics.
+    fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
+        None
+    }
 }
 
 /// Bootstrap phase tracking for each source
@@ -188,6 +269,7 @@ async fn dispatch_query_results(
     checkpoint_store: &Option<Arc<dyn CheckpointStore>>,
     outbox_capacity: usize,
     profiling: crate::profiling::ProfilingMetadata,
+    output_metrics: &Arc<QueryOutputMetrics>,
 ) {
     // Convert Drasi results to our QueryResult format, filtering out Noops
     let converted_results: Vec<ResultDiff> = results
@@ -250,6 +332,7 @@ async fn dispatch_query_results(
     // push to outbox, and get back the Arc for zero-copy dispatch — all in one
     // write-lock acquisition.
     let arc_result = {
+        let tx_start = std::time::Instant::now();
         let mut state = output_state.write().await;
         state.apply_diffs(&converted_results);
 
@@ -278,7 +361,17 @@ async fn dispatch_query_results(
             profiling,
         );
 
-        state.advance_sequence_and_push(query_result)
+        let result = state.advance_sequence_and_push(query_result);
+
+        // Update query output metrics
+        let duration_ns = u64::try_from(tx_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        output_metrics.record_transaction_duration_ns(duration_ns);
+        output_metrics.record_seq_advance();
+        output_metrics.record_live_results_count(state.results_len());
+        let earliest_seq = state.outbox_earliest_seq().unwrap_or(0);
+        output_metrics.update_outbox(state.outbox_len(), earliest_seq, state.as_of_sequence());
+
+        result
     };
 
     // Persist to outbox and live results writers if available (best-effort).
@@ -454,6 +547,8 @@ pub struct DrasiQuery {
     resolved_recovery_policy: crate::recovery::RecoveryPolicy,
     // Track which source IDs we subscribed to, for cleanup in stop()
     subscribed_source_ids: Arc<RwLock<Vec<String>>>,
+    // Per-query output metrics (outbox, sequence, snapshot health)
+    output_metrics: Arc<QueryOutputMetrics>,
 }
 
 impl DrasiQuery {
@@ -500,6 +595,7 @@ impl DrasiQuery {
             bootstrap_timeout,
             resolved_recovery_policy,
             subscribed_source_ids: Arc::new(RwLock::new(Vec::new())),
+            output_metrics: Arc::new(QueryOutputMetrics::new()),
         })
     }
 
@@ -732,7 +828,13 @@ impl Query for DrasiQuery {
         let future_queue: Option<Arc<dyn drasi_core::interface::FutureQueue>>;
         let session_control: Option<Arc<dyn drasi_core::interface::SessionControl>>;
 
-        if let Some(backend_ref) = &self.base.config.storage_backend {
+        if let Some(backend_ref) = self
+            .base
+            .config
+            .storage_backend
+            .as_ref()
+            .or_else(|| self.index_factory.default_backend())
+        {
             debug!(
                 "Query '{}' using storage backend: {:?}",
                 self.base.config.id, backend_ref
@@ -1003,7 +1105,6 @@ impl Query for DrasiQuery {
                             if let Some(cp) = checkpoints.get(&settings.source_id) {
                                 checkpoint_sequences_per_source
                                     .insert(settings.source_id.clone(), cp.sequence);
-                                settings.last_sequence = Some(cp.sequence);
                                 settings.request_position_handle = true;
                                 if let Some(pos) = &cp.source_position {
                                     settings.resume_from = Some(pos.clone());
@@ -1177,7 +1278,6 @@ impl Query for DrasiQuery {
                 );
                 for (_, _, settings) in &mut sources_to_subscribe {
                     settings.resume_from = None;
-                    settings.last_sequence = None;
                     settings.request_position_handle = has_persistent_backend;
                 }
                 // Reset per-loop accumulators
@@ -1451,6 +1551,16 @@ impl Query for DrasiQuery {
 
                 // Collect position handle if source provides one
                 if let Some(handle) = subscription_response.position_handle {
+                    // Seed the handle with the query's checkpoint sequence (if
+                    // resuming) so the source includes this subscriber in its
+                    // min-watermark from the start. Without this, a resuming
+                    // query whose handle stays at u64::MAX would be invisible to
+                    // the min-watermark, letting upstream advance past its
+                    // checkpoint. First-run queries (no checkpoint) leave the
+                    // handle at u64::MAX ("no position confirmed yet").
+                    if let Some(seq) = checkpoint_sequences_per_source.get(source_id) {
+                        handle.store(*seq, std::sync::atomic::Ordering::Release);
+                    }
                     position_handles.insert(source_id.clone(), handle);
                 }
 
@@ -1533,11 +1643,6 @@ impl Query for DrasiQuery {
         // Gate that blocks the streaming event processor until bootstrap completes.
         // Events buffer safely in the priority queue during bootstrap.
         let bootstrap_gate = Arc::new(Notify::new());
-
-        // Channel for the bootstrap supervisor to send handover checkpoints
-        // to the processor task after all bootstrap tasks complete.
-        let (handover_tx, handover_rx) =
-            tokio::sync::oneshot::channel::<std::collections::HashMap<String, u64>>();
 
         // NEW: Handle bootstrap channels
         if !bootstrap_channels.is_empty() {
@@ -1689,15 +1794,15 @@ impl Query for DrasiQuery {
                         }
 
                         // Await the BootstrapResult from the source's bootstrap provider.
-                        // This contains handover metadata (last_sequence, sequences_aligned).
+                        // This carries the optional source_position snapshot boundary.
                         let bootstrap_result = if let Some(rx) = bootstrap_result_rx {
                             match rx.await {
                                 Ok(Ok(result)) => {
                                     debug!(
                                         "[BOOTSTRAP] Query '{}' received handover from source '{}': \
-                                         last_sequence={:?}, sequences_aligned={}",
+                                         source_position={:?}",
                                         query_id_clone, source_id_clone,
-                                        result.last_sequence, result.sequences_aligned
+                                        result.source_position.as_ref().map(|p| p.len())
                                     );
                                     Some(result)
                                 }
@@ -1760,77 +1865,43 @@ impl Query for DrasiQuery {
                                 Some(format!("Bootstrap failed: {panic_count} task(s) panicked")),
                             ).await;
 
-                            // Send empty handover so processor doesn't block
-                            let _ = handover_tx.send(std::collections::HashMap::new());
+                            // Open the gate so the processor doesn't block
                             bootstrap_gate_clone.notify_one();
                             return;
                         }
 
-                        // Collect handover checkpoints from BootstrapResults.
-                        //
-                        // Two purposes:
-                        // 1. **Dedup map** (in-memory): For aligned sources with last_sequence,
-                        //    buffered streaming events at or below that sequence are filtered.
-                        //    Only populated when `sequences_aligned == true`.
-                        // 2. **Recovery checkpoint** (persisted): For ANY source that provides
-                        //    a last_sequence, we persist a checkpoint (optionally with
-                        //    source_position bytes) so crash-after-bootstrap can resume
-                        //    from the snapshot boundary without re-bootstrapping.
-                        let mut handover_checkpoints: std::collections::HashMap<String, u64> =
-                            std::collections::HashMap::new();
-
-                        // Tracks source positions from bootstrap for persistence
-                        let mut handover_positions: std::collections::HashMap<String, (u64, Option<bytes::Bytes>)> =
+                        // Persist the bootstrap snapshot boundary (source_position)
+                        // as a recovery checkpoint so a crash after bootstrap but
+                        // before the first streaming event doesn't lose progress and
+                        // avoids a redundant re-bootstrap. Bootstrap events don't go
+                        // through dispatch_event(), so there is no sequence yet; use
+                        // 0 as the sentinel sequence alongside the source_position.
+                        let mut handover_positions: std::collections::HashMap<String, Option<bytes::Bytes>> =
                             std::collections::HashMap::new();
 
                         for (source_id, bootstrap_result) in join_results.iter().filter_map(|r| r.as_ref().ok()) {
                             if let Some(br) = bootstrap_result {
-                                // Dedup map: only for aligned sources
-                                if br.sequences_aligned {
-                                    if let Some(seq) = br.last_sequence {
-                                        debug!(
-                                            "[BOOTSTRAP] Query '{query_id_clone}' handover checkpoint for '{source_id}': seq={seq}"
-                                        );
-                                        handover_checkpoints.insert(source_id.clone(), seq);
-                                    }
-                                } else {
-                                    debug!(
-                                        "[BOOTSTRAP] Query '{query_id_clone}' source '{source_id}' sequences not aligned, \
-                                         no dedup checkpoint (accept all buffered events)"
-                                    );
-                                }
-
-                                // Recovery checkpoint: persist whenever we have a sequence
-                                // OR a source_position. source_position enables native
-                                // stream resumption; sequence enables dedup. Bootstrap
-                                // events don't go through dispatch_event(), so sequence
-                                // may be None even when source_position is present. Use
-                                // 0 as the sentinel sequence in that case.
-                                if br.last_sequence.is_some() || br.source_position.is_some() {
-                                    let seq = br.last_sequence.unwrap_or(0);
+                                if let Some(pos) = &br.source_position {
                                     // Validate source_position size (same limit as dispatch_event)
-                                    let position = br.source_position.as_ref().and_then(|pos| {
-                                        if pos.len() > crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES {
-                                            warn!(
-                                                "[BOOTSTRAP] Query '{query_id_clone}' source '{source_id}' \
-                                                 bootstrap source_position is {} bytes (> {} limit); \
-                                                 dropping position, checkpoint will have sequence only",
-                                                pos.len(),
-                                                crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES
-                                            );
-                                            None
-                                        } else {
-                                            Some(pos.clone())
-                                        }
-                                    });
-                                    handover_positions.insert(source_id.clone(), (seq, position));
+                                    if pos.len() > crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES {
+                                        warn!(
+                                            "[BOOTSTRAP] Query '{query_id_clone}' source '{source_id}' \
+                                             bootstrap source_position is {} bytes (> {} limit); \
+                                             dropping position, no recovery checkpoint persisted",
+                                            pos.len(),
+                                            crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES
+                                        );
+                                    } else {
+                                        handover_positions.insert(source_id.clone(), Some(pos.clone()));
+                                    }
                                 }
                             }
                         }
 
                         info!(
                             "[BOOTSTRAP] Query '{query_id_clone}' all sources completed bootstrap, \
-                             handover checkpoints: {handover_checkpoints:?}"
+                             {} recovery checkpoint(s) to persist",
+                            handover_positions.len()
                         );
 
                         // Persist recovery checkpoints before opening the gate.
@@ -1854,9 +1925,9 @@ impl Query for DrasiQuery {
                             };
 
                             if session_ok {
-                                for (source_id, (seq, position)) in &handover_positions {
+                                for (source_id, position) in &handover_positions {
                                     if let Err(e) = checkpoint_store_for_supervisor
-                                        .stage_checkpoint(source_id, *seq, position.as_ref())
+                                        .stage_checkpoint(source_id, 0, position.as_ref())
                                         .await
                                     {
                                         warn!(
@@ -1875,9 +1946,6 @@ impl Query for DrasiQuery {
                                 }
                             }
                         }
-
-                        // Send handover checkpoints to the processor task
-                        let _ = handover_tx.send(handover_checkpoints);
 
                         // Emit bootstrapCompleted control signal
                         let mut metadata = HashMap::new();
@@ -1931,8 +1999,7 @@ impl Query for DrasiQuery {
                 "Query '{}' no bootstrap channels, skipping bootstrap",
                 self.base.config.id
             );
-            // No bootstrap needed — send empty handover and open the gate immediately
-            let _ = handover_tx.send(std::collections::HashMap::new());
+            // No bootstrap needed — open the gate immediately
             bootstrap_gate.notify_one();
         }
 
@@ -1965,6 +2032,7 @@ impl Query for DrasiQuery {
         let outbox_writer_for_processor = self.outbox_writer.read().await.clone();
         let live_results_writer_for_processor = self.live_results_writer.read().await.clone();
         let outbox_capacity_for_processor = self.output_state.read().await.outbox_capacity();
+        let output_metrics_for_processor = self.output_metrics.clone();
         let source_ids_for_processor: Vec<String> = self
             .base
             .config
@@ -2036,29 +2104,10 @@ impl Query for DrasiQuery {
 
                 info!("Query '{query_id}' starting priority queue event processor");
 
-                // Initialize dedup filter from stored checkpoints (if resuming).
-                // Then apply handover checkpoints from the bootstrap supervisor
-                // which override the initial state for bootstrapped sources.
+                // Initialize the crash-recovery dedup filter from stored checkpoints
+                // (if resuming) so buffered streaming events at or below the
+                // checkpoint sequence are filtered on replay.
                 let mut dedup = super::SequenceDedup::new(checkpoint_sequences_per_source.clone());
-                if let Ok(handover) = handover_rx.await {
-                    for (source_id, seq) in &handover {
-                        dedup.advance(source_id, *seq);
-                    }
-                    if !handover.is_empty() {
-                        info!(
-                            "Query '{query_id}' applied {} handover checkpoint(s) to dedup filter",
-                            handover.len()
-                        );
-                    }
-
-                    // Update position handles with handover checkpoints so sources
-                    // know the query's durable progress from the start.
-                    for (source_id, seq) in &handover {
-                        if let Some(handle) = position_handles_for_processor.get(source_id) {
-                            handle.store(*seq, std::sync::atomic::Ordering::Release);
-                        }
-                    }
-                }
 
                 loop {
                     // Check if query is still running
@@ -2134,6 +2183,7 @@ impl Query for DrasiQuery {
                                                         &checkpoint_store_for_dispatch,
                                                         outbox_capacity_for_processor,
                                                         profiling,
+                                                        &output_metrics_for_processor,
                                                     )
                                                     .await;
                                                 }
@@ -2205,6 +2255,7 @@ impl Query for DrasiQuery {
                                                     &checkpoint_store_for_dispatch,
                                                     outbox_capacity_for_processor,
                                                     profiling,
+                                                    &output_metrics_for_processor,
                                                 )
                                                 .await;
                                             }
@@ -2347,6 +2398,9 @@ impl Query for DrasiQuery {
         // This ensures reactions don't observe a partial result set during initialization.
         self.wait_until_running().await?;
 
+        // Track snapshot fetch invocations
+        self.output_metrics.record_snapshot_fetch();
+
         let (results_clone, as_of_sequence) = {
             let state = self.output_state.read().await;
             (state.clone_results(), state.as_of_sequence())
@@ -2434,6 +2488,10 @@ impl Query for DrasiQuery {
             results,
             config_hash: self.config_hash,
         })
+    }
+
+    fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
+        Some(self.output_metrics.clone())
     }
 }
 
@@ -2734,8 +2792,14 @@ impl QueryManager {
 
         // After teardown: clear persistent indexes + checkpoints so a future
         // query with the same ID starts fresh. Only needed for persistent backends.
+        // Resolve the effective backend the same way as start-up so that queries
+        // relying on the instance-wide default backend are also cleaned up.
         if let Some(config) = query_config {
-            if let Some(backend_ref) = &config.storage_backend {
+            if let Some(backend_ref) = config
+                .storage_backend
+                .as_ref()
+                .or_else(|| self.index_factory.default_backend())
+            {
                 if !self.index_factory.is_volatile(backend_ref) {
                     info!("Query '{id}' removed — clearing persistent indexes and checkpoints");
                     match self.index_factory.build(backend_ref, &id).await {

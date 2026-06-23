@@ -27,7 +27,7 @@
 //!
 //! let provider = GarnetIndexProvider::new("redis://localhost:6379", None, true);
 //! let drasi = DrasiLib::builder()
-//!     .with_index_provider(Arc::new(provider))
+//!     .with_index_provider("redis", Arc::new(provider))
 //!     .build()?;
 //! ```
 
@@ -35,6 +35,8 @@ use drasi_core::interface::IndexError;
 use redis::{aio::MultiplexedConnection, cmd, AsyncCommands};
 
 pub mod checkpoint;
+#[cfg(feature = "plugin-descriptor")]
+mod descriptor;
 pub mod element_index;
 pub mod future_queue;
 pub mod live_results;
@@ -50,6 +52,9 @@ pub use live_results::GarnetLiveResultsWriter;
 pub use outbox::GarnetOutboxWriter;
 pub use plugin::GarnetIndexProvider;
 pub use session_state::{GarnetSessionControl, GarnetSessionState};
+
+#[cfg(feature = "plugin-descriptor")]
+pub use descriptor::{GarnetIndexConfigDto, GarnetIndexDescriptor};
 
 trait ClearByPattern {
     async fn clear(&self, pattern: String) -> Result<(), IndexError>;

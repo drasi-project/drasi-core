@@ -1,4 +1,4 @@
-# Copyright 2025 The Drasi Authors.
+# Copyright 2026 The Drasi Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,13 +14,13 @@
 
 [package]
 name = "drasi-reaction-http"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "HTTP reaction plugin for Drasi"
+description = "HTTP reaction plugin for Drasi (single per-result notifications and adaptive batched delivery)"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "reaction", "http"]
+keywords = ["drasi", "plugin", "reaction", "http", "adaptive"]
 categories = ["network-programming"]
 
 [lints]
@@ -30,8 +30,11 @@ workspace = true
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
+# TODO(#574): For standalone reaction-plugin packaging, depend on published
+# crates.io versions instead of workspace-inherited drasi crates. This remains
+# intentionally uncompliant for now so the in-repo reaction can build against
+# local drasi-core/drasi-lib changes while it lives in this workspace.
 drasi-lib.workspace = true
-drasi-core.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
@@ -40,15 +43,19 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["full"] }
-futures = "0.3"
 chrono = "0.4"
-uuid = { version = "1.0", features = ["v4"] }
-tokio-stream = "0.1"
-prost-types = "0.12"
-ordered-float = "3.0"
+# TODO(#574): Pin the same crates.io drasi-plugin-sdk version as the target
+# dynamic plugin loader before treating this crate as standalone.
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 
+[dev-dependencies]
+# TODO(#574): Revisit this test-only workspace dependency when the HTTP
+# reaction is made buildable outside the drasi-core workspace.
+drasi-core.workspace = true
+wiremock = "0.6"
+tokio = { version = "1.0", features = ["full", "test-util"] }
+env_logger = "0.11"
 
 [features]
 # default = []

@@ -1,0 +1,47 @@
+# cargo-deny configuration for drasi-core.
+#
+# This file currently enforces a single, narrowly-scoped invariant: no crate in the
+# workspace may pull in a custom global allocator. The dynamic (cdylib) plugin system
+# transfers rich Rust types across the FFI boundary as owned `Box`es — `Box::into_raw`
+# on one side, `Box::from_raw` on the other, in both directions. That is only sound
+# because the plugin and the host share the process-global System allocator
+# (libc `malloc`/`free`). If any crate installs a custom `#[global_allocator]`
+# (jemalloc, mimalloc, tcmalloc, snmalloc, etc.), every cross-cdylib free becomes
+# silent heap corruption.
+#
+# This gate is run in CI via `.github/workflows/cargo-deny.yml` as `cargo deny check
+# bans`. RustSec advisory scanning is handled separately by `cargo-audit.yml`, so only
+# the `[bans]` check is configured here.
+#
+# See https://github.com/drasi-project/drasi-core/issues/378 for background.
+
+[graph]
+# Evaluate the dependency graph with all features enabled. `targets` is intentionally
+# left unset: cargo-deny then resolves dependencies for every target triple, so a custom
+# allocator gated behind a feature or a specific platform (e.g. Windows/macOS-only) is
+# still caught.
+all-features = true
+
+[bans]
+# Run locally as `cargo deny check bans`. A bare `cargo deny check` also runs the
+# advisories/licenses/sources checks, which are intentionally NOT configured here
+# (advisories are covered by cargo-audit.yml) and would report against their defaults.
+multiple-versions = "allow"
+wildcards = "allow"
+
+# Known custom global-allocator crates. Pulling any of these into the workspace — even
+# transitively — violates the cross-cdylib shared-System-allocator contract.
+deny = [
+    { crate = "jemallocator", reason = "Custom global allocator; breaks the cross-cdylib shared-System-allocator contract. See issue #378." },
+    { crate = "tikv-jemallocator", reason = "Custom global allocator; breaks the cross-cdylib shared-System-allocator contract. See issue #378." },
+    { crate = "jemalloc-sys", reason = "jemalloc backing; pulled in by jemalloc allocator crates. See issue #378." },
+    { crate = "tikv-jemalloc-sys", reason = "jemalloc backing; pulled in by jemalloc allocator crates. See issue #378." },
+    { crate = "mimalloc", reason = "Custom global allocator; breaks the cross-cdylib shared-System-allocator contract. See issue #378." },
+    { crate = "libmimalloc-sys", reason = "mimalloc backing; pulled in by the mimalloc allocator crate. See issue #378." },
+    { crate = "snmalloc-rs", reason = "Custom global allocator; breaks the cross-cdylib shared-System-allocator contract. See issue #378." },
+    { crate = "snmalloc-sys", reason = "snmalloc backing; pulled in by the snmalloc allocator crate. See issue #378." },
+    { crate = "tcmalloc", reason = "Custom global allocator; breaks the cross-cdylib shared-System-allocator contract. See issue #378." },
+    { crate = "rpmalloc", reason = "Custom global allocator; breaks the cross-cdylib shared-System-allocator contract. See issue #378." },
+    { crate = "wee_alloc", reason = "Custom global allocator; breaks the cross-cdylib shared-System-allocator contract. See issue #378." },
+    { crate = "talc", reason = "Custom global allocator; breaks the cross-cdylib shared-System-allocator contract. See issue #378." },
+]

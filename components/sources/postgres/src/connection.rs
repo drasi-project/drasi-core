@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::{anyhow, Result};
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use log::{debug, info, trace, warn};
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -591,4 +591,24 @@ pub(crate) fn parse_lsn(lsn_str: &str) -> Result<u64> {
     let low = u64::from_str_radix(parts[1], 16)?;
 
     Ok((high << 32) | low)
+}
+
+/// Encodes a WAL LSN as the opaque source-position bytes used by checkpoints and resume.
+pub(crate) fn lsn_to_position_bytes(lsn: u64) -> Bytes {
+    Bytes::from(lsn.to_be_bytes().to_vec())
+}
+
+/// Decodes opaque source-position bytes back to a WAL LSN.
+pub(crate) fn position_bytes_to_lsn(position: &Bytes) -> Result<u64> {
+    if position.len() != 8 {
+        return Err(anyhow!(
+            "Invalid Postgres LSN position: expected 8 bytes, got {}",
+            position.len()
+        ));
+    }
+
+    let bytes: [u8; 8] = position[..8]
+        .try_into()
+        .map_err(|_| anyhow!("unexpected: array conversion failed after length check"))?;
+    Ok(u64::from_be_bytes(bytes))
 }

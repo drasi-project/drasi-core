@@ -14,26 +14,23 @@
 
 //! Template engine for webhook payload transformation.
 //!
-//! Uses Handlebars templates to transform webhook payloads into
-//! Drasi source change events.
+//! This module provides the HTTP-source-specific `TemplateContext` and delegates
+//! to the shared `SourceMappingEngine` from `drasi-source-mapping`.
 
-use crate::config::{
-    EffectiveFromConfig, ElementTemplate, ElementType, OperationType, TimestampFormat,
-    WebhookMapping,
-};
-use anyhow::{anyhow, Result};
-use drasi_core::models::{
-    Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
-};
-use handlebars::{
-    Context, Handlebars, Helper, HelperResult, Output, RenderContext, RenderErrorReason,
-};
-use ordered_float::OrderedFloat;
+use crate::config::WebhookMapping;
+use anyhow::Result;
+use drasi_core::models::{ElementValue, SourceChange};
+use drasi_source_mapping::SourceMappingEngine;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use std::sync::Arc;
 
-/// Template context containing all variables available in templates
+// Re-export json_to_element_value for backward compatibility
+pub use drasi_source_mapping::json_to_element_value;
+
+/// Template context containing all variables available in templates.
+///
+/// This is the HTTP-source-specific context. It gets serialized to JSON
+/// before being passed to the shared mapping engine.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TemplateContext {
     /// Parsed payload body
@@ -52,53 +49,31 @@ pub struct TemplateContext {
     pub source_id: String,
 }
 
-/// Compiled template engine with pre-registered templates
+/// Compiled template engine with pre-registered templates.
+///
+/// Delegates to `SourceMappingEngine` from `drasi-source-mapping`.
 pub struct TemplateEngine {
-    handlebars: Handlebars<'static>,
+    inner: SourceMappingEngine,
 }
 
 impl TemplateEngine {
     /// Create a new template engine with custom helpers registered
     pub fn new() -> Self {
-        let mut handlebars = Handlebars::new();
-        handlebars.set_strict_mode(false);
-
-        // Register custom helpers
-        register_helpers(&mut handlebars);
-
-        Self { handlebars }
+        Self {
+            inner: SourceMappingEngine::new(),
+        }
     }
 
     /// Render a template string with the given context
     pub fn render_string(&self, template: &str, context: &TemplateContext) -> Result<String> {
-        self.handlebars
-            .render_template(template, context)
-            .map_err(|e| anyhow!("Template render error: {e}"))
+        let json_context = context_to_json(context);
+        self.inner.render_string(template, &json_context)
     }
 
     /// Render a template and preserve the JSON value type
-    ///
-    /// If the template is a simple variable reference like `{{payload.field}}`,
-    /// this returns the original JSON value. Otherwise, it returns the rendered string.
     pub fn render_value(&self, template: &str, context: &TemplateContext) -> Result<JsonValue> {
-        // Check if this is a simple variable reference
-        if let Some(path) = extract_simple_path(template) {
-            if let Some(value) = resolve_path(&context_to_json(context), &path) {
-                return Ok(value.clone());
-            }
-        }
-
-        // Fall back to string rendering
-        let rendered = self.render_string(template, context)?;
-
-        // Try to parse as JSON, otherwise return as string
-        if rendered.is_empty() {
-            Ok(JsonValue::Null)
-        } else if let Ok(parsed) = serde_json::from_str::<JsonValue>(&rendered) {
-            Ok(parsed)
-        } else {
-            Ok(JsonValue::String(rendered))
-        }
+        let json_context = context_to_json(context);
+        self.inner.render_value(template, &json_context)
     }
 
     /// Process a webhook mapping and create a SourceChange
@@ -108,239 +83,25 @@ impl TemplateEngine {
         context: &TemplateContext,
         source_id: &str,
     ) -> Result<SourceChange> {
-        // Determine the operation
-        let operation = self.resolve_operation(mapping, context)?;
-
-        // Get effective_from timestamp
-        let effective_from = self.resolve_effective_from(mapping, context)?;
-
-        // Build the element based on type
-        let element = self.build_element(mapping, context, source_id, effective_from)?;
-
-        // Create the appropriate SourceChange
-        match operation {
-            OperationType::Insert => Ok(SourceChange::Insert { element }),
-            OperationType::Update => Ok(SourceChange::Update { element }),
-            OperationType::Delete => {
-                // For delete, we only need metadata
-                let metadata = match element {
-                    Element::Node { metadata, .. } => metadata,
-                    Element::Relation { metadata, .. } => metadata,
-                };
-                Ok(SourceChange::Delete { metadata })
-            }
-        }
+        let json_context = context_to_json(context);
+        self.inner
+            .process_mapping(mapping, &json_context, source_id)
     }
 
-    /// Resolve the operation type from mapping configuration
-    fn resolve_operation(
-        &self,
-        mapping: &WebhookMapping,
-        context: &TemplateContext,
-    ) -> Result<OperationType> {
-        // If static operation is defined, use it
-        if let Some(ref op) = mapping.operation {
-            return Ok(op.clone());
-        }
-
-        // Otherwise, extract from payload using operation_from
-        let op_path = mapping
-            .operation_from
-            .as_ref()
-            .ok_or_else(|| anyhow!("No operation or operation_from specified"))?;
-
-        let op_map = mapping
-            .operation_map
-            .as_ref()
-            .ok_or_else(|| anyhow!("operation_map required when using operation_from"))?;
-
-        // Resolve the path value
-        let context_json = context_to_json(context);
-        let value = resolve_path(&context_json, op_path)
-            .ok_or_else(|| anyhow!("operation_from path '{op_path}' not found in context"))?;
-
-        let value_str = match value {
-            JsonValue::String(s) => s.clone(),
-            JsonValue::Number(n) => n.to_string(),
-            JsonValue::Bool(b) => b.to_string(),
-            _ => return Err(anyhow!("operation_from value must be a string or number")),
-        };
-
-        op_map
-            .get(&value_str)
-            .cloned()
-            .ok_or_else(|| anyhow!("No operation mapping found for value '{value_str}'"))
-    }
-
-    /// Resolve effective_from timestamp
-    fn resolve_effective_from(
-        &self,
-        mapping: &WebhookMapping,
-        context: &TemplateContext,
-    ) -> Result<u64> {
-        let Some(ref config) = mapping.effective_from else {
-            return Ok(current_time_millis());
-        };
-
-        let (template, format) = match config {
-            EffectiveFromConfig::Simple(t) => (t.as_str(), None),
-            EffectiveFromConfig::Explicit { value, format } => (value.as_str(), Some(format)),
-        };
-
-        let rendered = self.render_string(template, context)?;
-        if rendered.is_empty() {
-            return Ok(current_time_millis());
-        }
-
-        parse_timestamp(&rendered, format)
-    }
-
-    /// Build an Element from the template
-    fn build_element(
-        &self,
-        mapping: &WebhookMapping,
-        context: &TemplateContext,
-        source_id: &str,
-        effective_from: u64,
-    ) -> Result<Element> {
-        let template = &mapping.template;
-
-        // Render ID
-        let id = self.render_string(&template.id, context)?;
-        if id.is_empty() {
-            return Err(anyhow!("Template rendered empty ID"));
-        }
-
-        // Render labels
-        let labels: Result<Vec<Arc<str>>> = template
-            .labels
-            .iter()
-            .map(|l| {
-                let rendered = self.render_string(l, context)?;
-                Ok(Arc::from(rendered.as_str()))
-            })
-            .collect();
-        let labels = labels?;
-
-        // Build metadata
-        let metadata = ElementMetadata {
-            reference: ElementReference {
-                source_id: Arc::from(source_id),
-                element_id: Arc::from(id.as_str()),
-            },
-            labels: Arc::from(labels),
-            effective_from,
-        };
-
-        // Render properties
-        let properties = self.render_properties(template, context)?;
-
-        match mapping.element_type {
-            ElementType::Node => Ok(Element::Node {
-                metadata,
-                properties,
-            }),
-            ElementType::Relation => {
-                let from_template = template
-                    .from
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("Relation template missing 'from' field"))?;
-                let to_template = template
-                    .to
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("Relation template missing 'to' field"))?;
-
-                let from_id = self.render_string(from_template, context)?;
-                let to_id = self.render_string(to_template, context)?;
-
-                Ok(Element::Relation {
-                    metadata,
-                    properties,
-                    in_node: ElementReference {
-                        source_id: Arc::from(source_id),
-                        element_id: Arc::from(to_id.as_str()),
-                    },
-                    out_node: ElementReference {
-                        source_id: Arc::from(source_id),
-                        element_id: Arc::from(from_id.as_str()),
-                    },
-                })
-            }
-        }
-    }
-
-    /// Render properties from template
-    fn render_properties(
-        &self,
-        template: &ElementTemplate,
-        context: &TemplateContext,
-    ) -> Result<ElementPropertyMap> {
-        let mut props = ElementPropertyMap::new();
-
-        let Some(ref prop_value) = template.properties else {
-            return Ok(props);
-        };
-
-        match prop_value {
-            JsonValue::Object(obj) => {
-                for (key, value) in obj {
-                    let rendered = self.render_property_value(value, context)?;
-                    props.insert(key, rendered);
-                }
-            }
-            JsonValue::String(template_str) => {
-                // Single template that should resolve to an object
-                let rendered = self.render_value(template_str, context)?;
-                if let JsonValue::Object(obj) = rendered {
-                    for (key, value) in obj {
-                        props.insert(&key, json_to_element_value(&value)?);
-                    }
-                }
-            }
-            _ => {
-                return Err(anyhow!("Properties must be an object or a template string"));
-            }
-        }
-
-        Ok(props)
-    }
-
-    /// Render a single property value
-    fn render_property_value(
+    /// Render a single property value (used internally by tests)
+    pub fn render_property_value(
         &self,
         value: &JsonValue,
         context: &TemplateContext,
     ) -> Result<ElementValue> {
+        // For property values that are template strings, render them
+        let json_context = context_to_json(context);
         match value {
             JsonValue::String(template) => {
-                let rendered = self.render_value(template, context)?;
+                let rendered = self.inner.render_value(template, &json_context)?;
                 json_to_element_value(&rendered)
             }
-            JsonValue::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    Ok(ElementValue::Integer(i))
-                } else if let Some(f) = n.as_f64() {
-                    Ok(ElementValue::Float(OrderedFloat(f)))
-                } else {
-                    Err(anyhow!("Invalid number"))
-                }
-            }
-            JsonValue::Bool(b) => Ok(ElementValue::Bool(*b)),
-            JsonValue::Null => Ok(ElementValue::Null),
-            JsonValue::Array(arr) => {
-                let items: Result<Vec<_>> = arr
-                    .iter()
-                    .map(|v| self.render_property_value(v, context))
-                    .collect();
-                Ok(ElementValue::List(items?))
-            }
-            JsonValue::Object(obj) => {
-                let mut map = ElementPropertyMap::new();
-                for (k, v) in obj {
-                    map.insert(k, self.render_property_value(v, context)?);
-                }
-                Ok(ElementValue::Object(map))
-            }
+            other => json_to_element_value(other),
         }
     }
 }
@@ -351,289 +112,18 @@ impl Default for TemplateEngine {
     }
 }
 
-/// Register custom Handlebars helpers
-fn register_helpers(handlebars: &mut Handlebars) {
-    // lowercase helper
-    handlebars.register_helper(
-        "lowercase",
-        Box::new(
-            |h: &Helper,
-             _: &Handlebars,
-             _: &Context,
-             _: &mut RenderContext,
-             out: &mut dyn Output|
-             -> HelperResult {
-                let param = h
-                    .param(0)
-                    .ok_or(RenderErrorReason::ParamNotFoundForIndex("lowercase", 0))?;
-                let value = param.value().as_str().unwrap_or("");
-                out.write(&value.to_lowercase())?;
-                Ok(())
-            },
-        ),
-    );
-
-    // uppercase helper
-    handlebars.register_helper(
-        "uppercase",
-        Box::new(
-            |h: &Helper,
-             _: &Handlebars,
-             _: &Context,
-             _: &mut RenderContext,
-             out: &mut dyn Output|
-             -> HelperResult {
-                let param = h
-                    .param(0)
-                    .ok_or(RenderErrorReason::ParamNotFoundForIndex("uppercase", 0))?;
-                let value = param.value().as_str().unwrap_or("");
-                out.write(&value.to_uppercase())?;
-                Ok(())
-            },
-        ),
-    );
-
-    // now helper - returns current timestamp in milliseconds
-    handlebars.register_helper(
-        "now",
-        Box::new(
-            |_: &Helper,
-             _: &Handlebars,
-             _: &Context,
-             _: &mut RenderContext,
-             out: &mut dyn Output|
-             -> HelperResult {
-                out.write(&current_time_millis().to_string())?;
-                Ok(())
-            },
-        ),
-    );
-
-    // concat helper
-    handlebars.register_helper(
-        "concat",
-        Box::new(
-            |h: &Helper,
-             _: &Handlebars,
-             _: &Context,
-             _: &mut RenderContext,
-             out: &mut dyn Output|
-             -> HelperResult {
-                let mut result = String::new();
-                for param in h.params() {
-                    if let Some(s) = param.value().as_str() {
-                        result.push_str(s);
-                    } else {
-                        result.push_str(&param.value().to_string());
-                    }
-                }
-                out.write(&result)?;
-                Ok(())
-            },
-        ),
-    );
-
-    // default helper
-    handlebars.register_helper(
-        "default",
-        Box::new(
-            |h: &Helper,
-             _: &Handlebars,
-             _: &Context,
-             _: &mut RenderContext,
-             out: &mut dyn Output|
-             -> HelperResult {
-                let value = h.param(0).map(|p| p.value());
-                let default = h.param(1).map(|p| p.value());
-
-                let output = match value {
-                    Some(v) if !v.is_null() && v.as_str() != Some("") => v,
-                    _ => default.unwrap_or(&JsonValue::Null),
-                };
-
-                if let Some(s) = output.as_str() {
-                    out.write(s)?;
-                } else {
-                    out.write(&output.to_string())?;
-                }
-                Ok(())
-            },
-        ),
-    );
-
-    // json helper - serialize value to JSON string
-    handlebars.register_helper(
-        "json",
-        Box::new(
-            |h: &Helper,
-             _: &Handlebars,
-             _: &Context,
-             _: &mut RenderContext,
-             out: &mut dyn Output|
-             -> HelperResult {
-                let param = h
-                    .param(0)
-                    .ok_or(RenderErrorReason::ParamNotFoundForIndex("json", 0))?;
-                let json_str =
-                    serde_json::to_string(param.value()).unwrap_or_else(|_| "null".to_string());
-                out.write(&json_str)?;
-                Ok(())
-            },
-        ),
-    );
-}
-
-/// Extract a simple variable path from a template like `{{payload.field}}`
-fn extract_simple_path(template: &str) -> Option<String> {
-    let trimmed = template.trim();
-    if trimmed.starts_with("{{") && trimmed.ends_with("}}") {
-        let inner = trimmed[2..trimmed.len() - 2].trim();
-        // Check if it's a simple path (no spaces, no helpers)
-        if !inner.contains(' ') && !inner.contains('#') && !inner.contains('/') {
-            return Some(inner.to_string());
-        }
-    }
-    None
-}
-
-/// Resolve a dot-separated path in a JSON value
-fn resolve_path<'a>(value: &'a JsonValue, path: &str) -> Option<&'a JsonValue> {
-    let mut current = value;
-    for part in path.split('.') {
-        current = match current {
-            JsonValue::Object(obj) => obj.get(part)?,
-            JsonValue::Array(arr) => {
-                let index: usize = part.parse().ok()?;
-                arr.get(index)?
-            }
-            _ => return None,
-        };
-    }
-    Some(current)
-}
-
-/// Convert TemplateContext to JSON value for path resolution
+/// Convert TemplateContext to JSON value for the shared engine
 fn context_to_json(context: &TemplateContext) -> JsonValue {
     serde_json::to_value(context).unwrap_or(JsonValue::Null)
-}
-
-/// Convert JSON value to ElementValue
-pub fn json_to_element_value(value: &JsonValue) -> Result<ElementValue> {
-    match value {
-        JsonValue::Null => Ok(ElementValue::Null),
-        JsonValue::Bool(b) => Ok(ElementValue::Bool(*b)),
-        JsonValue::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(ElementValue::Integer(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(ElementValue::Float(OrderedFloat(f)))
-            } else {
-                Err(anyhow!("Invalid number value"))
-            }
-        }
-        JsonValue::String(s) => Ok(ElementValue::String(Arc::from(s.as_str()))),
-        JsonValue::Array(arr) => {
-            let items: Result<Vec<_>> = arr.iter().map(json_to_element_value).collect();
-            Ok(ElementValue::List(items?))
-        }
-        JsonValue::Object(obj) => {
-            let mut map = ElementPropertyMap::new();
-            for (k, v) in obj {
-                map.insert(k, json_to_element_value(v)?);
-            }
-            Ok(ElementValue::Object(map))
-        }
-    }
-}
-
-/// Get current time in milliseconds
-fn current_time_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// Parse a timestamp string into milliseconds since epoch
-fn parse_timestamp(value: &str, format: Option<&TimestampFormat>) -> Result<u64> {
-    if let Some(fmt) = format {
-        return parse_with_format(value, fmt);
-    }
-
-    // Auto-detect format
-    let trimmed = value.trim();
-
-    // Try ISO 8601 first (contains 'T' or '-')
-    if trimmed.contains('T') || (trimmed.contains('-') && !trimmed.starts_with('-')) {
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
-            return Ok(dt.timestamp_millis() as u64);
-        }
-        // Try without timezone
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
-            return Ok(dt.and_utc().timestamp_millis() as u64);
-        }
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S%.f") {
-            return Ok(dt.and_utc().timestamp_millis() as u64);
-        }
-    }
-
-    // Try parsing as number
-    if let Ok(num) = trimmed.parse::<i64>() {
-        let abs = num.unsigned_abs();
-        // Heuristic based on magnitude
-        if abs < 10_000_000_000 {
-            // Seconds (before year 2286)
-            return Ok(abs * 1000);
-        } else if abs < 10_000_000_000_000 {
-            // Milliseconds
-            return Ok(abs);
-        } else {
-            // Nanoseconds
-            return Ok(abs / 1_000_000);
-        }
-    }
-
-    Err(anyhow!(
-        "Unable to parse timestamp '{value}'. Expected ISO 8601 or Unix timestamp"
-    ))
-}
-
-/// Parse timestamp with explicit format
-fn parse_with_format(value: &str, format: &TimestampFormat) -> Result<u64> {
-    match format {
-        TimestampFormat::Iso8601 => {
-            let dt = chrono::DateTime::parse_from_rfc3339(value.trim())
-                .map_err(|e| anyhow!("Invalid ISO 8601 timestamp: {e}"))?;
-            Ok(dt.timestamp_millis() as u64)
-        }
-        TimestampFormat::UnixSeconds => {
-            let secs: i64 = value
-                .trim()
-                .parse()
-                .map_err(|e| anyhow!("Invalid Unix seconds: {e}"))?;
-            Ok((secs * 1000) as u64)
-        }
-        TimestampFormat::UnixMillis => {
-            let millis: u64 = value
-                .trim()
-                .parse()
-                .map_err(|e| anyhow!("Invalid Unix milliseconds: {e}"))?;
-            Ok(millis)
-        }
-        TimestampFormat::UnixNanos => {
-            let nanos: u64 = value
-                .trim()
-                .parse()
-                .map_err(|e| anyhow!("Invalid Unix nanoseconds: {e}"))?;
-            Ok(nanos / 1_000_000)
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ElementTemplate, WebhookMapping};
+    use crate::config::{
+        ElementTemplate, ElementType, OperationType, TimestampFormat, WebhookMapping,
+    };
+    use drasi_core::models::{Element, ElementValue, SourceChange};
 
     fn create_test_context() -> TemplateContext {
         let payload = serde_json::json!({
@@ -823,44 +313,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_timestamp_iso8601() {
-        let result = parse_timestamp("2024-01-15T10:30:00Z", None).unwrap();
-        assert!(result > 0);
-
-        let result =
-            parse_timestamp("2024-01-15T10:30:00Z", Some(&TimestampFormat::Iso8601)).unwrap();
-        assert!(result > 0);
-    }
-
-    #[test]
-    fn test_parse_timestamp_unix_seconds() {
-        let result = parse_timestamp("1705315800", None).unwrap();
-        assert_eq!(result, 1705315800000); // Converted to millis
-
-        let result = parse_timestamp("1705315800", Some(&TimestampFormat::UnixSeconds)).unwrap();
-        assert_eq!(result, 1705315800000);
-    }
-
-    #[test]
-    fn test_parse_timestamp_unix_millis() {
-        let result = parse_timestamp("1705315800000", None).unwrap();
-        assert_eq!(result, 1705315800000);
-
-        let result = parse_timestamp("1705315800000", Some(&TimestampFormat::UnixMillis)).unwrap();
-        assert_eq!(result, 1705315800000);
-    }
-
-    #[test]
-    fn test_parse_timestamp_unix_nanos() {
-        let result = parse_timestamp("1705315800000000000", None).unwrap();
-        assert_eq!(result, 1705315800000); // Converted to millis
-
-        let result =
-            parse_timestamp("1705315800000000000", Some(&TimestampFormat::UnixNanos)).unwrap();
-        assert_eq!(result, 1705315800000);
-    }
-
-    #[test]
     fn test_process_mapping_insert() {
         let engine = TemplateEngine::new();
         let context = create_test_context();
@@ -989,20 +441,5 @@ mod tests {
 
         let result = engine.process_mapping(&mapping, &context, "test").unwrap();
         assert!(matches!(result, SourceChange::Insert { .. }));
-    }
-
-    #[test]
-    fn test_extract_simple_path() {
-        assert_eq!(
-            extract_simple_path("{{payload.id}}"),
-            Some("payload.id".to_string())
-        );
-        assert_eq!(
-            extract_simple_path("{{ payload.id }}"),
-            Some("payload.id".to_string())
-        );
-        assert_eq!(extract_simple_path("{{#if condition}}"), None);
-        assert_eq!(extract_simple_path("prefix-{{id}}"), None);
-        assert_eq!(extract_simple_path("{{lowercase name}}"), None);
     }
 }

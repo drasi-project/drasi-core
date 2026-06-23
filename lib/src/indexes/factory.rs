@@ -67,36 +67,54 @@ impl From<drasi_core::interface::IndexError> for IndexError {
     }
 }
 
-/// Factory for creating index sets based on storage backend configuration
+/// Factory for creating index sets based on storage backend configuration.
+///
+/// In-memory backends are created natively. Persistent ("plugin") backends are
+/// served by named [`IndexBackendPlugin`] providers injected at build time via
+/// `DrasiLibBuilder::with_index_provider(name, provider)`. A query references a
+/// backend by name; the factory resolves it to an injected provider, a declared
+/// in-memory backend, or (if neither) reports a clear error.
 pub struct IndexFactory {
-    /// Map of backend ID to backend specification
-    backends: HashMap<String, StorageBackendSpec>,
-    /// Optional index backend plugin for persistent storage (RocksDB, Redis/Garnet)
-    plugin: Option<Arc<dyn IndexBackendPlugin>>,
+    /// Declared in-memory backends: id -> enable_archive
+    memory_backends: HashMap<String, bool>,
+    /// Declared plugin backends: id -> kind (used only for diagnostics)
+    plugin_backends: HashMap<String, String>,
+    /// Injected named providers: name -> provider
+    providers: HashMap<String, Arc<dyn IndexBackendPlugin>>,
+    /// Default backend applied to queries whose `storage_backend` is `None`.
+    /// When set (typically to a [`StorageBackendRef::Named`] pointing at an
+    /// injected provider), a query that does not specify a backend uses this
+    /// instead of falling back to native in-memory indexes.
+    default_backend: Option<StorageBackendRef>,
 }
 
 impl fmt::Debug for IndexFactory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IndexFactory")
-            .field("backends", &self.backends)
-            .field("plugin", &self.plugin.as_ref().map(|_| "<plugin>"))
+            .field("memory_backends", &self.memory_backends)
+            .field("plugin_backends", &self.plugin_backends)
+            .field("providers", &self.providers.keys().collect::<Vec<_>>())
+            .field("default_backend", &self.default_backend)
             .finish()
     }
 }
 
 impl IndexFactory {
-    /// Create a new IndexFactory from a list of backend configurations
+    /// Create a new IndexFactory from declared backends and injected providers.
     ///
     /// # Arguments
     ///
-    /// * `backends` - List of storage backend configurations
-    /// * `plugin` - Optional index backend plugin for persistent storage (RocksDB, Redis/Garnet).
-    ///   When using RocksDB or Redis backends, this plugin MUST be provided.
+    /// * `backends` - List of storage backend configurations. `Memory` backends are
+    ///   created natively; `Plugin` backends are recorded for diagnostics and must be
+    ///   satisfied by an injected provider of the same name.
+    /// * `providers` - Map of provider name -> [`IndexBackendPlugin`]. A query that
+    ///   references a name present here is served by that provider.
     ///
     /// # Example
     /// ```no_run
+    /// # use std::collections::HashMap;
     /// # use drasi_lib::indexes::{IndexFactory, StorageBackendConfig, StorageBackendSpec};
-    /// // For in-memory only (no plugin needed)
+    /// // For in-memory only (no providers needed)
     /// let backends = vec![
     ///     StorageBackendConfig {
     ///         id: "memory_test".to_string(),
@@ -105,19 +123,56 @@ impl IndexFactory {
     ///         },
     ///     },
     /// ];
-    /// let factory = IndexFactory::new(backends, None);
+    /// let factory = IndexFactory::new(backends, HashMap::new());
     ///
-    /// // For persistent storage (plugin required)
+    /// // For persistent storage, inject a named provider:
     /// // use drasi_index_rocksdb::RocksDbIndexProvider;
     /// // let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
-    /// // let factory = IndexFactory::new(backends, Some(Arc::new(provider)));
+    /// // let providers = HashMap::from([("rocks".to_string(), Arc::new(provider) as _)]);
+    /// // let factory = IndexFactory::new(vec![], providers);
     /// ```
     pub fn new(
         backends: Vec<StorageBackendConfig>,
-        plugin: Option<Arc<dyn IndexBackendPlugin>>,
+        providers: HashMap<String, Arc<dyn IndexBackendPlugin>>,
     ) -> Self {
-        let backends = backends.into_iter().map(|b| (b.id, b.spec)).collect();
-        Self { backends, plugin }
+        Self::new_with_default(backends, providers, None)
+    }
+
+    /// Create a new IndexFactory with an optional default backend.
+    ///
+    /// The `default_backend` is applied to queries whose `storage_backend` is
+    /// `None`. This is how `DrasiLibBuilder::with_default_index_provider` makes
+    /// a single injected provider cover every query that does not name a backend
+    /// explicitly. When `default_backend` is `None`, unspecified queries fall
+    /// back to native in-memory indexes (the standard behavior).
+    pub fn new_with_default(
+        backends: Vec<StorageBackendConfig>,
+        providers: HashMap<String, Arc<dyn IndexBackendPlugin>>,
+        default_backend: Option<StorageBackendRef>,
+    ) -> Self {
+        let mut memory_backends = HashMap::new();
+        let mut plugin_backends = HashMap::new();
+        for b in backends {
+            match b.spec {
+                StorageBackendSpec::Memory { enable_archive } => {
+                    memory_backends.insert(b.id, enable_archive);
+                }
+                StorageBackendSpec::Plugin { kind, .. } => {
+                    plugin_backends.insert(b.id, kind);
+                }
+            }
+        }
+        Self {
+            memory_backends,
+            plugin_backends,
+            providers,
+            default_backend,
+        }
+    }
+
+    /// The default backend applied to queries with no `storage_backend`, if any.
+    pub fn default_backend(&self) -> Option<&StorageBackendRef> {
+        self.default_backend.as_ref()
     }
 
     /// Build a CreatedIndexes for a query using the specified storage backend
@@ -128,48 +183,39 @@ impl IndexFactory {
     ///
     /// # Errors
     /// Returns `IndexError` if:
-    /// - Named backend reference doesn't exist
-    /// - Backend initialization fails (connection, path, etc.)
-    /// - Invalid configuration
+    /// - Named backend reference doesn't resolve to a provider or in-memory backend
+    /// - A declared plugin backend has no injected provider
+    /// - Backend initialization fails
     pub async fn build(
         &self,
         backend_ref: &StorageBackendRef,
         query_id: &str,
     ) -> Result<CreatedIndexes, IndexError> {
-        let spec = match backend_ref {
-            StorageBackendRef::Named(name) => self
-                .backends
-                .get(name)
-                .ok_or_else(|| IndexError::UnknownStore(name.clone()))?,
-            StorageBackendRef::Inline(spec) => spec,
-        };
-
-        self.build_from_spec(spec, query_id).await
-    }
-
-    /// Build a CreatedIndexes from a storage backend specification
-    async fn build_from_spec(
-        &self,
-        spec: &StorageBackendSpec,
-        query_id: &str,
-    ) -> Result<CreatedIndexes, IndexError> {
-        // Validate configuration before building
-        spec.validate().map_err(IndexError::InitializationFailed)?;
-
-        match spec {
-            StorageBackendSpec::Memory { enable_archive } => {
+        match backend_ref {
+            StorageBackendRef::Named(name) => {
+                if let Some(provider) = self.providers.get(name) {
+                    self.build_from_plugin(provider, query_id).await
+                } else if let Some(enable_archive) = self.memory_backends.get(name) {
+                    self.build_memory_indexes(*enable_archive)
+                } else if let Some(kind) = self.plugin_backends.get(name) {
+                    Err(IndexError::InitializationFailed(format!(
+                        "Storage backend '{name}' (kind '{kind}') is declared but no index provider \
+                         was injected for it. Use DrasiLib::builder().with_index_provider(\"{name}\", ...) \
+                         to provide one."
+                    )))
+                } else {
+                    Err(IndexError::UnknownStore(name.clone()))
+                }
+            }
+            StorageBackendRef::Inline(StorageBackendSpec::Memory { enable_archive }) => {
                 self.build_memory_indexes(*enable_archive)
             }
-            StorageBackendSpec::RocksDb { .. } | StorageBackendSpec::Redis { .. } => {
-                // Delegate to the plugin for persistent storage backends
-                match &self.plugin {
-                    Some(plugin) => self.build_from_plugin(plugin, query_id).await,
-                    None => Err(IndexError::InitializationFailed(
-                        "RocksDB or Redis backend requested but no index provider configured. \
-                         Use DrasiLib::builder().with_index_provider(...) to provide one."
-                            .to_string(),
-                    )),
-                }
+            StorageBackendRef::Inline(StorageBackendSpec::Plugin { kind, .. }) => {
+                Err(IndexError::InitializationFailed(format!(
+                    "Inline plugin storage backend (kind '{kind}') is not supported in embedded mode. \
+                     Declare a named storage backend and inject a provider via \
+                     DrasiLib::builder().with_index_provider(name, ...)."
+                )))
             }
         }
     }
@@ -215,27 +261,90 @@ impl IndexFactory {
     /// Check if a storage backend is volatile (requires re-bootstrap after restart)
     ///
     /// # Returns
-    /// - `true` for Memory backend (no persistence)
-    /// - `false` for RocksDB and Redis backends (persistent)
+    /// - `true` for in-memory backends (no persistence)
+    /// - The provider's own `is_volatile()` for injected plugin providers
+    /// - `false` for declared-but-uninjected plugin backends and unknown names
+    ///   (persistent assumption is safer than treating them as volatile)
     pub fn is_volatile(&self, backend_ref: &StorageBackendRef) -> bool {
-        let spec = match backend_ref {
-            StorageBackendRef::Named(name) => match self.backends.get(name) {
-                Some(spec) => spec,
-                None => return false, // Unknown backend, assume not volatile
-            },
-            StorageBackendRef::Inline(spec) => spec,
-        };
-
-        spec.is_volatile()
+        match backend_ref {
+            StorageBackendRef::Named(name) => {
+                if let Some(provider) = self.providers.get(name) {
+                    provider.is_volatile()
+                } else if self.memory_backends.contains_key(name) {
+                    true
+                } else {
+                    // Declared-but-uninjected plugin backend or unknown name.
+                    false
+                }
+            }
+            StorageBackendRef::Inline(spec) => spec.is_volatile(),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+
+    /// Minimal in-memory-backed mock provider for tests.
+    struct MockPlugin {
+        volatile: bool,
+    }
+
+    #[async_trait]
+    impl IndexBackendPlugin for MockPlugin {
+        async fn create_indexes(
+            &self,
+            _query_id: &str,
+        ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
+        {
+            let element_index = Arc::new(InMemoryElementIndex::new());
+            Ok(CreatedIndexes {
+                set: IndexSet {
+                    element_index: element_index.clone(),
+                    archive_index: element_index,
+                    result_index: Arc::new(InMemoryResultIndex::new()),
+                    future_queue: Arc::new(InMemoryFutureQueue::new()),
+                    session_control: Arc::new(NoOpSessionControl),
+                },
+                checkpoint_store: None,
+                outbox_writer: None,
+                live_results_writer: None,
+            })
+        }
+
+        fn is_volatile(&self) -> bool {
+            self.volatile
+        }
+    }
+
+    fn providers_with(name: &str, volatile: bool) -> HashMap<String, Arc<dyn IndexBackendPlugin>> {
+        let mut m: HashMap<String, Arc<dyn IndexBackendPlugin>> = HashMap::new();
+        m.insert(name.to_string(), Arc::new(MockPlugin { volatile }));
+        m
+    }
 
     #[test]
-    fn test_index_factory_new() {
+    fn test_index_factory_default_backend_accessor() {
+        // Without a default, the accessor returns None.
+        let factory = IndexFactory::new(vec![], HashMap::new());
+        assert!(factory.default_backend().is_none());
+
+        // With a default, the accessor returns the configured ref.
+        let factory = IndexFactory::new_with_default(
+            vec![],
+            providers_with("rocks", false),
+            Some(StorageBackendRef::Named("rocks".to_string())),
+        );
+        match factory.default_backend() {
+            Some(StorageBackendRef::Named(name)) => assert_eq!(name, "rocks"),
+            other => panic!("expected default Named(\"rocks\"), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_index_factory_new_splits_backends() {
         let backends = vec![
             StorageBackendConfig {
                 id: "memory_test".to_string(),
@@ -245,18 +354,24 @@ mod tests {
             },
             StorageBackendConfig {
                 id: "rocks_test".to_string(),
-                spec: StorageBackendSpec::RocksDb {
-                    path: "/tmp/test".to_string(),
-                    enable_archive: false,
-                    direct_io: false,
+                spec: StorageBackendSpec::Plugin {
+                    kind: "rocksdb".to_string(),
+                    config: serde_json::json!({ "path": "/tmp/test" }),
                 },
             },
         ];
 
-        let factory = IndexFactory::new(backends, None);
-        assert_eq!(factory.backends.len(), 2);
-        assert!(factory.backends.contains_key("memory_test"));
-        assert!(factory.backends.contains_key("rocks_test"));
+        let factory = IndexFactory::new(backends, HashMap::new());
+        assert_eq!(factory.memory_backends.len(), 1);
+        assert!(factory.memory_backends.contains_key("memory_test"));
+        assert_eq!(factory.plugin_backends.len(), 1);
+        assert_eq!(
+            factory
+                .plugin_backends
+                .get("rocks_test")
+                .map(|s| s.as_str()),
+            Some("rocksdb")
+        );
     }
 
     #[tokio::test]
@@ -268,7 +383,7 @@ mod tests {
             },
         }];
 
-        let factory = IndexFactory::new(backends, None);
+        let factory = IndexFactory::new(backends, HashMap::new());
         let backend_ref = StorageBackendRef::Named("memory_test".to_string());
         let result = factory.build(&backend_ref, "test_query").await;
 
@@ -276,8 +391,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_build_named_provider() {
+        let factory = IndexFactory::new(vec![], providers_with("rocks", false));
+        let backend_ref = StorageBackendRef::Named("rocks".to_string());
+        let result = factory.build(&backend_ref, "test_query").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
     async fn test_build_unknown_backend() {
-        let factory = IndexFactory::new(vec![], None);
+        let factory = IndexFactory::new(vec![], HashMap::new());
         let backend_ref = StorageBackendRef::Named("nonexistent".to_string());
         let result = factory.build(&backend_ref, "test_query").await;
 
@@ -291,8 +414,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_build_declared_plugin_without_provider_errors() {
+        // A Plugin backend declared in config but with no injected provider.
+        let backends = vec![StorageBackendConfig {
+            id: "rocks".to_string(),
+            spec: StorageBackendSpec::Plugin {
+                kind: "rocksdb".to_string(),
+                config: serde_json::json!({ "path": "/data/test" }),
+            },
+        }];
+        let factory = IndexFactory::new(backends, HashMap::new());
+        let backend_ref = StorageBackendRef::Named("rocks".to_string());
+        let result = factory.build(&backend_ref, "test_query").await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            IndexError::InitializationFailed(msg) => {
+                assert!(msg.contains("no index provider"));
+                assert!(msg.contains("rocks"));
+            }
+            _ => panic!("Expected InitializationFailed error"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_build_inline_memory() {
-        let factory = IndexFactory::new(vec![], None);
+        let factory = IndexFactory::new(vec![], HashMap::new());
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
             enable_archive: false,
         });
@@ -302,39 +449,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_rocksdb_without_plugin_errors() {
-        // Verify that attempting to use RocksDB without a plugin returns an error
-        let factory = IndexFactory::new(vec![], None);
-        let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: "/data/test".to_string(),
-            enable_archive: false,
-            direct_io: false,
+    async fn test_build_inline_plugin_errors() {
+        let factory = IndexFactory::new(vec![], providers_with("rocks", false));
+        let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Plugin {
+            kind: "rocksdb".to_string(),
+            config: serde_json::json!({ "path": "/data/test" }),
         });
         let result = factory.build(&backend_ref, "test_query").await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
             IndexError::InitializationFailed(msg) => {
-                assert!(msg.contains("no index provider configured"));
-            }
-            _ => panic!("Expected InitializationFailed error"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_build_redis_without_plugin_errors() {
-        // Verify that attempting to use Redis without a plugin returns an error
-        let factory = IndexFactory::new(vec![], None);
-        let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Redis {
-            connection_string: "redis://localhost:6379".to_string(), // DevSkim: ignore DS162092
-            cache_size: None,
-        });
-        let result = factory.build(&backend_ref, "test_query").await;
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            IndexError::InitializationFailed(msg) => {
-                assert!(msg.contains("no index provider configured"));
+                assert!(msg.contains("Inline plugin"));
             }
             _ => panic!("Expected InitializationFailed error"),
         }
@@ -349,49 +475,48 @@ mod tests {
             },
         }];
 
-        let factory = IndexFactory::new(backends, None);
+        let factory = IndexFactory::new(backends, HashMap::new());
         let backend_ref = StorageBackendRef::Named("memory_test".to_string());
         assert!(factory.is_volatile(&backend_ref));
     }
 
     #[test]
-    fn test_is_volatile_rocksdb() {
+    fn test_is_volatile_provider_delegates() {
+        let factory = IndexFactory::new(vec![], providers_with("rocks", false));
+        let backend_ref = StorageBackendRef::Named("rocks".to_string());
+        assert!(!factory.is_volatile(&backend_ref));
+
+        let factory = IndexFactory::new(vec![], providers_with("vol", true));
+        let backend_ref = StorageBackendRef::Named("vol".to_string());
+        assert!(factory.is_volatile(&backend_ref));
+    }
+
+    #[test]
+    fn test_is_volatile_declared_plugin_without_provider() {
         let backends = vec![StorageBackendConfig {
-            id: "rocks_test".to_string(),
-            spec: StorageBackendSpec::RocksDb {
-                path: "/data/test".to_string(),
-                enable_archive: false,
-                direct_io: false,
+            id: "rocks".to_string(),
+            spec: StorageBackendSpec::Plugin {
+                kind: "rocksdb".to_string(),
+                config: serde_json::json!({ "path": "/data/test" }),
             },
         }];
-
-        let factory = IndexFactory::new(backends, None);
-        let backend_ref = StorageBackendRef::Named("rocks_test".to_string());
+        let factory = IndexFactory::new(backends, HashMap::new());
+        let backend_ref = StorageBackendRef::Named("rocks".to_string());
+        // Uninjected plugin backend -> persistent assumption (not volatile)
         assert!(!factory.is_volatile(&backend_ref));
     }
 
     #[test]
     fn test_is_volatile_inline() {
-        let factory = IndexFactory::new(vec![], None);
+        let factory = IndexFactory::new(vec![], HashMap::new());
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
             enable_archive: false,
         });
         assert!(factory.is_volatile(&backend_ref));
 
-        let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: "/data/test".to_string(),
-            enable_archive: false,
-            direct_io: false,
-        });
-        assert!(!factory.is_volatile(&backend_ref));
-    }
-
-    #[test]
-    fn test_is_volatile_inline_redis() {
-        let factory = IndexFactory::new(vec![], None);
-        let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Redis {
-            connection_string: "redis://localhost:6379".to_string(), // DevSkim: ignore DS162092
-            cache_size: Some(1000),
+        let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Plugin {
+            kind: "rocksdb".to_string(),
+            config: serde_json::json!({ "path": "/data/test" }),
         });
         assert!(!factory.is_volatile(&backend_ref));
     }
@@ -399,7 +524,7 @@ mod tests {
     #[test]
     fn test_is_volatile_unknown_backend() {
         // When a named backend doesn't exist, is_volatile returns false
-        let factory = IndexFactory::new(vec![], None);
+        let factory = IndexFactory::new(vec![], HashMap::new());
         let backend_ref = StorageBackendRef::Named("nonexistent".to_string());
         assert!(!factory.is_volatile(&backend_ref));
     }
@@ -474,10 +599,13 @@ mod tests {
                 enable_archive: false,
             },
         }];
-        let factory = IndexFactory::new(backends, None);
+        let factory = IndexFactory::new(backends, HashMap::new());
 
-        // Use tokio runtime for async test
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        // Use a single-threaded runtime to verify compatibility with the `rt` feature.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let index_set = rt
             .block_on(factory.build(&StorageBackendRef::Named("memory_test".to_string()), "q1"))
             .unwrap();
@@ -498,46 +626,25 @@ mod tests {
                 enable_archive: true,
             },
         }];
-        let factory = IndexFactory::new(backends, None);
+        let factory = IndexFactory::new(backends, HashMap::new());
         let debug_str = format!("{factory:?}");
         assert!(debug_str.contains("IndexFactory"));
-        assert!(debug_str.contains("backends"));
+        assert!(debug_str.contains("memory_backends"));
         assert!(debug_str.contains("memory_test"));
     }
 
     #[test]
-    fn test_index_factory_debug_with_plugin() {
-        use crate::indexes::IndexBackendPlugin;
-        use async_trait::async_trait;
-
-        // Create a mock plugin for testing
-        struct MockPlugin;
-
-        #[async_trait]
-        impl IndexBackendPlugin for MockPlugin {
-            async fn create_indexes(
-                &self,
-                _query_id: &str,
-            ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
-            {
-                unimplemented!()
-            }
-
-            fn is_volatile(&self) -> bool {
-                false
-            }
-        }
-
-        let factory = IndexFactory::new(vec![], Some(Arc::new(MockPlugin)));
+    fn test_index_factory_debug_with_provider() {
+        let factory = IndexFactory::new(vec![], providers_with("rocks", false));
         let debug_str = format!("{factory:?}");
         assert!(debug_str.contains("IndexFactory"));
-        assert!(debug_str.contains("plugin"));
-        assert!(debug_str.contains("<plugin>"));
+        assert!(debug_str.contains("providers"));
+        assert!(debug_str.contains("rocks"));
     }
 
     #[tokio::test]
     async fn test_build_memory_without_archive() {
-        let factory = IndexFactory::new(vec![], None);
+        let factory = IndexFactory::new(vec![], HashMap::new());
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
             enable_archive: false,
         });
@@ -547,7 +654,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_memory_with_archive() {
-        let factory = IndexFactory::new(vec![], None);
+        let factory = IndexFactory::new(vec![], HashMap::new());
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
             enable_archive: true,
         });

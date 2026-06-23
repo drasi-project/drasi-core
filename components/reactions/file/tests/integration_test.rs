@@ -83,6 +83,7 @@ async fn setup_drasi_for_mode(
         "test-source",
         ApplicationSourceConfig {
             properties: HashMap::new(),
+            durability: None,
         },
     )?;
 
@@ -311,6 +312,7 @@ async fn test_file_reaction_aggregation_uses_updated_template() -> Result<()> {
         "test-source",
         ApplicationSourceConfig {
             properties: HashMap::new(),
+            durability: None,
         },
     )?;
 

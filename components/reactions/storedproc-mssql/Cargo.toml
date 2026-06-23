@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-storedproc-mssql"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "MS SQL Server Stored Procedure reaction plugin for Drasi"
@@ -52,6 +52,7 @@ env_logger = "0.10.0"
 serial_test = "3.0"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["mssql_server"] }
+shared-tests = { path = "../../../shared-tests" }
 
 [lints]
 workspace = true

@@ -643,4 +643,16 @@ impl Reaction for LogReaction {
     ) -> anyhow::Result<()> {
         self.base.enqueue_query_result(result).await
     }
+
+    fn is_durable(&self) -> bool {
+        false
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        false
+    }
+
+    fn default_recovery_policy(&self) -> drasi_lib::recovery::ReactionRecoveryPolicy {
+        drasi_lib::recovery::ReactionRecoveryPolicy::AutoSkipGap
+    }
 }

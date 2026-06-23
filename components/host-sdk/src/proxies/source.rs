@@ -212,12 +212,6 @@ impl Source for SourceProxy {
             None => (std::ptr::null(), 0u32),
         };
 
-        // Pass last_sequence across FFI (bool flag + u64 value)
-        let (has_last_sequence, last_sequence_val) = match settings.last_sequence {
-            Some(seq) => (true, seq),
-            None => (false, 0u64),
-        };
-
         let resp_ptr = (self.vtable.subscribe_fn)(
             self.vtable.state,
             source_id_ffi,
@@ -227,8 +221,6 @@ impl Source for SourceProxy {
             relations_ffi,
             resume_from_ptr,
             resume_from_len,
-            has_last_sequence,
-            last_sequence_val,
             settings.request_position_handle,
         );
 
@@ -337,11 +329,6 @@ impl Source for SourceProxy {
                         )));
                         return;
                     }
-                    let last_sequence = if ffi_result.last_sequence >= 0 {
-                        Some(ffi_result.last_sequence as u64)
-                    } else {
-                        None
-                    };
                     let source_position = if !ffi_result.source_position_ptr.is_null()
                         && ffi_result.source_position_len > 0
                     {
@@ -364,8 +351,6 @@ impl Source for SourceProxy {
                     };
                     let _ = tx.send(Ok(drasi_lib::bootstrap::BootstrapResult {
                         event_count: ffi_result.event_count as usize,
-                        last_sequence,
-                        sequences_aligned: ffi_result.sequences_aligned,
                         source_position,
                     }));
                 }));
@@ -441,6 +426,11 @@ impl Source for SourceProxy {
             .as_ref()
             .map(|ss| StateStoreVtableBuilder::build(ss.clone()));
 
+        let wal_provider_vtable = context
+            .wal_provider
+            .as_ref()
+            .map(|wp| crate::wal_provider_bridge::WalProviderVtableBuilder::build(wp.clone()));
+
         let instance_id_str = context.instance_id.clone();
         let component_id_str = context.source_id.clone();
 
@@ -448,6 +438,10 @@ impl Source for SourceProxy {
         let component_id_ffi = FfiStr::from_str(&component_id_str);
 
         let ss_ptr = state_store_vtable
+            .map(|v| Box::into_raw(Box::new(v)) as *const _)
+            .unwrap_or(std::ptr::null());
+
+        let wp_ptr = wal_provider_vtable
             .map(|v| Box::into_raw(Box::new(v)) as *const _)
             .unwrap_or(std::ptr::null());
 
@@ -497,6 +491,7 @@ impl Source for SourceProxy {
             lifecycle_callback: Some(crate::callbacks::instance_lifecycle_callback),
             lifecycle_ctx: ctx_ptr,
             snapshot_fetcher: std::ptr::null(),
+            wal_provider: wp_ptr,
         };
 
         (self.vtable.initialize_fn)(self.vtable.state, &ffi_ctx as *const FfiRuntimeContext);
@@ -537,11 +532,11 @@ impl Source for SourceProxy {
 
 impl Drop for SourceProxy {
     fn drop(&mut self) {
-        // Run plugin drop on a dedicated thread to avoid initializing
-        // plugin TLS on the caller's thread (macOS TLS cleanup deadlock).
+        // Run plugin drop on the shared worker thread to avoid TLS destructor
+        // races on macOS arm64 (see drop_worker module for details).
         let drop_fn = self.vtable.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
-        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
+        super::drop_worker::execute_drop_fn(drop_fn, state);
 
         // Bug C fix: leak the per-instance callback context Arc unconditionally.
         // The strong reference handed to the plugin via `Arc::into_raw` in
@@ -658,6 +653,6 @@ impl Drop for SourcePluginProxy {
     fn drop(&mut self) {
         let drop_fn = self.vtable.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
-        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
+        super::drop_worker::execute_drop_fn(drop_fn, state);
     }
 }

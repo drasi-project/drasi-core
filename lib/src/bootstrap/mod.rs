@@ -123,31 +123,25 @@ impl BootstrapContext {
 
 use crate::channels::BootstrapEventSender;
 
-/// Result of a bootstrap operation, carrying the event count plus handover
-/// metadata that lets the query transition cleanly from bootstrap to streaming.
+/// Result of a bootstrap operation, carrying the event count plus the optional
+/// source position marking the snapshot boundary for the bootstrap-to-streaming
+/// handover.
 ///
 /// See design doc 02 §5 — Bootstrap-to-Streaming Handover.
 ///
 /// # Fields
 /// * `event_count` - Number of bootstrap events sent through the channel.
-/// * `last_sequence` - The snapshot's position in the source's sequence space
-///   (e.g., a Postgres WAL LSN), when known. `None` for providers that have no
-///   positional concept (e.g., script file, no-op).
-/// * `sequences_aligned` - Whether the bootstrap's sequence namespace matches
-///   the streaming source's sequence namespace. `true` only when the query
-///   can safely dedup buffered stream events against `last_sequence`
-///   (typically homogeneous source + bootstrapper, e.g., Postgres / Postgres).
+/// * `source_position` - Opaque position bytes marking the snapshot boundary in
+///   the source's native address space (e.g., a database WAL LSN). When set, the
+///   source starts change-data-capture exactly at this boundary (eliminating
+///   overlap with the snapshot) and the framework persists it as the initial
+///   checkpoint so crash-recovery after bootstrap can resume without
+///   re-bootstrapping.
+///
+///   Must be at most [`SourceBase::MAX_SOURCE_POSITION_BYTES`] (64 KB).
 #[derive(Debug, Clone, Default)]
 pub struct BootstrapResult {
     pub event_count: usize,
-    pub last_sequence: Option<u64>,
-    pub sequences_aligned: bool,
-    /// Opaque position bytes marking the snapshot boundary in the source's
-    /// native address space (e.g., a database WAL LSN). When set, the
-    /// framework persists this as the initial checkpoint so crash-recovery
-    /// after bootstrap can resume without re-bootstrapping.
-    ///
-    /// Must be at most [`SourceBase::MAX_SOURCE_POSITION_BYTES`] (64 KB).
     pub source_position: Option<Bytes>,
 }
 
