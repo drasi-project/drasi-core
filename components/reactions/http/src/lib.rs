@@ -60,6 +60,7 @@
 pub(crate) mod adaptive_batcher;
 pub(crate) mod adaptive_loop;
 pub(crate) mod batch;
+pub(crate) mod checkpoint;
 pub mod config;
 pub mod descriptor;
 pub mod http;

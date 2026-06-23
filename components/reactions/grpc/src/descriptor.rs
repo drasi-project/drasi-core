@@ -147,6 +147,37 @@ pub struct GrpcReactionConfigDto {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_templates: Option<OutputTemplatesDto>,
+
+    /// Recovery policy applied on a sustained delivery failure or checkpoint
+    /// gap. When omitted, the reaction's archetype default (`strict`) applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_policy: Option<RecoveryPolicyDto>,
+}
+
+/// Recovery policy as exposed in declarative (JSON/YAML) config.
+///
+/// * `strict` (default) — fail-stop on sustained delivery failure; the un-acked
+///   batch replays from the query outbox on restart.
+/// * `auto_skip_gap` — drop the failed batch and continue (favor uptime).
+/// * `auto_reset` — re-bootstrap from a snapshot (not valid for this reaction,
+///   which has no snapshot; rejected at startup).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = reaction::grpc::RecoveryPolicy)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryPolicyDto {
+    Strict,
+    AutoReset,
+    AutoSkipGap,
+}
+
+impl From<RecoveryPolicyDto> for drasi_lib::recovery::ReactionRecoveryPolicy {
+    fn from(dto: RecoveryPolicyDto) -> Self {
+        match dto {
+            RecoveryPolicyDto::Strict => Self::Strict,
+            RecoveryPolicyDto::AutoReset => Self::AutoReset,
+            RecoveryPolicyDto::AutoSkipGap => Self::AutoSkipGap,
+        }
+    }
 }
 
 impl From<&GrpcReactionConfig> for GrpcReactionConfigDto {
@@ -167,6 +198,9 @@ impl From<&GrpcReactionConfig> for GrpcReactionConfigDto {
             output_format: Some(cfg.output_format),
             batching: Some(BatchingConfigDto::from(&cfg.batching)),
             output_templates: cfg.output_templates.as_ref().map(OutputTemplatesDto::from),
+            // `recovery_policy` is a `ReactionBase` parameter, not a field of
+            // `GrpcReactionConfig`; lossless on the descriptor path via raw config.
+            recovery_policy: None,
         }
     }
 }
@@ -270,6 +304,7 @@ impl From<&OutputTemplatesDto> for OutputTemplates {
     OutputTemplatesDto,
     QueryConfigDto,
     TemplateSpecDto,
+    RecoveryPolicyDto,
 )))]
 struct GrpcReactionSchemas;
 
@@ -380,6 +415,10 @@ impl ReactionPluginDescriptor for GrpcReactionDescriptor {
 
         if let Some(ref templates) = dto.output_templates {
             builder = builder.with_output_templates(OutputTemplates::from(templates));
+        }
+
+        if let Some(policy) = dto.recovery_policy {
+            builder = builder.with_recovery_policy(policy.into());
         }
 
         let mut reaction = builder.build()?;
@@ -779,6 +818,44 @@ mod tests {
         assert!(
             result.is_err(),
             "a route key matching no subscribed query must fail create_reaction"
+        );
+    }
+
+    #[test]
+    fn dto_parses_recovery_policy_snake_case_into_reaction_policy() {
+        use drasi_lib::recovery::ReactionRecoveryPolicy;
+        let dto: GrpcReactionConfigDto = serde_json::from_value(serde_json::json!({
+            "endpoint": "grpc://h:1",
+            "recoveryPolicy": "auto_skip_gap"
+        }))
+        .expect("recoveryPolicy parses");
+        assert_eq!(dto.recovery_policy, Some(RecoveryPolicyDto::AutoSkipGap));
+        assert_eq!(
+            ReactionRecoveryPolicy::from(dto.recovery_policy.unwrap()),
+            ReactionRecoveryPolicy::AutoSkipGap
+        );
+
+        // Omitted → None (archetype default applies).
+        let dto: GrpcReactionConfigDto =
+            serde_json::from_value(serde_json::json!({ "endpoint": "grpc://h:1" })).unwrap();
+        assert_eq!(dto.recovery_policy, None);
+    }
+
+    #[tokio::test]
+    async fn create_reaction_accepts_declarative_recovery_policy() {
+        let cfg = serde_json::json!({
+            "endpoint": "grpc://h:1",
+            "recoveryPolicy": "auto_skip_gap"
+        });
+        let reaction = GrpcReactionDescriptor
+            .create_reaction("id", vec![], &cfg, true)
+            .await
+            .expect("recoveryPolicy create_reaction succeeds");
+        // raw_config drives properties(), so the input policy is echoed back —
+        // confirming the field was accepted (deny-unknown would otherwise reject).
+        assert_eq!(
+            reaction.properties()["recoveryPolicy"],
+            serde_json::json!("auto_skip_gap")
         );
     }
 }

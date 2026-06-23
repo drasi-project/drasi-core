@@ -14,7 +14,7 @@
 
 //! Per-result HTTP delivery used by both standard and adaptive runtime loops.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use handlebars::Handlebars;
 use log::{debug, error, warn};
 use reqwest::{
@@ -31,6 +31,21 @@ use crate::output::{DefaultChangeNotification, Operation};
 
 const MAX_DELIVERY_ATTEMPTS: usize = 3;
 const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Outcome of attempting to deliver a single result to its HTTP target.
+///
+/// `Err` is reserved for **transient/sustained** failures (5xx after retries,
+/// connection errors) that warrant the reaction's recovery policy. Permanent
+/// "poison" conditions (4xx, SSRF-blocked or unresolvable URLs, invalid
+/// method/header config) resolve to `Ok(Dropped)`: they can never succeed on
+/// replay, so the event is dropped and the checkpoint advances past it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeliveryOutcome {
+    /// The downstream accepted the request.
+    Delivered,
+    /// The event was permanently undeliverable and dropped.
+    Dropped,
+}
 
 /// Build a [`Handlebars`] registry pre-loaded with the `json` helper used
 /// across all HTTP templates.
@@ -179,7 +194,7 @@ pub(crate) async fn process_result(
     notification: &DefaultChangeNotification,
     query_name: &str,
     reaction_name: &str,
-) -> Result<()> {
+) -> Result<DeliveryOutcome> {
     let result_type = notification.op_str();
     let context = build_context(notification);
 
@@ -193,11 +208,18 @@ pub(crate) async fn process_result(
             format!("/changes/{query_name}")
         }
     };
-    let full_url = resolve_http_url(base_url, &rendered_spec_url).with_context(|| {
-        format!(
-            "[{reaction_name}] rejecting rendered URL '{rendered_spec_url}' for query '{query_name}'"
-        )
-    })?;
+    // A rejected URL (SSRF guard / unparseable) is a permanent misconfiguration:
+    // drop the event rather than fail-stopping and replaying it forever.
+    let full_url = match resolve_http_url(base_url, &rendered_spec_url) {
+        Ok(url) => url,
+        Err(e) => {
+            error!(
+                "[{reaction_name}] Rejecting rendered URL '{rendered_spec_url}' for query \
+                 '{query_name}' ({result_type}): {e:#} — dropping event"
+            );
+            return Ok(DeliveryOutcome::Dropped);
+        }
+    };
 
     // Render body. Empty template => emit the standard change-notification envelope.
     let body = if !call_spec.template.is_empty() {
@@ -221,13 +243,28 @@ pub(crate) async fn process_result(
     let mut headers = HeaderMap::new();
     headers.insert("Content-Type", HeaderValue::from_static("application/json"));
     if let Some(token) = token {
-        headers.insert(
-            "Authorization",
-            HeaderValue::from_str(&format!("Bearer {token}"))?,
-        );
+        match HeaderValue::from_str(&format!("Bearer {token}")) {
+            Ok(value) => {
+                headers.insert("Authorization", value);
+            }
+            Err(e) => {
+                error!(
+                    "[{reaction_name}] Invalid auth token for query '{query_name}' ({result_type}): {e} — dropping event"
+                );
+                return Ok(DeliveryOutcome::Dropped);
+            }
+        }
     }
     for (key, value) in &call_spec.extension.headers {
-        let header_name = HeaderName::from_bytes(key.as_bytes())?;
+        let header_name = match HeaderName::from_bytes(key.as_bytes()) {
+            Ok(name) => name,
+            Err(e) => {
+                warn!(
+                    "[{reaction_name}] Header '{key}' is not a valid header name for query '{query_name}' ({result_type}): {e} — dropping header"
+                );
+                continue;
+            }
+        };
         let rendered_value = match handlebars.render_template(value, &context) {
             Ok(v) => v,
             Err(e) => {
@@ -249,7 +286,16 @@ pub(crate) async fn process_result(
         headers.insert(header_name, header_value);
     }
 
-    let method = parse_http_method(&call_spec.extension.method)?;
+    let method = match parse_http_method(&call_spec.extension.method) {
+        Ok(method) => method,
+        Err(e) => {
+            error!(
+                "[{reaction_name}] Invalid HTTP method '{}' for query '{query_name}' ({result_type}): {e} — dropping event",
+                call_spec.extension.method
+            );
+            return Ok(DeliveryOutcome::Dropped);
+        }
+    };
 
     debug!("[{reaction_name}] Sending {method} request to {full_url}");
     send_with_retry(
@@ -273,17 +319,24 @@ pub(crate) async fn post_default_notification(
     notification: &DefaultChangeNotification,
     query_name: &str,
     reaction_name: &str,
-) -> Result<()> {
+) -> Result<DeliveryOutcome> {
     let full_url = format!("{base_url}/changes/{query_name}");
     let body = serde_json::to_string(notification)?;
 
     let mut headers = HeaderMap::new();
     headers.insert("Content-Type", HeaderValue::from_static("application/json"));
     if let Some(token) = token {
-        headers.insert(
-            "Authorization",
-            HeaderValue::from_str(&format!("Bearer {token}"))?,
-        );
+        match HeaderValue::from_str(&format!("Bearer {token}")) {
+            Ok(value) => {
+                headers.insert("Authorization", value);
+            }
+            Err(e) => {
+                error!(
+                    "[{reaction_name}] Invalid auth token for query '{query_name}': {e} — dropping event"
+                );
+                return Ok(DeliveryOutcome::Dropped);
+            }
+        }
     }
 
     debug!("[{reaction_name}] Default-notification POST to {full_url}");
@@ -307,7 +360,7 @@ pub(crate) async fn send_with_retry(
     body: String,
     reaction_name: &str,
     description: &str,
-) -> Result<()> {
+) -> Result<DeliveryOutcome> {
     let mut backoff = INITIAL_RETRY_BACKOFF;
 
     for attempt in 1..=MAX_DELIVERY_ATTEMPTS {
@@ -327,7 +380,7 @@ pub(crate) async fn send_with_retry(
                 );
 
                 if status.is_success() {
-                    return Ok(());
+                    return Ok(DeliveryOutcome::Delivered);
                 }
 
                 let error_body = response
@@ -356,7 +409,7 @@ pub(crate) async fn send_with_retry(
                     "[{reaction_name}] Permanent {description} failure with status {}: {error_body}; dropping event",
                     status.as_u16()
                 );
-                return Ok(());
+                return Ok(DeliveryOutcome::Dropped);
             }
             Err(e) if attempt < MAX_DELIVERY_ATTEMPTS => {
                 warn!(

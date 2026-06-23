@@ -26,6 +26,7 @@
 
 pub(crate) mod adaptive_batcher;
 pub(crate) mod batch;
+pub(crate) mod checkpoint;
 pub mod config;
 pub mod connection;
 pub mod descriptor;
@@ -57,6 +58,7 @@ pub struct GrpcReactionBuilder {
     config: GrpcReactionConfig,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
+    recovery_policy: Option<drasi_lib::recovery::ReactionRecoveryPolicy>,
 }
 
 impl GrpcReactionBuilder {
@@ -67,6 +69,7 @@ impl GrpcReactionBuilder {
             config: GrpcReactionConfig::default(),
             priority_queue_capacity: None,
             auto_start: true,
+            recovery_policy: None,
         }
     }
 
@@ -230,6 +233,16 @@ impl GrpcReactionBuilder {
         self
     }
 
+    /// Override the reaction's recovery policy. When unset, the reaction uses
+    /// its archetype default ([`ReactionRecoveryPolicy::Strict`]).
+    pub fn with_recovery_policy(
+        mut self,
+        policy: drasi_lib::recovery::ReactionRecoveryPolicy,
+    ) -> Self {
+        self.recovery_policy = Some(policy);
+        self
+    }
+
     pub fn with_config(mut self, config: GrpcReactionConfig) -> Self {
         self.config = config;
         self
@@ -243,6 +256,7 @@ impl GrpcReactionBuilder {
             self.config,
             self.priority_queue_capacity,
             self.auto_start,
+            self.recovery_policy,
         ))
     }
 }

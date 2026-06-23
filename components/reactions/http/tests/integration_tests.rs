@@ -442,7 +442,7 @@ async fn standard_delete_template_receives_before() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn standard_continues_after_server_error_response() {
+async fn standard_continues_after_server_error_under_auto_skip_gap() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
         .and(path("/changes/q1"))
@@ -450,10 +450,14 @@ async fn standard_continues_after_server_error_response() {
         .mount(&server)
         .await;
 
+    // Under AutoSkipGap, a sustained 5xx failure is skipped and the loop keeps
+    // running (favoring uptime). Under the default Strict policy the reaction
+    // would fail-stop instead — see `standard_fail_stops_on_server_error_under_strict`.
     let r = Arc::new(
         HttpReaction::builder("standard-5xx")
             .with_base_url(server.uri())
             .with_query("q1")
+            .with_recovery_policy(drasi_lib::recovery::ReactionRecoveryPolicy::AutoSkipGap)
             .build()
             .unwrap(),
     );
@@ -463,7 +467,7 @@ async fn standard_continues_after_server_error_response() {
     enqueue_add(&r, "q1", json!({"id": 1})).await;
     wait_for_requests(&server, 1, 2000).await;
 
-    // A second result must still be delivered (the loop did not exit).
+    // A second result must still be attempted (the loop did not exit).
     enqueue_add(&r, "q1", json!({"id": 2})).await;
     wait_for_requests(&server, 4, 3000).await;
     r.stop().await.unwrap();
@@ -479,6 +483,45 @@ async fn standard_continues_after_server_error_response() {
         "reaction should process the second event after a 5xx response, got {} requests",
         reqs.len()
     );
+}
+
+#[tokio::test]
+async fn standard_fail_stops_on_server_error_under_strict() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    // Default (Strict) policy: a sustained 5xx delivery failure must drive the
+    // reaction to Error without advancing the checkpoint, so it replays from the
+    // outbox on restart.
+    let r = Arc::new(
+        HttpReaction::builder("standard-5xx-strict")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+
+    // The reaction should transition to Error within the retry window.
+    let mut errored = false;
+    for _ in 0..50 {
+        if matches!(r.status().await, ComponentStatus::Error) {
+            errored = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        errored,
+        "reaction must fail-stop (Error) on sustained 5xx delivery failure under Strict"
+    );
+    r.stop().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------

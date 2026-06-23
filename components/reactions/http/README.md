@@ -238,6 +238,7 @@ optional unless noted; defaults are applied by the builder.
 | `output_templates` | `Option<HttpOutputTemplates>` | `None` | `with_default_template`, `with_query_template`, `with_output_templates` | Per-query and default templates. In single-notification mode the URL, body, and headers are templated; in adaptive mode only the per-query **body** template applies to each batched item. See [Output templates](#output-templates-and-per-query-routing). |
 | `adaptive` | `Option<AdaptiveBatchConfig>` | `None` | `with_adaptive` | When `Some`, enables [adaptive batching](#adaptive-batching) and requires `batch_endpoint`. When `None`, the reaction delivers one HTTP request per result. |
 | `batch_endpoint` | `Option<String>` | `None` | `with_batch_endpoint` | Path appended to `base_url`. Required with `adaptive`; every coalesced batch is POSTed to `{base_url}{batch_endpoint}` as a single payload. Invalid combinations fail at `build()` time. |
+| `recovery_policy` | `Option<ReactionRecoveryPolicy>` | `None` (defaults to `Strict`) | `with_recovery_policy` | Behavior on a **sustained** delivery failure. `strict` (default) fail-stops the reaction (`Error`) without advancing the checkpoint, so the un-acked work replays from the query outbox on restart; `auto_skip_gap` skips the failed batch and keeps running. In declarative config the key is `recoveryPolicy` (`strict` \| `auto_skip_gap`). |
 
 Builder-only settings (not stored on `HttpReactionConfig`):
 
@@ -247,7 +248,7 @@ Builder-only settings (not stored on `HttpReactionConfig`):
 | `with_query(...)` / `from_query(...)` | _empty_ | Append one subscribed query id (`from_query` is an alias that reads naturally at call sites). |
 | `with_priority_queue_capacity(usize)` | `10000` | Capacity of the inbound queue that buffers query results before processing. Tune for high-throughput sources. |
 | `with_auto_start(bool)` | `true` | Whether the reaction starts automatically when `DrasiLib` is running. |
-| `with_recovery_policy(ReactionRecoveryPolicy)` | `Strict` | Override the recovery policy used by the runtime for this reaction instance. (Effective only for durable reactions; the HTTP reaction is fire-and-forget, so this is a no-op in practice.) |
+| `with_recovery_policy(ReactionRecoveryPolicy)` | `Strict` | Recovery policy for this reaction instance. The HTTP reaction maintains a per-query checkpoint advanced on successful (acked) delivery for at-least-once semantics. Under `Strict` (default) a sustained delivery failure fail-stops the reaction so the un-acked work replays from the query outbox on restart; under `AutoSkipGap` the failed batch is skipped and the reaction keeps running. Permanent per-item failures (4xx, SSRF-blocked/unresolvable URLs, invalid method/header) are dropped and never fail-stop. |
 | `with_config(HttpReactionConfig)` | — | Replace the entire runtime config in one call. |
 | `with_adaptive_defaults()` | — | Convenience for `with_adaptive(AdaptiveBatchConfig::default())`; still requires `with_batch_endpoint(...)`. |
 

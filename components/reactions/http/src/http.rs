@@ -187,6 +187,11 @@ impl Reaction for HttpReaction {
 
         let shutdown_rx = self.base.create_shutdown_channel().await;
         let reaction_name = self.base.id.clone();
+        let checkpoint_state = crate::checkpoint::CheckpointState::load(&self.base).await;
+        let policy = self
+            .base
+            .recovery_policy
+            .unwrap_or_else(|| self.default_recovery_policy());
         let base = self.base.clone_shared();
         let config = self.config.clone();
 
@@ -199,6 +204,8 @@ impl Reaction for HttpReaction {
                 runtime_adaptive,
                 client,
                 shutdown_rx,
+                checkpoint_state,
+                policy,
             ))
         } else {
             let handlebars = build_handlebars();
@@ -209,6 +216,8 @@ impl Reaction for HttpReaction {
                 client,
                 handlebars,
                 shutdown_rx,
+                checkpoint_state,
+                policy,
             ))
         };
 
@@ -232,5 +241,24 @@ impl Reaction for HttpReaction {
 
     async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) -> Result<()> {
         self.base.enqueue_query_result(result).await
+    }
+
+    /// The HTTP reaction is a stateless **trigger** reaction (design archetype 2a):
+    /// it fires per-change side effects and does not require a durable state store.
+    fn is_durable(&self) -> bool {
+        false
+    }
+
+    /// Trigger reactions must not replay historical state on a fresh start — that
+    /// would fire side effects for the entire query history.
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        false
+    }
+
+    /// At-least-once delivery: on a sustained delivery failure the reaction fails
+    /// fast so the un-acked batch replays from the query outbox on restart.
+    /// Operators can override to `AutoSkipGap` for uptime-over-completeness.
+    fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
+        ReactionRecoveryPolicy::Strict
     }
 }

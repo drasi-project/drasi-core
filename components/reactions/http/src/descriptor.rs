@@ -138,6 +138,37 @@ pub struct HttpReactionConfigDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueString>)]
     pub batch_endpoint: Option<ConfigValue<String>>,
+
+    /// Recovery policy applied on a sustained delivery failure or checkpoint
+    /// gap. When omitted, the reaction's archetype default (`strict`) applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_policy: Option<RecoveryPolicyDto>,
+}
+
+/// Recovery policy as exposed in declarative (JSON/YAML) config.
+///
+/// * `strict` (default) — fail-stop on sustained delivery failure; the un-acked
+///   batch replays from the query outbox on restart.
+/// * `auto_skip_gap` — drop the failed batch and continue (favor uptime).
+/// * `auto_reset` — re-bootstrap from a snapshot (not valid for this reaction,
+///   which has no snapshot; rejected at startup).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = reaction::http::RecoveryPolicy)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryPolicyDto {
+    Strict,
+    AutoReset,
+    AutoSkipGap,
+}
+
+impl From<RecoveryPolicyDto> for drasi_lib::recovery::ReactionRecoveryPolicy {
+    fn from(dto: RecoveryPolicyDto) -> Self {
+        match dto {
+            RecoveryPolicyDto::Strict => Self::Strict,
+            RecoveryPolicyDto::AutoReset => Self::AutoReset,
+            RecoveryPolicyDto::AutoSkipGap => Self::AutoSkipGap,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +266,10 @@ impl From<&HttpReactionConfig> for HttpReactionConfigDto {
                 .batch_endpoint
                 .as_ref()
                 .map(|e| ConfigValue::Static(e.clone())),
+            // `recovery_policy` is a `ReactionBase` parameter, not a field of
+            // `HttpReactionConfig`, so (like `priority_queue_capacity`) it cannot
+            // be recovered here. Lossless on the descriptor path via raw config.
+            recovery_policy: None,
         }
     }
 }
@@ -250,6 +285,7 @@ impl From<&HttpReactionConfig> for HttpReactionConfigDto {
     HttpQueryConfigDto,
     HttpCallSpecDto,
     AdaptiveBatchConfigDto,
+    RecoveryPolicyDto,
 )))]
 struct HttpReactionSchemas;
 
@@ -407,10 +443,54 @@ impl ReactionPluginDescriptor for HttpReactionDescriptor {
         if let Some(ref ep) = dto.batch_endpoint {
             builder = builder.with_batch_endpoint(mapper.resolve_string(ep).await?);
         }
+        if let Some(policy) = dto.recovery_policy {
+            builder = builder.with_recovery_policy(policy.into());
+        }
 
         let mut reaction = builder.build()?;
         reaction.base.set_raw_config(config_json.clone());
 
         Ok(Box::new(reaction))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_lib::reactions::Reaction;
+
+    #[test]
+    fn dto_parses_recovery_policy_snake_case_into_reaction_policy() {
+        use drasi_lib::recovery::ReactionRecoveryPolicy;
+        let dto: HttpReactionConfigDto =
+            serde_json::from_value(serde_json::json!({ "recoveryPolicy": "auto_skip_gap" }))
+                .expect("recoveryPolicy parses");
+        assert_eq!(dto.recovery_policy, Some(RecoveryPolicyDto::AutoSkipGap));
+        assert_eq!(
+            ReactionRecoveryPolicy::from(dto.recovery_policy.unwrap()),
+            ReactionRecoveryPolicy::AutoSkipGap
+        );
+
+        // Omitted → None (archetype default applies).
+        let dto: HttpReactionConfigDto = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(dto.recovery_policy, None);
+    }
+
+    #[tokio::test]
+    async fn create_reaction_accepts_declarative_recovery_policy() {
+        let cfg = serde_json::json!({
+            "baseUrl": "http://localhost",
+            "recoveryPolicy": "auto_skip_gap"
+        });
+        let reaction = HttpReactionDescriptor
+            .create_reaction("id", vec![], &cfg, true)
+            .await
+            .expect("recoveryPolicy create_reaction succeeds");
+        // raw_config drives properties(), so the input policy is echoed back —
+        // confirming the field was accepted by the typed DTO.
+        assert_eq!(
+            reaction.properties()["recoveryPolicy"],
+            serde_json::json!("auto_skip_gap")
+        );
     }
 }
