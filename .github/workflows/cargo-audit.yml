@@ -9,7 +9,7 @@ on:
 
 jobs:
   audit:
-    uses: drasi-project/.github/.github/workflows/cargo-audit.yaml@rust195
+    uses: drasi-project/.github/.github/workflows/cargo-audit.yaml@main
     with:
       # rustls-webpki 0.101.7 vulns — aws-smithy-http-client 1.1.13 bundles both
       # rustls 0.21 and 0.23 backends; workspace feature unification activates both.

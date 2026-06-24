@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   lint:
-    uses: drasi-project/.github/.github/workflows/rust-lint.yaml@rust195
+    uses: drasi-project/.github/.github/workflows/rust-lint.yaml@main
     with:
       install-jq: true
       clippy-command: >-

@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   test:
-    uses: drasi-project/.github/.github/workflows/rust-unit-test.yaml@rust195
+    uses: drasi-project/.github/.github/workflows/rust-unit-test.yaml@main
     with:
       test-command: |
         cargo test --workspace --exclude drasi-host-sdk
