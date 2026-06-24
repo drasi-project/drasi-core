@@ -48,7 +48,10 @@ fn json_helper(
     Ok(())
 }
 
-fn validate_rendered_topic(rendered_topic: &str, original_template: &str) -> anyhow::Result<()> {
+fn validate_rendered_topic(
+    rendered_topic: &str,
+    original_template_slash_count: usize,
+) -> anyhow::Result<()> {
     if rendered_topic.is_empty() {
         return Err(anyhow::anyhow!("Rendered topic is empty"));
     }
@@ -80,8 +83,7 @@ fn validate_rendered_topic(rendered_topic: &str, original_template: &str) -> any
     }
 
     let rendered_slashes_count = rendered_topic.matches('/').count();
-    let template_slashes_count = original_template.matches('/').count();
-    if rendered_slashes_count > template_slashes_count {
+    if rendered_slashes_count > original_template_slash_count {
         return Err(anyhow::anyhow!(
             "Rendered topic introduces additional '/' characters from interpolation"
         ));
@@ -292,7 +294,7 @@ impl ResultProcessor {
             {
                 Ok(_) => {}
                 Err(e) => {
-                    error!("Error processing result for query '{query_id}': {e}");
+                    warn!("Error processing result for query '{query_id}': {e}");
                 }
             }
         }
@@ -379,7 +381,7 @@ impl ResultProcessor {
             };
 
             let topic = handlebars.render_template(&spec.extension.topic, &context)?;
-            if let Err(e) = validate_rendered_topic(&topic, &spec.extension.topic) {
+            if let Err(e) = validate_rendered_topic(&topic, spec.extension.slash_count) {
                 warn!(
                     "[{reaction_id}] Skipping publish for query '{query_id}' due to invalid rendered topic '{topic}': {e}"
                 );
@@ -591,13 +593,17 @@ impl ResultProcessor {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_terminal_v5_disconnect, jittered_backoff, validate_rendered_topic, ReconnectBackoff,
+        is_terminal_v4_connack, is_terminal_v5_connack, is_terminal_v5_disconnect,
+        jittered_backoff, validate_rendered_topic, wait_for_reconnect_backoff, ReconnectBackoff,
         INITIAL_RECONNECT_BACKOFF, MAX_RECONNECT_BACKOFF,
     };
     use handlebars::Handlebars;
+    use rumqttc::mqttbytes::v4::ConnectReturnCode as ConnectCodeV4;
+    use rumqttc::v5::mqttbytes::v5::ConnectReturnCode as ConnectCodeV5;
     use rumqttc::v5::mqttbytes::v5::DisconnectReasonCode as DisconnectCode;
     use serde_json::json;
     use std::time::Duration;
+    use tokio::sync::oneshot;
 
     fn handlebars_with_json_helper() -> Handlebars<'static> {
         let mut handlebars = Handlebars::new();
@@ -607,34 +613,39 @@ mod tests {
 
     #[test]
     fn rendered_topic_rejects_wildcards() {
-        assert!(
-            validate_rendered_topic("stocks/+/updated", "stocks/{{after.symbol}}/updated").is_err()
-        );
-        assert!(validate_rendered_topic("stocks/#", "stocks/{{after.symbol}}/updated").is_err());
+        assert!(validate_rendered_topic("stocks/+/updated", 2).is_err());
+        assert!(validate_rendered_topic("stocks/#", 2).is_err());
+    }
+
+    #[test]
+    fn rendered_topic_rejects_empty_string() {
+        assert!(validate_rendered_topic("", 2).is_err());
+    }
+
+    #[test]
+    fn rendered_topic_rejects_null_character() {
+        assert!(validate_rendered_topic("stocks/ab\0cd/updated", 2).is_err());
     }
 
     #[test]
     fn rendered_topic_rejects_empty_levels() {
-        assert!(
-            validate_rendered_topic("stocks//updated", "stocks/{{after.symbol}}/updated").is_err()
-        );
+        assert!(validate_rendered_topic("stocks//updated", 2).is_err());
     }
 
     #[test]
     fn rendered_topic_rejects_slash_interpolation() {
-        assert!(validate_rendered_topic(
-            "stocks/aapl/extra/updated",
-            "stocks/{{after.symbol}}/updated"
-        )
-        .is_err());
+        assert!(validate_rendered_topic("stocks/aapl/extra/updated", 2).is_err());
     }
 
     #[test]
     fn rendered_topic_accepts_valid() {
-        assert!(
-            validate_rendered_topic("stocks/AAPL/updated", "stocks/{{after.symbol}}/updated")
-                .is_ok()
-        );
+        assert!(validate_rendered_topic("stocks/AAPL/updated", 2).is_ok());
+    }
+
+    #[test]
+    fn rendered_topic_rejects_over_mqtt_length_limit() {
+        let too_long = "a".repeat(65_536);
+        assert!(validate_rendered_topic(&too_long, 2).is_err());
     }
 
     #[test]
@@ -731,6 +742,54 @@ mod tests {
 
         assert!(delay >= base);
         assert!(delay <= base + Duration::from_secs(5));
+    }
+
+    #[test]
+    fn reconnect_backoff_uses_zero_jitter_for_seed_zero() {
+        let base = Duration::from_secs(3);
+        let delay = jittered_backoff(base, 0);
+        assert_eq!(delay, base);
+    }
+
+    #[tokio::test]
+    async fn wait_for_reconnect_backoff_returns_false_when_delay_elapses() {
+        let (_tx, mut rx) = oneshot::channel();
+        let should_stop =
+            wait_for_reconnect_backoff("test-rx", &mut rx, Duration::from_millis(1)).await;
+        assert!(!should_stop);
+    }
+
+    #[tokio::test]
+    async fn wait_for_reconnect_backoff_returns_true_on_shutdown_signal() {
+        let (tx, mut rx) = oneshot::channel();
+        let _ = tx.send(());
+        let should_stop =
+            wait_for_reconnect_backoff("test-rx", &mut rx, Duration::from_secs(5)).await;
+        assert!(should_stop);
+    }
+
+    #[test]
+    fn mqtt_v5_connack_classification_matches_terminal_reasons() {
+        assert!(is_terminal_v5_connack(ConnectCodeV5::BadUserNamePassword));
+        assert!(is_terminal_v5_connack(ConnectCodeV5::ProtocolError));
+        assert!(is_terminal_v5_connack(ConnectCodeV5::NotAuthorized));
+
+        assert!(!is_terminal_v5_connack(ConnectCodeV5::Success));
+        assert!(!is_terminal_v5_connack(ConnectCodeV5::ServerBusy));
+        assert!(!is_terminal_v5_connack(ConnectCodeV5::UseAnotherServer));
+    }
+
+    #[test]
+    fn mqtt_v4_connack_classification_matches_terminal_reasons() {
+        assert!(is_terminal_v4_connack(
+            ConnectCodeV4::RefusedProtocolVersion
+        ));
+        assert!(is_terminal_v4_connack(ConnectCodeV4::BadClientId));
+        assert!(is_terminal_v4_connack(ConnectCodeV4::BadUserNamePassword));
+        assert!(is_terminal_v4_connack(ConnectCodeV4::NotAuthorized));
+
+        assert!(!is_terminal_v4_connack(ConnectCodeV4::Success));
+        assert!(!is_terminal_v4_connack(ConnectCodeV4::ServiceUnavailable));
     }
 
     #[test]

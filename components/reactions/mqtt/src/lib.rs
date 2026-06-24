@@ -14,6 +14,7 @@
 
 mod client;
 pub mod config;
+pub mod descriptor;
 mod mqtt;
 mod processor;
 mod verifier;
@@ -197,7 +198,7 @@ impl MqttReactionBuilder {
 
     /// Build the MQTT reaction
     pub fn build(self) -> anyhow::Result<MqttReaction> {
-        let config = MqttReactionConfig {
+        let mut config = MqttReactionConfig {
             url: self.url,
             client_id: self.client_id,
             protocol_version: self.protocol_version,
@@ -222,5 +223,146 @@ impl MqttReactionBuilder {
             self.priority_queue_capacity,
             self.auto_start,
         )
+    }
+}
+
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "mqtt-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::MqttReactionDescriptor],
+    bootstrap_descriptors = [],
+);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::MqttQoS;
+    use serde_json::json;
+
+    #[test]
+    fn yaml_deserializes_reaction_config_with_routes_and_defaults() {
+        let yaml = r#"
+url: mqtt://broker.example.com:1883
+client_id: yaml-client
+protocol_version: v3_1_1
+event_channel_capacity: 256
+max_inflight: 42
+keep_alive: 15
+clean_start: false
+conn_timeout: 9000
+session_expiry_interval: 120
+default_template:
+  added:
+    template: "{{after.symbol}}"
+    topic: stocks/default/added
+routes:
+  stocks_query:
+    updated:
+      template: "{{after.price}}"
+      topic: stocks/{{query_name}}/updated
+      qos: at_most_once
+      retain: true
+      empty_payload: true
+      message_expiry_interval: 30
+"#;
+
+        let config: MqttReactionConfig =
+            serde_yaml::from_str(yaml).expect("config should deserialize from yaml");
+
+        assert_eq!(config.url, "mqtt://broker.example.com:1883");
+        assert_eq!(config.client_id.as_deref(), Some("yaml-client"));
+        assert!(matches!(
+            config.protocol_version,
+            MqttProtocolVersion::V3_1_1
+        ));
+        assert_eq!(config.event_channel_capacity, 256);
+        assert_eq!(config.max_inflight, Some(42));
+        assert_eq!(config.keep_alive, Some(15));
+        assert_eq!(config.clean_start, Some(false));
+        assert_eq!(config.conn_timeout, Some(9000));
+        assert_eq!(config.session_expiry_interval, Some(120));
+
+        let default_added = config
+            .default_template
+            .as_ref()
+            .and_then(|q| q.added.as_ref())
+            .expect("default added template should exist");
+        assert_eq!(default_added.template, "{{after.symbol}}");
+        assert_eq!(default_added.extension.topic, "stocks/default/added");
+        assert!(matches!(default_added.extension.qos, MqttQoS::AtLeastOnce));
+
+        let route_updated = config
+            .routes
+            .get("stocks_query")
+            .and_then(|q| q.updated.as_ref())
+            .expect("route updated template should exist");
+        assert_eq!(route_updated.template, "{{after.price}}");
+        assert_eq!(
+            route_updated.extension.topic,
+            "stocks/{{query_name}}/updated"
+        );
+        assert!(matches!(route_updated.extension.qos, MqttQoS::AtMostOnce));
+        assert!(route_updated.extension.retain);
+        assert!(route_updated.extension.empty_payload);
+        assert_eq!(route_updated.extension.message_expiry_interval, Some(30));
+    }
+
+    #[test]
+    fn builder_with_config_maps_yaml_values_into_reaction_properties() {
+        let yaml = r#"
+url: mqtt://localhost:1883
+client_id: mapped-client
+protocol_version: v3_1_1
+event_channel_capacity: 321
+max_inflight: 8
+keep_alive: 20
+clean_start: true
+conn_timeout: 7000
+session_expiry_interval: 66
+routes:
+  stocks_query:
+    added:
+      template: "{{after.symbol}}"
+      topic: stocks/{{query_name}}/added
+"#;
+
+        let config: MqttReactionConfig =
+            serde_yaml::from_str(yaml).expect("config should deserialize from yaml");
+
+        let reaction = MqttReactionBuilder::new("yaml-rx")
+            .with_query("stocks_query")
+            .with_config(config)
+            .build()
+            .expect("reaction should build from yaml config");
+
+        let props = drasi_lib::Reaction::properties(&reaction);
+        assert_eq!(props.get("client_id"), Some(&json!("mapped-client")));
+        assert_eq!(props.get("url"), Some(&json!("mqtt://localhost:1883")));
+        assert_eq!(props.get("protocol_version"), Some(&json!("v3_1_1")));
+        assert_eq!(props.get("event_channel_capacity"), Some(&json!(321)));
+        assert_eq!(props.get("max_inflight"), Some(&json!(8)));
+        assert_eq!(props.get("keep_alive"), Some(&json!(20)));
+        assert_eq!(props.get("clean_start"), Some(&json!(true)));
+        assert_eq!(props.get("conn_timeout"), Some(&json!(7000)));
+        assert_eq!(props.get("session_expiry_interval"), Some(&json!(66)));
+        assert_eq!(props.get("routes_count"), Some(&json!(1)));
+    }
+
+    #[test]
+    fn yaml_deserialization_rejects_unknown_fields() {
+        let yaml = r#"
+url: mqtt://localhost:1883
+unknown_field: true
+"#;
+
+        let err = serde_yaml::from_str::<MqttReactionConfig>(yaml)
+            .err()
+            .expect("unknown fields must be rejected");
+        assert!(err.to_string().contains("unknown field"));
     }
 }

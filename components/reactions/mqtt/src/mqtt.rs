@@ -25,10 +25,13 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use handlebars::{template, Handlebars};
-use rumqttc::v5::{mqttbytes::QoS, AsyncClient, Event, Incoming, MqttOptions};
+use rumqttc::{
+    tokio_rustls::client,
+    v5::{mqttbytes::QoS, AsyncClient, Event, Incoming, MqttOptions},
+};
 
 pub struct MqttReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: MqttReactionConfig,
     event_loop_task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     event_loop_shutdown_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
@@ -129,7 +132,14 @@ impl Reaction for MqttReaction {
             "url".to_string(),
             serde_json::Value::String(self.config.url.clone()),
         );
-        props.insert("id".to_string(), self.base.id.clone().into());
+
+        if let Some(client_id) = &self.config.client_id {
+            props.insert(
+                "client_id".to_string(),
+                serde_json::Value::String(client_id.clone()),
+            );
+        }
+
         props.insert(
             "protocol_version".to_string(),
             serde_json::Value::String(
@@ -230,23 +240,24 @@ impl Reaction for MqttReaction {
         let base = self.base.clone_shared();
 
         // create the main processor which will handle results processing
-        let mut processor = if let Ok(p) = ResultProcessor::new(config, base).await {
-            p
-        } else {
-            error!(
-                "[{}] Failed to create MQTT ResultProcessor, stopping reaction",
-                self.base.id
+        let mut processor = match ResultProcessor::new(config, base).await {
+            Ok(p) => p,
+            Err(e) => {
+                error!(
+                    "[{}] Failed to create MQTT ResultProcessor with error: {:?}, stopping reaction",
+                    self.base.id, e
             );
-            self.base
-                .set_status(
-                    ComponentStatus::Error,
-                    Some(format!(
-                        "[{}] MQTT reaction stopped due to initialization failure",
-                        self.base.id
-                    )),
-                )
-                .await;
-            return Ok(());
+                self.base
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(format!(
+                            "[{}] MQTT reaction stopped due to initialization failure",
+                            self.base.id
+                        )),
+                    )
+                    .await;
+                return Ok(());
+            }
         };
 
         // start the processing loop and event loop
@@ -359,6 +370,7 @@ impl Reaction for MqttReaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn base_config() -> MqttReactionConfig {
         MqttReactionConfig {
@@ -410,5 +422,71 @@ mod tests {
         .expect("reaction should be created");
 
         assert_eq!(reaction.config.client_id.as_deref(), Some("custom-client"));
+    }
+
+    #[test]
+    fn reaction_exposes_expected_identity_and_queries() {
+        let reaction = MqttReaction::create_internal(
+            "rx-3".to_string(),
+            vec!["q1".to_string(), "q2".to_string()],
+            base_config(),
+            None,
+            true,
+        )
+        .expect("reaction should be created");
+
+        assert_eq!(drasi_lib::Reaction::id(&reaction), "rx-3");
+        assert_eq!(drasi_lib::Reaction::type_name(&reaction), "mqtt");
+        assert_eq!(drasi_lib::Reaction::query_ids(&reaction), vec!["q1", "q2"]);
+        assert!(drasi_lib::Reaction::auto_start(&reaction));
+    }
+
+    #[test]
+    fn from_builder_respects_auto_start_setting() {
+        let reaction = MqttReaction::from_builder(
+            "rx-4".to_string(),
+            vec!["q1".to_string()],
+            base_config(),
+            None,
+            false,
+        )
+        .expect("reaction should be created");
+
+        assert!(!drasi_lib::Reaction::auto_start(&reaction));
+    }
+
+    #[test]
+    fn properties_reflect_optional_and_protocol_fields() {
+        let mut config = base_config();
+        config.protocol_version = crate::config::MqttProtocolVersion::V3_1_1;
+        config.keep_alive = Some(30);
+        config.clean_start = Some(false);
+        config.max_inflight = Some(10);
+        config.conn_timeout = Some(5_000);
+        config.session_expiry_interval = Some(60);
+
+        let reaction = MqttReaction::create_internal(
+            "rx-5".to_string(),
+            vec!["q1".to_string()],
+            config,
+            None,
+            true,
+        )
+        .expect("reaction should be created");
+
+        let props = drasi_lib::Reaction::properties(&reaction);
+        assert_eq!(props.get("client_id"), Some(&json!("drasi-mqtt-rx-5")));
+        assert_eq!(props.get("url"), Some(&json!("mqtt://localhost:1883")));
+        assert_eq!(props.get("protocol_version"), Some(&json!("v3_1_1")));
+        assert_eq!(props.get("routes_count"), Some(&json!(0)));
+        assert_eq!(props.get("has_default_template"), Some(&json!(false)));
+        assert_eq!(props.get("has_identity_provider"), Some(&json!(false)));
+        assert_eq!(props.get("has_tls"), Some(&json!(false)));
+        assert_eq!(props.get("event_channel_capacity"), Some(&json!(100)));
+        assert_eq!(props.get("max_inflight"), Some(&json!(10)));
+        assert_eq!(props.get("keep_alive"), Some(&json!(30)));
+        assert_eq!(props.get("clean_start"), Some(&json!(false)));
+        assert_eq!(props.get("conn_timeout"), Some(&json!(5000)));
+        assert_eq!(props.get("session_expiry_interval"), Some(&json!(60)));
     }
 }

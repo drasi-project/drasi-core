@@ -15,6 +15,7 @@
 //! Configuration types for MQTT reaction.
 //!
 //! This module contains configuration types for MQTT reaction and shared types.
+
 use drasi_lib::identity::IdentityProvider;
 use drasi_lib::reactions::common::TemplateRouting;
 pub use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
@@ -63,6 +64,10 @@ pub struct MqttExtension {
     /// Silently omitted on v3.1.1 connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_expiry_interval: Option<u32>,
+
+    /// Slash count for topic, calculated at startup. Used for validation of template rendering.
+    #[serde(default, skip)]
+    pub slash_count: usize,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -184,7 +189,7 @@ impl TemplateRouting<MqttExtension> for MqttReactionConfig {
 }
 
 impl MqttReactionConfig {
-    pub fn validate(&self, queries: &Vec<String>) -> anyhow::Result<()> {
+    pub fn validate(&mut self, queries: &Vec<String>) -> anyhow::Result<()> {
         // initial validation for values
         if self.event_channel_capacity == 0 {
             return Err(anyhow::anyhow!(
@@ -227,6 +232,9 @@ impl MqttReactionConfig {
         if let Some(default_template) = self.default_template.as_ref() {
             self.validate_route(default_template)?;
         }
+
+        // count the number of slashes in each topic for later validation of rendered topics
+        self.count_slashes();
 
         Ok(())
     }
@@ -363,14 +371,43 @@ impl MqttReactionConfig {
             }
         }
 
-        // validate that the topic template rules aren't violated.
-        if topic.contains("{{drasi.sequence}}") {
-            return Err(anyhow::anyhow!(
-                "The topic cannot contain the 'drasi.sequence' variable as it is not supported in MQTT reaction v1"
-            ));
-        }
+        self.validate_template(topic)?;
 
         Ok(())
+    }
+
+    fn count_slashes(&mut self) {
+        for route in self.routes.values_mut() {
+            if let Some(added) = &mut route.added {
+                added.extension.slash_count = Self::count_slashes_in_topic(&added.extension.topic);
+            }
+            if let Some(updated) = &mut route.updated {
+                updated.extension.slash_count =
+                    Self::count_slashes_in_topic(&updated.extension.topic);
+            }
+            if let Some(deleted) = &mut route.deleted {
+                deleted.extension.slash_count =
+                    Self::count_slashes_in_topic(&deleted.extension.topic);
+            }
+        }
+
+        if let Some(default_template) = &mut self.default_template {
+            if let Some(added) = &mut default_template.added {
+                added.extension.slash_count = Self::count_slashes_in_topic(&added.extension.topic);
+            }
+            if let Some(updated) = &mut default_template.updated {
+                updated.extension.slash_count =
+                    Self::count_slashes_in_topic(&updated.extension.topic);
+            }
+            if let Some(deleted) = &mut default_template.deleted {
+                deleted.extension.slash_count =
+                    Self::count_slashes_in_topic(&deleted.extension.topic);
+            }
+        }
+    }
+
+    fn count_slashes_in_topic(topic: &str) -> usize {
+        topic.chars().filter(|&c| c == '/').count()
     }
 }
 
@@ -449,5 +486,94 @@ mod tests {
     fn validate_topic_accepts_valid_topic() {
         let cfg = base_config();
         assert!(cfg.validate_topic("stocks/all-prices/updated").is_ok());
+    }
+
+    #[test]
+    fn validate_keep_alive_rejects_less_than_5() {
+        let mut cfg = base_config();
+        cfg.keep_alive = Some(4);
+        let err = cfg.validate(&vec![]).unwrap_err();
+        assert!(err.to_string().contains("at least 5 seconds"));
+    }
+
+    #[test]
+    fn validate_keep_alive_accepts_5_or_more() {
+        let mut cfg = base_config();
+        cfg.keep_alive = Some(5);
+        assert!(cfg.validate(&vec![]).is_ok());
+    }
+
+    #[test]
+    fn validate_url_type_rejects_invalid_scheme() {
+        let mut cfg = base_config();
+        cfg.url = "invalid://localhost:1883".to_string();
+        let err = cfg.validate_url_type().unwrap_err();
+        assert!(err.to_string().contains("Unsupported URL scheme"));
+    }
+
+    #[test]
+    fn validate_schema_needs_tls_for_secure_schemes() {
+        let mut cfg = base_config();
+        cfg.url = "mqtts://localhost:8883".to_string();
+        cfg.tls = None;
+        let err = cfg.validate_url_type().unwrap_err();
+        assert!(err.to_string().contains("TLS configuration is required"));
+    }
+
+    #[test]
+    fn validate_schema_rejects_tls_for_non_secure_schemes() {
+        let mut cfg = base_config();
+        cfg.url = "mqtt://localhost:1883".to_string();
+        cfg.tls = Some(MqttTlsConfig::default());
+        let err = cfg.validate_url_type().unwrap_err();
+        assert!(err.to_string().contains("TLS configuration should be None"));
+    }
+
+    #[test]
+    fn validate_routes_rejects_invalid_query() {
+        let mut cfg = base_config();
+        cfg.routes.insert(
+            "invalid_query".to_string(),
+            QueryConfig {
+                added: None,
+                updated: None,
+                deleted: None,
+            },
+        );
+        let err = cfg
+            .validate_routes(&vec!["valid_query".to_string()])
+            .unwrap_err();
+        assert!(err.to_string().contains("not in the list of valid queries"));
+    }
+
+    #[test]
+    fn validate_routes_accepts_valid_query() {
+        let mut cfg = base_config();
+        cfg.routes.insert(
+            "valid_query".to_string(),
+            QueryConfig {
+                added: None,
+                updated: None,
+                deleted: None,
+            },
+        );
+        assert!(cfg
+            .validate_routes(&vec!["valid_query".to_string()])
+            .is_ok());
+    }
+
+    #[test]
+    fn validate_template_rejects_drasi_sequence() {
+        let cfg = base_config();
+        let err = cfg.validate_template("{{drasi.sequence}}").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("not supported in MQTT reaction v1"));
+    }
+
+    #[test]
+    fn validate_template_accepts_valid_template() {
+        let cfg = base_config();
+        assert!(cfg.validate_template("{{drasi.timestamp}}").is_ok());
     }
 }

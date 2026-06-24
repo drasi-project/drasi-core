@@ -28,6 +28,82 @@ use rustls::RootCertStore;
 use std::sync::Arc;
 use std::time::Duration;
 
+macro_rules! validate_identity_provider {
+    ($config:expr, $options:expr, $host:expr, $port:expr) => {
+        // add identity provider credentials if provided
+        if let Some(identity_provider) = &$config.identity_provider {
+            let context = drasi_lib::identity::CredentialContext::new()
+                .with_property("hostname", &$host)
+                .with_property("port", $port.to_string());
+            let cred = identity_provider.get_credentials(&context).await;
+            match cred {
+                Ok(cred) => match cred {
+                    drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
+                        $options.set_credentials(username, password);
+                    }
+                    _ => {
+                        error!("Unsupported credential type from identity provider, expected username/password");
+                        return Err(anyhow::anyhow!(
+                            "Unsupported credential type from identity provider, deferred to v2"
+                        ));
+                    }
+                },
+                Err(e) => {
+                    error!("Failed to get credentials from identity provider: {e:?}");
+                    return Err(anyhow::anyhow!(
+                        "Failed to get credentials from identity provider: {e:?}"
+                    ));
+                }
+            }
+        }
+    };
+}
+
+macro_rules! validate_tls {
+    ($config:expr, $options:expr) => {
+        // set TLS options if provided (mTLS is not supported)
+        if let Some(transport) = $config.tls.as_ref() {
+            let mut client_config = if transport.accept_invalid_certs {
+                ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(NoVerifier))
+                    .with_no_client_auth()
+            } else {
+                let mut store: RootCertStore = RootCertStore::empty();
+                match &transport.ca {
+                    None => {
+                        // using system CA store
+                        let certs = rustls_native_certs::load_native_certs().certs;
+                        for cert in certs {
+                            store.add(cert)?;
+                        }
+                    }
+                    Some(pem_bytes) => {
+                        // using custom-user defined CA certs
+                        let certs = rustls_pemfile::certs(&mut &pem_bytes[..])
+                            .collect::<Result<Vec<_>, _>>()?;
+                        for cert in certs {
+                            store.add(cert)?;
+                        }
+                    }
+                }
+
+                ClientConfig::builder()
+                    .with_root_certificates(store)
+                    .with_no_client_auth()
+            };
+
+            if let Some(alpn) = &transport.alpn {
+                client_config.alpn_protocols = alpn.clone();
+            }
+
+            $options.set_transport(rumqttc::Transport::tls_with_config(
+                rumqttc::TlsConfiguration::Rustls(Arc::new(client_config)),
+            ));
+        }
+    };
+}
+
 impl MqttQoS {
     pub fn to_rumqttc_qos_v3_1_1(&self) -> QoS {
         match self {
@@ -160,73 +236,9 @@ impl Client {
         // generate MQTT options based on the config
         let mut options = MqttOptionsV5::new(id, host.clone(), port);
 
-        // add identity provider credentials if provided
-        if let Some(identity_provider) = &config.identity_provider {
-            let context = drasi_lib::identity::CredentialContext::new()
-                .with_property("hostname", &host)
-                .with_property("port", port.to_string());
-            let cred = identity_provider.get_credentials(&context).await;
-            match cred {
-                Ok(cred) => match cred {
-                    drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
-                        options.set_credentials(username, password);
-                    }
-                    _ => {
-                        error!("Unsupported credential type from identity provider, expected username/password");
-                        return Err(anyhow::anyhow!(
-                            "Unsupported credential type from identity provider, deferred to v2"
-                        ));
-                    }
-                },
-                Err(e) => {
-                    error!("Failed to get credentials from identity provider: {e:?}");
-                    return Err(anyhow::anyhow!(
-                        "Failed to get credentials from identity provider: {e:?}"
-                    ));
-                }
-            }
-        }
-
-        // set TLS options if provided (mTLS is not supported)
-        if let Some(transport) = config.tls.as_ref() {
-            let mut client_config = if transport.accept_invalid_certs {
-                ClientConfig::builder()
-                    .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(NoVerifier))
-                    .with_no_client_auth()
-            } else {
-                let mut store: RootCertStore = RootCertStore::empty();
-                match &transport.ca {
-                    None => {
-                        // using system CA store
-                        let certs = rustls_native_certs::load_native_certs().certs;
-                        for cert in certs {
-                            store.add(cert)?;
-                        }
-                    }
-                    Some(pem_bytes) => {
-                        // using custom-user defined CA certs
-                        let certs = rustls_pemfile::certs(&mut &pem_bytes[..])
-                            .collect::<Result<Vec<_>, _>>()?;
-                        for cert in certs {
-                            store.add(cert)?;
-                        }
-                    }
-                }
-
-                ClientConfig::builder()
-                    .with_root_certificates(store)
-                    .with_no_client_auth()
-            };
-
-            if let Some(alpn) = &transport.alpn {
-                client_config.alpn_protocols = alpn.clone();
-            }
-
-            options.set_transport(rumqttc::Transport::tls_with_config(
-                rumqttc::TlsConfiguration::Rustls(Arc::new(client_config)),
-            ));
-        }
+        // validate identity provider and TLS settings
+        validate_identity_provider!(config, options, host, port);
+        validate_tls!(config, options);
 
         if let Some(keep_alive) = config.keep_alive {
             options.set_keep_alive(Duration::from_secs(keep_alive));
@@ -260,73 +272,9 @@ impl Client {
         // generate MQTT options based on the config
         let mut options = MqttOptions::new(id, host.clone(), port);
 
-        // add identity provider credentials if provided
-        if let Some(identity_provider) = &config.identity_provider {
-            let context = drasi_lib::identity::CredentialContext::new()
-                .with_property("hostname", &host)
-                .with_property("port", port.to_string());
-            let cred = identity_provider.get_credentials(&context).await;
-            match cred {
-                Ok(cred) => match cred {
-                    drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
-                        options.set_credentials(username, password);
-                    }
-                    _ => {
-                        error!("Unsupported credential type from identity provider, expected username/password");
-                        return Err(anyhow::anyhow!(
-                            "Unsupported credential type from identity provider, deferred to v2"
-                        ));
-                    }
-                },
-                Err(e) => {
-                    error!("Failed to get credentials from identity provider: {e:?}");
-                    return Err(anyhow::anyhow!(
-                        "Failed to get credentials from identity provider: {e:?}"
-                    ));
-                }
-            }
-        }
-
-        // set TLS options if provided (mTLS is not supported)
-        if let Some(transport) = config.tls.as_ref() {
-            let mut client_config = if transport.accept_invalid_certs {
-                ClientConfig::builder()
-                    .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(NoVerifier))
-                    .with_no_client_auth()
-            } else {
-                let mut store: RootCertStore = RootCertStore::empty();
-                match &transport.ca {
-                    None => {
-                        // using system CA store
-                        let certs = rustls_native_certs::load_native_certs().certs;
-                        for cert in certs {
-                            store.add(cert)?;
-                        }
-                    }
-                    Some(pem_bytes) => {
-                        // using custom-user defined CA certs
-                        let certs = rustls_pemfile::certs(&mut &pem_bytes[..])
-                            .collect::<Result<Vec<_>, _>>()?;
-                        for cert in certs {
-                            store.add(cert)?;
-                        }
-                    }
-                }
-
-                ClientConfig::builder()
-                    .with_root_certificates(store)
-                    .with_no_client_auth()
-            };
-
-            if let Some(alpn) = &transport.alpn {
-                client_config.alpn_protocols = alpn.clone();
-            }
-
-            options.set_transport(rumqttc::Transport::tls_with_config(
-                rumqttc::TlsConfiguration::Rustls(Arc::new(client_config)),
-            ));
-        }
+        // validate identity provider and TLS settings
+        validate_identity_provider!(config, options, host, port);
+        validate_tls!(config, options);
 
         if let Some(keep_alive) = config.keep_alive {
             options.set_keep_alive(Duration::from_secs(keep_alive));
@@ -353,5 +301,140 @@ impl Client {
             anyhow::anyhow!("Invalid URL: missing port and no default for scheme")
         })?;
         Ok((host, port))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use drasi_lib::identity::{CredentialContext, Credentials, IdentityProvider};
+
+    #[derive(Clone)]
+    struct TokenIdentityProvider;
+
+    #[async_trait]
+    impl IdentityProvider for TokenIdentityProvider {
+        async fn get_credentials(
+            &self,
+            _context: &CredentialContext,
+        ) -> anyhow::Result<Credentials> {
+            Ok(Credentials::Token {
+                username: "token-user".to_string(),
+                token: "secret-token".to_string(),
+            })
+        }
+
+        fn clone_box(&self) -> Box<dyn IdentityProvider> {
+            Box::new(self.clone())
+        }
+    }
+
+    fn base_config(url: &str) -> MqttReactionConfig {
+        MqttReactionConfig {
+            url: url.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn qos_mapping_for_v3_1_1_is_correct() {
+        assert_eq!(MqttQoS::AtMostOnce.to_rumqttc_qos_v3_1_1(), QoS::AtMostOnce);
+        assert_eq!(
+            MqttQoS::AtLeastOnce.to_rumqttc_qos_v3_1_1(),
+            QoS::AtLeastOnce
+        );
+    }
+
+    #[test]
+    fn qos_mapping_for_v5_is_correct() {
+        assert_eq!(MqttQoS::AtMostOnce.to_rumqttc_qos_v5(), QosV5::AtMostOnce);
+        assert_eq!(MqttQoS::AtLeastOnce.to_rumqttc_qos_v5(), QosV5::AtLeastOnce);
+    }
+
+    #[test]
+    fn parse_url_accepts_supported_schemes_with_explicit_ports() {
+        let cases = [
+            ("mqtt://broker.example.com:1883", 1883_u16),
+            ("mqtts://broker.example.com:8883", 8883_u16),
+            ("ws://broker.example.com:80", 80_u16),
+            ("wss://broker.example.com:443", 443_u16),
+        ];
+
+        for (url, expected_port) in cases {
+            let config = base_config(url);
+            let (host, port) = Client::parse_url(&config).expect("url should parse");
+            assert_eq!(host, "broker.example.com");
+            assert_eq!(port, expected_port);
+        }
+    }
+
+    #[test]
+    fn parse_url_returns_error_when_port_is_missing() {
+        let config = base_config("mqtt://broker.example.com");
+        let err = Client::parse_url(&config).expect_err("portless url should fail");
+        assert!(err.to_string().contains("missing port"));
+    }
+
+    #[test]
+    fn parse_url_returns_error_when_host_is_missing() {
+        let config = base_config("mqtt://:1883");
+        let err = Client::parse_url(&config).expect_err("hostless url should fail");
+        assert!(
+            err.to_string().contains("missing host")
+                || err.to_string().to_ascii_lowercase().contains("empty host")
+        );
+    }
+
+    #[tokio::test]
+    async fn new_returns_v5_event_loop_for_v5_protocol() {
+        let mut config = base_config("mqtt://localhost:1883");
+        config.protocol_version = MqttProtocolVersion::V5;
+
+        let (_client, event_loop) = Client::new("test-client-v5".to_string(), &config)
+            .await
+            .expect("client creation should succeed");
+
+        assert!(matches!(event_loop, MqttEventLoop::V5(_)));
+    }
+
+    #[tokio::test]
+    async fn new_returns_v3_1_1_event_loop_for_v3_1_1_protocol() {
+        let mut config = base_config("mqtt://localhost:1883");
+        config.protocol_version = MqttProtocolVersion::V3_1_1;
+
+        let (_client, event_loop) = Client::new("test-client-v3".to_string(), &config)
+            .await
+            .expect("client creation should succeed");
+
+        assert!(matches!(event_loop, MqttEventLoop::V3_1_1(_)));
+    }
+
+    #[tokio::test]
+    async fn config_to_mqtt_options_v5_rejects_non_username_password_credentials() {
+        let mut config = base_config("mqtt://localhost:1883");
+        config.identity_provider = Some(Box::new(TokenIdentityProvider));
+
+        let err = Client::config_to_mqtt_options_v5("client-v5", &config)
+            .await
+            .expect_err("token credentials should be rejected");
+
+        assert!(err
+            .to_string()
+            .contains("Unsupported credential type from identity provider"));
+    }
+
+    #[tokio::test]
+    async fn config_to_mqtt_options_v3_1_1_rejects_non_username_password_credentials() {
+        let mut config = base_config("mqtt://localhost:1883");
+        config.identity_provider = Some(Box::new(TokenIdentityProvider));
+
+        let err = Client::config_to_mqtt_options_v3_1_1("client-v3", &config)
+            .await
+            .expect_err("token credentials should be rejected");
+
+        assert!(err
+            .to_string()
+            .contains("Unsupported credential type from identity provider"));
     }
 }

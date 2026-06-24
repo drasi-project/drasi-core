@@ -1,4 +1,4 @@
-# Copyright 2026 The Drasi Authors.
+# Copyright 2025 The Drasi Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,6 +32,8 @@ crate-type = ["lib", "cdylib"]
 [dependencies]
 drasi-lib.workspace = true
 drasi-core.workspace = true
+drasi-plugin-sdk.workspace = true
+utoipa.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
@@ -55,3 +57,7 @@ rcgen = "0.13"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 serial_test = "3.0"
 reqwest = "0.11"
+serde_yaml = "0.9"
+
+[features]
+dynamic-plugin = []
