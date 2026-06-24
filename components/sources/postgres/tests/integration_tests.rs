@@ -34,8 +34,8 @@ use postgres_helpers::{
     create_decimal_test_table, create_logical_replication_slot, create_publication,
     create_test_table, create_test_table_replica_identity_default, create_timestamptz_test_table,
     delete_test_row, execute_batch, grant_replication, grant_table_access, insert_decimal_test_row,
-    insert_test_row, insert_timestamptz_test_row, setup_replication_postgres, update_all_rows_name,
-    update_test_row,
+    insert_test_row, insert_timestamptz_test_row, quote_ident, setup_replication_postgres,
+    update_all_rows_name, update_test_row,
 };
 use serial_test::serial;
 use std::collections::{HashMap, HashSet};
@@ -323,10 +323,13 @@ async fn test_update_detection() -> Result<()> {
 
 /// Regression test for issue #599: a single transaction that modifies multiple
 /// rows must propagate **every** row-change to continuous queries, not just the
-/// first one. Covers both reproductions from the issue:
-///   1. one multi-row `UPDATE` statement (implicit transaction), and
+/// first one. Covers the issue's reproductions plus all three pgoutput change
+/// types (the bug lived in the shared `Commit` handler):
+///   1. one multi-row `UPDATE` statement (implicit transaction),
 ///   2. several single-row `UPDATE` statements inside one explicit
-///      `BEGIN; ...; COMMIT;` transaction.
+///      `BEGIN; ...; COMMIT;` transaction,
+///   3. a multi-row `INSERT` inside one explicit transaction, and
+///   4. a multi-row `DELETE` inside one explicit transaction.
 ///
 /// Before the fix, every change in a transaction was stamped with the same
 /// `commit_lsn` as its `source_position`, so the framework's per-subscriber
@@ -380,10 +383,11 @@ async fn test_multi_row_transaction_propagates_all_changes() -> Result<()> {
     .context("not all rows propagated after a single multi-row UPDATE statement (issue #599)")?;
 
     // Repro #2: multiple single-row UPDATEs inside ONE explicit transaction.
+    let table = quote_ident(TEST_TABLE);
     let mut batch = String::from("BEGIN;");
     for id in 1..=ROW_COUNT {
         batch.push_str(&format!(
-            "UPDATE {TEST_TABLE} SET name = 'tx_update' WHERE id = {id};"
+            "UPDATE {table} SET name = 'tx_update' WHERE id = {id};"
         ));
     }
     batch.push_str("COMMIT;");
@@ -400,6 +404,45 @@ async fn test_multi_row_transaction_propagates_all_changes() -> Result<()> {
     .context(
         "not all rows propagated after multiple single-row UPDATEs in one transaction (issue #599)",
     )?;
+
+    // Repro #3: multi-row INSERT inside ONE explicit transaction. The Commit
+    // handler is shared across change types, so insert offsets must be distinct
+    // too. Add a fresh batch of rows and verify every one propagates.
+    let mut insert_batch = String::from("BEGIN;");
+    for id in (ROW_COUNT + 1)..=(ROW_COUNT * 2) {
+        insert_batch.push_str(&format!(
+            "INSERT INTO {table} (id, name) VALUES ({id}, 'tx_insert');"
+        ));
+    }
+    insert_batch.push_str("COMMIT;");
+    execute_batch(&client, &insert_batch).await?;
+
+    wait_for_query_results(&core, "test-query", |results| {
+        results
+            .iter()
+            .filter(|r| r.get("name") == Some(&"tx_insert".into()))
+            .count()
+            == ROW_COUNT as usize
+    })
+    .await
+    .context("not all rows propagated after a multi-row INSERT in one transaction (issue #599)")?;
+
+    // Repro #4: multi-row DELETE inside ONE explicit transaction. Remove the
+    // just-inserted rows and verify all of them disappear from the query.
+    let mut delete_batch = String::from("BEGIN;");
+    for id in (ROW_COUNT + 1)..=(ROW_COUNT * 2) {
+        delete_batch.push_str(&format!("DELETE FROM {table} WHERE id = {id};"));
+    }
+    delete_batch.push_str("COMMIT;");
+    execute_batch(&client, &delete_batch).await?;
+
+    wait_for_query_results(&core, "test-query", |results| {
+        !results
+            .iter()
+            .any(|r| r.get("name") == Some(&"tx_insert".into()))
+    })
+    .await
+    .context("not all rows propagated after a multi-row DELETE in one transaction (issue #599)")?;
 
     core.stop().await?;
     pg.cleanup().await;
@@ -1306,8 +1349,133 @@ async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
     Ok(())
 }
 
-// ============================================================================
-// Multi-query replay filtering test.
+/// Backward-compatibility: a subscriber resuming from a **legacy 8-byte**
+/// checkpoint (a bare commit LSN persisted by an older version, before the
+/// 16-byte `[commit_lsn | offset]` encoding) must still be accepted and replay
+/// correctly — identically to the new 16-byte form.
+///
+/// `position_bytes_to_lsn` decodes the same restart LSN from both 8- and
+/// 16-byte positions, and `subscribe()` normalizes the 8-byte `[S]` to
+/// `[S | u64::MAX]` so it orders correctly against 16-byte event positions in
+/// the comparator (see the `connection.rs` unit tests). Like the 16-byte resume
+/// path (`test_resume_subscription_replays_from_lsn`), the source restarts WAL
+/// streaming from the resume LSN inclusive; per-query checkpoints handle
+/// exactly-once delivery downstream. This test captures a live 16-byte position,
+/// truncates it to its leading 8 bytes to simulate a legacy checkpoint, and
+/// verifies the resume is accepted and replays the transactions from that LSN.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_resume_from_legacy_8_byte_position_replays() -> Result<()> {
+    init_logging();
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_test_table(&client, TEST_TABLE).await?;
+    grant_table_access(&client, TEST_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
+
+    let slot = slot_name();
+    create_logical_replication_slot(&client, &slot).await?;
+
+    let source = build_source(pg.config(), slot)?;
+    source.start().await?;
+    wait_for_source_running(&source).await;
+
+    // First subscriber to capture live 16-byte positions.
+    let settings = subscription_settings("pg-direct-source", "q-first", None, true);
+    let response = source.subscribe(settings).await?;
+    let mut rx = response.receiver;
+
+    // Three autocommit inserts → three transactions with increasing commit LSNs.
+    insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
+    insert_test_row(&client, TEST_TABLE, 2, "Bob").await?;
+    insert_test_row(&client, TEST_TABLE, 3, "Carol").await?;
+
+    // Collect the three event positions (16-byte `[commit_lsn | offset]`).
+    let mut positions: Vec<Bytes> = Vec::new();
+    let start = Instant::now();
+    while positions.len() < 3 && start.elapsed() < Duration::from_secs(15) {
+        match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+            Ok(Ok(event)) => {
+                if let Some(pos) = event.source_position.clone() {
+                    assert_eq!(pos.len(), 16, "live CDC positions should be 16 bytes");
+                    positions.push(pos);
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => continue,
+        }
+    }
+    assert_eq!(positions.len(), 3, "Should receive 3 events with positions");
+
+    // Simulate a legacy persisted checkpoint at the FIRST transaction by
+    // truncating its 16-byte position to the leading 8 bytes (the bare LSN).
+    let resume_commit_lsn = u64::from_be_bytes(positions[0][..8].try_into().expect("8 bytes"));
+    let legacy_resume = Bytes::from(positions[0][..8].to_vec());
+    assert_eq!(legacy_resume.len(), 8, "legacy resume position must be 8 bytes");
+
+    source.stop().await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Restart and resume from the legacy 8-byte position.
+    source.start().await?;
+    wait_for_source_running(&source).await;
+
+    let settings =
+        subscription_settings("pg-direct-source", "q-legacy", Some(legacy_resume), true);
+    let response = source
+        .subscribe(settings)
+        .await
+        .context("resume from legacy 8-byte position should be accepted")?;
+    let mut rx2 = response.receiver;
+
+    // Collect replayed events and decode each commit LSN from its position.
+    let mut replayed_commit_lsns: Vec<u64> = Vec::new();
+    let start2 = Instant::now();
+    while start2.elapsed() < Duration::from_secs(15) {
+        match tokio::time::timeout(Duration::from_millis(500), rx2.recv()).await {
+            Ok(Ok(event)) => {
+                if let Some(pos) = event.source_position.clone() {
+                    // The source always emits 16-byte positions, even after a
+                    // legacy 8-byte resume.
+                    assert_eq!(pos.len(), 16, "replayed positions should be 16 bytes");
+                    replayed_commit_lsns
+                        .push(u64::from_be_bytes(pos[..8].try_into().expect("8 bytes")));
+                    if replayed_commit_lsns.len() >= 2 {
+                        break;
+                    }
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => continue,
+        }
+    }
+
+    // The 8-byte legacy resume is accepted and replays the WAL from the resume
+    // LSN inclusive (identical to the 16-byte path): at least the boundary
+    // transaction and the one after it, with no position older than the resume
+    // point.
+    assert!(
+        replayed_commit_lsns.len() >= 2,
+        "Legacy 8-byte resume should replay transactions from the resume LSN, \
+         got {replayed_commit_lsns:?}"
+    );
+    assert!(
+        replayed_commit_lsns
+            .iter()
+            .all(|&lsn| lsn >= resume_commit_lsn),
+        "Legacy 8-byte resume must not replay anything older than the resume LSN \
+         (resume commit_lsn={resume_commit_lsn:#x}, replayed={replayed_commit_lsns:?})"
+    );
+
+    source.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
 //
 // Verifies that when two queries have different checkpoints and the source
 // rewinds to the earlier checkpoint on restart, per-subscriber position

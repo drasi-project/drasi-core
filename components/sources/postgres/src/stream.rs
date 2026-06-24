@@ -730,7 +730,7 @@ impl ReplicationStream {
 
     /// Dispatch a single change event through the framework's `dispatch_event()`.
     ///
-    /// `position` is the opaque 16-byte source-position
+    /// The `position` parameter is the opaque 16-byte source-position
     /// (`[ commit_lsn | in-transaction offset ]`) the checkpoint framework
     /// persists for recovery/replay and the per-subscriber high-water-mark
     /// filter uses for dedup. Each change in a transaction shares the same

@@ -654,7 +654,8 @@ pub(crate) fn position_bytes_to_lsn(position: &Bytes) -> Result<u64> {
 /// re-delivered `[S|k]` events as strictly greater and re-deliver the whole
 /// transaction S. Padding with MAX restores the "transaction S fully processed"
 /// boundary (suppress `[S|*]`, deliver `[>S|*]`). Inputs of unexpected length are
-/// returned unchanged; the caller validates them via `position_bytes_to_lsn`.
+/// returned unchanged; callers are expected to have validated positions via
+/// `position_bytes_to_lsn` before calling this function.
 pub(crate) fn normalize_resume_position(position: &Bytes) -> Bytes {
     if position.len() == 8 {
         let arr: [u8; 8] = position[..8].try_into().expect("length checked");
@@ -741,5 +742,21 @@ mod position_tests {
     fn normalize_resume_position_passes_16_byte_through_unchanged() {
         let pos = commit_position_bytes(0x1234, 7);
         assert_eq!(normalize_resume_position(&pos), pos);
+    }
+
+    /// Locks the cross-crate position-format contract: the bootstrap provider's
+    /// snapshot boundary must equal this crate's `commit_position_bytes(lsn,
+    /// u64::MAX)`. The two crates re-implement the 16-byte encoding separately
+    /// (the bootstrapper cannot depend on this crate without a cycle), so this
+    /// test fails loudly if either side's encoding drifts. See PR #600 review.
+    #[test]
+    fn snapshot_boundary_matches_commit_position_encoding() {
+        for lsn in [0u64, 1, 0x0152_00b0, u64::MAX] {
+            assert_eq!(
+                drasi_bootstrap_postgres::snapshot_position_bytes(lsn),
+                commit_position_bytes(lsn, u64::MAX),
+                "bootstrap snapshot boundary diverged from CDC position encoding for lsn={lsn:#x}"
+            );
+        }
     }
 }

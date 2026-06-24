@@ -192,7 +192,7 @@ pub async fn create_test_table_replica_identity_default(
     Ok(())
 }
 
-fn quote_ident(ident: &str) -> String {
+pub fn quote_ident(ident: &str) -> String {
     // Quote a PostgreSQL identifier by wrapping it in double quotes
     // and doubling any embedded double quotes.
     format!("\"{}\"", ident.replace('"', "\"\""))
@@ -243,6 +243,12 @@ pub async fn update_all_rows_name(client: &Client, table: &str, name: &str) -> R
 /// Execute a batch of statements (e.g. an explicit `BEGIN; ...; COMMIT;` block)
 /// as a single round-trip. Used to drive multiple single-row writes inside one
 /// explicit transaction (issue #599 repro #2).
+///
+/// # ⚠ SQL injection caution
+/// `sql` is passed verbatim to `batch_execute`; it MUST consist only of
+/// compile-time-constant strings or properly sanitised identifiers/values
+/// (e.g. via [`quote_ident`] / `$N` placeholders). Never pass user-controlled
+/// data here.
 pub async fn execute_batch(client: &Client, sql: &str) -> Result<()> {
     client.batch_execute(sql).await?;
     Ok(())
