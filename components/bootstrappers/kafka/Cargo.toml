@@ -34,4 +34,8 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [features]
-dynamic-plugin = []
+# `rdkafka/cmake-build` is only needed when producing the distributable cdylib
+# plugins (cross-compiled / arch-targeted builds), where the default
+# configure/make build of bundled librdkafka picks the host arch. Normal
+# workspace builds and tests keep the default build path.
+dynamic-plugin = ["rdkafka/cmake-build"]
