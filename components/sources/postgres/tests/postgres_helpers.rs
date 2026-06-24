@@ -70,8 +70,17 @@ impl ReplicationPostgresGuard {
             match tokio_postgres::connect(&self.config().connection_string(), NoTls).await {
                 Ok((client, connection)) => {
                     tokio::spawn(async move {
+                        // This background task drives the connection until the
+                        // Client is dropped. During test teardown the container
+                        // is stopped (or the admin terminates the backend), so
+                        // the connection future commonly resolves with an error
+                        // like "terminating connection due to administrator
+                        // command" / a closed socket. That is expected and not a
+                        // test failure, so log it at debug to avoid alarming
+                        // ERROR noise. A genuine mid-test connection failure
+                        // surfaces via the failing `client` operation itself.
                         if let Err(e) = connection.await {
-                            log::error!("PostgreSQL connection error: {e}");
+                            log::debug!("PostgreSQL test connection closed: {e}");
                         }
                     });
 
