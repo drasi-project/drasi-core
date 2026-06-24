@@ -35,7 +35,7 @@ pub enum MqttQoSDto {
 /// DTO for MQTT template specification.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = reaction::mqtt::MqttTemplateSpec)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct MqttTemplateSpecDto {
     /// Handlebars payload template.
     #[serde(default)]
@@ -64,7 +64,7 @@ pub struct MqttTemplateSpecDto {
 /// DTO for per-query MQTT template configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = reaction::mqtt::MqttQueryConfig)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct MqttQueryConfigDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub added: Option<MqttTemplateSpecDto>,
@@ -88,7 +88,7 @@ pub enum MqttProtocolVersionDto {
 /// DTO for MQTT TLS configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = reaction::mqtt::MqttTlsConfig)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct MqttTlsConfigDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ca: Option<Vec<u8>>,
@@ -106,7 +106,7 @@ pub struct MqttTlsConfigDto {
 /// Configuration DTO for the MQTT reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = reaction::mqtt::MqttReactionConfig)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct MqttReactionConfigDto {
     /// Broker URL.
     #[serde(skip_serializing_if = "Option::is_none")]

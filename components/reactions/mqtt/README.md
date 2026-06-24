@@ -15,7 +15,7 @@ The MQTT Reaction monitors continuous query results and publishes one MQTT messa
 - **Handlebars Rendering**: Render both payloads and topic templates using the same operation context
 - **QoS and Retain Controls**: Per-operation QoS 0/1, retained messages, and empty payload publishing
 - **Authentication**: Username/password credentials via identity provider integration
-- **Backpressure Control**: Internal queueing and MQTT event-channel capacity tuning
+- **Backpressure and Reconnect Control**: Configurable MQTT event-channel capacity plus autonomous reconnect retry pacing
 
 ### Use Cases
 
@@ -41,9 +41,7 @@ fn mqtt_extension(topic: &str, qos: MqttQoS) -> MqttExtension {
     MqttExtension {
         topic: topic.to_string(),
         qos,
-        retain: false,
-        empty_payload: false,
-        message_expiry_interval: None,
+        ..Default::default()
     }
 }
 
@@ -87,9 +85,7 @@ fn ext(topic: &str, qos: MqttQoS) -> MqttExtension {
     MqttExtension {
         topic: topic.to_string(),
         qos,
-        retain: false,
-        empty_payload: false,
-        message_expiry_interval: None,
+        ..Default::default()
     }
 }
 
@@ -132,9 +128,7 @@ fn ext(topic: &str) -> MqttExtension {
     MqttExtension {
         topic: topic.to_string(),
         qos: MqttQoS::AtLeastOnce,
-        retain: false,
-        empty_payload: false,
-        message_expiry_interval: None,
+        ..Default::default()
     }
 }
 
@@ -160,7 +154,7 @@ use std::collections::HashMap;
 
 use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
 use drasi_reaction_mqtt::config::{
-    MqttExtension, MqttProtocolVersion, MqttQoS, MqttReactionConfig, QueryConfig as _,
+    MqttExtension, MqttProtocolVersion, MqttQoS, MqttReactionConfig,
 };
 use drasi_reaction_mqtt::MqttReaction;
 
@@ -168,9 +162,7 @@ fn ext(topic: &str, qos: MqttQoS) -> MqttExtension {
     MqttExtension {
         topic: topic.to_string(),
         qos,
-        retain: false,
-        empty_payload: false,
-        message_expiry_interval: None,
+        ..Default::default()
     }
 }
 
@@ -249,11 +241,23 @@ let reaction = MqttReaction::new(
 | Name | Description | Type |
 |------|-------------|------|
 | `template` | Handlebars payload template. If empty and `empty_payload` is `false`, publishes raw JSON payload. | `String` |
-| `extension.topic` | MQTT topic template. Must render to a safe MQTT publish topic. | `String` |
-| `extension.qos` | MQTT QoS (`AtMostOnce` or `AtLeastOnce`). | `MqttQoS` |
-| `extension.retain` | MQTT retain flag. | `bool` |
-| `extension.empty_payload` | Publish a zero-byte payload regardless of `template`. | `bool` |
-| `extension.message_expiry_interval` | MQTT v5 message expiry interval in seconds. | `Option<u32>` |
+| `topic` | MQTT topic template. Must render to a safe MQTT publish topic. Serialized at the same level as `template`. | `String` |
+| `qos` | MQTT QoS (`AtMostOnce` or `AtLeastOnce`). | `MqttQoS` |
+| `retain` | MQTT retain flag. | `bool` |
+| `empty_payload` | Publish a zero-byte payload regardless of `template`. | `bool` |
+| `message_expiry_interval` | MQTT v5 message expiry interval in seconds. | `Option<u32>` |
+
+`TemplateSpec<T>` flattens reaction-specific extension fields during serialization. In Rust, these fields live under `TemplateSpec.extension`; in YAML/JSON config, write them beside `template`:
+
+```yaml
+default_template:
+  added:
+    template: '{"symbol": {{json after.symbol}}, "price": {{json after.price}}}'
+    topic: stocks/{{query_name}}/added
+    qos: at_least_once
+    retain: false
+    empty_payload: false
+```
 
 ### Builder Methods
 
@@ -305,7 +309,23 @@ When a query diff arrives, the reaction selects the matching template, renders t
 
 ### Helper
 
-- `{{json value}}` serializes nested values as valid JSON
+- `{{json value}}` serializes a value as valid JSON syntax. Use it whenever a template value is placed inside JSON.
+
+Examples:
+
+```handlebars
+{{json after}}
+```
+
+renders the full `after` value as JSON.
+
+```handlebars
+{"id": {{json after.id}}, "temp": {{json after.temp}}}
+```
+
+keeps hand-built JSON valid even when `after.id` contains `"`, `<`, `>`, or `&`.
+
+Raw Handlebars interpolation (`{{after.id}}`) is still useful for plain text, but it HTML-escapes special characters and should not be used inside JSON string syntax such as `{"id": "{{after.id}}"}`.
 
 ## Execution Model
 
@@ -327,6 +347,8 @@ Publish via MQTT client (QoS/retain/expiry settings)
         v
 Event loop handles ACKs/reconnect logic and status transitions
 ```
+
+The reaction creates one long-lived MQTT client and one cooperating rumqttc event-loop task for the reaction lifetime. Transient event-loop errors keep the reaction running and are retried with capped exponential backoff plus jitter. Terminal CONNACK errors, and terminal MQTT v5 broker disconnect reason codes, transition the reaction to `Error`.
 
 ## Topic Safety
 
