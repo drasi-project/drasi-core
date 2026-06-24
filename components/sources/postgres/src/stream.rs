@@ -667,9 +667,8 @@ impl ReplicationStream {
             // PositionUnavailable on crash+restart.
             //
             // Positions are 16 bytes (`[ commit_lsn | offset ]`); only the
-            // leading commit_lsn drives WAL feedback (8-byte legacy positions
-            // are still accepted). The in-transaction offset is irrelevant to
-            // the slot watermark.
+            // leading commit_lsn drives WAL feedback. The in-transaction offset
+            // is irrelevant to the slot watermark.
             let confirmed_lsn = match self.base.compute_confirmed_source_position().await {
                 Some(bytes) => match super::connection::position_bytes_to_lsn(&bytes) {
                     Ok(lsn) => lsn,

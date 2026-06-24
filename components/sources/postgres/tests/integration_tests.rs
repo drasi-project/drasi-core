@@ -1115,9 +1115,13 @@ fn subscription_settings(
     }
 }
 
-/// Encode a Postgres LSN (u64) as 8-byte big-endian Bytes for `resume_from`.
+/// Encode a Postgres LSN (u64) as a 16-byte `[commit_lsn | offset]` position
+/// (offset 0) for `resume_from`, matching the source's position encoding.
 fn lsn_to_bytes(lsn: u64) -> Bytes {
-    Bytes::from(lsn.to_be_bytes().to_vec())
+    let mut buf = Vec::with_capacity(16);
+    buf.extend_from_slice(&lsn.to_be_bytes());
+    buf.extend_from_slice(&0u64.to_be_bytes());
+    Bytes::from(buf)
 }
 
 /// Test that subscribing with a resume position before the slot watermark
@@ -1349,133 +1353,8 @@ async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
     Ok(())
 }
 
-/// Backward-compatibility: a subscriber resuming from a **legacy 8-byte**
-/// checkpoint (a bare commit LSN persisted by an older version, before the
-/// 16-byte `[commit_lsn | offset]` encoding) must still be accepted and replay
-/// correctly — identically to the new 16-byte form.
-///
-/// `position_bytes_to_lsn` decodes the same restart LSN from both 8- and
-/// 16-byte positions, and `subscribe()` normalizes the 8-byte `[S]` to
-/// `[S | u64::MAX]` so it orders correctly against 16-byte event positions in
-/// the comparator (see the `connection.rs` unit tests). Like the 16-byte resume
-/// path (`test_resume_subscription_replays_from_lsn`), the source restarts WAL
-/// streaming from the resume LSN inclusive; per-query checkpoints handle
-/// exactly-once delivery downstream. This test captures a live 16-byte position,
-/// truncates it to its leading 8 bytes to simulate a legacy checkpoint, and
-/// verifies the resume is accepted and replays the transactions from that LSN.
-#[tokio::test]
-#[serial]
-#[ignore]
-async fn test_resume_from_legacy_8_byte_position_replays() -> Result<()> {
-    init_logging();
-
-    let pg = setup_replication_postgres().await;
-    let client = pg.get_client().await?;
-
-    grant_replication(&client, "postgres").await?;
-    create_test_table(&client, TEST_TABLE).await?;
-    grant_table_access(&client, TEST_TABLE, "postgres").await?;
-    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
-
-    let slot = slot_name();
-    create_logical_replication_slot(&client, &slot).await?;
-
-    let source = build_source(pg.config(), slot)?;
-    source.start().await?;
-    wait_for_source_running(&source).await;
-
-    // First subscriber to capture live 16-byte positions.
-    let settings = subscription_settings("pg-direct-source", "q-first", None, true);
-    let response = source.subscribe(settings).await?;
-    let mut rx = response.receiver;
-
-    // Three autocommit inserts → three transactions with increasing commit LSNs.
-    insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
-    insert_test_row(&client, TEST_TABLE, 2, "Bob").await?;
-    insert_test_row(&client, TEST_TABLE, 3, "Carol").await?;
-
-    // Collect the three event positions (16-byte `[commit_lsn | offset]`).
-    let mut positions: Vec<Bytes> = Vec::new();
-    let start = Instant::now();
-    while positions.len() < 3 && start.elapsed() < Duration::from_secs(15) {
-        match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
-            Ok(Ok(event)) => {
-                if let Some(pos) = event.source_position.clone() {
-                    assert_eq!(pos.len(), 16, "live CDC positions should be 16 bytes");
-                    positions.push(pos);
-                }
-            }
-            Ok(Err(_)) => break,
-            Err(_) => continue,
-        }
-    }
-    assert_eq!(positions.len(), 3, "Should receive 3 events with positions");
-
-    // Simulate a legacy persisted checkpoint at the FIRST transaction by
-    // truncating its 16-byte position to the leading 8 bytes (the bare LSN).
-    let resume_commit_lsn = u64::from_be_bytes(positions[0][..8].try_into().expect("8 bytes"));
-    let legacy_resume = Bytes::from(positions[0][..8].to_vec());
-    assert_eq!(legacy_resume.len(), 8, "legacy resume position must be 8 bytes");
-
-    source.stop().await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Restart and resume from the legacy 8-byte position.
-    source.start().await?;
-    wait_for_source_running(&source).await;
-
-    let settings =
-        subscription_settings("pg-direct-source", "q-legacy", Some(legacy_resume), true);
-    let response = source
-        .subscribe(settings)
-        .await
-        .context("resume from legacy 8-byte position should be accepted")?;
-    let mut rx2 = response.receiver;
-
-    // Collect replayed events and decode each commit LSN from its position.
-    let mut replayed_commit_lsns: Vec<u64> = Vec::new();
-    let start2 = Instant::now();
-    while start2.elapsed() < Duration::from_secs(15) {
-        match tokio::time::timeout(Duration::from_millis(500), rx2.recv()).await {
-            Ok(Ok(event)) => {
-                if let Some(pos) = event.source_position.clone() {
-                    // The source always emits 16-byte positions, even after a
-                    // legacy 8-byte resume.
-                    assert_eq!(pos.len(), 16, "replayed positions should be 16 bytes");
-                    replayed_commit_lsns
-                        .push(u64::from_be_bytes(pos[..8].try_into().expect("8 bytes")));
-                    if replayed_commit_lsns.len() >= 2 {
-                        break;
-                    }
-                }
-            }
-            Ok(Err(_)) => break,
-            Err(_) => continue,
-        }
-    }
-
-    // The 8-byte legacy resume is accepted and replays the WAL from the resume
-    // LSN inclusive (identical to the 16-byte path): at least the boundary
-    // transaction and the one after it, with no position older than the resume
-    // point.
-    assert!(
-        replayed_commit_lsns.len() >= 2,
-        "Legacy 8-byte resume should replay transactions from the resume LSN, \
-         got {replayed_commit_lsns:?}"
-    );
-    assert!(
-        replayed_commit_lsns
-            .iter()
-            .all(|&lsn| lsn >= resume_commit_lsn),
-        "Legacy 8-byte resume must not replay anything older than the resume LSN \
-         (resume commit_lsn={resume_commit_lsn:#x}, replayed={replayed_commit_lsns:?})"
-    );
-
-    source.stop().await?;
-    pg.cleanup().await;
-
-    Ok(())
-}
+// ============================================================================
+// Multi-query replay filtering test.
 //
 // Verifies that when two queries have different checkpoints and the source
 // rewinds to the earlier checkpoint on restart, per-subscriber position

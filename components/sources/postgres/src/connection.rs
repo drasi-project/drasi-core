@@ -593,14 +593,10 @@ pub(crate) fn parse_lsn(lsn_str: &str) -> Result<u64> {
     Ok((high << 32) | low)
 }
 
-/// Encodes a WAL LSN as the opaque source-position bytes used by checkpoints and resume.
-pub(crate) fn lsn_to_position_bytes(lsn: u64) -> Bytes {
-    Bytes::from(lsn.to_be_bytes().to_vec())
-}
-
 /// Encodes a transaction `commit_lsn` plus an in-transaction `offset` as a
 /// 16-byte source-position: `[ commit_lsn (8 BE) | offset (8 BE) ]`.
 ///
+/// This is the single canonical position encoding for the Postgres source.
 /// Every row-change committed in one Postgres transaction shares the same
 /// `commit_lsn` (the atomic ordering key required by the bootstrap-snapshot
 /// boundary), but each gets a distinct, monotonically increasing `offset` so
@@ -618,22 +614,16 @@ pub(crate) fn commit_position_bytes(commit_lsn: u64, offset: u64) -> Bytes {
     Bytes::from(buf)
 }
 
-/// Decodes opaque source-position bytes back to a WAL LSN.
-///
-/// Accepts both encodings:
-/// - 8 bytes: a bare LSN — only legacy checkpoints persisted by older versions
-///   and externally supplied resume positions (the current bootstrap provider
-///   emits a 16-byte `[ snapshot_lsn | u64::MAX ]` boundary), and
-/// - 16 bytes: a `[ commit_lsn (8 BE) | offset (8 BE) ]` position, from which
-///   the leading `commit_lsn` is returned as the WAL LSN.
+/// Decodes a 16-byte `[ commit_lsn (8 BE) | offset (8 BE) ]` source-position,
+/// returning the leading `commit_lsn` as the WAL LSN.
 ///
 /// The in-transaction `offset` only disambiguates per-change ordering for the
 /// high-water-mark filter; the WAL restart/feedback machinery operates on the
 /// `commit_lsn`, so it is intentionally ignored here.
 pub(crate) fn position_bytes_to_lsn(position: &Bytes) -> Result<u64> {
-    if position.len() != 8 && position.len() != 16 {
+    if position.len() != 16 {
         return Err(anyhow!(
-            "Invalid Postgres LSN position: expected 8 or 16 bytes, got {}",
+            "Invalid Postgres LSN position: expected 16 bytes, got {}",
             position.len()
         ));
     }
@@ -644,37 +634,9 @@ pub(crate) fn position_bytes_to_lsn(position: &Bytes) -> Result<u64> {
     Ok(u64::from_be_bytes(bytes))
 }
 
-/// Normalizes an externally supplied / legacy resume position to the 16-byte
-/// `[ commit_lsn | u64::MAX ]` encoding so it compares correctly against 16-byte
-/// CDC event positions under byte-lexicographic ordering.
-///
-/// 16-byte positions pass through unchanged. A bare 8-byte LSN `[S]` becomes
-/// `[S | u64::MAX]`: because `ByteLexPositionComparator` orders a shorter slice
-/// *before* a longer one sharing its prefix, an un-normalized `[S]` would treat
-/// re-delivered `[S|k]` events as strictly greater and re-deliver the whole
-/// transaction S. Padding with MAX restores the "transaction S fully processed"
-/// boundary (suppress `[S|*]`, deliver `[>S|*]`). Inputs of unexpected length are
-/// returned unchanged; callers are expected to have validated positions via
-/// `position_bytes_to_lsn` before calling this function.
-pub(crate) fn normalize_resume_position(position: &Bytes) -> Bytes {
-    if position.len() == 8 {
-        let arr: [u8; 8] = position[..8].try_into().expect("length checked");
-        commit_position_bytes(u64::from_be_bytes(arr), u64::MAX)
-    } else {
-        position.clone()
-    }
-}
-
 #[cfg(test)]
 mod position_tests {
     use super::*;
-
-    #[test]
-    fn lsn_position_roundtrip_8_bytes() {
-        let pos = lsn_to_position_bytes(0x1234_5678_9abc_def0);
-        assert_eq!(pos.len(), 8);
-        assert_eq!(position_bytes_to_lsn(&pos).unwrap(), 0x1234_5678_9abc_def0);
-    }
 
     #[test]
     fn commit_position_is_16_bytes_and_decodes_to_commit_lsn() {
@@ -685,9 +647,12 @@ mod position_tests {
     }
 
     #[test]
-    fn position_bytes_to_lsn_rejects_other_lengths() {
+    fn position_bytes_to_lsn_requires_16_bytes() {
+        // Only the 16-byte `[commit_lsn | offset]` encoding is accepted.
         assert!(position_bytes_to_lsn(&Bytes::from(vec![0u8; 4])).is_err());
+        assert!(position_bytes_to_lsn(&Bytes::from(vec![0u8; 8])).is_err());
         assert!(position_bytes_to_lsn(&Bytes::from(vec![0u8; 12])).is_err());
+        assert!(position_bytes_to_lsn(&commit_position_bytes(42, 0)).is_ok());
     }
 
     #[test]
@@ -704,44 +669,13 @@ mod position_tests {
         let next_tx = commit_position_bytes(101, 0);
         assert!(c2.as_ref() < next_tx.as_ref());
 
-        // A bare 8-byte boundary at LSN=S is ordered *before* any 16-byte
-        // `[S|offset]` sharing its prefix (byte-lex treats the shorter slice as
-        // smaller). So an 8-byte boundary does NOT suppress `[S|0]` — which is
-        // exactly why `subscribe()` normalizes legacy 8-byte resume positions to
-        // the MAX-padded form before they reach the high-water-mark filter.
-        let bare_boundary = lsn_to_position_bytes(100);
-        assert!(c0.as_ref() > bare_boundary.as_ref());
-
-        // The 16-byte MAX-padded boundary `[S|u64::MAX]` is the form that
-        // preserves snapshot/handover semantics: it suppresses every `[S|offset]`
-        // (commit_lsn == S, already in the snapshot) and delivers `[>S|*]`.
+        // The MAX-padded boundary `[S|u64::MAX]` (used by the bootstrap snapshot)
+        // suppresses every `[S|offset]` (commit_lsn == S, already in the snapshot)
+        // and delivers `[>S|*]`.
         let padded_boundary = commit_position_bytes(100, u64::MAX);
         assert!(c0.as_ref() < padded_boundary.as_ref());
         assert!(c2.as_ref() < padded_boundary.as_ref());
         assert!(next_tx.as_ref() > padded_boundary.as_ref());
-    }
-
-    #[test]
-    fn normalize_resume_position_pads_8_byte_to_max_and_suppresses_same_commit() {
-        // A legacy 8-byte resume position at commit_lsn S is normalized to the
-        // 16-byte [S | u64::MAX] form, which must suppress every re-delivered
-        // [S|offset] (transaction S already processed) and deliver [>S|*].
-        let legacy = lsn_to_position_bytes(100);
-        let normalized = normalize_resume_position(&legacy);
-        assert_eq!(normalized.len(), 16);
-        assert_eq!(normalized, commit_position_bytes(100, u64::MAX));
-
-        // Strict `>` (ByteLexPositionComparator::position_reached) against the
-        // normalized mark: same-commit changes are suppressed, later ones pass.
-        assert!(commit_position_bytes(100, 0).as_ref() <= normalized.as_ref());
-        assert!(commit_position_bytes(100, u64::MAX - 1).as_ref() <= normalized.as_ref());
-        assert!(commit_position_bytes(101, 0).as_ref() > normalized.as_ref());
-    }
-
-    #[test]
-    fn normalize_resume_position_passes_16_byte_through_unchanged() {
-        let pos = commit_position_bytes(0x1234, 7);
-        assert_eq!(normalize_resume_position(&pos), pos);
     }
 
     /// Locks the cross-crate position-format contract: the bootstrap provider's
