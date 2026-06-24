@@ -598,11 +598,41 @@ pub(crate) fn lsn_to_position_bytes(lsn: u64) -> Bytes {
     Bytes::from(lsn.to_be_bytes().to_vec())
 }
 
+/// Encodes a transaction `commit_lsn` plus an in-transaction `offset` as a
+/// 16-byte source-position: `[ commit_lsn (8 BE) | offset (8 BE) ]`.
+///
+/// Every row-change committed in one Postgres transaction shares the same
+/// `commit_lsn` (the atomic ordering key required by the bootstrap-snapshot
+/// boundary), but each gets a distinct, monotonically increasing `offset` so
+/// the framework's per-subscriber high-water-mark filter does not collapse
+/// multiple changes that belong to the same transaction (issue #599).
+///
+/// Byte-lexicographic comparison of these positions equals tuple ordering on
+/// `(commit_lsn, offset)`, so positions remain globally monotonic across the
+/// stream and the `commit_lsn` prefix still dominates cross-transaction and
+/// bootstrap-boundary comparisons.
+pub(crate) fn commit_position_bytes(commit_lsn: u64, offset: u64) -> Bytes {
+    let mut buf = Vec::with_capacity(16);
+    buf.extend_from_slice(&commit_lsn.to_be_bytes());
+    buf.extend_from_slice(&offset.to_be_bytes());
+    Bytes::from(buf)
+}
+
 /// Decodes opaque source-position bytes back to a WAL LSN.
+///
+/// Accepts both encodings:
+/// - 8 bytes: a bare LSN (legacy CDC positions, bootstrap snapshot positions,
+///   and externally supplied resume positions), and
+/// - 16 bytes: a `[ commit_lsn (8 BE) | offset (8 BE) ]` position, from which
+///   the leading `commit_lsn` is returned as the WAL LSN.
+///
+/// The in-transaction `offset` only disambiguates per-change ordering for the
+/// high-water-mark filter; the WAL restart/feedback machinery operates on the
+/// `commit_lsn`, so it is intentionally ignored here.
 pub(crate) fn position_bytes_to_lsn(position: &Bytes) -> Result<u64> {
-    if position.len() != 8 {
+    if position.len() != 8 && position.len() != 16 {
         return Err(anyhow!(
-            "Invalid Postgres LSN position: expected 8 bytes, got {}",
+            "Invalid Postgres LSN position: expected 8 or 16 bytes, got {}",
             position.len()
         ));
     }
@@ -611,4 +641,54 @@ pub(crate) fn position_bytes_to_lsn(position: &Bytes) -> Result<u64> {
         .try_into()
         .map_err(|_| anyhow!("unexpected: array conversion failed after length check"))?;
     Ok(u64::from_be_bytes(bytes))
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::*;
+
+    #[test]
+    fn lsn_position_roundtrip_8_bytes() {
+        let pos = lsn_to_position_bytes(0x1234_5678_9abc_def0);
+        assert_eq!(pos.len(), 8);
+        assert_eq!(position_bytes_to_lsn(&pos).unwrap(), 0x1234_5678_9abc_def0);
+    }
+
+    #[test]
+    fn commit_position_is_16_bytes_and_decodes_to_commit_lsn() {
+        let pos = commit_position_bytes(0x0000_0000_0152_00b0, 3);
+        assert_eq!(pos.len(), 16);
+        // Decoding ignores the in-transaction offset and returns the commit_lsn.
+        assert_eq!(position_bytes_to_lsn(&pos).unwrap(), 0x0000_0000_0152_00b0);
+    }
+
+    #[test]
+    fn position_bytes_to_lsn_rejects_other_lengths() {
+        assert!(position_bytes_to_lsn(&Bytes::from(vec![0u8; 4])).is_err());
+        assert!(position_bytes_to_lsn(&Bytes::from(vec![0u8; 12])).is_err());
+    }
+
+    #[test]
+    fn commit_positions_order_by_commit_lsn_then_offset() {
+        // Within a transaction, later offsets sort after earlier ones.
+        let c0 = commit_position_bytes(100, 0);
+        let c1 = commit_position_bytes(100, 1);
+        let c2 = commit_position_bytes(100, 2);
+        assert!(c0.as_ref() < c1.as_ref());
+        assert!(c1.as_ref() < c2.as_ref());
+
+        // A change in a later transaction sorts after every change of an
+        // earlier transaction, regardless of offset.
+        let next_tx = commit_position_bytes(101, 0);
+        assert!(c2.as_ref() < next_tx.as_ref());
+
+        // The commit_lsn prefix dominates a bare 8-byte boundary position:
+        // any change with commit_lsn > S is delivered; with commit_lsn == S
+        // it is suppressed (offset never exceeds the MAX-padded boundary).
+        let boundary = lsn_to_position_bytes(100);
+        assert!(c0.as_ref() > boundary.as_ref());
+        let padded_boundary = commit_position_bytes(100, u64::MAX);
+        assert!(c0.as_ref() < padded_boundary.as_ref());
+        assert!(next_tx.as_ref() > padded_boundary.as_ref());
+    }
 }

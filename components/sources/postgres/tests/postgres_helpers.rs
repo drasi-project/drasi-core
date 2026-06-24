@@ -232,6 +232,22 @@ pub async fn update_test_row(client: &Client, table: &str, id: i32, name: &str) 
     Ok(())
 }
 
+/// Update **all** rows of `table` to `name` in a single multi-row `UPDATE`
+/// statement (one implicit transaction). Reproduces issue #599 repro #1.
+pub async fn update_all_rows_name(client: &Client, table: &str, name: &str) -> Result<u64> {
+    let sql = format!("UPDATE {} SET name = $1", quote_ident(table));
+    let n = client.execute(&sql, &[&name]).await?;
+    Ok(n)
+}
+
+/// Execute a batch of statements (e.g. an explicit `BEGIN; ...; COMMIT;` block)
+/// as a single round-trip. Used to drive multiple single-row writes inside one
+/// explicit transaction (issue #599 repro #2).
+pub async fn execute_batch(client: &Client, sql: &str) -> Result<()> {
+    client.batch_execute(sql).await?;
+    Ok(())
+}
+
 pub async fn delete_test_row(client: &Client, table: &str, id: i32) -> Result<()> {
     let sql = format!("DELETE FROM {} WHERE id = $1", quote_ident(table));
     client.execute(&sql, &[&id]).await?;

@@ -949,7 +949,9 @@ impl Source for PostgresReplicationSource {
 
     async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
         self.base.initialize(context).await;
-        // Postgres WAL LSN is an 8-byte big-endian u64 — byte-lexicographic comparison is correct.
+        // Source positions are big-endian `[ commit_lsn (8) | offset (8) ]`
+        // (or a bare 8-byte LSN for bootstrap/legacy), so byte-lexicographic
+        // comparison equals tuple ordering on (commit_lsn, offset) and is correct.
         self.base
             .set_position_comparator(drasi_lib::sources::ByteLexPositionComparator)
             .await;
@@ -1653,7 +1655,7 @@ mod tests {
                 .build()
                 .unwrap();
 
-            // 4 bytes instead of expected 8
+            // 4 bytes — neither a bare LSN (8) nor a commit_lsn+offset (16)
             let bad_position = bytes::Bytes::from(vec![0u8; 4]);
             let settings = SourceSubscriptionSettings {
                 source_id: "test-source".to_string(),
@@ -1669,7 +1671,7 @@ mod tests {
             assert!(result.is_err());
             let err_msg = format!("{}", result.err().unwrap());
             assert!(
-                err_msg.contains("expected 8 bytes"),
+                err_msg.contains("expected 8 or 16 bytes"),
                 "Error should mention expected byte length, got: {err_msg}"
             );
         }

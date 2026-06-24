@@ -33,8 +33,9 @@ use drasi_source_postgres::{
 use postgres_helpers::{
     create_decimal_test_table, create_logical_replication_slot, create_publication,
     create_test_table, create_test_table_replica_identity_default, create_timestamptz_test_table,
-    delete_test_row, grant_replication, grant_table_access, insert_decimal_test_row,
-    insert_test_row, insert_timestamptz_test_row, setup_replication_postgres, update_test_row,
+    delete_test_row, execute_batch, grant_replication, grant_table_access, insert_decimal_test_row,
+    insert_test_row, insert_timestamptz_test_row, setup_replication_postgres, update_all_rows_name,
+    update_test_row,
 };
 use serial_test::serial;
 use std::collections::{HashMap, HashSet};
@@ -313,6 +314,92 @@ async fn test_update_detection() -> Result<()> {
             .any(|row| row.get("name") == Some(&"Alice Updated".into()))
     })
     .await?;
+
+    core.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
+/// Regression test for issue #599: a single transaction that modifies multiple
+/// rows must propagate **every** row-change to continuous queries, not just the
+/// first one. Covers both reproductions from the issue:
+///   1. one multi-row `UPDATE` statement (implicit transaction), and
+///   2. several single-row `UPDATE` statements inside one explicit
+///      `BEGIN; ...; COMMIT;` transaction.
+///
+/// Before the fix, every change in a transaction was stamped with the same
+/// `commit_lsn` as its `source_position`, so the framework's per-subscriber
+/// high-water-mark filter suppressed all but the first change.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_multi_row_transaction_propagates_all_changes() -> Result<()> {
+    init_logging();
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_test_table(&client, TEST_TABLE).await?;
+    grant_table_access(&client, TEST_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
+
+    let slot_name = slot_name();
+    create_logical_replication_slot(&client, &slot_name).await?;
+
+    let (core, _handle) = build_core(pg.config(), slot_name).await?;
+    core.start().await?;
+
+    // Seed N rows and wait until the query reflects all of them.
+    const ROW_COUNT: i32 = 5;
+    for id in 1..=ROW_COUNT {
+        insert_test_row(&client, TEST_TABLE, id, "original").await?;
+    }
+    wait_for_query_results(&core, "test-query", |results| {
+        results
+            .iter()
+            .filter(|r| r.get("name") == Some(&"original".into()))
+            .count()
+            == ROW_COUNT as usize
+    })
+    .await?;
+
+    // Repro #1: ONE multi-row UPDATE statement (single implicit transaction).
+    let updated = update_all_rows_name(&client, TEST_TABLE, "bulk_update").await?;
+    assert_eq!(updated, ROW_COUNT as u64, "UPDATE should affect all rows");
+
+    wait_for_query_results(&core, "test-query", |results| {
+        results
+            .iter()
+            .filter(|r| r.get("name") == Some(&"bulk_update".into()))
+            .count()
+            == ROW_COUNT as usize
+    })
+    .await
+    .context("not all rows propagated after a single multi-row UPDATE statement (issue #599)")?;
+
+    // Repro #2: multiple single-row UPDATEs inside ONE explicit transaction.
+    let mut batch = String::from("BEGIN;");
+    for id in 1..=ROW_COUNT {
+        batch.push_str(&format!(
+            "UPDATE {TEST_TABLE} SET name = 'tx_update' WHERE id = {id};"
+        ));
+    }
+    batch.push_str("COMMIT;");
+    execute_batch(&client, &batch).await?;
+
+    wait_for_query_results(&core, "test-query", |results| {
+        results
+            .iter()
+            .filter(|r| r.get("name") == Some(&"tx_update".into()))
+            .count()
+            == ROW_COUNT as usize
+    })
+    .await
+    .context(
+        "not all rows propagated after multiple single-row UPDATEs in one transaction (issue #599)",
+    )?;
 
     core.stop().await?;
     pg.cleanup().await;
@@ -1089,17 +1176,22 @@ async fn test_events_carry_source_position_bytes() -> Result<()> {
     while start.elapsed() < timeout {
         match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
             Ok(Ok(event)) => {
-                // Verify source_position is set and is 8 bytes
+                // Verify source_position is set and is 16 bytes
+                // (`[ commit_lsn (8) | in-transaction offset (8) ]`, issue #599)
                 assert!(
                     event.source_position.is_some(),
                     "Event should have source_position set"
                 );
                 let pos = event.source_position.as_ref().expect("already checked");
-                assert_eq!(pos.len(), 8, "source_position should be 8 bytes (LSN)");
+                assert_eq!(
+                    pos.len(),
+                    16,
+                    "source_position should be 16 bytes (commit_lsn + offset)"
+                );
 
-                // Verify it's a valid LSN (non-zero)
+                // The leading 8 bytes are the commit LSN and must be a valid (non-zero) LSN
                 let lsn = u64::from_be_bytes(pos[..8].try_into().expect("8 bytes"));
-                assert!(lsn > 0, "LSN should be non-zero");
+                assert!(lsn > 0, "commit LSN should be non-zero");
 
                 // Verify the event has a sequence number stamped by dispatch_event
                 assert!(
