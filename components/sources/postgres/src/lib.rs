@@ -875,7 +875,7 @@ impl Source for PostgresReplicationSource {
 
     async fn subscribe(
         &self,
-        settings: drasi_lib::config::SourceSubscriptionSettings,
+        mut settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
         // Serialize subscribe calls that may restart the replication task to
         // prevent TOCTOU races between concurrent callers.
@@ -884,8 +884,8 @@ impl Source for PostgresReplicationSource {
         let mut restart_from = None;
         let mut pause_before_subscribe = false;
 
-        if let Some(ref resume_bytes) = settings.resume_from {
-            let resume_lsn = connection::position_bytes_to_lsn(resume_bytes)?;
+        if let Some(resume_bytes) = settings.resume_from.clone() {
+            let resume_lsn = connection::position_bytes_to_lsn(&resume_bytes)?;
 
             let earliest_available = self.get_earliest_available_lsn().await?;
             if resume_lsn < earliest_available {
@@ -896,6 +896,14 @@ impl Source for PostgresReplicationSource {
                 }
                 .into());
             }
+
+            // Normalize a legacy/external 8-byte resume position (a bare
+            // commit_lsn) to the 16-byte `[commit_lsn | u64::MAX]` encoding before
+            // it becomes the per-subscriber high-water mark. Without this, byte-lex
+            // comparison would treat re-delivered `[S|k]` events as greater than an
+            // 8-byte `[S]` mark and re-deliver the whole transaction S. 16-byte
+            // positions pass through unchanged.
+            settings.resume_from = Some(connection::normalize_resume_position(&resume_bytes));
 
             let read_lsn = self.replay_state.current_read_lsn();
             let is_running = self.base.get_status().await == ComponentStatus::Running;
@@ -949,9 +957,11 @@ impl Source for PostgresReplicationSource {
 
     async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
         self.base.initialize(context).await;
-        // Source positions are big-endian `[ commit_lsn (8) | offset (8) ]`
-        // (or a bare 8-byte LSN for bootstrap/legacy), so byte-lexicographic
-        // comparison equals tuple ordering on (commit_lsn, offset) and is correct.
+        // Positions reaching the comparator are uniformly 16-byte big-endian
+        // `[ commit_lsn (8) | offset (8) ]` (CDC events, the `[snapshot_lsn|MAX]`
+        // bootstrap boundary, and legacy/external 8-byte resume positions which
+        // `subscribe()` normalizes to `[lsn|u64::MAX]`). Byte-lexicographic
+        // comparison therefore equals tuple ordering on (commit_lsn, offset).
         self.base
             .set_position_comparator(drasi_lib::sources::ByteLexPositionComparator)
             .await;
