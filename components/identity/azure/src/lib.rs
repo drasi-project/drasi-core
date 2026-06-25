@@ -29,10 +29,11 @@ use drasi_plugin_sdk::prelude::*;
 use utoipa::OpenApi;
 
 /// Authentication method for the Azure identity provider.
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AzureAuthMethod {
     /// System-assigned managed identity.
+    #[default]
     ManagedIdentity,
     /// User-assigned managed identity (requires `client_id`).
     ManagedIdentityUserAssigned,
@@ -40,12 +41,6 @@ pub enum AzureAuthMethod {
     WorkloadIdentity,
     /// Developer tools credential chain (e.g., `az login`).
     DeveloperTools,
-}
-
-impl Default for AzureAuthMethod {
-    fn default() -> Self {
-        Self::ManagedIdentity
-    }
 }
 
 /// Configuration DTO for the Azure identity provider plugin.

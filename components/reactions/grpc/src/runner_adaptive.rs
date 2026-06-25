@@ -134,10 +134,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
 
             for (key, items) in batches_by_key.into_iter() {
                 let mut retry_swaps = 0u32;
-                loop {
-                    let Some(c) = client.as_mut() else {
-                        break;
-                    };
+                while let Some(c) = client.as_mut() {
                     match send_batch_with_retry(
                         c,
                         items.clone(),
@@ -174,7 +171,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                             }
 
                             successful_sends += 1;
-                            if successful_sends % 100 == 0 {
+                            if successful_sends.is_multiple_of(100) {
                                 info!(
                                     "Adaptive metrics - Successful: {successful_sends}, Failed: {failed_sends}"
                                 );

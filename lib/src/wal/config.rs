@@ -46,19 +46,14 @@ pub struct WriteAheadLogConfig {
 ///
 /// Sources should choose based on their backpressure contract with upstream
 /// producers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CapacityPolicy {
     /// Reject the incoming event with [`WalError::CapacityExhausted`].
+    #[default]
     RejectIncoming,
 
     /// Evict the oldest event(s) to make room for the new one.
     OverwriteOldest,
-}
-
-impl Default for CapacityPolicy {
-    fn default() -> Self {
-        Self::RejectIncoming
-    }
 }
 
 impl WriteAheadLogConfig {

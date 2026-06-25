@@ -57,22 +57,17 @@ impl GtfsRtFeedType {
 }
 
 /// Initial cursor behavior when no persisted feed cursor exists.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum InitialCursorMode {
     /// Emit inserts for all elements in the first observed snapshot.
+    #[default]
     StartFromBeginning,
     /// Use the first observed snapshot as a baseline and only emit subsequent changes.
     StartFromNow,
     /// Emit only elements whose effective timestamp is greater than this value (ms since epoch)
     /// on the first poll, then process all subsequent diffs normally.
     StartFromTimestamp(i64),
-}
-
-impl Default for InitialCursorMode {
-    fn default() -> Self {
-        Self::StartFromBeginning
-    }
 }
 
 /// Source configuration for GTFS-RT polling.

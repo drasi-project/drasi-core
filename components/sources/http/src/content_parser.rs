@@ -159,22 +159,20 @@ fn xml_to_json(xml: &str) -> Result<JsonValue> {
 
                 stack.push((name, JsonValue::Object(obj)));
             }
-            Ok(Event::End(_)) => {
-                if stack.len() > 1 {
-                    if let Some((name, value)) = stack.pop() {
-                        if let Some((_, JsonValue::Object(parent_obj))) = stack.last_mut() {
-                            // Handle repeated elements by converting to array
-                            if let Some(existing) = parent_obj.get_mut(&name) {
-                                match existing {
-                                    JsonValue::Array(arr) => arr.push(value),
-                                    _ => {
-                                        let prev = existing.take();
-                                        *existing = JsonValue::Array(vec![prev, value]);
-                                    }
+            Ok(Event::End(_)) if stack.len() > 1 => {
+                if let Some((name, value)) = stack.pop() {
+                    if let Some((_, JsonValue::Object(parent_obj))) = stack.last_mut() {
+                        // Handle repeated elements by converting to array
+                        if let Some(existing) = parent_obj.get_mut(&name) {
+                            match existing {
+                                JsonValue::Array(arr) => arr.push(value),
+                                _ => {
+                                    let prev = existing.take();
+                                    *existing = JsonValue::Array(vec![prev, value]);
                                 }
-                            } else {
-                                parent_obj.insert(name, value);
                             }
+                        } else {
+                            parent_obj.insert(name, value);
                         }
                     }
                 }

@@ -469,7 +469,7 @@ impl ContinuousQuery {
                 .path_solver
                 .solve(self.match_path.clone(), anchor_element.clone(), slot_num)
                 .await?;
-            result.extend(solution.into_iter());
+            result.extend(solution);
         }
 
         Ok(result)

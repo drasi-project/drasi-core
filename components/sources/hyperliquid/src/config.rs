@@ -18,21 +18,16 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 /// Initial cursor behavior for the Hyperliquid source.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InitialCursor {
     /// Start streaming from the earliest data available (no filtering).
     StartFromBeginning,
     /// Start streaming from the moment the source starts (default).
+    #[default]
     StartFromNow,
     /// Start streaming from a specific timestamp (milliseconds since epoch).
     StartFromTimestamp { timestamp: i64 },
-}
-
-impl Default for InitialCursor {
-    fn default() -> Self {
-        Self::StartFromNow
-    }
 }
 
 impl InitialCursor {
@@ -47,18 +42,16 @@ impl InitialCursor {
 }
 
 /// Hyperliquid environment selection.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HyperliquidNetwork {
+    #[default]
     Mainnet,
     Testnet,
-    Custom { rest_url: String, ws_url: String },
-}
-
-impl Default for HyperliquidNetwork {
-    fn default() -> Self {
-        Self::Mainnet
-    }
+    Custom {
+        rest_url: String,
+        ws_url: String,
+    },
 }
 
 impl HyperliquidNetwork {
@@ -80,19 +73,14 @@ impl HyperliquidNetwork {
 }
 
 /// Coin selection strategy for per-coin subscriptions.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoinSelection {
     /// Subscribe to a specific list of coins.
     Specific { coins: Vec<String> },
     /// Subscribe to all available coins (discovered via metadata).
+    #[default]
     All,
-}
-
-impl Default for CoinSelection {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 impl CoinSelection {

@@ -11,6 +11,9 @@ jobs:
   audit:
     uses: drasi-project/.github/.github/workflows/cargo-audit.yaml@main
     with:
+      # rustls-webpki 0.101.7 vulns — aws-smithy-http-client 1.1.13 bundles both
+      # rustls 0.21 and 0.23 backends; workspace feature unification activates both.
+      # Cannot resolve without upstream AWS SDK dropping the old rustls-0-21 backend.
       audit-args: >-
         --ignore RUSTSEC-2026-0098
         --ignore RUSTSEC-2026-0099
