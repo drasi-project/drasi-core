@@ -12,95 +12,76 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::config::LogReactionConfig;
 use anyhow::Result;
 use async_trait::async_trait;
-use handlebars::Handlebars;
 use log::debug;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::HashMap;
 
-use drasi_lib::channels::{ComponentStatus, ResultDiff};
+use drasi_lib::channels::ComponentStatus;
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
 
+use crate::config::LogReactionConfig;
+use crate::render;
+
+/// Reaction that writes continuous query results to the console (stdout).
+///
+/// Each emission is printed in timestamp order. Output can be customised with
+/// per-query or default Handlebars templates; without a template the reaction
+/// prints a human-readable line for every change.
 pub struct LogReaction {
     pub(crate) base: ReactionBase,
     config: LogReactionConfig,
 }
 
 impl LogReaction {
-    /// Create a new log reaction
+    /// Create a new log reaction.
     ///
     /// The event channel is automatically injected when the reaction is added
-    /// to DrasiLib via `add_reaction()`.
+    /// to `DrasiLib` via `add_reaction()`.
     ///
     /// # Arguments
     ///
-    /// * `id` - Unique identifier for the reaction
-    /// * `queries` - Query IDs to subscribe to
-    /// * `config` - Configuration including templates and routes
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(LogReaction)` if all templates are valid and all routes correspond to subscribed queries.
-    /// Returns `Err` if template validation fails or if a route doesn't match a subscribed query.
+    /// * `id` - Unique identifier for the reaction.
+    /// * `queries` - Query ids to subscribe to.
+    /// * `config` - Configuration including templates and routes.
     ///
     /// # Errors
     ///
-    /// - Returns error if any template has invalid Handlebars syntax
-    /// - Returns error if a route query ID doesn't match any subscribed query
+    /// Returns an error if any template has invalid Handlebars syntax or if a
+    /// route does not match any subscribed query.
     pub fn new(
         id: impl Into<String>,
         queries: Vec<String>,
         config: LogReactionConfig,
     ) -> anyhow::Result<Self> {
-        let id = id.into();
-
-        // Validate templates and routes
-        Self::validate_config(&queries, &config)?;
-
-        let params = ReactionBaseParams::new(id, queries);
+        config.validate(&queries)?;
+        let params = ReactionBaseParams::new(id.into(), queries);
         Ok(Self {
             base: ReactionBase::new(params),
             config,
         })
     }
 
-    /// Create a new log reaction with custom priority queue capacity
+    /// Create a new log reaction with a custom priority queue capacity.
     ///
     /// The event channel is automatically injected when the reaction is added
-    /// to DrasiLib via `add_reaction()`.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - Unique identifier for the reaction
-    /// * `queries` - Query IDs to subscribe to
-    /// * `config` - Configuration including templates and routes
-    /// * `priority_queue_capacity` - Maximum events in priority queue
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(LogReaction)` if all templates are valid and all routes correspond to subscribed queries.
-    /// Returns `Err` if template validation fails or if a route doesn't match a subscribed query.
+    /// to `DrasiLib` via `add_reaction()`.
     ///
     /// # Errors
     ///
-    /// - Returns error if any template has invalid Handlebars syntax
-    /// - Returns error if a route query ID doesn't match any subscribed query
+    /// Returns an error if any template has invalid Handlebars syntax or if a
+    /// route does not match any subscribed query.
     pub fn with_priority_queue_capacity(
         id: impl Into<String>,
         queries: Vec<String>,
         config: LogReactionConfig,
         priority_queue_capacity: usize,
     ) -> anyhow::Result<Self> {
-        let id = id.into();
-
-        // Validate templates and routes
-        Self::validate_config(&queries, &config)?;
-
-        let params = ReactionBaseParams::new(id, queries)
+        config.validate(&queries)?;
+        let params = ReactionBaseParams::new(id.into(), queries)
             .with_priority_queue_capacity(priority_queue_capacity);
         Ok(Self {
             base: ReactionBase::new(params),
@@ -108,76 +89,26 @@ impl LogReaction {
         })
     }
 
-    /// Validate a template by attempting to compile it with Handlebars
-    fn validate_template(template: &str) -> anyhow::Result<()> {
-        if template.is_empty() {
-            return Ok(());
-        }
-        // Compile the template to validate syntax without requiring data
-        handlebars::Template::compile(template)
-            .map_err(|e| anyhow::anyhow!("Invalid template: {e}"))?;
-        Ok(())
+    /// Create a builder for [`LogReaction`].
+    pub fn builder(id: impl Into<String>) -> LogReactionBuilder {
+        LogReactionBuilder::new(id)
     }
 
-    /// Validate all templates in a QueryConfig
-    fn validate_query_config(config: &crate::config::QueryConfig) -> anyhow::Result<()> {
-        if let Some(added) = &config.added {
-            Self::validate_template(&added.template)?;
-        }
-        if let Some(updated) = &config.updated {
-            Self::validate_template(&updated.template)?;
-        }
-        if let Some(deleted) = &config.deleted {
-            Self::validate_template(&deleted.template)?;
-        }
-        Ok(())
-    }
-
-    /// Validate configuration: templates and route-query matching
-    fn validate_config(queries: &[String], config: &LogReactionConfig) -> anyhow::Result<()> {
-        // Validate all templates in routes
-        for (query_id, route_config) in &config.routes {
-            Self::validate_query_config(route_config)
-                .map_err(|e| anyhow::anyhow!("Invalid template in route '{query_id}': {e}"))?;
-        }
-
-        // Validate default template if provided
-        if let Some(default_template) = &config.default_template {
-            Self::validate_query_config(default_template)
-                .map_err(|e| anyhow::anyhow!("Invalid default template: {e}"))?;
-        }
-
-        // Validate that all routes correspond to subscribed queries
-        if !config.routes.is_empty() && !queries.is_empty() {
-            for route_query in config.routes.keys() {
-                // Pre-compute dotted format once per route
-                let dotted_route = format!(".{route_query}");
-                let matches = queries
-                    .iter()
-                    .any(|q| q == route_query || q.ends_with(&dotted_route));
-                if !matches {
-                    return Err(anyhow::anyhow!(
-                        "Route '{route_query}' does not match any subscribed query. Subscribed queries: {queries:?}"
-                    ));
-                }
-            }
-        }
-
-        Ok(())
+    /// Mutable access to the underlying [`ReactionBase`].
+    ///
+    /// The dynamic-plugin descriptor uses this to record the raw configuration
+    /// via `set_raw_config` after construction.
+    pub fn base_mut(&mut self) -> &mut ReactionBase {
+        &mut self.base
     }
 
     #[allow(clippy::print_stdout)]
     fn log_result(&self, message: &str) {
         println!("[{}] {}", self.base.id, message);
     }
-
-    /// Create a builder for LogReaction
-    pub fn builder(id: impl Into<String>) -> LogReactionBuilder {
-        LogReactionBuilder::new(id)
-    }
 }
 
-/// Builder for LogReaction
+/// Builder for [`LogReaction`].
 pub struct LogReactionBuilder {
     id: String,
     queries: Vec<String>,
@@ -187,7 +118,7 @@ pub struct LogReactionBuilder {
 }
 
 impl LogReactionBuilder {
-    /// Create a new builder with the given reaction ID
+    /// Create a new builder with the given reaction id.
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -198,80 +129,79 @@ impl LogReactionBuilder {
         }
     }
 
-    /// Set the query IDs to subscribe to
+    /// Set the query ids to subscribe to.
     pub fn with_queries(mut self, queries: Vec<String>) -> Self {
         self.queries = queries;
         self
     }
 
-    /// Add a query ID to subscribe to
+    /// Add a query id to subscribe to.
     pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
         self.queries.push(query_id.into());
         self
     }
 
-    /// Connect this reaction to receive results from a query (alias for with_query)
+    /// Alias of [`with_query`](Self::with_query); reads naturally at call sites.
     pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
         self.queries.push(query_id.into());
         self
     }
 
-    /// Set custom priority queue capacity
+    /// Set a custom priority queue capacity.
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
         self
     }
 
-    /// Set whether the reaction should auto-start
+    /// Set whether the reaction should auto-start.
     pub fn with_auto_start(mut self, auto_start: bool) -> Self {
         self.auto_start = auto_start;
         self
     }
 
-    /// Set default template configuration for all queries.
+    /// Replace the entire configuration.
+    pub fn with_config(mut self, config: LogReactionConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Set the default template configuration for all queries.
     ///
-    /// The default template is used when no query-specific route is defined.
+    /// The default template is used when no query-specific route applies.
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use drasi_reaction_log::{QueryConfig, TemplateSpec};
+    /// ```rust
+    /// use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
     ///
     /// let default_template = QueryConfig {
-    ///     added: Some(TemplateSpec {
-    ///         template: "[ADD] {{after.id}}".to_string(),
-    ///     }),
-    ///     updated: Some(TemplateSpec {
-    ///         template: "[UPD] {{after.id}}".to_string(),
-    ///     }),
-    ///     deleted: Some(TemplateSpec {
-    ///         template: "[DEL] {{before.id}}".to_string(),
-    ///     }),
+    ///     added: Some(TemplateSpec::new("[ADD] {{after.id}}")),
+    ///     updated: Some(TemplateSpec::new("[UPD] {{after.id}}")),
+    ///     deleted: Some(TemplateSpec::new("[DEL] {{before.id}}")),
     /// };
     ///
     /// let reaction = LogReaction::builder("my-logger")
     ///     .with_query("my-query")
     ///     .with_default_template(default_template)
-    ///     .build();
+    ///     .build()
+    ///     .unwrap();
     /// ```
     pub fn with_default_template(mut self, template: crate::config::QueryConfig) -> Self {
         self.config.default_template = Some(template);
         self
     }
 
-    /// Set template configuration for a specific query.
+    /// Set the template configuration for a specific query.
     ///
     /// Query-specific templates override the default template.
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use drasi_reaction_log::{QueryConfig, TemplateSpec};
+    /// ```rust
+    /// use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
     ///
     /// let sensor_config = QueryConfig {
-    ///     added: Some(TemplateSpec {
-    ///         template: "[SENSOR] {{after.id}}: {{after.temperature}}°C".to_string(),
-    ///     }),
+    ///     added: Some(TemplateSpec::new("[SENSOR] {{after.id}}: {{after.temperature}}")),
     ///     updated: None,
     ///     deleted: None,
     /// };
@@ -279,7 +209,8 @@ impl LogReactionBuilder {
     /// let reaction = LogReaction::builder("my-logger")
     ///     .with_query("sensor-data")
     ///     .with_route("sensor-data", sensor_config)
-    ///     .build();
+    ///     .build()
+    ///     .unwrap();
     /// ```
     pub fn with_route(
         mut self,
@@ -290,20 +221,14 @@ impl LogReactionBuilder {
         self
     }
 
-    /// Build the LogReaction
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(LogReaction)` if all templates are valid and all routes correspond to subscribed queries.
-    /// Returns `Err` if template validation fails or if a route doesn't match a subscribed query.
+    /// Build the [`LogReaction`].
     ///
     /// # Errors
     ///
-    /// - Returns error if any template has invalid Handlebars syntax
-    /// - Returns error if a route query ID doesn't match any subscribed query
+    /// Returns an error if any template has invalid Handlebars syntax or if a
+    /// route does not match any subscribed query.
     pub fn build(self) -> anyhow::Result<LogReaction> {
-        // Validate templates and routes
-        LogReaction::validate_config(&self.queries, &self.config)?;
+        self.config.validate(&self.queries)?;
 
         let mut params =
             ReactionBaseParams::new(self.id, self.queries).with_auto_start(self.auto_start);
@@ -372,7 +297,6 @@ impl Reaction for LogReaction {
     async fn start(&self) -> Result<()> {
         log_component_start("Reaction", &self.base.id);
 
-        // Transition to Starting
         self.base
             .set_status(
                 ComponentStatus::Starting,
@@ -380,7 +304,6 @@ impl Reaction for LogReaction {
             )
             .await;
 
-        // Transition to Running
         self.base
             .set_status(
                 ComponentStatus::Running,
@@ -393,38 +316,18 @@ impl Reaction for LogReaction {
             self.base.queries
         ));
 
-        // Spawn processing task to dequeue and process results in timestamp order
+        // Spawn the processing task to dequeue and process results in
+        // timestamp order. `start()` itself must return promptly.
         let priority_queue = self.base.priority_queue.clone();
         let reaction_name = self.base.id.clone();
         let config = self.config.clone();
 
-        // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
         let processing_task = tokio::spawn(async move {
-            // Set up Handlebars with json helper
-            let mut handlebars = Handlebars::new();
-            handlebars.register_helper(
-                "json",
-                Box::new(
-                    |h: &handlebars::Helper,
-                     _: &Handlebars,
-                     _: &handlebars::Context,
-                     _: &mut handlebars::RenderContext,
-                     out: &mut dyn handlebars::Output|
-                     -> handlebars::HelperResult {
-                        if let Some(value) = h.param(0) {
-                            let json_str = serde_json::to_string(&value.value())
-                                .unwrap_or_else(|_| "null".to_string());
-                            out.write(&json_str)?;
-                        }
-                        Ok(())
-                    },
-                ),
-            );
+            let handlebars = render::build_handlebars();
 
             loop {
-                // Use select to wait for either a result OR shutdown signal
                 let query_result_arc = tokio::select! {
                     biased;
 
@@ -436,19 +339,21 @@ impl Reaction for LogReaction {
                     result = priority_queue.dequeue() => result,
                 };
 
-                // Get mutable access to the result for profiling
-                // Note: We need to clone and modify since Arc doesn't allow mutation
+                // Clone so we can record profiling timestamps; `Arc` is shared.
                 let mut query_result = (*query_result_arc).clone();
 
-                // Capture reaction_receive_ns timestamp
                 if let Some(ref mut profiling) = query_result.profiling {
                     profiling.reaction_receive_ns = Some(drasi_lib::profiling::timestamp_ns());
                 }
 
+                // Treat an empty result set as a no-op.
                 if query_result.results.is_empty() {
                     debug!("[{reaction_name}] Received empty result set from query");
                     continue;
                 }
+
+                let timestamp = query_result.timestamp.to_rfc3339();
+                let metadata = Value::Object(query_result.metadata.clone().into_iter().collect());
 
                 #[allow(clippy::print_stdout)]
                 {
@@ -461,143 +366,25 @@ impl Reaction for LogReaction {
                 }
 
                 for result in &query_result.results {
-                    // Build context for template rendering
-                    let mut context = Map::new();
-                    context.insert(
-                        "query_name".to_string(),
-                        Value::String(query_result.query_id.clone()),
-                    );
-
-                    // Get query-specific config if available, otherwise use default
-                    let query_config = config
-                        .routes
-                        .get(&query_result.query_id)
-                        .or(config.default_template.as_ref());
-
-                    match result {
-                        ResultDiff::Add { data, .. } => {
-                            context.insert("operation".to_string(), Value::String("ADD".into()));
-                            context.insert("after".to_string(), data.clone());
-
-                            let template = query_config
-                                .and_then(|qc| qc.added.as_ref())
-                                .map(|ts| ts.template.as_str());
-
-                            if let Some(template_str) = template {
-                                match handlebars.render_template(template_str, &context) {
-                                    Ok(rendered) => {
-                                        #[allow(clippy::print_stdout)]
-                                        {
-                                            println!("[{reaction_name}]   {rendered}");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        debug!("[{reaction_name}] Template render error: {e}");
-                                        #[allow(clippy::print_stdout)]
-                                        {
-                                            println!("[{reaction_name}]   [ADD] {data}");
-                                        }
-                                    }
-                                }
-                            } else {
-                                #[allow(clippy::print_stdout)]
-                                {
-                                    println!("[{reaction_name}]   [ADD] {data}");
-                                }
-                            }
-                        }
-                        ResultDiff::Delete { data, .. } => {
-                            context.insert("operation".to_string(), Value::String("DELETE".into()));
-                            context.insert("before".to_string(), data.clone());
-
-                            let template = query_config
-                                .and_then(|qc| qc.deleted.as_ref())
-                                .map(|ts| ts.template.as_str());
-
-                            if let Some(template_str) = template {
-                                match handlebars.render_template(template_str, &context) {
-                                    Ok(rendered) => {
-                                        #[allow(clippy::print_stdout)]
-                                        {
-                                            println!("[{reaction_name}]   {rendered}");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        debug!("[{reaction_name}] Template render error: {e}");
-                                        #[allow(clippy::print_stdout)]
-                                        {
-                                            println!("[{reaction_name}]   [DELETE] {data}");
-                                        }
-                                    }
-                                }
-                            } else {
-                                #[allow(clippy::print_stdout)]
-                                {
-                                    println!("[{reaction_name}]   [DELETE] {data}");
-                                }
-                            }
-                        }
-                        ResultDiff::Update {
-                            before,
-                            after,
-                            data,
-                            ..
-                        } => {
-                            context.insert("operation".to_string(), Value::String("UPDATE".into()));
-                            context.insert("before".to_string(), before.clone());
-                            context.insert("after".to_string(), after.clone());
-                            context.insert("data".to_string(), data.clone());
-
-                            let template = query_config
-                                .and_then(|qc| qc.updated.as_ref())
-                                .map(|ts| ts.template.as_str());
-
-                            if let Some(template_str) = template {
-                                match handlebars.render_template(template_str, &context) {
-                                    Ok(rendered) => {
-                                        #[allow(clippy::print_stdout)]
-                                        {
-                                            println!("[{reaction_name}]   {rendered}");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        debug!("[{reaction_name}] Template render error: {e}");
-                                        #[allow(clippy::print_stdout)]
-                                        {
-                                            println!(
-                                                "[{reaction_name}]   [UPDATE] {before} -> {after}"
-                                            );
-                                        }
-                                    }
-                                }
-                            } else {
-                                #[allow(clippy::print_stdout)]
-                                {
-                                    println!("[{reaction_name}]   [UPDATE] {before} -> {after}");
-                                }
-                            }
-                        }
-                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
-                            let result_json = serde_json::to_string(result)
-                                .expect("ResultDiff serialization should succeed");
-                            let operation = match result {
-                                ResultDiff::Aggregation { .. } => "AGGREGATION",
-                                ResultDiff::Noop => "NOOP",
-                                _ => "UNKNOWN",
-                            };
-                            #[allow(clippy::print_stdout)]
-                            {
-                                println!("[{reaction_name}]   [{operation}] {result_json}");
-                            }
+                    if let Some(line) = render::render_diff(
+                        &config,
+                        &handlebars,
+                        &query_result.query_id,
+                        &timestamp,
+                        query_result.sequence,
+                        &metadata,
+                        result,
+                    ) {
+                        #[allow(clippy::print_stdout)]
+                        {
+                            println!("[{reaction_name}]   {line}");
                         }
                     }
                 }
 
-                // Capture reaction_complete_ns timestamp
                 if let Some(ref mut profiling) = query_result.profiling {
                     profiling.reaction_complete_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                    // Log profiling summary if available
                     if let (Some(source_send), Some(reaction_complete)) =
                         (profiling.source_send_ns, profiling.reaction_complete_ns)
                     {
@@ -612,17 +399,14 @@ impl Reaction for LogReaction {
             }
         });
 
-        // Store the processing task handle
         self.base.set_processing_task(processing_task).await;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        // Use ReactionBase common stop functionality
         self.base.stop_common().await?;
 
-        // Transition to Stopped
         self.base
             .set_status(
                 ComponentStatus::Stopped,
