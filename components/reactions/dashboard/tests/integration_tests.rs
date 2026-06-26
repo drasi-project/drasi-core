@@ -51,6 +51,18 @@ where
     }
 }
 
+/// Reserve an ephemeral TCP port to avoid collisions with other tests/processes.
+///
+/// Binds `127.0.0.1:0`, reads the assigned port, and drops the listener so the
+/// reaction can bind it. There is a tiny TOCTOU window, but this is far more
+/// robust than a hard-coded port under parallel test execution.
+fn reserve_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .context("failed to reserve an ephemeral port")?;
+    let port = listener.local_addr()?.port();
+    Ok(port)
+}
+
 #[tokio::test]
 async fn test_dashboard_reaction_end_to_end() -> Result<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -252,9 +264,10 @@ async fn test_dashboard_server_shuts_down_on_stop() -> Result<()> {
         .auto_start(true)
         .build();
 
+    let port = reserve_port()?;
     let reaction = DashboardReaction::builder("shutdown-dashboard")
         .with_query("shutdown-query")
-        .with_port(19111)
+        .with_port(port)
         .build()?;
 
     let core = DrasiLib::builder()
@@ -267,11 +280,14 @@ async fn test_dashboard_server_shuts_down_on_stop() -> Result<()> {
 
     core.start().await?;
 
+    let base_url = format!("http://127.0.0.1:{port}/");
+    let ws_url = format!("ws://127.0.0.1:{port}/ws");
+
     // Wait for the server to come up.
     let client = reqwest::Client::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(resp) = client.get("http://localhost:19111/").send().await {
+        if let Ok(resp) = client.get(&base_url).send().await {
             if resp.status().is_success() {
                 break;
             }
@@ -283,7 +299,7 @@ async fn test_dashboard_server_shuts_down_on_stop() -> Result<()> {
     }
 
     // Verify no-cache headers are set on served assets.
-    let root_response = client.get("http://localhost:19111/").send().await?;
+    let root_response = client.get(&base_url).send().await?;
     let cache_control = root_response
         .headers()
         .get(reqwest::header::CACHE_CONTROL)
@@ -296,7 +312,7 @@ async fn test_dashboard_server_shuts_down_on_stop() -> Result<()> {
     );
 
     // Open a live WebSocket so we can observe it being closed on shutdown.
-    let (ws_stream, _) = connect_async("ws://localhost:19111/ws").await?;
+    let (ws_stream, _) = connect_async(&ws_url).await?;
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
     ws_sender
         .send(Message::Text(
@@ -332,7 +348,7 @@ async fn test_dashboard_server_shuts_down_on_stop() -> Result<()> {
     let released = {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            match client.get("http://localhost:19111/").send().await {
+            match client.get(&base_url).send().await {
                 Err(_) => break true,
                 Ok(_) => {
                     if tokio::time::Instant::now() > deadline {

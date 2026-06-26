@@ -117,11 +117,8 @@ fn serve_asset(path: &str) -> Response {
             // from its in-memory cache after the reaction is restarted.
             (
                 [
-                    (header::CONTENT_TYPE, mime.to_string()),
-                    (
-                        header::CACHE_CONTROL,
-                        "no-cache, no-store, must-revalidate".to_string(),
-                    ),
+                    (header::CONTENT_TYPE, mime),
+                    (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
                 ],
                 content.data.into_owned(),
             )
