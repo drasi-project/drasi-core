@@ -74,8 +74,9 @@ async fn query_enters_error_state_when_bootstrap_fails() -> Result<()> {
 
     // Poll for the query to reach a terminal status. Bootstrap runs
     // asynchronously, so give the supervisor a moment to observe the failure.
+    const MAX_STATUS_POLL_ATTEMPTS: usize = 50;
     let mut status = core.get_query_status("q1").await?;
-    for _ in 0..50 {
+    for _ in 0..MAX_STATUS_POLL_ATTEMPTS {
         if status == ComponentStatus::Error {
             break;
         }
