@@ -29,6 +29,12 @@ use tokio_util::compat::Compat;
 pub struct PrimaryKeyCache {
     /// Map of table name -> ordered list of primary key column names
     keys: HashMap<String, Vec<String>>,
+    /// Map of lowercased bare table name -> canonical `schema.table` (using the
+    /// catalog's casing). Used to produce a stable element-ID prefix that is
+    /// identical regardless of how the table was written in config (`Products`,
+    /// `dbo.Products`, `DBO.products` all resolve to the same canonical name),
+    /// so the bootstrap and CDC paths agree on element IDs.
+    canonical_names: HashMap<String, String>,
 }
 
 impl PrimaryKeyCache {
@@ -36,13 +42,15 @@ impl PrimaryKeyCache {
     pub fn new() -> Self {
         Self {
             keys: HashMap::new(),
+            canonical_names: HashMap::new(),
         }
     }
 
     /// Discover primary keys from MS SQL system catalogs
     ///
-    /// Queries sys.indexes, sys.index_columns, sys.columns, and sys.tables
-    /// to find primary key columns for all tables in the database.
+    /// Queries sys.indexes, sys.index_columns, sys.columns, sys.tables, and
+    /// sys.schemas to find primary key columns (and the owning schema) for all
+    /// tables in the database.
     pub async fn discover_keys(
         &mut self,
         client: &mut Client<Compat<TcpStream>>,
@@ -50,6 +58,7 @@ impl PrimaryKeyCache {
     ) -> Result<()> {
         let query = "
             SELECT 
+                s.name AS schema_name,
                 t.name AS table_name,
                 c.name AS column_name,
                 ic.key_ordinal
@@ -59,6 +68,7 @@ impl PrimaryKeyCache {
             INNER JOIN sys.columns c ON ic.object_id = c.object_id 
                 AND ic.column_id = c.column_id
             INNER JOIN sys.tables t ON i.object_id = t.object_id
+            INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
             WHERE i.is_primary_key = 1
             ORDER BY t.name, ic.key_ordinal
         ";
@@ -67,13 +77,29 @@ impl PrimaryKeyCache {
         let rows = stream.into_first_result().await?;
 
         for row in rows {
-            let table_name: &str = row.get(0).ok_or_else(|| anyhow!("Missing table_name"))?;
-            let column_name: &str = row.get(1).ok_or_else(|| anyhow!("Missing column_name"))?;
+            let schema_name: &str = row.get(0).ok_or_else(|| anyhow!("Missing schema_name"))?;
+            let table_name: &str = row.get(1).ok_or_else(|| anyhow!("Missing table_name"))?;
+            let column_name: &str = row.get(2).ok_or_else(|| anyhow!("Missing column_name"))?;
 
             self.keys
                 .entry(table_name.to_string())
                 .or_default()
                 .push(column_name.to_string());
+
+            self.canonical_names
+                .entry(table_name.to_lowercase())
+                .and_modify(|existing| {
+                    let new_name = format!("{schema_name}.{table_name}");
+                    if *existing != new_name {
+                        warn!(
+                            "Table '{table_name}' exists in schemas '{}' and '{schema_name}'; \
+                             unqualified references will resolve to element-ID prefix '{existing}'. \
+                             Use schema-qualified table names in config to disambiguate.",
+                            existing.split('.').next().unwrap_or("?")
+                        );
+                    }
+                })
+                .or_insert_with(|| format!("{schema_name}.{table_name}"));
         }
 
         // Merge with configured table_keys (which take precedence)
@@ -107,9 +133,45 @@ impl PrimaryKeyCache {
         None
     }
 
+    /// Resolve any table reference to a canonical `schema.table` name.
+    ///
+    /// This makes the element-ID prefix independent of how the table was written
+    /// in config, while never collapsing distinct schemas:
+    /// - An **unqualified** name (`Products`) adopts the discovered catalog name
+    ///   (e.g. `dbo.Products`), or defaults to `dbo.<table>` when not discovered.
+    /// - A **schema-qualified** name (`dbo.Products`) adopts the catalog's casing
+    ///   only when the schema matches; an explicit, non-matching schema (e.g.
+    ///   `sales.Products` when the catalog discovered `dbo.Products`) is preserved
+    ///   as-is so same-named tables in different schemas get distinct element IDs.
+    pub fn canonical_table(&self, table: &str) -> String {
+        match table.split_once('.') {
+            Some((schema, tbl)) => {
+                // Only adopt the catalog canonical when it is the same schema.
+                if let Some(canonical) = self.canonical_names.get(&tbl.to_lowercase()) {
+                    if let Some((canonical_schema, _)) = canonical.split_once('.') {
+                        if canonical_schema.eq_ignore_ascii_case(schema) {
+                            return canonical.clone();
+                        }
+                    }
+                }
+                // Preserve the explicit schema (different schema, or undiscovered).
+                format!("{schema}.{tbl}")
+            }
+            None => self
+                .canonical_names
+                .get(&table.to_lowercase())
+                .cloned()
+                .unwrap_or_else(|| format!("dbo.{table}")),
+        }
+    }
+
     /// Generate element ID from a row using primary key values
     ///
-    /// Format: `{table_name}:{key_values}`
+    /// Format: `{canonical_schema.table}:{key_values}`
+    ///
+    /// The table portion is canonicalized via [`canonical_table`](Self::canonical_table)
+    /// so that the bootstrap and CDC paths produce identical element IDs for the
+    /// same row even when configured with differently-formatted table names.
     ///
     /// # Arguments
     /// * `table` - Table name
@@ -165,7 +227,11 @@ impl PrimaryKeyCache {
                      Using remaining key columns for element ID."
                 );
             }
-            Ok(format!("{}:{}", table, key_values.join("_")))
+            Ok(format!(
+                "{}:{}",
+                self.canonical_table(table),
+                key_values.join("_")
+            ))
         } else {
             // All primary key values are NULL - this is an error
             Err(MsSqlError::PrimaryKey(PrimaryKeyError::AllNull {
@@ -215,5 +281,32 @@ mod tests {
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0], "order_id");
         assert_eq!(keys[1], "product_id");
+    }
+
+    #[test]
+    fn test_canonical_table_uses_catalog() {
+        let mut cache = PrimaryKeyCache::new();
+        cache
+            .canonical_names
+            .insert("products".to_string(), "dbo.Products".to_string());
+
+        // Unqualified and same-schema inputs resolve to the catalog casing.
+        assert_eq!(cache.canonical_table("Products"), "dbo.Products");
+        assert_eq!(cache.canonical_table("dbo.Products"), "dbo.Products");
+        assert_eq!(cache.canonical_table("DBO.products"), "dbo.Products");
+        // An explicit, different schema is preserved (no cross-schema collapse).
+        assert_eq!(cache.canonical_table("sales.products"), "sales.products");
+    }
+
+    #[test]
+    fn test_canonical_table_fallback_without_catalog() {
+        let cache = PrimaryKeyCache::new();
+
+        // Bare and schema-qualified inputs both default to a `dbo.`-qualified
+        // canonical name, so bootstrap and CDC still agree.
+        assert_eq!(cache.canonical_table("Products"), "dbo.Products");
+        assert_eq!(cache.canonical_table("dbo.Products"), "dbo.Products");
+        // An explicit non-default schema is preserved.
+        assert_eq!(cache.canonical_table("sales.Orders"), "sales.Orders");
     }
 }
