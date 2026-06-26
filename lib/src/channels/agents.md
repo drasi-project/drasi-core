@@ -2,17 +2,25 @@
 
 ## FFI Boundary Warning
 
-Several types in this directory cross the dynamic plugin FFI boundary. They are passed
-as opaque pointers inside `#[repr(C)]` structs or have their fields extracted into
-FFI-safe representations.
+Several types in this directory cross the dynamic plugin FFI boundary. Rich
+`repr(Rust)` event payloads (`SourceEventWrapper`, `BootstrapEvent`,
+`QueryResult`) cross **by value as serialized MessagePack bytes** (issue #602) —
+they must keep their `serde` derives. Simple enums are mapped to `#[repr(C)]`
+mirrors.
+
+> **Do not** transfer these `repr(Rust)` types as opaque `Box::into_raw` /
+> `Box::from_raw` pointers: `repr(Rust)` has no stable cross-cdylib layout and
+> `bytes::Bytes`/`Arc<str>` carry module-local pointers, which caused #602's heap
+> corruption. The SDK version check validates only the `#[repr(C)]` envelope ABI,
+> not the payload layout.
 
 ### Types that cross FFI
 
 | Type | File | How it crosses | FFI wrapper |
 |------|------|---------------|-------------|
-| `SourceEventWrapper` | `events.rs` | Opaque pointer (`Box<SourceEventWrapper>` → `*mut c_void`) | `FfiSourceEvent.opaque` |
-| `BootstrapEvent` | `events.rs` | Opaque pointer (`Box<BootstrapEvent>` → `*mut c_void`) | `FfiBootstrapEvent.opaque` |
-| `QueryResult` | `events.rs` | Opaque pointer (`Box<QueryResult>` → `*mut c_void`) | `ReactionVtable.enqueue_query_result_fn` arg |
+| `SourceEventWrapper` | `events.rs` | Serialized `SourceEventPayload` bytes | `FfiSourceEvent.payload_ptr` |
+| `BootstrapEvent` | `events.rs` | Serialized `BootstrapEventPayload` bytes | `FfiBootstrapEvent.payload_ptr` |
+| `QueryResult` | `events.rs` | Serialized `QueryResult` bytes | `FfiQueryResult.payload_ptr` |
 | `SubscriptionResponse` | `events.rs` | Converted field-by-field to `FfiSubscriptionResponse` | `FfiSubscriptionResponse` |
 | `ComponentStatus` | `events.rs` | Mapped to `FfiComponentStatus` enum | `FfiComponentStatus` |
 | `DispatchMode` | `dispatcher.rs` | Mapped to `FfiDispatchMode` enum | `FfiDispatchMode` |
