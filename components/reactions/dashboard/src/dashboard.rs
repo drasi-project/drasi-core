@@ -53,6 +53,11 @@ pub struct DashboardReaction {
     websocket_hub: WebSocketHub,
     snapshot_store: QuerySnapshotStore,
     task_handles: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
+    server_handle: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
+    /// Signals the HTTP/WebSocket server to shut down gracefully. `true` means
+    /// "shut down now": the axum server stops accepting and closes idle
+    /// keep-alive connections, and WebSocket handlers terminate.
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
     predefined_dashboards: Vec<DashboardConfig>,
 }
 
@@ -90,6 +95,8 @@ impl DashboardReaction {
             websocket_hub: WebSocketHub::new(WEBSOCKET_BROADCAST_CAPACITY),
             snapshot_store: QuerySnapshotStore::new(),
             task_handles: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            server_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            shutdown_tx: tokio::sync::watch::channel(false).0,
             predefined_dashboards,
         }
     }
@@ -106,7 +113,19 @@ fn serve_asset(path: &str) -> Response {
     match DashboardAssets::get(effective_path) {
         Some(content) => {
             let mime = content.metadata.mimetype();
-            ([(header::CONTENT_TYPE, mime)], content.data.into_owned()).into_response()
+            // Force revalidation so a browser tab can't serve a stale shell/JS
+            // from its in-memory cache after the reaction is restarted.
+            (
+                [
+                    (header::CONTENT_TYPE, mime.to_string()),
+                    (
+                        header::CACHE_CONTROL,
+                        "no-cache, no-store, must-revalidate".to_string(),
+                    ),
+                ],
+                content.data.into_owned(),
+            )
+                .into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
@@ -283,6 +302,33 @@ impl Reaction for DashboardReaction {
             .await
             .and_then(|ctx| ctx.snapshot_fetcher.clone());
 
+        // Seed the accumulated snapshot store from the bootstrap snapshot so the
+        // live WebSocket stream starts from the same baseline the fallback fetcher
+        // reads, instead of starting empty (see issue #605). Seeding is best-effort:
+        // failures (e.g. bootstrap not yet complete) are logged and skipped, and the
+        // fallback fetcher in the API still serves initial state.
+        if let Some(fetcher) = snapshot_fetcher.as_ref() {
+            for query_id in &self.base.queries {
+                match fetcher.fetch_snapshot(query_id).await {
+                    Ok(stream) => {
+                        let rows = stream.collect_vec().await;
+                        let count = rows.len();
+                        self.snapshot_store.seed_rows(query_id, rows).await;
+                        debug!(
+                            "[{}] seeded {count} bootstrap row(s) for query '{query_id}'",
+                            self.base.id
+                        );
+                    }
+                    Err(err) => {
+                        debug!(
+                            "[{}] could not seed bootstrap snapshot for query '{query_id}': {err}",
+                            self.base.id
+                        );
+                    }
+                }
+            }
+        }
+
         let api_state = ApiState::new(
             self.base.id.clone(),
             self.base.queries.clone(),
@@ -293,6 +339,11 @@ impl Reaction for DashboardReaction {
         let websocket_hub = self.websocket_hub.clone();
         let query_ids = self.base.queries.clone();
         let server_status_handle = self.base.status_handle();
+        // Reset the shutdown flag for this run (supports stop/start cycles) and
+        // derive receivers for the server and per-connection WebSocket handlers.
+        let _ = self.shutdown_tx.send(false);
+        let mut server_shutdown_rx = self.shutdown_tx.subscribe();
+        let ws_shutdown_rx = self.shutdown_tx.subscribe();
         let server_handle = tokio::spawn(async move {
             let cors = CorsLayer::new()
                 .allow_origin(tower_http::cors::AllowOrigin::exact(
@@ -311,6 +362,7 @@ impl Reaction for DashboardReaction {
 
             let websocket_hub_for_route = websocket_hub.clone();
             let query_ids_for_route = query_ids.clone();
+            let ws_shutdown_for_route = ws_shutdown_rx.clone();
             let app = Router::new()
                 .route("/", get(index_handler))
                 .route("/dashboard/:id", get(dashboard_page_handler))
@@ -322,6 +374,7 @@ impl Reaction for DashboardReaction {
                             upgrade,
                             websocket_hub_for_route.clone(),
                             query_ids_for_route.clone(),
+                            ws_shutdown_for_route.clone(),
                         )
                     }),
                 )
@@ -334,7 +387,12 @@ impl Reaction for DashboardReaction {
                 .unwrap_or_else(|_| format!("{host}:{port}"));
             info!("dashboard server listening on {bound_addr}");
 
-            if let Err(err) = axum::serve(listener, app).await {
+            let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+                // Resolves when stop() sets the flag to `true`, or if the sender
+                // is dropped (treated as shutdown).
+                let _ = server_shutdown_rx.wait_for(|signalled| *signalled).await;
+            });
+            if let Err(err) = server.await {
                 error!("dashboard server error: {err}");
                 server_status_handle
                     .set_status(
@@ -344,13 +402,35 @@ impl Reaction for DashboardReaction {
                     .await;
             }
         });
-        self.task_handles.lock().await.push(server_handle);
+        *self.server_handle.lock().await = Some(server_handle);
 
         Ok(())
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
         self.base.stop_common().await?;
+
+        // Signal the HTTP/WebSocket server to shut down gracefully. This stops
+        // accepting new connections AND closes idle keep-alive connections and
+        // active WebSockets, so a browser tab pointed at the old server can't
+        // reuse a pooled connection on refresh (otherwise the new reaction is
+        // shadowed by orphaned connection tasks from the old one).
+        let _ = self.shutdown_tx.send(true);
+
+        // Give the server a bounded window to drain and close connections, then
+        // abort it as a fallback if graceful shutdown stalls.
+        if let Some(mut handle) = self.server_handle.lock().await.take() {
+            if tokio::time::timeout(Duration::from_secs(5), &mut handle)
+                .await
+                .is_err()
+            {
+                debug!(
+                    "[{}] dashboard server did not shut down within timeout; aborting",
+                    self.base.id
+                );
+                handle.abort();
+            }
+        }
 
         let mut task_handles = self.task_handles.lock().await;
         for handle in task_handles.drain(..) {

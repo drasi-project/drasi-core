@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, watch, RwLock};
 
 /// Supported client-to-server WebSocket messages.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -225,7 +225,14 @@ impl QuerySnapshotStore {
         for diff in &query_result.results {
             match diff {
                 ResultDiff::Add { data, .. } => {
-                    snapshot.rows.push(data.clone());
+                    // Insert-of-an-existing-element is an upsert in drasi: replace
+                    // an existing row with the same key instead of appending a
+                    // duplicate (see issue #605).
+                    if let Some(idx) = find_row_index(&snapshot.rows, data) {
+                        snapshot.rows[idx] = data.clone();
+                    } else {
+                        snapshot.rows.push(data.clone());
+                    }
                 }
                 ResultDiff::Delete { data, .. } => {
                     if let Some(idx) = find_row_index(&snapshot.rows, data) {
@@ -243,6 +250,33 @@ impl QuerySnapshotStore {
                     snapshot.aggregation = Some(after.clone());
                 }
                 ResultDiff::Noop => {}
+            }
+        }
+
+        // Evict oldest rows if over limit (FIFO)
+        if snapshot.rows.len() > self.max_rows_per_query {
+            let excess = snapshot.rows.len() - self.max_rows_per_query;
+            snapshot.rows.drain(..excess);
+        }
+    }
+
+    /// Seed the accumulated snapshot for a query with bootstrap rows.
+    ///
+    /// Used to populate the store from the initial bootstrap snapshot so the live
+    /// WebSocket stream starts from the same baseline the fallback fetcher reads
+    /// (see issue #605). To avoid clobbering newer live data that may have already
+    /// arrived, this only inserts rows whose key is not already present; existing
+    /// rows are left untouched. Respects `max_rows_per_query`.
+    pub async fn seed_rows(&self, query_id: &str, rows: Vec<Value>) {
+        if rows.is_empty() {
+            return;
+        }
+        let mut snapshots = self.snapshots.write().await;
+        let snapshot = snapshots.entry(query_id.to_string()).or_default();
+
+        for row in rows {
+            if find_row_index(&snapshot.rows, &row).is_none() {
+                snapshot.rows.push(row);
             }
         }
 
@@ -291,11 +325,17 @@ pub async fn ws_upgrade(
     ws: WebSocketUpgrade,
     hub: WebSocketHub,
     query_ids: Vec<String>,
+    shutdown_rx: watch::Receiver<bool>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, hub, query_ids))
+    ws.on_upgrade(move |socket| handle_socket(socket, hub, query_ids, shutdown_rx))
 }
 
-async fn handle_socket(socket: WebSocket, hub: WebSocketHub, query_ids: Vec<String>) {
+async fn handle_socket(
+    socket: WebSocket,
+    hub: WebSocketHub,
+    query_ids: Vec<String>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
     let (mut sender, mut receiver) = socket.split();
     let mut hub_receiver = hub.subscribe();
 
@@ -382,6 +422,12 @@ async fn handle_socket(socket: WebSocket, hub: WebSocketHub, query_ids: Vec<Stri
     tokio::select! {
         _ = &mut send_task => receive_task.abort(),
         _ = &mut receive_task => send_task.abort(),
+        // Server shutdown: terminate both tasks so the connection closes and the
+        // axum graceful-shutdown can complete promptly.
+        _ = shutdown_rx.wait_for(|signalled| *signalled) => {
+            send_task.abort();
+            receive_task.abort();
+        }
     }
 }
 

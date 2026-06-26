@@ -919,3 +919,136 @@ async fn test_snapshot_serialization_format() {
     assert_eq!(json["rows"].as_array().unwrap().len(), 1);
     assert_eq!(json["aggregation"]["total"], 42);
 }
+
+// -----------------------------------------------------------------------
+// Upsert-on-add and bootstrap seeding (issue #605)
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_snapshot_store_add_upserts_existing_id() {
+    // An `add` for a row whose `id` already exists must replace it (upsert),
+    // not append a duplicate. This is the core of issue #605: the MSSQL source
+    // delivers the first post-bootstrap change to an existing row as `op: add`.
+    let store = QuerySnapshotStore::new();
+    store
+        .apply(&make_query_result(
+            "q1",
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"id": "A1234", "location": "Parking"}),
+                row_signature: 0,
+            }],
+        ))
+        .await;
+    store
+        .apply(&make_query_result(
+            "q1",
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"id": "A1234", "location": "Curbside"}),
+                row_signature: 0,
+            }],
+        ))
+        .await;
+
+    let snapshot = store.get_snapshot("q1").await;
+    assert_eq!(snapshot.rows.len(), 1, "duplicate row was appended");
+    assert_eq!(snapshot.rows[0]["location"], "Curbside");
+}
+
+#[tokio::test]
+async fn test_snapshot_store_add_appends_distinct_ids() {
+    let store = QuerySnapshotStore::new();
+    store
+        .apply(&make_query_result(
+            "q1",
+            vec![
+                ResultDiff::Add {
+                    data: serde_json::json!({"id": "A", "v": 1}),
+                    row_signature: 0,
+                },
+                ResultDiff::Add {
+                    data: serde_json::json!({"id": "B", "v": 2}),
+                    row_signature: 0,
+                },
+            ],
+        ))
+        .await;
+    let snapshot = store.get_snapshot("q1").await;
+    assert_eq!(snapshot.rows.len(), 2);
+}
+
+#[tokio::test]
+async fn test_snapshot_store_seed_rows_populates_store() {
+    let store = QuerySnapshotStore::new();
+    store
+        .seed_rows(
+            "q1",
+            vec![
+                serde_json::json!({"id": "A1234", "location": "Parking"}),
+                serde_json::json!({"id": "B5678", "location": "Parking"}),
+            ],
+        )
+        .await;
+
+    let snapshot = store.get_snapshot("q1").await;
+    assert_eq!(snapshot.rows.len(), 2);
+    assert!(store.has_data("q1").await);
+}
+
+#[tokio::test]
+async fn test_snapshot_store_seeded_row_then_add_upserts() {
+    // The end-to-end #605 scenario: bootstrap seeds a row, then the first
+    // post-bootstrap change arrives as `op: add` and must replace, not duplicate.
+    let store = QuerySnapshotStore::new();
+    store
+        .seed_rows(
+            "q1",
+            vec![serde_json::json!({"id": "A1234", "location": "Parking"})],
+        )
+        .await;
+    store
+        .apply(&make_query_result(
+            "q1",
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"id": "A1234", "location": "Curbside"}),
+                row_signature: 0,
+            }],
+        ))
+        .await;
+
+    let snapshot = store.get_snapshot("q1").await;
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(snapshot.rows[0]["location"], "Curbside");
+}
+
+#[tokio::test]
+async fn test_snapshot_store_seed_rows_does_not_overwrite_existing() {
+    // Seeding must not clobber newer live data that already arrived for a key.
+    let store = QuerySnapshotStore::new();
+    store
+        .apply(&make_query_result(
+            "q1",
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"id": "A1234", "location": "Curbside"}),
+                row_signature: 0,
+            }],
+        ))
+        .await;
+    store
+        .seed_rows(
+            "q1",
+            vec![
+                serde_json::json!({"id": "A1234", "location": "Parking"}),
+                serde_json::json!({"id": "B5678", "location": "Parking"}),
+            ],
+        )
+        .await;
+
+    let snapshot = store.get_snapshot("q1").await;
+    assert_eq!(snapshot.rows.len(), 2);
+    let a = snapshot
+        .rows
+        .iter()
+        .find(|r| r["id"] == "A1234")
+        .expect("A1234 present");
+    assert_eq!(a["location"], "Curbside", "stale seed overwrote live data");
+}

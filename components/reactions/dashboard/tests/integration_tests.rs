@@ -233,3 +233,120 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
 
     Ok(())
 }
+
+/// Regression test for the "stale tab after reaction restart" bug: stopping the
+/// dashboard reaction must gracefully shut the HTTP/WebSocket server down —
+/// closing active WebSocket connections and releasing the listener — so a client
+/// can't keep talking to (or reuse a pooled connection against) the old server.
+#[tokio::test]
+async fn test_dashboard_server_shuts_down_on_stop() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let (mock_source, _source_handle) = MockSource::new("shutdown-source")?;
+
+    let query = Query::cypher("shutdown-query")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("shutdown-source")
+        .auto_start(true)
+        .build();
+
+    let reaction = DashboardReaction::builder("shutdown-dashboard")
+        .with_query("shutdown-query")
+        .with_port(19111)
+        .build()?;
+
+    let core = DrasiLib::builder()
+        .with_id("dashboard-shutdown-core")
+        .with_source(mock_source)
+        .with_query(query)
+        .with_reaction(reaction)
+        .build()
+        .await?;
+
+    core.start().await?;
+
+    // Wait for the server to come up.
+    let client = reqwest::Client::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(resp) = client.get("http://localhost:19111/").send().await {
+            if resp.status().is_success() {
+                break;
+            }
+        }
+        if tokio::time::Instant::now() > deadline {
+            return Err(anyhow::anyhow!("server did not become ready"));
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    // Verify no-cache headers are set on served assets.
+    let root_response = client.get("http://localhost:19111/").send().await?;
+    let cache_control = root_response
+        .headers()
+        .get(reqwest::header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        cache_control.contains("no-cache"),
+        "served assets should carry a no-cache Cache-Control header, got: {cache_control:?}"
+    );
+
+    // Open a live WebSocket so we can observe it being closed on shutdown.
+    let (ws_stream, _) = connect_async("ws://localhost:19111/ws").await?;
+    let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+    ws_sender
+        .send(Message::Text(
+            r#"{"type":"subscribe","query_ids":["shutdown-query"]}"#.to_string(),
+        ))
+        .await?;
+    sleep(Duration::from_millis(50)).await;
+
+    // Stop the reaction (and the rest of the core).
+    core.stop().await?;
+
+    // The active WebSocket must be closed by the graceful shutdown: the stream
+    // should end (None) or error within a short window, rather than hanging open.
+    let ws_closed = timeout(Duration::from_secs(5), async {
+        loop {
+            match ws_receiver.next().await {
+                None => break true,
+                Some(Ok(Message::Close(_))) => break true,
+                Some(Err(_)) => break true,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        ws_closed,
+        "active WebSocket should be closed when the reaction stops"
+    );
+
+    // The HTTP listener must be released: new requests to the old port should
+    // fail (connection refused) once shutdown completes.
+    let released = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match client.get("http://localhost:19111/").send().await {
+                Err(_) => break true,
+                Ok(_) => {
+                    if tokio::time::Instant::now() > deadline {
+                        break false;
+                    }
+                    sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+    };
+    assert!(
+        released,
+        "HTTP server should stop accepting connections after the reaction stops"
+    );
+
+    Ok(())
+}

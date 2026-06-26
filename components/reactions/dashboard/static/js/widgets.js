@@ -345,7 +345,14 @@ export function applyResultDiff(runtime, diff) {
 
   if (diff.op === "add") {
     const row = normalizeDiffData(diff);
-    if (row) { runtime.rows.push(row); runtime.latest = row; }
+    if (row) {
+      // Insert-of-an-existing-element is an upsert in drasi: replace an existing
+      // row with the same key instead of appending a duplicate (see issue #605).
+      const idx = findRowIndex(runtime.rows, row);
+      if (idx >= 0) runtime.rows[idx] = row;
+      else runtime.rows.push(row);
+      runtime.latest = row;
+    }
     return;
   }
   if (diff.op === "update") {
