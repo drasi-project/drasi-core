@@ -68,9 +68,26 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
                 return -1;
             }
             let ffi_event = unsafe { &*event };
-            let bootstrap_event = unsafe {
-                let opaque = ffi_event.opaque as *mut drasi_lib::channels::events::BootstrapEvent;
-                std::ptr::read(opaque)
+            // Decode the serialized payload into a plugin-owned BootstrapEvent and
+            // free the producer's buffer via its own deallocator (issue #602: never
+            // reinterpret/drop the other side's repr(Rust) memory).
+            let decoded = if ffi_event.payload_ptr.is_null() || ffi_event.payload_len == 0 {
+                None
+            } else {
+                let slice = unsafe {
+                    std::slice::from_raw_parts(ffi_event.payload_ptr, ffi_event.payload_len)
+                };
+                crate::ffi::payload::decode_bootstrap_event_payload(slice)
+            };
+            if !ffi_event.payload_ptr.is_null() {
+                (ffi_event.payload_drop_fn)(
+                    ffi_event.payload_ptr as *mut u8,
+                    ffi_event.payload_len,
+                );
+            }
+            unsafe { drop(Box::from_raw(event)) };
+            let Some(bootstrap_event) = decoded else {
+                return 0;
             };
             match sender_state.tx.send(bootstrap_event) {
                 Ok(()) => 0,

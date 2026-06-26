@@ -16,8 +16,21 @@
 
 use super::types::FfiStr;
 
-/// The SDK version of this crate. Used for compatibility checks at plugin load time.
-pub const FFI_SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The FFI ABI contract version of this SDK. Used for compatibility checks at
+/// plugin load time: the host (`loader.rs`) rejects any plugin whose reported
+/// `sdk_version` differs in **major.minor** from this value.
+///
+/// This is intentionally **decoupled from the crate release version**
+/// (`CARGO_PKG_VERSION`): it identifies the layout/ABI of the `#[repr(C)]`
+/// envelope structs and the wire format of serialized payloads, not the package
+/// release. **Bump the minor (pre-1.0) on any `#[repr(C)]` layout change or
+/// payload wire-format change.**
+///
+/// History:
+/// - `0.10.0`: source change / bootstrap events now cross the boundary as
+///   serialized (MessagePack) payloads instead of reinterpreted `repr(Rust)`
+///   opaque pointers (fixes #602 cross-cdylib heap corruption).
+pub const FFI_SDK_VERSION: &str = "0.10.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");

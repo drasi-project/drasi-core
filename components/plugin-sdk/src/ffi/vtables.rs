@@ -30,30 +30,64 @@ use super::types::{
 // ============================================================================
 
 /// Represents a source change event that crosses the FFI boundary.
-/// The opaque pointer holds a heap-allocated Rust type (e.g., `SourceEventWrapper`)
-/// that the plugin owns. The FFI metadata fields expose key information so the
-/// host can route/filter without deserializing.
+///
+/// The event is carried as a **serialized, self-describing payload**
+/// ([`crate::ffi::payload::SourceEventPayload`] encoded with `rmp-serde`), not as
+/// a `repr(Rust)` opaque pointer. The producing plugin owns `payload_ptr`; the
+/// host copies/deserializes it into a host-owned `SourceEventWrapper` and then
+/// frees the plugin's buffer via `payload_drop_fn`. Neither side ever reads or
+/// drops the other side's `repr(Rust)` memory (fixes #602).
+///
+/// The envelope struct itself is `#[repr(C)]` POD and is allocated by the plugin
+/// (`Box::into_raw`); the host frees it with `Box::from_raw`, which is sound
+/// because the layout is stable and there is no recursive `Drop`.
 #[repr(C)]
 pub struct FfiSourceEvent {
-    pub opaque: *mut c_void,
-    pub source_id: FfiStr,
-    pub timestamp_us: i64,
+    /// MessagePack-encoded `SourceEventPayload`. Plugin-owned, never null.
+    pub payload_ptr: *const u8,
+    /// Length in bytes of `payload_ptr`.
+    pub payload_len: usize,
+    /// Frees `payload_ptr` using the plugin's allocator. Never null.
+    pub payload_drop_fn: extern "C" fn(*mut u8, usize),
+    /// Operation kind — a cheap routing hint mirrored from the payload.
     pub op: FfiChangeOp,
-    pub label: FfiStr,
-    pub entity_id: FfiStr,
-    pub drop_fn: extern "C" fn(*mut c_void),
+    /// Event timestamp in microseconds — a cheap routing hint mirrored from the payload.
+    pub timestamp_us: i64,
 }
 
 /// Bootstrap event — initial state data loaded before streaming begins.
+///
+/// Carried as a serialized [`crate::ffi::payload::BootstrapEventPayload`]
+/// (`rmp-serde`); see [`FfiSourceEvent`] for the ownership contract.
 #[repr(C)]
 pub struct FfiBootstrapEvent {
-    pub opaque: *mut c_void,
-    pub source_id: FfiStr,
+    /// MessagePack-encoded `BootstrapEventPayload`. Plugin-owned, never null.
+    pub payload_ptr: *const u8,
+    /// Length in bytes of `payload_ptr`.
+    pub payload_len: usize,
+    /// Frees `payload_ptr` using the plugin's allocator. Never null.
+    pub payload_drop_fn: extern "C" fn(*mut u8, usize),
+    /// Event timestamp in microseconds — a cheap routing hint mirrored from the payload.
     pub timestamp_us: i64,
+    /// Sequence number — a cheap routing hint mirrored from the payload.
     pub sequence: u64,
-    pub label: FfiStr,
-    pub entity_id: FfiStr,
-    pub drop_fn: extern "C" fn(*mut c_void),
+}
+
+/// A `QueryResult` delivered from the host to a reaction plugin.
+///
+/// Carried as a serialized (MessagePack via `rmp-serde`) `QueryResult` byte
+/// buffer, **not** a reinterpreted `repr(Rust)` opaque pointer (issue #602). The
+/// **host** owns `payload_ptr`; the consuming plugin deserializes its own
+/// `QueryResult` and frees the host's buffer via `payload_drop_fn`. The plugin
+/// frees the `#[repr(C)]` envelope itself with `Box::from_raw`.
+#[repr(C)]
+pub struct FfiQueryResult {
+    /// MessagePack-encoded `QueryResult`. Host-owned, never null.
+    pub payload_ptr: *const u8,
+    /// Length in bytes of `payload_ptr`.
+    pub payload_len: usize,
+    /// Frees `payload_ptr` using the host's allocator. Never null.
+    pub payload_drop_fn: extern "C" fn(*mut u8, usize),
 }
 
 // ============================================================================

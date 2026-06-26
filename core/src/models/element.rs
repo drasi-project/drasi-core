@@ -17,11 +17,13 @@ use std::{
     sync::Arc,
 };
 
+use serde::{Deserialize, Serialize};
+
 use crate::evaluation::variable_value::VariableValue;
 
 use super::{ElementPropertyMap, ElementValue};
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ElementReference {
     pub source_id: Arc<str>,
     pub element_id: Arc<str>,
@@ -92,7 +94,7 @@ pub fn validate_effective_from(value: ElementTimestamp) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ElementMetadata {
     pub reference: ElementReference,
     pub labels: Arc<[Arc<str>]>,
@@ -113,7 +115,7 @@ impl Display for ElementMetadata {
     }
 }
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Element {
     // Incoming changes get turned into an Element
     Node {

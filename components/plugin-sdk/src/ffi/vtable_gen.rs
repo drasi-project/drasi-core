@@ -42,6 +42,7 @@ use drasi_lib::{ComponentStatus, DispatchMode, SourceRuntimeContext, StateStoreP
 use super::bootstrap_proxy::FfiBootstrapProviderProxy;
 use super::callbacks::FfiLifecycleEvent;
 use super::callbacks::FfiLifecycleEventType;
+use super::payload::{BootstrapEventPayload, SourceEventPayload};
 use super::state_store_proxy::FfiStateStoreProxy;
 use super::types::*;
 use super::vtables::*;
@@ -65,6 +66,64 @@ fn ffi_guard<T, F: FnOnce() -> T>(default: T, f: F) -> T {
         Ok(v) => v,
         Err(_) => default,
     }
+}
+
+/// Serialize an FFI event payload (`SourceEventPayload` / `BootstrapEventPayload`)
+/// to a heap-allocated MessagePack byte buffer for cross-cdylib transfer.
+///
+/// Returns `(ptr, len)`; the buffer must be freed by the consuming side via
+/// [`ffi_drop_payload_bytes`] (passed as the envelope's `payload_drop_fn`). This
+/// replaces the previous `repr(Rust)` opaque-pointer transfer that caused #602.
+fn serialize_ffi_payload<T: serde::Serialize>(value: &T) -> (*const u8, usize) {
+    // `to_vec_named` encodes structs as field-name maps, which (unlike the
+    // compact positional encoding) tolerates `#[serde(skip_serializing_if)]`
+    // fields and field additions across SDK versions.
+    let bytes = match rmp_serde::to_vec_named(value) {
+        Ok(b) => b,
+        Err(e) => {
+            log::error!("Failed to serialize FFI event payload: {e}");
+            Vec::new()
+        }
+    };
+    let len = bytes.len();
+    let ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+    (ptr, len)
+}
+
+/// Frees a payload buffer produced by [`serialize_ffi_payload`].
+extern "C" fn ffi_drop_payload_bytes(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() && len > 0 {
+        unsafe {
+            let slice = std::slice::from_raw_parts_mut(ptr, len);
+            drop(Box::from_raw(slice as *mut [u8]));
+        }
+    }
+}
+
+/// Decode a host-sent `*mut FfiQueryResult` into a plugin-owned `QueryResult`.
+///
+/// Deserializes the host's MessagePack buffer, frees that buffer via the host's
+/// `payload_drop_fn`, and frees the `#[repr(C)]` envelope. Returns `None` if the
+/// payload could not be decoded (buffers are freed regardless). The host never
+/// hands the plugin a reinterpreted `repr(Rust)` pointer (issue #602).
+///
+/// # Safety
+/// `ptr` must be a non-null `*mut FfiQueryResult` produced by the host.
+unsafe fn decode_ffi_query_result(
+    ptr: *mut FfiQueryResult,
+) -> Option<drasi_lib::channels::QueryResult> {
+    let ffi = unsafe { &*ptr };
+    let decoded = if ffi.payload_ptr.is_null() || ffi.payload_len == 0 {
+        None
+    } else {
+        let slice = unsafe { std::slice::from_raw_parts(ffi.payload_ptr, ffi.payload_len) };
+        super::payload::decode_query_result(slice)
+    };
+    if !ffi.payload_ptr.is_null() {
+        (ffi.payload_drop_fn)(ffi.payload_ptr as *mut u8, ffi.payload_len);
+    }
+    unsafe { drop(Box::from_raw(ptr)) };
+    decoded
 }
 
 // Compile-time assertions that transmute between raw pointers and callback
@@ -98,17 +157,6 @@ fn dispatch_to_runtime<R: Send + 'static>(
         let _ = tx.send(result);
     });
     rx.recv().expect("plugin runtime task dropped unexpectedly")
-}
-
-/// Helper to extract ElementMetadata from a SourceChange.
-fn source_change_metadata(change: &SourceChange) -> Option<&ElementMetadata> {
-    match change {
-        SourceChange::Insert { element } | SourceChange::Update { element } => {
-            Some(element.get_metadata())
-        }
-        SourceChange::Delete { metadata } => Some(metadata),
-        SourceChange::Future { .. } => None,
-    }
 }
 
 // ============================================================================
@@ -1513,7 +1561,10 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
                     break;
                 }
                 let query_result =
-                    unsafe { *Box::from_raw(result_ptr as *mut drasi_lib::channels::QueryResult) };
+                    match unsafe { decode_ffi_query_result(result_ptr as *mut FfiQueryResult) } {
+                        Some(qr) => qr,
+                        None => continue,
+                    };
                 let inner = unsafe { ptr.as_ref() };
                 if let Err(e) = inner.inner.enqueue_query_result(query_result).await {
                     log::error!("Failed to enqueue query result: {e}");
@@ -1915,10 +1966,12 @@ pub fn build_reaction_vtable_from_boxed(
                     if result_ptr.is_null() {
                         break;
                     }
-                    let query_result = {
-                        let rp = result_ptr;
-                        unsafe { *Box::from_raw(rp as *mut drasi_lib::channels::QueryResult) }
-                    };
+                    let query_result =
+                        match unsafe { decode_ffi_query_result(result_ptr as *mut FfiQueryResult) }
+                        {
+                            Some(qr) => qr,
+                            None => continue,
+                        };
                     if let Err(e) = arc.inner.enqueue_query_result(query_result).await {
                         log::error!("Failed to enqueue query result: {e}");
                     }
@@ -2122,32 +2175,18 @@ pub fn build_bootstrap_provider_vtable(
         // Forward records from std::sync::mpsc to FFI sender
         let mut count: usize = 0;
         while let Ok(record) = std_rx.recv() {
-            let source_id_owned = record.source_id.clone();
-            let timestamp_us = record
-                .timestamp
-                .timestamp_nanos_opt()
-                .map(|n| n / 1000)
-                .unwrap_or(0);
-            let sequence = record.sequence;
-
-            // Extract entity metadata for FFI envelope
-            let entity_id_str = source_change_metadata(&record.change)
-                .map(|m| m.reference.element_id.to_string())
-                .unwrap_or_default();
-            let label_str = source_change_metadata(&record.change)
-                .and_then(|m| m.labels.first().map(|l| l.to_string()))
-                .unwrap_or_default();
-
-            let boxed = Box::new(record);
-            let ptr = Box::into_raw(boxed);
+            // Serialize the event payload for cross-cdylib transfer (issue #602):
+            // never hand the host a reinterpreted `repr(Rust)` pointer.
+            let payload = BootstrapEventPayload::from_event(&record);
+            let timestamp_us = payload.timestamp_us;
+            let sequence = payload.sequence;
+            let (payload_ptr, payload_len) = serialize_ffi_payload(&payload);
             let event = Box::new(FfiBootstrapEvent {
-                opaque: ptr as *mut c_void,
-                source_id: FfiStr::from_str(&source_id_owned),
+                payload_ptr,
+                payload_len,
+                payload_drop_fn: ffi_drop_payload_bytes,
                 timestamp_us,
                 sequence,
-                label: FfiStr::from_str(&label_str),
-                entity_id: FfiStr::from_str(&entity_id_str),
-                drop_fn: bootstrap_event_drop,
             });
             let event_ptr = Box::into_raw(event);
             let result = (send_fn)(sender_state, event_ptr);
@@ -2210,14 +2249,6 @@ pub fn build_bootstrap_provider_vtable(
                 drop(Box::from_raw(slice as *mut [u8]));
             }
         }
-    }
-
-    extern "C" fn bootstrap_event_drop(opaque: *mut c_void) {
-        ffi_guard((), || {
-            if !opaque.is_null() {
-                unsafe { drop(Box::from_raw(opaque as *mut BootstrapEvent)) };
-            }
-        });
     }
 
     extern "C" fn drop_fn(state: *mut c_void) {
@@ -2757,7 +2788,12 @@ fn wrap_subscription_response(
         receiver: Arc<DrasiLibChangeReceiver>,
     }
 
-    /// Convert a SourceEventWrapper into a heap-allocated FfiSourceEvent.
+    /// Serialize a `SourceEventWrapper` into a heap-allocated `FfiSourceEvent`.
+    ///
+    /// The event crosses the cdylib boundary as a MessagePack-encoded
+    /// `SourceEventPayload` (raw bytes), never as a reinterpreted `repr(Rust)`
+    /// pointer. The plugin keeps ownership of its own `wrapper` (dropped here);
+    /// the host deserializes a fresh, host-owned copy. Fixes #602.
     fn wrap_source_event(wrapper: Arc<SourceEventWrapper>) -> *mut FfiSourceEvent {
         let op = match &wrapper.event {
             drasi_lib::channels::events::SourceEvent::Change(change) => match change {
@@ -2768,29 +2804,15 @@ fn wrap_subscription_response(
             },
             _ => FfiChangeOp::Update,
         };
-        let timestamp_us = wrapper
-            .timestamp
-            .timestamp_nanos_opt()
-            .map(|n| n / 1000)
-            .unwrap_or(0);
-        let boxed = Box::new(Arc::try_unwrap(wrapper).unwrap_or_else(|arc| (*arc).clone()));
-        let source_id = FfiStr::from_str(&boxed.source_id);
-        let opaque = Box::into_raw(boxed) as *mut c_void;
-        extern "C" fn drop_wrapper(ptr: *mut c_void) {
-            ffi_guard((), || {
-                if !ptr.is_null() {
-                    unsafe { drop(Box::from_raw(ptr as *mut SourceEventWrapper)) };
-                }
-            });
-        }
+        let payload = SourceEventPayload::from_wrapper(&wrapper);
+        let timestamp_us = payload.timestamp_us;
+        let (payload_ptr, payload_len) = serialize_ffi_payload(&payload);
         Box::into_raw(Box::new(FfiSourceEvent {
-            opaque,
-            source_id,
-            timestamp_us,
+            payload_ptr,
+            payload_len,
+            payload_drop_fn: ffi_drop_payload_bytes,
             op,
-            label: FfiStr::from_str(""),
-            entity_id: FfiStr::from_str(""),
-            drop_fn: drop_wrapper,
+            timestamp_us,
         }))
     }
 
@@ -2905,40 +2927,21 @@ fn wrap_subscription_response(
             receiver: Arc<DrasiLibBootstrapReceiver>,
         }
 
-        /// Convert a BootstrapEvent into a heap-allocated FfiBootstrapEvent.
+        /// Serialize a `BootstrapEvent` into a heap-allocated `FfiBootstrapEvent`.
         ///
-        /// The `source_id` FfiStr borrows from the boxed record (kept alive
-        /// via `opaque`). The `label` and `entity_id` fields use static
-        /// empty strings — the host currently extracts the full event from
-        /// `opaque` and does not read these metadata fields.
+        /// Crosses the boundary as a MessagePack-encoded `BootstrapEventPayload`
+        /// (raw bytes), never as a reinterpreted `repr(Rust)` pointer. Fixes #602.
         fn wrap_bootstrap_event(record: BootstrapEvent) -> *mut FfiBootstrapEvent {
-            let timestamp_us = record
-                .timestamp
-                .timestamp_nanos_opt()
-                .map(|n| n / 1000)
-                .unwrap_or(0);
-            let sequence = record.sequence;
-
-            // Box the record first so FfiStr can borrow from the
-            // heap-stable data inside it (same pattern as wrap_source_event).
-            let boxed = Box::new(record);
-            let source_id = FfiStr::from_str(&boxed.source_id);
-            let opaque = Box::into_raw(boxed) as *mut c_void;
-            extern "C" fn drop_bootstrap(ptr: *mut c_void) {
-                ffi_guard((), || {
-                    if !ptr.is_null() {
-                        unsafe { drop(Box::from_raw(ptr as *mut BootstrapEvent)) };
-                    }
-                });
-            }
+            let payload = BootstrapEventPayload::from_event(&record);
+            let timestamp_us = payload.timestamp_us;
+            let sequence = payload.sequence;
+            let (payload_ptr, payload_len) = serialize_ffi_payload(&payload);
             Box::into_raw(Box::new(FfiBootstrapEvent {
-                opaque,
-                source_id,
+                payload_ptr,
+                payload_len,
+                payload_drop_fn: ffi_drop_payload_bytes,
                 timestamp_us,
                 sequence,
-                label: FfiStr::from_str(""),
-                entity_id: FfiStr::from_str(""),
-                drop_fn: drop_bootstrap,
             }))
         }
 

@@ -27,9 +27,48 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use drasi_lib::channels::events::SourceEventWrapper;
+use drasi_lib::channels::events::{BootstrapEvent, SourceEventWrapper};
 use drasi_lib::channels::ChangeReceiver;
-use drasi_plugin_sdk::ffi::{FfiChangeReceiver, FfiSourceEvent};
+use drasi_plugin_sdk::ffi::payload::{decode_bootstrap_event_payload, decode_source_event_payload};
+use drasi_plugin_sdk::ffi::{FfiBootstrapEvent, FfiChangeReceiver, FfiSourceEvent};
+
+/// Decode a plugin-sent `FfiSourceEvent` into a **host-owned** `SourceEventWrapper`.
+///
+/// The payload crosses the cdylib boundary as MessagePack bytes (issue #602): the
+/// host deserializes its own copy and frees the plugin's buffer via the
+/// plugin-supplied `payload_drop_fn`. The host never reads or drops the plugin's
+/// `repr(Rust)` memory. Returns `None` if the payload cannot be decoded (the
+/// plugin buffer is freed regardless).
+fn decode_source_event(ffi_event: &FfiSourceEvent) -> Option<SourceEventWrapper> {
+    let decoded = if ffi_event.payload_ptr.is_null() || ffi_event.payload_len == 0 {
+        None
+    } else {
+        let slice =
+            unsafe { std::slice::from_raw_parts(ffi_event.payload_ptr, ffi_event.payload_len) };
+        decode_source_event_payload(slice)
+    };
+    // Free the plugin-owned payload buffer with the plugin's own deallocator.
+    if !ffi_event.payload_ptr.is_null() {
+        (ffi_event.payload_drop_fn)(ffi_event.payload_ptr as *mut u8, ffi_event.payload_len);
+    }
+    decoded
+}
+
+/// Decode a plugin-sent `FfiBootstrapEvent` into a host-owned `BootstrapEvent`.
+/// See [`decode_source_event`] for the ownership contract (issue #602).
+fn decode_bootstrap_event(ffi_event: &FfiBootstrapEvent) -> Option<BootstrapEvent> {
+    let decoded = if ffi_event.payload_ptr.is_null() || ffi_event.payload_len == 0 {
+        None
+    } else {
+        let slice =
+            unsafe { std::slice::from_raw_parts(ffi_event.payload_ptr, ffi_event.payload_len) };
+        decode_bootstrap_event_payload(slice)
+    };
+    if !ffi_event.payload_ptr.is_null() {
+        (ffi_event.payload_drop_fn)(ffi_event.payload_ptr as *mut u8, ffi_event.payload_len);
+    }
+    decoded
+}
 
 /// Context passed to the push callback. Holds the std mpsc sender and a
 /// tokio Notify to wake the host receiver.
@@ -69,8 +108,14 @@ fn change_push_callback_inner(ctx: *mut std::ffi::c_void, event: *mut FfiSourceE
     }
 
     let ffi_event = unsafe { &*event };
-    let wrapper = unsafe { *Box::from_raw(ffi_event.opaque as *mut SourceEventWrapper) };
+    let decoded = decode_source_event(ffi_event);
+    // Free the plugin-allocated `#[repr(C)]` envelope (POD; no recursive Drop).
     unsafe { drop(Box::from_raw(event)) };
+
+    let Some(wrapper) = decoded else {
+        // Undecodable payload — skip without tearing down the stream.
+        return true;
+    };
 
     let guard = context.tx.lock().expect("push callback mutex poisoned");
     if let Some(tx) = guard.as_ref() {
@@ -228,10 +273,14 @@ fn bootstrap_push_callback_inner(
     }
 
     let ffi_event = unsafe { &*event };
-    let bootstrap_event = unsafe {
-        *Box::from_raw(ffi_event.opaque as *mut drasi_lib::channels::events::BootstrapEvent)
-    };
+    let decoded = decode_bootstrap_event(ffi_event);
+    // Free the plugin-allocated `#[repr(C)]` envelope (POD; no recursive Drop).
     unsafe { drop(Box::from_raw(event)) };
+
+    let Some(bootstrap_event) = decoded else {
+        // Undecodable payload — skip without tearing down the stream.
+        return true;
+    };
 
     let guard = context
         .tx
@@ -350,5 +399,160 @@ impl BootstrapReceiverProxy {
         });
 
         out_rx
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    //! T2 (part 2) — host-side FFI ownership for issue #602.
+    //!
+    //! These tests drive the **real** host consumer (`decode_source_event` /
+    //! `decode_bootstrap_event`) with an `FfiSourceEvent`/`FfiBootstrapEvent`
+    //! constructed exactly as the plugin producer does, using a call-counting
+    //! `payload_drop_fn`. They assert that:
+    //!   1. the host rebuilds a value-equal, host-owned event, and
+    //!   2. the host frees the plugin's payload buffer **exactly once** via the
+    //!      plugin-supplied `drop_fn` — never reinterpreting/dropping the
+    //!      plugin's `repr(Rust)` memory.
+
+    use super::*;
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+    };
+    use drasi_lib::channels::events::SourceEvent;
+    use drasi_plugin_sdk::ffi::payload::{BootstrapEventPayload, SourceEventPayload};
+    use drasi_plugin_sdk::ffi::FfiChangeOp;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SRC_DROPS: AtomicUsize = AtomicUsize::new(0);
+    static BOOT_DROPS: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn counting_drop_src(ptr: *mut u8, len: usize) {
+        SRC_DROPS.fetch_add(1, Ordering::SeqCst);
+        if !ptr.is_null() && len > 0 {
+            unsafe {
+                drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+            }
+        }
+    }
+
+    extern "C" fn counting_drop_boot(ptr: *mut u8, len: usize) {
+        BOOT_DROPS.fetch_add(1, Ordering::SeqCst);
+        if !ptr.is_null() && len > 0 {
+            unsafe {
+                drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+            }
+        }
+    }
+
+    fn node() -> Element {
+        let mut props = ElementPropertyMap::new();
+        props.insert("plate", ElementValue::String(std::sync::Arc::from("A1234")));
+        Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("src-1", "vehicles:A1234"),
+                labels: std::sync::Arc::from(vec![std::sync::Arc::from("vehicles")]),
+                effective_from: 1_771_000_000_000,
+            },
+            properties: props,
+        }
+    }
+
+    /// Mirrors the plugin producer: serialize the payload (named MessagePack)
+    /// into a heap buffer and build the `#[repr(C)]` envelope.
+    fn make_source_event(payload: &SourceEventPayload) -> *mut FfiSourceEvent {
+        let bytes = rmp_serde::to_vec_named(payload).unwrap();
+        let payload_len = bytes.len();
+        let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+        Box::into_raw(Box::new(FfiSourceEvent {
+            payload_ptr,
+            payload_len,
+            payload_drop_fn: counting_drop_src,
+            op: FfiChangeOp::Insert,
+            timestamp_us: payload.timestamp_us,
+        }))
+    }
+
+    #[test]
+    fn decode_source_event_rebuilds_and_frees_buffer_once() {
+        SRC_DROPS.store(0, Ordering::SeqCst);
+        let payload = SourceEventPayload {
+            source_id: "src-1".to_string(),
+            event: SourceEvent::Change(SourceChange::Insert { element: node() }),
+            timestamp_us: 1_771_000_000_000_000,
+            sequence: Some(99),
+            source_position: Some(b"binlog:1".to_vec()),
+        };
+        let raw = make_source_event(&payload);
+        let ffi = unsafe { &*raw };
+
+        let wrapper = decode_source_event(ffi).expect("host-owned wrapper");
+        assert_eq!(wrapper.source_id, "src-1");
+        assert_eq!(wrapper.sequence, Some(99));
+        assert_eq!(wrapper.source_position.as_deref(), Some(&b"binlog:1"[..]));
+        assert_eq!(wrapper.event, payload.event);
+
+        // The plugin's payload buffer was freed exactly once, by the host
+        // calling the plugin-supplied drop_fn.
+        assert_eq!(SRC_DROPS.load(Ordering::SeqCst), 1);
+
+        // The host owns `wrapper`; dropping it must not touch the (already freed)
+        // plugin buffer or double-free.
+        drop(wrapper);
+        assert_eq!(SRC_DROPS.load(Ordering::SeqCst), 1);
+
+        // Free the #[repr(C)] envelope (as the real callback does).
+        unsafe { drop(Box::from_raw(raw)) };
+    }
+
+    #[test]
+    fn decode_source_event_handles_undecodable_payload_without_leak() {
+        SRC_DROPS.store(0, Ordering::SeqCst);
+        // Garbage bytes that are not a valid SourceEventPayload.
+        let bytes = vec![0xFFu8; 8];
+        let payload_len = bytes.len();
+        let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+        let raw = Box::into_raw(Box::new(FfiSourceEvent {
+            payload_ptr,
+            payload_len,
+            payload_drop_fn: counting_drop_src,
+            op: FfiChangeOp::Insert,
+            timestamp_us: 0,
+        }));
+        let ffi = unsafe { &*raw };
+
+        assert!(decode_source_event(ffi).is_none());
+        // Buffer still freed exactly once even though decode failed.
+        assert_eq!(SRC_DROPS.load(Ordering::SeqCst), 1);
+        unsafe { drop(Box::from_raw(raw)) };
+    }
+
+    #[test]
+    fn decode_bootstrap_event_rebuilds_and_frees_buffer_once() {
+        BOOT_DROPS.store(0, Ordering::SeqCst);
+        let payload = BootstrapEventPayload {
+            source_id: "src-1".to_string(),
+            change: SourceChange::Insert { element: node() },
+            timestamp_us: 1_771_000_000_000_000,
+            sequence: 5,
+        };
+        let bytes = rmp_serde::to_vec_named(&payload).unwrap();
+        let payload_len = bytes.len();
+        let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+        let raw = Box::into_raw(Box::new(FfiBootstrapEvent {
+            payload_ptr,
+            payload_len,
+            payload_drop_fn: counting_drop_boot,
+            timestamp_us: payload.timestamp_us,
+            sequence: 5,
+        }));
+        let ffi = unsafe { &*raw };
+
+        let event = decode_bootstrap_event(ffi).expect("host-owned bootstrap event");
+        assert_eq!(event.source_id, "src-1");
+        assert_eq!(event.sequence, 5);
+        assert_eq!(event.change, payload.change);
+        assert_eq!(BOOT_DROPS.load(Ordering::SeqCst), 1);
+        unsafe { drop(Box::from_raw(raw)) };
     }
 }
