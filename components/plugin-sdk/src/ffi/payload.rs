@@ -40,6 +40,64 @@ use drasi_core::models::SourceChange;
 use drasi_lib::channels::events::{BootstrapEvent, SourceEvent, SourceEventWrapper};
 use serde::{Deserialize, Serialize};
 
+/// Maximum accepted serialized FFI payload size.
+///
+/// Defends the consuming process against unbounded allocation from a buggy or
+/// malicious peer that supplies an enormous `payload_len`. 256 MiB is far larger
+/// than any realistic single change event / query result, so legitimate traffic
+/// is never affected. This bound also caps the `source_position` bytes, which are
+/// carried inside the payload.
+pub const MAX_FFI_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
+
+/// Read a peer-owned serialized payload buffer, decode it, and free the peer's
+/// buffer via `drop_fn`.
+///
+/// This is the single, hardened entry point used by **every** FFI payload
+/// consumer (source events, bootstrap events, query results, on both the host and
+/// plugin sides). It defends against a buggy or malicious producer:
+///
+/// - null / empty buffer → returns `None`;
+/// - `len > MAX_FFI_PAYLOAD_BYTES` → rejected (no allocation) to prevent a
+///   memory-exhaustion DoS;
+/// - **null `drop_fn`** → the buffer is leaked with a logged error instead of
+///   calling a null function pointer (which would crash the process — there is no
+///   panic recovery across `extern "C"`). The ABI requires `drop_fn` to be
+///   non-null; this guard is defense-in-depth.
+///
+/// The producer's buffer is always freed when `drop_fn` is non-null, even if
+/// decoding fails.
+///
+/// # Safety
+/// `ptr` / `len` must describe a buffer produced by the peer's serializer that is
+/// owned by the peer and freeable by `drop_fn`.
+pub unsafe fn take_ffi_payload<T>(
+    ptr: *const u8,
+    len: usize,
+    drop_fn: Option<extern "C" fn(*mut u8, usize)>,
+    decode: impl FnOnce(&[u8]) -> Option<T>,
+) -> Option<T> {
+    let decoded = if ptr.is_null() || len == 0 {
+        None
+    } else if len > MAX_FFI_PAYLOAD_BYTES {
+        log::error!("Rejecting oversized FFI payload ({len} bytes > {MAX_FFI_PAYLOAD_BYTES} max)");
+        None
+    } else {
+        decode(unsafe { std::slice::from_raw_parts(ptr, len) })
+    };
+    // Free the producer's buffer. A null `drop_fn` (ABI violation by a buggy or
+    // malicious producer) leaks the buffer with a logged error rather than
+    // crashing the process — there is no panic recovery across `extern "C"`.
+    if !ptr.is_null() {
+        match drop_fn {
+            Some(free) => free(ptr as *mut u8, len),
+            None => {
+                log::error!("FFI contract violation: null payload_drop_fn; leaking {len} bytes")
+            }
+        }
+    }
+    decoded
+}
+
 /// Serialized form of a `SourceEventWrapper` for FFI transfer.
 ///
 /// Carries everything the host needs to rebuild a host-owned
@@ -288,5 +346,119 @@ mod tests {
         assert_eq!(decoded.query_id, qr.query_id);
         assert_eq!(decoded.sequence, qr.sequence);
         assert!(decoded.profiling.is_none());
+    }
+
+    // ---- take_ffi_payload hardening (security review) ----
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Dedicated per-test counters (no shared static / `store(0)` resets that would
+    // race under parallel test execution).
+    static DROPS_DECODE: AtomicUsize = AtomicUsize::new(0);
+    static DROPS_OVERSIZED: AtomicUsize = AtomicUsize::new(0);
+
+    /// Counts calls but never frees, so a test can pass a deliberately wrong
+    /// `len` (e.g. the oversized case) without triggering an invalid free.
+    extern "C" fn count_drop_decode(_ptr: *mut u8, _len: usize) {
+        DROPS_DECODE.fetch_add(1, Ordering::SeqCst);
+    }
+    extern "C" fn count_drop_oversized(_ptr: *mut u8, _len: usize) {
+        DROPS_OVERSIZED.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn encoded_source_event() -> Vec<u8> {
+        let wrapper = SourceEventWrapper {
+            source_id: "src-1".to_string(),
+            event: SourceEvent::Change(SourceChange::Insert {
+                element: sample_node(),
+            }),
+            timestamp: Utc::now(),
+            profiling: None,
+            sequence: Some(1),
+            source_position: None,
+        };
+        let payload = SourceEventPayload::from_wrapper(&wrapper);
+        rmp_serde::to_vec_named(&payload).unwrap()
+    }
+
+    #[test]
+    fn take_ffi_payload_decodes_and_calls_drop() {
+        let bytes = encoded_source_event();
+        let len = bytes.len();
+        let ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+
+        let decoded = unsafe {
+            take_ffi_payload(
+                ptr,
+                len,
+                Some(count_drop_decode),
+                decode_source_event_payload,
+            )
+        };
+        assert!(decoded.is_some());
+        assert_eq!(DROPS_DECODE.load(Ordering::SeqCst), 1);
+
+        unsafe {
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                ptr as *mut u8,
+                len,
+            )))
+        };
+    }
+
+    #[test]
+    fn take_ffi_payload_rejects_oversized_without_reading() {
+        // A real (small) buffer, but we lie about its length to exceed the cap.
+        // `take_ffi_payload` must reject it *before* slicing/decoding (no OOB read),
+        // and must still invoke the producer's drop fn.
+        let bytes = vec![0u8; 16];
+        let real_len = bytes.len();
+        let ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+
+        let decoded = unsafe {
+            take_ffi_payload(
+                ptr,
+                MAX_FFI_PAYLOAD_BYTES + 1,
+                Some(count_drop_oversized),
+                decode_source_event_payload,
+            )
+        };
+        assert!(decoded.is_none(), "oversized payload must be rejected");
+        assert_eq!(
+            DROPS_OVERSIZED.load(Ordering::SeqCst),
+            1,
+            "buffer must still be freed"
+        );
+
+        unsafe {
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                ptr as *mut u8,
+                real_len,
+            )))
+        };
+    }
+
+    #[test]
+    fn take_ffi_payload_null_drop_fn_does_not_crash() {
+        // A buggy/malicious producer setting `drop_fn = None` (null) must not crash
+        // the process (no panic recovery across `extern "C"`). The buffer leaks, but
+        // the consumer stays alive and still decodes the event.
+        let bytes = encoded_source_event();
+        let len = bytes.len();
+        let ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+
+        let decoded = unsafe { take_ffi_payload(ptr, len, None, decode_source_event_payload) };
+        assert!(
+            decoded.is_some(),
+            "decode should still succeed; only the free is skipped"
+        );
+
+        // Buffer was leaked (drop fn was null) — reclaim it so the test doesn't leak.
+        unsafe {
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                ptr as *mut u8,
+                len,
+            )))
+        };
     }
 }

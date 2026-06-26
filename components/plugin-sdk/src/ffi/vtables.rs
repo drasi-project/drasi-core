@@ -47,8 +47,12 @@ pub struct FfiSourceEvent {
     pub payload_ptr: *const u8,
     /// Length in bytes of `payload_ptr`.
     pub payload_len: usize,
-    /// Frees `payload_ptr` using the plugin's allocator. Never null.
-    pub payload_drop_fn: extern "C" fn(*mut u8, usize),
+    /// Frees `payload_ptr` using the producer's allocator. `None` is tolerated
+    /// (the buffer is then leaked with a logged error) so a buggy/malicious
+    /// producer cannot crash the consumer with a null function pointer.
+    /// `Option<extern "C" fn>` is null-pointer-optimized: same `#[repr(C)]` ABI
+    /// as a bare `extern "C" fn`, with the null bit-pattern decoded as `None`.
+    pub payload_drop_fn: Option<extern "C" fn(*mut u8, usize)>,
     /// Operation kind — a cheap routing hint mirrored from the payload.
     pub op: FfiChangeOp,
     /// Event timestamp in microseconds — a cheap routing hint mirrored from the payload.
@@ -65,8 +69,12 @@ pub struct FfiBootstrapEvent {
     pub payload_ptr: *const u8,
     /// Length in bytes of `payload_ptr`.
     pub payload_len: usize,
-    /// Frees `payload_ptr` using the plugin's allocator. Never null.
-    pub payload_drop_fn: extern "C" fn(*mut u8, usize),
+    /// Frees `payload_ptr` using the producer's allocator. `None` is tolerated
+    /// (the buffer is then leaked with a logged error) so a buggy/malicious
+    /// producer cannot crash the consumer with a null function pointer.
+    /// `Option<extern "C" fn>` is null-pointer-optimized: same `#[repr(C)]` ABI
+    /// as a bare `extern "C" fn`, with the null bit-pattern decoded as `None`.
+    pub payload_drop_fn: Option<extern "C" fn(*mut u8, usize)>,
     /// Event timestamp in microseconds — a cheap routing hint mirrored from the payload.
     pub timestamp_us: i64,
     /// Sequence number — a cheap routing hint mirrored from the payload.
@@ -86,8 +94,12 @@ pub struct FfiQueryResult {
     pub payload_ptr: *const u8,
     /// Length in bytes of `payload_ptr`.
     pub payload_len: usize,
-    /// Frees `payload_ptr` using the host's allocator. Never null.
-    pub payload_drop_fn: extern "C" fn(*mut u8, usize),
+    /// Frees `payload_ptr` using the producer's allocator. `None` is tolerated
+    /// (the buffer is then leaked with a logged error) so a buggy/malicious
+    /// producer cannot crash the consumer with a null function pointer.
+    /// `Option<extern "C" fn>` is null-pointer-optimized: same `#[repr(C)]` ABI
+    /// as a bare `extern "C" fn`, with the null bit-pattern decoded as `None`.
+    pub payload_drop_fn: Option<extern "C" fn(*mut u8, usize)>,
 }
 
 // ============================================================================

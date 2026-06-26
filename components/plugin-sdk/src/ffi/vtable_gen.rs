@@ -114,15 +114,14 @@ unsafe fn decode_ffi_query_result(
     ptr: *mut FfiQueryResult,
 ) -> Option<drasi_lib::channels::QueryResult> {
     let ffi = unsafe { &*ptr };
-    let decoded = if ffi.payload_ptr.is_null() || ffi.payload_len == 0 {
-        None
-    } else {
-        let slice = unsafe { std::slice::from_raw_parts(ffi.payload_ptr, ffi.payload_len) };
-        super::payload::decode_query_result(slice)
+    let decoded = unsafe {
+        super::payload::take_ffi_payload(
+            ffi.payload_ptr,
+            ffi.payload_len,
+            ffi.payload_drop_fn,
+            super::payload::decode_query_result,
+        )
     };
-    if !ffi.payload_ptr.is_null() {
-        (ffi.payload_drop_fn)(ffi.payload_ptr as *mut u8, ffi.payload_len);
-    }
     unsafe { drop(Box::from_raw(ptr)) };
     decoded
 }
@@ -2185,7 +2184,7 @@ pub fn build_bootstrap_provider_vtable(
             let event = Box::new(FfiBootstrapEvent {
                 payload_ptr,
                 payload_len,
-                payload_drop_fn: ffi_drop_payload_bytes,
+                payload_drop_fn: Some(ffi_drop_payload_bytes),
                 timestamp_us,
                 sequence,
             });
@@ -2812,7 +2811,7 @@ fn wrap_subscription_response(
         Box::into_raw(Box::new(FfiSourceEvent {
             payload_ptr,
             payload_len,
-            payload_drop_fn: ffi_drop_payload_bytes,
+            payload_drop_fn: Some(ffi_drop_payload_bytes),
             op,
             timestamp_us,
         }))
@@ -2941,7 +2940,7 @@ fn wrap_subscription_response(
             Box::into_raw(Box::new(FfiBootstrapEvent {
                 payload_ptr,
                 payload_len,
-                payload_drop_fn: ffi_drop_payload_bytes,
+                payload_drop_fn: Some(ffi_drop_payload_bytes),
                 timestamp_us,
                 sequence,
             }))

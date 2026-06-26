@@ -29,7 +29,9 @@ use async_trait::async_trait;
 
 use drasi_lib::channels::events::{BootstrapEvent, SourceEventWrapper};
 use drasi_lib::channels::ChangeReceiver;
-use drasi_plugin_sdk::ffi::payload::{decode_bootstrap_event_payload, decode_source_event_payload};
+use drasi_plugin_sdk::ffi::payload::{
+    decode_bootstrap_event_payload, decode_source_event_payload, take_ffi_payload,
+};
 use drasi_plugin_sdk::ffi::{FfiBootstrapEvent, FfiChangeReceiver, FfiSourceEvent};
 
 /// Decode a plugin-sent `FfiSourceEvent` into a **host-owned** `SourceEventWrapper`.
@@ -38,36 +40,30 @@ use drasi_plugin_sdk::ffi::{FfiBootstrapEvent, FfiChangeReceiver, FfiSourceEvent
 /// host deserializes its own copy and frees the plugin's buffer via the
 /// plugin-supplied `payload_drop_fn`. The host never reads or drops the plugin's
 /// `repr(Rust)` memory. Returns `None` if the payload cannot be decoded (the
-/// plugin buffer is freed regardless).
+/// plugin buffer is freed regardless). Size/null hardening lives in
+/// [`take_ffi_payload`].
 fn decode_source_event(ffi_event: &FfiSourceEvent) -> Option<SourceEventWrapper> {
-    let decoded = if ffi_event.payload_ptr.is_null() || ffi_event.payload_len == 0 {
-        None
-    } else {
-        let slice =
-            unsafe { std::slice::from_raw_parts(ffi_event.payload_ptr, ffi_event.payload_len) };
-        decode_source_event_payload(slice)
-    };
-    // Free the plugin-owned payload buffer with the plugin's own deallocator.
-    if !ffi_event.payload_ptr.is_null() {
-        (ffi_event.payload_drop_fn)(ffi_event.payload_ptr as *mut u8, ffi_event.payload_len);
+    unsafe {
+        take_ffi_payload(
+            ffi_event.payload_ptr,
+            ffi_event.payload_len,
+            ffi_event.payload_drop_fn,
+            decode_source_event_payload,
+        )
     }
-    decoded
 }
 
 /// Decode a plugin-sent `FfiBootstrapEvent` into a host-owned `BootstrapEvent`.
 /// See [`decode_source_event`] for the ownership contract (issue #602).
 fn decode_bootstrap_event(ffi_event: &FfiBootstrapEvent) -> Option<BootstrapEvent> {
-    let decoded = if ffi_event.payload_ptr.is_null() || ffi_event.payload_len == 0 {
-        None
-    } else {
-        let slice =
-            unsafe { std::slice::from_raw_parts(ffi_event.payload_ptr, ffi_event.payload_len) };
-        decode_bootstrap_event_payload(slice)
-    };
-    if !ffi_event.payload_ptr.is_null() {
-        (ffi_event.payload_drop_fn)(ffi_event.payload_ptr as *mut u8, ffi_event.payload_len);
+    unsafe {
+        take_ffi_payload(
+            ffi_event.payload_ptr,
+            ffi_event.payload_len,
+            ffi_event.payload_drop_fn,
+            decode_bootstrap_event_payload,
+        )
     }
-    decoded
 }
 
 /// Context passed to the push callback. Holds the std mpsc sender and a
@@ -476,7 +472,7 @@ mod ownership_tests {
         Box::into_raw(Box::new(FfiSourceEvent {
             payload_ptr,
             payload_len,
-            payload_drop_fn: drop_fn,
+            payload_drop_fn: Some(drop_fn),
             op: FfiChangeOp::Insert,
             timestamp_us: payload.timestamp_us,
         }))
@@ -522,7 +518,7 @@ mod ownership_tests {
         let raw = Box::into_raw(Box::new(FfiSourceEvent {
             payload_ptr,
             payload_len,
-            payload_drop_fn: counting_drop_src_invalid,
+            payload_drop_fn: Some(counting_drop_src_invalid),
             op: FfiChangeOp::Insert,
             timestamp_us: 0,
         }));
@@ -548,7 +544,7 @@ mod ownership_tests {
         let raw = Box::into_raw(Box::new(FfiBootstrapEvent {
             payload_ptr,
             payload_len,
-            payload_drop_fn: counting_drop_boot,
+            payload_drop_fn: Some(counting_drop_boot),
             timestamp_us: payload.timestamp_us,
             sequence: 5,
         }));

@@ -146,7 +146,7 @@ fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c
                 Box::into_raw(Box::new(FfiQueryResult {
                     payload_ptr,
                     payload_len,
-                    payload_drop_fn: drop_query_result_bytes,
+                    payload_drop_fn: Some(drop_query_result_bytes),
                 })) as *mut c_void
             }
             Err(_) => {
