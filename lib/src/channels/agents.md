@@ -20,7 +20,7 @@ mirrors.
 |------|------|---------------|-------------|
 | `SourceEventWrapper` | `events.rs` | Serialized `SourceEventPayload` bytes | `FfiSourceEvent.payload_ptr` |
 | `BootstrapEvent` | `events.rs` | Serialized `BootstrapEventPayload` bytes | `FfiBootstrapEvent.payload_ptr` |
-| `QueryResult` | `events.rs` | Serialized bytes | `FfiQueryResult.payload_ptr` |
+| `QueryResult` | `events.rs` | Serialized `QueryResult` bytes | `FfiQueryResult.payload_ptr` |
 | `SubscriptionResponse` | `events.rs` | Converted field-by-field to `FfiSubscriptionResponse` | `FfiSubscriptionResponse` |
 | `ComponentStatus` | `events.rs` | Mapped to `FfiComponentStatus` enum | `FfiComponentStatus` |
 | `DispatchMode` | `dispatcher.rs` | Mapped to `FfiDispatchMode` enum | `FfiDispatchMode` |

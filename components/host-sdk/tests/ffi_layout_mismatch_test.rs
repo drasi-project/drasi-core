@@ -16,10 +16,13 @@
 //!
 //! Issue #602 was a heap corruption (`free(): invalid pointer`) caused by the
 //! host taking ownership of a plugin-allocated `repr(Rust)` `SourceEventWrapper`
-//! (which embeds `bytes::Bytes` / `Arc<str>`) via `Box::from_raw`. That is sound
-//! only if the host and plugin agree on the `repr(Rust)` layout — which Rust does
-//! not guarantee across independently compiled cdylibs. The fix transfers events
-//! as serialized MessagePack bytes instead.
+//! (which embeds `bytes::Bytes` / `Arc<str>`) via `Box::from_raw`. That is
+//! unconditionally undefined behaviour, for two independent reasons: `repr(Rust)`
+//! has no stable layout across independently compiled cdylibs, *and* `bytes::Bytes`
+//! carries a `&'static Vtable` pointer that is only valid in the producing
+//! module's address space — so even byte-identical layouts would still free a
+//! foreign interior pointer. The fix transfers events as serialized MessagePack
+//! bytes instead.
 //!
 //! This test reproduces the bug **deterministically** by forcing a layout
 //! disagreement: the mock-source cdylib is built with one `-Zlayout-seed` and the

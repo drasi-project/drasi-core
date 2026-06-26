@@ -18,7 +18,7 @@ use super::types::FfiStr;
 
 /// The FFI ABI contract version of this SDK. Used for compatibility checks at
 /// plugin load time: the host (`loader.rs`) rejects any plugin whose reported
-/// `sdk_version` differs in **major.minor** from this value.
+/// `sdk_version` differs in the **major or minor** component from this value.
 ///
 /// This is intentionally **decoupled from the crate release version**
 /// (`CARGO_PKG_VERSION`): it identifies the layout/ABI of the `#[repr(C)]`

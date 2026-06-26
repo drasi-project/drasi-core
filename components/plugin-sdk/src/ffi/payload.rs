@@ -123,6 +123,8 @@ pub struct BootstrapEventPayload {
     pub change: SourceChange,
     /// Event timestamp in microseconds since the Unix epoch.
     pub timestamp_us: i64,
+    /// Monotonic sequence number; always present for bootstrap events
+    /// (unlike `SourceEventPayload::sequence`, which is `None` for volatile sources).
     pub sequence: u64,
 }
 
@@ -218,16 +220,18 @@ pub fn decode_bootstrap_event_payload(bytes: &[u8]) -> Option<BootstrapEvent> {
 }
 
 /// Encode a `QueryResult` to MessagePack bytes for host→plugin FFI transfer.
+///
+/// # Panics
+/// Panics if `QueryResult` fails to serialize. This is unreachable in practice
+/// (serializing an in-memory, properly-derived type with no I/O cannot fail) and
+/// would indicate a programming error such as adding a non-serializable field.
+/// Failing loudly is deliberate: returning an empty buffer would be silently
+/// decoded by the consumer as "no result" — undetectable data loss in a reactive
+/// pipeline.
 pub fn encode_query_result(result: &drasi_lib::channels::QueryResult) -> Vec<u8> {
     // `to_vec_named` (field-name map) tolerates `#[serde(skip_serializing_if)]`
     // fields such as `QueryResult::profiling`; the compact positional encoding
     // would emit fewer elements than the decoder expects.
-    //
-    // Serialization of this in-memory, properly-derived type cannot fail at
-    // runtime (no I/O; no fallible custom `Serialize` impl). If it ever does it
-    // is a programming error — a non-serializable field was added. Returning an
-    // empty buffer would be silently decoded by the consumer as "no result",
-    // i.e. undetectable data loss in a reactive pipeline, so we fail loudly.
     rmp_serde::to_vec_named(result)
         .expect("BUG: failed to encode FFI query result payload (non-serializable field added?)")
 }
