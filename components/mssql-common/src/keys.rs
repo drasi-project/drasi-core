@@ -88,6 +88,17 @@ impl PrimaryKeyCache {
 
             self.canonical_names
                 .entry(table_name.to_lowercase())
+                .and_modify(|existing| {
+                    let new_name = format!("{schema_name}.{table_name}");
+                    if *existing != new_name {
+                        warn!(
+                            "Table '{table_name}' exists in schemas '{}' and '{schema_name}'; \
+                             unqualified references will resolve to element-ID prefix '{existing}'. \
+                             Use schema-qualified table names in config to disambiguate.",
+                            existing.split('.').next().unwrap_or("?")
+                        );
+                    }
+                })
                 .or_insert_with(|| format!("{schema_name}.{table_name}"));
         }
 
