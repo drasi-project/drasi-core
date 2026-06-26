@@ -95,6 +95,18 @@ fn signal_forwarder_done(context: &ResultPushContext) {
 ///
 /// Wrapped in `catch_unwind` because this is `extern "C"` — panics unwinding
 /// across the FFI boundary are undefined behavior.
+extern "C" fn result_push_callback(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c_void {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        result_push_callback_inner(ctx, sentinel)
+    }))
+    .unwrap_or_else(|_| {
+        // On panic, signal done so drop() doesn't deadlock
+        let context = unsafe { &*(ctx as *const ResultPushContext) };
+        signal_forwarder_done(context);
+        std::ptr::null_mut()
+    })
+}
+
 /// Frees a serialized `QueryResult` byte buffer produced by the host in
 /// [`result_push_callback_inner`]. Called by the consuming plugin after it has
 /// deserialized its own copy (issue #602).
@@ -106,18 +118,6 @@ extern "C" fn drop_query_result_bytes(ptr: *mut u8, len: usize) {
             drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
         }
     }
-}
-
-extern "C" fn result_push_callback(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c_void {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        result_push_callback_inner(ctx, sentinel)
-    }))
-    .unwrap_or_else(|_| {
-        // On panic, signal done so drop() doesn't deadlock
-        let context = unsafe { &*(ctx as *const ResultPushContext) };
-        signal_forwarder_done(context);
-        std::ptr::null_mut()
-    })
 }
 
 fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c_void {

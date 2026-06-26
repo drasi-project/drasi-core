@@ -424,20 +424,26 @@ mod ownership_tests {
     use drasi_plugin_sdk::ffi::FfiChangeOp;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    static SRC_DROPS: AtomicUsize = AtomicUsize::new(0);
+    static SRC_DROPS_VALID: AtomicUsize = AtomicUsize::new(0);
+    static SRC_DROPS_INVALID: AtomicUsize = AtomicUsize::new(0);
     static BOOT_DROPS: AtomicUsize = AtomicUsize::new(0);
 
-    extern "C" fn counting_drop_src(ptr: *mut u8, len: usize) {
-        SRC_DROPS.fetch_add(1, Ordering::SeqCst);
-        if !ptr.is_null() && len > 0 {
-            unsafe {
-                drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
-            }
-        }
+    extern "C" fn counting_drop_src_valid(ptr: *mut u8, len: usize) {
+        SRC_DROPS_VALID.fetch_add(1, Ordering::SeqCst);
+        free_bytes(ptr, len);
+    }
+
+    extern "C" fn counting_drop_src_invalid(ptr: *mut u8, len: usize) {
+        SRC_DROPS_INVALID.fetch_add(1, Ordering::SeqCst);
+        free_bytes(ptr, len);
     }
 
     extern "C" fn counting_drop_boot(ptr: *mut u8, len: usize) {
         BOOT_DROPS.fetch_add(1, Ordering::SeqCst);
+        free_bytes(ptr, len);
+    }
+
+    fn free_bytes(ptr: *mut u8, len: usize) {
         if !ptr.is_null() && len > 0 {
             unsafe {
                 drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
@@ -460,14 +466,17 @@ mod ownership_tests {
 
     /// Mirrors the plugin producer: serialize the payload (named MessagePack)
     /// into a heap buffer and build the `#[repr(C)]` envelope.
-    fn make_source_event(payload: &SourceEventPayload) -> *mut FfiSourceEvent {
+    fn make_source_event(
+        payload: &SourceEventPayload,
+        drop_fn: extern "C" fn(*mut u8, usize),
+    ) -> *mut FfiSourceEvent {
         let bytes = rmp_serde::to_vec_named(payload).unwrap();
         let payload_len = bytes.len();
         let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
         Box::into_raw(Box::new(FfiSourceEvent {
             payload_ptr,
             payload_len,
-            payload_drop_fn: counting_drop_src,
+            payload_drop_fn: drop_fn,
             op: FfiChangeOp::Insert,
             timestamp_us: payload.timestamp_us,
         }))
@@ -475,7 +484,6 @@ mod ownership_tests {
 
     #[test]
     fn decode_source_event_rebuilds_and_frees_buffer_once() {
-        SRC_DROPS.store(0, Ordering::SeqCst);
         let payload = SourceEventPayload {
             source_id: "src-1".to_string(),
             event: SourceEvent::Change(SourceChange::Insert { element: node() }),
@@ -483,7 +491,7 @@ mod ownership_tests {
             sequence: Some(99),
             source_position: Some(b"binlog:1".to_vec()),
         };
-        let raw = make_source_event(&payload);
+        let raw = make_source_event(&payload, counting_drop_src_valid);
         let ffi = unsafe { &*raw };
 
         let wrapper = decode_source_event(ffi).expect("host-owned wrapper");
@@ -494,12 +502,12 @@ mod ownership_tests {
 
         // The plugin's payload buffer was freed exactly once, by the host
         // calling the plugin-supplied drop_fn.
-        assert_eq!(SRC_DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(SRC_DROPS_VALID.load(Ordering::SeqCst), 1);
 
         // The host owns `wrapper`; dropping it must not touch the (already freed)
         // plugin buffer or double-free.
         drop(wrapper);
-        assert_eq!(SRC_DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(SRC_DROPS_VALID.load(Ordering::SeqCst), 1);
 
         // Free the #[repr(C)] envelope (as the real callback does).
         unsafe { drop(Box::from_raw(raw)) };
@@ -507,7 +515,6 @@ mod ownership_tests {
 
     #[test]
     fn decode_source_event_handles_undecodable_payload_without_leak() {
-        SRC_DROPS.store(0, Ordering::SeqCst);
         // Garbage bytes that are not a valid SourceEventPayload.
         let bytes = vec![0xFFu8; 8];
         let payload_len = bytes.len();
@@ -515,7 +522,7 @@ mod ownership_tests {
         let raw = Box::into_raw(Box::new(FfiSourceEvent {
             payload_ptr,
             payload_len,
-            payload_drop_fn: counting_drop_src,
+            payload_drop_fn: counting_drop_src_invalid,
             op: FfiChangeOp::Insert,
             timestamp_us: 0,
         }));
@@ -523,13 +530,12 @@ mod ownership_tests {
 
         assert!(decode_source_event(ffi).is_none());
         // Buffer still freed exactly once even though decode failed.
-        assert_eq!(SRC_DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(SRC_DROPS_INVALID.load(Ordering::SeqCst), 1);
         unsafe { drop(Box::from_raw(raw)) };
     }
 
     #[test]
     fn decode_bootstrap_event_rebuilds_and_frees_buffer_once() {
-        BOOT_DROPS.store(0, Ordering::SeqCst);
         let payload = BootstrapEventPayload {
             source_id: "src-1".to_string(),
             change: SourceChange::Insert { element: node() },
