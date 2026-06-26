@@ -1131,3 +1131,35 @@ async fn test_snapshot_store_seed_rows_does_not_overwrite_existing() {
         "stale seed overwrote live data"
     );
 }
+
+#[tokio::test]
+async fn test_snapshot_store_sig0_seed_then_real_signature_upserts() {
+    // FFI backward-compat path: a row may be seeded with signature 0 (id known),
+    // then a live diff arrives carrying the real engine signature. The signature
+    // search must fall through to id/equality so the row is replaced, not
+    // duplicated.
+    let store = QuerySnapshotStore::new();
+    store
+        .seed_rows(
+            "q1",
+            vec![(0, serde_json::json!({"id": "A1234", "location": "Parking"}))],
+        )
+        .await;
+    store
+        .apply(&make_query_result(
+            "q1",
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"id": "A1234", "location": "Curbside"}),
+                row_signature: 42,
+            }],
+        ))
+        .await;
+
+    let snapshot = store.get_snapshot("q1").await;
+    assert_eq!(
+        snapshot.rows.len(),
+        1,
+        "real-signature diff must replace the sig-0 seeded row, not duplicate it"
+    );
+    assert_eq!(snapshot.rows[0].data["location"], "Curbside");
+}

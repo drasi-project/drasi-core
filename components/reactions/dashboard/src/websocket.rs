@@ -371,11 +371,16 @@ fn upsert_row(rows: &mut Vec<SnapshotRow>, row_signature: u64, data: &Value) {
 /// Find a row by its canonical identity.
 ///
 /// Matches on `row_signature` (the engine-stamped identity) when it is known
-/// (non-zero); otherwise falls back to matching by the `id` field, then by full
-/// data equality.
+/// (non-zero); otherwise — or when the signature search misses (e.g. a row was
+/// seeded with signature `0` via the FFI backward-compat fallback) — falls back
+/// to matching by the `id` field, then by full data equality.
 fn find_row_index(rows: &[SnapshotRow], row_signature: u64, data: &Value) -> Option<usize> {
     if row_signature != 0 {
-        return rows.iter().position(|r| r.row_signature == row_signature);
+        if let Some(idx) = rows.iter().position(|r| r.row_signature == row_signature) {
+            return Some(idx);
+        }
+        // Fall through: a previously-seeded row may carry signature 0, so match
+        // it by id/equality rather than appending a duplicate.
     }
     if let Some(target_id) = data.get("id") {
         rows.iter()

@@ -140,6 +140,15 @@ console.log("\n=== applyResultDiff: id/equality fallback (row_signature unknown)
   assertEqual(rt.rows.length, 2, "different signatures with same id are distinct rows");
 }
 
+{
+  // sig-0 seeded row (id known) then real-signature live add must replace it
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", data: { id: "A1234", location: "Parking" } }); // seeded, sig 0
+  applyResultDiff(rt, { op: "add", k: 42, data: { id: "A1234", location: "Curbside" } }); // live, real sig
+  assertEqual(rt.rows.length, 1, "real-signature add replaces sig-0 seeded row (id fallback)");
+  assertEqual(rt.rows[0].location, "Curbside", "row updated to live value");
+}
+
 // ─── Summary ────────────────────────────────────────────────────────
 console.log(`\n${passed + failed} tests, ${passed} passed, ${failed} failed\n`);
 process.exit(failed > 0 ? 1 : 0);

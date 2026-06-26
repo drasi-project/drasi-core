@@ -365,6 +365,17 @@ function findRowIndexByKey(rows, key) {
   return rows.findIndex((r) => rowKey(r) === key);
 }
 
+// Locate a row matching an incoming diff. Matches on row_signature when known,
+// and falls back to the id/equality key when the signature search misses (e.g. a
+// row seeded with an unknown signature) so we replace rather than duplicate.
+function findRowIndexForDiff(rows, sig, data) {
+  if (sig) {
+    const idx = rows.findIndex((r) => rowSig(r.__sig) === sig);
+    if (idx >= 0) return idx;
+  }
+  return findRowIndexByKey(rows, diffKey(0, data));
+}
+
 function normalizeDiffData(diff) {
   if (diff.op === "add" || diff.op === "delete") return diff.data ?? null;
   if (diff.op === "update") return diff.after ?? diff.data ?? null;
@@ -375,14 +386,14 @@ function normalizeDiffData(diff) {
 export function applyResultDiff(runtime, diff) {
   if (!runtime) return;
 
-  const sig = rowSig(diff.k ?? diff.row_signature);
+  const sig = rowSig(diff.k);
 
   if (diff.op === "add") {
     const row = normalizeDiffData(diff);
     if (!row) return;
     // Insert-of-an-existing-element is an upsert in drasi: replace an existing
     // row with the same identity instead of appending a duplicate (issue #605).
-    const idx = findRowIndexByKey(runtime.rows, diffKey(sig, row));
+    const idx = findRowIndexForDiff(runtime.rows, sig, row);
     tagSig(row, sig);
     if (idx >= 0) runtime.rows[idx] = row;
     else runtime.rows.push(row);
@@ -394,9 +405,9 @@ export function applyResultDiff(runtime, diff) {
     if (!after) return;
     // row_signature is stable across an update; match by it first, then fall
     // back to the `before` state, then the `after` key.
-    let idx = sig ? findRowIndexByKey(runtime.rows, `sig:${sig}`) : -1;
+    let idx = sig ? runtime.rows.findIndex((r) => rowSig(r.__sig) === sig) : -1;
     if (idx < 0 && diff.before) idx = findRowIndexByKey(runtime.rows, diffKey(0, diff.before));
-    if (idx < 0) idx = findRowIndexByKey(runtime.rows, diffKey(sig, after));
+    if (idx < 0) idx = findRowIndexByKey(runtime.rows, diffKey(0, after));
     tagSig(after, sig);
     if (idx >= 0) runtime.rows[idx] = after;
     else runtime.rows.push(after);
@@ -405,7 +416,7 @@ export function applyResultDiff(runtime, diff) {
   }
   if (diff.op === "delete") {
     const row = normalizeDiffData(diff);
-    const idx = findRowIndexByKey(runtime.rows, diffKey(sig, row));
+    const idx = findRowIndexForDiff(runtime.rows, sig, row);
     if (idx >= 0) runtime.rows.splice(idx, 1);
     runtime.latest = runtime.rows.length > 0 ? runtime.rows[runtime.rows.length - 1] : null;
     return;
