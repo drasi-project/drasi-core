@@ -78,13 +78,14 @@ fn serialize_ffi_payload<T: serde::Serialize>(value: &T) -> (*const u8, usize) {
     // `to_vec_named` encodes structs as field-name maps, which (unlike the
     // compact positional encoding) tolerates `#[serde(skip_serializing_if)]`
     // fields and field additions across SDK versions.
-    let bytes = match rmp_serde::to_vec_named(value) {
-        Ok(b) => b,
-        Err(e) => {
-            log::error!("Failed to serialize FFI event payload: {e}");
-            Vec::new()
-        }
-    };
+    //
+    // Serialization of a properly-derived, in-memory struct cannot fail at
+    // runtime (no I/O; no fallible custom `Serialize` impl). If it ever does it
+    // is a programming error — a non-serializable field was added. Returning an
+    // empty buffer would be silently decoded by the consumer as "no event", i.e.
+    // undetectable data loss in a reactive pipeline, so we fail loudly instead.
+    let bytes = rmp_serde::to_vec_named(value)
+        .expect("BUG: failed to serialize FFI event payload (non-serializable field added?)");
     let len = bytes.len();
     let ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
     (ptr, len)

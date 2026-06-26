@@ -70,16 +70,9 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
             let ffi_event = unsafe { &*event };
             // Decode the serialized payload into a plugin-owned BootstrapEvent and
             // free the producer's buffer via its own deallocator (issue #602: never
-            // reinterpret/drop the other side's repr(Rust) memory). `take_ffi_payload`
-            // also bounds the size and null-guards the drop fn.
-            let decoded = unsafe {
-                crate::ffi::payload::take_ffi_payload(
-                    ffi_event.payload_ptr,
-                    ffi_event.payload_len,
-                    ffi_event.payload_drop_fn,
-                    crate::ffi::payload::decode_bootstrap_event_payload,
-                )
-            };
+            // reinterpret/drop the other side's repr(Rust) memory). The canonical
+            // consumer also bounds the size and null-guards the drop fn.
+            let decoded = unsafe { crate::ffi::payload::consume_bootstrap_event(ffi_event) };
             unsafe { drop(Box::from_raw(event)) };
             let Some(bootstrap_event) = decoded else {
                 return 0;

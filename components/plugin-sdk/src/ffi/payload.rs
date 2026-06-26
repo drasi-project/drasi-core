@@ -34,6 +34,7 @@
 //! Both the plugin SDK and the host SDK depend on this crate, so they share these
 //! exact struct definitions and therefore agree on the wire schema.
 
+use super::vtables::{FfiBootstrapEvent, FfiSourceEvent};
 use bytes::Bytes;
 use chrono::DateTime;
 use drasi_core::models::SourceChange;
@@ -221,13 +222,14 @@ pub fn encode_query_result(result: &drasi_lib::channels::QueryResult) -> Vec<u8>
     // `to_vec_named` (field-name map) tolerates `#[serde(skip_serializing_if)]`
     // fields such as `QueryResult::profiling`; the compact positional encoding
     // would emit fewer elements than the decoder expects.
-    match rmp_serde::to_vec_named(result) {
-        Ok(b) => b,
-        Err(e) => {
-            log::error!("Failed to encode FFI query result payload: {e}");
-            Vec::new()
-        }
-    }
+    //
+    // Serialization of this in-memory, properly-derived type cannot fail at
+    // runtime (no I/O; no fallible custom `Serialize` impl). If it ever does it
+    // is a programming error — a non-serializable field was added. Returning an
+    // empty buffer would be silently decoded by the consumer as "no result",
+    // i.e. undetectable data loss in a reactive pipeline, so we fail loudly.
+    rmp_serde::to_vec_named(result)
+        .expect("BUG: failed to encode FFI query result payload (non-serializable field added?)")
 }
 
 /// Decode raw MessagePack FFI payload bytes into a `QueryResult`.
@@ -239,6 +241,48 @@ pub fn decode_query_result(bytes: &[u8]) -> Option<drasi_lib::channels::QueryRes
             log::error!("Failed to decode FFI query result payload: {e}");
             None
         }
+    }
+}
+
+/// Consume a peer-produced `FfiSourceEvent`: decode its serialized payload into a
+/// host-owned `SourceEventWrapper` and free the peer's payload buffer via the
+/// envelope's `payload_drop_fn` (delegating null/size hardening to
+/// [`take_ffi_payload`]). The `#[repr(C)]` envelope itself is borrowed and not
+/// freed here.
+///
+/// This is the single canonical source-event consumer shared by every FFI
+/// consumer site (host and plugin), so the decode→free→hardening sequence is
+/// implemented exactly once (issue #602).
+///
+/// # Safety
+/// `ffi` must reference a valid envelope produced by the peer's serializer, whose
+/// `payload_ptr`/`payload_len`/`payload_drop_fn` describe a peer-owned buffer.
+pub unsafe fn consume_source_event(ffi: &FfiSourceEvent) -> Option<SourceEventWrapper> {
+    unsafe {
+        take_ffi_payload(
+            ffi.payload_ptr,
+            ffi.payload_len,
+            ffi.payload_drop_fn,
+            decode_source_event_payload,
+        )
+    }
+}
+
+/// Consume a peer-produced `FfiBootstrapEvent`: decode its serialized payload into
+/// a host-owned `BootstrapEvent` and free the peer's payload buffer via the
+/// envelope's `payload_drop_fn`. The `#[repr(C)]` envelope itself is borrowed and
+/// not freed here. Single canonical bootstrap-event consumer (issue #602).
+///
+/// # Safety
+/// See [`consume_source_event`].
+pub unsafe fn consume_bootstrap_event(ffi: &FfiBootstrapEvent) -> Option<BootstrapEvent> {
+    unsafe {
+        take_ffi_payload(
+            ffi.payload_ptr,
+            ffi.payload_len,
+            ffi.payload_drop_fn,
+            decode_bootstrap_event_payload,
+        )
     }
 }
 

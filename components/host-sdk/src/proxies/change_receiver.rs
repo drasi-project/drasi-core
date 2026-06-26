@@ -29,9 +29,7 @@ use async_trait::async_trait;
 
 use drasi_lib::channels::events::{BootstrapEvent, SourceEventWrapper};
 use drasi_lib::channels::ChangeReceiver;
-use drasi_plugin_sdk::ffi::payload::{
-    decode_bootstrap_event_payload, decode_source_event_payload, take_ffi_payload,
-};
+use drasi_plugin_sdk::ffi::payload::{consume_bootstrap_event, consume_source_event};
 use drasi_plugin_sdk::ffi::{FfiBootstrapEvent, FfiChangeReceiver, FfiSourceEvent};
 
 /// Decode a plugin-sent `FfiSourceEvent` into a **host-owned** `SourceEventWrapper`.
@@ -40,30 +38,16 @@ use drasi_plugin_sdk::ffi::{FfiBootstrapEvent, FfiChangeReceiver, FfiSourceEvent
 /// host deserializes its own copy and frees the plugin's buffer via the
 /// plugin-supplied `payload_drop_fn`. The host never reads or drops the plugin's
 /// `repr(Rust)` memory. Returns `None` if the payload cannot be decoded (the
-/// plugin buffer is freed regardless). Size/null hardening lives in
-/// [`take_ffi_payload`].
+/// plugin buffer is freed regardless). Delegates to the canonical
+/// [`consume_source_event`], where the size/null hardening lives.
 fn decode_source_event(ffi_event: &FfiSourceEvent) -> Option<SourceEventWrapper> {
-    unsafe {
-        take_ffi_payload(
-            ffi_event.payload_ptr,
-            ffi_event.payload_len,
-            ffi_event.payload_drop_fn,
-            decode_source_event_payload,
-        )
-    }
+    unsafe { consume_source_event(ffi_event) }
 }
 
 /// Decode a plugin-sent `FfiBootstrapEvent` into a host-owned `BootstrapEvent`.
 /// See [`decode_source_event`] for the ownership contract (issue #602).
 fn decode_bootstrap_event(ffi_event: &FfiBootstrapEvent) -> Option<BootstrapEvent> {
-    unsafe {
-        take_ffi_payload(
-            ffi_event.payload_ptr,
-            ffi_event.payload_len,
-            ffi_event.payload_drop_fn,
-            decode_bootstrap_event_payload,
-        )
-    }
+    unsafe { consume_bootstrap_event(ffi_event) }
 }
 
 /// Context passed to the push callback. Holds the std mpsc sender and a
