@@ -94,8 +94,9 @@ fn serialize_ffi_payload<T: serde::Serialize>(value: &T) -> (*const u8, usize) {
 extern "C" fn ffi_drop_payload_bytes(ptr: *mut u8, len: usize) {
     if !ptr.is_null() && len > 0 {
         unsafe {
-            let slice = std::slice::from_raw_parts_mut(ptr, len);
-            drop(Box::from_raw(slice as *mut [u8]));
+            // Rebuild the boxed slice from a *raw* slice pointer — never create a
+            // `&mut [u8]` reference to memory we are about to free (that would be UB).
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
         }
     }
 }
@@ -2245,8 +2246,9 @@ pub fn build_bootstrap_provider_vtable(
     extern "C" fn ffi_drop_position_bytes(ptr: *mut u8, len: usize) {
         if !ptr.is_null() && len > 0 {
             unsafe {
-                let slice = std::slice::from_raw_parts_mut(ptr, len);
-                drop(Box::from_raw(slice as *mut [u8]));
+                // Rebuild the boxed slice from a *raw* slice pointer — never create a
+                // `&mut [u8]` reference to memory we are about to free (that would be UB).
+                drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
             }
         }
     }
@@ -3163,8 +3165,9 @@ fn wrap_subscription_response(
         extern "C" fn ffi_drop_position_bytes(ptr: *mut u8, len: usize) {
             if !ptr.is_null() && len > 0 {
                 unsafe {
-                    let slice = std::slice::from_raw_parts_mut(ptr, len);
-                    drop(Box::from_raw(slice as *mut [u8]));
+                    // Rebuild the boxed slice from a *raw* slice pointer — never create
+                    // a `&mut [u8]` reference to memory we are about to free.
+                    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
                 }
             }
         }

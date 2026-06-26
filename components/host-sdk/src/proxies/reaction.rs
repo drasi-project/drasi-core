@@ -101,8 +101,9 @@ fn signal_forwarder_done(context: &ResultPushContext) {
 extern "C" fn drop_query_result_bytes(ptr: *mut u8, len: usize) {
     if !ptr.is_null() && len > 0 {
         unsafe {
-            let slice = std::slice::from_raw_parts_mut(ptr, len);
-            drop(Box::from_raw(slice as *mut [u8]));
+            // Rebuild the boxed slice from a *raw* slice pointer — never create a
+            // `&mut [u8]` reference to memory we are about to free (that would be UB).
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
         }
     }
 }

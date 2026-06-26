@@ -77,7 +77,9 @@ mod serde_roundtrip_tests {
     use std::sync::Arc;
 
     fn roundtrip(change: &SourceChange) -> SourceChange {
-        let bytes = rmp_serde::to_vec(change).expect("serialize SourceChange");
+        // Mirror the production FFI wire format: named-map encoding
+        // (`to_vec_named`), which tolerates skipped fields and field-count changes.
+        let bytes = rmp_serde::to_vec_named(change).expect("serialize SourceChange");
         rmp_serde::from_slice(&bytes).expect("deserialize SourceChange")
     }
 

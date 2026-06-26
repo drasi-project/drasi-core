@@ -86,8 +86,11 @@ impl SourceEventPayload {
 
     /// Reconstruct a host/plugin-owned `SourceEventWrapper` (consuming side).
     pub fn into_wrapper(self) -> SourceEventWrapper {
-        let timestamp =
-            DateTime::from_timestamp_micros(self.timestamp_us).unwrap_or_else(chrono::Utc::now);
+        let timestamp = DateTime::from_timestamp_micros(self.timestamp_us)
+            // Deterministic fallback (Unix epoch) on an out-of-range/invalid
+            // timestamp — never `Utc::now()`, which would be non-deterministic
+            // and could silently mask a corrupt payload.
+            .unwrap_or(DateTime::UNIX_EPOCH);
         SourceEventWrapper {
             source_id: self.source_id,
             event: self.event,
@@ -117,8 +120,11 @@ impl BootstrapEventPayload {
 
     /// Reconstruct a host/plugin-owned `BootstrapEvent` (consuming side).
     pub fn into_event(self) -> BootstrapEvent {
-        let timestamp =
-            DateTime::from_timestamp_micros(self.timestamp_us).unwrap_or_else(chrono::Utc::now);
+        let timestamp = DateTime::from_timestamp_micros(self.timestamp_us)
+            // Deterministic fallback (Unix epoch) on an out-of-range/invalid
+            // timestamp — never `Utc::now()`, which would be non-deterministic
+            // and could silently mask a corrupt payload.
+            .unwrap_or(DateTime::UNIX_EPOCH);
         BootstrapEvent {
             source_id: self.source_id,
             change: self.change,
