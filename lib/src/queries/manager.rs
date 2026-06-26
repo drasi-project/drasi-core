@@ -1713,7 +1713,7 @@ impl Query for DrasiQuery {
                     component_id = %query_id,
                     component_type = "query"
                 );
-                let handle: tokio::task::JoinHandle<(String, Option<crate::bootstrap::BootstrapResult>)> = tokio::spawn(
+                let handle: tokio::task::JoinHandle<(String, Result<Option<crate::bootstrap::BootstrapResult>, String>)> = tokio::spawn(
                     async move {
                         let mut count = 0u64;
 
@@ -1795,33 +1795,36 @@ impl Query for DrasiQuery {
 
                         // Await the BootstrapResult from the source's bootstrap provider.
                         // This carries the optional source_position snapshot boundary.
-                        let bootstrap_result = if let Some(rx) = bootstrap_result_rx {
-                            match rx.await {
-                                Ok(Ok(result)) => {
-                                    debug!(
-                                        "[BOOTSTRAP] Query '{}' received handover from source '{}': \
-                                         source_position={:?}",
-                                        query_id_clone, source_id_clone,
-                                        result.source_position.as_ref().map(|p| p.len())
-                                    );
-                                    Some(result)
+                        // A provider failure (Ok(Err)) is propagated as an Err so the
+                        // supervisor can transition the query to the Error state.
+                        let bootstrap_result: Result<Option<crate::bootstrap::BootstrapResult>, String> =
+                            if let Some(rx) = bootstrap_result_rx {
+                                match rx.await {
+                                    Ok(Ok(result)) => {
+                                        debug!(
+                                            "[BOOTSTRAP] Query '{}' received handover from source '{}': \
+                                             source_position={:?}",
+                                            query_id_clone, source_id_clone,
+                                            result.source_position.as_ref().map(|p| p.len())
+                                        );
+                                        Ok(Some(result))
+                                    }
+                                    Ok(Err(e)) => {
+                                        error!(
+                                            "[BOOTSTRAP] Query '{query_id_clone}' bootstrap provider failed for source '{source_id_clone}': {e}"
+                                        );
+                                        Err(format!("source '{source_id_clone}': {e}"))
+                                    }
+                                    Err(_) => {
+                                        warn!(
+                                            "[BOOTSTRAP] Query '{query_id_clone}' bootstrap result channel dropped for source '{source_id_clone}'"
+                                        );
+                                        Ok(None)
+                                    }
                                 }
-                                Ok(Err(e)) => {
-                                    error!(
-                                        "[BOOTSTRAP] Query '{query_id_clone}' bootstrap provider failed for source '{source_id_clone}': {e}"
-                                    );
-                                    None
-                                }
-                                Err(_) => {
-                                    warn!(
-                                        "[BOOTSTRAP] Query '{query_id_clone}' bootstrap result channel dropped for source '{source_id_clone}'"
-                                    );
-                                    None
-                                }
-                            }
-                        } else {
-                            None
-                        };
+                            } else {
+                                Ok(None)
+                            };
 
                         (source_id_clone, bootstrap_result)
                     }
@@ -1854,15 +1857,29 @@ impl Query for DrasiQuery {
                         let join_results = futures::future::join_all(bootstrap_handles).await;
                         let panic_count = join_results.iter().filter(|r| matches!(r, Err(e) if e.is_panic())).count();
 
-                        if panic_count > 0 {
+                        // Collect bootstrap provider failures reported by the per-source tasks.
+                        let failures: Vec<String> = join_results
+                            .iter()
+                            .filter_map(|r| r.as_ref().ok())
+                            .filter_map(|(_, result)| result.as_ref().err().cloned())
+                            .collect();
+
+                        if panic_count > 0 || !failures.is_empty() {
+                            let mut details = Vec::new();
+                            if panic_count > 0 {
+                                details.push(format!("{panic_count} task(s) panicked"));
+                            }
+                            details.extend(failures.iter().cloned());
+                            let detail = details.join("; ");
+
                             error!(
-                                "[BOOTSTRAP] Query '{query_id_clone}' {panic_count} bootstrap task(s) panicked, \
+                                "[BOOTSTRAP] Query '{query_id_clone}' bootstrap failed ({detail}), \
                                  transitioning to Error and opening gate"
                             );
 
                             reporter_clone.set_status(
                                 ComponentStatus::Error,
-                                Some(format!("Bootstrap failed: {panic_count} task(s) panicked")),
+                                Some(format!("Bootstrap failed: {detail}")),
                             ).await;
 
                             // Open the gate so the processor doesn't block
@@ -1880,7 +1897,7 @@ impl Query for DrasiQuery {
                             std::collections::HashMap::new();
 
                         for (source_id, bootstrap_result) in join_results.iter().filter_map(|r| r.as_ref().ok()) {
-                            if let Some(br) = bootstrap_result {
+                            if let Ok(Some(br)) = bootstrap_result {
                                 if let Some(pos) = &br.source_position {
                                     // Validate source_position size (same limit as dispatch_event)
                                     if pos.len() > crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES {
