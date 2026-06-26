@@ -511,10 +511,10 @@ extern "C" fn snapshot_iter_next(iter_ctx: *mut c_void) -> drasi_plugin_sdk::ffi
         (Some(rt), Some(s)) => (rt, s),
         _ => return drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
     };
-    use tokio_stream::StreamExt;
-    match rt.block_on(stream.next()) {
-        Some(row) => {
-            let json = serde_json::to_string(&row).unwrap_or_else(|_| "null".into());
+    match rt.block_on(stream.next_keyed()) {
+        Some((sig, row)) => {
+            let envelope = drasi_lib::queries::output_state::KeyedSnapshotRow { k: sig, v: row };
+            let json = serde_json::to_string(&envelope).unwrap_or_else(|_| "null".into());
             drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(json)
         }
         None => drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),

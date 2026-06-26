@@ -38,8 +38,8 @@ pub use config_hash::compute_config_hash;
 pub use label_extractor::*;
 pub use manager::*;
 pub use output_state::{
-    FetchError, OutboxGap, OutboxResponse, OutboxStream, QueryOutputState, SnapshotResponse,
-    SnapshotStream,
+    FetchError, KeyedSnapshotRow, OutboxGap, OutboxResponse, OutboxStream, QueryOutputState,
+    SnapshotResponse, SnapshotStream,
 };
 pub use priority_queue::*;
 pub use sequence_dedup::SequenceDedup;

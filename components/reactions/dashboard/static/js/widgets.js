@@ -322,14 +322,46 @@ export function createDefaultWidget(widgetType, index = 0) {
 
 // ─── Runtime data accumulation ──────────────────────────────
 
+// The engine stamps every row with a `row_signature` (delivered as `k`) that is
+// the canonical row identity. We key rows by it when known, attaching it to the
+// stored row object as a non-enumerable `__sig` so it never leaks into rendering
+// (templates, table columns, JSON). When the signature is unknown (0/absent) we
+// fall back to an `id`/equality heuristic.
+
+function rowSig(value) {
+  return typeof value === "number" && value > 0 ? value : 0;
+}
+
+function tagSig(row, sig) {
+  if (row && typeof row === "object" && sig) {
+    Object.defineProperty(row, "__sig", {
+      value: sig,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return row;
+}
+
 function rowKey(row) {
-  if (!row || typeof row !== "object") return JSON.stringify(row);
-  if (row.id !== undefined) return `id:${row.id}`;
+  if (row && typeof row === "object") {
+    const sig = rowSig(row.__sig);
+    if (sig) return `sig:${sig}`;
+    if (row.id !== undefined) return `id:${row.id}`;
+    return JSON.stringify(row);
+  }
   return JSON.stringify(row);
 }
 
-function findRowIndex(rows, ref) {
-  const key = rowKey(ref);
+// Identity key for an incoming diff payload, given its signature and data.
+function diffKey(sig, data) {
+  if (sig) return `sig:${sig}`;
+  if (data && typeof data === "object" && data.id !== undefined) return `id:${data.id}`;
+  return JSON.stringify(data);
+}
+
+function findRowIndexByKey(rows, key) {
   return rows.findIndex((r) => rowKey(r) === key);
 }
 
@@ -343,24 +375,29 @@ function normalizeDiffData(diff) {
 export function applyResultDiff(runtime, diff) {
   if (!runtime) return;
 
+  const sig = rowSig(diff.k ?? diff.row_signature);
+
   if (diff.op === "add") {
     const row = normalizeDiffData(diff);
-    if (row) {
-      // Insert-of-an-existing-element is an upsert in drasi: replace an existing
-      // row with the same key instead of appending a duplicate (see issue #605).
-      const idx = findRowIndex(runtime.rows, row);
-      if (idx >= 0) runtime.rows[idx] = row;
-      else runtime.rows.push(row);
-      runtime.latest = row;
-    }
+    if (!row) return;
+    // Insert-of-an-existing-element is an upsert in drasi: replace an existing
+    // row with the same identity instead of appending a duplicate (issue #605).
+    const idx = findRowIndexByKey(runtime.rows, diffKey(sig, row));
+    tagSig(row, sig);
+    if (idx >= 0) runtime.rows[idx] = row;
+    else runtime.rows.push(row);
+    runtime.latest = row;
     return;
   }
   if (diff.op === "update") {
     const after = normalizeDiffData(diff);
     if (!after) return;
-    // Try matching by `before` state first, then fall back to matching by `after` key
-    let idx = diff.before ? findRowIndex(runtime.rows, diff.before) : -1;
-    if (idx < 0) idx = findRowIndex(runtime.rows, after);
+    // row_signature is stable across an update; match by it first, then fall
+    // back to the `before` state, then the `after` key.
+    let idx = sig ? findRowIndexByKey(runtime.rows, `sig:${sig}`) : -1;
+    if (idx < 0 && diff.before) idx = findRowIndexByKey(runtime.rows, diffKey(0, diff.before));
+    if (idx < 0) idx = findRowIndexByKey(runtime.rows, diffKey(sig, after));
+    tagSig(after, sig);
     if (idx >= 0) runtime.rows[idx] = after;
     else runtime.rows.push(after);
     runtime.latest = after;
@@ -368,7 +405,7 @@ export function applyResultDiff(runtime, diff) {
   }
   if (diff.op === "delete") {
     const row = normalizeDiffData(diff);
-    const idx = findRowIndex(runtime.rows, row);
+    const idx = findRowIndexByKey(runtime.rows, diffKey(sig, row));
     if (idx >= 0) runtime.rows.splice(idx, 1);
     runtime.latest = runtime.rows.length > 0 ? runtime.rows[runtime.rows.length - 1] : null;
     return;

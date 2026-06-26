@@ -37,6 +37,10 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WebSocketResultDiff {
     pub op: String,
+    /// The row's engine-stamped `row_signature` — the canonical row identity.
+    /// Serialized as `k`; `0` means unknown (clients fall back to id/equality).
+    #[serde(rename = "k", default)]
+    pub row_signature: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,15 +98,23 @@ impl HubMessage {
             .results
             .iter()
             .map(|result_diff| match result_diff {
-                ResultDiff::Add { data, .. } => WebSocketResultDiff {
+                ResultDiff::Add {
+                    data,
+                    row_signature,
+                } => WebSocketResultDiff {
                     op: "add".to_string(),
+                    row_signature: *row_signature,
                     data: Some(data.clone()),
                     before: None,
                     after: None,
                     grouping_keys: None,
                 },
-                ResultDiff::Delete { data, .. } => WebSocketResultDiff {
+                ResultDiff::Delete {
+                    data,
+                    row_signature,
+                } => WebSocketResultDiff {
                     op: "delete".to_string(),
+                    row_signature: *row_signature,
                     data: Some(data.clone()),
                     before: None,
                     after: None,
@@ -113,16 +125,22 @@ impl HubMessage {
                     before,
                     after,
                     grouping_keys,
-                    ..
+                    row_signature,
                 } => WebSocketResultDiff {
                     op: "update".to_string(),
+                    row_signature: *row_signature,
                     data: Some(data.clone()),
                     before: Some(before.clone()),
                     after: Some(after.clone()),
                     grouping_keys: grouping_keys.clone(),
                 },
-                ResultDiff::Aggregation { before, after, .. } => WebSocketResultDiff {
+                ResultDiff::Aggregation {
+                    before,
+                    after,
+                    row_signature,
+                } => WebSocketResultDiff {
                     op: "aggregation".to_string(),
+                    row_signature: *row_signature,
                     data: None,
                     before: before.clone(),
                     after: Some(after.clone()),
@@ -130,6 +148,7 @@ impl HubMessage {
                 },
                 ResultDiff::Noop => WebSocketResultDiff {
                     op: "noop".to_string(),
+                    row_signature: 0,
                     data: None,
                     before: None,
                     after: None,
@@ -178,10 +197,22 @@ impl WebSocketHub {
     }
 }
 
+/// A single accumulated snapshot row paired with its canonical identity.
+///
+/// `row_signature` is the engine-stamped identity (`0` when unknown, in which
+/// case matching falls back to an `id`/equality heuristic on `data`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SnapshotRow {
+    #[serde(rename = "k", default)]
+    pub row_signature: u64,
+    #[serde(rename = "v")]
+    pub data: Value,
+}
+
 /// Snapshot of accumulated query results, separating rows from aggregation state.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct QuerySnapshot {
-    pub rows: Vec<Value>,
+    pub rows: Vec<SnapshotRow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregation: Option<Value>,
 }
@@ -224,26 +255,41 @@ impl QuerySnapshotStore {
 
         for diff in &query_result.results {
             match diff {
-                ResultDiff::Add { data, .. } => {
+                ResultDiff::Add {
+                    data,
+                    row_signature,
+                } => {
                     // Insert-of-an-existing-element is an upsert in drasi: replace
-                    // an existing row with the same key instead of appending a
+                    // an existing row with the same identity instead of appending a
                     // duplicate (see issue #605).
-                    if let Some(idx) = find_row_index(&snapshot.rows, data) {
-                        snapshot.rows[idx] = data.clone();
-                    } else {
-                        snapshot.rows.push(data.clone());
-                    }
+                    upsert_row(&mut snapshot.rows, *row_signature, data);
                 }
-                ResultDiff::Delete { data, .. } => {
-                    if let Some(idx) = find_row_index(&snapshot.rows, data) {
+                ResultDiff::Delete {
+                    data,
+                    row_signature,
+                } => {
+                    if let Some(idx) = find_row_index(&snapshot.rows, *row_signature, data) {
                         snapshot.rows.remove(idx);
                     }
                 }
-                ResultDiff::Update { before, after, .. } => {
-                    if let Some(idx) = find_row_index(&snapshot.rows, before) {
-                        snapshot.rows[idx] = after.clone();
+                ResultDiff::Update {
+                    before,
+                    after,
+                    row_signature,
+                    ..
+                } => {
+                    // The row_signature is stable across an update; match on it,
+                    // falling back to the `before` payload when it is unknown.
+                    if let Some(idx) = find_row_index(&snapshot.rows, *row_signature, before) {
+                        snapshot.rows[idx] = SnapshotRow {
+                            row_signature: *row_signature,
+                            data: after.clone(),
+                        };
                     } else {
-                        snapshot.rows.push(after.clone());
+                        snapshot.rows.push(SnapshotRow {
+                            row_signature: *row_signature,
+                            data: after.clone(),
+                        });
                     }
                 }
                 ResultDiff::Aggregation { after, .. } => {
@@ -264,19 +310,23 @@ impl QuerySnapshotStore {
     ///
     /// Used to populate the store from the initial bootstrap snapshot so the live
     /// WebSocket stream starts from the same baseline the fallback fetcher reads
-    /// (see issue #605). To avoid clobbering newer live data that may have already
-    /// arrived, this only inserts rows whose key is not already present; existing
-    /// rows are left untouched. Respects `max_rows_per_query`.
-    pub async fn seed_rows(&self, query_id: &str, rows: Vec<Value>) {
+    /// (see issue #605). Rows carry their `row_signature` so subsequent live diffs
+    /// match them by identity. To avoid clobbering newer live data that may have
+    /// already arrived, this only inserts rows whose identity is not already
+    /// present; existing rows are left untouched. Respects `max_rows_per_query`.
+    pub async fn seed_rows(&self, query_id: &str, rows: Vec<(u64, Value)>) {
         if rows.is_empty() {
             return;
         }
         let mut snapshots = self.snapshots.write().await;
         let snapshot = snapshots.entry(query_id.to_string()).or_default();
 
-        for row in rows {
-            if find_row_index(&snapshot.rows, &row).is_none() {
-                snapshot.rows.push(row);
+        for (row_signature, data) in rows {
+            if find_row_index(&snapshot.rows, row_signature, &data).is_none() {
+                snapshot.rows.push(SnapshotRow {
+                    row_signature,
+                    data,
+                });
             }
         }
 
@@ -303,12 +353,35 @@ impl QuerySnapshotStore {
     }
 }
 
-fn find_row_index(rows: &[Value], target: &Value) -> Option<usize> {
-    // Match by "id" field if present, otherwise by full equality.
-    if let Some(target_id) = target.get("id") {
-        rows.iter().position(|r| r.get("id") == Some(target_id))
+/// Insert or replace a row by its identity.
+fn upsert_row(rows: &mut Vec<SnapshotRow>, row_signature: u64, data: &Value) {
+    if let Some(idx) = find_row_index(rows, row_signature, data) {
+        rows[idx] = SnapshotRow {
+            row_signature,
+            data: data.clone(),
+        };
     } else {
-        rows.iter().position(|r| r == target)
+        rows.push(SnapshotRow {
+            row_signature,
+            data: data.clone(),
+        });
+    }
+}
+
+/// Find a row by its canonical identity.
+///
+/// Matches on `row_signature` (the engine-stamped identity) when it is known
+/// (non-zero); otherwise falls back to matching by the `id` field, then by full
+/// data equality.
+fn find_row_index(rows: &[SnapshotRow], row_signature: u64, data: &Value) -> Option<usize> {
+    if row_signature != 0 {
+        return rows.iter().position(|r| r.row_signature == row_signature);
+    }
+    if let Some(target_id) = data.get("id") {
+        rows.iter()
+            .position(|r| r.data.get("id") == Some(target_id))
+    } else {
+        rows.iter().position(|r| &r.data == data)
     }
 }
 

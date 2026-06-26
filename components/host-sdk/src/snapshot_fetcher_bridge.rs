@@ -96,9 +96,11 @@ extern "C" fn snapshot_iter_next(iter_ctx: *mut c_void) -> FfiOwnedStr {
             (Some(rt), Some(s)) => (rt, s),
             _ => return FfiOwnedStr::from_string(String::new()),
         };
-        match rt.block_on(stream.next()) {
-            Some(row) => {
-                let json = serde_json::to_string(&row).unwrap_or_else(|_| "null".into());
+        match rt.block_on(stream.next_keyed()) {
+            Some((sig, row)) => {
+                let envelope =
+                    drasi_lib::queries::output_state::KeyedSnapshotRow { k: sig, v: row };
+                let json = serde_json::to_string(&envelope).unwrap_or_else(|_| "null".into());
                 FfiOwnedStr::from_string(json)
             }
             None => FfiOwnedStr::from_string(String::new()),
@@ -239,14 +241,18 @@ mod tests {
         }
     }
 
-    /// Helper: call `next_fn` and return the deserialized JSON, or `None` on EOF.
+    /// Helper: call `next_fn` and return the deserialized row JSON, or `None` on EOF.
+    ///
+    /// Rows now cross FFI as a `KeyedSnapshotRow { k, v }` envelope; return the `v`.
     unsafe fn pull_next(iter: &FfiSnapshotIterator) -> Option<serde_json::Value> {
         let owned = (iter.next_fn)(iter.iter_ctx);
         let json_str = owned.into_string();
         if json_str.is_empty() {
             None
         } else {
-            Some(serde_json::from_str(&json_str).expect("valid JSON"))
+            let envelope: drasi_lib::queries::output_state::KeyedSnapshotRow =
+                serde_json::from_str(&json_str).expect("valid KeyedSnapshotRow envelope");
+            Some(envelope.v)
         }
     }
 

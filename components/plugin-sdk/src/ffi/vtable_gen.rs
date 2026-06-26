@@ -165,7 +165,7 @@ impl Drop for FfiSnapshotIterHandle {
 /// the stream ends and `drop_fn` is called.
 pub(crate) fn make_snapshot_stream(
     iter: FfiSnapshotIterator,
-) -> impl tokio_stream::Stream<Item = serde_json::Value> + Send {
+) -> impl tokio_stream::Stream<Item = (u64, serde_json::Value)> + Send {
     let handle = FfiSnapshotIterHandle {
         iter_ctx: iter.iter_ctx,
         next_fn: iter.next_fn,
@@ -184,12 +184,21 @@ pub(crate) fn make_snapshot_stream(
                 if json_str.is_empty() {
                     None
                 } else {
-                    match serde_json::from_str::<serde_json::Value>(&json_str) {
-                        Ok(val) => Some(val),
-                        Err(e) => {
-                            log::error!("[FFI snapshot stream] failed to deserialize row: {e}");
-                            None
-                        }
+                    // Rows cross FFI as a `KeyedSnapshotRow` envelope so the
+                    // canonical `row_signature` identity survives. Fall back to
+                    // treating the payload as a bare row (signature 0) for
+                    // forward/backward resilience.
+                    match serde_json::from_str::<drasi_lib::queries::output_state::KeyedSnapshotRow>(
+                        &json_str,
+                    ) {
+                        Ok(envelope) => Some((envelope.k, envelope.v)),
+                        Err(_) => match serde_json::from_str::<serde_json::Value>(&json_str) {
+                            Ok(val) => Some((0u64, val)),
+                            Err(e) => {
+                                log::error!("[FFI snapshot stream] failed to deserialize row: {e}");
+                                None
+                            }
+                        },
                     }
                 }
             })
@@ -331,7 +340,7 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
         let stream = make_snapshot_stream(resp.iterator);
 
         Ok(
-            drasi_lib::queries::output_state::SnapshotStream::from_stream(
+            drasi_lib::queries::output_state::SnapshotStream::from_keyed_stream(
                 stream,
                 as_of_sequence,
                 config_hash,

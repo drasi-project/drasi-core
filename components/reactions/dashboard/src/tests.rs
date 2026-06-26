@@ -800,7 +800,7 @@ async fn test_snapshot_store_delete_row() {
         .await;
     let snapshot = store.get_snapshot("q1").await;
     assert_eq!(snapshot.rows.len(), 1);
-    assert_eq!(snapshot.rows[0]["id"], 2);
+    assert_eq!(snapshot.rows[0].data["id"], 2);
 }
 
 #[tokio::test]
@@ -829,7 +829,7 @@ async fn test_snapshot_store_update_row() {
         .await;
     let snapshot = store.get_snapshot("q1").await;
     assert_eq!(snapshot.rows.len(), 1);
-    assert_eq!(snapshot.rows[0]["name"], "Alicia");
+    assert_eq!(snapshot.rows[0].data["name"], "Alicia");
 }
 
 #[tokio::test]
@@ -862,8 +862,8 @@ async fn test_snapshot_store_fifo_eviction_rows_only() {
     let snapshot = store.get_snapshot("q1").await;
     // Should keep only 2 newest rows (evict id:1)
     assert_eq!(snapshot.rows.len(), 2);
-    assert_eq!(snapshot.rows[0]["id"], 2);
-    assert_eq!(snapshot.rows[1]["id"], 3);
+    assert_eq!(snapshot.rows[0].data["id"], 2);
+    assert_eq!(snapshot.rows[1].data["id"], 3);
     // Aggregation must NOT be evicted
     assert_eq!(snapshot.aggregation, Some(serde_json::json!({"total": 6})));
 }
@@ -914,10 +914,86 @@ async fn test_snapshot_serialization_format() {
         .await;
     let snapshot = store.get_snapshot("q1").await;
     let json = serde_json::to_value(&snapshot).unwrap();
-    // Verify the JSON structure the frontend expects
+    // Verify the JSON structure the frontend expects: rows are { k, v } envelopes
+    // carrying the row_signature so the client can key by identity.
     assert!(json["rows"].is_array());
     assert_eq!(json["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(json["rows"][0]["v"]["id"], 1);
+    assert_eq!(json["rows"][0]["k"], 0);
     assert_eq!(json["aggregation"]["total"], 42);
+}
+
+#[tokio::test]
+async fn test_snapshot_store_add_upserts_by_row_signature() {
+    // With a real row_signature and no `id` field, an `add` for the same
+    // signature must upsert (the canonical identity, independent of `id`).
+    let store = QuerySnapshotStore::new();
+    store
+        .apply(&make_query_result(
+            "q1",
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"location": "Parking"}),
+                row_signature: 7777,
+            }],
+        ))
+        .await;
+    store
+        .apply(&make_query_result(
+            "q1",
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"location": "Curbside"}),
+                row_signature: 7777,
+            }],
+        ))
+        .await;
+    let snapshot = store.get_snapshot("q1").await;
+    assert_eq!(snapshot.rows.len(), 1, "same signature must upsert");
+    assert_eq!(snapshot.rows[0].data["location"], "Curbside");
+    assert_eq!(snapshot.rows[0].row_signature, 7777);
+}
+
+#[tokio::test]
+async fn test_snapshot_store_seeded_signature_then_add_upserts() {
+    // Seed with a signature, then a live add for the same signature upserts even
+    // though the rows carry no `id` column (the #605 plugin scenario).
+    let store = QuerySnapshotStore::new();
+    store
+        .seed_rows("q1", vec![(42, serde_json::json!({"location": "Parking"}))])
+        .await;
+    store
+        .apply(&make_query_result(
+            "q1",
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"location": "Curbside"}),
+                row_signature: 42,
+            }],
+        ))
+        .await;
+    let snapshot = store.get_snapshot("q1").await;
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(snapshot.rows[0].data["location"], "Curbside");
+}
+
+#[tokio::test]
+async fn test_snapshot_store_distinct_signatures_append() {
+    let store = QuerySnapshotStore::new();
+    store
+        .apply(&make_query_result(
+            "q1",
+            vec![
+                ResultDiff::Add {
+                    data: serde_json::json!({"v": 1}),
+                    row_signature: 1,
+                },
+                ResultDiff::Add {
+                    data: serde_json::json!({"v": 2}),
+                    row_signature: 2,
+                },
+            ],
+        ))
+        .await;
+    let snapshot = store.get_snapshot("q1").await;
+    assert_eq!(snapshot.rows.len(), 2);
 }
 
 // -----------------------------------------------------------------------
@@ -951,7 +1027,7 @@ async fn test_snapshot_store_add_upserts_existing_id() {
 
     let snapshot = store.get_snapshot("q1").await;
     assert_eq!(snapshot.rows.len(), 1, "duplicate row was appended");
-    assert_eq!(snapshot.rows[0]["location"], "Curbside");
+    assert_eq!(snapshot.rows[0].data["location"], "Curbside");
 }
 
 #[tokio::test]
@@ -983,8 +1059,8 @@ async fn test_snapshot_store_seed_rows_populates_store() {
         .seed_rows(
             "q1",
             vec![
-                serde_json::json!({"id": "A1234", "location": "Parking"}),
-                serde_json::json!({"id": "B5678", "location": "Parking"}),
+                (0, serde_json::json!({"id": "A1234", "location": "Parking"})),
+                (0, serde_json::json!({"id": "B5678", "location": "Parking"})),
             ],
         )
         .await;
@@ -1002,7 +1078,7 @@ async fn test_snapshot_store_seeded_row_then_add_upserts() {
     store
         .seed_rows(
             "q1",
-            vec![serde_json::json!({"id": "A1234", "location": "Parking"})],
+            vec![(0, serde_json::json!({"id": "A1234", "location": "Parking"}))],
         )
         .await;
     store
@@ -1017,7 +1093,7 @@ async fn test_snapshot_store_seeded_row_then_add_upserts() {
 
     let snapshot = store.get_snapshot("q1").await;
     assert_eq!(snapshot.rows.len(), 1);
-    assert_eq!(snapshot.rows[0]["location"], "Curbside");
+    assert_eq!(snapshot.rows[0].data["location"], "Curbside");
 }
 
 #[tokio::test]
@@ -1037,8 +1113,8 @@ async fn test_snapshot_store_seed_rows_does_not_overwrite_existing() {
         .seed_rows(
             "q1",
             vec![
-                serde_json::json!({"id": "A1234", "location": "Parking"}),
-                serde_json::json!({"id": "B5678", "location": "Parking"}),
+                (0, serde_json::json!({"id": "A1234", "location": "Parking"})),
+                (0, serde_json::json!({"id": "B5678", "location": "Parking"})),
             ],
         )
         .await;
@@ -1048,7 +1124,10 @@ async fn test_snapshot_store_seed_rows_does_not_overwrite_existing() {
     let a = snapshot
         .rows
         .iter()
-        .find(|r| r["id"] == "A1234")
+        .find(|r| r.data["id"] == "A1234")
         .expect("A1234 present");
-    assert_eq!(a["location"], "Curbside", "stale seed overwrote live data");
+    assert_eq!(
+        a.data["location"], "Curbside",
+        "stale seed overwrote live data"
+    );
 }

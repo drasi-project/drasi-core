@@ -311,7 +311,7 @@ impl Reaction for DashboardReaction {
             for query_id in &self.base.queries {
                 match fetcher.fetch_snapshot(query_id).await {
                     Ok(stream) => {
-                        let rows = stream.collect_vec().await;
+                        let rows = stream.collect_keyed_vec().await;
                         let count = rows.len();
                         self.snapshot_store.seed_rows(query_id, rows).await;
                         debug!(

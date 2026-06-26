@@ -534,8 +534,12 @@ export class DashboardDesigner {
         const runtime = this.runtimeByWidgetId.get(widget.id) ?? createWidgetRuntime();
         // Only populate if the runtime has no data yet
         if (runtime.rows.length === 0 && runtime.aggregation === null) {
-          for (const row of rows) {
-            applyResultDiff(runtime, { op: "add", data: row });
+          for (const entry of rows) {
+            // Snapshot rows arrive as { k: row_signature, v: data }; pass the
+            // signature through so live diffs match by identity (issue #605).
+            const data = entry && typeof entry === "object" && "v" in entry ? entry.v : entry;
+            const k = entry && typeof entry === "object" ? entry.k : undefined;
+            applyResultDiff(runtime, { op: "add", data, k });
           }
           if (aggregation !== null) {
             applyResultDiff(runtime, { op: "aggregation", after: aggregation });
