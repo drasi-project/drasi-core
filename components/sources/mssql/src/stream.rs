@@ -385,6 +385,11 @@ async fn poll_cdc_changes(
             let operation = extract_operation(&row)?;
             let row_lsn = extract_lsn(&row)?;
 
+            // Real change time, mapped from the LSN's commit time. Falls back to
+            // wall-clock if the LSN is not yet in cdc.lsn_time_mapping.
+            let effective_from = extract_commit_time(&row)
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as u64);
+
             // Generate element ID from primary key
             let element_id = pk_cache.generate_element_id(table, &row)?;
 
@@ -400,7 +405,7 @@ async fn poll_cdc_changes(
                             metadata: ElementMetadata {
                                 reference: ElementReference::new(source_id, &element_id),
                                 labels: Arc::from([Arc::from(label)]),
-                                effective_from: 0,
+                                effective_from,
                             },
                             properties,
                         },
@@ -413,7 +418,7 @@ async fn poll_cdc_changes(
                             metadata: ElementMetadata {
                                 reference: ElementReference::new(source_id, &element_id),
                                 labels: Arc::from([Arc::from(label)]),
-                                effective_from: 0,
+                                effective_from,
                             },
                             properties,
                         },
@@ -423,7 +428,7 @@ async fn poll_cdc_changes(
                     metadata: ElementMetadata {
                         reference: ElementReference::new(source_id, &element_id),
                         labels: Arc::from([Arc::from(label)]),
-                        effective_from: 0,
+                        effective_from,
                     },
                 },
                 CdcOperation::UpdateBefore => {
@@ -478,9 +483,12 @@ async fn query_table_changes(
     // If table already contains schema (e.g., "dbo.Orders"), replace dot with underscore
     let capture_instance = table.replace('.', "_");
 
-    // Tiberius uses @P1, @P2, etc. for positional parameters
+    // Tiberius uses @P1, @P2, etc. for positional parameters.
+    // The `__$commit_time` computed column maps each change's LSN to its commit
+    // time so the source can set a real `effective_from` (drasi.changeDateTime).
     let query = format!(
-        "SELECT * FROM cdc.fn_cdc_get_all_changes_{capture_instance}(@P1, @P2, 'all') ORDER BY __$start_lsn, __$seqval, __$operation"
+        "SELECT *, sys.fn_cdc_map_lsn_to_time(__$start_lsn) AS {commit_time} FROM cdc.fn_cdc_get_all_changes_{capture_instance}(@P1, @P2, 'all') ORDER BY __$start_lsn, __$seqval, __$operation",
+        commit_time = cdc_columns::COMMIT_TIME,
     );
 
     debug!("CDC query: {query}");
@@ -610,6 +618,21 @@ fn extract_lsn(row: &tiberius::Row) -> Result<Lsn> {
         .ok_or_else(|| anyhow!("__$start_lsn is NULL"))?;
 
     Lsn::from_bytes(lsn_bytes)
+}
+
+/// Extract the CDC commit time (the `__$commit_time` computed column, mapped
+/// from `__$start_lsn` via `sys.fn_cdc_map_lsn_to_time`) as epoch milliseconds.
+///
+/// Returns `None` if the column is absent or NULL — e.g. the LSN is not yet in
+/// `cdc.lsn_time_mapping` — so the caller can fall back to the wall clock.
+fn extract_commit_time(row: &tiberius::Row) -> Option<u64> {
+    let col_idx = row
+        .columns()
+        .iter()
+        .position(|c| c.name() == cdc_columns::COMMIT_TIME)?;
+
+    let dt: chrono::NaiveDateTime = row.try_get(col_idx).ok()??;
+    Some(dt.and_utc().timestamp_millis() as u64)
 }
 
 #[cfg(test)]
