@@ -172,6 +172,7 @@ async fn prepare_database(config: &MssqlConfig) -> Result<MssqlConfig> {
     // Wait for CDC to be fully initialized (max LSN must be available).
     // CDC capture job starts asynchronously and the first max LSN may not
     // be available immediately after sp_cdc_enable_table returns.
+    let mut cdc_ready = false;
     for _ in 0..30 {
         let result = db_client
             .query("SELECT sys.fn_cdc_get_max_lsn() AS lsn", &[])
@@ -180,11 +181,16 @@ async fn prepare_database(config: &MssqlConfig) -> Result<MssqlConfig> {
             .await?;
         if let Some(row) = result.first() {
             if row.try_get::<&[u8], _>(0).ok().flatten().is_some() {
+                cdc_ready = true;
                 break;
             }
         }
         sleep(Duration::from_secs(1)).await;
     }
+    anyhow::ensure!(
+        cdc_ready,
+        "CDC max LSN never became available for dbo.Products; capture job failed to start"
+    );
 
     Ok(db_config)
 }
@@ -692,6 +698,7 @@ async fn prepare_types_database(config: &MssqlConfig) -> Result<MssqlConfig> {
     // Wait for CDC to be fully initialized (max LSN must be available) before
     // the source starts from StartPosition::Current, otherwise the first INSERT
     // can land before the capture job is ready and never be observed.
+    let mut cdc_ready = false;
     for _ in 0..30 {
         let result = db_client
             .query("SELECT sys.fn_cdc_get_max_lsn() AS lsn", &[])
@@ -700,11 +707,16 @@ async fn prepare_types_database(config: &MssqlConfig) -> Result<MssqlConfig> {
             .await?;
         if let Some(row) = result.first() {
             if row.try_get::<&[u8], _>(0).ok().flatten().is_some() {
+                cdc_ready = true;
                 break;
             }
         }
         sleep(Duration::from_secs(1)).await;
     }
+    anyhow::ensure!(
+        cdc_ready,
+        "CDC max LSN never became available for dbo.TypesTest; capture job failed to start"
+    );
 
     Ok(db_config)
 }

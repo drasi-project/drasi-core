@@ -125,19 +125,32 @@ impl PrimaryKeyCache {
     /// Resolve any table reference to a canonical `schema.table` name.
     ///
     /// This makes the element-ID prefix independent of how the table was written
-    /// in config: `Products`, `dbo.Products`, and `DBO.products` all map to the
-    /// same canonical name (using the catalog's casing when discovered). When the
-    /// table is not in the discovered catalog (e.g. a `table_keys`-only table),
-    /// it falls back to the schema given in the input, or `dbo` if none — which
-    /// is still deterministic across the bootstrap and CDC paths.
+    /// in config, while never collapsing distinct schemas:
+    /// - An **unqualified** name (`Products`) adopts the discovered catalog name
+    ///   (e.g. `dbo.Products`), or defaults to `dbo.<table>` when not discovered.
+    /// - A **schema-qualified** name (`dbo.Products`) adopts the catalog's casing
+    ///   only when the schema matches; an explicit, non-matching schema (e.g.
+    ///   `sales.Products` when the catalog discovered `dbo.Products`) is preserved
+    ///   as-is so same-named tables in different schemas get distinct element IDs.
     pub fn canonical_table(&self, table: &str) -> String {
-        let bare = table.rsplit('.').next().unwrap_or(table);
-        if let Some(canonical) = self.canonical_names.get(&bare.to_lowercase()) {
-            return canonical.clone();
-        }
         match table.split_once('.') {
-            Some((schema, tbl)) => format!("{schema}.{tbl}"),
-            None => format!("dbo.{bare}"),
+            Some((schema, tbl)) => {
+                // Only adopt the catalog canonical when it is the same schema.
+                if let Some(canonical) = self.canonical_names.get(&tbl.to_lowercase()) {
+                    if let Some((canonical_schema, _)) = canonical.split_once('.') {
+                        if canonical_schema.eq_ignore_ascii_case(schema) {
+                            return canonical.clone();
+                        }
+                    }
+                }
+                // Preserve the explicit schema (different schema, or undiscovered).
+                format!("{schema}.{tbl}")
+            }
+            None => self
+                .canonical_names
+                .get(&table.to_lowercase())
+                .cloned()
+                .unwrap_or_else(|| format!("dbo.{table}")),
         }
     }
 
@@ -266,11 +279,12 @@ mod tests {
             .canonical_names
             .insert("products".to_string(), "dbo.Products".to_string());
 
-        // All input formats resolve to the same canonical name (catalog casing).
+        // Unqualified and same-schema inputs resolve to the catalog casing.
         assert_eq!(cache.canonical_table("Products"), "dbo.Products");
         assert_eq!(cache.canonical_table("dbo.Products"), "dbo.Products");
         assert_eq!(cache.canonical_table("DBO.products"), "dbo.Products");
-        assert_eq!(cache.canonical_table("sales.products"), "dbo.Products");
+        // An explicit, different schema is preserved (no cross-schema collapse).
+        assert_eq!(cache.canonical_table("sales.products"), "sales.products");
     }
 
     #[test]

@@ -486,8 +486,11 @@ async fn query_table_changes(
     // Tiberius uses @P1, @P2, etc. for positional parameters.
     // The `__$commit_time` computed column maps each change's LSN to its commit
     // time so the source can set a real `effective_from` (drasi.changeDateTime).
+    // `sys.fn_cdc_map_lsn_to_time` returns the commit time in the SQL Server
+    // instance's local time zone, so we shift it to UTC using the server's
+    // current UTC offset before the host interprets it as a UTC timestamp.
     let query = format!(
-        "SELECT *, sys.fn_cdc_map_lsn_to_time(__$start_lsn) AS {commit_time} FROM cdc.fn_cdc_get_all_changes_{capture_instance}(@P1, @P2, 'all') ORDER BY __$start_lsn, __$seqval, __$operation",
+        "SELECT *, DATEADD(MINUTE, DATEDIFF(MINUTE, GETDATE(), GETUTCDATE()), sys.fn_cdc_map_lsn_to_time(__$start_lsn)) AS {commit_time} FROM cdc.fn_cdc_get_all_changes_{capture_instance}(@P1, @P2, 'all') ORDER BY __$start_lsn, __$seqval, __$operation",
         commit_time = cdc_columns::COMMIT_TIME,
     );
 
@@ -621,10 +624,11 @@ fn extract_lsn(row: &tiberius::Row) -> Result<Lsn> {
 }
 
 /// Extract the CDC commit time (the `__$commit_time` computed column, mapped
-/// from `__$start_lsn` via `sys.fn_cdc_map_lsn_to_time`) as epoch milliseconds.
+/// from `__$start_lsn` and shifted to UTC) as epoch milliseconds.
 ///
-/// Returns `None` if the column is absent or NULL — e.g. the LSN is not yet in
-/// `cdc.lsn_time_mapping` — so the caller can fall back to the wall clock.
+/// Returns `None` if the column is absent, NULL (e.g. the LSN is not yet in
+/// `cdc.lsn_time_mapping`), or maps to a pre-1970 instant — so the caller can
+/// fall back to the wall clock.
 fn extract_commit_time(row: &tiberius::Row) -> Option<u64> {
     let col_idx = row
         .columns()
@@ -632,7 +636,7 @@ fn extract_commit_time(row: &tiberius::Row) -> Option<u64> {
         .position(|c| c.name() == cdc_columns::COMMIT_TIME)?;
 
     let dt: chrono::NaiveDateTime = row.try_get(col_idx).ok()??;
-    Some(dt.and_utc().timestamp_millis() as u64)
+    u64::try_from(dt.and_utc().timestamp_millis()).ok()
 }
 
 #[cfg(test)]
