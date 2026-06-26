@@ -61,9 +61,9 @@ struct PushCallbackContext {
 /// Uses `std::sync::mpsc` which is safe to call from any runtime.
 extern "C" fn change_push_callback(ctx: *mut std::ffi::c_void, event: *mut FfiSourceEvent) -> bool {
     // Catch panics to prevent unwinding across the extern "C" boundary (which is UB).
-    // On panic, return false to signal shutdown. The leaked Arc is NOT reclaimed here
-    // because we cannot know which code path panicked. It will be reclaimed when the
-    // forwarder task exits (via the null-event callback or send failure).
+    // On panic, return false to signal shutdown. The leaked Arc is NOT reclaimed here;
+    // it is reclaimed exactly once when the forwarder sends its final null sentinel
+    // (the plugin guarantees one on forwarder exit via SourceSentinelOnDrop).
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         change_push_callback_inner(ctx, event)
     }))
@@ -74,15 +74,20 @@ fn change_push_callback_inner(ctx: *mut std::ffi::c_void, event: *mut FfiSourceE
     let context = unsafe { &*(ctx as *const PushCallbackContext) };
 
     if event.is_null() {
-        // Channel closed — drop the sender to signal the host receiver
-        {
-            let mut guard = context.tx.lock().expect("push callback mutex poisoned");
+        // Forwarder-exit sentinel. The plugin guarantees exactly one null
+        // callback when its forwarder task ends (`SourceSentinelOnDrop`), so this
+        // is the SOLE point at which the leaked Arc reference is reclaimed — which
+        // guarantees the context outlives every event callback. Reclaiming on any
+        // other return path as well would double-free the context (the macOS arm64
+        // teardown UAF / "mutex poisoned" crash). Tolerate a poisoned lock so the
+        // reclaim below always runs (skipping it would leak the context).
+        if let Ok(mut guard) = context.tx.lock() {
             *guard = None;
-            context.notify.notify_one();
-            // guard must be dropped BEFORE reclaiming the Arc, otherwise
-            // MutexGuard::drop runs after the PushCallbackContext is freed.
         }
-        // Reclaim the leaked Arc reference (see ChangeReceiverProxy::new)
+        context.notify.notify_one();
+        // Reclaim the single leaked Arc reference (see ChangeReceiverProxy::new).
+        // The lock guard above is already dropped, so the Mutex is not touched
+        // after the context is freed.
         unsafe { Arc::from_raw(ctx as *const PushCallbackContext) };
         return false;
     }
@@ -97,22 +102,21 @@ fn change_push_callback_inner(ctx: *mut std::ffi::c_void, event: *mut FfiSourceE
         return true;
     };
 
-    let guard = context.tx.lock().expect("push callback mutex poisoned");
-    if let Some(tx) = guard.as_ref() {
-        let ok = tx.send(Arc::new(wrapper)).is_ok();
-        drop(guard);
-        if ok {
-            context.notify.notify_one();
-            true
-        } else {
-            // Receiver was dropped — reclaim the leaked Arc
-            unsafe { Arc::from_raw(ctx as *const PushCallbackContext) };
-            false
-        }
+    // Forward to the host receiver. On any failure (receiver gone or a poisoned
+    // lock) return false to stop the forwarder, but do NOT reclaim the leaked Arc
+    // here — the guaranteed null sentinel does that exactly once.
+    let Ok(guard) = context.tx.lock() else {
+        return false;
+    };
+    let Some(tx) = guard.as_ref() else {
+        return false;
+    };
+    let ok = tx.send(Arc::new(wrapper)).is_ok();
+    drop(guard);
+    if ok {
+        context.notify.notify_one();
+        true
     } else {
-        // Sender was already dropped — reclaim the leaked Arc
-        drop(guard);
-        unsafe { Arc::from_raw(ctx as *const PushCallbackContext) };
         false
     }
 }
@@ -237,17 +241,16 @@ fn bootstrap_push_callback_inner(
     let context = unsafe { &*(ctx as *const BootstrapPushCallbackContext) };
 
     if event.is_null() {
-        // Stream exhausted — drop the sender to signal completion
-        {
-            let mut guard = context
-                .tx
-                .lock()
-                .expect("bootstrap push callback mutex poisoned");
+        // Forwarder-exit sentinel (`BootstrapSentinelOnDrop`, guaranteed exactly
+        // once on forwarder exit). This is the SOLE point at which the leaked Arc
+        // reference is reclaimed, so the context outlives every event callback;
+        // reclaiming on any other return path too would double-free it. Tolerate a
+        // poisoned lock so the reclaim below always runs.
+        if let Ok(mut guard) = context.tx.lock() {
             *guard = None;
-            context.notify.notify_one();
-            // guard must be dropped BEFORE reclaiming the Arc
         }
-        // Reclaim the leaked Arc reference
+        context.notify.notify_one();
+        // Reclaim the single leaked Arc reference.
         unsafe { Arc::from_raw(ctx as *const BootstrapPushCallbackContext) };
         return false;
     }
@@ -262,23 +265,21 @@ fn bootstrap_push_callback_inner(
         return true;
     };
 
-    let guard = context
-        .tx
-        .lock()
-        .expect("bootstrap push callback mutex poisoned");
-    if let Some(tx) = guard.as_ref() {
-        let ok = tx.send(bootstrap_event).is_ok();
-        drop(guard);
-        if ok {
-            context.notify.notify_one();
-            true
-        } else {
-            unsafe { Arc::from_raw(ctx as *const BootstrapPushCallbackContext) };
-            false
-        }
+    // Forward to the host receiver. On any failure (receiver gone or a poisoned
+    // lock) return false to stop the forwarder, but do NOT reclaim the leaked Arc
+    // here — the guaranteed null sentinel does that exactly once.
+    let Ok(guard) = context.tx.lock() else {
+        return false;
+    };
+    let Some(tx) = guard.as_ref() else {
+        return false;
+    };
+    let ok = tx.send(bootstrap_event).is_ok();
+    drop(guard);
+    if ok {
+        context.notify.notify_one();
+        true
     } else {
-        drop(guard);
-        unsafe { Arc::from_raw(ctx as *const BootstrapPushCallbackContext) };
         false
     }
 }
@@ -567,5 +568,103 @@ mod ownership_tests {
         // Buffer still freed exactly once even though decode failed.
         assert_eq!(BOOT_DROPS_INVALID.load(Ordering::SeqCst), 1);
         unsafe { drop(Box::from_raw(raw)) };
+    }
+
+    // ---- leaked-Arc reclaim exactly once (macOS arm64 teardown double-free) ----
+    //
+    // The plugin forwarder leaks one Arc ref to the callback context (see
+    // `ChangeReceiverProxy::new`) and guarantees exactly one final null-event
+    // "sentinel" callback on exit (`SourceSentinelOnDrop`). The leaked ref must be
+    // reclaimed by that sentinel and by NOTHING else: when the host receiver is
+    // dropped first, a real event's `send()` fails, and if that path *also*
+    // reclaimed the Arc the subsequent sentinel would read freed memory and
+    // double-free it (the flaky "push callback mutex poisoned" + SIGSEGV). These
+    // tests pin the reclaim count via `Arc::strong_count`.
+
+    extern "C" fn free_only_drop(ptr: *mut u8, len: usize) {
+        free_bytes(ptr, len);
+    }
+
+    #[test]
+    fn change_callback_reclaims_leaked_arc_exactly_once_on_send_failure() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Arc<SourceEventWrapper>>(4);
+        let ctx = Arc::new(PushCallbackContext {
+            tx: std::sync::Mutex::new(Some(tx)),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        });
+        // Mirror new(): leak a second strong ref for the plugin forwarder.
+        let leaked = Arc::into_raw(ctx.clone()) as *mut std::ffi::c_void;
+        assert_eq!(Arc::strong_count(&ctx), 2);
+
+        // Receiver dropped first → the next send() fails (teardown order).
+        drop(rx);
+
+        let payload = SourceEventPayload {
+            source_id: "s".to_string(),
+            event: SourceEvent::Change(SourceChange::Insert { element: node() }),
+            timestamp_us: 0,
+            sequence: None,
+            source_position: None,
+        };
+        let ev = make_source_event(&payload, free_only_drop);
+        // Real event: decodes, but send() fails → returns false WITHOUT reclaiming.
+        assert!(!change_push_callback(leaked, ev));
+        assert_eq!(
+            Arc::strong_count(&ctx),
+            2,
+            "send-failure path must NOT reclaim the leaked Arc"
+        );
+
+        // Forwarder-exit sentinel: reclaims exactly once.
+        assert!(!change_push_callback(leaked, std::ptr::null_mut()));
+        assert_eq!(
+            Arc::strong_count(&ctx),
+            1,
+            "sentinel must reclaim the leaked Arc exactly once"
+        );
+    }
+
+    #[test]
+    fn bootstrap_callback_reclaims_leaked_arc_exactly_once_on_send_failure() {
+        let (tx, rx) =
+            std::sync::mpsc::sync_channel::<drasi_lib::channels::events::BootstrapEvent>(4);
+        let ctx = Arc::new(BootstrapPushCallbackContext {
+            tx: std::sync::Mutex::new(Some(tx)),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        });
+        let leaked = Arc::into_raw(ctx.clone()) as *mut std::ffi::c_void;
+        assert_eq!(Arc::strong_count(&ctx), 2);
+
+        drop(rx);
+
+        let payload = BootstrapEventPayload {
+            source_id: "s".to_string(),
+            change: SourceChange::Insert { element: node() },
+            timestamp_us: 0,
+            sequence: 1,
+        };
+        let bytes = rmp_serde::to_vec_named(&payload).unwrap();
+        let payload_len = bytes.len();
+        let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+        let ev = Box::into_raw(Box::new(FfiBootstrapEvent {
+            payload_ptr,
+            payload_len,
+            payload_drop_fn: Some(free_only_drop),
+            timestamp_us: 0,
+            sequence: 1,
+        }));
+        assert!(!bootstrap_push_callback(leaked, ev));
+        assert_eq!(
+            Arc::strong_count(&ctx),
+            2,
+            "send-failure path must NOT reclaim the leaked Arc"
+        );
+
+        assert!(!bootstrap_push_callback(leaked, std::ptr::null_mut()));
+        assert_eq!(
+            Arc::strong_count(&ctx),
+            1,
+            "sentinel must reclaim the leaked Arc exactly once"
+        );
     }
 }
