@@ -34,7 +34,7 @@
 //! Both the plugin SDK and the host SDK depend on this crate, so they share these
 //! exact struct definitions and therefore agree on the wire schema.
 
-use super::vtables::{FfiBootstrapEvent, FfiSourceEvent};
+use super::vtables::{FfiBootstrapEvent, FfiQueryResult, FfiSourceEvent};
 use bytes::Bytes;
 use chrono::DateTime;
 use drasi_core::models::SourceChange;
@@ -286,6 +286,36 @@ pub unsafe fn consume_bootstrap_event(ffi: &FfiBootstrapEvent) -> Option<Bootstr
     }
 }
 
+/// Consume a peer-produced `*mut FfiQueryResult`: decode its serialized payload
+/// into an owned `QueryResult`, free the peer's payload buffer via the envelope's
+/// `payload_drop_fn`, **and** free the `#[repr(C)]` envelope `Box` itself (whose
+/// ownership the producer transferred via `Box::into_raw`). Single canonical
+/// query-result consumer (issue #602).
+///
+/// Unlike [`consume_source_event`]/[`consume_bootstrap_event`] (which borrow their
+/// envelope), the query-result envelope is passed by owned pointer, so this also
+/// reclaims it.
+///
+/// # Safety
+/// `ptr` must be a non-null `*mut FfiQueryResult` produced by the peer via
+/// `Box::into_raw`, whose `payload_ptr`/`payload_len`/`payload_drop_fn` describe a
+/// peer-owned buffer.
+pub unsafe fn consume_query_result(
+    ptr: *mut FfiQueryResult,
+) -> Option<drasi_lib::channels::QueryResult> {
+    let ffi = unsafe { &*ptr };
+    let decoded = unsafe {
+        take_ffi_payload(
+            ffi.payload_ptr,
+            ffi.payload_len,
+            ffi.payload_drop_fn,
+            decode_query_result,
+        )
+    };
+    unsafe { drop(Box::from_raw(ptr)) };
+    decoded
+}
+
 #[cfg(test)]
 mod tests {
     //! T2 (part 1) — payload round-trip fidelity and the named-encoding
@@ -504,5 +534,73 @@ mod tests {
                 len,
             )))
         };
+    }
+
+    // ---- consume_query_result ownership (host→plugin path) ----
+
+    // Dedicated per-test counters (avoid shared-static / reset races under
+    // parallel test execution).
+    static QR_DROPS_VALID: AtomicUsize = AtomicUsize::new(0);
+    static QR_DROPS_INVALID: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn count_drop_qr_valid(ptr: *mut u8, len: usize) {
+        QR_DROPS_VALID.fetch_add(1, Ordering::SeqCst);
+        free_raw_bytes(ptr, len);
+    }
+    extern "C" fn count_drop_qr_invalid(ptr: *mut u8, len: usize) {
+        QR_DROPS_INVALID.fetch_add(1, Ordering::SeqCst);
+        free_raw_bytes(ptr, len);
+    }
+
+    fn free_raw_bytes(ptr: *mut u8, len: usize) {
+        if !ptr.is_null() && len > 0 {
+            unsafe { drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len))) };
+        }
+    }
+
+    /// Mirror the host producer: build a `*mut FfiQueryResult` from a serialized
+    /// payload buffer guarded by a counting `payload_drop_fn`.
+    fn make_ffi_query_result(
+        bytes: Vec<u8>,
+        drop_fn: extern "C" fn(*mut u8, usize),
+    ) -> *mut FfiQueryResult {
+        let payload_len = bytes.len();
+        let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+        Box::into_raw(Box::new(FfiQueryResult {
+            payload_ptr,
+            payload_len,
+            payload_drop_fn: Some(drop_fn),
+        }))
+    }
+
+    #[test]
+    fn consume_query_result_decodes_and_frees_buffer_once() {
+        let qr = drasi_lib::channels::QueryResult::new(
+            "q-1".to_string(),
+            7,
+            Utc::now(),
+            Vec::new(),
+            std::collections::HashMap::new(),
+        );
+        let raw = make_ffi_query_result(encode_query_result(&qr), count_drop_qr_valid);
+
+        let decoded = unsafe { consume_query_result(raw) }.expect("owned QueryResult");
+        assert_eq!(decoded.query_id, "q-1");
+        assert_eq!(decoded.sequence, 7);
+
+        // The host's payload buffer was freed exactly once (no leak, no double-free),
+        // and the envelope `Box` was reclaimed by `consume_query_result`.
+        assert_eq!(QR_DROPS_VALID.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn consume_query_result_handles_undecodable_payload_without_leak() {
+        // Garbage bytes that are not a valid QueryResult.
+        let raw = make_ffi_query_result(vec![0xFFu8; 8], count_drop_qr_invalid);
+
+        let decoded = unsafe { consume_query_result(raw) };
+        assert!(decoded.is_none(), "garbage payload must not decode");
+        // Buffer still freed exactly once even though decode failed.
+        assert_eq!(QR_DROPS_INVALID.load(Ordering::SeqCst), 1);
     }
 }

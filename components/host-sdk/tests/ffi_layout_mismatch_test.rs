@@ -159,3 +159,99 @@ async fn mock_source_change_stream_survives_layout_mismatch() {
     drop(plugin);
     drop(_event_rx);
 }
+
+/// Drive the **bootstrap** event path from the mock-source cdylib across the FFI
+/// boundary under the same layout mismatch. Bootstrap events embed the same
+/// `repr(Rust)` `Element`/`Arc<str>` payloads as change events and follow the
+/// same serialize/`drop_fn` contract (issue #602), so they need their own
+/// regression. Before the fix, receiving and dropping a bootstrap event under a
+/// layout mismatch corrupts the heap; after the fix the serialized transfer is
+/// layout-independent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "gated: run via `make test-ffi-layout-mismatch` (nightly -Zlayout-seed + MALLOC_CHECK_)"]
+async fn mock_source_bootstrap_stream_survives_layout_mismatch() {
+    let path = plugin_dir().join(plugin_filename("drasi-source-mock"));
+    assert!(
+        path.exists(),
+        "mock source cdylib not found at {} — build it first (see make test-ffi-layout-mismatch)",
+        path.display()
+    );
+
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Failed to load mock source plugin");
+
+    let config = serde_json::json!({
+        "dataType": { "type": "generic" },
+        "intervalMs": 5
+    });
+    let source = plugin.source_plugins[0]
+        .create_source("layout-mismatch-boot-src", &config, false)
+        .await
+        .expect("Should create mock source instance");
+
+    let (event_tx, _event_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
+    let context = drasi_lib::context::SourceRuntimeContext::new(
+        "layout-mismatch-boot-instance",
+        "layout-mismatch-boot-src",
+        None,
+        event_tx,
+        None,
+    );
+    source.initialize(context).await;
+    source.start().await.expect("Should start source");
+
+    // enable_bootstrap: true drives the FfiBootstrapEvent deserialization path.
+    let settings = drasi_lib::config::SourceSubscriptionSettings {
+        source_id: "layout-mismatch-boot-src".to_string(),
+        enable_bootstrap: true,
+        query_id: "layout-mismatch-boot-query".to_string(),
+        nodes: HashSet::new(),
+        relations: HashSet::new(),
+        resume_from: None,
+        request_position_handle: false,
+    };
+    let sub = source.subscribe(settings).await.expect("Should subscribe");
+    let mut bootstrap_receiver = sub
+        .bootstrap_receiver
+        .expect("mock source should provide a bootstrap receiver when enable_bootstrap is true");
+
+    // Drain bootstrap events. Each carries an `Element` with `Arc<str>` data;
+    // touching and dropping it under a layout mismatch corrupts the heap before
+    // the fix.
+    let mut received = 0usize;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), bootstrap_receiver.recv()).await {
+            Ok(Some(event)) => {
+                // Touch the event's heap data — reads through `Arc<str>`. This is
+                // what corrupts/aborts before the fix.
+                let _ = event.source_id.len();
+                let _ = format!("{:?}", event.change.get_reference());
+                received += 1;
+                // Drop the host-owned event explicitly to exercise the drop glue.
+                drop(event);
+            }
+            Ok(None) => break,  // bootstrap channel closed (stream complete)
+            Err(_) => continue, // timeout tick
+        }
+    }
+
+    assert!(
+        received >= 1,
+        "expected to receive at least one bootstrap event from the mock source"
+    );
+    println!("LAYOUT_MISMATCH_OK: received {received} bootstrap events without corruption");
+
+    source.stop().await.expect("Should stop source");
+    drop(bootstrap_receiver);
+    drop(source);
+    drop(plugin);
+    drop(_event_rx);
+}

@@ -104,7 +104,8 @@ extern "C" fn ffi_drop_payload_bytes(ptr: *mut u8, len: usize) {
 
 /// Decode a host-sent `*mut FfiQueryResult` into a plugin-owned `QueryResult`.
 ///
-/// Deserializes the host's MessagePack buffer, frees that buffer via the host's
+/// Delegates to the canonical [`super::payload::consume_query_result`], which
+/// deserializes the host's MessagePack buffer, frees that buffer via the host's
 /// `payload_drop_fn`, and frees the `#[repr(C)]` envelope. Returns `None` if the
 /// payload could not be decoded (buffers are freed regardless). The host never
 /// hands the plugin a reinterpreted `repr(Rust)` pointer (issue #602).
@@ -114,17 +115,7 @@ extern "C" fn ffi_drop_payload_bytes(ptr: *mut u8, len: usize) {
 unsafe fn decode_ffi_query_result(
     ptr: *mut FfiQueryResult,
 ) -> Option<drasi_lib::channels::QueryResult> {
-    let ffi = unsafe { &*ptr };
-    let decoded = unsafe {
-        super::payload::take_ffi_payload(
-            ffi.payload_ptr,
-            ffi.payload_len,
-            ffi.payload_drop_fn,
-            super::payload::decode_query_result,
-        )
-    };
-    unsafe { drop(Box::from_raw(ptr)) };
-    decoded
+    unsafe { super::payload::consume_query_result(ptr) }
 }
 
 // Compile-time assertions that transmute between raw pointers and callback

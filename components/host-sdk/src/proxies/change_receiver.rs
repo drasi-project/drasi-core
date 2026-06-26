@@ -407,6 +407,7 @@ mod ownership_tests {
     static SRC_DROPS_VALID: AtomicUsize = AtomicUsize::new(0);
     static SRC_DROPS_INVALID: AtomicUsize = AtomicUsize::new(0);
     static BOOT_DROPS: AtomicUsize = AtomicUsize::new(0);
+    static BOOT_DROPS_INVALID: AtomicUsize = AtomicUsize::new(0);
 
     extern "C" fn counting_drop_src_valid(ptr: *mut u8, len: usize) {
         SRC_DROPS_VALID.fetch_add(1, Ordering::SeqCst);
@@ -420,6 +421,11 @@ mod ownership_tests {
 
     extern "C" fn counting_drop_boot(ptr: *mut u8, len: usize) {
         BOOT_DROPS.fetch_add(1, Ordering::SeqCst);
+        free_bytes(ptr, len);
+    }
+
+    extern "C" fn counting_drop_boot_invalid(ptr: *mut u8, len: usize) {
+        BOOT_DROPS_INVALID.fetch_add(1, Ordering::SeqCst);
         free_bytes(ptr, len);
     }
 
@@ -539,6 +545,27 @@ mod ownership_tests {
         assert_eq!(event.sequence, 5);
         assert_eq!(event.change, payload.change);
         assert_eq!(BOOT_DROPS.load(Ordering::SeqCst), 1);
+        unsafe { drop(Box::from_raw(raw)) };
+    }
+
+    #[test]
+    fn decode_bootstrap_event_handles_undecodable_payload_without_leak() {
+        // Garbage bytes that are not a valid BootstrapEventPayload.
+        let bytes = vec![0xFFu8; 8];
+        let payload_len = bytes.len();
+        let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+        let raw = Box::into_raw(Box::new(FfiBootstrapEvent {
+            payload_ptr,
+            payload_len,
+            payload_drop_fn: Some(counting_drop_boot_invalid),
+            timestamp_us: 0,
+            sequence: 0,
+        }));
+        let ffi = unsafe { &*raw };
+
+        assert!(decode_bootstrap_event(ffi).is_none());
+        // Buffer still freed exactly once even though decode failed.
+        assert_eq!(BOOT_DROPS_INVALID.load(Ordering::SeqCst), 1);
         unsafe { drop(Box::from_raw(raw)) };
     }
 }
