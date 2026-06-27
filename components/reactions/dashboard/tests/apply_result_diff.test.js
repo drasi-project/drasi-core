@@ -37,6 +37,7 @@ const strippedSource = widgetsSource
 vm.runInNewContext(strippedSource, widgetsSandbox, { filename: "widgets.js" });
 
 const applyResultDiff = widgetsSandbox.applyResultDiff;
+const snapshotRowToAddDiff = widgetsSandbox.snapshotRowToAddDiff;
 
 // ─── Test runner ────────────────────────────────────────────────────
 let passed = 0;
@@ -146,6 +147,52 @@ console.log("\n=== applyResultDiff: id/equality fallback (row_signature unknown)
   applyResultDiff(rt, { op: "add", data: { id: "A1234", location: "Parking" } }); // seeded, sig 0
   applyResultDiff(rt, { op: "add", k: 42, data: { id: "A1234", location: "Curbside" } }); // live, real sig
   assertEqual(rt.rows.length, 1, "real-signature add replaces sig-0 seeded row (id fallback)");
+  assertEqual(rt.rows[0].location, "Curbside", "row updated to live value");
+}
+
+console.log("\n=== string-form row_signature (64-bit precision-safe wire) ===");
+
+{
+  // signatures arrive as strings on the wire; same string upserts
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", k: "12345678901234567890", data: { location: "Parking" } });
+  applyResultDiff(rt, { op: "add", k: "12345678901234567890", data: { location: "Curbside" } });
+  assertEqual(rt.rows.length, 1, "same string signature upserts");
+  assertEqual(rt.rows[0].location, "Curbside", "string-sig replacement keeps newest value");
+}
+
+{
+  // two large signatures that would collide as JS Numbers stay distinct as strings
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", k: "9007199254740993", data: { v: 1 } });
+  applyResultDiff(rt, { op: "add", k: "9007199254740992", data: { v: 2 } });
+  assertEqual(rt.rows.length, 2, "near-2^53 string signatures are not conflated");
+}
+
+console.log("\n=== snapshotRowToAddDiff: snapshot envelope decode ===");
+
+{
+  // { k, v } envelope is decoded into an add diff carrying the signature
+  const diff = snapshotRowToAddDiff({ k: "42", v: { location: "Parking" } });
+  assertEqual(diff.op, "add", "decodes to an add diff");
+  assertEqual(diff.k, "42", "carries the row_signature");
+  assertEqual(diff.data.location, "Parking", "carries the row data");
+}
+
+{
+  // a plain row containing a `v` field is NOT misread as an envelope
+  const diff = snapshotRowToAddDiff({ id: "X", v: 42 });
+  assertEqual(diff.data.id, "X", "plain row passed through (data)");
+  assertEqual(diff.data.v, 42, "plain row's v field preserved");
+  assertEqual(diff.k, undefined, "no signature for a plain row");
+}
+
+{
+  // snapshot-load then live diff: signature threads through end to end
+  const rt = newRuntime();
+  applyResultDiff(rt, snapshotRowToAddDiff({ k: "777", v: { location: "Parking" } }));
+  applyResultDiff(rt, { op: "add", k: "777", data: { location: "Curbside" } });
+  assertEqual(rt.rows.length, 1, "live diff replaces snapshot-loaded row by signature");
   assertEqual(rt.rows[0].location, "Curbside", "row updated to live value");
 }
 

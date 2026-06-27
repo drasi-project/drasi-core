@@ -329,7 +329,12 @@ export function createDefaultWidget(widgetType, index = 0) {
 // fall back to an `id`/equality heuristic.
 
 function rowSig(value) {
-  return typeof value === "number" && value > 0 ? value : 0;
+  // row_signature arrives as a string (`k`) to preserve all 64 bits; treat any
+  // non-empty, non-"0" string as a present signature. Numbers are accepted for
+  // resilience. Returns the signature (string or number) or 0 when unknown.
+  if (typeof value === "string") return value.length > 0 && value !== "0" ? value : 0;
+  if (typeof value === "number") return value > 0 ? value : 0;
+  return 0;
 }
 
 function tagSig(row, sig) {
@@ -381,6 +386,20 @@ function normalizeDiffData(diff) {
   if (diff.op === "update") return diff.after ?? diff.data ?? null;
   if (diff.op === "aggregation") return diff.after ?? null;
   return null;
+}
+
+// Convert a snapshot row from the REST API into a synthetic `add` diff.
+//
+// Snapshot rows arrive as a { k: row_signature, v: data } envelope; this threads
+// the signature through so a later live diff with the same signature upserts the
+// row instead of duplicating it (issue #605). Plain (pre-envelope) rows are passed
+// through with an unknown signature.
+export function snapshotRowToAddDiff(entry) {
+  const isEnvelope =
+    entry && typeof entry === "object" && "k" in entry && "v" in entry;
+  const data = isEnvelope ? entry.v : entry;
+  const k = isEnvelope ? entry.k : undefined;
+  return { op: "add", data, k };
 }
 
 export function applyResultDiff(runtime, diff) {

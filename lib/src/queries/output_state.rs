@@ -37,7 +37,7 @@ use crate::channels::{QueryResult, ResultDiff};
 pub struct KeyedSnapshotRow {
     /// The row's `row_signature` (engine-computed identity). `0` means unknown.
     pub k: u64,
-    /// The row data.
+    /// The row's data payload as a JSON object (the query result columns and values).
     pub v: serde_json::Value,
 }
 
@@ -378,6 +378,10 @@ impl SnapshotStream {
     }
 
     /// Create a `SnapshotStream` from a stream of `(row_signature, value)` pairs.
+    ///
+    /// Prefer this over [`from_stream`](Self::from_stream) when row signatures are
+    /// available; signatures let downstream consumers deduplicate and match rows
+    /// by canonical identity (see `row_signature`).
     pub fn from_keyed_stream(
         stream: impl Stream<Item = (u64, serde_json::Value)> + Send + 'static,
         as_of_sequence: u64,
@@ -391,6 +395,9 @@ impl SnapshotStream {
     }
 
     /// Collect all rows from the stream into a `Vec`, dropping signatures.
+    ///
+    /// Use [`collect_keyed_vec`](Self::collect_keyed_vec) to retain each row's
+    /// `row_signature` alongside its data.
     pub async fn collect_vec(self) -> Vec<serde_json::Value> {
         use tokio_stream::StreamExt;
         self.inner.map(|(_, v)| v).collect().await
@@ -402,6 +409,15 @@ impl SnapshotStream {
         self.inner.collect().await
     }
 
+    /// Collect up to `limit` `(row_signature, value)` pairs, then stop pulling.
+    ///
+    /// Bounds peak memory when draining a potentially large snapshot into a
+    /// capped consumer (e.g. a store with a per-query row limit).
+    pub async fn collect_keyed_vec_capped(self, limit: usize) -> Vec<(u64, serde_json::Value)> {
+        use tokio_stream::StreamExt;
+        self.inner.take(limit).collect().await
+    }
+
     /// Pull the next `(row_signature, value)` pair from the stream.
     pub async fn next_keyed(&mut self) -> Option<(u64, serde_json::Value)> {
         use tokio_stream::StreamExt;
@@ -409,6 +425,13 @@ impl SnapshotStream {
     }
 }
 
+/// Yields `serde_json::Value` rows, **dropping each row's `row_signature`**.
+///
+/// This trait impl is retained for value-only consumers (e.g. bootstrap replay in
+/// other reactions). Identity-preserving consumers must instead use the keyed
+/// methods ([`next_keyed`](SnapshotStream::next_keyed) /
+/// [`collect_keyed_vec`](SnapshotStream::collect_keyed_vec)); routing snapshot rows
+/// through this lossy path is what previously caused the #605 deduplication bug.
 impl Stream for SnapshotStream {
     type Item = serde_json::Value;
 

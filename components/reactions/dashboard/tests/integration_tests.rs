@@ -82,9 +82,10 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
         .auto_start(true)
         .build();
 
+    let port = reserve_port()?;
     let reaction = DashboardReaction::builder("test-dashboard")
         .with_query("test-query")
-        .with_port(19110)
+        .with_port(port)
         .build()?;
 
     let core = DrasiLib::builder()
@@ -97,11 +98,14 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
 
     core.start().await?;
 
+    let base = format!("http://127.0.0.1:{port}");
+    let ws_url = format!("ws://127.0.0.1:{port}/ws");
+
     // Poll until the server is ready (max 10 seconds).
     let client = reqwest::Client::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(resp) = client.get("http://localhost:19110/").send().await {
+        if let Ok(resp) = client.get(format!("{base}/")).send().await {
             if resp.status().is_success() {
                 break;
             }
@@ -115,7 +119,7 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
     }
 
     // Verify static UI endpoint.
-    let root_response = client.get("http://localhost:19110/").send().await?;
+    let root_response = client.get(format!("{base}/")).send().await?;
     assert_eq!(root_response.status(), reqwest::StatusCode::OK);
     let root_body = root_response.text().await?;
     assert!(
@@ -125,7 +129,7 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
 
     // Dashboard CRUD via REST.
     let create_response = client
-        .post("http://localhost:19110/api/dashboards")
+        .post(format!("{base}/api/dashboards"))
         .json(&serde_json::json!({
             "name": "Integration Dashboard",
             "gridOptions": {"columns": 12, "rowHeight": 60, "margin": 10},
@@ -137,35 +141,26 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
     let created_dashboard: DashboardConfig = create_response.json().await?;
 
     let get_response = client
-        .get(format!(
-            "http://localhost:19110/api/dashboards/{}",
-            created_dashboard.id
-        ))
+        .get(format!("{base}/api/dashboards/{}", created_dashboard.id))
         .send()
         .await?;
     assert_eq!(get_response.status(), reqwest::StatusCode::OK);
 
     let update_response = client
-        .put(format!(
-            "http://localhost:19110/api/dashboards/{}",
-            created_dashboard.id
-        ))
+        .put(format!("{base}/api/dashboards/{}", created_dashboard.id))
         .json(&serde_json::json!({"name": "Integration Dashboard Updated"}))
         .send()
         .await?;
     assert_eq!(update_response.status(), reqwest::StatusCode::OK);
 
     let delete_response = client
-        .delete(format!(
-            "http://localhost:19110/api/dashboards/{}",
-            created_dashboard.id
-        ))
+        .delete(format!("{base}/api/dashboards/{}", created_dashboard.id))
         .send()
         .await?;
     assert_eq!(delete_response.status(), reqwest::StatusCode::NO_CONTENT);
 
     // WebSocket protocol harness.
-    let (ws_stream, _) = connect_async("ws://localhost:19110/ws").await?;
+    let (ws_stream, _) = connect_async(&ws_url).await?;
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
     ws_sender
@@ -189,13 +184,18 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
         )
         .await?;
     let insert_message = next_query_result(&mut ws_receiver).await?;
+    let add_diff = insert_message["results"]
+        .as_array()
+        .and_then(|results| results.iter().find(|result| result["op"] == "add"))
+        .expect("INSERT operation should produce add diff message");
+    // The row_signature (canonical identity, #605) must be wired through as a
+    // non-zero string `k` on the live diff.
+    let k = add_diff["k"]
+        .as_str()
+        .expect("add diff should carry a string row_signature `k`");
     assert!(
-        insert_message["results"]
-            .as_array()
-            .unwrap_or(&Vec::new())
-            .iter()
-            .any(|result| result["op"] == "add"),
-        "INSERT operation should produce add diff message"
+        !k.is_empty() && k != "0",
+        "add diff row_signature should be present and non-zero, got {k:?}"
     );
 
     // UPDATE verification.

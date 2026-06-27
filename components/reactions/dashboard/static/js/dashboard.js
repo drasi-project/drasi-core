@@ -9,6 +9,7 @@ import {
   AGGREGATION_MODES,
   resizeAllCharts,
   disposeWidgetChart,
+  snapshotRowToAddDiff,
 } from "./widgets.js";
 import { openModal, closeModal, showToast } from "./modal.js";
 
@@ -535,13 +536,7 @@ export class DashboardDesigner {
         // Only populate if the runtime has no data yet
         if (runtime.rows.length === 0 && runtime.aggregation === null) {
           for (const entry of rows) {
-            // Snapshot rows arrive as { k: row_signature, v: data }; pass the
-            // signature through so live diffs match by identity (issue #605).
-            const isEnvelope =
-              entry && typeof entry === "object" && "k" in entry && "v" in entry;
-            const data = isEnvelope ? entry.v : entry;
-            const k = isEnvelope ? entry.k : undefined;
-            applyResultDiff(runtime, { op: "add", data, k });
+            applyResultDiff(runtime, snapshotRowToAddDiff(entry));
           }
           if (aggregation !== null) {
             applyResultDiff(runtime, { op: "aggregation", after: aggregation });

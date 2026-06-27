@@ -53,6 +53,7 @@ pub struct DashboardReaction {
     websocket_hub: WebSocketHub,
     snapshot_store: QuerySnapshotStore,
     task_handles: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
+    /// Handle for the running axum HTTP/WebSocket server task.
     server_handle: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
     /// Signals the HTTP/WebSocket server to shut down gracefully. `true` means
     /// "shut down now": the axum server stops accepting and closes idle
@@ -241,6 +242,44 @@ impl Reaction for DashboardReaction {
             )
             .await;
 
+        let snapshot_fetcher = self
+            .base
+            .context()
+            .await
+            .and_then(|ctx| ctx.snapshot_fetcher.clone());
+
+        // Seed the accumulated snapshot store from the bootstrap snapshot so the
+        // live WebSocket stream starts from the same baseline the fallback fetcher
+        // reads, instead of starting empty (see issue #605). This runs BEFORE the
+        // processing task is spawned so a concurrently-arriving live diff (e.g. a
+        // delete) can't be applied before seeding and then resurrected by the stale
+        // bootstrap snapshot. Seeding is best-effort: failures (e.g. bootstrap not
+        // yet complete) are logged and skipped, and the fallback fetcher in the API
+        // still serves initial state. The collection is capped at the store's
+        // per-query row limit to bound peak memory on large result sets.
+        if let Some(fetcher) = snapshot_fetcher.as_ref() {
+            let cap = self.snapshot_store.max_rows_per_query();
+            for query_id in &self.base.queries {
+                match fetcher.fetch_snapshot(query_id).await {
+                    Ok(stream) => {
+                        let rows = stream.collect_keyed_vec_capped(cap).await;
+                        let count = rows.len();
+                        self.snapshot_store.seed_rows(query_id, rows).await;
+                        debug!(
+                            "[{}] seeded {count} bootstrap row(s) for query '{query_id}'",
+                            self.base.id
+                        );
+                    }
+                    Err(err) => {
+                        debug!(
+                            "[{}] could not seed bootstrap snapshot for query '{query_id}': {err}",
+                            self.base.id
+                        );
+                    }
+                }
+            }
+        }
+
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
         let status_handle = self.base.status_handle();
         let reaction_id = self.base.id.clone();
@@ -292,39 +331,6 @@ impl Reaction for DashboardReaction {
             }
         });
         self.task_handles.lock().await.push(heartbeat_handle);
-
-        let snapshot_fetcher = self
-            .base
-            .context()
-            .await
-            .and_then(|ctx| ctx.snapshot_fetcher.clone());
-
-        // Seed the accumulated snapshot store from the bootstrap snapshot so the
-        // live WebSocket stream starts from the same baseline the fallback fetcher
-        // reads, instead of starting empty (see issue #605). Seeding is best-effort:
-        // failures (e.g. bootstrap not yet complete) are logged and skipped, and the
-        // fallback fetcher in the API still serves initial state.
-        if let Some(fetcher) = snapshot_fetcher.as_ref() {
-            for query_id in &self.base.queries {
-                match fetcher.fetch_snapshot(query_id).await {
-                    Ok(stream) => {
-                        let rows = stream.collect_keyed_vec().await;
-                        let count = rows.len();
-                        self.snapshot_store.seed_rows(query_id, rows).await;
-                        debug!(
-                            "[{}] seeded {count} bootstrap row(s) for query '{query_id}'",
-                            self.base.id
-                        );
-                    }
-                    Err(err) => {
-                        debug!(
-                            "[{}] could not seed bootstrap snapshot for query '{query_id}': {err}",
-                            self.base.id
-                        );
-                    }
-                }
-            }
-        }
 
         let api_state = ApiState::new(
             self.base.id.clone(),

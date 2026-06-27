@@ -19,11 +19,38 @@ use axum::response::IntoResponse;
 use drasi_lib::channels::{QueryResult, ResultDiff};
 use futures::{SinkExt, StreamExt};
 use log::{debug, error, warn};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, RwLock};
+
+/// Serialize a `row_signature` (`u64`) as a JSON **string**.
+///
+/// JavaScript `Number` only represents integers exactly up to 2^53−1, but
+/// `row_signature` is a full 64-bit hash. Sending it as a string preserves all
+/// 64 bits so the browser can compare identities without precision loss.
+fn serialize_row_signature<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&value.to_string())
+}
+
+/// Deserialize a `row_signature` from either a JSON string or number.
+///
+/// Strings are the canonical form (see [`serialize_row_signature`]); numbers are
+/// accepted for resilience.
+fn deserialize_row_signature<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    use serde::de::Error as _;
+    match Value::deserialize(deserializer)? {
+        Value::String(s) => s.parse::<u64>().map_err(D::Error::custom),
+        Value::Number(n) => n
+            .as_u64()
+            .ok_or_else(|| D::Error::custom("row_signature is not a u64")),
+        Value::Null => Ok(0),
+        other => Err(D::Error::custom(format!(
+            "unexpected row_signature type: {other}"
+        ))),
+    }
+}
 
 /// Supported client-to-server WebSocket messages.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -38,8 +65,14 @@ pub enum ClientMessage {
 pub struct WebSocketResultDiff {
     pub op: String,
     /// The row's engine-stamped `row_signature` — the canonical row identity.
-    /// Serialized as `k`; `0` means unknown (clients fall back to id/equality).
-    #[serde(rename = "k", default)]
+    /// Serialized as `k` (a JSON string to preserve all 64 bits in the browser);
+    /// `0` means unknown (clients fall back to id/equality).
+    #[serde(
+        rename = "k",
+        default,
+        serialize_with = "serialize_row_signature",
+        deserialize_with = "deserialize_row_signature"
+    )]
     pub row_signature: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
@@ -203,7 +236,12 @@ impl WebSocketHub {
 /// case matching falls back to an `id`/equality heuristic on `data`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SnapshotRow {
-    #[serde(rename = "k", default)]
+    #[serde(
+        rename = "k",
+        default,
+        serialize_with = "serialize_row_signature",
+        deserialize_with = "deserialize_row_signature"
+    )]
     pub row_signature: u64,
     #[serde(rename = "v")]
     pub data: Value,
@@ -246,6 +284,11 @@ impl QuerySnapshotStore {
             snapshots: Arc::new(RwLock::new(HashMap::new())),
             max_rows_per_query: max_rows,
         }
+    }
+
+    /// The configured per-query row cap.
+    pub fn max_rows_per_query(&self) -> usize {
+        self.max_rows_per_query
     }
 
     /// Apply a query result's diffs to the accumulated snapshot.
@@ -577,5 +620,28 @@ mod tests {
         assert_eq!(parsed["results"][0]["op"], "add");
         assert_eq!(parsed["results"][1]["op"], "update");
         assert_eq!(parsed["results"][2]["op"], "delete");
+        // row_signature is serialized as a string under `k` (64-bit precision-safe).
+        assert_eq!(parsed["results"][0]["k"], "0");
+    }
+
+    #[test]
+    fn test_row_signature_serialized_as_string_roundtrips() {
+        let big = 12_345_678_901_234_567_890u64; // > 2^53, would lose precision as a JSON number
+        let diff = WebSocketResultDiff {
+            op: "add".to_string(),
+            row_signature: big,
+            data: Some(serde_json::json!({"id": 1})),
+            before: None,
+            after: None,
+            grouping_keys: None,
+        };
+        let json = serde_json::to_value(&diff).unwrap();
+        assert_eq!(json["k"], serde_json::Value::String(big.to_string()));
+        let back: WebSocketResultDiff = serde_json::from_value(json).unwrap();
+        assert_eq!(back.row_signature, big);
+        // Also accepts a numeric form on the wire for resilience.
+        let from_num: WebSocketResultDiff =
+            serde_json::from_str(r#"{"op":"add","k":42,"data":{"id":1}}"#).unwrap();
+        assert_eq!(from_num.row_signature, 42);
     }
 }

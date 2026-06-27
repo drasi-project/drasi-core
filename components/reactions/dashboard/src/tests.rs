@@ -919,7 +919,7 @@ async fn test_snapshot_serialization_format() {
     assert!(json["rows"].is_array());
     assert_eq!(json["rows"].as_array().unwrap().len(), 1);
     assert_eq!(json["rows"][0]["v"]["id"], 1);
-    assert_eq!(json["rows"][0]["k"], 0);
+    assert_eq!(json["rows"][0]["k"], "0");
     assert_eq!(json["aggregation"]["total"], 42);
 }
 
