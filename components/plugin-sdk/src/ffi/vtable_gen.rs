@@ -165,7 +165,7 @@ impl Drop for FfiSnapshotIterHandle {
 /// the stream ends and `drop_fn` is called.
 pub(crate) fn make_snapshot_stream(
     iter: FfiSnapshotIterator,
-) -> impl tokio_stream::Stream<Item = serde_json::Value> + Send {
+) -> impl tokio_stream::Stream<Item = (u64, serde_json::Value)> + Send {
     let handle = FfiSnapshotIterHandle {
         iter_ctx: iter.iter_ctx,
         next_fn: iter.next_fn,
@@ -184,12 +184,21 @@ pub(crate) fn make_snapshot_stream(
                 if json_str.is_empty() {
                     None
                 } else {
-                    match serde_json::from_str::<serde_json::Value>(&json_str) {
-                        Ok(val) => Some(val),
-                        Err(e) => {
-                            log::error!("[FFI snapshot stream] failed to deserialize row: {e}");
-                            None
-                        }
+                    // Rows cross FFI as a `KeyedSnapshotRow` envelope so the
+                    // canonical `row_signature` identity survives. Fall back to
+                    // treating the payload as a bare row (signature 0) for
+                    // forward/backward resilience.
+                    match serde_json::from_str::<drasi_lib::queries::output_state::KeyedSnapshotRow>(
+                        &json_str,
+                    ) {
+                        Ok(envelope) => Some((envelope.k, envelope.v)),
+                        Err(_) => match serde_json::from_str::<serde_json::Value>(&json_str) {
+                            Ok(val) => Some((0u64, val)),
+                            Err(e) => {
+                                log::error!("[FFI snapshot stream] failed to deserialize row: {e}");
+                                None
+                            }
+                        },
                     }
                 }
             })
@@ -331,7 +340,7 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
         let stream = make_snapshot_stream(resp.iterator);
 
         Ok(
-            drasi_lib::queries::output_state::SnapshotStream::from_stream(
+            drasi_lib::queries::output_state::SnapshotStream::from_keyed_stream(
                 stream,
                 as_of_sequence,
                 config_hash,
@@ -3584,5 +3593,73 @@ pub fn build_secret_store_plugin_vtable<T: SecretStorePluginDescriptor + 'static
         config_schema_name_fn: config_schema_name_fn::<T>,
         create_secret_store_fn: create_secret_store_fn::<T>,
         drop_fn: drop_fn::<T>,
+    }
+}
+
+#[cfg(test)]
+mod snapshot_stream_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Test iterator state: yields `payload` once, then EOF (empty string).
+    struct TestIter {
+        remaining: AtomicUsize,
+        payload: String,
+    }
+
+    extern "C" fn test_next(ctx: *mut c_void) -> FfiOwnedStr {
+        let state = unsafe { &*(ctx as *const TestIter) };
+        let n = state.remaining.load(Ordering::SeqCst);
+        if n == 0 {
+            return FfiOwnedStr::from_string(String::new());
+        }
+        state.remaining.store(n - 1, Ordering::SeqCst);
+        FfiOwnedStr::from_string(state.payload.clone())
+    }
+
+    extern "C" fn test_drop(ctx: *mut c_void) {
+        if !ctx.is_null() {
+            unsafe { drop(Box::from_raw(ctx as *mut TestIter)) };
+        }
+    }
+
+    fn make_iter(payload: &str) -> FfiSnapshotIterator {
+        let state = Box::new(TestIter {
+            remaining: AtomicUsize::new(1),
+            payload: payload.to_string(),
+        });
+        FfiSnapshotIterator {
+            iter_ctx: Box::into_raw(state) as *mut c_void,
+            next_fn: test_next,
+            drop_fn: test_drop,
+        }
+    }
+
+    #[tokio::test]
+    async fn make_snapshot_stream_parses_keyed_envelope() {
+        use tokio_stream::StreamExt;
+        let rows: Vec<(u64, serde_json::Value)> =
+            make_snapshot_stream(make_iter(r#"{"k":42,"v":{"id":2}}"#))
+                .collect()
+                .await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, 42);
+        assert_eq!(rows[0].1, serde_json::json!({"id": 2}));
+    }
+
+    #[tokio::test]
+    async fn make_snapshot_stream_falls_back_to_bare_row() {
+        // FFI backward-compat: a pre-0.10 plugin sends a bare row (no envelope).
+        use tokio_stream::StreamExt;
+        let rows: Vec<(u64, serde_json::Value)> = make_snapshot_stream(make_iter(r#"{"id":1}"#))
+            .collect()
+            .await;
+        assert_eq!(
+            rows.len(),
+            1,
+            "bare row should still yield exactly one item"
+        );
+        assert_eq!(rows[0].0, 0, "bare row gets the unknown signature 0");
+        assert_eq!(rows[0].1, serde_json::json!({"id": 1}));
     }
 }
