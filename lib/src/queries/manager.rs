@@ -1868,58 +1868,38 @@ impl Query for DrasiQuery {
                         let panic_count = join_results.iter().filter(|r| matches!(r, Err(e) if e.is_panic())).count();
 
                         // Collect bootstrap provider failures reported by the per-source
-                        // tasks. Keep the source id and a single-line rendering of the
-                        // full error chain separately so the status message can omit the
-                        // raw error text (which may contain sensitive data).
-                        let failures: Vec<(String, String)> = join_results
+                        // tasks. Each error already carries the source id via anyhow
+                        // context; render the full chain single-line with `{:#}`.
+                        let failures: Vec<String> = join_results
                             .iter()
                             .filter_map(|r| r.as_ref().ok())
-                            .filter_map(|(source_id, result)| {
-                                result
-                                    .as_ref()
-                                    .err()
-                                    .map(|e| (source_id.clone(), format!("{e:#}")))
+                            .filter_map(|(_, result)| {
+                                result.as_ref().err().map(|e| format!("{e:#}"))
                             })
                             .collect();
 
                         if panic_count > 0 || !failures.is_empty() {
-                            // Full detail (including provider error chains) goes to the
-                            // operator log stream only. Each failure's error already
-                            // carries the source id via anyhow context, so don't prepend
-                            // it again here.
-                            let mut log_details = Vec::new();
+                            let mut details = Vec::new();
                             if panic_count > 0 {
-                                log_details.push(format!("{panic_count} task(s) panicked"));
+                                details.push(format!("{panic_count} task(s) panicked"));
                             }
-                            log_details.extend(failures.iter().map(|(_, e)| e.clone()));
-                            let log_detail = log_details.join("; ");
+                            details.extend(failures.iter().cloned());
+                            let detail = details.join("; ");
 
                             error!(
-                                "[BOOTSTRAP] Query '{query_id_clone}' bootstrap failed ({log_detail}), \
+                                "[BOOTSTRAP] Query '{query_id_clone}' bootstrap failed ({detail}), \
                                  transitioning to Error and opening gate"
                             );
 
-                            // The status message is exposed via the public
-                            // get_query_status() API, so it must not include raw provider
-                            // error chains (which could carry connection strings,
-                            // credentials, etc.). Source ids are operator-defined and safe.
-                            let mut status_parts = Vec::new();
-                            if panic_count > 0 {
-                                status_parts.push(format!("{panic_count} task(s) panicked"));
-                            }
-                            if !failures.is_empty() {
-                                let ids: Vec<&str> =
-                                    failures.iter().map(|(id, _)| id.as_str()).collect();
-                                status_parts.push(format!(
-                                    "{} source(s) failed: {}",
-                                    failures.len(),
-                                    ids.join(", ")
-                                ));
-                            }
-
+                            // The same failure reason is reported in the status so callers
+                            // of get_query_status() can see why bootstrap failed without
+                            // having to correlate against logs. This is an embedded,
+                            // in-process API and the identical text is already emitted to
+                            // the operator log above, so the status carries no information
+                            // not already present there.
                             reporter_clone.set_status(
                                 ComponentStatus::Error,
-                                Some(format!("Bootstrap failed: {}", status_parts.join("; "))),
+                                Some(format!("Bootstrap failed: {detail}")),
                             ).await;
 
                             // Open the gate so the processor doesn't block
