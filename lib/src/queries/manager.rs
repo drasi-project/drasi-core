@@ -1713,7 +1713,7 @@ impl Query for DrasiQuery {
                     component_id = %query_id,
                     component_type = "query"
                 );
-                let handle: tokio::task::JoinHandle<(String, Result<Option<crate::bootstrap::BootstrapResult>, String>)> = tokio::spawn(
+                let handle: tokio::task::JoinHandle<(String, anyhow::Result<Option<crate::bootstrap::BootstrapResult>>)> = tokio::spawn(
                     async move {
                         let mut count = 0u64;
 
@@ -1795,9 +1795,12 @@ impl Query for DrasiQuery {
 
                         // Await the BootstrapResult from the source's bootstrap provider.
                         // This carries the optional source_position snapshot boundary.
-                        // A provider failure (Ok(Err)) is propagated as an Err so the
-                        // supervisor can transition the query to the Error state.
-                        let bootstrap_result: Result<Option<crate::bootstrap::BootstrapResult>, String> =
+                        // A provider failure (Ok(Err)) or a dropped result channel
+                        // (Err) is propagated as an Err so the supervisor can
+                        // transition the query to the Error state. Errors are carried
+                        // as anyhow::Error to preserve the context chain, matching the
+                        // internal-module convention.
+                        let bootstrap_result: anyhow::Result<Option<crate::bootstrap::BootstrapResult>> =
                             if let Some(rx) = bootstrap_result_rx {
                                 match rx.await {
                                     Ok(Ok(result)) => {
@@ -1811,15 +1814,22 @@ impl Query for DrasiQuery {
                                     }
                                     Ok(Err(e)) => {
                                         error!(
-                                            "[BOOTSTRAP] Query '{query_id_clone}' bootstrap provider failed for source '{source_id_clone}': {e}"
+                                            "[BOOTSTRAP] Query '{query_id_clone}' bootstrap provider failed for source '{source_id_clone}': {e:#}"
                                         );
-                                        Err(format!("source '{source_id_clone}': {e}"))
+                                        Err(e).context(format!("source '{source_id_clone}'"))
                                     }
                                     Err(_) => {
-                                        warn!(
-                                            "[BOOTSTRAP] Query '{query_id_clone}' bootstrap result channel dropped for source '{source_id_clone}'"
+                                        // The sender was dropped without producing a
+                                        // result. This is a silent-failure path (e.g. a
+                                        // provider task panicked before sending), so
+                                        // treat it as a bootstrap failure rather than
+                                        // letting the query proceed to Running.
+                                        error!(
+                                            "[BOOTSTRAP] Query '{query_id_clone}' bootstrap result channel dropped for source '{source_id_clone}' (provider may have failed)"
                                         );
-                                        Ok(None)
+                                        Err(anyhow::anyhow!(
+                                            "source '{source_id_clone}': bootstrap result channel dropped without a result"
+                                        ))
                                     }
                                 }
                             } else {
@@ -1857,29 +1867,59 @@ impl Query for DrasiQuery {
                         let join_results = futures::future::join_all(bootstrap_handles).await;
                         let panic_count = join_results.iter().filter(|r| matches!(r, Err(e) if e.is_panic())).count();
 
-                        // Collect bootstrap provider failures reported by the per-source tasks.
-                        let failures: Vec<String> = join_results
+                        // Collect bootstrap provider failures reported by the per-source
+                        // tasks. Keep the source id and a single-line rendering of the
+                        // full error chain separately so the status message can omit the
+                        // raw error text (which may contain sensitive data).
+                        let failures: Vec<(String, String)> = join_results
                             .iter()
                             .filter_map(|r| r.as_ref().ok())
-                            .filter_map(|(_, result)| result.as_ref().err().cloned())
+                            .filter_map(|(source_id, result)| {
+                                result
+                                    .as_ref()
+                                    .err()
+                                    .map(|e| (source_id.clone(), format!("{e:#}")))
+                            })
                             .collect();
 
                         if panic_count > 0 || !failures.is_empty() {
-                            let mut details = Vec::new();
+                            // Full detail (including provider error chains) goes to the
+                            // operator log stream only. Each failure's error already
+                            // carries the source id via anyhow context, so don't prepend
+                            // it again here.
+                            let mut log_details = Vec::new();
                             if panic_count > 0 {
-                                details.push(format!("{panic_count} task(s) panicked"));
+                                log_details.push(format!("{panic_count} task(s) panicked"));
                             }
-                            details.extend(failures.iter().cloned());
-                            let detail = details.join("; ");
+                            log_details.extend(failures.iter().map(|(_, e)| e.clone()));
+                            let log_detail = log_details.join("; ");
 
                             error!(
-                                "[BOOTSTRAP] Query '{query_id_clone}' bootstrap failed ({detail}), \
+                                "[BOOTSTRAP] Query '{query_id_clone}' bootstrap failed ({log_detail}), \
                                  transitioning to Error and opening gate"
                             );
 
+                            // The status message is exposed via the public
+                            // get_query_status() API, so it must not include raw provider
+                            // error chains (which could carry connection strings,
+                            // credentials, etc.). Source ids are operator-defined and safe.
+                            let mut status_parts = Vec::new();
+                            if panic_count > 0 {
+                                status_parts.push(format!("{panic_count} task(s) panicked"));
+                            }
+                            if !failures.is_empty() {
+                                let ids: Vec<&str> =
+                                    failures.iter().map(|(id, _)| id.as_str()).collect();
+                                status_parts.push(format!(
+                                    "{} source(s) failed: {}",
+                                    failures.len(),
+                                    ids.join(", ")
+                                ));
+                            }
+
                             reporter_clone.set_status(
                                 ComponentStatus::Error,
-                                Some(format!("Bootstrap failed: {detail}")),
+                                Some(format!("Bootstrap failed: {}", status_parts.join("; "))),
                             ).await;
 
                             // Open the gate so the processor doesn't block

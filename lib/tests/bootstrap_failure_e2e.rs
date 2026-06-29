@@ -1,4 +1,4 @@
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -47,6 +47,20 @@ impl BootstrapProvider for FailingBootstrapProvider {
     }
 }
 
+/// Poll a query's status until it reaches `Error` or a 5 second deadline elapses.
+async fn wait_for_error_status(core: &DrasiLib, query_id: &str) -> Result<ComponentStatus> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut status = core.get_query_status(query_id).await?;
+    while tokio::time::Instant::now() < deadline {
+        if status == ComponentStatus::Error {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        status = core.get_query_status(query_id).await?;
+    }
+    Ok(status)
+}
+
 /// When the bootstrap provider fails, the query should end up in the Error state.
 #[tokio::test]
 async fn query_enters_error_state_when_bootstrap_fails() -> Result<()> {
@@ -72,22 +86,60 @@ async fn query_enters_error_state_when_bootstrap_fails() -> Result<()> {
 
     core.start().await?;
 
-    // Poll for the query to reach a terminal status. Bootstrap runs
-    // asynchronously, so give the supervisor a moment to observe the failure.
-    const MAX_STATUS_POLL_ATTEMPTS: usize = 50;
-    let mut status = core.get_query_status("q1").await?;
-    for _ in 0..MAX_STATUS_POLL_ATTEMPTS {
-        if status == ComponentStatus::Error {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        status = core.get_query_status("q1").await?;
-    }
+    // Bootstrap runs asynchronously, so give the supervisor a moment to
+    // observe the failure before asserting on the terminal status.
+    let status = wait_for_error_status(&core, "q1").await?;
 
     assert_eq!(
         status,
         ComponentStatus::Error,
         "Query should transition to Error state when bootstrap fails, got {status:?}"
+    );
+
+    Ok(())
+}
+
+/// When multiple sources' bootstrap providers fail, the query should enter the
+/// Error state and the supervisor's multi-source aggregation should report each
+/// failed source. This exercises the `failures` collection and join logic that a
+/// single-source test never reaches.
+#[tokio::test]
+async fn query_enters_error_state_when_multiple_bootstraps_fail() -> Result<()> {
+    let (source_a, _handle_a) = MockSource::new("source-a")?;
+    source_a
+        .set_bootstrap_provider(Box::new(FailingBootstrapProvider))
+        .await;
+
+    let (source_b, _handle_b) = MockSource::new("source-b")?;
+    source_b
+        .set_bootstrap_provider(Box::new(FailingBootstrapProvider))
+        .await;
+
+    let query = Query::cypher("q-multi")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("source-a")
+        .from_source("source-b")
+        .auto_start(true)
+        .build();
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("bootstrap-multi-failure-test")
+            .with_source(source_a)
+            .with_source(source_b)
+            .with_query(query)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+
+    let status = wait_for_error_status(&core, "q-multi").await?;
+
+    assert_eq!(
+        status,
+        ComponentStatus::Error,
+        "Query should transition to Error state when multiple bootstraps fail, got {status:?}"
     );
 
     Ok(())
