@@ -51,6 +51,10 @@ impl FfiIdentityProviderProxy {
     /// # Safety
     /// The vtable pointer must be non-null and valid for the duration of this call.
     pub unsafe fn new(vtable: *const IdentityProviderVtable) -> Self {
+        assert!(
+            !vtable.is_null(),
+            "FfiIdentityProviderProxy::new: vtable pointer is null"
+        );
         let vtable = &*vtable;
         Self {
             vtable: IdentityProviderVtable {
@@ -97,6 +101,12 @@ impl Drop for FfiIdentityProviderProxy {
     fn drop(&mut self) {
         // Release the underlying host state (decrements the Arc refcount). There is no
         // separate vtable-struct allocation owned by this proxy, so nothing else to free.
+        // `state` is established non-null by `new`/`clone_box`; a null here would indicate
+        // a `clone_fn` that returned null after a caught panic, which we surface in dev.
+        debug_assert!(
+            !self.vtable.state.is_null(),
+            "FfiIdentityProviderProxy::drop: state is null; clone_fn may have panicked"
+        );
         (self.vtable.drop_fn)(self.vtable.state);
     }
 }

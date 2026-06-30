@@ -1857,8 +1857,9 @@ fn find_cdylib(crate_name: &str) -> Option<PathBuf> {
 /// [drasi-source-mock cdylib] FfiIdentityProviderProxy::clone_box()  <- the #341 leak site
 /// ```
 ///
-/// The mock source's test-only `identityCloneStress` hook clones the injected provider N
-/// times (calling `get_credentials` on each clone) during `initialize`. Each `clone_box`
+/// The mock source's test-only clone hook (gated behind the
+/// `DRASI_MOCK_IDENTITY_CLONE_STRESS` env var) clones the injected provider N times
+/// (calling `get_credentials` on each clone) during `initialize`. Each `clone_box`
 /// invokes the FFI vtable `clone_fn` inside the source cdylib — the path that previously
 /// leaked an `IdentityProviderVtable` struct — and each `get_credentials` round-trips
 /// through the host back into the identity-provider cdylib.
@@ -1874,26 +1875,18 @@ async fn test_identity_provider_cross_cdylib_clone_stress() {
 
     const CLONE_STRESS: usize = 500;
 
-    let identity_path = match find_cdylib("drasi-identity-test") {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "SKIP: drasi-identity-test cdylib not built. Build with: \
-                 cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin"
-            );
-            return;
-        }
-    };
-    let mock_path = match find_cdylib("drasi-source-mock") {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "SKIP: drasi-source-mock cdylib not built. Build with: \
-                 cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin"
-            );
-            return;
-        }
-    };
+    let identity_path = find_cdylib("drasi-identity-test").unwrap_or_else(|| {
+        panic!(
+            "drasi-identity-test cdylib not built. Build with: \
+             cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin"
+        )
+    });
+    let mock_path = find_cdylib("drasi-source-mock").unwrap_or_else(|| {
+        panic!(
+            "drasi-source-mock cdylib not built. Build with: \
+             cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin"
+        )
+    });
 
     // --- Create a real identity provider from the identity-test cdylib ---
     let identity_plugin = load_plugin_from_path(
@@ -1931,7 +1924,7 @@ async fn test_identity_provider_cross_cdylib_clone_stress() {
     reset();
     assert_eq!(get_calls(), 0, "counter should start at zero after reset");
 
-    // --- Create the mock source with the clone-stress hook enabled ---
+    // --- Create the mock source with the clone-stress hook enabled (env-gated) ---
     let mock_plugin = load_plugin_from_path(
         &mock_path,
         std::ptr::null_mut(),
@@ -1941,7 +1934,12 @@ async fn test_identity_provider_cross_cdylib_clone_stress() {
     )
     .expect("Should load mock source plugin");
 
-    let config = serde_json::json!({ "identityCloneStress": CLONE_STRESS });
+    // The mock source reads this env var only inside `initialize` to drive the clone path;
+    // it is never part of the public config schema. Safe to set process-wide because this
+    // test is `#[serial]`.
+    std::env::set_var("DRASI_MOCK_IDENTITY_CLONE_STRESS", CLONE_STRESS.to_string());
+
+    let config = serde_json::json!({});
     let source = mock_plugin.source_plugins[0]
         .create_source("identity-xcdylib", &config, false)
         .await
@@ -1960,6 +1958,7 @@ async fn test_identity_provider_cross_cdylib_clone_stress() {
 
     // Drives CLONE_STRESS clone_box()+get_credentials() calls across both cdylib boundaries.
     source.initialize(context).await;
+    std::env::remove_var("DRASI_MOCK_IDENTITY_CLONE_STRESS");
 
     // Every clone's get_credentials must have reached the identity cdylib intact.
     assert_eq!(
