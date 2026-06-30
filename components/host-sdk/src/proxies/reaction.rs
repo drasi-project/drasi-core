@@ -263,6 +263,20 @@ impl Reaction for ReactionProxy {
         };
 
         (self.vtable.initialize_fn)(self.vtable.state, &ffi_ctx as *const FfiRuntimeContext);
+
+        // Reclaim the identity-provider vtable struct we allocated for `ip_ptr`. The
+        // plugin copies the vtable fields by value during `initialize_fn` (see
+        // `FfiIdentityProviderProxy::new`) and does not retain this pointer, so it is safe
+        // to free the struct here. This frees only the `IdentityProviderVtable` struct
+        // (no `Drop` impl) — the underlying state remains owned by the plugin proxy and is
+        // released via `drop_fn` when that proxy is dropped.
+        if !ip_ptr.is_null() {
+            unsafe {
+                drop(Box::from_raw(
+                    ip_ptr as *mut drasi_plugin_sdk::ffi::identity::IdentityProviderVtable,
+                ));
+            }
+        }
     }
 
     async fn start(&self) -> anyhow::Result<()> {

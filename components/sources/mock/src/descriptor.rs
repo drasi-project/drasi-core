@@ -46,6 +46,12 @@ pub struct MockSourceConfigDto {
     pub data_type: DataTypeDto,
     #[serde(default = "default_interval_ms")]
     pub interval_ms: ConfigValue<u64>,
+    /// Test-only knob: when greater than zero, the source clones the injected
+    /// identity provider this many times (calling `get_credentials` on each clone)
+    /// during `initialize`, to exercise the FFI identity-provider clone/drop path.
+    /// Not intended for production use.
+    #[serde(default)]
+    pub identity_clone_stress: u32,
 }
 
 fn default_interval_ms() -> ConfigValue<u64> {
@@ -113,6 +119,7 @@ impl SourcePluginDescriptor for MockSourceDescriptor {
         let mut source = MockSourceBuilder::new(id)
             .with_data_type(data_type)
             .with_interval_ms(interval_ms)
+            .with_identity_clone_stress(dto.identity_clone_stress)
             .with_auto_start(auto_start)
             .build()?;
 

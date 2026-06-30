@@ -1501,6 +1501,10 @@ async fn test_identity_provider_username_password_roundtrip() {
     let vtable_ptr = Box::into_raw(Box::new(vtable));
 
     let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
+    // The proxy copies the vtable by value (see `FfiIdentityProviderProxy::new`) and does
+    // not retain `vtable_ptr`, so the caller still owns the vtable-struct allocation.
+    // Reclaim it here, mirroring the host's free-after-initialize contract.
+    let _reclaim_vtable = unsafe { Box::from_raw(vtable_ptr) };
 
     use drasi_lib::identity::IdentityProvider;
     let creds = proxy
@@ -1529,6 +1533,10 @@ async fn test_identity_provider_token_roundtrip() {
     let vtable_ptr = Box::into_raw(Box::new(vtable));
 
     let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
+    // The proxy copies the vtable by value (see `FfiIdentityProviderProxy::new`) and does
+    // not retain `vtable_ptr`, so the caller still owns the vtable-struct allocation.
+    // Reclaim it here, mirroring the host's free-after-initialize contract.
+    let _reclaim_vtable = unsafe { Box::from_raw(vtable_ptr) };
 
     use drasi_lib::identity::IdentityProvider;
     let creds = proxy
@@ -1558,6 +1566,10 @@ async fn test_identity_provider_certificate_roundtrip() {
     let vtable_ptr = Box::into_raw(Box::new(vtable));
 
     let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
+    // The proxy copies the vtable by value (see `FfiIdentityProviderProxy::new`) and does
+    // not retain `vtable_ptr`, so the caller still owns the vtable-struct allocation.
+    // Reclaim it here, mirroring the host's free-after-initialize contract.
+    let _reclaim_vtable = unsafe { Box::from_raw(vtable_ptr) };
 
     use drasi_lib::identity::IdentityProvider;
     let creds = proxy
@@ -1592,6 +1604,10 @@ async fn test_identity_provider_certificate_no_username() {
     let vtable_ptr = Box::into_raw(Box::new(vtable));
 
     let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
+    // The proxy copies the vtable by value (see `FfiIdentityProviderProxy::new`) and does
+    // not retain `vtable_ptr`, so the caller still owns the vtable-struct allocation.
+    // Reclaim it here, mirroring the host's free-after-initialize contract.
+    let _reclaim_vtable = unsafe { Box::from_raw(vtable_ptr) };
 
     use drasi_lib::identity::IdentityProvider;
     let creds = proxy
@@ -1622,6 +1638,10 @@ async fn test_identity_provider_error_propagation() {
     let vtable_ptr = Box::into_raw(Box::new(vtable));
 
     let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
+    // The proxy copies the vtable by value (see `FfiIdentityProviderProxy::new`) and does
+    // not retain `vtable_ptr`, so the caller still owns the vtable-struct allocation.
+    // Reclaim it here, mirroring the host's free-after-initialize contract.
+    let _reclaim_vtable = unsafe { Box::from_raw(vtable_ptr) };
 
     use drasi_lib::identity::IdentityProvider;
     let result = proxy
@@ -1652,6 +1672,10 @@ async fn test_identity_provider_clone_box() {
     let vtable_ptr = Box::into_raw(Box::new(vtable));
 
     let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
+    // The proxy copies the vtable by value (see `FfiIdentityProviderProxy::new`) and does
+    // not retain `vtable_ptr`, so the caller still owns the vtable-struct allocation.
+    // Reclaim it here, mirroring the host's free-after-initialize contract.
+    let _reclaim_vtable = unsafe { Box::from_raw(vtable_ptr) };
 
     use drasi_lib::identity::IdentityProvider;
 
@@ -1684,6 +1708,10 @@ async fn test_identity_provider_credential_context_roundtrip() {
     let vtable_ptr = Box::into_raw(Box::new(vtable));
 
     let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
+    // The proxy copies the vtable by value (see `FfiIdentityProviderProxy::new`) and does
+    // not retain `vtable_ptr`, so the caller still owns the vtable-struct allocation.
+    // Reclaim it here, mirroring the host's free-after-initialize contract.
+    let _reclaim_vtable = unsafe { Box::from_raw(vtable_ptr) };
 
     use drasi_lib::identity::{CredentialContext, IdentityProvider};
     let context = CredentialContext::new()
@@ -1794,6 +1822,154 @@ async fn test_source_with_identity_provider_injection() {
     // This should not crash — identity_provider is passed through FFI
     source.initialize(context).await;
     assert_eq!(source.id(), "ip-inject-test");
+}
+
+/// Resolve a built cdylib by crate name, checking the copied `plugins/` dir first and then
+/// the raw `target/debug/` output (where `cargo build --lib` places it). Returns `None` if
+/// the plugin has not been built.
+fn find_cdylib(crate_name: &str) -> Option<PathBuf> {
+    let file = plugin_filename(crate_name);
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("Cannot find workspace root from CARGO_MANIFEST_DIR");
+    let candidates = [
+        root.join("target")
+            .join("debug")
+            .join("plugins")
+            .join(&file),
+        root.join("target").join("debug").join(&file),
+    ];
+    candidates.into_iter().find(|p| p.exists())
+}
+
+/// Cross-cdylib regression test for the `FfiIdentityProviderProxy` vtable lifecycle
+/// (issue #341).
+///
+/// This drives the **full two-cdylib chain** that exists in production:
+///
+/// ```text
+/// [drasi-identity-test cdylib]   <- returns canned Credentials, counts calls
+///        |  (host wraps the returned vtable)
+///   HostIdentityProviderProxy    <- Arc<dyn IdentityProvider> (host side, by value)
+///        |  (host builds ip_ptr vtable, passes via FfiRuntimeContext)
+/// [drasi-source-mock cdylib] FfiIdentityProviderProxy::clone_box()  <- the #341 leak site
+/// ```
+///
+/// The mock source's test-only `identityCloneStress` hook clones the injected provider N
+/// times (calling `get_credentials` on each clone) during `initialize`. Each `clone_box`
+/// invokes the FFI vtable `clone_fn` inside the source cdylib — the path that previously
+/// leaked an `IdentityProviderVtable` struct — and each `get_credentials` round-trips
+/// through the host back into the identity-provider cdylib.
+///
+/// We assert that all N `get_credentials` calls reached the identity cdylib intact by
+/// reading its process-global counter back across the FFI boundary via an exported symbol.
+/// Running this test under `MALLOC_CHECK_=3` (or valgrind) additionally surfaces the
+/// per-clone vtable-struct leak / any cross-cdylib invalid free.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn test_identity_provider_cross_cdylib_clone_stress() {
+    use drasi_plugin_sdk::descriptor::IdentityProviderPluginDescriptor;
+
+    const CLONE_STRESS: usize = 500;
+
+    let identity_path = match find_cdylib("drasi-identity-test") {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "SKIP: drasi-identity-test cdylib not built. Build with: \
+                 cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin"
+            );
+            return;
+        }
+    };
+    let mock_path = match find_cdylib("drasi-source-mock") {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "SKIP: drasi-source-mock cdylib not built. Build with: \
+                 cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin"
+            );
+            return;
+        }
+    };
+
+    // --- Create a real identity provider from the identity-test cdylib ---
+    let identity_plugin = load_plugin_from_path(
+        &identity_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load identity-test plugin");
+    assert!(
+        !identity_plugin.identity_provider_plugins.is_empty(),
+        "identity-test plugin should register an identity provider descriptor"
+    );
+    let provider_box = identity_plugin.identity_provider_plugins[0]
+        .create_identity_provider(&serde_json::json!({}))
+        .await
+        .expect("Should create identity provider from cdylib");
+    let provider: std::sync::Arc<dyn drasi_lib::identity::IdentityProvider> =
+        std::sync::Arc::from(provider_box);
+
+    // --- Read the cdylib-resident call counter via the exported symbol ---
+    let counter_lib =
+        unsafe { libloading::Library::new(&identity_path) }.expect("Should reopen identity cdylib");
+    let get_calls: libloading::Symbol<extern "C" fn() -> usize> = unsafe {
+        counter_lib
+            .get(b"drasi_test_identity_get_credentials_calls\0")
+            .expect("Missing exported counter symbol")
+    };
+    let reset: libloading::Symbol<extern "C" fn()> = unsafe {
+        counter_lib
+            .get(b"drasi_test_identity_reset\0")
+            .expect("Missing exported reset symbol")
+    };
+    reset();
+    assert_eq!(get_calls(), 0, "counter should start at zero after reset");
+
+    // --- Create the mock source with the clone-stress hook enabled ---
+    let mock_plugin = load_plugin_from_path(
+        &mock_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load mock source plugin");
+
+    let config = serde_json::json!({ "identityCloneStress": CLONE_STRESS });
+    let source = mock_plugin.source_plugins[0]
+        .create_source("identity-xcdylib", &config, false)
+        .await
+        .expect("Should create mock source");
+
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
+    let context = drasi_lib::context::SourceRuntimeContext {
+        instance_id: "test-instance".to_string(),
+        source_id: "identity-xcdylib".to_string(),
+        update_tx,
+        state_store: None,
+        identity_provider: Some(provider),
+        wal_provider: None,
+    };
+
+    // Drives CLONE_STRESS clone_box()+get_credentials() calls across both cdylib boundaries.
+    source.initialize(context).await;
+
+    // Every clone's get_credentials must have reached the identity cdylib intact.
+    assert_eq!(
+        get_calls(),
+        CLONE_STRESS,
+        "expected {CLONE_STRESS} get_credentials calls to traverse both cdylib boundaries"
+    );
+
+    // Exercise teardown (plugin proxy drop_fn + host ip_ptr reclaim) explicitly.
+    drop(source);
 }
 
 // ============================================================================

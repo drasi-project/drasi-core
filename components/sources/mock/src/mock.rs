@@ -26,6 +26,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use drasi_lib::channels::*;
+use drasi_lib::identity::{CredentialContext, IdentityProvider};
 use drasi_lib::managers::{log_component_start, log_component_stop};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
@@ -57,6 +58,11 @@ pub struct MockSource {
     /// Tracks sensor IDs that have been seen for INSERT vs UPDATE logic.
     /// Only used when `config.data_type` is `SensorReading`.
     seen_sensors: Arc<RwLock<HashSet<u32>>>,
+
+    /// Test-only knob: number of times to clone the injected identity provider
+    /// (and call `get_credentials` on each clone) during `initialize`, used to
+    /// exercise the FFI identity-provider clone/drop path. `0` in normal use.
+    identity_clone_stress: u32,
 }
 
 impl MockSource {
@@ -101,6 +107,7 @@ impl MockSource {
             base: SourceBase::new(params)?,
             config,
             seen_sensors: Arc::new(RwLock::new(HashSet::new())),
+            identity_clone_stress: 0,
         })
     }
 
@@ -140,6 +147,7 @@ impl MockSource {
             base: SourceBase::new(params)?,
             config,
             seen_sensors: Arc::new(RwLock::new(HashSet::new())),
+            identity_clone_stress: 0,
         })
     }
 }
@@ -171,6 +179,7 @@ impl Source for MockSource {
         let dto = MockSourceConfigDto {
             data_type: data_type_dto,
             interval_ms: ConfigValue::Static(self.config.interval_ms),
+            identity_clone_stress: self.identity_clone_stress,
         };
 
         self.base.properties_or_serialize(&dto)
@@ -555,6 +564,21 @@ impl Source for MockSource {
     }
 
     async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        // Test-only: exercise the FFI identity-provider clone/drop path across the plugin
+        // boundary. When `identity_clone_stress > 0` and an identity provider was injected,
+        // clone it that many times and fetch credentials on each clone. Each `clone_box`
+        // invokes the FFI vtable `clone_fn` (the path that previously leaked a vtable
+        // struct), and each `get_credentials` round-trips through the host back into the
+        // identity-provider plugin.
+        if self.identity_clone_stress > 0 {
+            if let Some(provider) = context.identity_provider.clone() {
+                let ctx = CredentialContext::default();
+                for _ in 0..self.identity_clone_stress {
+                    let cloned: Box<dyn IdentityProvider> = provider.clone_box();
+                    let _ = cloned.get_credentials(&ctx).await;
+                }
+            }
+        }
         self.base.initialize(context).await;
     }
 
@@ -649,6 +673,7 @@ pub struct MockSourceBuilder {
     dispatch_buffer_capacity: Option<usize>,
     bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
     auto_start: bool,
+    identity_clone_stress: u32,
 }
 
 impl MockSourceBuilder {
@@ -666,6 +691,7 @@ impl MockSourceBuilder {
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
             auto_start: true,
+            identity_clone_stress: 0,
         }
     }
 
@@ -733,6 +759,16 @@ impl MockSourceBuilder {
         self
     }
 
+    /// Set the test-only identity-provider clone-stress count.
+    ///
+    /// When greater than zero, [`MockSource::initialize`] clones the injected identity
+    /// provider this many times (calling `get_credentials` on each clone) to exercise the
+    /// FFI identity-provider clone/drop path. Defaults to `0` (disabled).
+    pub fn with_identity_clone_stress(mut self, count: u32) -> Self {
+        self.identity_clone_stress = count;
+        self
+    }
+
     /// Build the MockSource instance.
     ///
     /// # Returns
@@ -768,6 +804,7 @@ impl MockSourceBuilder {
             base: SourceBase::new(params)?,
             config,
             seen_sensors: Arc::new(RwLock::new(HashSet::new())),
+            identity_clone_stress: self.identity_clone_stress,
         })
     }
 }
