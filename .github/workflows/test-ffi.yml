@@ -77,6 +77,7 @@ jobs:
           cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
           cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
           cargo build --lib -p drasi-reaction-sse --features drasi-reaction-sse/dynamic-plugin
+          cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
 
       - name: Copy plugins to test directory
         shell: bash
@@ -84,7 +85,7 @@ jobs:
           mkdir -p target/debug/plugins
           PREFIX="${{ matrix.lib_prefix }}"
           EXT="${{ matrix.lib_ext }}"
-          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse; do
+          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_identity_test; do
             SRC="target/debug/${PREFIX}${name}.${EXT}"
             if [ -f "$SRC" ]; then
               cp "$SRC" target/debug/plugins/
@@ -100,7 +101,7 @@ jobs:
           PREFIX="${{ matrix.lib_prefix }}"
           EXT="${{ matrix.lib_ext }}"
           MISSING=0
-          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse; do
+          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse drasi_identity_test; do
             FILE="target/debug/plugins/${PREFIX}${name}.${EXT}"
             if [ ! -f "$FILE" ]; then
               echo "ERROR: Expected plugin not found: $FILE"
@@ -112,7 +113,7 @@ jobs:
             ls -la target/debug/plugins/ || true
             exit 1
           fi
-          echo "All 3 test plugins verified."
+          echo "All 4 test plugins verified."
 
       - name: Run host-sdk FFI integration tests
         shell: bash
