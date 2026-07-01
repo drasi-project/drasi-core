@@ -26,6 +26,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use drasi_lib::channels::*;
+use drasi_lib::identity::{CredentialContext, IdentityProvider};
 use drasi_lib::managers::{log_component_start, log_component_stop};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
@@ -555,6 +556,26 @@ impl Source for MockSource {
     }
 
     async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
+        // Test-only: exercise the FFI identity-provider clone/drop path across the plugin
+        // boundary. Gated entirely behind the `DRASI_MOCK_IDENTITY_CLONE_STRESS` environment
+        // variable (read only here) so no test-only knob leaks into the public config schema.
+        // When set to N > 0 and an identity provider was injected, clone it N times and fetch
+        // credentials on each clone. Each `clone_box` invokes the FFI vtable `clone_fn` (the
+        // path that previously leaked a vtable struct), and each `get_credentials` round-trips
+        // through the host back into the identity-provider plugin.
+        if let Some(provider) = context.identity_provider.clone() {
+            let clone_stress = std::env::var("DRASI_MOCK_IDENTITY_CLONE_STRESS")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0);
+            if clone_stress > 0 {
+                let ctx = CredentialContext::default();
+                for _ in 0..clone_stress {
+                    let cloned: Box<dyn IdentityProvider> = provider.clone_box();
+                    let _ = cloned.get_credentials(&ctx).await;
+                }
+            }
+        }
         self.base.initialize(context).await;
     }
 
