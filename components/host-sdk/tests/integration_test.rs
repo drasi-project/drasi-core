@@ -1971,6 +1971,144 @@ async fn test_identity_provider_cross_cdylib_clone_stress() {
     drop(source);
 }
 
+/// Cross-cdylib regression test for the `ReactionProxy::initialize` host-side `ip_ptr`
+/// reclaim (issue #341) — the symmetric twin of the `SourceProxy` fix exercised by
+/// [`test_identity_provider_cross_cdylib_clone_stress`].
+///
+/// This drives the **full two-cdylib chain** through the *reaction* boundary:
+///
+/// ```text
+/// [drasi-identity-test cdylib]      <- returns canned Credentials, counts calls
+///        |  (host wraps the returned vtable)
+///   HostIdentityProviderProxy       <- Arc<dyn IdentityProvider> (host side, by value)
+///        |  (host builds ip_ptr vtable, passes via FfiRuntimeContext, reclaims after init)
+/// [drasi-reaction-snapshot-test cdylib] FfiIdentityProviderProxy::clone_box()  <- #341 leak site
+/// ```
+///
+/// The snapshot-test reaction's test-only clone hook (gated behind the
+/// `DRASI_SNAPSHOT_TEST_IDENTITY_CLONE_STRESS` env var) clones the injected provider N
+/// times (calling `get_credentials` on each clone) during `initialize`. On the host side,
+/// `ReactionProxy::initialize` allocates `ip_ptr`, passes it to the reaction plugin's
+/// `initialize_fn`, and then reclaims it — the path with no dedicated coverage before this
+/// test. Each `clone_box` invokes the FFI vtable `clone_fn` inside the reaction cdylib, and
+/// each `get_credentials` round-trips through the host back into the identity cdylib.
+///
+/// We assert that all N `get_credentials` calls reached the identity cdylib intact by
+/// reading its process-global counter back across the FFI boundary via an exported symbol.
+/// Running this test under `MALLOC_CHECK_=3` (or valgrind) additionally surfaces the
+/// per-clone vtable-struct leak / any cross-cdylib invalid free on the reaction path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn test_reaction_identity_provider_cross_cdylib_clone_stress() {
+    use drasi_plugin_sdk::descriptor::IdentityProviderPluginDescriptor;
+
+    const CLONE_STRESS: usize = 500;
+
+    let identity_path = find_cdylib("drasi-identity-test").unwrap_or_else(|| {
+        panic!(
+            "drasi-identity-test cdylib not built. Build with: \
+             cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin"
+        )
+    });
+    let reaction_path = find_cdylib("drasi-reaction-snapshot-test").unwrap_or_else(|| {
+        panic!(
+            "drasi-reaction-snapshot-test cdylib not built. Build with: \
+             cargo build --lib -p drasi-reaction-snapshot-test"
+        )
+    });
+
+    // --- Create a real identity provider from the identity-test cdylib ---
+    let identity_plugin = load_plugin_from_path(
+        &identity_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load identity-test plugin");
+    assert!(
+        !identity_plugin.identity_provider_plugins.is_empty(),
+        "identity-test plugin should register an identity provider descriptor"
+    );
+    let provider_box = identity_plugin.identity_provider_plugins[0]
+        .create_identity_provider(&serde_json::json!({}))
+        .await
+        .expect("Should create identity provider from cdylib");
+    let provider: std::sync::Arc<dyn drasi_lib::identity::IdentityProvider> =
+        std::sync::Arc::from(provider_box);
+
+    // --- Read the cdylib-resident call counter via the exported symbol ---
+    let counter_lib =
+        unsafe { libloading::Library::new(&identity_path) }.expect("Should reopen identity cdylib");
+    let get_calls: libloading::Symbol<extern "C" fn() -> usize> = unsafe {
+        counter_lib
+            .get(b"drasi_test_identity_get_credentials_calls\0")
+            .expect("Missing exported counter symbol")
+    };
+    let reset: libloading::Symbol<extern "C" fn()> = unsafe {
+        counter_lib
+            .get(b"drasi_test_identity_reset\0")
+            .expect("Missing exported reset symbol")
+    };
+    reset();
+    assert_eq!(get_calls(), 0, "counter should start at zero after reset");
+
+    // --- Create the snapshot-test reaction with the clone-stress hook enabled (env-gated) ---
+    let reaction_plugin = load_plugin_from_path(
+        &reaction_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load snapshot-test reaction plugin");
+    assert!(
+        !reaction_plugin.reaction_plugins.is_empty(),
+        "snapshot-test plugin should register a reaction descriptor"
+    );
+
+    // The reaction reads this env var only inside `initialize` to drive the clone path; it is
+    // never part of the public config schema. Safe to set process-wide because this test is
+    // `#[serial]`.
+    std::env::set_var(
+        "DRASI_SNAPSHOT_TEST_IDENTITY_CLONE_STRESS",
+        CLONE_STRESS.to_string(),
+    );
+
+    let config = serde_json::json!({});
+    let reaction = reaction_plugin.reaction_plugins[0]
+        .create_reaction("identity-xcdylib-reaction", vec![], &config, false)
+        .await
+        .expect("Should create snapshot-test reaction");
+
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
+    let context = drasi_lib::ReactionRuntimeContext {
+        instance_id: "test-instance".to_string(),
+        reaction_id: "identity-xcdylib-reaction".to_string(),
+        update_tx,
+        state_store: None,
+        identity_provider: Some(provider),
+        snapshot_fetcher: None,
+    };
+
+    // Drives CLONE_STRESS clone_box()+get_credentials() calls across both cdylib boundaries
+    // and exercises the host-side ReactionProxy::initialize ip_ptr reclaim.
+    reaction.initialize(context).await;
+    std::env::remove_var("DRASI_SNAPSHOT_TEST_IDENTITY_CLONE_STRESS");
+
+    // Every clone's get_credentials must have reached the identity cdylib intact.
+    assert_eq!(
+        get_calls(),
+        CLONE_STRESS,
+        "expected {CLONE_STRESS} get_credentials calls to traverse both cdylib boundaries \
+         through the reaction path"
+    );
+
+    // Exercise teardown (plugin proxy drop_fn + host ip_ptr reclaim) explicitly.
+    drop(reaction);
+}
+
 // ============================================================================
 // Reaction enqueue_query_result E2E Tests
 // ============================================================================

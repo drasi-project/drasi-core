@@ -27,6 +27,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::QueryResult;
+use drasi_lib::identity::{CredentialContext, IdentityProvider};
 use drasi_lib::reactions::bootstrap_context::BootstrapContext;
 use drasi_lib::reactions::{Reaction, SnapshotFetcher};
 use drasi_lib::{ComponentStatus, ReactionRuntimeContext};
@@ -108,6 +109,30 @@ impl Reaction for SnapshotTestReaction {
     }
 
     async fn initialize(&self, context: ReactionRuntimeContext) {
+        // Test-only: exercise the FFI identity-provider clone/drop path across the reaction
+        // plugin boundary. Gated entirely behind the
+        // `DRASI_SNAPSHOT_TEST_IDENTITY_CLONE_STRESS` environment variable (read only here) so
+        // no test-only knob leaks into the public config schema. When set to N > 0 and an
+        // identity provider was injected, clone it N times and fetch credentials on each clone.
+        // Each `clone_box` invokes the FFI vtable `clone_fn` inside the reaction cdylib (the
+        // `FfiIdentityProviderProxy::clone_box` path that previously leaked a vtable struct),
+        // and each `get_credentials` round-trips through the host back into the
+        // identity-provider plugin. This mirrors the mock source's clone-stress hook and
+        // additionally exercises the host-side `ReactionProxy::initialize` `ip_ptr` reclaim.
+        if let Some(provider) = context.identity_provider.clone() {
+            let clone_stress = std::env::var("DRASI_SNAPSHOT_TEST_IDENTITY_CLONE_STRESS")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0);
+            if clone_stress > 0 {
+                let ctx = CredentialContext::default();
+                for _ in 0..clone_stress {
+                    let cloned: Box<dyn IdentityProvider> = provider.clone_box();
+                    let _ = cloned.get_credentials(&ctx).await;
+                }
+            }
+        }
+
         // Store the snapshot fetcher (if provided) for use during start().
         let mut guard = self.snapshot_fetcher.lock().await;
         *guard = context.snapshot_fetcher;

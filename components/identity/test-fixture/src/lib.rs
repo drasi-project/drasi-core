@@ -26,8 +26,8 @@
 //! Every `get_credentials` call increments a process-global counter that the host test can
 //! read back across the FFI boundary via the exported
 //! [`drasi_test_identity_get_credentials_calls`] accessor. This lets a test assert that N
-//! `get_credentials` calls made by a *source* plugin traversed **both** cdylib boundaries
-//! (source plugin → host → this identity plugin) intact.
+//! `get_credentials` calls made by a *source* or *reaction* plugin traversed **both** cdylib
+//! boundaries (plugin → host → this identity plugin) intact.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
