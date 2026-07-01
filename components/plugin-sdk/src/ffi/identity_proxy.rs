@@ -35,8 +35,8 @@ pub struct FfiIdentityProviderProxy {
     vtable: IdentityProviderVtable,
 }
 
-// Safety: The vtable points to host-allocated state (Arc<dyn IdentityProvider>)
-// which is Send+Sync. The vtable itself is immutable after creation.
+// Safety: `vtable.state` references host-allocated state (Arc<dyn IdentityProvider>)
+// which is Send+Sync. The vtable function pointers are immutable after creation.
 unsafe impl Send for FfiIdentityProviderProxy {}
 unsafe impl Sync for FfiIdentityProviderProxy {}
 
@@ -50,6 +50,8 @@ impl FfiIdentityProviderProxy {
     ///
     /// # Safety
     /// The vtable pointer must be non-null and valid for the duration of this call.
+    /// The `state` it contains must remain valid for the full lifetime of the returned
+    /// proxy; the proxy calls `drop_fn(state)` on `Drop`.
     pub unsafe fn new(vtable: *const IdentityProviderVtable) -> Self {
         assert!(
             !vtable.is_null(),

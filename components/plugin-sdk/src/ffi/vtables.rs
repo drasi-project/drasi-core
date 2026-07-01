@@ -244,7 +244,7 @@ pub struct FfiRuntimeContext {
     /// **Lifetime: transient.** Valid only for the duration of `initialize_fn`. The plugin
     /// must copy the vtable fields by value before `initialize_fn` returns (as
     /// `FfiIdentityProviderProxy::new` does); the host frees the vtable struct immediately
-    /// after `initialize_fn` returns. The plugin must not retain this pointer past init.
+    /// after `initialize_fn` returns. The plugin must not retain this pointer past `initialize_fn`.
     pub identity_provider: *const super::identity::IdentityProviderVtable,
     /// Nullable — snapshot fetcher for on-demand query snapshot access.
     ///
