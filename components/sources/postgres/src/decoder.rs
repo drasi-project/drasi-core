@@ -403,7 +403,19 @@ impl PgOutputDecoder {
         match oid_value {
             16 => {
                 // bool
-                Ok(PostgresValue::Bool(data[0] != 0))
+                // pgoutput streams column values in text format, so a boolean
+                // arrives as the ASCII bytes "t"/"f" (or "true"/"false"), not a
+                // binary 0x01/0x00. Decode from text, tolerating the binary form.
+                let value = match data {
+                    b"t" | b"true" | b"y" | b"1" => true,
+                    b"f" | b"false" | b"n" | b"0" => false,
+                    [1] => true,
+                    [0] => false,
+                    other => {
+                        return Err(anyhow!("Failed to parse bool from bytes {other:?}"))
+                    }
+                };
+                Ok(PostgresValue::Bool(value))
             }
             21 => {
                 // int2
@@ -1069,5 +1081,50 @@ mod tests {
             }
             other => panic!("expected TimestampTz, got {other:?}"),
         }
+    }
+
+    // ── decode_column_value: bool (OID 16) via streaming/pgoutput path ─
+    #[test]
+    fn test_decode_bool_text_true() {
+        let decoder = PgOutputDecoder::new();
+        // pgoutput streams booleans in text format as "t"/"f".
+        for input in [b"t".as_slice(), b"true".as_slice()] {
+            match decoder.decode_column_value(input, 16).unwrap() {
+                PostgresValue::Bool(b) => assert!(b, "expected true for {input:?}"),
+                other => panic!("expected Bool, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_decode_bool_text_false() {
+        let decoder = PgOutputDecoder::new();
+        // Regression test: "f" (0x66) is non-zero, so the old `data[0] != 0`
+        // logic incorrectly decoded it as true.
+        for input in [b"f".as_slice(), b"false".as_slice()] {
+            match decoder.decode_column_value(input, 16).unwrap() {
+                PostgresValue::Bool(b) => assert!(!b, "expected false for {input:?}"),
+                other => panic!("expected Bool, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_decode_bool_binary_fallback() {
+        let decoder = PgOutputDecoder::new();
+        match decoder.decode_column_value(&[1], 16).unwrap() {
+            PostgresValue::Bool(b) => assert!(b),
+            other => panic!("expected Bool, got {other:?}"),
+        }
+        match decoder.decode_column_value(&[0], 16).unwrap() {
+            PostgresValue::Bool(b) => assert!(!b),
+            other => panic!("expected Bool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_bool_invalid_errors() {
+        let decoder = PgOutputDecoder::new();
+        assert!(decoder.decode_column_value(b"maybe", 16).is_err());
     }
 }
