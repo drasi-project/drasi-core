@@ -957,7 +957,7 @@ fn bool_result_map(results: &[serde_json::Value]) -> HashMap<i64, bool> {
 ///
 /// The streaming decoder previously decoded booleans with `data[0] != 0`.
 /// Because pgoutput streams column values in text form, `false` arrives as the
-/// ASCII byte `"f"` (0x66, non-zero) and was therefore mis-decoded as `true` —
+/// ASCII byte `"f"` (0x66, non-zero) and was therefore wrongly decoded as `true` —
 /// so every streamed boolean surfaced as `true`, `true -> false` flips were
 /// never observed, and `WHERE active = false` never matched on streamed rows.
 /// The bootstrap path (typed `try_get::<bool>`) was always correct.
