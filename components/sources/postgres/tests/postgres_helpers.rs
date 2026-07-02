@@ -303,6 +303,49 @@ pub async fn insert_timestamptz_test_row(
     Ok(())
 }
 
+pub async fn create_bool_test_table(client: &Client, table_name: &str) -> Result<()> {
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS {table_name} (\n    id INTEGER PRIMARY KEY,\n    active BOOLEAN NOT NULL\n)"
+    );
+    execute_sql(client, &create_sql).await?;
+
+    let replica_sql = format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL");
+    execute_sql(client, &replica_sql).await?;
+
+    Ok(())
+}
+
+/// Insert a row with the given boolean value via a parameterized query.
+/// PostgreSQL's pgoutput protocol streams booleans in text form (`t`/`f`),
+/// which is the exact case the streaming decoder must parse.
+pub async fn insert_bool_test_row(
+    client: &Client,
+    table: &str,
+    id: i32,
+    active: bool,
+) -> Result<()> {
+    let sql = format!(
+        "INSERT INTO {} (id, active) VALUES ($1, $2)",
+        quote_ident(table)
+    );
+    client.execute(&sql, &[&id, &active]).await?;
+    Ok(())
+}
+
+pub async fn update_bool_test_row(
+    client: &Client,
+    table: &str,
+    id: i32,
+    active: bool,
+) -> Result<()> {
+    let sql = format!(
+        "UPDATE {} SET active = $1 WHERE id = $2",
+        quote_ident(table)
+    );
+    client.execute(&sql, &[&active, &id]).await?;
+    Ok(())
+}
+
 pub async fn insert_decimal_test_row(
     client: &Client,
     table: &str,
