@@ -1116,6 +1116,7 @@ mod tests {
 
     #[test]
     fn test_decode_bool_binary_fallback() {
+        // pgoutput always sends text, but binary bytes are tolerated defensively.
         let decoder = PgOutputDecoder::new();
         match decoder.decode_column_value(&[1], 16).unwrap() {
             PostgresValue::Bool(b) => assert!(b),
@@ -1130,6 +1131,23 @@ mod tests {
     #[test]
     fn test_decode_bool_invalid_errors() {
         let decoder = PgOutputDecoder::new();
-        assert!(decoder.decode_column_value(b"maybe", 16).is_err());
+        // Inputs pgoutput never emits for a boolean must error rather than
+        // silently decode. Covers: unrecognised text, empty slice (no panic on
+        // len==0), case-sensitive/SQL literal forms not sent by pgoutput, and
+        // out-of-range binary bytes beyond the 0x00/0x01 fallback.
+        for input in [
+            b"maybe".as_slice(),
+            b"".as_slice(),
+            b"T".as_slice(),
+            b"TRUE".as_slice(),
+            b"y".as_slice(),
+            b"1".as_slice(),
+            b"\x02".as_slice(),
+        ] {
+            assert!(
+                decoder.decode_column_value(input, 16).is_err(),
+                "expected error decoding bool from {input:?}"
+            );
+        }
     }
 }
