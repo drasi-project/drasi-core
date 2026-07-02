@@ -407,12 +407,15 @@ impl PgOutputDecoder {
                 // arrives as the ASCII bytes "t"/"f" (or "true"/"false"), not a
                 // binary 0x01/0x00. Decode from text, tolerating the binary form.
                 let value = match data {
-                    b"t" | b"true" | b"y" | b"1" => true,
-                    b"f" | b"false" | b"n" | b"0" => false,
+                    b"t" | b"true" => true,
+                    b"f" | b"false" => false,
                     [1] => true,
                     [0] => false,
                     other => {
-                        return Err(anyhow!("Failed to parse bool from bytes {other:?}"))
+                        return Err(anyhow!(
+                            "Failed to parse bool: unexpected bytes (len={})",
+                            other.len()
+                        ))
                     }
                 };
                 Ok(PostgresValue::Bool(value))
@@ -1068,6 +1071,8 @@ mod tests {
             ElementValue::String(Arc::from("hello world"))
         );
     }
+
+    #[test]
     fn test_decode_timestamptz_text_no_fractional_seconds() {
         // The `%.f` specifier is optional, so whole-second timestamps (which
         // PostgreSQL emits when subsecond precision is zero) must parse too.
