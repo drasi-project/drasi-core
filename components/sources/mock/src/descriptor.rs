@@ -114,6 +114,7 @@ impl SourcePluginDescriptor for MockSourceDescriptor {
             .with_data_type(data_type)
             .with_interval_ms(interval_ms)
             .with_auto_start(auto_start)
+            .with_bootstrap_provider(crate::bootstrap::MockBootstrapProvider::new(id))
             .build()?;
 
         source.base.set_raw_config(config_json.clone());

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::models::{ElementReference, ElementTimestamp};
 
@@ -25,7 +26,7 @@ pub enum PushType {
     Overwrite,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FutureElementRef {
     pub element_ref: ElementReference,
     pub original_time: ElementTimestamp,
