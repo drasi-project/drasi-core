@@ -27,7 +27,10 @@ use tokio_util::compat::Compat;
 
 /// Cache of primary keys for tables
 pub struct PrimaryKeyCache {
-    /// Map of table name -> ordered list of primary key column names
+    /// Map of canonical `schema.table` name -> ordered list of primary key
+    /// column names. Keying by the canonical schema-qualified name keeps
+    /// same-named tables in different schemas (e.g. `dbo.Orders` and
+    /// `sales.Orders`) from merging their primary-key columns into one entry.
     keys: HashMap<String, Vec<String>>,
     /// Map of lowercased bare table name -> canonical `schema.table` (using the
     /// catalog's casing). Used to produce a stable element-ID prefix that is
@@ -70,7 +73,7 @@ impl PrimaryKeyCache {
             INNER JOIN sys.tables t ON i.object_id = t.object_id
             INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
             WHERE i.is_primary_key = 1
-            ORDER BY t.name, ic.key_ordinal
+            ORDER BY s.name, t.name, ic.key_ordinal
         ";
 
         let stream = client.query(query, &[]).await?;
@@ -81,16 +84,17 @@ impl PrimaryKeyCache {
             let table_name: &str = row.get(1).ok_or_else(|| anyhow!("Missing table_name"))?;
             let column_name: &str = row.get(2).ok_or_else(|| anyhow!("Missing column_name"))?;
 
+            let canonical = format!("{schema_name}.{table_name}");
+
             self.keys
-                .entry(table_name.to_string())
+                .entry(canonical.clone())
                 .or_default()
                 .push(column_name.to_string());
 
             self.canonical_names
                 .entry(table_name.to_lowercase())
                 .and_modify(|existing| {
-                    let new_name = format!("{schema_name}.{table_name}");
-                    if *existing != new_name {
+                    if *existing != canonical {
                         warn!(
                             "Table '{table_name}' exists in schemas '{}' and '{schema_name}'; \
                              unqualified references will resolve to element-ID prefix '{existing}'. \
@@ -99,12 +103,14 @@ impl PrimaryKeyCache {
                         );
                     }
                 })
-                .or_insert_with(|| format!("{schema_name}.{table_name}"));
+                .or_insert_with(|| canonical.clone());
         }
 
-        // Merge with configured table_keys (which take precedence)
+        // Merge with configured table_keys (which take precedence). Insert by the
+        // canonical `schema.table` so config lookups match discovery keying.
         for tk in &config.table_keys {
-            self.keys.insert(tk.table.clone(), tk.key_columns.clone());
+            let canonical = self.canonical_table(&tk.table);
+            self.keys.insert(canonical, tk.key_columns.clone());
         }
 
         log::info!("Discovered primary keys for {} tables", self.keys.len());
@@ -115,22 +121,20 @@ impl PrimaryKeyCache {
         Ok(())
     }
 
-    /// Get primary key columns for a table
-    /// Handles both "table" and "schema.table" formats
+    /// Get primary key columns for a table.
+    ///
+    /// Resolves the reference to its canonical `schema.table` name (via
+    /// [`canonical_table`](Self::canonical_table)) before looking it up, so that
+    /// `Orders`, `dbo.Orders`, and `DBO.orders` all find the same entry while
+    /// distinct schemas (`dbo.Orders` vs `sales.Orders`) stay separate.
     pub fn get(&self, table: &str) -> Option<&Vec<String>> {
-        // Try exact match first
-        if let Some(keys) = self.keys.get(table) {
+        // Primary lookup: canonical schema.table (how keys are stored).
+        if let Some(keys) = self.keys.get(&self.canonical_table(table)) {
             return Some(keys);
         }
 
-        // Try without schema prefix (e.g., "dbo.Orders" -> "Orders")
-        if let Some(table_only) = table.split('.').nth(1) {
-            if let Some(keys) = self.keys.get(table_only) {
-                return Some(keys);
-            }
-        }
-
-        None
+        // Fallback: an exact, verbatim match (e.g. a caller-inserted key).
+        self.keys.get(table)
     }
 
     /// Resolve any table reference to a canonical `schema.table` name.
@@ -264,23 +268,54 @@ mod tests {
         let mut cache = PrimaryKeyCache::new();
         cache
             .keys
-            .insert("orders".to_string(), vec!["order_id".to_string()]);
+            .insert("dbo.orders".to_string(), vec!["order_id".to_string()]);
+        cache
+            .canonical_names
+            .insert("orders".to_string(), "dbo.orders".to_string());
 
+        // Bare, same-schema, and differently-cased references all resolve.
         assert_eq!(cache.get("orders").unwrap(), &vec!["order_id"]);
+        assert_eq!(cache.get("dbo.orders").unwrap(), &vec!["order_id"]);
+        assert_eq!(cache.get("DBO.Orders").unwrap(), &vec!["order_id"]);
     }
 
     #[test]
     fn test_composite_key() {
         let mut cache = PrimaryKeyCache::new();
         cache.keys.insert(
-            "order_items".to_string(),
+            "dbo.order_items".to_string(),
             vec!["order_id".to_string(), "product_id".to_string()],
         );
+        cache
+            .canonical_names
+            .insert("order_items".to_string(), "dbo.order_items".to_string());
 
         let keys = cache.get("order_items").unwrap();
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0], "order_id");
         assert_eq!(keys[1], "product_id");
+    }
+
+    #[test]
+    fn test_same_table_name_across_schemas_stays_distinct() {
+        // Regression: `dbo.Orders` and `sales.Orders` must not merge their PK
+        // column lists into a single bare-name entry.
+        let mut cache = PrimaryKeyCache::new();
+        cache
+            .keys
+            .insert("dbo.Orders".to_string(), vec!["OrderId".to_string()]);
+        cache
+            .keys
+            .insert("sales.Orders".to_string(), vec!["SaleId".to_string()]);
+        // The catalog discovered `dbo.Orders` first, so the bare name resolves there.
+        cache
+            .canonical_names
+            .insert("orders".to_string(), "dbo.Orders".to_string());
+
+        assert_eq!(cache.get("dbo.Orders").unwrap(), &vec!["OrderId"]);
+        assert_eq!(cache.get("sales.Orders").unwrap(), &vec!["SaleId"]);
+        // The unqualified reference follows the discovered canonical schema.
+        assert_eq!(cache.get("Orders").unwrap(), &vec!["OrderId"]);
     }
 
     #[test]
