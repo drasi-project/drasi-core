@@ -1713,7 +1713,7 @@ impl Query for DrasiQuery {
                     component_id = %query_id,
                     component_type = "query"
                 );
-                let handle: tokio::task::JoinHandle<(String, Option<crate::bootstrap::BootstrapResult>)> = tokio::spawn(
+                let handle: tokio::task::JoinHandle<(String, anyhow::Result<Option<crate::bootstrap::BootstrapResult>>)> = tokio::spawn(
                     async move {
                         let mut count = 0u64;
 
@@ -1795,33 +1795,46 @@ impl Query for DrasiQuery {
 
                         // Await the BootstrapResult from the source's bootstrap provider.
                         // This carries the optional source_position snapshot boundary.
-                        let bootstrap_result = if let Some(rx) = bootstrap_result_rx {
-                            match rx.await {
-                                Ok(Ok(result)) => {
-                                    debug!(
-                                        "[BOOTSTRAP] Query '{}' received handover from source '{}': \
-                                         source_position={:?}",
-                                        query_id_clone, source_id_clone,
-                                        result.source_position.as_ref().map(|p| p.len())
-                                    );
-                                    Some(result)
+                        // A provider failure (Ok(Err)) or a dropped result channel
+                        // (Err) is propagated as an Err so the supervisor can
+                        // transition the query to the Error state. Errors are carried
+                        // as anyhow::Error to preserve the context chain, matching the
+                        // internal-module convention.
+                        let bootstrap_result: anyhow::Result<Option<crate::bootstrap::BootstrapResult>> =
+                            if let Some(rx) = bootstrap_result_rx {
+                                match rx.await {
+                                    Ok(Ok(result)) => {
+                                        debug!(
+                                            "[BOOTSTRAP] Query '{}' received handover from source '{}': \
+                                             source_position={:?}",
+                                            query_id_clone, source_id_clone,
+                                            result.source_position.as_ref().map(|p| p.len())
+                                        );
+                                        Ok(Some(result))
+                                    }
+                                    Ok(Err(e)) => {
+                                        error!(
+                                            "[BOOTSTRAP] Query '{query_id_clone}' bootstrap provider failed for source '{source_id_clone}': {e:#}"
+                                        );
+                                        Err(e).context(format!("source '{source_id_clone}'"))
+                                    }
+                                    Err(_) => {
+                                        // The sender was dropped without producing a
+                                        // result. This is a silent-failure path (e.g. a
+                                        // provider task panicked before sending), so
+                                        // treat it as a bootstrap failure rather than
+                                        // letting the query proceed to Running.
+                                        error!(
+                                            "[BOOTSTRAP] Query '{query_id_clone}' bootstrap result channel dropped for source '{source_id_clone}' (provider may have failed)"
+                                        );
+                                        Err(anyhow::anyhow!(
+                                            "source '{source_id_clone}': bootstrap result channel dropped without a result"
+                                        ))
+                                    }
                                 }
-                                Ok(Err(e)) => {
-                                    error!(
-                                        "[BOOTSTRAP] Query '{query_id_clone}' bootstrap provider failed for source '{source_id_clone}': {e}"
-                                    );
-                                    None
-                                }
-                                Err(_) => {
-                                    warn!(
-                                        "[BOOTSTRAP] Query '{query_id_clone}' bootstrap result channel dropped for source '{source_id_clone}'"
-                                    );
-                                    None
-                                }
-                            }
-                        } else {
-                            None
-                        };
+                            } else {
+                                Ok(None)
+                            };
 
                         (source_id_clone, bootstrap_result)
                     }
@@ -1854,15 +1867,39 @@ impl Query for DrasiQuery {
                         let join_results = futures::future::join_all(bootstrap_handles).await;
                         let panic_count = join_results.iter().filter(|r| matches!(r, Err(e) if e.is_panic())).count();
 
-                        if panic_count > 0 {
+                        // Collect bootstrap provider failures reported by the per-source
+                        // tasks. Each error already carries the source id via anyhow
+                        // context; render the full chain single-line with `{:#}`.
+                        let failures: Vec<String> = join_results
+                            .iter()
+                            .filter_map(|r| r.as_ref().ok())
+                            .filter_map(|(_, result)| {
+                                result.as_ref().err().map(|e| format!("{e:#}"))
+                            })
+                            .collect();
+
+                        if panic_count > 0 || !failures.is_empty() {
+                            let mut details = Vec::new();
+                            if panic_count > 0 {
+                                details.push(format!("{panic_count} task(s) panicked"));
+                            }
+                            details.extend(failures.iter().cloned());
+                            let detail = details.join("; ");
+
                             error!(
-                                "[BOOTSTRAP] Query '{query_id_clone}' {panic_count} bootstrap task(s) panicked, \
+                                "[BOOTSTRAP] Query '{query_id_clone}' bootstrap failed ({detail}), \
                                  transitioning to Error and opening gate"
                             );
 
+                            // The same failure reason is reported in the status so callers
+                            // of get_query_status() can see why bootstrap failed without
+                            // having to correlate against logs. This is an embedded,
+                            // in-process API and the identical text is already emitted to
+                            // the operator log above, so the status carries no information
+                            // not already present there.
                             reporter_clone.set_status(
                                 ComponentStatus::Error,
-                                Some(format!("Bootstrap failed: {panic_count} task(s) panicked")),
+                                Some(format!("Bootstrap failed: {detail}")),
                             ).await;
 
                             // Open the gate so the processor doesn't block
@@ -1880,7 +1917,7 @@ impl Query for DrasiQuery {
                             std::collections::HashMap::new();
 
                         for (source_id, bootstrap_result) in join_results.iter().filter_map(|r| r.as_ref().ok()) {
-                            if let Some(br) = bootstrap_result {
+                            if let Ok(Some(br)) = bootstrap_result {
                                 if let Some(pos) = &br.source_position {
                                     // Validate source_position size (same limit as dispatch_event)
                                     if pos.len() > crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES {
