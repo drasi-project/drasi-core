@@ -205,7 +205,7 @@ impl ComponentEventHistory {
             .collect();
 
         // Sort by timestamp
-        all_events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        all_events.sort_by_key(|a| a.timestamp);
         all_events
     }
 

@@ -59,4 +59,4 @@ drasi-bootstrap-sqlite = { workspace = true }
 drasi-reaction-application.workspace = true
 tokio-test = "0.4"
 tempfile = "3"
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }

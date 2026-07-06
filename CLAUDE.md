@@ -55,7 +55,7 @@ cargo fmt -- --check                       # Check formatting
 The project uses specific clippy configuration in `clippy.toml` that allows print/unwrap in tests.
 
 ### Rust Toolchain
-- Uses Rust 1.83.0 for CI (see `.github/workflows/ci-lint.yml`)
+- Uses Rust 1.95.0 for CI (see `.github/workflows/ci-lint.yml`)
 - Formatting uses nightly toolchain
 
 ## Architecture
