@@ -25,9 +25,10 @@ use drasi_lib::reactions::Reaction;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::{ComponentStatus, ReactionRuntimeContext};
 use drasi_plugin_sdk::descriptor::ReactionPluginDescriptor;
+use drasi_plugin_sdk::ffi::payload::encode_query_result;
 use drasi_plugin_sdk::ffi::{
     FfiBootstrapContext, FfiCheckpoint, FfiCheckpointResult, FfiComponentStatus, FfiOutboxIterator,
-    FfiOutboxIteratorResponse, FfiResult, FfiRuntimeContext, FfiSnapshotIterator,
+    FfiOutboxIteratorResponse, FfiQueryResult, FfiResult, FfiRuntimeContext, FfiSnapshotIterator,
     FfiSnapshotIteratorResponse, FfiStr, ReactionPluginVtable, ReactionVtable,
 };
 use libloading::Library;
@@ -106,6 +107,19 @@ extern "C" fn result_push_callback(ctx: *mut c_void, sentinel: *mut c_void) -> *
     })
 }
 
+/// Frees a serialized `QueryResult` byte buffer produced by the host in
+/// [`result_push_callback_inner`]. Called by the consuming plugin after it has
+/// deserialized its own copy (issue #602).
+extern "C" fn drop_query_result_bytes(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() && len > 0 {
+        unsafe {
+            // Rebuild the boxed slice from a *raw* slice pointer — never create a
+            // `&mut [u8]` reference to memory we are about to free (that would be UB).
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+        }
+    }
+}
+
 fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c_void {
     let context = unsafe { &*(ctx as *const ResultPushContext) };
 
@@ -123,7 +137,18 @@ fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c
         .expect("result_push_callback lock poisoned");
     if let Some(ref rx) = *guard {
         match rx.recv() {
-            Ok(result) => Box::into_raw(Box::new(result)) as *mut c_void,
+            Ok(result) => {
+                // Serialize the QueryResult for cross-cdylib transfer (issue #602):
+                // never hand the plugin a reinterpreted `repr(Rust)` pointer.
+                let bytes = encode_query_result(&result);
+                let payload_len = bytes.len();
+                let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+                Box::into_raw(Box::new(FfiQueryResult {
+                    payload_ptr,
+                    payload_len,
+                    payload_drop_fn: Some(drop_query_result_bytes),
+                })) as *mut c_void
+            }
             Err(_) => {
                 // Channel closed — return null so the forwarder breaks.
                 // Do NOT signal forwarder_done here; the forwarder will

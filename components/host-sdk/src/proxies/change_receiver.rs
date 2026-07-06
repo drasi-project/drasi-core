@@ -27,9 +27,28 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use drasi_lib::channels::events::SourceEventWrapper;
+use drasi_lib::channels::events::{BootstrapEvent, SourceEventWrapper};
 use drasi_lib::channels::ChangeReceiver;
-use drasi_plugin_sdk::ffi::{FfiChangeReceiver, FfiSourceEvent};
+use drasi_plugin_sdk::ffi::payload::{consume_bootstrap_event, consume_source_event};
+use drasi_plugin_sdk::ffi::{FfiBootstrapEvent, FfiChangeReceiver, FfiSourceEvent};
+
+/// Decode a plugin-sent `FfiSourceEvent` into a **host-owned** `SourceEventWrapper`.
+///
+/// The payload crosses the cdylib boundary as MessagePack bytes (issue #602): the
+/// host deserializes its own copy and frees the plugin's buffer via the
+/// plugin-supplied `payload_drop_fn`. The host never reads or drops the plugin's
+/// `repr(Rust)` memory. Returns `None` if the payload cannot be decoded (the
+/// plugin buffer is freed regardless). Delegates to the canonical
+/// [`consume_source_event`], where the size/null hardening lives.
+fn decode_source_event(ffi_event: &FfiSourceEvent) -> Option<SourceEventWrapper> {
+    unsafe { consume_source_event(ffi_event) }
+}
+
+/// Decode a plugin-sent `FfiBootstrapEvent` into a host-owned `BootstrapEvent`.
+/// See [`decode_source_event`] for the ownership contract (issue #602).
+fn decode_bootstrap_event(ffi_event: &FfiBootstrapEvent) -> Option<BootstrapEvent> {
+    unsafe { consume_bootstrap_event(ffi_event) }
+}
 
 /// Context passed to the push callback. Holds the std mpsc sender and a
 /// tokio Notify to wake the host receiver.
@@ -42,9 +61,9 @@ struct PushCallbackContext {
 /// Uses `std::sync::mpsc` which is safe to call from any runtime.
 extern "C" fn change_push_callback(ctx: *mut std::ffi::c_void, event: *mut FfiSourceEvent) -> bool {
     // Catch panics to prevent unwinding across the extern "C" boundary (which is UB).
-    // On panic, return false to signal shutdown. The leaked Arc is NOT reclaimed here
-    // because we cannot know which code path panicked. It will be reclaimed when the
-    // forwarder task exits (via the null-event callback or send failure).
+    // On panic, return false to signal shutdown. The leaked Arc is NOT reclaimed here;
+    // it is reclaimed exactly once when the forwarder sends its final null sentinel
+    // (the plugin guarantees one on forwarder exit via SourceSentinelOnDrop).
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         change_push_callback_inner(ctx, event)
     }))
@@ -55,39 +74,49 @@ fn change_push_callback_inner(ctx: *mut std::ffi::c_void, event: *mut FfiSourceE
     let context = unsafe { &*(ctx as *const PushCallbackContext) };
 
     if event.is_null() {
-        // Channel closed — drop the sender to signal the host receiver
-        {
-            let mut guard = context.tx.lock().expect("push callback mutex poisoned");
+        // Forwarder-exit sentinel. The plugin guarantees exactly one null
+        // callback when its forwarder task ends (`SourceSentinelOnDrop`), so this
+        // is the SOLE point at which the leaked Arc reference is reclaimed — which
+        // guarantees the context outlives every event callback. Reclaiming on any
+        // other return path as well would double-free the context (the macOS arm64
+        // teardown UAF / "mutex poisoned" crash). Tolerate a poisoned lock so the
+        // reclaim below always runs (skipping it would leak the context).
+        if let Ok(mut guard) = context.tx.lock() {
             *guard = None;
-            context.notify.notify_one();
-            // guard must be dropped BEFORE reclaiming the Arc, otherwise
-            // MutexGuard::drop runs after the PushCallbackContext is freed.
         }
-        // Reclaim the leaked Arc reference (see ChangeReceiverProxy::new)
+        context.notify.notify_one();
+        // Reclaim the single leaked Arc reference (see ChangeReceiverProxy::new).
+        // The lock guard above is already dropped, so the Mutex is not touched
+        // after the context is freed.
         unsafe { Arc::from_raw(ctx as *const PushCallbackContext) };
         return false;
     }
 
     let ffi_event = unsafe { &*event };
-    let wrapper = unsafe { *Box::from_raw(ffi_event.opaque as *mut SourceEventWrapper) };
+    let decoded = decode_source_event(ffi_event);
+    // Free the plugin-allocated `#[repr(C)]` envelope (POD; no recursive Drop).
     unsafe { drop(Box::from_raw(event)) };
 
-    let guard = context.tx.lock().expect("push callback mutex poisoned");
-    if let Some(tx) = guard.as_ref() {
-        let ok = tx.send(Arc::new(wrapper)).is_ok();
-        drop(guard);
-        if ok {
-            context.notify.notify_one();
-            true
-        } else {
-            // Receiver was dropped — reclaim the leaked Arc
-            unsafe { Arc::from_raw(ctx as *const PushCallbackContext) };
-            false
-        }
+    let Some(wrapper) = decoded else {
+        // Undecodable payload — skip without tearing down the stream.
+        return true;
+    };
+
+    // Forward to the host receiver. On any failure (receiver gone or a poisoned
+    // lock) return false to stop the forwarder, but do NOT reclaim the leaked Arc
+    // here — the guaranteed null sentinel does that exactly once.
+    let Ok(guard) = context.tx.lock() else {
+        return false;
+    };
+    let Some(tx) = guard.as_ref() else {
+        return false;
+    };
+    let ok = tx.send(Arc::new(wrapper)).is_ok();
+    drop(guard);
+    if ok {
+        context.notify.notify_one();
+        true
     } else {
-        // Sender was already dropped — reclaim the leaked Arc
-        drop(guard);
-        unsafe { Arc::from_raw(ctx as *const PushCallbackContext) };
         false
     }
 }
@@ -212,44 +241,45 @@ fn bootstrap_push_callback_inner(
     let context = unsafe { &*(ctx as *const BootstrapPushCallbackContext) };
 
     if event.is_null() {
-        // Stream exhausted — drop the sender to signal completion
-        {
-            let mut guard = context
-                .tx
-                .lock()
-                .expect("bootstrap push callback mutex poisoned");
+        // Forwarder-exit sentinel (`BootstrapSentinelOnDrop`, guaranteed exactly
+        // once on forwarder exit). This is the SOLE point at which the leaked Arc
+        // reference is reclaimed, so the context outlives every event callback;
+        // reclaiming on any other return path too would double-free it. Tolerate a
+        // poisoned lock so the reclaim below always runs.
+        if let Ok(mut guard) = context.tx.lock() {
             *guard = None;
-            context.notify.notify_one();
-            // guard must be dropped BEFORE reclaiming the Arc
         }
-        // Reclaim the leaked Arc reference
+        context.notify.notify_one();
+        // Reclaim the single leaked Arc reference.
         unsafe { Arc::from_raw(ctx as *const BootstrapPushCallbackContext) };
         return false;
     }
 
     let ffi_event = unsafe { &*event };
-    let bootstrap_event = unsafe {
-        *Box::from_raw(ffi_event.opaque as *mut drasi_lib::channels::events::BootstrapEvent)
-    };
+    let decoded = decode_bootstrap_event(ffi_event);
+    // Free the plugin-allocated `#[repr(C)]` envelope (POD; no recursive Drop).
     unsafe { drop(Box::from_raw(event)) };
 
-    let guard = context
-        .tx
-        .lock()
-        .expect("bootstrap push callback mutex poisoned");
-    if let Some(tx) = guard.as_ref() {
-        let ok = tx.send(bootstrap_event).is_ok();
-        drop(guard);
-        if ok {
-            context.notify.notify_one();
-            true
-        } else {
-            unsafe { Arc::from_raw(ctx as *const BootstrapPushCallbackContext) };
-            false
-        }
+    let Some(bootstrap_event) = decoded else {
+        // Undecodable payload — skip without tearing down the stream.
+        return true;
+    };
+
+    // Forward to the host receiver. On any failure (receiver gone or a poisoned
+    // lock) return false to stop the forwarder, but do NOT reclaim the leaked Arc
+    // here — the guaranteed null sentinel does that exactly once.
+    let Ok(guard) = context.tx.lock() else {
+        return false;
+    };
+    let Some(tx) = guard.as_ref() else {
+        return false;
+    };
+    let ok = tx.send(bootstrap_event).is_ok();
+    drop(guard);
+    if ok {
+        context.notify.notify_one();
+        true
     } else {
-        drop(guard);
-        unsafe { Arc::from_raw(ctx as *const BootstrapPushCallbackContext) };
         false
     }
 }
@@ -350,5 +380,291 @@ impl BootstrapReceiverProxy {
         });
 
         out_rx
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    //! T2 (part 2) — host-side FFI ownership for issue #602.
+    //!
+    //! These tests drive the **real** host consumer (`decode_source_event` /
+    //! `decode_bootstrap_event`) with an `FfiSourceEvent`/`FfiBootstrapEvent`
+    //! constructed exactly as the plugin producer does, using a call-counting
+    //! `payload_drop_fn`. They assert that:
+    //!   1. the host rebuilds a value-equal, host-owned event, and
+    //!   2. the host frees the plugin's payload buffer **exactly once** via the
+    //!      plugin-supplied `drop_fn` — never reinterpreting/dropping the
+    //!      plugin's `repr(Rust)` memory.
+
+    use super::*;
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+    };
+    use drasi_lib::channels::events::SourceEvent;
+    use drasi_plugin_sdk::ffi::payload::{BootstrapEventPayload, SourceEventPayload};
+    use drasi_plugin_sdk::ffi::FfiChangeOp;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SRC_DROPS_VALID: AtomicUsize = AtomicUsize::new(0);
+    static SRC_DROPS_INVALID: AtomicUsize = AtomicUsize::new(0);
+    static BOOT_DROPS: AtomicUsize = AtomicUsize::new(0);
+    static BOOT_DROPS_INVALID: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn counting_drop_src_valid(ptr: *mut u8, len: usize) {
+        SRC_DROPS_VALID.fetch_add(1, Ordering::SeqCst);
+        free_bytes(ptr, len);
+    }
+
+    extern "C" fn counting_drop_src_invalid(ptr: *mut u8, len: usize) {
+        SRC_DROPS_INVALID.fetch_add(1, Ordering::SeqCst);
+        free_bytes(ptr, len);
+    }
+
+    extern "C" fn counting_drop_boot(ptr: *mut u8, len: usize) {
+        BOOT_DROPS.fetch_add(1, Ordering::SeqCst);
+        free_bytes(ptr, len);
+    }
+
+    extern "C" fn counting_drop_boot_invalid(ptr: *mut u8, len: usize) {
+        BOOT_DROPS_INVALID.fetch_add(1, Ordering::SeqCst);
+        free_bytes(ptr, len);
+    }
+
+    fn free_bytes(ptr: *mut u8, len: usize) {
+        if !ptr.is_null() && len > 0 {
+            unsafe {
+                drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+            }
+        }
+    }
+
+    fn node() -> Element {
+        let mut props = ElementPropertyMap::new();
+        props.insert("plate", ElementValue::String(std::sync::Arc::from("A1234")));
+        Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("src-1", "vehicles:A1234"),
+                labels: std::sync::Arc::from(vec![std::sync::Arc::from("vehicles")]),
+                effective_from: 1_771_000_000_000,
+            },
+            properties: props,
+        }
+    }
+
+    /// Mirrors the plugin producer: serialize the payload (named MessagePack)
+    /// into a heap buffer and build the `#[repr(C)]` envelope.
+    fn make_source_event(
+        payload: &SourceEventPayload,
+        drop_fn: extern "C" fn(*mut u8, usize),
+    ) -> *mut FfiSourceEvent {
+        let bytes = rmp_serde::to_vec_named(payload).unwrap();
+        let payload_len = bytes.len();
+        let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+        Box::into_raw(Box::new(FfiSourceEvent {
+            payload_ptr,
+            payload_len,
+            payload_drop_fn: Some(drop_fn),
+            op: FfiChangeOp::Insert,
+            timestamp_us: payload.timestamp_us,
+        }))
+    }
+
+    #[test]
+    fn decode_source_event_rebuilds_and_frees_buffer_once() {
+        let payload = SourceEventPayload {
+            source_id: "src-1".to_string(),
+            event: SourceEvent::Change(SourceChange::Insert { element: node() }),
+            timestamp_us: 1_771_000_000_000_000,
+            sequence: Some(99),
+            source_position: Some(b"binlog:1".to_vec()),
+        };
+        let raw = make_source_event(&payload, counting_drop_src_valid);
+        let ffi = unsafe { &*raw };
+
+        let wrapper = decode_source_event(ffi).expect("host-owned wrapper");
+        assert_eq!(wrapper.source_id, "src-1");
+        assert_eq!(wrapper.sequence, Some(99));
+        assert_eq!(wrapper.source_position.as_deref(), Some(&b"binlog:1"[..]));
+        assert_eq!(wrapper.event, payload.event);
+
+        // The plugin's payload buffer was freed exactly once, by the host
+        // calling the plugin-supplied drop_fn.
+        assert_eq!(SRC_DROPS_VALID.load(Ordering::SeqCst), 1);
+
+        // The host owns `wrapper`; dropping it must not touch the (already freed)
+        // plugin buffer or double-free.
+        drop(wrapper);
+        assert_eq!(SRC_DROPS_VALID.load(Ordering::SeqCst), 1);
+
+        // Free the #[repr(C)] envelope (as the real callback does).
+        unsafe { drop(Box::from_raw(raw)) };
+    }
+
+    #[test]
+    fn decode_source_event_handles_undecodable_payload_without_leak() {
+        // Garbage bytes that are not a valid SourceEventPayload.
+        let bytes = vec![0xFFu8; 8];
+        let payload_len = bytes.len();
+        let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+        let raw = Box::into_raw(Box::new(FfiSourceEvent {
+            payload_ptr,
+            payload_len,
+            payload_drop_fn: Some(counting_drop_src_invalid),
+            op: FfiChangeOp::Insert,
+            timestamp_us: 0,
+        }));
+        let ffi = unsafe { &*raw };
+
+        assert!(decode_source_event(ffi).is_none());
+        // Buffer still freed exactly once even though decode failed.
+        assert_eq!(SRC_DROPS_INVALID.load(Ordering::SeqCst), 1);
+        unsafe { drop(Box::from_raw(raw)) };
+    }
+
+    #[test]
+    fn decode_bootstrap_event_rebuilds_and_frees_buffer_once() {
+        let payload = BootstrapEventPayload {
+            source_id: "src-1".to_string(),
+            change: SourceChange::Insert { element: node() },
+            timestamp_us: 1_771_000_000_000_000,
+            sequence: 5,
+        };
+        let bytes = rmp_serde::to_vec_named(&payload).unwrap();
+        let payload_len = bytes.len();
+        let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+        let raw = Box::into_raw(Box::new(FfiBootstrapEvent {
+            payload_ptr,
+            payload_len,
+            payload_drop_fn: Some(counting_drop_boot),
+            timestamp_us: payload.timestamp_us,
+            sequence: 5,
+        }));
+        let ffi = unsafe { &*raw };
+
+        let event = decode_bootstrap_event(ffi).expect("host-owned bootstrap event");
+        assert_eq!(event.source_id, "src-1");
+        assert_eq!(event.sequence, 5);
+        assert_eq!(event.change, payload.change);
+        assert_eq!(BOOT_DROPS.load(Ordering::SeqCst), 1);
+        unsafe { drop(Box::from_raw(raw)) };
+    }
+
+    #[test]
+    fn decode_bootstrap_event_handles_undecodable_payload_without_leak() {
+        // Garbage bytes that are not a valid BootstrapEventPayload.
+        let bytes = vec![0xFFu8; 8];
+        let payload_len = bytes.len();
+        let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+        let raw = Box::into_raw(Box::new(FfiBootstrapEvent {
+            payload_ptr,
+            payload_len,
+            payload_drop_fn: Some(counting_drop_boot_invalid),
+            timestamp_us: 0,
+            sequence: 0,
+        }));
+        let ffi = unsafe { &*raw };
+
+        assert!(decode_bootstrap_event(ffi).is_none());
+        // Buffer still freed exactly once even though decode failed.
+        assert_eq!(BOOT_DROPS_INVALID.load(Ordering::SeqCst), 1);
+        unsafe { drop(Box::from_raw(raw)) };
+    }
+
+    // ---- leaked-Arc reclaim exactly once (macOS arm64 teardown double-free) ----
+    //
+    // The plugin forwarder leaks one Arc ref to the callback context (see
+    // `ChangeReceiverProxy::new`) and guarantees exactly one final null-event
+    // "sentinel" callback on exit (`SourceSentinelOnDrop`). The leaked ref must be
+    // reclaimed by that sentinel and by NOTHING else: when the host receiver is
+    // dropped first, a real event's `send()` fails, and if that path *also*
+    // reclaimed the Arc the subsequent sentinel would read freed memory and
+    // double-free it (the flaky "push callback mutex poisoned" + SIGSEGV). These
+    // tests pin the reclaim count via `Arc::strong_count`.
+
+    extern "C" fn free_only_drop(ptr: *mut u8, len: usize) {
+        free_bytes(ptr, len);
+    }
+
+    #[test]
+    fn change_callback_reclaims_leaked_arc_exactly_once_on_send_failure() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Arc<SourceEventWrapper>>(4);
+        let ctx = Arc::new(PushCallbackContext {
+            tx: std::sync::Mutex::new(Some(tx)),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        });
+        // Mirror new(): leak a second strong ref for the plugin forwarder.
+        let leaked = Arc::into_raw(ctx.clone()) as *mut std::ffi::c_void;
+        assert_eq!(Arc::strong_count(&ctx), 2);
+
+        // Receiver dropped first → the next send() fails (teardown order).
+        drop(rx);
+
+        let payload = SourceEventPayload {
+            source_id: "s".to_string(),
+            event: SourceEvent::Change(SourceChange::Insert { element: node() }),
+            timestamp_us: 0,
+            sequence: None,
+            source_position: None,
+        };
+        let ev = make_source_event(&payload, free_only_drop);
+        // Real event: decodes, but send() fails → returns false WITHOUT reclaiming.
+        assert!(!change_push_callback(leaked, ev));
+        assert_eq!(
+            Arc::strong_count(&ctx),
+            2,
+            "send-failure path must NOT reclaim the leaked Arc"
+        );
+
+        // Forwarder-exit sentinel: reclaims exactly once.
+        assert!(!change_push_callback(leaked, std::ptr::null_mut()));
+        assert_eq!(
+            Arc::strong_count(&ctx),
+            1,
+            "sentinel must reclaim the leaked Arc exactly once"
+        );
+    }
+
+    #[test]
+    fn bootstrap_callback_reclaims_leaked_arc_exactly_once_on_send_failure() {
+        let (tx, rx) =
+            std::sync::mpsc::sync_channel::<drasi_lib::channels::events::BootstrapEvent>(4);
+        let ctx = Arc::new(BootstrapPushCallbackContext {
+            tx: std::sync::Mutex::new(Some(tx)),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        });
+        let leaked = Arc::into_raw(ctx.clone()) as *mut std::ffi::c_void;
+        assert_eq!(Arc::strong_count(&ctx), 2);
+
+        drop(rx);
+
+        let payload = BootstrapEventPayload {
+            source_id: "s".to_string(),
+            change: SourceChange::Insert { element: node() },
+            timestamp_us: 0,
+            sequence: 1,
+        };
+        let bytes = rmp_serde::to_vec_named(&payload).unwrap();
+        let payload_len = bytes.len();
+        let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+        let ev = Box::into_raw(Box::new(FfiBootstrapEvent {
+            payload_ptr,
+            payload_len,
+            payload_drop_fn: Some(free_only_drop),
+            timestamp_us: 0,
+            sequence: 1,
+        }));
+        assert!(!bootstrap_push_callback(leaked, ev));
+        assert_eq!(
+            Arc::strong_count(&ctx),
+            2,
+            "send-failure path must NOT reclaim the leaked Arc"
+        );
+
+        assert!(!bootstrap_push_callback(leaked, std::ptr::null_mut()));
+        assert_eq!(
+            Arc::strong_count(&ctx),
+            1,
+            "sentinel must reclaim the leaked Arc exactly once"
+        );
     }
 }

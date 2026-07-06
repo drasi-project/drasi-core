@@ -68,9 +68,14 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
                 return -1;
             }
             let ffi_event = unsafe { &*event };
-            let bootstrap_event = unsafe {
-                let opaque = ffi_event.opaque as *mut drasi_lib::channels::events::BootstrapEvent;
-                std::ptr::read(opaque)
+            // Decode the serialized payload into a plugin-owned BootstrapEvent and
+            // free the producer's buffer via its own deallocator (issue #602: never
+            // reinterpret/drop the other side's repr(Rust) memory). The canonical
+            // consumer also bounds the size and null-guards the drop fn.
+            let decoded = unsafe { crate::ffi::payload::consume_bootstrap_event(ffi_event) };
+            unsafe { drop(Box::from_raw(event)) };
+            let Some(bootstrap_event) = decoded else {
+                return 0;
             };
             match sender_state.tx.send(bootstrap_event) {
                 Ok(()) => 0,

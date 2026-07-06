@@ -75,6 +75,33 @@ test-host-sdk: build-test-plugins
 	cargo test -p drasi-host-sdk --test integration_test -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
 
+# Deterministic cross-cdylib layout-mismatch regression for issue #602.
+#
+# Builds the mock-source cdylib with one layout seed and runs the host-sdk
+# layout-mismatch test with a DIFFERENT seed under glibc heap hardening. Before
+# the #602 fix this aborts (free(): invalid pointer / SIGSEGV); after the fix the
+# serialized event transfer is layout-independent and the test passes.
+#
+# Requires a nightly toolchain (for -Zrandomize-layout / -Zlayout-seed).
+PLUGIN_LAYOUT_SEED  ?= 1
+HOST_LAYOUT_SEED    ?= 2
+test-ffi-layout-mismatch:
+	@echo "=== [#602] Building mock plugin with layout seed $(PLUGIN_LAYOUT_SEED) (nightly) ==="
+	RUSTFLAGS="-Zrandomize-layout -Zlayout-seed=$(PLUGIN_LAYOUT_SEED)" \
+		cargo +nightly build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
+	@mkdir -p $(PLUGIN_OUT_DIR)
+	@for ext in dylib so dll; do \
+		for f in target/debug/libdrasi_source_mock.$$ext target/debug/drasi_source_mock.$$ext; do \
+			[ -f "$$f" ] && cp "$$f" $(PLUGIN_OUT_DIR)/ || true; \
+		done; \
+	done
+	@echo "=== [#602] Running layout-mismatch test with host seed $(HOST_LAYOUT_SEED) + MALLOC_CHECK_=3 ==="
+	MALLOC_CHECK_=3 MALLOC_PERTURB_=165 GLIBC_TUNABLES=glibc.malloc.check=3 \
+		RUSTFLAGS="-Zrandomize-layout -Zlayout-seed=$(HOST_LAYOUT_SEED)" \
+		cargo +nightly test -p drasi-host-sdk --test ffi_layout_mismatch_test -- \
+			--ignored --nocapture --test-threads=1
+	@echo "=== [#602] layout-mismatch regression passed (no heap corruption) ==="
+
 # === Plugin Build & Publish (via xtask) ===
 
 # Build all dynamic plugins (debug)

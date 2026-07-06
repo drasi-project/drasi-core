@@ -70,8 +70,17 @@ impl ReplicationPostgresGuard {
             match tokio_postgres::connect(&self.config().connection_string(), NoTls).await {
                 Ok((client, connection)) => {
                     tokio::spawn(async move {
+                        // This background task drives the connection until the
+                        // Client is dropped. During test teardown the container
+                        // is stopped (or the admin terminates the backend), so
+                        // the connection future commonly resolves with an error
+                        // like "terminating connection due to administrator
+                        // command" / a closed socket. That is expected and not a
+                        // test failure, so log it at debug to avoid alarming
+                        // ERROR noise. A genuine mid-test connection failure
+                        // surfaces via the failing `client` operation itself.
                         if let Err(e) = connection.await {
-                            log::error!("PostgreSQL connection error: {e}");
+                            log::debug!("PostgreSQL test connection closed: {e}");
                         }
                     });
 
@@ -192,7 +201,7 @@ pub async fn create_test_table_replica_identity_default(
     Ok(())
 }
 
-fn quote_ident(ident: &str) -> String {
+pub fn quote_ident(ident: &str) -> String {
     // Quote a PostgreSQL identifier by wrapping it in double quotes
     // and doubling any embedded double quotes.
     format!("\"{}\"", ident.replace('"', "\"\""))
@@ -229,6 +238,28 @@ pub async fn insert_test_row(client: &Client, table: &str, id: i32, name: &str) 
 pub async fn update_test_row(client: &Client, table: &str, id: i32, name: &str) -> Result<()> {
     let sql = format!("UPDATE {} SET name = $1 WHERE id = $2", quote_ident(table));
     client.execute(&sql, &[&name, &id]).await?;
+    Ok(())
+}
+
+/// Update **all** rows of `table` to `name` in a single multi-row `UPDATE`
+/// statement (one implicit transaction). Reproduces issue #599 repro #1.
+pub async fn update_all_rows_name(client: &Client, table: &str, name: &str) -> Result<u64> {
+    let sql = format!("UPDATE {} SET name = $1", quote_ident(table));
+    let n = client.execute(&sql, &[&name]).await?;
+    Ok(n)
+}
+
+/// Execute a batch of statements (e.g. an explicit `BEGIN; ...; COMMIT;` block)
+/// as a single round-trip. Used to drive multiple single-row writes inside one
+/// explicit transaction (issue #599 repro #2).
+///
+/// # ⚠ SQL injection caution
+/// `sql` is passed verbatim to `batch_execute`; it MUST consist only of
+/// compile-time-constant strings or properly sanitised identifiers/values
+/// (e.g. via [`quote_ident`] / `$N` placeholders). Never pass user-controlled
+/// data here.
+pub async fn execute_batch(client: &Client, sql: &str) -> Result<()> {
+    client.batch_execute(sql).await?;
     Ok(())
 }
 
