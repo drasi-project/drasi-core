@@ -210,7 +210,7 @@ pub enum ControlOperation {
 }
 
 /// Unified event envelope carrying both data changes and control messages
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SourceEvent {
     /// Data change event from source
     Change(SourceChange),
