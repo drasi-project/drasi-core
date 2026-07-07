@@ -45,12 +45,9 @@ on:
       - drasi-e2e-nightly
 
 permissions:
-  # contents: write + pull-requests: write are required because the release-health
-  # job calls release-plz.yml, which declares those permissions. A called workflow
-  # cannot exceed the caller's grants, so they must be set here even though the
-  # nightly runs release-plz in dry-run mode (no writes actually happen).
-  contents: write
-  pull-requests: write
+  # contents: read for checkout + release-health dry-run; packages: write +
+  # id-token: write for the publish-plugins call (OCI push + cosign).
+  contents: read
   packages: write
   id-token: write
 
@@ -84,19 +81,17 @@ jobs:
           echo "Nightly core SHA: $SHA"
           echo "Nightly plugin tag: $TAG"
 
-  # Release-health signal: run the real release-plz workflow in dry-run mode. This
-  # calls release-plz.yml directly (rather than duplicating its setup inline) so
-  # the pinned release-plz / cargo-semver-checks versions live in exactly one
-  # place. dry_run=true gates off every publish step, leaving only the
-  # `release-plz update` preview — a failure here fails the nightly and, because
-  # the rest of the chain depends on it, stops the plugin publish + e2e.
+  # Release-health signal: dry-run the release tooling to catch packaging / semver
+  # / changelog breakage early. Calls the standalone release-health.yml (a single
+  # job) rather than the full release-plz.yml, so release-plz's downstream
+  # publish-plugins + set-public-visibility subtree isn't pulled into this run.
+  # A failure here fails the nightly and, because the rest of the chain depends on
+  # it, stops the plugin publish + e2e.
   release-health:
     name: Release health (release-plz dry-run)
     needs: resolve-sha
     if: ${{ inputs.skip_release_health != true }}
-    uses: ./.github/workflows/release-plz.yml
-    with:
-      dry_run: true
+    uses: ./.github/workflows/release-health.yml
     secrets: inherit
 
   publish-plugins:
