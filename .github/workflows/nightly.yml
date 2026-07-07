@@ -112,10 +112,9 @@ jobs:
       # on each tag overwrite.
       sign: false
       dry_run: false
-      # [visibility-only] in the commit message runs ONLY the set-public-visibility
-      # step (reusing already-published images) to test package-visibility without
-      # the full 8-target build.
-      visibility_only: ${{ contains(github.event.head_commit.message, '[visibility-only]') }}
+      # Nightly test packages are already pullable; skip the org-admin visibility
+      # step (it needs a token that can administer org package visibility).
+      skip_visibility: true
     secrets: inherit
 
   # Call drasi-server's nightly-e2e reusable workflow directly. Using a reusable
