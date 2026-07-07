@@ -88,23 +88,31 @@ jobs:
   # calls release-plz.yml directly (rather than duplicating its setup inline) so
   # the pinned release-plz / cargo-semver-checks versions live in exactly one
   # place. dry_run=true gates off every publish step, leaving only the
-  # `release-plz update` preview — a failure here fails the nightly.
+  # `release-plz update` preview — a failure here fails the nightly and, because
+  # the rest of the chain depends on it, stops the plugin publish + e2e.
   release-health:
     name: Release health (release-plz dry-run)
+    needs: resolve-sha
     if: ${{ inputs.skip_release_health != true }}
     uses: ./.github/workflows/release-plz.yml
     with:
       dry_run: true
     secrets: inherit
 
-
   publish-plugins:
     name: Publish nightly plugins
-    needs: resolve-sha
-    # Skip when requested via the workflow_dispatch input, or (for push-triggered
-    # runs, which cannot pass inputs) when the commit message contains
-    # [skip-plugins]. Lets you reuse an already-published nightly tag to cut build time.
-    if: ${{ inputs.skip_publish_plugins != true && !contains(github.event.head_commit.message, '[skip-plugins]') }}
+    needs: [resolve-sha, release-health]
+    # Single chain: publish only after the release-health dry-run passes. always()
+    # so a *skipped* release-health (skip_release_health) still lets publishing
+    # proceed, while a *failed* release-health blocks the rest of the nightly.
+    # [skip-plugins] / skip_publish_plugins reuse an already-published nightly tag.
+    if: >-
+      ${{ always()
+        && needs.resolve-sha.result == 'success'
+        && needs.release-health.result != 'failure'
+        && needs.release-health.result != 'cancelled'
+        && inputs.skip_publish_plugins != true
+        && !contains(github.event.head_commit.message, '[skip-plugins]') }}
     uses: ./.github/workflows/publish-plugins.yml
     with:
       tag: ${{ needs.resolve-sha.outputs.plugin_tag }}
