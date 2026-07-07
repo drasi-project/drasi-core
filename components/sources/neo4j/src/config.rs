@@ -13,23 +13,18 @@
 // limitations under the License.
 
 /// Startup behavior for CDC cursor initialization.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub enum StartCursor {
     /// Start reading from the earliest available CDC record.
     Beginning,
     /// Start reading from the current CDC position.
+    #[default]
     Now,
     /// Start from a timestamp hint in milliseconds since epoch.
     ///
     /// Neo4j CDC does not provide direct timestamp seeking, so this mode currently
     /// falls back to `Beginning` and applies timestamp filtering in the source loop.
     Timestamp(i64),
-}
-
-impl Default for StartCursor {
-    fn default() -> Self {
-        Self::Now
-    }
 }
 
 /// Configuration for the Neo4j CDC source.

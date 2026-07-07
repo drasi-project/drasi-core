@@ -14,7 +14,7 @@ mediated by the host.
 | `BootstrapProvider` trait | Wrapped as `BootstrapProviderVtable` (plugin→host) AND reverse-wrapped as vtable (host→plugin) | Both directions |
 | `BootstrapRequest` | Deconstructed into individual FFI args (query_id, node_labels, etc.) | Multiple `FfiStr` + `*const FfiStr` arrays |
 | `BootstrapContext` | Deconstructed into individual FFI args (server_id, source_id) | Multiple `FfiStr` args |
-| `BootstrapEvent` | Opaque pointer (`Box<BootstrapEvent>` → `*mut c_void`) | `FfiBootstrapEvent.opaque` |
+| `BootstrapEvent` | Serialized to MessagePack bytes (`BootstrapEventPayload`) and transferred as a `payload_ptr` + `payload_len` buffer freed via `payload_drop_fn`; never a reinterpreted `repr(Rust)` pointer (issue #602) | `FfiBootstrapEvent` + `payload.rs::consume_bootstrap_event` |
 
 ### Cross-plugin bootstrap flow
 

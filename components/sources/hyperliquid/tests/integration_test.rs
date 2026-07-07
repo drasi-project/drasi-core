@@ -88,10 +88,8 @@ async fn test_hyperliquid_source_live() -> Result<()> {
             if result.query_id == PRICE_QUERY {
                 for entry in &result.results {
                     match entry {
-                        ResultDiff::Add { data, .. } => {
-                            if data.get("coin").is_some() {
-                                saw_price_add = true;
-                            }
+                        ResultDiff::Add { data, .. } if data.get("coin").is_some() => {
+                            saw_price_add = true;
                         }
                         ResultDiff::Update { .. } => {
                             if saw_price_add {

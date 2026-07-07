@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-bootstrap-mysql"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "MySQL bootstrap provider for Drasi"
@@ -43,8 +43,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 ordered-float = "3.0"
-mysql_async = "0.34"
-mysql_common = "0.32"
+mysql_async = "0.37"
+mysql_common = "0.37"
 bytes = "1.0"
 
 [features]

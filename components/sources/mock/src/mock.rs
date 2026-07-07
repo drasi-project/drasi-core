@@ -599,7 +599,7 @@ impl MockSource {
     ///
     /// ```rust,ignore
     /// let source = MockSource::new("test", config)?;
-    /// let mut rx = source.test_subscribe();
+    /// let mut rx = source.test_subscribe().await;
     ///
     /// source.start().await?;
     ///
@@ -608,10 +608,10 @@ impl MockSource {
     ///     println!("Received: {:?}", event);
     /// }
     /// ```
-    pub fn test_subscribe(
+    pub async fn test_subscribe(
         &self,
     ) -> Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::SourceEventWrapper>> {
-        self.base.test_subscribe()
+        self.base.test_subscribe().await
     }
 }
 

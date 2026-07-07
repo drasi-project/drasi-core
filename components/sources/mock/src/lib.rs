@@ -128,6 +128,7 @@
 //! - [`MockSource::test_subscribe()`] - Subscribe to receive events directly from the source,
 //!   bypassing DrasiLib's subscription mechanism
 
+pub mod bootstrap;
 mod config;
 mod conversion;
 pub mod descriptor;

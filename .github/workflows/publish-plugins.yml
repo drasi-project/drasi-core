@@ -39,9 +39,8 @@ jobs:
             os: ubuntu-latest-8-cores
             arch_suffix: linux-amd64
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest-8-cores
+            os: ubuntu-24.04-arm
             arch_suffix: linux-arm64
-            cross: true
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest-8-cores
             arch_suffix: linux-musl-amd64
@@ -74,18 +73,25 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq libjq-dev protobuf-compiler
+          # libcurl4-openssl-dev: the native librdkafka build (used by the Kafka
+          # bootstrap/source plugins) detects the host's curl/openssl on the
+          # native linux-gnu runners (amd64 and arm64) and enables
+          # WITH_OAUTHBEARER_OIDC, which #include <curl/curl.h>. The cross targets
+          # (musl, windows-gnu) build in a sysroot without curl/openssl so they
+          # don't need this.
+          sudo apt-get install -y jq libjq-dev protobuf-compiler cmake libcurl4-openssl-dev
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install jq protobuf
+          brew install jq protobuf cmake
 
       - name: Install system dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install protoc -y
+          choco install cmake -y --installargs 'ADD_CMAKE_TO_PATH=System'
           vcpkg install openssl:x64-windows-static-md
           echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
           echo "OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md" >> $env:GITHUB_ENV
@@ -93,7 +99,9 @@ jobs:
 
       - name: Set JQ_LIB_DIR (Linux)
         if: runner.os == 'Linux'
-        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+        # $(uname -m) is x86_64 on amd64 runners and aarch64 on arm64 runners,
+        # which matches the Debian multiarch lib path on both.
+        run: echo "JQ_LIB_DIR=/usr/lib/$(uname -m)-linux-gnu" >> $GITHUB_ENV
 
       - name: Set JQ_LIB_DIR (macOS)
         if: runner.os == 'macOS'
@@ -167,23 +175,46 @@ jobs:
 
       - name: Set packages to public
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The default GITHUB_TOKEN cannot administer org-level container
+          # package visibility (those endpoints return 404). A PAT (classic)
+          # with write:packages, or a GitHub App token with org packages:write,
+          # is required. Configure a PACKAGES_ADMIN_TOKEN secret; we fall back
+          # to GITHUB_TOKEN only so the step doesn't fail to start.
+          GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          REGISTRY="${{ inputs.registry }}"
-          ORG="${REGISTRY#*/}"
+          set -euo pipefail
+          ORG="drasi-project"
+
+          FAILED=0
+
+          set_public() {
+            local pkg="$1"
+            local encoded
+            encoded=$(printf '%s' "$pkg" | sed 's|/|%2F|g')
+            echo "Setting ${ORG}/${pkg} to public..."
+            if ! gh api --method PATCH \
+              "/orgs/${ORG}/packages/container/${encoded}" \
+              -f visibility=public; then
+              echo "::error::Failed to set ${ORG}/${pkg} to public"
+              FAILED=1
+            fi
+          }
+
           # Set plugin directory to public
-          echo "Setting ${ORG}/drasi-plugin-directory to public..."
-          gh api --method PATCH \
-            "/orgs/${ORG}/packages/container/drasi-plugin-directory" \
-            -f visibility=public \
-            2>/dev/null || echo "  (skipped — may already be public or insufficient permissions)"
-          # Set each plugin package to public
-          PLUGINS=$(cargo run -p xtask -- list-plugins 2>/dev/null | grep '^\s' | awk '{print $1}')
+          set_public "drasi-plugin-directory"
+
+          # Set each plugin package to public. list-plugins prints plugin lines
+          # as "  <type>/<kind> v<version> (<path>)"; match only those so the
+          # indented "SDK: ..." summary line is excluded.
+          PLUGINS=$(cargo run -p xtask -- list-plugins \
+            | { grep -E '^[[:space:]]+[a-z-]+/[^[:space:]]+ v[0-9]' || true; } \
+            | awk '{print $1}')
           for PLUGIN in $PLUGINS; do
-            ENCODED=$(echo "$PLUGIN" | sed 's|/|%2F|g')
-            echo "Setting ${ORG}/${PLUGIN} to public..."
-            gh api --method PATCH \
-              "/orgs/${ORG}/packages/container/${ENCODED}" \
-              -f visibility=public \
-              2>/dev/null || echo "  (skipped — may already be public or insufficient permissions)"
+            set_public "$PLUGIN"
           done
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::One or more packages could not be set to public."
+            echo "If these are 404/permission errors, ensure PACKAGES_ADMIN_TOKEN is set to a token that can administer org packages."
+            exit 1
+          fi

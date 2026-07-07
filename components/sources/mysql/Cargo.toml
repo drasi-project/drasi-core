@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-mysql"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "MySQL source plugin for Drasi"
@@ -44,8 +44,8 @@ serde_json = "1.0"
 tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 ordered-float = "3.0"
-mysql_async = "0.34"
-mysql_common = "0.32"
+mysql_async = { version = "0.37", features = ["binlog"] }
+mysql_common = { version = "0.37", features = ["binlog"] }
 futures-util = "0.3"
 bytes = "1.0"
 

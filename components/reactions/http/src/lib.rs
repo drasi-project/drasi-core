@@ -1,4 +1,4 @@
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,234 +14,216 @@
 
 #![allow(unexpected_cfgs)]
 
-//! HTTP reaction plugin for Drasi
+//! HTTP reaction plugin for Drasi.
 //!
-//! This plugin implements HTTP reactions for Drasi and provides extension traits
-//! for configuring HTTP reactions in the Drasi plugin architecture.
+//! Forwards continuous query result changes to HTTP endpoints, either as
+//! **single notifications per result** (default) or **batched** using an
+//! **adaptive batching** strategy that scales batch sizes to incoming load
+//! for greater throughput and reduced network traffic. Batching is enabled
+//! by adding [`config::AdaptiveBatchConfig`] and a batch endpoint. See
+//! [`config::HttpReactionConfig`] for the full configuration shape and the
+//! crate `README.md` for examples.
 //!
-//! ## Instance-based Usage
+//! ## Quick start (per-result)
 //!
-//! ```rust,ignore
-//! use drasi_reaction_http::{HttpReaction, HttpReactionConfig};
-//! use std::sync::Arc;
+//! ```
+//! # fn main() -> anyhow::Result<()> {
+//! use drasi_reaction_http::HttpReaction;
 //!
-//! // Create configuration
-//! let config = HttpReactionConfig {
-//!     base_url: "http://api.example.com".to_string(),
-//!     token: Some("secret-token".to_string()),
-//!     timeout_ms: 5000,
-//!     routes: Default::default(),
-//! };
+//! let reaction = HttpReaction::builder("my-http")
+//!     .with_queries(vec!["query1".to_string()])
+//!     .with_base_url("https://api.example.com")
+//!     .with_token("secret")
+//!     .build()?;
+//! # let _ = reaction;
+//! # Ok(())
+//! # }
+//! ```
 //!
-//! // Create instance and add to DrasiLib
-//! let reaction = Arc::new(HttpReaction::new(
-//!     "my-http-reaction",
-//!     vec!["query1".to_string()],
-//!     config,
-//! ));
-//! drasi.add_reaction(reaction).await?;
+//! ## Quick start (adaptive batching)
+//!
+//! ```
+//! # fn main() -> anyhow::Result<()> {
+//! use drasi_reaction_http::{AdaptiveBatchConfig, HttpReaction};
+//!
+//! let reaction = HttpReaction::builder("my-http")
+//!     .with_queries(vec!["query1".to_string()])
+//!     .with_base_url("https://api.example.com")
+//!     .with_adaptive(AdaptiveBatchConfig::default())
+//!     .with_batch_endpoint("/batch")
+//!     .build()?;
+//! # let _ = reaction;
+//! # Ok(())
+//! # }
 //! ```
 
+pub(crate) mod adaptive_batcher;
+pub(crate) mod adaptive_loop;
+pub(crate) mod batch;
 pub mod config;
 pub mod descriptor;
 pub mod http;
+pub mod output;
+pub(crate) mod process;
+pub(crate) mod standard_loop;
 
-pub use config::{CallSpec, HttpReactionConfig, QueryConfig};
+#[cfg(test)]
+mod tests;
+
+pub use config::{
+    AdaptiveBatchConfig, HttpCallExt, HttpCallSpec, HttpOutputTemplates, HttpQueryConfig,
+    HttpReactionConfig, OperationType, QueryConfig, TemplateRouting, TemplateSpec,
+};
+use drasi_lib::recovery::ReactionRecoveryPolicy;
 pub use http::HttpReaction;
+pub use output::{BatchEnvelope, DefaultChangeNotification, Operation};
 
-use std::collections::HashMap;
-
-/// Builder for HTTP reaction
+/// Builder for the HTTP reaction.
 ///
-/// Creates an HttpReaction instance with a fluent API.
-///
-/// # Example
-/// ```rust,ignore
-/// use drasi_reaction_http::{HttpReaction, HttpReactionBuilder};
-///
-/// let reaction = HttpReaction::builder("my-http-reaction")
-///     .with_queries(vec!["query1".to_string()])
-///     .with_base_url("http://api.example.com")
-///     .with_token("secret-token")
-///     .with_timeout_ms(10000)
-///     .build()?;
-/// ```
+/// Provides a fluent API for the common cases. For complex template
+/// routes you can also pass a fully-formed [`HttpOutputTemplates`] or
+/// [`HttpReactionConfig`].
 pub struct HttpReactionBuilder {
     id: String,
     queries: Vec<String>,
-    base_url: String,
-    token: Option<String>,
-    timeout_ms: u64,
-    routes: HashMap<String, QueryConfig>,
+    config: HttpReactionConfig,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
+    recovery_policy: Option<ReactionRecoveryPolicy>,
 }
 
 impl HttpReactionBuilder {
-    /// Create a new HTTP reaction builder with the given ID
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             queries: Vec::new(),
-            base_url: "http://localhost".to_string(),
-            token: None,
-            timeout_ms: 5000,
-            routes: HashMap::new(),
+            config: HttpReactionConfig::default(),
             priority_queue_capacity: None,
             auto_start: true,
+            recovery_policy: None,
         }
     }
 
-    /// Set the query IDs to subscribe to
     pub fn with_queries(mut self, queries: Vec<String>) -> Self {
         self.queries = queries;
         self
     }
 
-    /// Add a query ID to subscribe to
     pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
         self.queries.push(query_id.into());
         self
     }
 
-    /// Set the base URL for HTTP requests
+    /// Alias of [`with_query`](Self::with_query); reads naturally at call
+    /// sites (e.g. `…from_query("orders")…`).
+    pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
+        self.queries.push(query_id.into());
+        self
+    }
+
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
-        self.base_url = base_url.into();
+        self.config.base_url = base_url.into();
         self
     }
 
-    /// Set the authentication token
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
-        self.token = Some(token.into());
+        self.config.token = Some(token.into());
         self
     }
 
-    /// Set the request timeout in milliseconds
     pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
-        self.timeout_ms = timeout_ms;
+        self.config.timeout_ms = timeout_ms;
         self
     }
 
-    /// Add a route configuration for a specific query
-    pub fn with_route(mut self, query_id: impl Into<String>, config: QueryConfig) -> Self {
-        self.routes.insert(query_id.into(), config);
-        self
-    }
-
-    /// Set the priority queue capacity
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
         self
     }
 
-    /// Set whether the reaction should auto-start
     pub fn with_auto_start(mut self, auto_start: bool) -> Self {
         self.auto_start = auto_start;
         self
     }
 
-    /// Set the full configuration at once
-    pub fn with_config(mut self, config: HttpReactionConfig) -> Self {
-        self.base_url = config.base_url;
-        self.token = config.token;
-        self.timeout_ms = config.timeout_ms;
-        self.routes = config.routes;
+    pub fn with_recovery_policy(mut self, policy: ReactionRecoveryPolicy) -> Self {
+        self.recovery_policy = Some(policy);
         self
     }
 
-    /// Build the HTTP reaction
-    pub fn build(self) -> anyhow::Result<HttpReaction> {
-        let config = HttpReactionConfig {
-            base_url: self.base_url,
-            token: self.token,
-            timeout_ms: self.timeout_ms,
-            routes: self.routes,
-        };
+    /// Replace the default fallback template applied to every query that
+    /// has no explicit route.
+    pub fn with_default_template(mut self, template: HttpQueryConfig) -> Self {
+        let templates = self
+            .config
+            .output_templates
+            .get_or_insert_with(Default::default);
+        templates.default_template = Some(template);
+        self
+    }
 
+    /// Add or replace the per-query template for `query_id`.
+    pub fn with_query_template(
+        mut self,
+        query_id: impl Into<String>,
+        template: HttpQueryConfig,
+    ) -> Self {
+        let templates = self
+            .config
+            .output_templates
+            .get_or_insert_with(Default::default);
+        templates.routes.insert(query_id.into(), template);
+        self
+    }
+
+    /// Replace the whole [`HttpOutputTemplates`] block at once.
+    pub fn with_output_templates(mut self, templates: HttpOutputTemplates) -> Self {
+        self.config.output_templates = Some(templates);
+        self
+    }
+
+    /// Enable adaptive batching with the given [`AdaptiveBatchConfig`].
+    pub fn with_adaptive(mut self, adaptive: AdaptiveBatchConfig) -> Self {
+        self.config.adaptive = Some(adaptive);
+        self
+    }
+
+    /// Convenience: enable adaptive batching with default tuning.
+    pub fn with_adaptive_defaults(self) -> Self {
+        self.with_adaptive(AdaptiveBatchConfig::default())
+    }
+
+    /// Set the batch endpoint path. Coalesced batches are POSTed to
+    /// `{baseUrl}{endpoint}` as a single [`BatchEnvelope`] payload.
+    ///
+    /// Requires adaptive mode (enable it via [`with_adaptive`](Self::with_adaptive)).
+    /// If a batch endpoint is set without adaptive mode, [`build`](Self::build)
+    /// fails fast.
+    pub fn with_batch_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.config.batch_endpoint = Some(endpoint.into());
+        self
+    }
+
+    /// Replace the full configuration.
+    pub fn with_config(mut self, config: HttpReactionConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    pub fn build(self) -> anyhow::Result<HttpReaction> {
+        self.config
+            .validate(&self.queries, self.priority_queue_capacity)?;
         Ok(HttpReaction::from_builder(
             self.id,
             self.queries,
-            config,
+            self.config,
             self.priority_queue_capacity,
             self.auto_start,
+            self.recovery_policy,
         ))
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use drasi_lib::Reaction;
-
-    #[test]
-    fn test_http_builder_defaults() {
-        let reaction = HttpReactionBuilder::new("test-reaction").build().unwrap();
-        assert_eq!(reaction.id(), "test-reaction");
-        let props = reaction.properties();
-        assert_eq!(
-            props.get("baseUrl"),
-            Some(&serde_json::Value::String("http://localhost".to_string()))
-        );
-        assert_eq!(
-            props.get("timeoutMs"),
-            Some(&serde_json::Value::Number(5000.into()))
-        );
-    }
-
-    #[test]
-    fn test_http_builder_custom_values() {
-        let reaction = HttpReaction::builder("test-reaction")
-            .with_base_url("http://api.example.com") // DevSkim: ignore DS137138
-            .with_token("secret-token")
-            .with_timeout_ms(10000)
-            .with_queries(vec!["query1".to_string()])
-            .build()
-            .unwrap();
-
-        assert_eq!(reaction.id(), "test-reaction");
-        let props = reaction.properties();
-        assert_eq!(
-            props.get("baseUrl"),
-            Some(&serde_json::Value::String(
-                "http://api.example.com".to_string() // DevSkim: ignore DS137138
-            ))
-        );
-        assert_eq!(
-            props.get("timeoutMs"),
-            Some(&serde_json::Value::Number(10000.into()))
-        );
-        assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
-    }
-
-    #[test]
-    fn test_http_builder_with_query() {
-        let reaction = HttpReaction::builder("test-reaction")
-            .with_query("query1")
-            .with_query("query2")
-            .build()
-            .unwrap();
-
-        assert_eq!(reaction.query_ids(), vec!["query1", "query2"]);
-    }
-
-    #[test]
-    fn test_http_new_constructor() {
-        let config = HttpReactionConfig {
-            base_url: "http://test.example.com".to_string(), // DevSkim: ignore DS137138
-            token: Some("test-token".to_string()),
-            timeout_ms: 3000,
-            routes: Default::default(),
-        };
-
-        let reaction = HttpReaction::new("test-reaction", vec!["query1".to_string()], config);
-
-        assert_eq!(reaction.id(), "test-reaction");
-        assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
-    }
-}
-
-/// Dynamic plugin entry point.
-///
 /// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(

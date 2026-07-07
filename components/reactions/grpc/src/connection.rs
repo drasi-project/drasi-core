@@ -115,3 +115,58 @@ pub async fn create_client_with_retry(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_state_display_covers_every_variant() {
+        assert_eq!(ConnectionState::Disconnected.to_string(), "Disconnected");
+        assert_eq!(ConnectionState::Connecting.to_string(), "Connecting");
+        assert_eq!(ConnectionState::Connected.to_string(), "Connected");
+        assert_eq!(ConnectionState::Failed.to_string(), "Failed");
+        assert_eq!(ConnectionState::Reconnecting.to_string(), "Reconnecting");
+    }
+
+    #[test]
+    fn connection_state_is_copy_and_comparable() {
+        let s = ConnectionState::Connected;
+        let copy = s; // Copy
+        assert_eq!(s, copy);
+        assert_ne!(ConnectionState::Connected, ConnectionState::Failed);
+    }
+
+    #[tokio::test]
+    async fn create_client_accepts_grpc_scheme_endpoint() {
+        // The channel is lazy, so a successful return means the `grpc://` →
+        // `http://` rewrite produced a valid URI (no socket connect happens).
+        let client = create_client("grpc://localhost:50052", 1000).await;
+        assert!(client.is_ok(), "grpc:// endpoint must build a lazy channel");
+    }
+
+    #[tokio::test]
+    async fn create_client_accepts_plain_http_endpoint() {
+        assert!(create_client("http://localhost:50052", 1000).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn create_client_rejects_malformed_endpoint() {
+        let err = create_client("not a uri", 1000).await;
+        assert!(err.is_err(), "a malformed endpoint URI must error");
+    }
+
+    #[tokio::test]
+    async fn create_client_with_retry_succeeds_for_valid_endpoint() {
+        let client = create_client_with_retry("grpc://localhost:50052", 1000, 3).await;
+        assert!(client.is_ok());
+    }
+
+    #[tokio::test]
+    async fn create_client_with_retry_exhausts_retries_for_invalid_endpoint() {
+        // A malformed URI fails on every attempt; with max_retries=1 the helper
+        // returns the underlying error after a single backoff.
+        let err = create_client_with_retry("ht tp://bad", 1000, 1).await;
+        assert!(err.is_err(), "invalid endpoint must surface an error");
+    }
+}

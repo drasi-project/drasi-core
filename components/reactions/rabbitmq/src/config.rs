@@ -17,18 +17,13 @@
 use std::collections::HashMap;
 
 /// Exchange type mapping for RabbitMQ.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub enum ExchangeType {
     Direct,
+    #[default]
     Topic,
     Fanout,
     Headers,
-}
-
-impl Default for ExchangeType {
-    fn default() -> Self {
-        Self::Topic
-    }
 }
 
 impl ExchangeType {

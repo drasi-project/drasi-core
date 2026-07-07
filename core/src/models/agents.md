@@ -2,42 +2,50 @@
 
 ## FFI Boundary Warning
 
-The types in this directory cross the dynamic plugin FFI boundary as **opaque pointers**
-inside `#[repr(C)]` envelope structs. Both the host binary and cdylib plugins statically
-link this crate, so the in-memory layout of these types **must remain identical** on both
-sides.
+The types in this directory cross the dynamic plugin FFI boundary **by value, as
+serialized (MessagePack via `rmp-serde`) bytes** — NOT as reinterpreted
+`repr(Rust)` pointers. They therefore **must derive `serde::Serialize` and
+`serde::Deserialize`** (see `SourceChange`, `Element`, `ElementValue`,
+`ElementMetadata`, `ElementReference`, `FutureElementRef`).
 
-### Types that cross FFI
+> **History (issue #602):** these types used to cross as opaque `Box::into_raw`
+> pointers that the other side reclaimed with `Box::from_raw`. That is **undefined
+> behavior** across independently compiled cdylibs: `repr(Rust)` has no stable
+> layout, and `bytes::Bytes` / `Arc<str>` carry pointers (incl. a `&'static`
+> `Bytes` vtable) that are only valid in the producing module. The result was
+> non-deterministic heap corruption (`free(): invalid pointer`). The SDK version
+> check does **not** make the opaque pattern sound — it validates only the
+> `#[repr(C)]` envelope ABI, never the `repr(Rust)` payload layout.
 
-| Type | File | How it crosses | FFI wrapper |
-|------|------|---------------|-------------|
-| `SourceChange` | `source_change.rs` | Opaque pointer inside `SourceEventWrapper` | `FfiSourceEvent.opaque` |
-| `Element` | `element.rs` | Contained within `SourceChange` variants | (transitive) |
-| `ElementMetadata` | `element.rs` | Metadata extracted for FFI envelope fields | `FfiSourceEvent.entity_id`, `.label` |
-| `ElementValue` | `element_value.rs` | Contained within `Element` properties | (transitive) |
+### Types that cross FFI (serialized)
+
+| Type | File | How it crosses |
+|------|------|----------------|
+| `SourceChange` | `source_change.rs` | Inside `SourceEventPayload` / `BootstrapEventPayload`, serialized into `FfiSourceEvent.payload_ptr` / `FfiBootstrapEvent.payload_ptr` |
+| `Element` | `element.rs` | Contained within `SourceChange` variants (serialized transitively) |
+| `ElementMetadata` | `element.rs` | Contained within `Element` / `SourceChange::Delete` (serialized transitively) |
+| `ElementValue` | `element_value.rs` | Contained within `Element` properties (serialized transitively) |
+
+The serialized payload structs live in `components/plugin-sdk/src/ffi/payload.rs`.
 
 ### What to update when changing these types
 
-If you add, remove, or reorder fields on any of these types, you **must** also update:
+1. **Keep `Serialize`/`Deserialize` derives intact.** Adding/removing/reordering
+   fields is safe for the wire format **only** with the named-map encoding
+   (`rmp_serde::to_vec_named`, which the SDK uses) — positional encoding is
+   intolerant of `#[serde(skip_serializing_if)]` and field-count changes.
 
-1. **Plugin SDK vtable generation** — `components/plugin-sdk/src/ffi/vtable_gen.rs`
-   - Search for the type name to find where metadata is extracted or the type is wrapped/unwrapped
-   - `SourceChange` metadata extraction: look for `extract_source_change_metadata`
-   - `SourceEventWrapper` wrapping: look for `FfiSourceEvent` construction
+2. **Plugin SDK payloads** — `components/plugin-sdk/src/ffi/payload.rs`
+   (`SourceEventPayload` / `BootstrapEventPayload` and their `from_*`/`into_*`).
 
-2. **Plugin SDK FFI types** — `components/plugin-sdk/src/ffi/types.rs`
-   - If new enum variants are added (e.g., new `SourceChange` variant), update the
-     corresponding `Ffi*` enum (e.g., `FfiChangeOp`)
-
-3. **Host SDK proxy reconstruction** — `components/host-sdk/src/proxies/change_receiver.rs`
-   - Where opaque pointers are cast back to concrete types via `Box::from_raw`
-
-4. **Version bump** — `components/plugin-sdk/src/ffi/metadata.rs`
-   - Bump `FFI_SDK_VERSION` minor (or major for breaking layout changes) so the host
-     rejects plugins built against the old layout
+3. **Version bump** — bump `FFI_SDK_VERSION` in
+   `components/plugin-sdk/src/ffi/metadata.rs` if you change the wire format or any
+   `#[repr(C)]` envelope in `vtables.rs`, so the host rejects incompatible plugins.
 
 ### Safety invariant
 
-The opaque pointer pattern relies on both sides agreeing on the memory layout of these
-types. The `drasi_plugin_metadata()` check (SDK version + target triple) guards against
-mismatches, but **only if you bump the version when layouts change**.
+Never reintroduce `Box::into_raw` / `Box::from_raw` (or `&*ptr` reads, or
+`std::ptr::read`) of these `repr(Rust)` types across the cdylib boundary. Cross
+them only as serialized bytes. The `#[repr(C)]` **envelope** structs in
+`vtables.rs` may cross as `Box`es (their layout is stable); the rich `repr(Rust)`
+payloads may not.

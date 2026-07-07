@@ -19,6 +19,7 @@ use chrono::{DateTime, Utc};
 use drasi_lib::StateStoreProvider;
 use log::error;
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -185,7 +186,7 @@ impl DashboardStorage {
             }
         }
 
-        dashboards.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        dashboards.sort_by_key(|d| Reverse(d.updated_at));
         Ok(dashboards)
     }
 

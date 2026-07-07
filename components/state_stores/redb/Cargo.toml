@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-state-store-redb"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 license = "Apache-2.0"
 description = "Redb-based state store provider for Drasi plugins"
@@ -36,4 +36,4 @@ tokio = { version = "1.0", features = ["sync"] }
 
 [dev-dependencies]
 tempfile = "3.8"
-tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.0", features = ["rt", "macros"] }

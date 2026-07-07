@@ -57,7 +57,9 @@ pub mod descriptor;
 pub mod postgres;
 
 pub use config::{PostgresBootstrapConfig, SslMode, TableKeyConfig};
-pub use postgres::{PostgresBootstrapProvider, PostgresBootstrapProviderBuilder};
+pub use postgres::{
+    snapshot_position_bytes, PostgresBootstrapProvider, PostgresBootstrapProviderBuilder,
+};
 
 /// Dynamic plugin entry point.
 ///
