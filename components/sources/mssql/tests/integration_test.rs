@@ -146,15 +146,33 @@ async fn prepare_database(config: &MssqlConfig) -> Result<MssqlConfig> {
         "CREATE TABLE dbo.Products (\n            ProductId INT PRIMARY KEY,\n            Name NVARCHAR(100) NOT NULL,\n            Price DECIMAL(10,2) NOT NULL\n        );",
     )
     .await?;
-    execute_sql(
-        &mut db_client,
-        "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'Products' AND is_tracked_by_cdc = 1)\n            EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'Products', @role_name = NULL;",
-    )
-    .await?;
+    // Enabling CDC on the table creates a capture job via SQL Server Agent. The
+    // Agent can still be starting up right after the container is ready, which
+    // surfaces as transient error 14258 ("Cannot perform this operation while
+    // SQLServerAgent is starting"). Retry until it succeeds.
+    let enable_cdc_sql =
+        "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'Products' AND is_tracked_by_cdc = 1)\n            EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'Products', @role_name = NULL;";
+    let mut last_err = None;
+    for _ in 0..30 {
+        match execute_sql(&mut db_client, enable_cdc_sql).await {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        return Err(e).context("Failed to enable CDC on dbo.Products after retries");
+    }
 
     // Wait for CDC to be fully initialized (max LSN must be available).
     // CDC capture job starts asynchronously and the first max LSN may not
     // be available immediately after sp_cdc_enable_table returns.
+    let mut cdc_ready = false;
     for _ in 0..30 {
         let result = db_client
             .query("SELECT sys.fn_cdc_get_max_lsn() AS lsn", &[])
@@ -163,11 +181,16 @@ async fn prepare_database(config: &MssqlConfig) -> Result<MssqlConfig> {
             .await?;
         if let Some(row) = result.first() {
             if row.try_get::<&[u8], _>(0).ok().flatten().is_some() {
+                cdc_ready = true;
                 break;
             }
         }
         sleep(Duration::from_secs(1)).await;
     }
+    anyhow::ensure!(
+        cdc_ready,
+        "CDC max LSN never became available for dbo.Products; capture job failed to start"
+    );
 
     Ok(db_config)
 }
@@ -651,11 +674,49 @@ async fn prepare_types_database(config: &MssqlConfig) -> Result<MssqlConfig> {
         );",
     )
     .await?;
-    execute_sql(
-        &mut db_client,
-        "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'TypesTest' AND is_tracked_by_cdc = 1)\n            EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'TypesTest', @role_name = NULL;",
-    )
-    .await?;
+    // Enable CDC on the table, retrying past the transient SQL Server Agent
+    // startup race (error 14258), then wait for the capture job to initialize.
+    let enable_cdc_sql =
+        "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'TypesTest' AND is_tracked_by_cdc = 1)\n            EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'TypesTest', @role_name = NULL;";
+    let mut last_err = None;
+    for _ in 0..30 {
+        match execute_sql(&mut db_client, enable_cdc_sql).await {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        return Err(e).context("Failed to enable CDC on dbo.TypesTest after retries");
+    }
+
+    // Wait for CDC to be fully initialized (max LSN must be available) before
+    // the source starts from StartPosition::Current, otherwise the first INSERT
+    // can land before the capture job is ready and never be observed.
+    let mut cdc_ready = false;
+    for _ in 0..30 {
+        let result = db_client
+            .query("SELECT sys.fn_cdc_get_max_lsn() AS lsn", &[])
+            .await?
+            .into_first_result()
+            .await?;
+        if let Some(row) = result.first() {
+            if row.try_get::<&[u8], _>(0).ok().flatten().is_some() {
+                cdc_ready = true;
+                break;
+            }
+        }
+        sleep(Duration::from_secs(1)).await;
+    }
+    anyhow::ensure!(
+        cdc_ready,
+        "CDC max LSN never became available for dbo.TypesTest; capture job failed to start"
+    );
 
     Ok(db_config)
 }
@@ -1896,6 +1957,503 @@ async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
         Err(_) => {
             anyhow::bail!("test_ffi_mssql_full_restart_picks_up_offline_changes timed out")
         }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Regression tests for issue #603
+//
+//  Bug 1: `effective_from` is hardcoded to 0 in the MS SQL source and
+//         bootstrapper, so `drasi.changeDateTime()` always returns epoch.
+//  Bug 2: bootstrap and CDC generate *different* element IDs for the same row
+//         (e.g. `Products:1` vs `dbo.Products:1` when the source and bootstrap
+//         are configured with differently-formatted table names), so an UPDATE
+//         delivered via CDC creates a duplicate node instead of updating the
+//         bootstrapped node in place.
+//
+// These tests are written to FAIL against the current (buggy) code and PASS
+// once the fixes land. The existing `element_id_int` helper deliberately
+// strips the table prefix, so Bug 2 can only be observed by comparing the
+// FULL element id (see `test_mssql_bootstrap_cdc_element_id_match`).
+// ============================================================================
+
+/// Plausible `effective_from` range in milliseconds (2001-09-09 .. 2100-01-01),
+/// used to assert the timestamp is a real millisecond epoch and not 0 / nanos.
+const PLAUSIBLE_MS_RANGE: std::ops::RangeInclusive<u64> = 1_000_000_000_000..=4_102_444_800_000;
+
+/// Subscribe directly to a started source and return its bootstrap + CDC receivers.
+async fn subscribe_direct(
+    source: &MsSqlSource,
+    query_id: &str,
+) -> Result<(
+    tokio::sync::mpsc::Receiver<drasi_lib::channels::BootstrapEvent>,
+    Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::SourceEventWrapper>>,
+)> {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(15) {
+        if source.status().await == ComponentStatus::Running {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    anyhow::ensure!(
+        source.status().await == ComponentStatus::Running,
+        "MSSQL source did not reach Running state"
+    );
+
+    let settings = SourceSubscriptionSettings {
+        source_id: SOURCE_ID.to_string(),
+        enable_bootstrap: true,
+        query_id: query_id.to_string(),
+        nodes: HashSet::from(["Products".to_string()]),
+        relations: HashSet::new(),
+        resume_from: None,
+        request_position_handle: true,
+    };
+    let response = source
+        .subscribe(settings)
+        .await
+        .context("Failed to subscribe to MSSQL source")?;
+    let bootstrap_rx = response
+        .bootstrap_receiver
+        .expect("bootstrap_receiver should be present when enable_bootstrap is true");
+    Ok((bootstrap_rx, response.receiver))
+}
+
+/// Bug 1: `effective_from` must be a real millisecond timestamp (not 0) for
+/// both the bootstrap snapshot and live CDC changes. `drasi.changeDateTime()`
+/// is a thin wrapper over `effective_from`, so a non-zero value here is exactly
+/// what makes `changeDateTime()` return a real time instead of epoch 0.
+#[tokio::test]
+#[ignore] // Run with: cargo test -p drasi-source-mssql --test integration_test -- --ignored --nocapture
+#[cfg(not(target_arch = "aarch64"))]
+async fn test_mssql_effective_from_populated() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let result = tokio::time::timeout(Duration::from_secs(300), async {
+        let mssql = setup_mssql()
+            .await
+            .context("Failed to start MSSQL container")?;
+        let db_config = prepare_database(mssql.config())
+            .await
+            .context("Failed to prepare MSSQL database")?;
+
+        // Seed one row BEFORE subscribing so it is part of the bootstrap snapshot.
+        let mut client = db_config.connect().await?;
+        execute_sql(
+            &mut client,
+            "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (1, 'Seed1', 1.00);",
+        )
+        .await?;
+        sleep(Duration::from_secs(5)).await;
+
+        let bootstrap_provider = MsSqlBootstrapProvider::builder()
+            .with_source_id(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_tables(vec![TEST_TABLE.to_string()])
+            .build()
+            .context("Failed to build MSSQL bootstrap provider")?;
+
+        let source = MsSqlSource::builder(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_table(TEST_TABLE)
+            .with_poll_interval_ms(250)
+            .with_start_position(StartPosition::Current)
+            .with_trust_server_certificate(true)
+            .with_bootstrap_provider(bootstrap_provider)
+            .build()
+            .context("Failed to build MSSQL source")?;
+
+        source
+            .start()
+            .await
+            .context("Failed to start MSSQL source")?;
+        let (mut bootstrap_rx, mut cdc_rx) = subscribe_direct(&source, "q-eff").await?;
+
+        // Drain bootstrap; capture the seed row's effective_from.
+        let mut bootstrap_eff: Option<u64> = None;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(60), bootstrap_rx.recv()).await {
+                Ok(Some(event)) => {
+                    if let SourceChange::Insert { element } = &event.change {
+                        if element_id_int(element.get_reference().element_id.as_ref()) == Some(1) {
+                            bootstrap_eff = Some(element.get_effective_from());
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => anyhow::bail!("Timed out draining bootstrap snapshot"),
+            }
+        }
+        let bootstrap_eff = bootstrap_eff.context("bootstrap did not emit seed row 1")?;
+        anyhow::ensure!(
+            bootstrap_eff != 0,
+            "BUG 1: bootstrap effective_from is 0 (drasi.changeDateTime() would be epoch)"
+        );
+        anyhow::ensure!(
+            PLAUSIBLE_MS_RANGE.contains(&bootstrap_eff),
+            "bootstrap effective_from {bootstrap_eff} is not a plausible millisecond timestamp"
+        );
+
+        // Live CDC changes must also carry a real effective_from.
+        execute_sql(
+            &mut client,
+            "UPDATE dbo.Products SET Name = 'Seed1b' WHERE ProductId = 1;",
+        )
+        .await?;
+        execute_sql(
+            &mut client,
+            "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (2, 'Seed2', 2.00);",
+        )
+        .await?;
+
+        let mut cdc_effs: Vec<u64> = Vec::new();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(30) && cdc_effs.len() < 2 {
+            match tokio::time::timeout(Duration::from_millis(500), cdc_rx.recv()).await {
+                Ok(Ok(wrapper)) => {
+                    if let SourceEvent::Change(change) = &wrapper.event {
+                        cdc_effs.push(change.get_transaction_time());
+                    }
+                }
+                Ok(Err(_)) => break,
+                Err(_) => {}
+            }
+        }
+        anyhow::ensure!(!cdc_effs.is_empty(), "no CDC changes observed");
+        for eff in &cdc_effs {
+            anyhow::ensure!(
+                *eff != 0,
+                "BUG 1: CDC effective_from is 0 (drasi.changeDateTime() would be epoch)"
+            );
+            anyhow::ensure!(
+                PLAUSIBLE_MS_RANGE.contains(eff),
+                "CDC effective_from {eff} is not a plausible millisecond timestamp"
+            );
+        }
+
+        source.stop().await.context("Failed to stop MSSQL source")?;
+        mssql.cleanup().await;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => anyhow::bail!("test_mssql_effective_from_populated timed out"),
+    }
+
+    Ok(())
+}
+
+/// Bug 2 (root cause): bootstrap and CDC must produce the SAME full element id
+/// for the same row, even when the source and bootstrap are configured with
+/// differently-formatted table names. Here the source is configured with the
+/// schema-qualified `dbo.Products` (required for CDC) while the bootstrap is
+/// configured with the bare `Products`. Today this yields `dbo.Products:1` from
+/// CDC and `Products:1` from bootstrap — a mismatch that makes an UPDATE create
+/// a duplicate node.
+#[tokio::test]
+#[ignore]
+#[cfg(not(target_arch = "aarch64"))]
+async fn test_mssql_bootstrap_cdc_element_id_match() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let result = tokio::time::timeout(Duration::from_secs(300), async {
+        let mssql = setup_mssql()
+            .await
+            .context("Failed to start MSSQL container")?;
+        let db_config = prepare_database(mssql.config())
+            .await
+            .context("Failed to prepare MSSQL database")?;
+
+        let mut client = db_config.connect().await?;
+        execute_sql(
+            &mut client,
+            "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (1, 'Parking', 1.00);",
+        )
+        .await?;
+        sleep(Duration::from_secs(5)).await;
+
+        // Deliberately divergent table-name formats (the real-world trigger).
+        let bootstrap_provider = MsSqlBootstrapProvider::builder()
+            .with_source_id(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_tables(vec!["Products".to_string()]) // bare
+            .build()
+            .context("Failed to build MSSQL bootstrap provider")?;
+
+        let source = MsSqlSource::builder(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_table(TEST_TABLE) // schema-qualified dbo.Products
+            .with_poll_interval_ms(250)
+            .with_start_position(StartPosition::Current)
+            .with_trust_server_certificate(true)
+            .with_bootstrap_provider(bootstrap_provider)
+            .build()
+            .context("Failed to build MSSQL source")?;
+
+        source
+            .start()
+            .await
+            .context("Failed to start MSSQL source")?;
+        let (mut bootstrap_rx, mut cdc_rx) = subscribe_direct(&source, "q-idmatch").await?;
+
+        // Capture the FULL element id the bootstrap produced for row 1.
+        let mut bootstrap_id: Option<String> = None;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(60), bootstrap_rx.recv()).await {
+                Ok(Some(event)) => {
+                    if let SourceChange::Insert { element } = &event.change {
+                        let id = element.get_reference().element_id.to_string();
+                        if element_id_int(&id) == Some(1) {
+                            bootstrap_id = Some(id);
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => anyhow::bail!("Timed out draining bootstrap snapshot"),
+            }
+        }
+        let bootstrap_id = bootstrap_id.context("bootstrap did not emit row 1")?;
+
+        // Update row 1 via CDC and capture the FULL element id CDC produced.
+        execute_sql(
+            &mut client,
+            "UPDATE dbo.Products SET Name = 'Curbside' WHERE ProductId = 1;",
+        )
+        .await?;
+
+        let mut cdc_id: Option<String> = None;
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(30) {
+            match tokio::time::timeout(Duration::from_millis(500), cdc_rx.recv()).await {
+                Ok(Ok(wrapper)) => {
+                    if let SourceEvent::Change(change) = &wrapper.event {
+                        let id = change.get_reference().element_id.to_string();
+                        if element_id_int(&id) == Some(1) {
+                            cdc_id = Some(id);
+                            break;
+                        }
+                    }
+                }
+                Ok(Err(_)) => break,
+                Err(_) => {}
+            }
+        }
+        let cdc_id = cdc_id.context("no CDC change observed for row 1")?;
+
+        anyhow::ensure!(
+            bootstrap_id == cdc_id,
+            "BUG 2: bootstrap element id ({bootstrap_id}) != CDC element id ({cdc_id}); \
+             an UPDATE will create a duplicate node instead of updating in place"
+        );
+
+        source.stop().await.context("Failed to stop MSSQL source")?;
+        mssql.cleanup().await;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => anyhow::bail!("test_mssql_bootstrap_cdc_element_id_match timed out"),
+    }
+
+    Ok(())
+}
+
+/// Bug 2 (user-visible symptom): a row loaded at bootstrap and then UPDATEd via
+/// CDC must update IN PLACE in query results — not appear as a second node.
+/// Also asserts Bug 1 at the query level: `drasi.changeDateTime()` is not epoch.
+#[tokio::test]
+#[ignore]
+#[cfg(not(target_arch = "aarch64"))]
+async fn test_mssql_update_after_bootstrap_no_duplicate() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let result = tokio::time::timeout(Duration::from_secs(300), async {
+        let mssql = setup_mssql()
+            .await
+            .context("Failed to start MSSQL container")?;
+        let db_config = prepare_database(mssql.config())
+            .await
+            .context("Failed to prepare MSSQL database")?;
+
+        // Seed three rows BEFORE start so they are bootstrapped.
+        let mut client = db_config.connect().await?;
+        for id in 1..=3 {
+            execute_sql(
+                &mut client,
+                &format!(
+                    "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES ({id}, 'Parking', 1.00);"
+                ),
+            )
+            .await?;
+        }
+        sleep(Duration::from_secs(5)).await;
+
+        // Divergent table-name formats (the real-world trigger for Bug 2).
+        let bootstrap_provider = MsSqlBootstrapProvider::builder()
+            .with_source_id(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_tables(vec!["Products".to_string()]) // bare
+            .build()
+            .context("Failed to build MSSQL bootstrap provider")?;
+
+        let source = MsSqlSource::builder(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_table(TEST_TABLE) // schema-qualified dbo.Products
+            .with_poll_interval_ms(250)
+            .with_start_position(StartPosition::Current)
+            .with_trust_server_certificate(true)
+            .with_bootstrap_provider(bootstrap_provider)
+            .build()
+            .context("Failed to build MSSQL source")?;
+
+        let query = Query::cypher(QUERY_ID)
+            .query(
+                r#"
+                MATCH (p:Products)
+                RETURN p.ProductId AS id, p.Name AS name, drasi.changeDateTime(p) AS cdt
+            "#,
+            )
+            .from_source(SOURCE_ID)
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .build();
+
+        let (reaction, handle) = ApplicationReaction::builder("app-reaction")
+            .with_query(QUERY_ID)
+            .build();
+
+        let core = DrasiLib::builder()
+            .with_id("mssql-dup-test")
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .build()
+            .await
+            .context("Failed to build DrasiLib")?;
+
+        core.start().await.context("Failed to start DrasiLib")?;
+
+        let mut subscription = handle
+            .subscribe_with_options(
+                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .context("Failed to create subscription")?;
+
+        // Let bootstrap settle before mutating.
+        sleep(Duration::from_secs(3)).await;
+
+        // UPDATE a bootstrapped row via CDC.
+        execute_sql(
+            &mut client,
+            "UPDATE dbo.Products SET Name = 'Curbside' WHERE ProductId = 2;",
+        )
+        .await?;
+
+        // Collect diffs for ~20s and classify what happened to row 2.
+        let mut saw_update_curbside = false;
+        let mut saw_add_curbside = false;
+        let mut cdt_datetime: Option<String> = None;
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(20) {
+            match tokio::time::timeout(Duration::from_secs(2), subscription.recv()).await {
+                Ok(Some(result)) => {
+                    for entry in &result.results {
+                        match entry {
+                            ResultDiff::Update { after, .. }
+                                if matches_fields(after, &[("id", "2"), ("name", "Curbside")]) =>
+                            {
+                                saw_update_curbside = true;
+                                cdt_datetime = after
+                                    .get("cdt")
+                                    .and_then(|c| c.as_str())
+                                    .map(|s| s.to_string());
+                            }
+                            ResultDiff::Add { data, .. }
+                                if matches_fields(data, &[("id", "2"), ("name", "Curbside")]) =>
+                            {
+                                saw_add_curbside = true;
+                                cdt_datetime = data
+                                    .get("cdt")
+                                    .and_then(|c| c.as_str())
+                                    .map(|s| s.to_string());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    if saw_update_curbside {
+                        break;
+                    }
+                }
+            }
+        }
+
+        anyhow::ensure!(
+            !saw_add_curbside,
+            "BUG 2: UPDATE of a bootstrapped row produced a NEW node (duplicate ADD) \
+             instead of an in-place UPDATE"
+        );
+        anyhow::ensure!(
+            saw_update_curbside,
+            "expected an in-place UPDATE for row 2 -> 'Curbside' but none was observed"
+        );
+
+        // Bug 1 at the query level: changeDateTime must not be epoch 0.
+        let cdt = cdt_datetime.context("did not capture drasi.changeDateTime() for row 2")?;
+        anyhow::ensure!(
+            !cdt.starts_with("1970"),
+            "BUG 1: drasi.changeDateTime() returned epoch ({cdt}) for a live CDC change"
+        );
+
+        core.stop().await.context("Failed to stop DrasiLib")?;
+        mssql.cleanup().await;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => anyhow::bail!("test_mssql_update_after_bootstrap_no_duplicate timed out"),
     }
 
     Ok(())

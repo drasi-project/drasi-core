@@ -25,9 +25,10 @@ use drasi_lib::reactions::Reaction;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::{ComponentStatus, ReactionRuntimeContext};
 use drasi_plugin_sdk::descriptor::ReactionPluginDescriptor;
+use drasi_plugin_sdk::ffi::payload::encode_query_result;
 use drasi_plugin_sdk::ffi::{
     FfiBootstrapContext, FfiCheckpoint, FfiCheckpointResult, FfiComponentStatus, FfiOutboxIterator,
-    FfiOutboxIteratorResponse, FfiResult, FfiRuntimeContext, FfiSnapshotIterator,
+    FfiOutboxIteratorResponse, FfiQueryResult, FfiResult, FfiRuntimeContext, FfiSnapshotIterator,
     FfiSnapshotIteratorResponse, FfiStr, ReactionPluginVtable, ReactionVtable,
 };
 use libloading::Library;
@@ -106,6 +107,19 @@ extern "C" fn result_push_callback(ctx: *mut c_void, sentinel: *mut c_void) -> *
     })
 }
 
+/// Frees a serialized `QueryResult` byte buffer produced by the host in
+/// [`result_push_callback_inner`]. Called by the consuming plugin after it has
+/// deserialized its own copy (issue #602).
+extern "C" fn drop_query_result_bytes(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() && len > 0 {
+        unsafe {
+            // Rebuild the boxed slice from a *raw* slice pointer — never create a
+            // `&mut [u8]` reference to memory we are about to free (that would be UB).
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+        }
+    }
+}
+
 fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c_void {
     let context = unsafe { &*(ctx as *const ResultPushContext) };
 
@@ -123,7 +137,18 @@ fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c
         .expect("result_push_callback lock poisoned");
     if let Some(ref rx) = *guard {
         match rx.recv() {
-            Ok(result) => Box::into_raw(Box::new(result)) as *mut c_void,
+            Ok(result) => {
+                // Serialize the QueryResult for cross-cdylib transfer (issue #602):
+                // never hand the plugin a reinterpreted `repr(Rust)` pointer.
+                let bytes = encode_query_result(&result);
+                let payload_len = bytes.len();
+                let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+                Box::into_raw(Box::new(FfiQueryResult {
+                    payload_ptr,
+                    payload_len,
+                    payload_drop_fn: Some(drop_query_result_bytes),
+                })) as *mut c_void
+            }
             Err(_) => {
                 // Channel closed — return null so the forwarder breaks.
                 // Do NOT signal forwarder_done here; the forwarder will
@@ -236,9 +261,9 @@ impl Reaction for ReactionProxy {
         )
         .map(crate::identity_bridge::IdentityProviderVtableBuilder::build);
 
-        let ip_ptr = identity_vtable
-            .map(|v| Box::into_raw(Box::new(v)) as *const _)
-            .unwrap_or(std::ptr::null());
+        let ip_ptr: *mut drasi_plugin_sdk::ffi::identity::IdentityProviderVtable = identity_vtable
+            .map(|v| Box::into_raw(Box::new(v)))
+            .unwrap_or(std::ptr::null_mut());
 
         let snapshot_fetcher_vtable = context
             .snapshot_fetcher
@@ -253,7 +278,7 @@ impl Reaction for ReactionProxy {
             instance_id: instance_id_ffi,
             component_id: component_id_ffi,
             state_store: ss_ptr,
-            identity_provider: ip_ptr,
+            identity_provider: ip_ptr as *const _,
             log_callback: Some(crate::callbacks::instance_log_callback),
             log_ctx: ctx_ptr,
             lifecycle_callback: Some(crate::callbacks::instance_lifecycle_callback),
@@ -263,6 +288,21 @@ impl Reaction for ReactionProxy {
         };
 
         (self.vtable.initialize_fn)(self.vtable.state, &ffi_ctx as *const FfiRuntimeContext);
+
+        // Reclaim the identity-provider vtable struct we allocated for `ip_ptr`. This is a
+        // transient pointer: the plugin SDK (>= 0.10.0) copies the vtable fields by value in
+        // `FfiIdentityProviderProxy::new` during `initialize_fn` and never retains `ip_ptr`,
+        // so it is safe to free the struct here. Plugins built against SDK < 0.10.0 retained
+        // the raw pointer; they are rejected by the loader's exact major.minor version gate
+        // (see `validate_plugin_metadata` in `host-sdk/src/loader.rs`), which prevents a
+        // use-after-free. This frees only the `IdentityProviderVtable` struct (no `Drop`
+        // impl) — the underlying state remains owned by the plugin proxy and is released via
+        // `drop_fn` when that proxy is dropped.
+        if !ip_ptr.is_null() {
+            unsafe {
+                drop(Box::from_raw(ip_ptr));
+            }
+        }
     }
 
     async fn start(&self) -> anyhow::Result<()> {

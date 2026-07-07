@@ -892,7 +892,10 @@ impl Source for PostgresReplicationSource {
                 return Err(SourceError::PositionUnavailable {
                     source_id: self.base.id.clone(),
                     requested: resume_bytes.clone(),
-                    earliest_available: Some(connection::lsn_to_position_bytes(earliest_available)),
+                    earliest_available: Some(connection::commit_position_bytes(
+                        earliest_available,
+                        0,
+                    )),
                 }
                 .into());
             }
@@ -949,7 +952,10 @@ impl Source for PostgresReplicationSource {
 
     async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
         self.base.initialize(context).await;
-        // Postgres WAL LSN is an 8-byte big-endian u64 — byte-lexicographic comparison is correct.
+        // Source positions are uniformly 16-byte big-endian
+        // `[ commit_lsn (8) | offset (8) ]` (CDC events and the
+        // `[snapshot_lsn | u64::MAX]` bootstrap boundary), so byte-lexicographic
+        // comparison equals tuple ordering on (commit_lsn, offset).
         self.base
             .set_position_comparator(drasi_lib::sources::ByteLexPositionComparator)
             .await;
@@ -1653,8 +1659,9 @@ mod tests {
                 .build()
                 .unwrap();
 
-            // 4 bytes instead of expected 8
-            let bad_position = bytes::Bytes::from(vec![0u8; 4]);
+            // 8 bytes — a bare LSN is no longer a valid position (only the
+            // 16-byte `[commit_lsn | offset]` encoding is accepted).
+            let bad_position = bytes::Bytes::from(vec![0u8; 8]);
             let settings = SourceSubscriptionSettings {
                 source_id: "test-source".to_string(),
                 query_id: "q-bad-position".to_string(),
@@ -1669,7 +1676,7 @@ mod tests {
             assert!(result.is_err());
             let err_msg = format!("{}", result.err().unwrap());
             assert!(
-                err_msg.contains("expected 8 bytes"),
+                err_msg.contains("expected 16 bytes"),
                 "Error should mention expected byte length, got: {err_msg}"
             );
         }
