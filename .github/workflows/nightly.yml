@@ -104,32 +104,24 @@ jobs:
       dry_run: false
     secrets: inherit
 
-  dispatch-server:
-    name: Dispatch drasi-server e2e
+  # Call drasi-server's nightly-e2e reusable workflow directly. Using a reusable
+  # workflow call (instead of repository_dispatch) means:
+  #   - no PAT needed (GITHUB_TOKEN is used across the org),
+  #   - a real needs: ordering edge (runs only after plugins are published),
+  #   - the e2e result surfaces inside this drasi-core run.
+  # The @ref pins which version of the consumer runs; point it at the branch while
+  # testing, then switch to @main once merged. server_ref tells the consumer which
+  # drasi-server ref to check out (required because a cross-repo call runs in this
+  # caller's context).
+  call-server-e2e:
+    name: drasi-server e2e
     needs: [resolve-sha, publish-plugins]
     if: ${{ inputs.skip_dispatch != true }}
-    runs-on: ubuntu-latest
-    steps:
-      # repository_dispatch to another repo requires a token with write access to
-      # drasi-server; the automatic GITHUB_TOKEN cannot cross repositories.
-      # Configure NIGHTLY_DISPATCH_TOKEN (PAT or GitHub App token with contents:write
-      # on drasi-project/drasi-server).
-      - name: Repository dispatch to drasi-server
-        env:
-          GH_TOKEN: ${{ secrets.NIGHTLY_DISPATCH_TOKEN }}
-          CORE_SHA: ${{ needs.resolve-sha.outputs.sha }}
-          PLUGIN_TAG: ${{ needs.resolve-sha.outputs.plugin_tag }}
-        run: |
-          gh api repos/drasi-project/drasi-server/dispatches \
-            --method POST \
-            --input - <<EOF
-          {
-            "event_type": "nightly-e2e",
-            "client_payload": {
-              "core_sha": "${CORE_SHA}",
-              "plugin_tag": "${PLUGIN_TAG}",
-              "registry": "ghcr.io/drasi-project"
-            }
-          }
-          EOF
-          echo "Dispatched nightly-e2e to drasi-server (core_sha=${CORE_SHA}, plugin_tag=${PLUGIN_TAG})"
+    uses: drasi-project/drasi-server/.github/workflows/nightly-e2e.yml@drasi-e2e-nightly
+    with:
+      core_sha: ${{ needs.resolve-sha.outputs.sha }}
+      plugin_tag: ${{ needs.resolve-sha.outputs.plugin_tag }}
+      registry: ghcr.io/drasi-project
+      server_repo: drasi-project/drasi-server
+      server_ref: drasi-e2e-nightly
+    secrets: inherit
