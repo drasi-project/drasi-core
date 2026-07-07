@@ -15,8 +15,9 @@ name: Nightly E2E (Producer)
 
 on:
   schedule:
-    # 08:00 UTC daily. Runs against the default branch (main).
-    - cron: '0 8 * * *'
+    # 14:00 UTC daily = 06:00 PST. GitHub cron is UTC and does not observe DST,
+    # so during PDT (summer) this fires at 07:00 local. Runs against main.
+    - cron: '0 14 * * *'
   workflow_dispatch:
     inputs:
       plugin_tag:
@@ -31,6 +32,11 @@ on:
         default: false
       skip_dispatch:
         description: 'Skip dispatching the drasi-server e2e (build/publish only)'
+        required: false
+        type: boolean
+        default: false
+      skip_publish_plugins:
+        description: 'Skip publishing plugins (reuse already-published nightly tag)'
         required: false
         type: boolean
         default: false
@@ -56,7 +62,7 @@ jobs:
       plugin_tag: ${{ steps.rev.outputs.plugin_tag }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@v5
         with:
           # Always pin the nightly to main's HEAD, regardless of the ref this
           # workflow was dispatched from.
@@ -79,7 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -112,7 +118,7 @@ jobs:
           curl -sSfL https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.45.0/cargo-semver-checks-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
           cargo-semver-checks --version
 
-      - name: Release-plz dry-run (fails the nightly if the release would break)
+      - name: Release-plz dry-run
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -124,6 +130,10 @@ jobs:
   publish-plugins:
     name: Publish nightly plugins
     needs: resolve-sha
+    # Skip when requested via the workflow_dispatch input, or (for push-triggered
+    # runs, which cannot pass inputs) when the commit message contains
+    # [skip-plugins]. Lets you reuse an already-published nightly tag to cut build time.
+    if: ${{ inputs.skip_publish_plugins != true && !contains(github.event.head_commit.message, '[skip-plugins]') }}
     uses: ./.github/workflows/publish-plugins.yml
     with:
       tag: ${{ needs.resolve-sha.outputs.plugin_tag }}
@@ -145,7 +155,10 @@ jobs:
   call-server-e2e:
     name: drasi-server e2e
     needs: [resolve-sha, publish-plugins]
-    if: ${{ inputs.skip_dispatch != true }}
+    # Run when resolve-sha succeeded and publish-plugins did not fail. Using
+    # always() + result checks so a *skipped* publish-plugins (e.g. [skip-plugins])
+    # still lets the e2e run against the already-published tag.
+    if: ${{ always() && inputs.skip_dispatch != true && needs.resolve-sha.result == 'success' && needs.publish-plugins.result != 'failure' && needs.publish-plugins.result != 'cancelled' }}
     uses: drasi-project/drasi-server/.github/workflows/nightly-e2e.yml@drasi-e2e-nightly
     with:
       core_sha: ${{ needs.resolve-sha.outputs.sha }}
