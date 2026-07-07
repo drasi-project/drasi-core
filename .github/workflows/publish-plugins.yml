@@ -28,6 +28,11 @@ on:
         required: false
         type: boolean
         default: false
+      visibility_only:
+        description: 'Skip building/publishing plugins; only run the set-public-visibility step'
+        required: false
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       pre_release:
@@ -55,6 +60,11 @@ on:
         required: false
         type: boolean
         default: false
+      visibility_only:
+        description: 'Skip building/publishing plugins; only run the set-public-visibility step'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   packages: write
@@ -67,6 +77,8 @@ env:
 jobs:
   build-and-publish:
     name: Build & Publish (${{ matrix.arch_suffix }})
+    # Skipped entirely in visibility-only mode (reuse already-published images).
+    if: ${{ !inputs.visibility_only }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -199,7 +211,9 @@ jobs:
   set-public-visibility:
     name: Set Package Visibility to Public
     needs: build-and-publish
-    if: ${{ !inputs.dry_run }}
+    # Run after a normal publish (build succeeded) OR in visibility-only mode
+    # (build skipped). always() lets a skipped build still reach this job.
+    if: ${{ always() && !inputs.dry_run && needs.build-and-publish.result != 'failure' && needs.build-and-publish.result != 'cancelled' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
