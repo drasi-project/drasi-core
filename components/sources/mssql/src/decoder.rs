@@ -88,6 +88,12 @@ pub mod cdc_columns {
     /// Bit mask showing which columns were updated
     pub const UPDATE_MASK: &str = "__$update_mask";
 
+    /// Computed column (added by the source's CDC query) carrying the commit
+    /// time mapped from `__$start_lsn` via `sys.fn_cdc_map_lsn_to_time`. Not a
+    /// native CDC column; aliased with the `__$` prefix so it is treated as a
+    /// metadata column and excluded from element properties.
+    pub const COMMIT_TIME: &str = "__$commit_time";
+
     /// Check if a column name is a CDC metadata column
     pub fn is_metadata_column(name: &str) -> bool {
         name.starts_with("__$")
