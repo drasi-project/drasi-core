@@ -51,10 +51,6 @@ permissions:
   packages: write
   id-token: write
 
-concurrency:
-  group: nightly-e2e-producer
-  cancel-in-progress: false
-
 jobs:
   resolve-sha:
     name: Resolve main SHA
