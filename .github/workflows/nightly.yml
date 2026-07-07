@@ -45,7 +45,12 @@ on:
       - drasi-e2e-nightly
 
 permissions:
-  contents: read
+  # contents: write + pull-requests: write are required because the release-health
+  # job calls release-plz.yml, which declares those permissions. A called workflow
+  # cannot exceed the caller's grants, so they must be set here even though the
+  # nightly runs release-plz in dry-run mode (no writes actually happen).
+  contents: write
+  pull-requests: write
   packages: write
   id-token: write
 
