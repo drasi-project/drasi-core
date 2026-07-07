@@ -16,6 +16,21 @@ on:
         required: false
         type: boolean
         default: false
+  # Callable so the nightly (nightly.yml) can run the exact same dry-run for its
+  # release-health signal instead of duplicating the setup. Only dry_run is used
+  # by the nightly; force_publish is exposed for parity.
+  workflow_call:
+    inputs:
+      dry_run:
+        description: 'Dry run only (no publishing)'
+        required: false
+        type: boolean
+        default: false
+      force_publish:
+        description: 'Force publish crates (use after failed release)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   pull-requests: write

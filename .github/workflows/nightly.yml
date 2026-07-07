@@ -79,52 +79,18 @@ jobs:
           echo "Nightly core SHA: $SHA"
           echo "Nightly plugin tag: $TAG"
 
+  # Release-health signal: run the real release-plz workflow in dry-run mode. This
+  # calls release-plz.yml directly (rather than duplicating its setup inline) so
+  # the pinned release-plz / cargo-semver-checks versions live in exactly one
+  # place. dry_run=true gates off every publish step, leaving only the
+  # `release-plz update` preview — a failure here fails the nightly.
   release-health:
     name: Release health (release-plz dry-run)
     if: ${{ inputs.skip_release_health != true }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      # Run the release-plz dry-run INLINE (mirroring release-plz.yml's setup and
-      # its dry-run step) so a failure fails this job and the whole nightly. This
-      # is the early-warning signal that the real release would break. We do not
-      # publish anything here.
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq libjq-dev protobuf-compiler
-
-      - name: Set JQ_LIB_DIR
-        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-
-      - name: Install Rust toolchain
-        run: rustup show
-
-      - name: Configure Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Install release-plz
-        run: |
-          curl -sSfL https://github.com/release-plz/release-plz/releases/download/release-plz-v0.3.157/release-plz-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
-
-      - name: Install cargo-semver-checks
-        run: |
-          curl -sSfL https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.45.0/cargo-semver-checks-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
-          cargo-semver-checks --version
-
-      - name: Release-plz dry-run
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "=== release-plz update (dry-run: version bumps, changelog, semver checks) ==="
-          release-plz update
-          echo "=== release-plz dry-run passed ==="
+    uses: ./.github/workflows/release-plz.yml
+    with:
+      dry_run: true
+    secrets: inherit
 
 
   publish-plugins:
