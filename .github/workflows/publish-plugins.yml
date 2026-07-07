@@ -119,6 +119,10 @@ jobs:
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
+          # The Microsoft apt repos preinstalled on GitHub runners intermittently
+          # serve a broken InRelease signature (NOSPLIT), failing apt-get update.
+          # We don't use them, so remove before updating.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources 2>/dev/null || true
           sudo apt-get update
           # libcurl4-openssl-dev: the native librdkafka build (used by the Kafka
           # bootstrap/source plugins) detects the host's curl/openssl on the
@@ -221,6 +225,10 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          # The Microsoft apt repos preinstalled on GitHub runners intermittently
+          # serve a broken InRelease signature (NOSPLIT), failing apt-get update.
+          # We don't use them, so remove before updating.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y jq libjq-dev protobuf-compiler
 
