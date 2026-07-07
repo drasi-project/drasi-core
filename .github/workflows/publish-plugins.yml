@@ -8,11 +8,48 @@ on:
         required: false
         type: string
         default: ''
+      tag:
+        description: 'Fixed tag override (e.g. "drasi-nightly-test"). Mutually exclusive with pre_release.'
+        required: false
+        type: string
+        default: ''
       registry:
         description: 'OCI registry to publish to'
         required: false
         type: string
         default: 'ghcr.io/drasi-project'
+      sign:
+        description: 'Sign published plugins with cosign'
+        required: false
+        type: boolean
+        default: true
+      dry_run:
+        description: 'Dry run only (no publishing)'
+        required: false
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      pre_release:
+        description: 'Pre-release label (e.g., "dev.1", "rc.1"). Leave empty for stable release.'
+        required: false
+        type: string
+        default: ''
+      tag:
+        description: 'Fixed tag override (e.g. "drasi-nightly-test"). Mutually exclusive with pre_release.'
+        required: false
+        type: string
+        default: ''
+      registry:
+        description: 'OCI registry to publish to'
+        required: false
+        type: string
+        default: 'ghcr.io/drasi-project'
+      sign:
+        description: 'Sign published plugins with cosign'
+        required: false
+        type: boolean
+        default: true
       dry_run:
         description: 'Dry run only (no publishing)'
         required: false
@@ -135,8 +172,14 @@ jobs:
           OCI_REGISTRY_USERNAME: ${{ github.actor }}
           OCI_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ARGS="--release --target ${{ matrix.target }} --registry ${{ inputs.registry }} --arch-suffix ${{ matrix.arch_suffix }} --sign"
-          if [ -n "${{ inputs.pre_release }}" ]; then
+          ARGS="--release --target ${{ matrix.target }} --registry ${{ inputs.registry }} --arch-suffix ${{ matrix.arch_suffix }}"
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            ARGS="$ARGS --sign"
+          fi
+          # --tag and --pre-release are mutually exclusive; --tag wins when set.
+          if [ -n "${{ inputs.tag }}" ]; then
+            ARGS="$ARGS --tag ${{ inputs.tag }}"
+          elif [ -n "${{ inputs.pre_release }}" ]; then
             ARGS="$ARGS --pre-release ${{ inputs.pre_release }}"
           fi
           cargo run -p xtask -- publish-plugins $ARGS
@@ -146,7 +189,9 @@ jobs:
         shell: bash
         run: |
           ARGS="--release --target ${{ matrix.target }} --registry ${{ inputs.registry }} --arch-suffix ${{ matrix.arch_suffix }} --dry-run"
-          if [ -n "${{ inputs.pre_release }}" ]; then
+          if [ -n "${{ inputs.tag }}" ]; then
+            ARGS="$ARGS --tag ${{ inputs.tag }}"
+          elif [ -n "${{ inputs.pre_release }}" ]; then
             ARGS="$ARGS --pre-release ${{ inputs.pre_release }}"
           fi
           cargo run -p xtask -- publish-plugins $ARGS

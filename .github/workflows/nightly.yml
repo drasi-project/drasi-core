@@ -1,0 +1,135 @@
+name: Nightly E2E (Producer)
+
+# Producer half of the end-to-end nightly pipeline. Runs in drasi-core because
+# this is where the change under test originates. It:
+#   1. resolves the current main HEAD SHA (the "nightly" version of the crates),
+#   2. triggers the release-plz dry-run for release-health signal,
+#   3. publishes the plugins to a fixed, overwritable OCI tag via workflow_call,
+#   4. dispatches the SHA + plugin tag to drasi-server to run the consumer e2e.
+#
+# The SHA and the plugin images both come from the same workflow run (same main
+# commit), so the crate patch overlay and the OCI plugins the server pulls are
+# always consistent.
+#
+# See docs/nightly-e2e/README.md for the full design.
+
+on:
+  schedule:
+    # 08:00 UTC daily. Runs against the default branch (main).
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+    inputs:
+      plugin_tag:
+        description: 'Fixed OCI tag for nightly plugins'
+        required: false
+        type: string
+        default: 'drasi-nightly-test'
+      skip_release_health:
+        description: 'Skip the release-plz dry-run health check'
+        required: false
+        type: boolean
+        default: false
+      skip_dispatch:
+        description: 'Skip dispatching the drasi-server e2e (build/publish only)'
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches:
+      - drasi-e2e-nightly
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  # actions: write is required to trigger release-plz.yml via `gh workflow run`.
+  actions: write
+
+concurrency:
+  group: nightly-e2e-producer
+  cancel-in-progress: false
+
+jobs:
+  resolve-sha:
+    name: Resolve main SHA
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.rev.outputs.sha }}
+      plugin_tag: ${{ steps.rev.outputs.plugin_tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Always pin the nightly to main's HEAD, regardless of the ref this
+          # workflow was dispatched from.
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve HEAD SHA and plugin tag
+        id: rev
+        run: |
+          SHA=$(git rev-parse HEAD)
+          TAG='${{ inputs.plugin_tag || 'drasi-nightly-test' }}'
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "plugin_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Nightly core SHA: $SHA"
+          echo "Nightly plugin tag: $TAG"
+
+  release-health:
+    name: Release health (release-plz dry-run)
+    if: ${{ inputs.skip_release_health != true }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Fire-and-forget: release-plz.yml already exposes a `dry_run` input, so we
+      # trigger it rather than duplicating (or modifying) the release workflow.
+      # This is an independent signal; its pass/fail is visible on the release-plz
+      # run itself, not on this nightly run.
+      - name: Trigger release-plz dry-run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run release-plz.yml -f dry_run=true --ref main
+
+  publish-plugins:
+    name: Publish nightly plugins
+    needs: resolve-sha
+    uses: ./.github/workflows/publish-plugins.yml
+    with:
+      tag: ${{ needs.resolve-sha.outputs.plugin_tag }}
+      # Nightly -test channel: skip cosign signing to avoid orphaned signatures
+      # on each tag overwrite.
+      sign: false
+      dry_run: false
+    secrets: inherit
+
+  dispatch-server:
+    name: Dispatch drasi-server e2e
+    needs: [resolve-sha, publish-plugins]
+    if: ${{ inputs.skip_dispatch != true }}
+    runs-on: ubuntu-latest
+    steps:
+      # repository_dispatch to another repo requires a token with write access to
+      # drasi-server; the automatic GITHUB_TOKEN cannot cross repositories.
+      # Configure NIGHTLY_DISPATCH_TOKEN (PAT or GitHub App token with contents:write
+      # on drasi-project/drasi-server).
+      - name: Repository dispatch to drasi-server
+        env:
+          GH_TOKEN: ${{ secrets.NIGHTLY_DISPATCH_TOKEN }}
+          CORE_SHA: ${{ needs.resolve-sha.outputs.sha }}
+          PLUGIN_TAG: ${{ needs.resolve-sha.outputs.plugin_tag }}
+        run: |
+          gh api repos/drasi-project/drasi-server/dispatches \
+            --method POST \
+            --input - <<EOF
+          {
+            "event_type": "nightly-e2e",
+            "client_payload": {
+              "core_sha": "${CORE_SHA}",
+              "plugin_tag": "${PLUGIN_TAG}",
+              "registry": "ghcr.io/drasi-project"
+            }
+          }
+          EOF
+          echo "Dispatched nightly-e2e to drasi-server (core_sha=${CORE_SHA}, plugin_tag=${PLUGIN_TAG})"

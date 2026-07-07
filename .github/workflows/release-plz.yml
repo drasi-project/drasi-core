@@ -20,6 +20,12 @@ on:
 permissions:
   pull-requests: write
   contents: write
+  # Required so the downstream publish-plugins job (called via workflow_call)
+  # can push OCI images and use cosign keyless signing. A called workflow's
+  # GITHUB_TOKEN cannot exceed the caller's permissions, so they must be granted
+  # here even though release-plz itself does not use them.
+  packages: write
+  id-token: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,6 +35,10 @@ jobs:
     name: Release-plz
     runs-on: ubuntu-latest-8-cores
     environment: drasi-core-release
+    outputs:
+      # 'true' only when this run actually published crates (release commit or
+      # force_publish, and not a dry run). Gates the downstream publish-plugins job.
+      published: ${{ steps.publish_result.outputs.published }}
     
     steps:
       - name: Checkout code
@@ -93,6 +103,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
+      # Runs only after a successful publish (same condition as above, and this
+      # step is reached only if 'Publish crates' did not fail). Its output gates
+      # the downstream publish-plugins job.
+      - name: Mark published
+        id: publish_result
+        if: ${{ (steps.check_release.outputs.is_release == 'true' || inputs.force_publish == true) && inputs.dry_run != true }}
+        run: echo "published=true" >> "$GITHUB_OUTPUT"
+
       # Dry run mode - preview what would happen
       - name: Dry run - preview version bumps
         if: ${{ inputs.dry_run == true }}
@@ -106,3 +124,16 @@ jobs:
           echo "To create a release PR, run this workflow with dry_run=false."
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # After a successful crate publish, build and publish the plugin OCI images so
+  # the crates on crates.io and the plugin images in GHCR stay in lockstep for a
+  # release. Skipped for release-PR-creation commits and dry runs (published != 'true').
+  publish-plugins:
+    name: Publish plugins
+    needs: release-plz
+    if: ${{ needs.release-plz.outputs.published == 'true' }}
+    uses: ./.github/workflows/publish-plugins.yml
+    with:
+      sign: true
+      dry_run: false
+    secrets: inherit
