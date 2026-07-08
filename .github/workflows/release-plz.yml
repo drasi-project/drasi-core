@@ -16,21 +16,6 @@ on:
         required: false
         type: boolean
         default: false
-  # Callable so the nightly (nightly.yml) can run the exact same dry-run for its
-  # release-health signal instead of duplicating the setup. Only dry_run is used
-  # by the nightly; force_publish is exposed for parity.
-  workflow_call:
-    inputs:
-      dry_run:
-        description: 'Dry run only (no publishing)'
-        required: false
-        type: boolean
-        default: false
-      force_publish:
-        description: 'Force publish crates (use after failed release)'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   pull-requests: write
@@ -61,34 +46,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install system dependencies
-        run: |
-          # The Microsoft apt repos preinstalled on GitHub runners intermittently
-          # serve a broken InRelease signature (NOSPLIT), failing apt-get update.
-          # We don't use them, so remove before updating.
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources 2>/dev/null || true
-          sudo apt-get update
-          sudo apt-get install -y jq libjq-dev protobuf-compiler
-
-      - name: Set JQ_LIB_DIR
-        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-
-      - name: Install Rust toolchain
-        run: rustup show
-
-      - name: Configure Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-                  
-      - name: Install release-plz
-        run: |
-          curl -sSfL https://github.com/release-plz/release-plz/releases/download/release-plz-v0.3.157/release-plz-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
-
-      - name: Install cargo-semver-checks
-        run: |
-          curl -sSfL https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.45.0/cargo-semver-checks-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
-          cargo-semver-checks --version
+      - name: Install release tools
+        uses: ./.github/actions/install-release-tools
 
       # Check if this commit is from a release PR (commit message starts with "chore: release" or similar)
       - name: Check if release commit

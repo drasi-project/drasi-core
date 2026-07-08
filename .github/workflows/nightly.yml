@@ -3,13 +3,14 @@ name: Nightly E2E (Producer)
 # Producer half of the end-to-end nightly pipeline. Runs in drasi-core because
 # this is where the change under test originates. It:
 #   1. resolves the current main HEAD SHA (the "nightly" version of the crates),
-#   2. triggers the release-plz dry-run for release-health signal,
+#   2. runs the release-plz dry-run as a release health signal,
 #   3. publishes the plugins to a fixed, overwritable OCI tag via workflow_call,
-#   4. dispatches the SHA + plugin tag to drasi-server to run the consumer e2e.
+#   4. calls drasi-server's nightly-e2e.yml (cross-repo workflow_call) to build
+#      the server against this SHA and run the integration e2e.
 #
-# The SHA and the plugin images both come from the same workflow run (same main
-# commit), so the crate patch overlay and the OCI plugins the server pulls are
-# always consistent.
+# The SHA and the plugin images both come from the same workflow run (same commit),
+# so the git-dependency overlay and the OCI plugins the server pulls are always
+# consistent.
 #
 # See docs/nightly-e2e/README.md for the full design.
 
@@ -31,7 +32,7 @@ on:
         type: boolean
         default: false
       skip_dispatch:
-        description: 'Skip dispatching the drasi-server e2e (build/publish only)'
+        description: 'Skip calling the drasi-server e2e (build/publish only)'
         required: false
         type: boolean
         default: false
@@ -45,7 +46,7 @@ on:
       - drasi-e2e-nightly
 
 permissions:
-  # contents: read for checkout + release-health dry-run; packages: write +
+  # contents: read for checkout + release dry-run; packages: write +
   # id-token: write for the publish-plugins call (OCI push + cosign).
   contents: read
   packages: write
@@ -77,31 +78,46 @@ jobs:
           echo "Nightly core SHA: $SHA"
           echo "Nightly plugin tag: $TAG"
 
-  # Release-health signal: dry-run the release tooling to catch packaging / semver
-  # / changelog breakage early. Calls the standalone release-health.yml (a single
-  # job) rather than the full release-plz.yml, so release-plz's downstream
-  # publish-plugins + set-public-visibility subtree isn't pulled into this run.
-  # A failure here fails the nightly and, because the rest of the chain depends on
-  # it, stops the plugin publish + e2e.
-  release-health:
-    name: Release health (release-plz dry-run)
+  # Release-dry-run signal: run the release tooling in dry-run mode to catch
+  # packaging / semver / changelog breakage early. Uses the shared
+  # install-release-tools composite action (same pinned versions as release-plz.yml)
+  # and runs only `release-plz update`, which publishes nothing. A failure here
+  # fails the nightly and, because the rest of the chain depends on it, stops the
+  # plugin publish + e2e.
+  release-dry-run:
+    name: Release dry-run (release-plz)
     needs: resolve-sha
     if: ${{ inputs.skip_release_health != true }}
-    uses: ./.github/workflows/release-health.yml
-    secrets: inherit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install release tools
+        uses: ./.github/actions/install-release-tools
+
+      - name: Release-plz dry-run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== release-plz update (dry-run: version bumps, changelog, semver checks) ==="
+          release-plz update
+          echo "=== release-plz dry-run passed ==="
 
   publish-plugins:
     name: Publish nightly plugins
-    needs: [resolve-sha, release-health]
-    # Single chain: publish only after the release-health dry-run passes. always()
-    # so a *skipped* release-health (skip_release_health) still lets publishing
-    # proceed, while a *failed* release-health blocks the rest of the nightly.
+    needs: [resolve-sha, release-dry-run]
+    # Single chain: publish only after the release dry-run passes. always()
+    # so a *skipped* release-dry-run (skip_release_health) still lets publishing
+    # proceed, while a *failed* release-dry-run blocks the rest of the nightly.
     # [skip-plugins] / skip_publish_plugins reuse an already-published nightly tag.
     if: >-
       ${{ always()
         && needs.resolve-sha.result == 'success'
-        && needs.release-health.result != 'failure'
-        && needs.release-health.result != 'cancelled'
+        && needs.release-dry-run.result != 'failure'
+        && needs.release-dry-run.result != 'cancelled'
         && inputs.skip_publish_plugins != true
         && !contains(github.event.head_commit.message, '[skip-plugins]') }}
     uses: ./.github/workflows/publish-plugins.yml
