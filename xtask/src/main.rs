@@ -302,6 +302,44 @@ fn parse_target(args: &[String]) -> Option<String> {
     None
 }
 
+/// Strip a trailing glibc-version suffix from a `cargo-zigbuild` target triple.
+///
+/// `cargo-zigbuild` accepts targets like `x86_64-unknown-linux-gnu.2.28` to pin
+/// the glibc floor, but it still writes artifacts to the base-triple directory
+/// (`target/x86_64-unknown-linux-gnu/...`) and Rust/OCI metadata should record
+/// the canonical triple. This returns the base triple with any `.<major>.<minor>`
+/// glibc suffix removed; non-glibc targets are returned unchanged.
+fn strip_glibc_suffix(target: &str) -> &str {
+    // Only `*-linux-gnu` targets carry a glibc version suffix.
+    if let Some(idx) = target.find("-linux-gnu.") {
+        // Keep everything up to and including "-linux-gnu".
+        let end = idx + "-linux-gnu".len();
+        &target[..end]
+    } else {
+        target
+    }
+}
+
+/// Returns true when the target triple carries a `cargo-zigbuild` glibc-version
+/// suffix (e.g. `x86_64-unknown-linux-gnu.2.28`), which requires building with
+/// `cargo zigbuild` rather than plain `cargo`/`cross`.
+fn has_glibc_suffix(target: &str) -> bool {
+    target.contains("-linux-gnu.")
+}
+
+/// Build a `Command` from a build-tool string, splitting on whitespace so that
+/// multi-word tools like `"cargo zigbuild"` become the program `cargo` with a
+/// leading `zigbuild` subcommand argument.
+fn build_command(build_tool: &str) -> Command {
+    let mut parts = build_tool.split_whitespace();
+    let program = parts.next().unwrap_or("cargo");
+    let mut cmd = Command::new(program);
+    for extra in parts {
+        cmd.arg(extra);
+    }
+    cmd
+}
+
 fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
     for (i, arg) in args.iter().enumerate() {
         if arg == flag {
@@ -314,7 +352,18 @@ fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
 fn build_plugins(args: &[String]) {
     let release = args.iter().any(|a| a == "--release");
     let jobs = parse_jobs(args);
-    let target = parse_target(args);
+    // The build target may carry a `cargo-zigbuild` glibc-version suffix
+    // (e.g. `x86_64-unknown-linux-gnu.2.28`). That suffix is passed through to
+    // the build tool to pin the glibc floor, but artifact paths and metadata use
+    // the canonical base triple.
+    let build_target = parse_target(args);
+    let target = build_target
+        .as_deref()
+        .map(|t| strip_glibc_suffix(t).to_string());
+    let use_zigbuild = build_target
+        .as_deref()
+        .map(has_glibc_suffix)
+        .unwrap_or(false);
     let result = discover_dynamic_plugins();
 
     if result.plugins.is_empty() {
@@ -354,7 +403,11 @@ fn build_plugins(args: &[String]) {
     // Determine whether to use `cross` instead of `cargo`.
     // `cross` only works reliably on Linux hosts (it uses Docker with Linux containers).
     // On macOS/Windows hosts, use `cargo` — macOS cross-arch builds work via `rustup target add`.
-    let use_cross = if let Some(ref t) = target {
+    // When a glibc-pinned target is requested we use `cargo zigbuild` instead of
+    // either, which sets a deterministic glibc floor for the whole link.
+    let use_cross = if use_zigbuild {
+        false
+    } else if let Some(ref t) = target {
         let host = host_target_triple();
         if t != &host && host.contains("linux") {
             // Only use cross on Linux hosts, and only if cross is installed
@@ -371,7 +424,13 @@ fn build_plugins(args: &[String]) {
     } else {
         false
     };
-    let build_tool = if use_cross { "cross" } else { "cargo" };
+    let build_tool = if use_zigbuild {
+        "cargo zigbuild"
+    } else if use_cross {
+        "cross"
+    } else {
+        "cargo"
+    };
 
     println!(
         "=== Building {} cdylib plugins ({}{}, {}, {} parallel jobs) ===",
@@ -388,6 +447,9 @@ fn build_plugins(args: &[String]) {
     let failed = Arc::new(AtomicBool::new(false));
     let target_dir = Arc::new(target_dir);
     let target = Arc::new(target);
+    // The value passed to `--target` on the build command. For zigbuild this is
+    // the glibc-suffixed triple; otherwise it matches the canonical `target`.
+    let cmd_target = Arc::new(build_target.clone().or_else(|| (*target).clone()));
     let build_tool_str = build_tool.to_string();
     let plugins: Vec<_> = result
         .plugins
@@ -405,10 +467,10 @@ fn build_plugins(args: &[String]) {
             println!("  Building {name}...");
 
             let feature_flag = format!("{name}/dynamic-plugin");
-            let mut cmd = Command::new(&build_tool_str);
+            let mut cmd = build_command(&build_tool_str);
             cmd.args(["build", "--lib", "-p", name, "--features", &feature_flag]);
 
-            if let Some(t) = target.as_ref() {
+            if let Some(t) = cmd_target.as_ref() {
                 cmd.args(["--target", t]);
             }
             if release {
@@ -424,7 +486,7 @@ fn build_plugins(args: &[String]) {
             }
         }
     } else {
-        // cargo: parallel builds with --manifest-path
+        // cargo / cargo zigbuild: parallel builds with --manifest-path
         let build_tool = Arc::new(build_tool_str);
 
         for chunk in plugins.chunks(jobs) {
@@ -439,13 +501,13 @@ fn build_plugins(args: &[String]) {
                     let manifest = manifest.clone();
                     let failed = Arc::clone(&failed);
                     let target_dir = Arc::clone(&target_dir);
-                    let target = Arc::clone(&target);
+                    let cmd_target = Arc::clone(&cmd_target);
                     let build_tool = Arc::clone(&build_tool);
 
                     thread::spawn(move || {
                         println!("  Building {name}...");
 
-                        let mut cmd = Command::new(build_tool.as_str());
+                        let mut cmd = build_command(build_tool.as_str());
                         cmd.args([
                             "build",
                             "--lib",
@@ -457,7 +519,7 @@ fn build_plugins(args: &[String]) {
                             "dynamic-plugin",
                         ]);
 
-                        if let Some(t) = target.as_ref() {
+                        if let Some(t) = cmd_target.as_ref() {
                             cmd.args(["--target", t]);
                         }
 
@@ -1093,3 +1155,69 @@ fn triple_to_arch_suffix(triple: &str) -> Option<String> {
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_glibc_suffix_from_gnu_triples() {
+        assert_eq!(
+            strip_glibc_suffix("x86_64-unknown-linux-gnu.2.28"),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            strip_glibc_suffix("aarch64-unknown-linux-gnu.2.17"),
+            "aarch64-unknown-linux-gnu"
+        );
+    }
+
+    #[test]
+    fn leaves_non_suffixed_triples_unchanged() {
+        for t in [
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-musl",
+            "x86_64-pc-windows-gnu",
+            "aarch64-apple-darwin",
+        ] {
+            assert_eq!(strip_glibc_suffix(t), t);
+        }
+    }
+
+    #[test]
+    fn detects_glibc_suffix() {
+        assert!(has_glibc_suffix("x86_64-unknown-linux-gnu.2.28"));
+        assert!(has_glibc_suffix("aarch64-unknown-linux-gnu.2.17"));
+
+        assert!(!has_glibc_suffix("x86_64-unknown-linux-gnu"));
+        assert!(!has_glibc_suffix("x86_64-unknown-linux-musl"));
+        assert!(!has_glibc_suffix("x86_64-pc-windows-gnu"));
+    }
+
+    #[test]
+    fn build_command_splits_multiword_tools() {
+        // Single-word tool: program only, no leading args.
+        let cargo = build_command("cargo");
+        assert_eq!(cargo.get_program(), "cargo");
+        assert_eq!(cargo.get_args().count(), 0);
+
+        // Multi-word tool: program + subcommand arg.
+        let zig = build_command("cargo zigbuild");
+        assert_eq!(zig.get_program(), "cargo");
+        let args: Vec<_> = zig.get_args().collect();
+        assert_eq!(args, ["zigbuild"]);
+    }
+
+    #[test]
+    fn plugin_lib_ext_and_name_match_base_gnu_triple() {
+        // After stripping the glibc suffix, the base -gnu triple yields a .so
+        // and a lib-prefixed name (regression guard for the zigbuild path).
+        let base = strip_glibc_suffix("x86_64-unknown-linux-gnu.2.28");
+        assert_eq!(plugin_lib_ext(Some(base)), "so");
+        assert_eq!(
+            plugin_lib_name("drasi-source-kubernetes", Some(base)),
+            "libdrasi_source_kubernetes"
+        );
+    }
+}
+
