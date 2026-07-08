@@ -177,6 +177,7 @@ jobs:
           GLIBC_FLOOR: ${{ matrix.glibc }}
         run: |
           set -euo pipefail
+          command -v objdump >/dev/null 2>&1 || { echo "::error::objdump not found (install binutils)"; exit 1; }
           PLUGINS_DIR="target/${{ matrix.target }}/release/plugins"
           if [ ! -d "$PLUGINS_DIR" ]; then
             echo "::error::Plugins directory not found: $PLUGINS_DIR"
