@@ -1,0 +1,201 @@
+// Tests for applyResultDiff in widgets.js (issue #605).
+// Run: node tests/apply_result_diff.test.js
+//
+// Loads the actual widgets.js source into a VM sandbox so the production
+// implementation is tested directly. Focuses on upsert-on-add semantics:
+// an `add` for a row whose key already exists must replace it, not duplicate.
+
+const { readFileSync } = require("fs");
+const path = require("path");
+const vm = require("vm");
+
+const widgetsSource = readFileSync(
+  path.join(__dirname, "../static/js/widgets.js"),
+  "utf-8"
+);
+
+const widgetsSandbox = {
+  window: { Handlebars: { registerHelper: () => {} } },
+  document: { createElement: () => ({}), documentElement: { getAttribute: () => "dark" } },
+  Map,
+  Number,
+  Math,
+  Array,
+  String,
+  Object,
+  RegExp,
+  JSON,
+  console,
+};
+
+// Strip ES module export/import syntax so it can run as a script in vm.
+const strippedSource = widgetsSource
+  .replace(/^export\s+\{[^}]*\};?\s*$/gm, "")
+  .replace(/^export\s+/gm, "")
+  .replace(/^import\s+.*$/gm, "");
+
+vm.runInNewContext(strippedSource, widgetsSandbox, { filename: "widgets.js" });
+
+const applyResultDiff = widgetsSandbox.applyResultDiff;
+const snapshotRowToAddDiff = widgetsSandbox.snapshotRowToAddDiff;
+
+// ─── Test runner ────────────────────────────────────────────────────
+let passed = 0;
+let failed = 0;
+
+function assertEqual(actual, expected, message) {
+  if (actual === expected) {
+    passed++;
+    console.log(`  ✓ ${message}`);
+  } else {
+    failed++;
+    console.error(`  ✗ ${message}`);
+    console.error(`    expected: ${JSON.stringify(expected)}`);
+    console.error(`    actual:   ${JSON.stringify(actual)}`);
+  }
+}
+
+function newRuntime() {
+  return { rows: [], latest: null, aggregation: null };
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────
+
+console.log("\n=== applyResultDiff: row_signature keying ===");
+
+{
+  // add of an existing row_signature replaces, not duplicates (no id needed)
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", k: 7777, data: { location: "Parking" } });
+  applyResultDiff(rt, { op: "add", k: 7777, data: { location: "Curbside" } });
+  assertEqual(rt.rows.length, 1, "add with same row_signature replaces (no duplicate)");
+  assertEqual(rt.rows[0].location, "Curbside", "replacement keeps newest value");
+}
+
+{
+  // distinct row_signatures append
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", k: 1, data: { location: "Parking" } });
+  applyResultDiff(rt, { op: "add", k: 2, data: { location: "Parking" } });
+  assertEqual(rt.rows.length, 2, "add with distinct row_signatures appends");
+}
+
+{
+  // update matches by row_signature even when before/after content differs
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", k: 42, data: { location: "Parking" } });
+  applyResultDiff(rt, { op: "update", k: 42, before: { location: "Parking" }, after: { location: "Curbside" } });
+  assertEqual(rt.rows.length, 1, "update matches by row_signature");
+  assertEqual(rt.rows[0].location, "Curbside", "update applies new value");
+}
+
+{
+  // seeded snapshot row (with k) then live add for same signature upserts (#605 plugin path)
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", k: 99, data: { location: "Parking" } }); // synthetic snapshot add
+  applyResultDiff(rt, { op: "add", k: 99, data: { location: "Curbside" } }); // first live change as add
+  assertEqual(rt.rows.length, 1, "seeded-then-add by signature upserts");
+  assertEqual(rt.rows[0].location, "Curbside", "live add replaces seeded row");
+}
+
+{
+  // delete by row_signature removes the row
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", k: 5, data: { location: "Parking" } });
+  applyResultDiff(rt, { op: "delete", k: 5, data: { location: "Parking" } });
+  assertEqual(rt.rows.length, 0, "delete by row_signature removes the row");
+}
+
+console.log("\n=== applyResultDiff: id/equality fallback (row_signature unknown) ===");
+
+{
+  // add of an existing id replaces when signature is 0/absent
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", data: { id: "A1234", location: "Parking" } });
+  applyResultDiff(rt, { op: "add", data: { id: "A1234", location: "Curbside" } });
+  assertEqual(rt.rows.length, 1, "add with existing id replaces (no duplicate)");
+  assertEqual(rt.rows[0].location, "Curbside", "replacement keeps newest value");
+}
+
+{
+  // add of distinct ids appends
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", data: { id: "A", v: 1 } });
+  applyResultDiff(rt, { op: "add", data: { id: "B", v: 2 } });
+  assertEqual(rt.rows.length, 2, "add with distinct ids appends");
+}
+
+{
+  // rows without id or signature fall back to full-object equality
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", data: { name: "Alice" } });
+  applyResultDiff(rt, { op: "add", data: { name: "Alice" } });
+  assertEqual(rt.rows.length, 1, "add with identical keyless row upserts by equality");
+}
+
+{
+  // signature takes precedence over id when both present
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", k: 1, data: { id: "X", v: 1 } });
+  applyResultDiff(rt, { op: "add", k: 2, data: { id: "X", v: 2 } });
+  assertEqual(rt.rows.length, 2, "different signatures with same id are distinct rows");
+}
+
+{
+  // sig-0 seeded row (id known) then real-signature live add must replace it
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", data: { id: "A1234", location: "Parking" } }); // seeded, sig 0
+  applyResultDiff(rt, { op: "add", k: 42, data: { id: "A1234", location: "Curbside" } }); // live, real sig
+  assertEqual(rt.rows.length, 1, "real-signature add replaces sig-0 seeded row (id fallback)");
+  assertEqual(rt.rows[0].location, "Curbside", "row updated to live value");
+}
+
+console.log("\n=== string-form row_signature (64-bit precision-safe wire) ===");
+
+{
+  // signatures arrive as strings on the wire; same string upserts
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", k: "12345678901234567890", data: { location: "Parking" } });
+  applyResultDiff(rt, { op: "add", k: "12345678901234567890", data: { location: "Curbside" } });
+  assertEqual(rt.rows.length, 1, "same string signature upserts");
+  assertEqual(rt.rows[0].location, "Curbside", "string-sig replacement keeps newest value");
+}
+
+{
+  // two large signatures that would collide as JS Numbers stay distinct as strings
+  const rt = newRuntime();
+  applyResultDiff(rt, { op: "add", k: "9007199254740993", data: { v: 1 } });
+  applyResultDiff(rt, { op: "add", k: "9007199254740992", data: { v: 2 } });
+  assertEqual(rt.rows.length, 2, "near-2^53 string signatures are not conflated");
+}
+
+console.log("\n=== snapshotRowToAddDiff: snapshot envelope decode ===");
+
+{
+  // { k, v } envelope is decoded into an add diff carrying the signature
+  const diff = snapshotRowToAddDiff({ k: "42", v: { location: "Parking" } });
+  assertEqual(diff.op, "add", "decodes to an add diff");
+  assertEqual(diff.k, "42", "carries the row_signature");
+  assertEqual(diff.data.location, "Parking", "carries the row data");
+}
+
+{
+  // a plain row containing a `v` field is NOT misread as an envelope
+  const diff = snapshotRowToAddDiff({ id: "X", v: 42 });
+  assertEqual(diff.data.id, "X", "plain row passed through (data)");
+  assertEqual(diff.data.v, 42, "plain row's v field preserved");
+  assertEqual(diff.k, undefined, "no signature for a plain row");
+}
+
+{
+  // snapshot-load then live diff: signature threads through end to end
+  const rt = newRuntime();
+  applyResultDiff(rt, snapshotRowToAddDiff({ k: "777", v: { location: "Parking" } }));
+  applyResultDiff(rt, { op: "add", k: "777", data: { location: "Curbside" } });
+  assertEqual(rt.rows.length, 1, "live diff replaces snapshot-loaded row by signature");
+  assertEqual(rt.rows[0].location, "Curbside", "row updated to live value");
+}
+
+// ─── Summary ────────────────────────────────────────────────────────
+console.log(`\n${passed + failed} tests, ${passed} passed, ${failed} failed\n`);
+process.exit(failed > 0 ? 1 : 0);

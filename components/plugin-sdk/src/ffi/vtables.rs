@@ -273,6 +273,9 @@ pub struct FfiRuntimeContext {
     pub instance_id: FfiStr,
     pub component_id: FfiStr,
     /// Nullable — not all plugins need state store.
+    ///
+    /// **Lifetime: persistent.** The plugin retains this pointer for the component's
+    /// lifetime; neither side frees the vtable struct.
     pub state_store: *const StateStoreVtable,
     /// Per-instance log callback (nullable — falls back to global if null).
     pub log_callback: Option<super::callbacks::LogCallbackFn>,
@@ -283,10 +286,21 @@ pub struct FfiRuntimeContext {
     /// Opaque context for per-instance lifecycle callback.
     pub lifecycle_ctx: *mut c_void,
     /// Nullable — identity provider for credential injection.
+    ///
+    /// **Lifetime: transient.** Valid only for the duration of `initialize_fn`. The plugin
+    /// must copy the vtable fields by value before `initialize_fn` returns (as
+    /// `FfiIdentityProviderProxy::new` does); the host frees the vtable struct immediately
+    /// after `initialize_fn` returns. The plugin must not retain this pointer past `initialize_fn`.
     pub identity_provider: *const super::identity::IdentityProviderVtable,
     /// Nullable — snapshot fetcher for on-demand query snapshot access.
+    ///
+    /// **Lifetime: persistent.** The plugin retains this pointer for the component's
+    /// lifetime; neither side frees the vtable struct.
     pub snapshot_fetcher: *const SnapshotFetcherVtable,
     /// Nullable — WAL provider for transient source durability.
+    ///
+    /// **Lifetime: persistent.** The plugin retains this pointer and (via
+    /// `FfiWalProviderProxy`) frees the vtable struct and its inner state on `Drop`.
     pub wal_provider: *const WalProviderVtable,
 }
 

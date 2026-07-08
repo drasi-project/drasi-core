@@ -559,6 +559,16 @@ p { margin: 0.5em 0; }
   grid-template-columns: 260px 1fr;
   gap: 16px;
   min-height: calc(100vh - 160px);
+  position: relative;
+}
+
+/* Collapsed: hide the sidebar and give the canvas full width. */
+.editor-layout.sidebar-collapsed {
+  grid-template-columns: 1fr;
+}
+
+.editor-layout.sidebar-collapsed .editor-sidebar {
+  display: none;
 }
 
 .editor-sidebar {
@@ -569,6 +579,53 @@ p { margin: 0.5em 0; }
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar-header .dashboard-name-editable {
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebar-toggle-btn,
+.sidebar-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.sidebar-toggle-btn:hover,
+.sidebar-expand-btn:hover {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+/* Floating "show panel" button, only visible when collapsed. */
+.sidebar-expand-btn {
+  display: none;
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 5;
+}
+
+.editor-layout.sidebar-collapsed .sidebar-expand-btn {
+  display: inline-flex;
 }
 
 .sidebar-section-title {

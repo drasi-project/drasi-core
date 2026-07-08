@@ -13,15 +13,12 @@
 # limitations under the License.
 
 [package]
-name = "drasi-identity-azure"
-version = "0.2.10"
-edition = "2021"
-authors = ["Drasi Project"]
-description = "Azure identity provider plugin for Drasi"
-license = "Apache-2.0"
-repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "identity", "azure"]
-categories = ["authentication"]
+name = "drasi-identity-test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hermetic test-fixture identity provider plugin for validating the FFI identity-provider boundary"
+publish = false
 
 [lib]
 crate-type = ["lib", "cdylib"]
@@ -35,13 +32,8 @@ drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
-log = "0.4"
-tokio = { version = "1.0", features = ["rt-multi-thread", "sync"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-azure_identity = { version = "0.31", default-features = false, features = ["tokio"] }
-azure_core = { version = "0.31", default-features = false, features = ["tokio", "reqwest"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [features]
 dynamic-plugin = []
