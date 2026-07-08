@@ -18,14 +18,10 @@ on:
         default: false
 
 permissions:
+  # Defaults for the release-plz job (create release PRs, push tags/commits).
+  # The downstream publish-plugins job grants its own packages/id-token scopes.
   pull-requests: write
   contents: write
-  # Required so the downstream publish-plugins job (called via workflow_call)
-  # can push OCI images and use cosign keyless signing. A called workflow's
-  # GITHUB_TOKEN cannot exceed the caller's permissions, so they must be granted
-  # here even though release-plz itself does not use them.
-  packages: write
-  id-token: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -110,6 +106,12 @@ jobs:
     name: Publish plugins
     needs: release-plz
     if: ${{ needs.release-plz.outputs.published == 'true' }}
+    # Elevated scopes needed by the called publish-plugins.yml (OCI push + cosign
+    # keyless). A called workflow's token can't exceed the calling job's grants.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     uses: ./.github/workflows/publish-plugins.yml
     with:
       sign: true

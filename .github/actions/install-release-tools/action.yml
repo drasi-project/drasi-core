@@ -20,7 +20,9 @@ runs:
 
     - name: Set JQ_LIB_DIR
       shell: bash
-      run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> "$GITHUB_ENV"
+      # Derive the multiarch lib path from uname -m so this works on amd64 and
+      # arm64 runners (matches publish-plugins.yml).
+      run: echo "JQ_LIB_DIR=/usr/lib/$(uname -m)-linux-gnu" >> "$GITHUB_ENV"
 
     - name: Install Rust toolchain
       shell: bash

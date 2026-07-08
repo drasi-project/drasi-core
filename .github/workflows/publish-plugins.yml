@@ -9,7 +9,7 @@ on:
         type: string
         default: ''
       tag:
-        description: 'Fixed tag override (e.g. "drasi-nightly-test"). Mutually exclusive with pre_release.'
+        description: 'Fixed tag override (e.g. "drasi-nightly-test"). When set, overrides pre_release.'
         required: false
         type: string
         default: ''
@@ -33,6 +33,11 @@ on:
         required: false
         type: boolean
         default: false
+      ref:
+        description: 'Git ref/SHA to check out and build (default: the triggering ref)'
+        required: false
+        type: string
+        default: ''
   workflow_call:
     inputs:
       pre_release:
@@ -41,7 +46,7 @@ on:
         type: string
         default: ''
       tag:
-        description: 'Fixed tag override (e.g. "drasi-nightly-test"). Mutually exclusive with pre_release.'
+        description: 'Fixed tag override (e.g. "drasi-nightly-test"). When set, overrides pre_release.'
         required: false
         type: string
         default: ''
@@ -65,6 +70,11 @@ on:
         required: false
         type: boolean
         default: false
+      ref:
+        description: 'Git ref/SHA to check out and build (default: the triggering ref)'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   packages: write
@@ -114,6 +124,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          # Empty ref falls back to the triggering ref (release-plz / manual runs).
+          # The nightly passes the resolved main SHA so plugins are built from the
+          # same commit as core_sha handed to the drasi-server e2e.
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
 
       - name: Install system dependencies (Linux)

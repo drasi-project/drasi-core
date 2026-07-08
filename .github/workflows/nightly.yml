@@ -46,13 +46,8 @@ on:
       - drasi-e2e-nightly
 
 permissions:
-  # contents: read for checkout + release dry-run; packages: write +
-  # id-token: write for the publish-plugins call (OCI push + cosign);
-  # issues: write for the report-failure job to open/update the tracking issue.
+  # Least privilege by default; elevated scopes are granted per-job below.
   contents: read
-  packages: write
-  id-token: write
-  issues: write
 
 jobs:
   resolve-sha:
@@ -63,7 +58,7 @@ jobs:
       plugin_tag: ${{ steps.rev.outputs.plugin_tag }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           # Always pin the nightly to main's HEAD, regardless of the ref this
           # workflow was dispatched from.
@@ -93,8 +88,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
+          # Check out the exact SHA resolve-sha pinned, so the dry-run validates
+          # the same commit the nightly is testing (not the triggering ref, which
+          # differs on push/workflow_dispatch from a branch).
+          ref: ${{ needs.resolve-sha.outputs.sha }}
           fetch-depth: 0
 
       - name: Install release tools
@@ -111,6 +110,12 @@ jobs:
   publish-plugins:
     name: Publish nightly plugins
     needs: [resolve-sha, release-dry-run]
+    # Elevated scopes needed by the called publish-plugins.yml (OCI push + cosign
+    # keyless). A called workflow's token can't exceed the calling job's grants.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     # Single chain: publish only after the release dry-run passes. always()
     # so a *skipped* release-dry-run (skip_release_dry_run) still lets publishing
     # proceed, while a *failed* release-dry-run blocks the rest of the nightly.
@@ -121,10 +126,14 @@ jobs:
         && needs.release-dry-run.result != 'failure'
         && needs.release-dry-run.result != 'cancelled'
         && inputs.skip_publish_plugins != true
-        && !contains(github.event.head_commit.message, '[skip-plugins]') }}
+        && !contains(github.event.head_commit.message || '', '[skip-plugins]') }}
     uses: ./.github/workflows/publish-plugins.yml
     with:
       tag: ${{ needs.resolve-sha.outputs.plugin_tag }}
+      # Build plugins from the exact SHA resolve-sha pinned, so the published
+      # images match the core_sha handed to the drasi-server e2e (not the
+      # triggering ref, which differs on push/workflow_dispatch from a branch).
+      ref: ${{ needs.resolve-sha.outputs.sha }}
       # Nightly -test channel: skip cosign signing to avoid orphaned signatures
       # on each tag overwrite.
       sign: false
@@ -146,6 +155,12 @@ jobs:
   call-server-e2e:
     name: drasi-server e2e
     needs: [resolve-sha, publish-plugins]
+    # contents: read to call the reusable workflow; packages: read so the consumer
+    # can pull the nightly plugin images. A called workflow's token can't exceed
+    # the calling job's grants.
+    permissions:
+      contents: read
+      packages: read
     # Run when resolve-sha succeeded and publish-plugins did not fail. Using
     # always() + result checks so a *skipped* publish-plugins (e.g. [skip-plugins])
     # still lets the e2e run against the already-published tag.
@@ -169,6 +184,9 @@ jobs:
     needs: [resolve-sha, release-dry-run, publish-plugins, call-server-e2e]
     if: ${{ always() && github.event_name != 'push' && contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-latest
+    # Only this job writes the tracking issue.
+    permissions:
+      issues: write
     steps:
       - name: Open or update failure issue
         uses: actions/github-script@v7
