@@ -26,65 +26,89 @@ use super::identity::IdentityProviderVtable;
 /// Plugin-side proxy wrapping an `IdentityProviderVtable` into the
 /// `IdentityProvider` trait. Plugins use this to call the host's
 /// identity provider through FFI.
+///
+/// The vtable is stored **by value** (not as a raw `Box` pointer), mirroring the
+/// host-side `HostIdentityProviderProxy`. Storing by value means there is no separate
+/// vtable-struct allocation to track or free, so `clone_box` cannot leak the struct and
+/// `Drop` never has to (incorrectly) free host-owned memory across the cdylib boundary.
 pub struct FfiIdentityProviderProxy {
-    vtable: *const IdentityProviderVtable,
+    vtable: IdentityProviderVtable,
 }
 
-// Safety: The vtable points to host-allocated state (Arc<dyn IdentityProvider>)
-// which is Send+Sync. The vtable itself is immutable after creation.
+// Safety: `vtable.state` references host-allocated state (Arc<dyn IdentityProvider>)
+// which is Send+Sync. The vtable function pointers are immutable after creation.
 unsafe impl Send for FfiIdentityProviderProxy {}
 unsafe impl Sync for FfiIdentityProviderProxy {}
 
 impl FfiIdentityProviderProxy {
     /// Create a new proxy from a vtable pointer.
     ///
+    /// The four vtable fields are copied **by value** out of `vtable`; the proxy does not
+    /// retain the pointer. Ownership of the underlying state (`drop_fn` will be called on
+    /// `Drop`) transfers to the proxy, but the caller's vtable-struct allocation remains
+    /// owned by the caller and is never freed here.
+    ///
     /// # Safety
-    /// The vtable pointer must be valid and the vtable must outlive this proxy.
-    /// The proxy takes ownership (will call drop_fn on Drop).
+    /// The vtable pointer must be non-null and valid for the duration of this call.
+    /// The `state` it contains must remain valid for the full lifetime of the returned
+    /// proxy; the proxy calls `drop_fn(state)` on `Drop`.
     pub unsafe fn new(vtable: *const IdentityProviderVtable) -> Self {
-        Self { vtable }
+        assert!(
+            !vtable.is_null(),
+            "FfiIdentityProviderProxy::new: vtable pointer is null"
+        );
+        let vtable = &*vtable;
+        Self {
+            vtable: IdentityProviderVtable {
+                state: vtable.state,
+                get_credentials_fn: vtable.get_credentials_fn,
+                clone_fn: vtable.clone_fn,
+                drop_fn: vtable.drop_fn,
+            },
+        }
     }
 }
 
 #[async_trait]
 impl IdentityProvider for FfiIdentityProviderProxy {
     async fn get_credentials(&self, context: &CredentialContext) -> Result<Credentials> {
-        let vtable = unsafe { &*self.vtable };
         // Serialize context as JSON for FFI transport
         let context_json =
             serde_json::to_string(&context.properties).unwrap_or_else(|_| "{}".to_string());
-        let result =
-            (vtable.get_credentials_fn)(vtable.state, context_json.as_ptr(), context_json.len());
+        let result = (self.vtable.get_credentials_fn)(
+            self.vtable.state,
+            context_json.as_ptr(),
+            context_json.len(),
+        );
         unsafe { result.into_result() }
     }
 
     fn clone_box(&self) -> Box<dyn IdentityProvider> {
-        let vtable = unsafe { &*self.vtable };
-        let cloned_state = (vtable.clone_fn)(vtable.state);
+        let cloned_state = (self.vtable.clone_fn)(self.vtable.state);
 
-        // Build a new vtable with the cloned state but same function pointers
-        let cloned_vtable = Box::new(IdentityProviderVtable {
-            state: cloned_state,
-            get_credentials_fn: vtable.get_credentials_fn,
-            clone_fn: vtable.clone_fn,
-            drop_fn: vtable.drop_fn,
-        });
-
+        // Build a new vtable value with freshly cloned state and the same function
+        // pointers. No heap allocation for the vtable struct, so nothing to leak.
         Box::new(FfiIdentityProviderProxy {
-            vtable: Box::into_raw(cloned_vtable),
+            vtable: IdentityProviderVtable {
+                state: cloned_state,
+                get_credentials_fn: self.vtable.get_credentials_fn,
+                clone_fn: self.vtable.clone_fn,
+                drop_fn: self.vtable.drop_fn,
+            },
         })
     }
 }
 
 impl Drop for FfiIdentityProviderProxy {
     fn drop(&mut self) {
-        if !self.vtable.is_null() {
-            let vtable = unsafe { &*self.vtable };
-            (vtable.drop_fn)(vtable.state);
-            // If we own the vtable (from clone_box), free it
-            // Note: the original vtable from FfiRuntimeContext is host-owned
-            // and should NOT be freed here. Only cloned vtables should be freed.
-            // We handle this by always using Box::into_raw for cloned vtables.
-        }
+        // Release the underlying host state (decrements the Arc refcount). There is no
+        // separate vtable-struct allocation owned by this proxy, so nothing else to free.
+        // `state` is established non-null by `new`/`clone_box`; a null here would indicate
+        // a `clone_fn` that returned null after a caught panic, which we surface in dev.
+        debug_assert!(
+            !self.vtable.state.is_null(),
+            "FfiIdentityProviderProxy::drop: state is null; clone_fn may have panicked"
+        );
+        (self.vtable.drop_fn)(self.vtable.state);
     }
 }

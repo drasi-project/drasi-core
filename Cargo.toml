@@ -85,6 +85,7 @@ members = [
   # Identity Provider Plugins
   "components/identity/azure",
   "components/identity/aws",
+  "components/identity/test-fixture",
 
   # Secret Store Plugins
   "components/secret_stores/file",

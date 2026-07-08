@@ -242,12 +242,23 @@ impl MsSqlBootstrapHandler {
 
         let mut total_count = 0;
 
+        // Timestamp applied to every bootstrapped row's `effective_from`, so
+        // `drasi.changeDateTime()` reflects the snapshot time instead of epoch 0.
+        let effective_from = chrono::Utc::now().timestamp_millis() as u64;
+
         // Bootstrap each node label
         for (label, table_name) in &tables {
             info!("Bootstrapping table '{table_name}' with label '{label}'");
 
             let count = self
-                .bootstrap_table(client, label, table_name, context, &event_tx)
+                .bootstrap_table(
+                    client,
+                    label,
+                    table_name,
+                    effective_from,
+                    context,
+                    &event_tx,
+                )
                 .await?;
 
             total_count += count;
@@ -338,6 +349,7 @@ impl MsSqlBootstrapHandler {
         client: &mut tiberius::Client<tokio_util::compat::Compat<tokio::net::TcpStream>>,
         label: &str,
         table_name: &str,
+        effective_from: u64,
         context: &BootstrapContext,
         event_tx: &tokio::sync::mpsc::Sender<BootstrapEvent>,
     ) -> Result<usize> {
@@ -357,7 +369,9 @@ impl MsSqlBootstrapHandler {
 
         for row_set in rows {
             for row in row_set {
-                let source_change = self.row_to_source_change(&row, label, table_name).await?;
+                let source_change = self
+                    .row_to_source_change(&row, label, table_name, effective_from)
+                    .await?;
 
                 batch.push(SourceChangeEvent {
                     source_id: self.source_id.clone(),
@@ -388,6 +402,7 @@ impl MsSqlBootstrapHandler {
         row: &Row,
         label: &str,
         table_name: &str,
+        effective_from: u64,
     ) -> Result<SourceChange> {
         let mut properties = ElementPropertyMap::new();
 
@@ -411,7 +426,7 @@ impl MsSqlBootstrapHandler {
                 metadata: ElementMetadata {
                     reference: ElementReference::new(&self.source_id, &element_id),
                     labels: Arc::from([Arc::from(label)]),
-                    effective_from: 0,
+                    effective_from,
                 },
                 properties,
             },
