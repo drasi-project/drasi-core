@@ -105,17 +105,7 @@ drasi-index-rocksdb = { path = "../components/indexes/rocksdb", features = [
 ] }
 # Mirrors how drasi-server depends on the plugin SDK to drive index backends
 # through their descriptor/DTO when statically linking a backend crate.
-#
-# IMPORTANT: This is a path-only dependency (no version) on purpose. There is a
-# dependency cycle between drasi-lib and drasi-plugin-sdk:
-#   - drasi-plugin-sdk depends on drasi-lib (normal dependency)
-#   - drasi-lib depends on drasi-plugin-sdk (this dev-dependency)
-# Cargo strips path-only dev-dependencies from the published manifest, so
-# `cargo publish` of drasi-lib does NOT require drasi-plugin-sdk to exist on
-# crates.io. This breaks the publish deadlock (see issue #617) and lets
-# drasi-lib publish first, followed by drasi-plugin-sdk. Do NOT add a `version`
-# or switch back to `{ workspace = true }` here, or the release will deadlock.
-drasi-plugin-sdk = { path = "../components/plugin-sdk" }
+drasi-plugin-sdk = { workspace = true }
 
 # Additional testing dependencies
 rstest = "0.18"
