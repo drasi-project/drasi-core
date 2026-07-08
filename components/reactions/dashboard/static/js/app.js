@@ -2,7 +2,7 @@ import { DashboardDesigner } from "./dashboard.js";
 import { DashboardSocket } from "./websocket.js";
 import { promptModal, confirmModal, showToast } from "./modal.js";
 import { initTheme, toggleTheme } from "./theme.js";
-import { reThemeAllCharts } from "./widgets.js";
+import { reThemeAllCharts, resizeAllCharts } from "./widgets.js";
 
 // ─── Theme ──────────────────────────────────────────────────
 initTheme();
@@ -23,6 +23,11 @@ const newDashboardButton = document.getElementById("new-dashboard-btn");
 const backButton = document.getElementById("back-btn");
 const saveButton = document.getElementById("save-dashboard-btn");
 const addWidgetButton = document.getElementById("add-widget-btn");
+const editorLayout = document.getElementById("editor-layout");
+const sidebarCollapseButton = document.getElementById("sidebar-collapse-btn");
+const sidebarExpandButton = document.getElementById("sidebar-expand-btn");
+
+const SIDEBAR_COLLAPSED_KEY = "drasi-dashboard-sidebar-collapsed";
 
 // ─── State ──────────────────────────────────────────────────
 const designer = new DashboardDesigner("dashboard-grid");
@@ -63,6 +68,33 @@ function showListView() {
 function showEditorView() {
   editorView.classList.add("active");
   listView.classList.remove("active");
+}
+
+// ─── Sidebar Collapse ───────────────────────────────────────
+function applySidebarCollapsed(collapsed) {
+  editorLayout.classList.toggle("sidebar-collapsed", collapsed);
+  sidebarCollapseButton.setAttribute("aria-expanded", String(!collapsed));
+  // Let the layout settle, then reflow charts to the new canvas width.
+  window.setTimeout(() => resizeAllCharts(), 50);
+}
+
+function setSidebarCollapsed(collapsed) {
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+  } catch (error) {
+    // Ignore storage errors (e.g. private mode); collapse still works in-session.
+  }
+  applySidebarCollapsed(collapsed);
+}
+
+function initSidebarCollapsed() {
+  let collapsed = false;
+  try {
+    collapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+  } catch (error) {
+    collapsed = false;
+  }
+  applySidebarCollapsed(collapsed);
 }
 
 // ─── Socket Status ──────────────────────────────────────────
@@ -251,6 +283,9 @@ function bindEvents() {
     designer.openWidgetPicker();
   });
 
+  sidebarCollapseButton.addEventListener("click", () => setSidebarCollapsed(true));
+  sidebarExpandButton.addEventListener("click", () => setSidebarCollapsed(false));
+
   designer.onChanged(async (dashboard) => {
     if (!dashboard) return;
     currentDashboard = dashboard;
@@ -271,6 +306,7 @@ function bootSocket() {
 async function init() {
   designer.init();
   bindEvents();
+  initSidebarCollapsed();
   bootSocket();
   await refreshQueryList();
   await refreshDashboards();
