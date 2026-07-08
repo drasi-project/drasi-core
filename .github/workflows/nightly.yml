@@ -26,12 +26,12 @@ on:
         required: false
         type: string
         default: 'drasi-nightly-test'
-      skip_release_health:
-        description: 'Skip the release-plz dry-run health check'
+      skip_release_dry_run:
+        description: 'Skip the release-plz dry-run check'
         required: false
         type: boolean
         default: false
-      skip_dispatch:
+      skip_server_e2e:
         description: 'Skip calling the drasi-server e2e (build/publish only)'
         required: false
         type: boolean
@@ -87,7 +87,7 @@ jobs:
   release-dry-run:
     name: Release dry-run (release-plz)
     needs: resolve-sha
-    if: ${{ inputs.skip_release_health != true }}
+    if: ${{ inputs.skip_release_dry_run != true }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -110,7 +110,7 @@ jobs:
     name: Publish nightly plugins
     needs: [resolve-sha, release-dry-run]
     # Single chain: publish only after the release dry-run passes. always()
-    # so a *skipped* release-dry-run (skip_release_health) still lets publishing
+    # so a *skipped* release-dry-run (skip_release_dry_run) still lets publishing
     # proceed, while a *failed* release-dry-run blocks the rest of the nightly.
     # [skip-plugins] / skip_publish_plugins reuse an already-published nightly tag.
     if: >-
@@ -147,7 +147,7 @@ jobs:
     # Run when resolve-sha succeeded and publish-plugins did not fail. Using
     # always() + result checks so a *skipped* publish-plugins (e.g. [skip-plugins])
     # still lets the e2e run against the already-published tag.
-    if: ${{ always() && inputs.skip_dispatch != true && needs.resolve-sha.result == 'success' && needs.publish-plugins.result != 'failure' && needs.publish-plugins.result != 'cancelled' }}
+    if: ${{ always() && inputs.skip_server_e2e != true && needs.resolve-sha.result == 'success' && needs.publish-plugins.result != 'failure' && needs.publish-plugins.result != 'cancelled' }}
     uses: drasi-project/drasi-server/.github/workflows/nightly-e2e.yml@drasi-e2e-nightly
     with:
       core_sha: ${{ needs.resolve-sha.outputs.sha }}
