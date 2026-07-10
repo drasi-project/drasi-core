@@ -427,7 +427,9 @@ impl SourcePluginDescriptor for MqttSourceDescriptor {
 
         let connect_properties = match dto.connect_properties {
             Some(p) => Some(MqttConnectProperties {
-                session_expiry_interval: mapper.resolve_optional(&p.session_expiry_interval).await?,
+                session_expiry_interval: mapper
+                    .resolve_optional(&p.session_expiry_interval)
+                    .await?,
                 receive_maximum: mapper.resolve_optional(&p.receive_maximum).await?,
                 max_packet_size: mapper.resolve_optional(&p.max_packet_size).await?,
                 topic_alias_max: mapper.resolve_optional(&p.topic_alias_max).await?,
@@ -462,17 +464,27 @@ impl SourcePluginDescriptor for MqttSourceDescriptor {
                 Some(t) => Some(t.into_runtime(&mapper).await?),
                 None => None,
             },
-            request_channel_capacity: mapper.resolve_optional(&dto.request_channel_capacity).await?,
+            request_channel_capacity: mapper
+                .resolve_optional(&dto.request_channel_capacity)
+                .await?,
             max_inflight: mapper.resolve_optional(&dto.max_inflight).await?,
             keep_alive: mapper.resolve_optional(&dto.keep_alive).await?,
             clean_start: mapper.resolve_optional(&dto.clean_start).await?,
-            max_incoming_packet_size: mapper.resolve_optional(&dto.max_incoming_packet_size).await?,
-            max_outgoing_packet_size: mapper.resolve_optional(&dto.max_outgoing_packet_size).await?,
+            max_incoming_packet_size: mapper
+                .resolve_optional(&dto.max_incoming_packet_size)
+                .await?,
+            max_outgoing_packet_size: mapper
+                .resolve_optional(&dto.max_outgoing_packet_size)
+                .await?,
             conn_timeout: mapper.resolve_optional(&dto.conn_timeout).await?,
             connect_properties,
             subscribe_properties,
-            adaptive_max_batch_size: mapper.resolve_optional(&dto.adaptive_max_batch_size).await?,
-            adaptive_min_batch_size: mapper.resolve_optional(&dto.adaptive_min_batch_size).await?,
+            adaptive_max_batch_size: mapper
+                .resolve_optional(&dto.adaptive_max_batch_size)
+                .await?,
+            adaptive_min_batch_size: mapper
+                .resolve_optional(&dto.adaptive_min_batch_size)
+                .await?,
             adaptive_max_wait_ms: mapper.resolve_optional(&dto.adaptive_max_wait_ms).await?,
             adaptive_min_wait_ms: mapper.resolve_optional(&dto.adaptive_min_wait_ms).await?,
             adaptive_window_secs: mapper.resolve_optional(&dto.adaptive_window_secs).await?,

@@ -272,6 +272,7 @@ impl MqttProcessor {
                         timestamp: chrono::DateTime::<chrono::Utc>::from(
                             std::time::UNIX_EPOCH + std::time::Duration::from_millis(timestamp),
                         ),
+                        sequence: None,
                     };
 
                     tokio::select! {

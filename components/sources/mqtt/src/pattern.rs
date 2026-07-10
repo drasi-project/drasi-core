@@ -281,14 +281,14 @@ impl PatternMatcher {
         properties: &serde_json::Map<String, serde_json::Value>,
     ) -> anyhow::Result<String> {
         let mut out = String::with_capacity(s.len());
-        let bytes = s.chars().collect::<Vec<_>>();
+        let chars = s.chars().collect::<Vec<_>>();
         let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == '$' && i + 1 < bytes.len() && bytes[i + 1] == '.' {
+        while i < chars.len() {
+            if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '.' {
                 let start = i + 2;
                 let mut end = start;
-                while end < bytes.len() {
-                    let c = bytes[end];
+                while end < chars.len() {
+                    let c = chars[end];
                     if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
                         end += 1;
                     } else {
@@ -300,8 +300,8 @@ impl PatternMatcher {
                     i += 2;
                     continue;
                 }
-                let path = &s[start..end];
-                let value = properties.get(path).ok_or_else(|| {
+                let path: String = chars[start..end].iter().collect();
+                let value = properties.get(&path).ok_or_else(|| {
                     anyhow::anyhow!("Property '{path}' not found for payload reference")
                 })?;
                 let stringified = match value {
@@ -318,7 +318,7 @@ impl PatternMatcher {
                 out.push_str(&stringified);
                 i = end;
             } else {
-                out.push(bytes[i]);
+                out.push(chars[i]);
                 i += 1;
             }
         }
@@ -848,6 +848,28 @@ mod tests {
                 ..
             } => {
                 assert_eq!(id, "f9-to-gw7");
+            }
+            _ => panic!("last change should be the relation"),
+        }
+    }
+
+    #[test]
+    fn relation_id_payload_ref_handles_multibyte_prefix() {
+        let mut mapping = topic_mapping(MappingMode::PayloadSpread, None);
+        mapping.relations[0].id = "cafe\u{301}-$.gateway".to_string();
+        mapping.relations.truncate(1);
+
+        let matcher = PatternMatcher::new(&vec![mapping]);
+        let input = packet("building/f9/r3/dev", br#"{"gateway":"gw7","v":1}"#, 42);
+        let changes = matcher.generate_schema(&input).expect("schema");
+
+        let last = changes.last().expect("at least one change");
+        match last {
+            MqttSourceChange::Update {
+                element: MqttElement::Relation { id, .. },
+                ..
+            } => {
+                assert_eq!(id, "cafe\u{301}-gw7");
             }
             _ => panic!("last change should be the relation"),
         }

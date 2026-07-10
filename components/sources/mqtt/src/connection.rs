@@ -24,7 +24,7 @@ use rumqttc::v5::{
     AsyncClient as AsyncClientV5, EventLoop as EventLoopV5, MqttOptions as MqttOptionsV5,
 };
 use rumqttc::{
-    v5::{mqttbytes::v5::ConnectReturnCode, ConnectionError},
+    v5::{mqttbytes::v5::ConnectReturnCode as ConnectReturnCodeV5, ConnectionError},
     AsyncClient, EventLoop, MqttOptions,
 };
 use std::sync::Arc;
@@ -382,14 +382,25 @@ impl MqttConnection {
 
         let (client_v5, mut event_loop_v5) =
             AsyncClientV5::new(options_v5, config.event_channel_capacity);
-        for trial in 0..5 {
+        let mut trial = 0;
+        while trial < 5 {
             match event_loop_v5.poll().await {
-                Ok(event) => {
+                Ok(rumqttc::v5::Event::Incoming(rumqttc::v5::mqttbytes::v5::Packet::ConnAck(
+                    connack,
+                ))) if connack.code == ConnectReturnCodeV5::Success => {
                     info!("Successfully connected to MQTT broker using v5 options");
                     return Ok((client_v5, event_loop_v5));
                 }
+                Ok(rumqttc::v5::Event::Incoming(rumqttc::v5::mqttbytes::v5::Packet::ConnAck(
+                    connack,
+                ))) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to connect using MQTT v5 options: broker returned {:?}",
+                        connack.code
+                    ));
+                }
                 Err(ConnectionError::ConnectionRefused(
-                    ConnectReturnCode::UnsupportedProtocolVersion,
+                    ConnectReturnCodeV5::UnsupportedProtocolVersion,
                 )) => {
                     error!(
                         "Failed to connect using MQTT v5 options: Unsupported protocol version."
@@ -398,16 +409,18 @@ impl MqttConnection {
                         "Failed to connect using MQTT v5 options: Unsupported protocol version. The broker may not support MQTT v5."
                     ));
                 }
+                Ok(event) => {
+                    info!("Waiting for MQTT v5 ConnAck, observed event: {event:?}");
+                }
                 Err(e) => {
+                    trial += 1;
                     error!(
-                        "Failed to connect using MQTT v5 options on trial {}: {:?}",
-                        trial + 1,
-                        e
+                        "Failed to connect using MQTT v5 options on trial {trial}: {e:?}",
                     );
+                    // delay before retrying
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             };
-            // delay before retrying
-            tokio::time::sleep(Duration::from_millis(500)).await;
         }
         Err(anyhow::anyhow!(
             "Failed to connect to MQTT broker using MQTT v5 options after multiple attempts."
@@ -424,22 +437,33 @@ impl MqttConnection {
         let (client_v3, mut event_loop_v3) =
             AsyncClient::new(options_v3, config.event_channel_capacity);
 
-        for trial in 0..5 {
+        let mut trial = 0;
+        while trial < 5 {
             match event_loop_v3.poll().await {
-                Ok(event) => {
+                Ok(rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(connack)))
+                    if connack.code == rumqttc::ConnectReturnCode::Success =>
+                {
                     info!("Successfully connected to MQTT broker using v3 options");
                     return Ok((client_v3, event_loop_v3));
                 }
+                Ok(rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(connack))) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to connect using MQTT v3 options: broker returned {:?}",
+                        connack.code
+                    ));
+                }
+                Ok(event) => {
+                    info!("Waiting for MQTT v3 ConnAck, observed event: {event:?}");
+                }
                 Err(e) => {
+                    trial += 1;
                     error!(
-                        "Failed to connect using MQTT v3 options on trial {}: {:?}",
-                        trial + 1,
-                        e
+                        "Failed to connect using MQTT v3 options on trial {trial}: {e:?}",
                     );
+                    // delay before retrying
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             };
-            // delay before retrying
-            tokio::time::sleep(Duration::from_millis(500)).await;
         }
         Err(anyhow::anyhow!(
             "Failed to connect to MQTT broker using MQTT v3 options after multiple attempts."
