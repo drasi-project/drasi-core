@@ -170,10 +170,6 @@ fn convert_json_to_element_value(
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Ok(ElementValue::Integer(i))
-            } else if n.as_u64().is_some() {
-                Err(anyhow::anyhow!(
-                    "Unsigned number {n} exceeds maximum integer value"
-                ))
             } else if let Some(f) = n.as_f64() {
                 Ok(ElementValue::Float(OrderedFloat(f)))
             } else {
@@ -302,6 +298,10 @@ mod tests {
             ElementValue::Float(OrderedFloat(2.25))
         );
         assert_eq!(
+            convert_json_to_element_value(&json!(9_223_372_036_854_775_808_u64)).unwrap(),
+            ElementValue::Float(OrderedFloat(9_223_372_036_854_775_808_f64))
+        );
+        assert_eq!(
             convert_json_to_element_value(&json!("mqtt")).unwrap(),
             ElementValue::String(Arc::from("mqtt"))
         );
@@ -315,6 +315,45 @@ mod tests {
         assert!(
             matches!(object, ElementValue::Object(map) if map.get("x") == Some(&ElementValue::Integer(1)))
         );
+    }
+
+    #[test]
+    fn out_of_range_unsigned_property_does_not_drop_change() {
+        let mut properties = serde_json::Map::new();
+        properties.insert("counter".to_string(), json!(9_223_372_036_854_775_808_u64));
+        properties.insert("status".to_string(), json!("ok"));
+
+        let mqtt_change = MqttSourceChange::Update {
+            element: sample_node(properties),
+            timestamp: Some(77),
+        };
+
+        let converted = convert_mqtt_to_source_change(&mqtt_change, "test-source")
+            .expect("large unsigned property should not drop the whole change");
+
+        match converted {
+            SourceChange::Update {
+                element:
+                    Element::Node {
+                        metadata,
+                        properties,
+                    },
+            } => {
+                assert_eq!(metadata.reference.element_id.as_ref(), "device-1");
+                assert_eq!(metadata.effective_from, 77);
+                assert_eq!(
+                    properties.get("counter"),
+                    Some(&ElementValue::Float(OrderedFloat(
+                        9_223_372_036_854_775_808_f64
+                    )))
+                );
+                assert_eq!(
+                    properties.get("status"),
+                    Some(&ElementValue::String(Arc::from("ok")))
+                );
+            }
+            _ => panic!("expected node update"),
+        }
     }
 
     #[test]
