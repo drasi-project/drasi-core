@@ -407,6 +407,15 @@ impl DrasiLib {
             )
             .await;
 
+        // Inject QueryManager into SourceManager as well, so query-consuming
+        // sources (those returning a non-empty `subscribed_query_ids()`) can
+        // subscribe to continuous-query results.
+        self.source_manager
+            .inject_query_provider(
+                Arc::clone(&self.query_manager) as Arc<dyn crate::reactions::QueryProvider>
+            )
+            .await;
+
         // Inject StateStoreProvider into SourceManager and ReactionManager
         // This allows sources and reactions to persist state
         let state_store = self.config.state_store_provider.clone();

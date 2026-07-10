@@ -16,6 +16,7 @@ use anyhow::Result;
 use log::{info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::Instrument;
 
 // Import real Drasi Source SDK
 use drasi_core::models::{ElementPropertyMap, ElementValue};
@@ -29,10 +30,12 @@ use crate::config::SourceRuntime;
 use crate::context::SourceRuntimeContext;
 use crate::identity::IdentityProvider;
 use crate::managers::{ComponentLogKey, ComponentLogRegistry};
+use crate::reactions::QueryProvider;
 use crate::schema::SourceSchema;
 use crate::sources::Source;
 use crate::state_store::StateStoreProvider;
 use crate::wal::WalProvider;
+use std::collections::HashMap;
 
 // Convert JSON value to ElementValue
 pub fn convert_json_to_element_value(value: &Value) -> ElementValue {
@@ -85,6 +88,12 @@ pub struct SourceManager {
     /// Managers send transitional states (Starting, Stopping, Reconfiguring) here;
     /// the loop applies them to the graph and records events automatically.
     update_tx: ComponentUpdateSender,
+    /// Provider used to obtain query instances so query-consuming sources can
+    /// subscribe to continuous-query results. Injected after construction.
+    query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
+    /// Forwarder tasks that pump query results into query-consuming sources,
+    /// keyed by source id. Aborted when the source stops.
+    subscription_tasks: Arc<RwLock<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>>,
 }
 
 impl SourceManager {
@@ -108,6 +117,8 @@ impl SourceManager {
             log_registry,
             graph,
             update_tx,
+            query_provider: Arc::new(RwLock::new(None)),
+            subscription_tasks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -131,6 +142,137 @@ impl SourceManager {
     /// for crash recovery and replay.
     pub async fn inject_wal_provider(&self, wal_provider: Arc<dyn WalProvider>) {
         *self.wal_provider.write().await = Some(wal_provider);
+    }
+
+    /// Inject the query provider (called after DrasiLib is fully constructed).
+    ///
+    /// This lets query-consuming sources (those returning a non-empty
+    /// [`Source::subscribed_query_ids`](crate::sources::Source::subscribed_query_ids))
+    /// subscribe to continuous-query results, mirroring the reaction model.
+    pub async fn inject_query_provider(&self, query_provider: Arc<dyn QueryProvider>) {
+        *self.query_provider.write().await = Some(query_provider);
+    }
+
+    /// Wire query subscriptions for every source that declares them.
+    ///
+    /// Called by the lifecycle after all queries have started, so query-consuming
+    /// sources begin receiving results. Best-effort: individual failures are
+    /// logged and do not abort the batch.
+    pub async fn wire_all_query_subscriptions(&self) {
+        let source_ids: Vec<String> = {
+            let graph = self.graph.read().await;
+            graph
+                .list_by_kind(&ComponentKind::Source)
+                .into_iter()
+                .map(|(id, _status)| id)
+                .collect()
+        };
+
+        for id in source_ids {
+            if let Err(e) = self.wire_query_subscriptions(&id).await {
+                warn!("Failed to wire query subscriptions for source '{id}': {e}");
+            }
+        }
+    }
+
+    /// Subscribe the given source to its declared queries and spawn forwarders
+    /// that pump each query's results into `source.enqueue_query_result()`.
+    ///
+    /// This mirrors the reaction subscription model but is intentionally simpler
+    /// (no checkpoint/recovery machinery — sources that need durability persist
+    /// their own state). Idempotent: if the source already has active forwarders,
+    /// this is a no-op.
+    pub async fn wire_query_subscriptions(&self, id: &str) -> Result<()> {
+        let source = match self.get_source_instance(id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        let query_ids = source.subscribed_query_ids();
+        if query_ids.is_empty() {
+            return Ok(());
+        }
+
+        // Idempotency: skip if forwarders are already running for this source.
+        {
+            let tasks = self.subscription_tasks.read().await;
+            if tasks.get(id).map(|v| !v.is_empty()).unwrap_or(false) {
+                return Ok(());
+            }
+        }
+
+        let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
+            anyhow::anyhow!("QueryProvider not injected — was SourceManager initialized properly?")
+        })?;
+
+        let instance_id = self.instance_id.clone();
+        let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
+        for query_id in &query_ids {
+            let query = query_provider.get_query_instance(query_id).await?;
+            let subscription = query.subscribe(id.to_string()).await?;
+            let mut receiver = subscription.receiver;
+
+            let source = source.clone();
+            let source_id = id.to_string();
+            let query_id_owned = query_id.clone();
+
+            let span = tracing::info_span!(
+                "source_query_forwarder",
+                instance_id = %instance_id,
+                component_id = %source_id,
+                component_type = "source"
+            );
+
+            let handle = tokio::spawn(
+                async move {
+                    log::debug!(
+                        "[{source_id}] started query-result forwarder for query '{query_id_owned}'"
+                    );
+                    loop {
+                        match receiver.recv().await {
+                            Ok(query_result) => {
+                                let result = std::sync::Arc::try_unwrap(query_result)
+                                    .unwrap_or_else(|arc| (*arc).clone());
+                                if let Err(e) = source.enqueue_query_result(result).await {
+                                    log::error!(
+                                        "[{source_id}] failed to enqueue result from query '{query_id_owned}': {e}"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                log::debug!(
+                                    "[{source_id}] query-result forwarder for '{query_id_owned}' stopping: {e}"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+                .instrument(span),
+            );
+            handles.push(handle);
+        }
+
+        self.subscription_tasks
+            .write()
+            .await
+            .insert(id.to_string(), handles);
+
+        info!(
+            "Wired {} query subscription(s) for source '{id}'",
+            query_ids.len()
+        );
+        Ok(())
+    }
+
+    /// Abort and drop any query-result forwarder tasks for the given source.
+    async fn abort_query_subscriptions(&self, id: &str) {
+        if let Some(handles) = self.subscription_tasks.write().await.remove(id) {
+            for handle in handles {
+                handle.abort();
+            }
+        }
     }
 
     pub async fn get_source_instance(&self, id: &str) -> Option<Arc<dyn Source>> {
@@ -193,7 +335,20 @@ impl SourceManager {
                 })?;
 
         crate::managers::lifecycle_helpers::start_component(&self.graph, &id, "source", &source)
-            .await
+            .await?;
+
+        // Wire query subscriptions for query-consuming sources. At runtime the
+        // subscribed queries are expected to already be running; during batch
+        // startup the lifecycle calls `wire_all_query_subscriptions()` after all
+        // queries have started instead (this is a no-op then, since queries may
+        // not be up yet and wiring is idempotent).
+        if !source.subscribed_query_ids().is_empty() {
+            if let Err(e) = self.wire_query_subscriptions(&id).await {
+                warn!("Failed to wire query subscriptions for source '{id}': {e}");
+            }
+        }
+
+        Ok(())
     }
 
     /// Stop a running source by ID, transitioning it to the Stopped state.
@@ -207,6 +362,9 @@ impl SourceManager {
                 .ok_or_else(|| {
                     anyhow::Error::new(crate::managers::ComponentNotFoundError::new("source", &id))
                 })?;
+
+        // Abort any query-result forwarders before stopping the source itself.
+        self.abort_query_subscriptions(&id).await;
 
         crate::managers::lifecycle_helpers::stop_component(&self.graph, &id, "source", &source)
             .await

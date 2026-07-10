@@ -47,6 +47,7 @@ members = [
   "components/sources/platform",
   "components/sources/application",
   "components/sources/mock",
+  "components/sources/state-machine",
   "components/sources/ris-live",
   "components/sources/mssql",
   "components/sources/dataverse",
