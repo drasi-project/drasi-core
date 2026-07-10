@@ -22,7 +22,7 @@ use drasi_source_http::HttpSource;
 use log::info;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::{thread::sleep, time::Duration};
+use std::time::Duration;
 use tokio::time::Instant;
 
 pub fn init_logging() {
