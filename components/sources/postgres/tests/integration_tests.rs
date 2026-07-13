@@ -33,10 +33,10 @@ use drasi_source_postgres::{
 use postgres_helpers::{
     create_bool_test_table, create_decimal_test_table, create_logical_replication_slot,
     create_publication, create_test_table, create_test_table_replica_identity_default,
-    create_timestamptz_test_table, delete_test_row, grant_replication, grant_table_access,
-    execute_batch, insert_bool_test_row, insert_decimal_test_row, insert_test_row,
-    insert_timestamptz_test_row, quote_ident, setup_replication_postgres,
-    update_all_rows_name, update_bool_test_row, update_test_row,
+    create_timestamptz_test_table, delete_test_row, execute_batch, grant_replication,
+    grant_table_access, insert_bool_test_row, insert_decimal_test_row, insert_test_row,
+    insert_timestamptz_test_row, quote_ident, setup_replication_postgres, update_all_rows_name,
+    update_bool_test_row, update_test_row,
 };
 use serial_test::serial;
 use std::collections::{HashMap, HashSet};
