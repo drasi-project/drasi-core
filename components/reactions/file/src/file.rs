@@ -39,7 +39,7 @@ use drasi_lib::Reaction;
 /// Use [`FileReaction::builder`] to construct an instance with the desired
 /// output path, write mode, and Handlebars templates.
 pub struct FileReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: FileReactionConfig,
     handlebars: Arc<Handlebars<'static>>,
     file_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
@@ -103,59 +103,13 @@ impl FileReaction {
         handlebars
     }
 
-    fn default_filename_template(write_mode: &WriteMode) -> &'static str {
-        match write_mode {
-            WriteMode::Append => "{{query_name}}.log",
-            WriteMode::Overwrite => "{{query_name}}.json",
-            WriteMode::PerChange => "{{query_name}}_{{operation}}_{{uuid}}.json",
-        }
-    }
-
-    fn validate_template(template: &str) -> anyhow::Result<()> {
-        if template.is_empty() {
-            return Ok(());
-        }
-
-        handlebars::Template::compile(template).map_err(|e| anyhow!("Invalid template: {e}"))?;
-        Ok(())
-    }
-
-    fn validate_query_config(config: &crate::config::QueryConfig) -> anyhow::Result<()> {
-        if let Some(added) = &config.added {
-            Self::validate_template(&added.template)?;
-        }
-        if let Some(updated) = &config.updated {
-            Self::validate_template(&updated.template)?;
-        }
-        if let Some(deleted) = &config.deleted {
-            Self::validate_template(&deleted.template)?;
-        }
-        Ok(())
-    }
-
     fn validate_config(queries: &[String], config: &FileReactionConfig) -> anyhow::Result<()> {
-        if config.output_path.trim().is_empty() {
-            return Err(anyhow!("output_path must not be empty"));
-        }
+        // Validate config-internal invariants (output path, template syntax).
+        config.validate()?;
 
-        if let Some(filename_template) = &config.filename_template {
-            Self::validate_template(filename_template)
-                .map_err(|e| anyhow!("Invalid filename template: {e}"))?;
-        } else {
-            Self::validate_template(Self::default_filename_template(&config.write_mode))
-                .map_err(|e| anyhow!("Invalid default filename template: {e}"))?;
-        }
-
-        for (query_id, route_config) in &config.routes {
-            Self::validate_query_config(route_config)
-                .map_err(|e| anyhow!("Invalid template in route '{query_id}': {e}"))?;
-        }
-
-        if let Some(default_template) = &config.default_template {
-            Self::validate_query_config(default_template)
-                .map_err(|e| anyhow!("Invalid default template: {e}"))?;
-        }
-
+        // Validate route coverage against the subscribed query list. A route
+        // key must match a subscribed query exactly or by its last dotted
+        // segment (so `routes.my_query` matches the wire id `source.my_query`).
         if !config.routes.is_empty() && !queries.is_empty() {
             for route_query in config.routes.keys() {
                 let dotted_route = format!(".{route_query}");
@@ -320,13 +274,103 @@ impl FileReaction {
         Ok(tmp_path)
     }
 
+    /// Resolves the template spec for a query/operation following the standard
+    /// resolution order: per-query route, then the last dotted segment of the
+    /// query id, then the default template. Returns `None` when no template is
+    /// configured, in which case the caller falls back to the default envelope.
+    fn resolve_template_spec<'a>(
+        config: &'a FileReactionConfig,
+        query_id: &str,
+        operation: OperationType,
+    ) -> Option<&'a crate::config::TemplateSpec> {
+        let from_route = config
+            .routes
+            .get(query_id)
+            .and_then(|qc| FileReactionConfig::get_spec_from_config(qc, operation));
+        if from_route.is_some() {
+            return from_route;
+        }
+
+        if let Some(segment) = query_id.rsplit('.').next().filter(|s| *s != query_id) {
+            if let Some(spec) = config
+                .routes
+                .get(segment)
+                .and_then(|qc| FileReactionConfig::get_spec_from_config(qc, operation))
+            {
+                return Some(spec);
+            }
+        }
+
+        config
+            .default_template
+            .as_ref()
+            .and_then(|qc| FileReactionConfig::get_spec_from_config(qc, operation))
+    }
+
+    /// Builds the canonical default output envelope for a diff.
+    ///
+    /// Mirrors the runtime `QueryResult`/`ResultDiff` shape using camelCase
+    /// field names (`queryId`, `sequenceId`, `timestamp`, `operation`,
+    /// `before`/`after`, `metadata`). Returns `None` for `Noop`, which produces
+    /// no output. `metadata` is omitted when empty.
+    fn default_envelope(query_result: &QueryResult, diff: &ResultDiff) -> Option<Value> {
+        let mut item = Map::new();
+        item.insert(
+            "queryId".into(),
+            Value::String(query_result.query_id.clone()),
+        );
+        item.insert("sequenceId".into(), Value::from(query_result.sequence));
+        item.insert(
+            "timestamp".into(),
+            Value::String(query_result.timestamp.to_rfc3339()),
+        );
+
+        match diff {
+            ResultDiff::Add { data, .. } => {
+                item.insert("operation".into(), Value::String("ADD".into()));
+                item.insert("after".into(), data.clone());
+            }
+            ResultDiff::Update { before, after, .. } => {
+                item.insert("operation".into(), Value::String("UPDATE".into()));
+                item.insert("before".into(), before.clone());
+                item.insert("after".into(), after.clone());
+            }
+            ResultDiff::Delete { data, .. } => {
+                item.insert("operation".into(), Value::String("DELETE".into()));
+                item.insert("before".into(), data.clone());
+            }
+            // An aggregation result is the post-change aggregate value, rendered
+            // as an UPDATE-shaped item: `after` is always present, `before` only
+            // when the previous aggregate value is known.
+            ResultDiff::Aggregation { before, after, .. } => {
+                item.insert("operation".into(), Value::String("UPDATE".into()));
+                if let Some(before) = before {
+                    item.insert("before".into(), before.clone());
+                }
+                item.insert("after".into(), after.clone());
+            }
+            // Noop carries no row data and must not produce an output item.
+            ResultDiff::Noop => return None,
+        }
+
+        if !query_result.metadata.is_empty() {
+            item.insert(
+                "metadata".into(),
+                Value::Object(query_result.metadata.clone().into_iter().collect()),
+            );
+        }
+
+        Some(Value::Object(item))
+    }
+
     fn render_output(
         config: &FileReactionConfig,
         handlebars: &Handlebars<'static>,
-        query_id: &str,
-        event_timestamp: chrono::DateTime<chrono::Utc>,
+        query_result: &QueryResult,
         diff: &ResultDiff,
+        reaction_name: &str,
     ) -> Result<(PathBuf, String)> {
+        let query_id = &query_result.query_id;
         let (operation_name, operation_type) = match diff {
             ResultDiff::Add { .. } => ("ADD", Some(OperationType::Add)),
             ResultDiff::Update { .. } => ("UPDATE", Some(OperationType::Update)),
@@ -336,16 +380,21 @@ impl FileReaction {
         };
 
         let mut context = Map::new();
-        context.insert("query_name".into(), Value::String(query_id.to_string()));
+        context.insert("query_name".into(), Value::String(query_id.clone()));
+        context.insert("query_id".into(), Value::String(query_id.clone()));
         context.insert(
             "operation".into(),
             Value::String(operation_name.to_string()),
         );
         context.insert(
             "timestamp".into(),
-            Value::String(event_timestamp.to_rfc3339()),
+            Value::String(query_result.timestamp.to_rfc3339()),
         );
         context.insert("uuid".into(), Value::String(Uuid::new_v4().to_string()));
+        context.insert(
+            "metadata".into(),
+            Value::Object(query_result.metadata.clone().into_iter().collect()),
+        );
 
         match diff {
             ResultDiff::Add { data, .. } => {
@@ -377,7 +426,7 @@ impl FileReaction {
         let filename_template = config
             .filename_template
             .as_deref()
-            .unwrap_or_else(|| Self::default_filename_template(&config.write_mode));
+            .unwrap_or_else(|| config.write_mode.default_filename_template());
 
         let rendered_filename = handlebars.render_template(filename_template, &context)?;
         let sanitized_filename = sanitize_filename(&rendered_filename);
@@ -387,18 +436,35 @@ impl FileReaction {
             ));
         }
 
-        let content = if let Some(operation_type) = operation_type {
-            if let Some(template_spec) = config.get_template_spec(query_id, operation_type) {
-                handlebars.render_template(&template_spec.template, &context)?
-            } else {
-                serde_json::to_string(diff)?
-            }
-        } else {
-            serde_json::to_string(diff)?
+        // Render the body template if one is configured for this query and
+        // operation. On a render failure, fall back to the default envelope
+        // rather than dropping the event.
+        let template = operation_type
+            .and_then(|op| Self::resolve_template_spec(config, query_id, op))
+            .map(|spec| spec.template.as_str());
+
+        let content = match template {
+            Some(template) => match handlebars.render_template(template, &context) {
+                Ok(rendered) => rendered,
+                Err(e) => {
+                    error!(
+                        "[{reaction_name}] Failed to render template for query '{query_id}' ({operation_name}); falling back to default envelope: {e}"
+                    );
+                    Self::default_envelope_string(query_result, diff)?
+                }
+            },
+            None => Self::default_envelope_string(query_result, diff)?,
         };
 
         let output_file = Path::new(&config.output_path).join(sanitized_filename);
         Ok((output_file, content))
+    }
+
+    /// Serializes the canonical default envelope for a diff to a JSON string.
+    fn default_envelope_string(query_result: &QueryResult, diff: &ResultDiff) -> Result<String> {
+        let envelope = Self::default_envelope(query_result, diff)
+            .ok_or_else(|| anyhow!("Noop diff produces no output"))?;
+        Ok(serde_json::to_string(&envelope)?)
     }
 
     async fn process_result(
@@ -413,13 +479,7 @@ impl FileReaction {
             if matches!(diff, ResultDiff::Noop) {
                 continue;
             }
-            match Self::render_output(
-                config,
-                handlebars,
-                &query_result.query_id,
-                query_result.timestamp,
-                diff,
-            ) {
+            match Self::render_output(config, handlebars, query_result, diff, reaction_name) {
                 Ok((output_file, content)) => {
                     if let Err(e) = Self::write_to_file(
                         file_locks,
@@ -529,6 +589,14 @@ impl FileReactionBuilder {
         self
     }
 
+    /// Connects this reaction to a query (alias of [`with_query`](Self::with_query)).
+    ///
+    /// Reads naturally at call sites, e.g. `…from_query("orders")…`.
+    pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
+        self.queries.push(query_id.into());
+        self
+    }
+
     /// Sets the base output directory for generated files.
     pub fn with_output_path(mut self, output_path: impl Into<String>) -> Self {
         self.config.output_path = output_path.into();
@@ -604,29 +672,8 @@ impl Reaction for FileReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut properties = HashMap::new();
-        properties.insert(
-            "output_path".to_string(),
-            Value::String(self.config.output_path.clone()),
-        );
-        properties.insert(
-            "write_mode".to_string(),
-            Value::String(
-                match self.config.write_mode {
-                    WriteMode::Append => "append",
-                    WriteMode::Overwrite => "overwrite",
-                    WriteMode::PerChange => "per_change",
-                }
-                .to_string(),
-            ),
-        );
-        if let Some(filename_template) = &self.config.filename_template {
-            properties.insert(
-                "filename_template".to_string(),
-                Value::String(filename_template.clone()),
-            );
-        }
-        properties
+        self.base
+            .properties_or_serialize(&crate::descriptor::config_to_dto(&self.config))
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -830,7 +877,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fallback_to_raw_json_when_no_template() {
+    async fn test_default_envelope_when_no_template() {
         let temp_dir = TempDir::new().expect("temp dir");
         let mut config = create_test_config();
         config.output_path = temp_dir.path().to_string_lossy().to_string();
@@ -839,15 +886,17 @@ mod tests {
 
         let handlebars = FileReaction::build_handlebars();
         let file_locks = FileReaction::new_file_locks();
+        let mut metadata = HashMap::new();
+        metadata.insert("src".to_string(), serde_json::json!("app"));
         let result = QueryResult::new(
             "orders".to_string(),
-            0,
+            7,
             chrono::Utc::now(),
             vec![ResultDiff::Add {
                 data: serde_json::json!({"id": 1}),
                 row_signature: 0,
             }],
-            HashMap::new(),
+            metadata,
         );
 
         FileReaction::process_result(
@@ -864,9 +913,16 @@ mod tests {
         let content = tokio::fs::read_to_string(output_file)
             .await
             .expect("read file");
+        let value: serde_json::Value = serde_json::from_str(content.trim()).expect("valid JSON");
+        assert_eq!(value["queryId"], "orders");
+        assert_eq!(value["sequenceId"], 7);
+        assert_eq!(value["operation"], "ADD");
+        assert_eq!(value["after"]["id"], 1);
+        assert_eq!(value["metadata"]["src"], "app");
+        assert!(value.get("timestamp").is_some());
         assert!(
-            content.contains("\"ADD\"") && content.contains("\"id\""),
-            "expected raw JSON diff payload, got: {content}"
+            value.get("before").is_none(),
+            "ADD must not carry before, got: {content}"
         );
     }
 
@@ -1259,7 +1315,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_route_no_match_falls_to_default() {
+    async fn test_query_route_matches_last_dotted_segment() {
         let temp_dir = TempDir::new().expect("temp dir");
         let mut routes = HashMap::new();
         routes.insert(
@@ -1283,8 +1339,9 @@ mod tests {
 
         let handlebars = FileReaction::build_handlebars();
         let file_locks = FileReaction::new_file_locks();
-        // Query with dotted prefix does not match the "orders" route key exactly,
-        // so it falls through to default_template.
+        // The wire id is `ns.orders`; its last dotted segment `orders` matches
+        // the configured route key (resolution order step 2), so the route
+        // template wins over the default template.
         let result = QueryResult::new(
             "ns.orders".to_string(),
             0,
@@ -1311,8 +1368,159 @@ mod tests {
             .await
             .expect("read file");
         assert!(
-            content.contains("default-5"),
-            "expected default template fallback, got: {content}"
+            content.contains("matched-5"),
+            "expected last-segment route match, got: {content}"
         );
+        assert!(
+            !content.contains("default-5"),
+            "should not fall through to default template, got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_render_failure_falls_back_to_default_envelope() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        // A template that compiles but fails at render time (missing partial).
+        let config = FileReactionConfig {
+            output_path: temp_dir.path().to_string_lossy().to_string(),
+            write_mode: WriteMode::Append,
+            filename_template: Some("{{query_name}}.log".to_string()),
+            routes: HashMap::new(),
+            default_template: Some(QueryConfig {
+                added: Some(TemplateSpec::new("{{> missing_partial}}")),
+                ..Default::default()
+            }),
+        };
+
+        let handlebars = FileReaction::build_handlebars();
+        let file_locks = FileReaction::new_file_locks();
+        let result = QueryResult::new(
+            "orders".to_string(),
+            3,
+            chrono::Utc::now(),
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"id": 99}),
+                row_signature: 0,
+            }],
+            HashMap::new(),
+        );
+
+        FileReaction::process_result(
+            &config,
+            &handlebars,
+            &file_locks,
+            &Arc::new(Mutex::new(HashSet::new())),
+            &result,
+            "test",
+        )
+        .await;
+
+        let output_file = temp_dir.path().join("orders.log");
+        let content = tokio::fs::read_to_string(output_file)
+            .await
+            .expect("read file");
+        let value: serde_json::Value = serde_json::from_str(content.trim()).expect("valid JSON");
+        assert_eq!(value["operation"], "ADD");
+        assert_eq!(value["after"]["id"], 99);
+        assert_eq!(value["sequenceId"], 3);
+    }
+
+    #[test]
+    fn test_from_query_appends_subscription() {
+        let reaction = FileReaction::builder("test")
+            .from_query("query-a")
+            .from_query("query-b")
+            .build()
+            .expect("build");
+        assert_eq!(
+            reaction.query_ids(),
+            vec!["query-a".to_string(), "query-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_properties_round_trip_full_config() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "orders".to_string(),
+            QueryConfig {
+                added: Some(TemplateSpec::new("add-{{after.id}}")),
+                ..Default::default()
+            },
+        );
+
+        let reaction = FileReaction::builder("test")
+            .with_query("orders")
+            .with_output_path("/data/out")
+            .with_write_mode(WriteMode::PerChange)
+            .with_filename_template("{{query_name}}.json")
+            .with_route("orders", routes.get("orders").cloned().expect("route"))
+            .with_default_template(QueryConfig {
+                deleted: Some(TemplateSpec::new("del-{{before.id}}")),
+                ..Default::default()
+            })
+            .build()
+            .expect("build");
+
+        let props = reaction.properties();
+        assert_eq!(props["outputPath"], "/data/out");
+        assert_eq!(props["writeMode"], "per_change");
+        assert_eq!(props["filenameTemplate"], "{{query_name}}.json");
+        assert_eq!(
+            props["routes"]["orders"]["added"]["template"],
+            "add-{{after.id}}"
+        );
+        assert_eq!(
+            props["defaultTemplate"]["deleted"]["template"],
+            "del-{{before.id}}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_template_context_exposes_query_id_and_metadata() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config = FileReactionConfig {
+            output_path: temp_dir.path().to_string_lossy().to_string(),
+            write_mode: WriteMode::Append,
+            filename_template: Some("{{query_name}}.log".to_string()),
+            routes: HashMap::new(),
+            default_template: Some(QueryConfig {
+                added: Some(TemplateSpec::new(
+                    r#"{"q":"{{query_id}}","src":"{{metadata.src}}"}"#,
+                )),
+                ..Default::default()
+            }),
+        };
+
+        let handlebars = FileReaction::build_handlebars();
+        let file_locks = FileReaction::new_file_locks();
+        let mut metadata = HashMap::new();
+        metadata.insert("src".to_string(), serde_json::json!("application"));
+        let result = QueryResult::new(
+            "orders".to_string(),
+            0,
+            chrono::Utc::now(),
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"id": 1}),
+                row_signature: 0,
+            }],
+            metadata,
+        );
+
+        FileReaction::process_result(
+            &config,
+            &handlebars,
+            &file_locks,
+            &Arc::new(Mutex::new(HashSet::new())),
+            &result,
+            "test",
+        )
+        .await;
+
+        let content = tokio::fs::read_to_string(temp_dir.path().join("orders.log"))
+            .await
+            .expect("read file");
+        assert!(content.contains(r#""q":"orders""#), "got: {content}");
+        assert!(content.contains(r#""src":"application""#), "got: {content}");
     }
 }
