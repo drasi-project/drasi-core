@@ -15,12 +15,14 @@
 //! Azure Event Grid reaction implementation.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use handlebars::Handlebars;
 use log::{debug, error, info, warn};
 use serde_json::{json, Map, Value};
+use tokio::sync::oneshot;
 
 use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::identity::{CredentialContext, Credentials};
@@ -49,20 +51,20 @@ impl EventGridReaction {
         EventGridReactionBuilder::new(id)
     }
 
-    /// Create a new Event Grid reaction from a validated config.
-    ///
-    /// This convenience constructor does **not** validate `config`; prefer
-    /// [`EventGridReaction::builder`] whose `build()` validates.
+    /// Create a new Event Grid reaction from a config, validating it against
+    /// `queries`. Mirrors the builder's `build()` so direct construction cannot
+    /// produce an invalid reaction that only fails at `start()`.
     pub fn new(
         id: impl Into<String>,
         queries: Vec<String>,
         config: EventGridReactionConfig,
-    ) -> Self {
+    ) -> Result<Self> {
+        config.validate(&queries, None)?;
         let params = ReactionBaseParams::new(id.into(), queries);
-        Self {
+        Ok(Self {
             base: ReactionBase::new(params),
             config,
-        }
+        })
     }
 
     pub(crate) fn from_builder(
@@ -331,6 +333,56 @@ async fn resolve_auth(config: &EventGridReactionConfig, base: &ReactionBase) -> 
     }
 }
 
+/// Initial backoff before retrying a failed auth acquisition; doubles each attempt.
+const AUTH_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+/// Upper bound for the auth-retry backoff.
+const AUTH_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Outcome of an auth resolution that may back off and wait.
+enum AuthOutcome {
+    /// Auth was resolved successfully.
+    Ok(Auth),
+    /// A shutdown signal arrived while retrying; the loop should stop.
+    Shutdown,
+}
+
+/// Resolve auth, retrying with capped exponential backoff on failure.
+///
+/// A transient identity-provider outage would otherwise cause the caller to
+/// drop the current batch and hot-loop on the next one. Retrying here preserves
+/// the dequeued batch until auth succeeds, and paces retries so a persistent
+/// outage does not spin or spam the log. Returns [`AuthOutcome::Shutdown`] if a
+/// shutdown signal arrives while backing off.
+async fn resolve_auth_with_retry(
+    config: &EventGridReactionConfig,
+    base: &ReactionBase,
+    reaction_name: &str,
+    shutdown_rx: &mut oneshot::Receiver<()>,
+) -> AuthOutcome {
+    let mut backoff = AUTH_INITIAL_BACKOFF;
+    let mut attempt: usize = 0;
+    loop {
+        match resolve_auth(config, base).await {
+            Ok(auth) => return AuthOutcome::Ok(auth),
+            Err(e) => {
+                attempt += 1;
+                warn!(
+                    "[{reaction_name}] Authentication attempt {attempt} failed: {e:#} — retrying in {backoff:?}"
+                );
+                tokio::select! {
+                    biased;
+                    _ = &mut *shutdown_rx => {
+                        debug!("[{reaction_name}] Shutdown signal received during auth retry backoff");
+                        return AuthOutcome::Shutdown;
+                    }
+                    _ = tokio::time::sleep(backoff) => {}
+                }
+                backoff = (backoff * 2).min(AUTH_MAX_BACKOFF);
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Reaction for EventGridReaction {
     fn id(&self) -> &str {
@@ -473,12 +525,16 @@ impl Reaction for EventGridReaction {
 
                 let body = encode_batch(&events, config.schema, &reaction_name);
 
-                let auth = match resolve_auth(&config, &base).await {
-                    Ok(a) => a,
-                    Err(e) => {
-                        error!("[{reaction_name}] Authentication failed: {e:#}");
-                        continue;
-                    }
+                let auth = match resolve_auth_with_retry(
+                    &config,
+                    &base,
+                    &reaction_name,
+                    &mut shutdown_rx,
+                )
+                .await
+                {
+                    AuthOutcome::Ok(a) => a,
+                    AuthOutcome::Shutdown => break,
                 };
 
                 if let Err(e) = publish(

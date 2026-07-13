@@ -184,13 +184,23 @@ fn validate_rejects_non_https_scheme() {
 }
 
 #[test]
-fn validate_accepts_http_for_local_testing() {
-    let c = EventGridReactionConfig {
+fn validate_accepts_http_only_with_allow_http() {
+    // Plaintext http is rejected by default (would leak the access key)...
+    let rejected = EventGridReactionConfig {
         endpoint: "http://localhost:1234/api/events".into(),
         access_key: Some("k".into()),
         ..Default::default()
     };
-    assert!(c.validate(&[], None).is_ok());
+    assert!(rejected.validate(&[], None).is_err());
+
+    // ...but permitted when explicitly opted in for local testing.
+    let allowed = EventGridReactionConfig {
+        endpoint: "http://localhost:1234/api/events".into(),
+        access_key: Some("k".into()),
+        allow_http: true,
+        ..Default::default()
+    };
+    assert!(allowed.validate(&[], None).is_ok());
 }
 
 #[test]
@@ -335,6 +345,25 @@ fn eventgrid_schema_fields_and_dropped_metadata() {
     assert_eq!(v["dataVersion"], "1");
     // Native EventGrid schema does not carry extension attributes.
     assert!(v.get("category").is_none());
+}
+
+#[test]
+fn cloudevents_extension_keys_are_lowercased() {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("Category".into(), json!("inventory"));
+    metadata.insert("SubJect".into(), json!("shadowed-reserved"));
+    let envelope = EventEnvelope {
+        metadata,
+        ..sample_envelope()
+    };
+    let (v, dropped) = envelope.to_value(EventGridSchema::CloudEvents);
+    assert!(!dropped);
+    // Mixed-case key normalized to a valid lowercase CloudEvents attribute name.
+    assert_eq!(v["category"], "inventory");
+    assert!(v.get("Category").is_none());
+    // Reserved-key check applies to the normalized name, so `SubJect` (subject)
+    // is dropped rather than overwriting the real `subject` attribute.
+    assert_eq!(v["subject"], "orders");
 }
 
 // ---------------------------------------------------------------------------

@@ -112,10 +112,13 @@ impl EventEnvelope {
                 obj.insert("time".into(), json!(self.time));
                 obj.insert("subject".into(), json!(self.subject));
                 obj.insert("data".into(), self.data.clone());
-                // Flatten metadata as extension attributes (skip reserved keys).
+                // Flatten metadata as extension attributes. CloudEvents requires
+                // attribute names to be lowercase, so normalize keys before the
+                // reserved-key check and insertion.
                 for (k, v) in &self.metadata {
-                    if !is_reserved_cloudevents_key(k) {
-                        obj.insert(k.clone(), v.clone());
+                    let key = k.to_ascii_lowercase();
+                    if !is_reserved_cloudevents_key(&key) {
+                        obj.insert(key, v.clone());
                     }
                 }
                 (Value::Object(obj), false)

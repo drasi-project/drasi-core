@@ -38,6 +38,7 @@ fully testable against a local mock server.
 | `format` | `packed` \| `unpacked` \| `template` | no | `packed` | Output format. |
 | `timeoutMs` | integer | no | `10000` | Per-request timeout in milliseconds. |
 | `outputTemplates` | object | no | — | Per-query and default templates (template format). |
+| `allowHttp` | boolean | no | `false` | Permit a plaintext `http` endpoint. Leave `false` in production: with an access key an `http` endpoint transmits the `aeg-sas-key` in cleartext. Intended for local test servers only. |
 
 ¹ `accessKey` is required unless an identity provider is configured for AAD
 authentication.
@@ -112,7 +113,9 @@ requests a token scoped to `https://eventgrid.azure.net/.default`:
 
 ```rust
 use std::sync::Arc;
+use drasi_lib::DrasiLib;
 use drasi_identity_azure::AzureIdentityProvider;
+use drasi_reaction_eventgrid::EventGridReaction;
 
 let identity = AzureIdentityProvider::with_workload_identity("eventgrid")?
     .with_scope("https://eventgrid.azure.net/.default");
@@ -171,17 +174,24 @@ map to `u`.
 
 ## Delivery guarantees
 
-- **At-least-once.** Event Grid does not deduplicate custom events. On
-  crash/replay the same change may be re-published. Subscribers should dedupe on
-  the event `id`, which is **deterministic** for a given
+- **Best-effort delivery with bounded retries.** The reaction does not persist a
+  publish queue, so delivery is not guaranteed. A batch is **dropped** when the
+  publish retry budget is exhausted or on a non-retriable `4xx` response; the
+  failure is logged and the processing loop keeps running.
+- **Retries.** Transient publish failures (network errors, 5xx, 429, 408) are
+  retried up to 3 times with exponential backoff before the batch is dropped.
+  Auth acquisition failures are retried separately with capped exponential
+  backoff, preserving the current batch until auth succeeds (or shutdown), so a
+  transient identity-provider outage does not drop events or hot-loop.
+- **Duplicates on replay.** Event Grid does not deduplicate custom events, and on
+  crash/replay the same change may be re-published. Subscribers should therefore
+  **dedupe on the event `id`**, which is **deterministic** for a given
   `(reaction, query, sequence, op, index)` tuple.
-- **Retries.** Transient failures (network errors, 5xx, 429, 408) are retried up
-  to 3 times with exponential backoff. Non-transient failures (e.g. 401) are
-  logged and the message is dropped; the processing loop keeps running.
 - **Recovery policy.** The reaction is stateless (`is_durable() == false`,
   `needs_snapshot_on_fresh_start() == false`) and defaults to
-  `ReactionRecoveryPolicy::AutoSkipGap`. Override to `Strict` if you require
-  strict at-least-once from the last checkpoint.
+  `ReactionRecoveryPolicy::AutoSkipGap`. Override to `Strict` if you want
+  re-processing from the last checkpoint after a gap, but note that even then a
+  batch dropped by the cases above is not redelivered.
 
 ## Limitations
 

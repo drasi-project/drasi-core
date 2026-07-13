@@ -131,6 +131,12 @@ pub struct EventGridReactionConfig {
     /// Optional per-query and default-template overrides (used in template mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_templates: Option<EventGridOutputTemplates>,
+
+    /// Permit plaintext `http` endpoints. **Disabled by default**: with an
+    /// access key an `http` endpoint would transmit the `aeg-sas-key` credential
+    /// in cleartext. Opt in only for local test servers (e.g. wiremock).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_http: bool,
 }
 
 impl Default for EventGridReactionConfig {
@@ -142,6 +148,7 @@ impl Default for EventGridReactionConfig {
             format: OutputFormat::default(),
             timeout_ms: default_timeout_ms(),
             output_templates: None,
+            allow_http: false,
         }
     }
 }
@@ -158,6 +165,7 @@ impl std::fmt::Debug for EventGridReactionConfig {
             .field("format", &self.format)
             .field("timeout_ms", &self.timeout_ms)
             .field("output_templates", &self.output_templates)
+            .field("allow_http", &self.allow_http)
             .finish()
     }
 }
@@ -255,7 +263,7 @@ impl EventGridReactionConfig {
         query_ids: &[String],
         priority_queue_capacity: Option<usize>,
     ) -> anyhow::Result<()> {
-        validate_endpoint(&self.endpoint).context("endpoint")?;
+        validate_endpoint(&self.endpoint, self.allow_http).context("endpoint")?;
 
         if self.timeout_ms == 0 {
             anyhow::bail!("`timeoutMs` must be greater than 0");
@@ -298,18 +306,22 @@ impl EventGridReactionConfig {
     }
 }
 
-/// Validate that `endpoint` is an absolute `https` URL with a host. Matches the
-/// platform, which passes the topic URL straight to the SDK client unchanged.
-fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
+/// Validate that `endpoint` is an absolute URL with a host. Requires `https`
+/// unless `allow_http` is explicitly set (local test servers only): an `http`
+/// endpoint would transmit an access-key credential in cleartext.
+fn validate_endpoint(endpoint: &str, allow_http: bool) -> anyhow::Result<()> {
     if endpoint.is_empty() {
         anyhow::bail!("must not be empty");
     }
     let url = Url::parse(endpoint).context("invalid URL")?;
     match url.scheme() {
         "https" => {}
-        // Permit http for local test servers (e.g. wiremock) so the same code
-        // path is exercised end-to-end; production topics are always https.
-        "http" => {}
+        // Plaintext http is rejected by default because it would leak the
+        // `aeg-sas-key` credential; opt in via `allow_http` for local testing.
+        "http" if allow_http => {}
+        "http" => anyhow::bail!(
+            "http endpoints are not permitted (the access key would be sent in cleartext); use https or set `allowHttp` for local testing"
+        ),
         scheme => anyhow::bail!("unsupported URL scheme '{scheme}'; expected https"),
     }
     if url.host_str().is_none() {

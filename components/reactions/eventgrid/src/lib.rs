@@ -127,6 +127,14 @@ impl EventGridReactionBuilder {
         self
     }
 
+    /// Permit a plaintext `http` endpoint. Disabled by default; opt in only for
+    /// local test servers, since an `http` endpoint transmits the access key in
+    /// cleartext.
+    pub fn with_allow_http(mut self, allow_http: bool) -> Self {
+        self.config.allow_http = allow_http;
+        self
+    }
+
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
         self
@@ -179,6 +187,13 @@ impl EventGridReactionBuilder {
         self
     }
 
+    /// Validate the configuration and construct the [`EventGridReaction`].
+    ///
+    /// Returns an error if the configuration is invalid — for example a missing,
+    /// malformed, or non-`https` endpoint (see `allowHttp`), a zero `timeoutMs`
+    /// or `priorityQueueCapacity`, the `template` format selected without any
+    /// templates, an invalid Handlebars template, or a template route that
+    /// matches no subscribed query.
     pub fn build(self) -> anyhow::Result<EventGridReaction> {
         self.config
             .validate(&self.queries, self.priority_queue_capacity)?;

@@ -34,6 +34,12 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TEST_KEY: &str = "test-access-key";
 
+/// Brief pause after `core.start()` to let the source→query→reaction pipeline
+/// wire up before the first change is sent. Kept small because request arrival
+/// is awaited precisely by [`wait_for_requests`]; this only covers subscription
+/// setup, not event propagation.
+const PIPELINE_WARMUP: Duration = Duration::from_millis(100);
+
 fn make_source(
     id: &str,
 ) -> (
@@ -94,6 +100,7 @@ async fn eventgrid_end_to_end_unpacked_cloudevents() -> Result<()> {
         .build();
     let reaction = EventGridReaction::builder("eventgrid-e2e")
         .with_endpoint(format!("{}/api/events", server.uri()))
+        .with_allow_http(true)
         .with_access_key(TEST_KEY)
         .with_schema(EventGridSchema::CloudEvents)
         .with_format(OutputFormat::Unpacked)
@@ -110,7 +117,7 @@ async fn eventgrid_end_to_end_unpacked_cloudevents() -> Result<()> {
             .await?,
     );
     core.start().await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(PIPELINE_WARMUP).await;
 
     // ---- INSERT ----
     let props = PropertyMapBuilder::new()
@@ -189,6 +196,7 @@ async fn eventgrid_end_to_end_eventgrid_schema_insert() -> Result<()> {
         .build();
     let reaction = EventGridReaction::builder("eventgrid-native")
         .with_endpoint(format!("{}/api/events", server.uri()))
+        .with_allow_http(true)
         .with_access_key(TEST_KEY)
         .with_schema(EventGridSchema::EventGrid)
         .with_format(OutputFormat::Unpacked)
@@ -205,7 +213,7 @@ async fn eventgrid_end_to_end_eventgrid_schema_insert() -> Result<()> {
             .await?,
     );
     core.start().await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(PIPELINE_WARMUP).await;
 
     let props = PropertyMapBuilder::new()
         .with_string("name", "Grace")
@@ -262,6 +270,7 @@ async fn eventgrid_template_metadata_becomes_extension_attributes() -> Result<()
 
     let reaction = EventGridReaction::builder("eventgrid-template")
         .with_endpoint(format!("{}/api/events", server.uri()))
+        .with_allow_http(true)
         .with_access_key(TEST_KEY)
         .with_schema(EventGridSchema::CloudEvents)
         .with_format(OutputFormat::Template)
@@ -279,7 +288,7 @@ async fn eventgrid_template_metadata_becomes_extension_attributes() -> Result<()
             .await?,
     );
     core.start().await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(PIPELINE_WARMUP).await;
 
     let props = PropertyMapBuilder::new().with_string("name", "Ada").build();
     handle
@@ -319,6 +328,7 @@ async fn eventgrid_publish_failure_keeps_reaction_running() -> Result<()> {
         .build();
     let reaction = EventGridReaction::builder("eventgrid-fail")
         .with_endpoint(format!("{}/api/events", server.uri()))
+        .with_allow_http(true)
         .with_access_key("wrong-key")
         .with_format(OutputFormat::Unpacked)
         .with_query("people-query")
@@ -334,7 +344,7 @@ async fn eventgrid_publish_failure_keeps_reaction_running() -> Result<()> {
             .await?,
     );
     core.start().await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(PIPELINE_WARMUP).await;
 
     let props = PropertyMapBuilder::new().with_string("name", "Ada").build();
     handle

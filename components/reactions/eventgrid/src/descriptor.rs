@@ -104,6 +104,10 @@ pub struct EventGridReactionConfigDto {
     /// Per-query and default output templates (template format).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_templates: Option<EventGridOutputTemplatesDto>,
+
+    /// Permit plaintext `http` endpoints (local testing only). Defaults to false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_http: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +189,7 @@ impl From<&EventGridReactionConfig> for EventGridReactionConfigDto {
             timeout_ms: Some(ConfigValue::Static(c.timeout_ms)),
             priority_queue_capacity: None,
             output_templates: c.output_templates.as_ref().map(dto_output_templates),
+            allow_http: c.allow_http.then_some(true),
         }
     }
 }
@@ -274,6 +279,9 @@ impl ReactionPluginDescriptor for EventGridReactionDescriptor {
         }
         if let Some(templates) = &dto.output_templates {
             builder = builder.with_output_templates(map_output_templates(templates));
+        }
+        if let Some(allow_http) = dto.allow_http {
+            builder = builder.with_allow_http(allow_http);
         }
 
         let mut reaction = builder.build()?;
