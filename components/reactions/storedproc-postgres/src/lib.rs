@@ -54,8 +54,6 @@ pub use config::{PostgresStoredProcReactionConfig, QueryConfig, TemplateSpec};
 pub use reaction::PostgresStoredProcReaction;
 
 /// Dynamic plugin entry point.
-///
-/// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
     plugin_id = "storedproc-postgres-reaction",

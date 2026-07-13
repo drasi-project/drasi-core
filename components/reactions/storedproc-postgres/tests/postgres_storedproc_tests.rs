@@ -19,6 +19,8 @@
 
 mod postgres_helpers;
 
+use chrono::Utc;
+use drasi_lib::channels::{QueryResult, ResultDiff};
 use drasi_lib::reactions::common;
 use drasi_lib::reactions::common::TemplateRouting;
 use drasi_lib::Reaction;
@@ -1399,6 +1401,329 @@ async fn test_executor_with_string_numbers() {
     assert_eq!(rows.len(), 1);
     let value = rows[0].get::<_, f64>(0);
     assert!((value - 25.789).abs() < 0.00001);
+
+    pg.cleanup().await;
+}
+
+// ============================================================================
+// End-to-End Pipeline Tests
+//
+// Unlike the executor tests above (which pass pre-rendered SQL), these push
+// `QueryResult`s through `enqueue_query_result` so the reaction's processing
+// loop performs the real Handlebars `{{param}}` render → positional-bind →
+// execute pipeline against a live PostgreSQL instance.
+// ============================================================================
+
+/// Run a single SQL statement against the test database.
+async fn exec_sql(config: &PostgresConfig, sql: &str) {
+    let (client, connection) =
+        tokio_postgres::connect(&config.connection_string(), tokio_postgres::NoTls)
+            .await
+            .expect("connect");
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("Connection error: {e}");
+        }
+    });
+    client.execute(sql, &[]).await.expect("exec_sql");
+}
+
+/// Poll `count_sql` (which must return a single `bigint`) until it reaches
+/// `expected` or the deadline elapses.
+async fn wait_for_count(config: &PostgresConfig, count_sql: &str, expected: i64, timeout_ms: u64) {
+    let (client, connection) =
+        tokio_postgres::connect(&config.connection_string(), tokio_postgres::NoTls)
+            .await
+            .expect("connect");
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("Connection error: {e}");
+        }
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let count: i64 = client
+            .query_one(count_sql, &[])
+            .await
+            .expect("count")
+            .get(0);
+        if count >= expected {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("timed out waiting for count {expected} from `{count_sql}` (last={count})");
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn add_diff(data: serde_json::Value) -> ResultDiff {
+    ResultDiff::Add {
+        data,
+        row_signature: 0,
+    }
+}
+
+/// Drives the full `{{param}}` render→execute pipeline for ADD, UPDATE and
+/// DELETE through the reaction's processing loop against a real database.
+#[tokio::test]
+#[serial]
+async fn test_end_to_end_param_pipeline_all_operations() {
+    let pg = setup_postgres().await;
+    let pg_config = pg.config();
+    setup_stored_procedures(pg_config).await;
+
+    let reaction = PostgresStoredProcReaction::builder("e2e-pipeline")
+        .with_hostname(&pg_config.host)
+        .with_port(pg_config.port)
+        .with_database(&pg_config.database)
+        .with_user(&pg_config.user)
+        .with_password(&pg_config.password)
+        .with_ssl(false)
+        .with_query("sensor-query")
+        .with_default_template(QueryConfig {
+            added: Some(TemplateSpec::new(
+                "CALL log_sensor_added({{param after.sensor_id}}, {{param after.temperature}})",
+            )),
+            updated: Some(TemplateSpec::new(
+                "CALL log_sensor_updated({{param after.sensor_id}}, {{param after.temperature}})",
+            )),
+            deleted: Some(TemplateSpec::new(
+                "CALL log_sensor_deleted({{param before.sensor_id}})",
+            )),
+        })
+        .with_auto_start(false)
+        .build()
+        .await
+        .expect("build reaction");
+
+    reaction.start().await.expect("start");
+
+    // ADD
+    reaction
+        .enqueue_query_result(QueryResult::new(
+            "sensor-query".to_string(),
+            1,
+            Utc::now(),
+            vec![add_diff(
+                json!({"sensor_id": "sensor-e2e", "temperature": 21.5}),
+            )],
+            HashMap::new(),
+        ))
+        .await
+        .expect("enqueue add");
+
+    // UPDATE
+    reaction
+        .enqueue_query_result(QueryResult::new(
+            "sensor-query".to_string(),
+            2,
+            Utc::now(),
+            vec![ResultDiff::Update {
+                data: json!({}),
+                before: json!({"sensor_id": "sensor-e2e", "temperature": 21.5}),
+                after: json!({"sensor_id": "sensor-e2e", "temperature": 22.7}),
+                grouping_keys: None,
+                row_signature: 0,
+            }],
+            HashMap::new(),
+        ))
+        .await
+        .expect("enqueue update");
+
+    // DELETE
+    reaction
+        .enqueue_query_result(QueryResult::new(
+            "sensor-query".to_string(),
+            3,
+            Utc::now(),
+            vec![ResultDiff::Delete {
+                data: json!({"sensor_id": "sensor-e2e", "temperature": 22.7}),
+                row_signature: 0,
+            }],
+            HashMap::new(),
+        ))
+        .await
+        .expect("enqueue delete");
+
+    wait_for_count(pg_config, "SELECT COUNT(*) FROM sensor_log", 3, 5000).await;
+    reaction.stop().await.expect("stop");
+
+    // Verify each operation rendered and executed the right procedure.
+    let entries = get_log_entries(pg_config).await;
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0], ("ADD".to_string(), "sensor-e2e".to_string()));
+    assert_eq!(entries[1], ("UPDATE".to_string(), "sensor-e2e".to_string()));
+    assert_eq!(entries[2], ("DELETE".to_string(), "sensor-e2e".to_string()));
+
+    pg.cleanup().await;
+}
+
+/// End-to-end proof of the new standard context keys (`query_name`,
+/// `operation`) and whole-object JSONB binding (`{{param after}}`).
+#[tokio::test]
+#[serial]
+async fn test_end_to_end_context_keys_and_json_binding() {
+    let pg = setup_postgres().await;
+    let pg_config = pg.config();
+
+    exec_sql(
+        pg_config,
+        "CREATE TABLE IF NOT EXISTS ctx_capture (
+            id SERIAL PRIMARY KEY,
+            query_name TEXT,
+            operation TEXT,
+            payload JSONB
+        )",
+    )
+    .await;
+    exec_sql(
+        pg_config,
+        "CREATE OR REPLACE PROCEDURE capture_ctx(
+            p_query TEXT, p_op TEXT, p_payload JSONB
+        ) LANGUAGE plpgsql AS $$
+        BEGIN
+            INSERT INTO ctx_capture (query_name, operation, payload)
+            VALUES (p_query, p_op, p_payload);
+        END; $$",
+    )
+    .await;
+
+    let reaction = PostgresStoredProcReaction::builder("e2e-ctx")
+        .with_hostname(&pg_config.host)
+        .with_port(pg_config.port)
+        .with_database(&pg_config.database)
+        .with_user(&pg_config.user)
+        .with_password(&pg_config.password)
+        .with_ssl(false)
+        .with_query("ctx-query")
+        .with_default_template(QueryConfig {
+            added: Some(TemplateSpec::new(
+                "CALL capture_ctx({{param query_name}}, {{param operation}}, {{param after}})",
+            )),
+            updated: None,
+            deleted: None,
+        })
+        .with_auto_start(false)
+        .build()
+        .await
+        .expect("build reaction");
+
+    reaction.start().await.expect("start");
+    reaction
+        .enqueue_query_result(QueryResult::new(
+            "ctx-query".to_string(),
+            1,
+            Utc::now(),
+            vec![add_diff(json!({"sensor_id": "s1", "temperature": 30.0}))],
+            HashMap::new(),
+        ))
+        .await
+        .expect("enqueue add");
+
+    wait_for_count(pg_config, "SELECT COUNT(*) FROM ctx_capture", 1, 5000).await;
+    reaction.stop().await.expect("stop");
+
+    let (client, connection) =
+        tokio_postgres::connect(&pg_config.connection_string(), tokio_postgres::NoTls)
+            .await
+            .expect("connect");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let row = client
+        .query_one(
+            "SELECT query_name, operation, payload->>'sensor_id', (payload->>'temperature')::float8
+             FROM ctx_capture",
+            &[],
+        )
+        .await
+        .expect("query ctx_capture");
+
+    assert_eq!(row.get::<_, String>(0), "ctx-query"); // query_name key
+    assert_eq!(row.get::<_, String>(1), "ADD"); // operation key
+    assert_eq!(row.get::<_, String>(2), "s1"); // whole-object JSONB payload
+    assert!((row.get::<_, f64>(3) - 30.0).abs() < 1e-9);
+
+    pg.cleanup().await;
+}
+
+/// End-to-end regression test for the string-binding fix: a numeric-looking
+/// string bound to a TEXT column must be preserved verbatim (leading zeros
+/// intact), rather than being coerced to a number.
+#[tokio::test]
+#[serial]
+async fn test_end_to_end_numeric_string_preserved_in_text_column() {
+    let pg = setup_postgres().await;
+    let pg_config = pg.config();
+
+    exec_sql(
+        pg_config,
+        "CREATE TABLE IF NOT EXISTS code_capture (id SERIAL PRIMARY KEY, code TEXT)",
+    )
+    .await;
+    exec_sql(
+        pg_config,
+        "CREATE OR REPLACE PROCEDURE store_code(p_code TEXT)
+         LANGUAGE plpgsql AS $$
+         BEGIN
+             INSERT INTO code_capture (code) VALUES (p_code);
+         END; $$",
+    )
+    .await;
+
+    let reaction = PostgresStoredProcReaction::builder("e2e-code")
+        .with_hostname(&pg_config.host)
+        .with_port(pg_config.port)
+        .with_database(&pg_config.database)
+        .with_user(&pg_config.user)
+        .with_password(&pg_config.password)
+        .with_ssl(false)
+        .with_query("code-query")
+        .with_default_template(QueryConfig {
+            added: Some(TemplateSpec::new("CALL store_code({{param after.code}})")),
+            updated: None,
+            deleted: None,
+        })
+        .with_auto_start(false)
+        .build()
+        .await
+        .expect("build reaction");
+
+    reaction.start().await.expect("start");
+    reaction
+        .enqueue_query_result(QueryResult::new(
+            "code-query".to_string(),
+            1,
+            Utc::now(),
+            // "007" parses as a number but must NOT be coerced for a TEXT column.
+            vec![add_diff(json!({"code": "007"}))],
+            HashMap::new(),
+        ))
+        .await
+        .expect("enqueue add");
+
+    wait_for_count(pg_config, "SELECT COUNT(*) FROM code_capture", 1, 5000).await;
+    reaction.stop().await.expect("stop");
+
+    let (client, connection) =
+        tokio_postgres::connect(&pg_config.connection_string(), tokio_postgres::NoTls)
+            .await
+            .expect("connect");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let code: String = client
+        .query_one("SELECT code FROM code_capture", &[])
+        .await
+        .expect("query code_capture")
+        .get(0);
+
+    assert_eq!(
+        code, "007",
+        "numeric-looking string must be preserved verbatim"
+    );
 
     pg.cleanup().await;
 }

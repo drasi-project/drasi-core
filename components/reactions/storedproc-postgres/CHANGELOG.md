@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **BREAKING:** Stored-procedure commands are now [Handlebars](https://handlebarsjs.com/) templates. Argument values are bound as positional SQL parameters via the `{{param ...}}` helper (e.g. `CALL add_user({{param after.id}})`), replacing the previous `@field` placeholder syntax. Templates are compiled and validated when the reaction is built. ([#541](https://github.com/drasi-project/drasi-core/issues/541))
 
+### Fixed
+
+- String parameter values are now bound faithfully. Previously a numeric-looking string (e.g. `"007"`) was eagerly coerced to a float, losing leading zeros and formatting when written to a `TEXT`/`VARCHAR` column. Strings are now bound verbatim for text columns and coerced to a number only when the target stored-procedure parameter is genuinely numeric. ([#541](https://github.com/drasi-project/drasi-core/issues/541))
+
 ## [0.3.4] - 2026-07-08
 
 ### Miscellaneous Tasks

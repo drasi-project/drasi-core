@@ -79,20 +79,6 @@ fn register_json_helper(handlebars: &mut Handlebars<'static>) {
     );
 }
 
-/// Build a Handlebars registry pre-loaded with the `json` helper, in strict
-/// mode so that a template referencing a missing field fails the render (and
-/// the event is skipped) rather than silently binding `null`.
-///
-/// This registry is suitable for validating templates at construction time.
-/// Actual dispatch uses [`render_command`], which builds a per-render registry
-/// that additionally carries the parameter-collecting `param` helper.
-pub(crate) fn build_handlebars() -> Handlebars<'static> {
-    let mut handlebars = Handlebars::new();
-    handlebars.set_strict_mode(true);
-    register_json_helper(&mut handlebars);
-    handlebars
-}
-
 /// Compile a single template string, treating an empty string as valid
 /// (meaning "no command configured").
 pub(crate) fn validate_template(template: &str) -> Result<()> {

@@ -73,7 +73,21 @@ impl ToSql for SqlParam {
                     _ => f.to_sql(ty, out),
                 }
             }
-            SqlParam::Text(s) => s.to_sql(ty, out),
+            SqlParam::Text(s) => {
+                // Bind verbatim for text targets; coerce only when the target
+                // column is genuinely numeric so string-typed row data can still
+                // feed numeric stored-procedure parameters. A non-numeric string
+                // aimed at a numeric column is a real type error and surfaces as
+                // a parse error here rather than silently corrupting the value.
+                match *ty {
+                    Type::INT2 => s.parse::<i16>()?.to_sql(ty, out),
+                    Type::INT4 => s.parse::<i32>()?.to_sql(ty, out),
+                    Type::INT8 => s.parse::<i64>()?.to_sql(ty, out),
+                    Type::FLOAT4 => s.parse::<f32>()?.to_sql(ty, out),
+                    Type::FLOAT8 => s.parse::<f64>()?.to_sql(ty, out),
+                    _ => s.to_sql(ty, out),
+                }
+            }
             SqlParam::Json(v) => v.to_sql(ty, out),
         }
     }
@@ -309,9 +323,10 @@ impl PostgresExecutor {
 
             debug!("Executing: {} with {} parameters", query, params.len());
 
-            // Convert JSON values to SqlParam enum
-            // For numbers, try to preserve the numeric type for stored procedures with numeric parameters
-            // For strings that look like numbers, try to parse them as f64 for DOUBLE PRECISION compatibility
+            // Convert JSON values to SqlParam enum. Strings are kept as text
+            // (preserving exact content such as leading zeros); numeric coercion,
+            // when the target column is actually numeric, is handled type-aware in
+            // `SqlParam::to_sql`.
             let sql_params: Vec<SqlParam> = params
                 .iter()
                 .map(|v| match v {
@@ -327,15 +342,7 @@ impl PostgresExecutor {
                             SqlParam::Text(n.to_string())
                         }
                     }
-                    Value::String(s) => {
-                        // Try to parse strings as numbers for compatibility with numeric columns
-                        // If it's a valid number, pass it as f64, otherwise keep as string
-                        if let Ok(f) = s.parse::<f64>() {
-                            SqlParam::Float(f)
-                        } else {
-                            SqlParam::Text(s.clone())
-                        }
-                    }
+                    Value::String(s) => SqlParam::Text(s.clone()),
                     Value::Array(_) | Value::Object(_) => {
                         // For complex types, pass as JSON
                         SqlParam::Json(v.clone())
@@ -392,5 +399,55 @@ impl PostgresExecutor {
         }
 
         Err(last_error.unwrap_or_else(|| anyhow!("Operation failed with no error")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Encode a value via `ToSql` into a fresh buffer for comparison.
+    fn encode<T: ToSql>(v: &T, ty: &Type) -> (IsNull, BytesMut) {
+        let mut buf = BytesMut::new();
+        let is_null = v.to_sql(ty, &mut buf).expect("encode failed");
+        (is_null, buf)
+    }
+
+    #[test]
+    fn text_binds_verbatim_for_text_columns() {
+        // A numeric-looking string must reach a TEXT column unchanged
+        // (leading zeros preserved), not coerced to a number.
+        let (_, got) = encode(&SqlParam::Text("007".to_string()), &Type::TEXT);
+        let (_, want) = encode(&"007", &Type::TEXT);
+        assert_eq!(got, want);
+        assert_eq!(&got[..], b"007");
+    }
+
+    #[test]
+    fn text_coerces_to_int_for_int_columns() {
+        let (_, got) = encode(&SqlParam::Text("42".to_string()), &Type::INT4);
+        let (_, want) = encode(&42i32, &Type::INT4);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn text_coerces_to_float_for_float_columns() {
+        let (_, got) = encode(&SqlParam::Text("1.5".to_string()), &Type::FLOAT8);
+        let (_, want) = encode(&1.5f64, &Type::FLOAT8);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn text_non_numeric_into_numeric_column_errors() {
+        let mut buf = BytesMut::new();
+        let result = SqlParam::Text("not-a-number".to_string()).to_sql(&Type::INT4, &mut buf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn numeric_json_value_still_binds_to_text_column() {
+        // Integers/floats coming from JSON numbers still stringify for TEXT columns.
+        let (_, got) = encode(&SqlParam::Int(42), &Type::TEXT);
+        assert_eq!(&got[..], b"42");
     }
 }
