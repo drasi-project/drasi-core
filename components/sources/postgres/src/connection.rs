@@ -593,16 +593,37 @@ pub(crate) fn parse_lsn(lsn_str: &str) -> Result<u64> {
     Ok((high << 32) | low)
 }
 
-/// Encodes a WAL LSN as the opaque source-position bytes used by checkpoints and resume.
-pub(crate) fn lsn_to_position_bytes(lsn: u64) -> Bytes {
-    Bytes::from(lsn.to_be_bytes().to_vec())
+/// Encodes a transaction `commit_lsn` plus an in-transaction `offset` as a
+/// 16-byte source-position: `[ commit_lsn (8 BE) | offset (8 BE) ]`.
+///
+/// This is the single canonical position encoding for the Postgres source.
+/// Every row-change committed in one Postgres transaction shares the same
+/// `commit_lsn` (the atomic ordering key required by the bootstrap-snapshot
+/// boundary), but each gets a distinct, monotonically increasing `offset` so
+/// the framework's per-subscriber high-water-mark filter does not collapse
+/// multiple changes that belong to the same transaction (issue #599).
+///
+/// Byte-lexicographic comparison of these positions equals tuple ordering on
+/// `(commit_lsn, offset)`, so positions remain globally monotonic across the
+/// stream and the `commit_lsn` prefix still dominates cross-transaction and
+/// bootstrap-boundary comparisons.
+pub(crate) fn commit_position_bytes(commit_lsn: u64, offset: u64) -> Bytes {
+    let mut buf = Vec::with_capacity(16);
+    buf.extend_from_slice(&commit_lsn.to_be_bytes());
+    buf.extend_from_slice(&offset.to_be_bytes());
+    Bytes::from(buf)
 }
 
-/// Decodes opaque source-position bytes back to a WAL LSN.
+/// Decodes a 16-byte `[ commit_lsn (8 BE) | offset (8 BE) ]` source-position,
+/// returning the leading `commit_lsn` as the WAL LSN.
+///
+/// The in-transaction `offset` only disambiguates per-change ordering for the
+/// high-water-mark filter; the WAL restart/feedback machinery operates on the
+/// `commit_lsn`, so it is intentionally ignored here.
 pub(crate) fn position_bytes_to_lsn(position: &Bytes) -> Result<u64> {
-    if position.len() != 8 {
+    if position.len() != 16 {
         return Err(anyhow!(
-            "Invalid Postgres LSN position: expected 8 bytes, got {}",
+            "Invalid Postgres LSN position: expected 16 bytes, got {}",
             position.len()
         ));
     }
@@ -611,4 +632,65 @@ pub(crate) fn position_bytes_to_lsn(position: &Bytes) -> Result<u64> {
         .try_into()
         .map_err(|_| anyhow!("unexpected: array conversion failed after length check"))?;
     Ok(u64::from_be_bytes(bytes))
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::*;
+
+    #[test]
+    fn commit_position_is_16_bytes_and_decodes_to_commit_lsn() {
+        let pos = commit_position_bytes(0x0000_0000_0152_00b0, 3);
+        assert_eq!(pos.len(), 16);
+        // Decoding ignores the in-transaction offset and returns the commit_lsn.
+        assert_eq!(position_bytes_to_lsn(&pos).unwrap(), 0x0000_0000_0152_00b0);
+    }
+
+    #[test]
+    fn position_bytes_to_lsn_requires_16_bytes() {
+        // Only the 16-byte `[commit_lsn | offset]` encoding is accepted.
+        assert!(position_bytes_to_lsn(&Bytes::from(vec![0u8; 4])).is_err());
+        assert!(position_bytes_to_lsn(&Bytes::from(vec![0u8; 8])).is_err());
+        assert!(position_bytes_to_lsn(&Bytes::from(vec![0u8; 12])).is_err());
+        assert!(position_bytes_to_lsn(&commit_position_bytes(42, 0)).is_ok());
+    }
+
+    #[test]
+    fn commit_positions_order_by_commit_lsn_then_offset() {
+        // Within a transaction, later offsets sort after earlier ones.
+        let c0 = commit_position_bytes(100, 0);
+        let c1 = commit_position_bytes(100, 1);
+        let c2 = commit_position_bytes(100, 2);
+        assert!(c0.as_ref() < c1.as_ref());
+        assert!(c1.as_ref() < c2.as_ref());
+
+        // A change in a later transaction sorts after every change of an
+        // earlier transaction, regardless of offset.
+        let next_tx = commit_position_bytes(101, 0);
+        assert!(c2.as_ref() < next_tx.as_ref());
+
+        // The MAX-padded boundary `[S|u64::MAX]` (used by the bootstrap snapshot)
+        // suppresses every `[S|offset]` (commit_lsn == S, already in the snapshot)
+        // and delivers `[>S|*]`.
+        let padded_boundary = commit_position_bytes(100, u64::MAX);
+        assert!(c0.as_ref() < padded_boundary.as_ref());
+        assert!(c2.as_ref() < padded_boundary.as_ref());
+        assert!(next_tx.as_ref() > padded_boundary.as_ref());
+    }
+
+    /// Locks the cross-crate position-format contract: the bootstrap provider's
+    /// snapshot boundary must equal this crate's `commit_position_bytes(lsn,
+    /// u64::MAX)`. The two crates re-implement the 16-byte encoding separately
+    /// (the bootstrapper cannot depend on this crate without a cycle), so this
+    /// test fails loudly if either side's encoding drifts. See PR #600 review.
+    #[test]
+    fn snapshot_boundary_matches_commit_position_encoding() {
+        for lsn in [0u64, 1, 0x0152_00b0, u64::MAX] {
+            assert_eq!(
+                drasi_bootstrap_postgres::postgres::snapshot_position_bytes(lsn),
+                commit_position_bytes(lsn, u64::MAX),
+                "bootstrap snapshot boundary diverged from CDC position encoding for lsn={lsn:#x}"
+            );
+        }
+    }
 }

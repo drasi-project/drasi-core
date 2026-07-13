@@ -46,8 +46,19 @@ fn parse_lsn(lsn_str: &str) -> Result<u64> {
     Ok((high << 32) | low)
 }
 
-fn lsn_to_position_bytes(lsn: u64) -> Bytes {
-    Bytes::from(lsn.to_be_bytes().to_vec())
+/// Encodes the bootstrap snapshot boundary as a 16-byte source-position
+/// `[ snapshot_lsn (8 BE) | u64::MAX (8 BE) ]`, matching the CDC source's
+/// `[ commit_lsn | in-transaction offset ]` encoding.
+///
+/// Padding the offset with `u64::MAX` preserves the exact handover boundary:
+/// a CDC transaction whose `commit_lsn == snapshot_lsn` (already contained in
+/// the snapshot) stays suppressed, while every transaction committing after the
+/// snapshot is delivered. See issue #599.
+pub fn snapshot_position_bytes(snapshot_lsn: u64) -> Bytes {
+    let mut buf = Vec::with_capacity(16);
+    buf.extend_from_slice(&snapshot_lsn.to_be_bytes());
+    buf.extend_from_slice(&u64::MAX.to_be_bytes());
+    Bytes::from(buf)
 }
 
 /// Bootstrap provider for PostgreSQL sources
@@ -326,7 +337,7 @@ impl PostgresBootstrapHandler {
         info!("Bootstrap: Connected, creating snapshot transaction...");
         // Start snapshot transaction and capture LSN
         let (transaction, snapshot_lsn) = self.create_snapshot(&mut client).await?;
-        let source_position = lsn_to_position_bytes(snapshot_lsn);
+        let source_position = snapshot_position_bytes(snapshot_lsn);
 
         info!("Bootstrap snapshot created at LSN: {snapshot_lsn:x}");
 
@@ -801,5 +812,21 @@ mod tests {
             validate_effective_from(bad_effective_from).is_err(),
             "Nanosecond timestamp ({bad_effective_from}) should be rejected"
         );
+    }
+
+    /// The bootstrap snapshot boundary must be the 16-byte
+    /// `[ snapshot_lsn (8 BE) | u64::MAX (8 BE) ]` encoding so it lines up with
+    /// the CDC source's `[ commit_lsn | offset ]` positions and suppresses every
+    /// change of a transaction whose commit_lsn equals the snapshot LSN.
+    #[test]
+    fn snapshot_position_bytes_is_16_byte_max_padded() {
+        let lsn = 0x0000_0000_0152_00b0u64;
+        let pos = super::snapshot_position_bytes(lsn);
+        assert_eq!(pos.len(), 16, "snapshot boundary must be 16 bytes");
+
+        let mut expected = Vec::with_capacity(16);
+        expected.extend_from_slice(&lsn.to_be_bytes());
+        expected.extend_from_slice(&u64::MAX.to_be_bytes());
+        assert_eq!(pos.as_ref(), expected.as_slice());
     }
 }
