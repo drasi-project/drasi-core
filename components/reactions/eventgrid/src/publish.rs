@@ -218,7 +218,10 @@ mod publish_tests {
             "test",
         )
         .await;
-        assert!(result.is_ok(), "expected success after one retry: {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected success after one retry: {result:?}"
+        );
     }
 
     #[tokio::test]

@@ -525,17 +525,13 @@ impl Reaction for EventGridReaction {
 
                 let body = encode_batch(&events, config.schema, &reaction_name);
 
-                let auth = match resolve_auth_with_retry(
-                    &config,
-                    &base,
-                    &reaction_name,
-                    &mut shutdown_rx,
-                )
-                .await
-                {
-                    AuthOutcome::Ok(a) => a,
-                    AuthOutcome::Shutdown => break,
-                };
+                let auth =
+                    match resolve_auth_with_retry(&config, &base, &reaction_name, &mut shutdown_rx)
+                        .await
+                    {
+                        AuthOutcome::Ok(a) => a,
+                        AuthOutcome::Shutdown => break,
+                    };
 
                 if let Err(e) = publish(
                     &client,
