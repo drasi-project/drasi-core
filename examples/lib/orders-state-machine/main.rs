@@ -66,8 +66,15 @@ use drasi_source_postgres::{PostgresReplicationSource, TableKeyConfig};
 use drasi_source_state_machine::{StateMachineSourceBuilder, StateMachineSourceConfig};
 use drasi_state_store_redb::RedbStateStoreProvider;
 
-const PG_HOST: &str = "localhost"; // DevSkim: ignore DS137138
-const PG_PORT: u16 = 5432;
+// Connect over IPv4 explicitly. On macOS `localhost` resolves to `::1` (IPv6)
+// first, but Docker publishes the container port on IPv4 (`0.0.0.0`), so
+// connecting to `localhost` could hit `::1` where nothing is listening.
+// `127.0.0.1` forces the IPv4 address Docker exposes.
+const PG_HOST: &str = "127.0.0.1"; // DevSkim: ignore DS137138
+                                   // Host port published by docker-compose (mapped to the container's 5432). Uses a
+                                   // distinctive port so it doesn't collide with a local Postgres or another
+                                   // container already bound to 5432 on the host.
+const PG_PORT: u16 = 5442;
 const PG_DB: &str = "drasi";
 const PG_USER: &str = "postgres";
 const PG_PASSWORD: &str = "postgres";
@@ -316,7 +323,7 @@ async fn main() -> Result<()> {
     println!("│ Orders State Machine started!                 │");
     println!("├──────────────────────────────────────────────┤");
     println!("│ 🌐 Dashboard:  http://localhost:3000          │");
-    println!("│ 🗄  Postgres:   localhost:5432 (db: drasi)     │");
+    println!("│ 🗄  Postgres:   127.0.0.1:5442 (db: drasi)     │");
     println!("│ Orders advance one stage roughly every 1 s.   │");
     println!("│ A new order is seeded every 8 s.              │");
     println!("├──────────────────────────────────────────────┤");

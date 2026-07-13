@@ -29,7 +29,10 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: drasi
     ports:
-      - "5432:5432"
+      # Publish on a distinctive host port (5442) to avoid colliding with a local
+      # Postgres or another container already using the default 5432 on the host.
+      # The container still listens on 5432 internally; the app connects to 5442.
+      - "5442:5432"
     volumes:
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:

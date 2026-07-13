@@ -86,7 +86,7 @@ progress through their lifecycle.
 To run the steps manually:
 
 ```bash
-docker compose up -d          # Postgres on :5432
+docker compose up -d          # Postgres on host port :5442 (container 5432)
 cargo run                     # Drasi + dashboard on :3000
 docker compose down -v        # tear down the database when finished
 ```
