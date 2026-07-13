@@ -290,30 +290,22 @@ impl PostgresExecutor {
         Ok(())
     }
 
-    /// Execute a stored procedure with the given parameters
-    pub async fn execute_procedure(
-        &self,
-        procedure_name: &str,
-        parameters: Vec<Value>,
-    ) -> Result<()> {
-        let proc_name = procedure_name.to_string();
+    /// Execute a rendered stored-procedure command with the given positional
+    /// bind parameters.
+    ///
+    /// The `command` is the fully rendered SQL string containing `$1..$N`
+    /// placeholders (produced by the Handlebars `param` helper); `parameters`
+    /// are the ordered values to bind. Values are bound by `tokio-postgres`,
+    /// never interpolated into the SQL text, so untrusted row data cannot alter
+    /// the command structure.
+    pub async fn execute_command(&self, command: &str, parameters: Vec<Value>) -> Result<()> {
+        let query = command.to_string();
         let params = parameters.clone();
         let client = self.client.clone();
         let cmd_timeout = self.command_timeout;
 
         self.execute_with_retry(|| async {
             let client = client.read().await;
-
-            // Build the CALL statement
-            // For tokio-postgres, we need to use parameterized queries with $1, $2, etc.
-            let param_placeholders: Vec<String> =
-                (1..=params.len()).map(|i| format!("${i}")).collect();
-
-            let query = if param_placeholders.is_empty() {
-                format!("CALL {proc_name}()")
-            } else {
-                format!("CALL {}({})", proc_name, param_placeholders.join(", "))
-            };
 
             debug!("Executing: {} with {} parameters", query, params.len());
 
@@ -357,7 +349,7 @@ impl PostgresExecutor {
                 .map(|p| p as &(dyn ToSql + Sync))
                 .collect();
 
-            // Execute the stored procedure
+            // Execute the rendered command
             let result = timeout(cmd_timeout, client.execute(&query, &param_refs[..]))
                 .await
                 .map_err(|_| anyhow!("Procedure execution timed out after {cmd_timeout:?}"))?
