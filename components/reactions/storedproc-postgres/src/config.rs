@@ -28,8 +28,11 @@ pub use common::{QueryConfig, TemplateSpec};
 /// Stored-procedure commands are configured as [Handlebars] templates. Argument
 /// values are referenced with the `{{param <expr>}}` helper, which binds them as
 /// positional SQL parameters (`$1`, `$2`, …) so untrusted row data can never
-/// alter the command structure. The `{{json <expr>}}` helper is also available
-/// for embedding a serialized JSON value into literal SQL text.
+/// alter the command structure. `{{param <expr>}}` is the only interpolation
+/// allowed in a template; bare (`{{expr}}`) and raw (`{{{expr}}}`) interpolation
+/// are rejected at configuration time so values cannot be inlined into SQL text.
+/// A whole object (for example `{{param after}}`) is bound as a single JSONB
+/// parameter.
 ///
 /// Commands can be configured at two levels:
 /// 1. **Default templates**: Applied to all queries unless overridden (using `default_template`)
@@ -41,7 +44,9 @@ pub use common::{QueryConfig, TemplateSpec};
 /// - `after` - The post-change row (available for ADD and UPDATE)
 /// - `before` - The pre-change row (available for UPDATE and DELETE)
 /// - `data` - The raw `data` payload of an Update diff (available for UPDATE)
-/// - `query_id` / `query_name` - The id of the query that produced the result
+/// - `query_id` / `query_name` - The id of the query that produced the result.
+///   These are aliases that always hold the same value (`query_result.query_id`);
+///   both are provided for symmetry with other Drasi reactions.
 /// - `operation` - The operation type (`"ADD"`, `"UPDATE"`, or `"DELETE"`)
 /// - `timestamp` - RFC3339 result timestamp
 /// - `metadata` - The result's metadata map
@@ -294,6 +299,36 @@ fn validate_query_config(config: &QueryConfig) -> anyhow::Result<()> {
         crate::render::validate_template(&spec.template)?;
     }
     Ok(())
+}
+
+impl PostgresStoredProcReactionConfig {
+    /// Pre-compile every configured (non-empty) template once, keyed by the
+    /// template string. The runtime render path looks templates up here so the
+    /// Handlebars parse cost is paid at construction time, not per event.
+    pub(crate) fn compile_templates(
+        &self,
+    ) -> anyhow::Result<HashMap<String, crate::render::CompiledTemplate>> {
+        let mut cache = HashMap::new();
+        let mut compile_all = |qc: &QueryConfig,
+                               cache: &mut HashMap<String, crate::render::CompiledTemplate>|
+         -> anyhow::Result<()> {
+            for spec in [&qc.added, &qc.updated, &qc.deleted].into_iter().flatten() {
+                if !spec.template.is_empty() && !cache.contains_key(&spec.template) {
+                    let compiled = crate::render::CompiledTemplate::compile(&spec.template)?;
+                    cache.insert(spec.template.clone(), compiled);
+                }
+            }
+            Ok(())
+        };
+
+        if let Some(default) = &self.default_template {
+            compile_all(default, &mut cache)?;
+        }
+        for qc in self.routes.values() {
+            compile_all(qc, &mut cache)?;
+        }
+        Ok(cache)
+    }
 }
 
 #[cfg(test)]

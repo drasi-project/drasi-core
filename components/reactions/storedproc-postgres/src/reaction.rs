@@ -38,6 +38,7 @@ use crate::render;
 pub struct PostgresStoredProcReaction {
     pub(crate) base: ReactionBase,
     config: PostgresStoredProcReactionConfig,
+    templates: Arc<HashMap<String, render::CompiledTemplate>>,
     executor: RwLock<Option<Arc<PostgresExecutor>>>,
 }
 
@@ -103,6 +104,9 @@ impl PostgresStoredProcReaction {
         // Validate configuration
         config.validate(&queries)?;
 
+        // Pre-compile all templates once so the render path never re-parses.
+        let templates = Arc::new(config.compile_templates()?);
+
         // Create reaction base
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
@@ -119,6 +123,7 @@ impl PostgresStoredProcReaction {
         Ok(Self {
             base,
             config,
+            templates,
             executor: RwLock::new(None),
         })
     }
@@ -139,6 +144,7 @@ impl PostgresStoredProcReaction {
     async fn run_processing_loop(
         base: ReactionBase,
         config: PostgresStoredProcReactionConfig,
+        templates: Arc<HashMap<String, render::CompiledTemplate>>,
         executor: Arc<PostgresExecutor>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) {
@@ -189,20 +195,32 @@ impl PostgresStoredProcReaction {
                     }
                 };
 
-                // Render the command to SQL + positional bind parameters. On a
-                // render failure (e.g. a missing referenced field) we log and
-                // skip the event rather than executing partial or unsafe SQL.
-                let (command, params) =
-                    match render::render_command(&spec.template, &render_input.context) {
-                        Ok(rendered) => rendered,
-                        Err(e) => {
-                            error!(
-                                "[{reaction_id}] Failed to render command for query '{}': {e}",
-                                query_result.query_id
-                            );
-                            continue;
-                        }
-                    };
+                // Render the command to SQL + positional bind parameters using
+                // the pre-compiled template. On a render failure (e.g. a missing
+                // referenced field) we log and skip the event rather than
+                // executing partial or unsafe SQL.
+                let compiled = match templates.get(&spec.template) {
+                    Some(compiled) => compiled,
+                    None => {
+                        // Every configured template is compiled at construction,
+                        // so this should not happen; skip defensively.
+                        error!(
+                            "[{reaction_id}] No compiled template found for query '{}', skipping",
+                            query_result.query_id
+                        );
+                        continue;
+                    }
+                };
+                let (command, params) = match compiled.render(&render_input.context) {
+                    Ok(rendered) => rendered,
+                    Err(e) => {
+                        error!(
+                            "[{reaction_id}] Failed to render command for query '{}': {e}",
+                            query_result.query_id
+                        );
+                        continue;
+                    }
+                };
 
                 debug!(
                     "[{reaction_id}] Executing command with {} parameters for {:?} operation",
@@ -308,8 +326,9 @@ impl Reaction for PostgresStoredProcReaction {
         let shutdown_rx = self.base.create_shutdown_channel().await;
         let base = self.base.clone_shared();
         let config = self.config.clone();
+        let templates = Arc::clone(&self.templates);
         let handle = tokio::spawn(async move {
-            Self::run_processing_loop(base, config, executor, shutdown_rx).await;
+            Self::run_processing_loop(base, config, templates, executor, shutdown_rx).await;
         });
         self.base.set_processing_task(handle).await;
 
@@ -501,15 +520,25 @@ impl PostgresStoredProcReactionBuilder {
         self
     }
 
-    /// Set the stored procedure name (shortcut for simple configurations)
+    /// Configure a procedure that accepts the changed row as a single JSONB
+    /// argument (shortcut for the common "sync the whole row" case).
     ///
-    /// Creates default templates that call the specified procedure with:
-    /// - added: passes the `after` row fields
-    /// - updated: passes the `before` and `after` row fields
-    /// - deleted: passes the `before` row fields
+    /// This creates default templates that call `proc_name` with the whole row
+    /// object bound as a single positional JSONB parameter:
+    /// - added: `CALL proc_name({{param after}})`
+    /// - updated: `CALL proc_name({{param before}}, {{param after}})`
+    /// - deleted: `CALL proc_name({{param before}})`
     ///
-    /// Values are bound as positional parameters via the `{{param …}}` helper.
-    pub fn with_stored_procedure(mut self, proc_name: impl Into<String>) -> Self {
+    /// # Important
+    ///
+    /// The procedure **must** accept a single `jsonb` argument (two for the
+    /// update case: `before` then `after`). It is *not* suitable for procedures
+    /// that take individual typed columns such as `(id INT, name TEXT)` — those
+    /// would fail with a type mismatch. For typed-argument procedures, configure
+    /// explicit templates via [`with_default_template`](Self::with_default_template)
+    /// or [`with_route`](Self::with_route) that reference each field, for example
+    /// `CALL add_user({{param after.id}}, {{param after.name}})`.
+    pub fn with_jsonb_procedure(mut self, proc_name: impl Into<String>) -> Self {
         use crate::config::TemplateSpec;
 
         let proc = proc_name.into();
@@ -550,7 +579,7 @@ mod tests {
     async fn test_recovery_trait_defaults() {
         let reaction = PostgresStoredProcReaction::builder("test-postgres")
             .with_connection("localhost", 5432, "testdb", "testuser", "testpass")
-            .with_stored_procedure("test_proc")
+            .with_jsonb_procedure("test_proc")
             .build()
             .await
             .unwrap();

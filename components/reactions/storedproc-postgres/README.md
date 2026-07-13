@@ -223,7 +223,7 @@ Each template is rendered against a standard context with these keys:
 | `after` | The post-change row | ADD, UPDATE |
 | `before` | The pre-change row | UPDATE, DELETE |
 | `data` | The raw `data` payload of an Update diff | UPDATE |
-| `query_id` / `query_name` | The id of the query that produced the result | all |
+| `query_id` / `query_name` | The id of the query that produced the result (aliases holding the same value) | all |
 | `operation` | `"ADD"`, `"UPDATE"`, or `"DELETE"` | all |
 | `timestamp` | RFC3339 result timestamp | all |
 | `metadata` | Result metadata map | all |
@@ -267,12 +267,20 @@ Access nested fields using dot notation:
 TemplateSpec::new("CALL add_address({{param after.user.id}}, {{param after.address.city}})")
 ```
 
-### Embedding literal JSON with `{{json}}`
+### Binding a whole object as JSONB
 
-The `{{json <expr>}}` helper serializes a value to JSON and inlines it into the SQL text
-(for example, to pass a JSON literal to a `jsonb` argument). Because its output becomes
-part of the command string, only use it with trusted values — prefer `{{param}}` for
-row data.
+To pass an entire object to a `jsonb` argument, reference it with `{{param}}` directly.
+The object is bound as a single positional JSONB parameter, so it is safe even for
+untrusted row data:
+
+```rust
+TemplateSpec::new("CALL ingest_record({{param after}})")
+```
+
+Only `{{param <expr>}}` may emit a value into the rendered SQL. Bare (`{{expr}}`) and raw
+(`{{{expr}}}`) interpolation, as well as other helpers, are rejected when the reaction is
+built so row data can never be inlined into SQL text. Write the procedure name and any
+other structure as literal text in the template.
 
 ### Render failures and SQL safety
 

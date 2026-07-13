@@ -22,8 +22,8 @@
 //!
 //! Argument values are referenced with the `{{param <expr>}}` helper, which binds
 //! them as positional SQL parameters (`$1`, `$2`, …) so untrusted row data can
-//! never alter the command structure. The `{{json <expr>}}` helper is also
-//! available for embedding serialized JSON into literal SQL text.
+//! never alter the command structure. `{{param <expr>}}` is the only allowed
+//! interpolation; bare and raw interpolation are rejected at configuration time.
 //!
 //! # Example
 //!

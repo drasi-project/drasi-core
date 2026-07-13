@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **BREAKING:** Stored-procedure commands are now [Handlebars](https://handlebarsjs.com/) templates. Argument values are bound as positional SQL parameters via the `{{param ...}}` helper (e.g. `CALL add_user({{param after.id}})`), replacing the previous `@field` placeholder syntax. Templates are compiled and validated when the reaction is built. ([#541](https://github.com/drasi-project/drasi-core/issues/541))
+- **BREAKING:** `{{param ...}}` is now the only interpolation allowed in a command template. The `{{json ...}}` helper has been removed, and bare (`{{expr}}`) and raw (`{{{expr}}}`) interpolation, partials, and decorators are rejected when the reaction is built. This closes a SQL-injection surface where row data could be inlined into SQL text; to pass a whole object as JSONB, use `{{param after}}`. ([#541](https://github.com/drasi-project/drasi-core/issues/541))
+- **BREAKING:** The builder shortcut `with_stored_procedure` has been renamed to `with_jsonb_procedure` to make its behavior explicit: it generates templates that pass the whole row as a single JSONB argument (`CALL proc({{param after}})`), so it is only suitable for procedures that accept a single `jsonb` parameter. Procedures with individual typed columns should use explicit `with_default_template`/`with_route` templates that reference each field (e.g. `CALL add_user({{param after.id}}, {{param after.name}})`). ([#541](https://github.com/drasi-project/drasi-core/issues/541))
 
 ### Fixed
 
