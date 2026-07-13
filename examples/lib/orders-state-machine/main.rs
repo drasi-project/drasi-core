@@ -47,10 +47,10 @@
 //!
 //! ```bash
 //! docker compose up -d        # start Postgres with logical replication
-//! cargo run                   # start Drasi + the dashboard on :3000
+//! cargo run                   # start Drasi + the dashboard on :3002
 //! ```
 //!
-//! Then open <http://localhost:3000> (use <http://127.0.0.1:3000> if your browser
+//! Then open <http://localhost:3002> (use <http://127.0.0.1:3002> if your browser
 //! resolves `localhost` to IPv6).
 
 use std::sync::Arc;
@@ -282,10 +282,10 @@ async fn main() -> Result<()> {
         .with_query("order-states-all")
         .with_query("delivered-states")
         // Bind all IPv4 interfaces. On WSL2 this is reachable from Windows both
-        // via the WSL2 localhost relay (http://localhost:3000) and directly via
-        // the WSL2 IP (http://<wsl-ip>:3000).
+        // via the WSL2 localhost relay (http://localhost:3002) and directly via
+        // the WSL2 IP (http://<wsl-ip>:3002).
         .with_host("0.0.0.0")
-        .with_port(3000)
+        .with_port(3002)
         .with_dashboard(orders_dashboard())
         .build()?;
 
@@ -322,7 +322,7 @@ async fn main() -> Result<()> {
     println!("\n┌──────────────────────────────────────────────┐");
     println!("│ Orders State Machine started!                 │");
     println!("├──────────────────────────────────────────────┤");
-    println!("│ 🌐 Dashboard:  http://localhost:3000          │");
+    println!("│ 🌐 Dashboard:  http://localhost:3002          │");
     println!("│ 🗄  Postgres:   127.0.0.1:5442 (db: drasi)     │");
     println!("│ Orders advance one stage roughly every 1 s.   │");
     println!("│ A new order is seeded every 8 s.              │");

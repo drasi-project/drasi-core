@@ -45,7 +45,7 @@ if [ "$reachable" != "1" ]; then
 fi
 
 echo ""
-echo "Starting Drasi + dashboard (http://localhost:3000)..."
+echo "Starting Drasi + dashboard (http://localhost:3002)..."
 echo "Press Ctrl+C to stop the app; run 'docker compose down -v' to remove the database."
 echo ""
 

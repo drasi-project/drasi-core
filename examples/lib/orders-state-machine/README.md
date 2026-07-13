@@ -10,10 +10,10 @@ the way from NEW to DELIVERED on a live dashboard).
 | **6 stage queries** | `draft-orders`, `confirmed-orders`, `paid-orders`, `picked-orders`, `shipped-orders`, `delivered-orders` — each a single-entity query returning the owning `order_id`. |
 | **State machine source** (`order-state-source`) | Subscribes to the stage queries and correlates them by `order_id` into the states `NEW → CONFIRMED → PAID → PICKED → SHIPPED → DELIVERED`, exposing each order's live state as its own source. |
 | **Stored-procedure reaction** (`order-advancer`) | When an order enters a stage, calls `schedule_advance(orderId)` to schedule the next step. |
-| **Dashboard reaction** | Visualizes the live order states on a web UI at `:3000`. |
+| **Dashboard reaction** | Visualizes the live order states on a web UI at `:3002`. |
 
 ```text
-Postgres (orders, payments,   ──▶ orders-db ──▶ 6 stage queries ──┬──▶ state machine source (order-state-source) ──▶ dashboard queries ──▶ dashboard (:3000)
+Postgres (orders, payments,   ──▶ orders-db ──▶ 6 stage queries ──┬──▶ state machine source (order-state-source) ──▶ dashboard queries ──▶ dashboard (:3002)
           stock_picks, shipments)                                  └──▶ stored-proc reaction ──▶ CALL schedule_advance(...)
        ▲                                                                                    │
        └──────────────────── pacing driver: SELECT advance_due_orders() ◀───────────────────┘
@@ -79,7 +79,7 @@ cd examples/lib/orders-state-machine
 ```
 
 `run.sh` starts Postgres with logical replication, waits for it to be healthy, then
-runs the app. Open <http://localhost:3000> (or <http://127.0.0.1:3000> if your
+runs the app. Open <http://localhost:3002> (or <http://127.0.0.1:3002> if your
 browser resolves `localhost` to IPv6 — the server binds IPv4) to watch orders
 progress through their lifecycle.
 
@@ -87,7 +87,7 @@ To run the steps manually:
 
 ```bash
 docker compose up -d          # Postgres on host port :5442 (container 5432)
-cargo run                     # Drasi + dashboard on :3000
+cargo run                     # Drasi + dashboard on :3002
 docker compose down -v        # tear down the database when finished
 ```
 
