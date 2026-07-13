@@ -86,6 +86,7 @@ members = [
   # Identity Provider Plugins
   "components/identity/azure",
   "components/identity/aws",
+  "components/identity/test-fixture",
 
   # Secret Store Plugins
   "components/secret_stores/file",
@@ -134,7 +135,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.9.1"
+version = "0.10.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
@@ -146,67 +147,67 @@ categories = ["database"]
 drasi-query-ast = { version = "0.3.5", path = "query-ast" }
 drasi-query-cypher = { version = "0.3.6", path = "query-cypher" }
 drasi-query-gql = { version = "0.3.6", path = "query-gql" }
-drasi-core = { version = "0.5.6", path = "core" }
-drasi-functions-cypher = { version = "0.5.6", path = "functions-cypher" }
-drasi-functions-gql = { version = "0.5.6", path = "functions-gql" }
-drasi-middleware = { version = "0.5.7", path = "middleware" }
-drasi-identity-azure = { version = "0.2.9", path = "components/identity/azure" }
-drasi-identity-aws = { version = "0.2.3", path = "components/identity/aws" }
-drasi-lib = { version = "0.8.8", path = "lib" }
-drasi-ffi-primitives = { version = "0.9.1", path = "components/ffi-primitives" }
-drasi-plugin-sdk = { version = "0.9.1", path = "components/plugin-sdk" }
-drasi-host-sdk = { version = "0.9.1", path = "components/host-sdk" }
+drasi-core = { version = "0.5.7", path = "core" }
+drasi-functions-cypher = { version = "0.5.7", path = "functions-cypher" }
+drasi-functions-gql = { version = "0.5.7", path = "functions-gql" }
+drasi-middleware = { version = "0.5.8", path = "middleware" }
+drasi-identity-azure = { version = "0.2.10", path = "components/identity/azure" }
+drasi-identity-aws = { version = "0.2.4", path = "components/identity/aws" }
+drasi-lib = { version = "0.8.9", path = "lib" }
+drasi-ffi-primitives = { version = "0.10.0", path = "components/ffi-primitives" }
+drasi-plugin-sdk = { version = "0.10.0", path = "components/plugin-sdk" }
+drasi-host-sdk = { version = "0.10.0", path = "components/host-sdk" }
 
 # Common dependencies
 im = "15"
 # Pin roaring below 0.11.4 which requires rustc 1.90.0 (transitive via sui-sdk-types)
 roaring = ">=0.11.2, <0.11.4"
 utoipa = { version = "4", features = ["chrono"] }
-drasi-index-rocksdb = { version = "0.5.7", path = "components/indexes/rocksdb" }
-drasi-index-garnet = { version = "0.3.2", path = "components/indexes/garnet" }
+drasi-index-rocksdb = { version = "0.5.8", path = "components/indexes/rocksdb" }
+drasi-index-garnet = { version = "0.3.3", path = "components/indexes/garnet" }
 
 # Component plugins
-drasi-source-mssql = { version = "0.2.6", path = "components/sources/mssql" }
-drasi-bootstrap-mssql = { version = "0.2.9", path = "components/bootstrappers/mssql" }
+drasi-source-mssql = { version = "0.2.7", path = "components/sources/mssql" }
+drasi-bootstrap-mssql = { version = "0.2.10", path = "components/bootstrappers/mssql" }
 drasi-bootstrap-here-traffic = { version = "0.1.0", path = "components/bootstrappers/here-traffic" }
-drasi-bootstrap-postgres = { version = "0.2.9", path = "components/bootstrappers/postgres" }
-drasi-bootstrap-cloudflare-radar = { version = "0.1.4", path = "components/bootstrappers/cloudflare-radar" }
-drasi-reaction-application = { version = "0.3.7", path = "components/reactions/application" }
-drasi-source-postgres = { version = "0.2.6", path = "components/sources/postgres" }
+drasi-bootstrap-postgres = { version = "0.2.10", path = "components/bootstrappers/postgres" }
+drasi-bootstrap-cloudflare-radar = { version = "0.1.5", path = "components/bootstrappers/cloudflare-radar" }
+drasi-reaction-application = { version = "0.3.8", path = "components/reactions/application" }
+drasi-source-postgres = { version = "0.2.7", path = "components/sources/postgres" }
 drasi-source-here-traffic = { version = "0.1.0", path = "components/sources/here-traffic" }
-drasi-source-application = { version = "0.2.6", path = "components/sources/application" }
-drasi-source-hyperliquid = { version = "0.1.5", path = "components/sources/hyperliquid" }
-drasi-source-cloudflare-radar = { version = "0.1.4", path = "components/sources/cloudflare-radar" }
-drasi-bootstrap-application = { version = "0.2.9", path = "components/bootstrappers/application" }
-drasi-reaction-http = { version = "0.3.0", path = "components/reactions/http" }
+drasi-source-application = { version = "0.2.7", path = "components/sources/application" }
+drasi-source-hyperliquid = { version = "0.1.6", path = "components/sources/hyperliquid" }
+drasi-source-cloudflare-radar = { version = "0.1.5", path = "components/sources/cloudflare-radar" }
+drasi-bootstrap-application = { version = "0.2.10", path = "components/bootstrappers/application" }
+drasi-reaction-http = { version = "0.3.1", path = "components/reactions/http" }
+drasi-reaction-grpc = { version = "0.4.1", path = "components/reactions/grpc" }
+drasi-reaction-file = { version = "0.1.2", path = "components/reactions/file" }
 drasi-reaction-eventgrid = { version = "0.1.0", path = "components/reactions/eventgrid" }
-drasi-reaction-grpc = { version = "0.4.0", path = "components/reactions/grpc" }
-drasi-reaction-file = { version = "0.1.1", path = "components/reactions/file" }
 drasi-reaction-aws-sqs = { version = "0.1.3", path = "components/reactions/aws-sqs" }
-drasi-mssql-common = { version = "0.2.7", path = "components/mssql-common" }
-drasi-mysql-common = { version = "0.2.5", path = "components/mysql-common" }
-drasi-bootstrap-mysql = { version = "0.2.7", path = "components/bootstrappers/mysql" }
-drasi-source-mysql = { version = "0.2.4", path = "components/sources/mysql" }
-drasi-source-ris-live = { version = "0.1.5", path = "components/sources/ris-live" }
-drasi-bootstrap-sui-deepbook = { version = "0.1.4", path = "components/bootstrappers/sui-deepbook" }
-drasi-source-sui-deepbook = { version = "0.1.4", path = "components/sources/sui-deepbook" }
-drasi-kubernetes-common = { version = "0.1.5", path = "components/kubernetes-common" }
-drasi-source-kubernetes = { version = "0.1.4", path = "components/sources/kubernetes" }
-drasi-bootstrap-kubernetes = { version = "0.1.4", path = "components/bootstrappers/kubernetes" }
-drasi-source-oracle = { version = "0.1.4", path = "components/sources/oracle" }
-drasi-bootstrap-oracle = { version = "0.1.4", path = "components/bootstrappers/oracle" }
-drasi-oracle-common = { version = "0.1.5", path = "components/oracle-common" }
-drasi-source-mapping = { version = "0.1.3", path = "components/sources/mapping" }
-drasi-source-kafka = { version = "0.1.3", path = "components/sources/kafka" }
-drasi-bootstrap-kafka = { version = "0.1.3", path = "components/bootstrappers/kafka" }
-drasi-source-gtfs-rt = { version = "0.1.4", path = "components/sources/gtfs-rt" }
-drasi-bootstrap-gtfs-rt = { version = "0.1.4", path = "components/bootstrappers/gtfs-rt" }
+drasi-mssql-common = { version = "0.2.8", path = "components/mssql-common" }
+drasi-mysql-common = { version = "0.2.6", path = "components/mysql-common" }
+drasi-bootstrap-mysql = { version = "0.2.8", path = "components/bootstrappers/mysql" }
+drasi-source-mysql = { version = "0.2.5", path = "components/sources/mysql" }
+drasi-source-ris-live = { version = "0.1.6", path = "components/sources/ris-live" }
+drasi-bootstrap-sui-deepbook = { version = "0.1.5", path = "components/bootstrappers/sui-deepbook" }
+drasi-source-sui-deepbook = { version = "0.1.5", path = "components/sources/sui-deepbook" }
+drasi-kubernetes-common = { version = "0.1.6", path = "components/kubernetes-common" }
+drasi-source-kubernetes = { version = "0.1.5", path = "components/sources/kubernetes" }
+drasi-bootstrap-kubernetes = { version = "0.1.5", path = "components/bootstrappers/kubernetes" }
+drasi-source-oracle = { version = "0.1.5", path = "components/sources/oracle" }
+drasi-bootstrap-oracle = { version = "0.1.5", path = "components/bootstrappers/oracle" }
+drasi-oracle-common = { version = "0.1.6", path = "components/oracle-common" }
+drasi-source-mapping = { version = "0.1.4", path = "components/sources/mapping" }
+drasi-source-kafka = { version = "0.1.4", path = "components/sources/kafka" }
+drasi-bootstrap-kafka = { version = "0.1.4", path = "components/bootstrappers/kafka" }
+drasi-source-gtfs-rt = { version = "0.1.5", path = "components/sources/gtfs-rt" }
+drasi-bootstrap-gtfs-rt = { version = "0.1.5", path = "components/bootstrappers/gtfs-rt" }
 drasi-source-open511 = { version = "0.1.1", path = "components/sources/open511" }
 drasi-bootstrap-open511 = { version = "0.1.0", path = "components/bootstrappers/open511" }
-drasi-source-neo4j = { version = "0.1.2", path = "components/sources/neo4j" }
-drasi-bootstrap-neo4j = { version = "0.1.2", path = "components/bootstrappers/neo4j" }
-drasi-neo4j-common = { version = "0.1.2", path = "components/neo4j-common" }
-drasi-bootstrap-sqlite = { version = "0.1.7", path = "components/bootstrappers/sqlite" }
+drasi-source-neo4j = { version = "0.1.3", path = "components/sources/neo4j" }
+drasi-bootstrap-neo4j = { version = "0.1.3", path = "components/bootstrappers/neo4j" }
+drasi-neo4j-common = { version = "0.1.3", path = "components/neo4j-common" }
+drasi-bootstrap-sqlite = { version = "0.1.8", path = "components/bootstrappers/sqlite" }
 
 [workspace.lints.rust]
 warnings = "deny"

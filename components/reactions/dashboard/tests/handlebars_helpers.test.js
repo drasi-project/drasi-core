@@ -51,6 +51,7 @@ const widgetsSandbox = {
 
 // Strip ES module export syntax so it can run as a script in vm
 const strippedSource = widgetsSource
+  .replace(/^export\s+\{[^}]*\};?\s*$/gm, "")
   .replace(/^export\s+/gm, "")
   .replace(/^import\s+.*$/gm, "");
 

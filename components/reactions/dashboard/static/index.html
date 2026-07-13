@@ -62,9 +62,9 @@
           Save
         </button>
       </div>
-      <div class="editor-layout">
-        <aside class="editor-sidebar">
-          <div>
+      <div class="editor-layout" id="editor-layout">
+        <aside class="editor-sidebar" id="editor-sidebar">
+          <div class="sidebar-header">
             <input
               type="text"
               id="editor-title"
@@ -72,6 +72,9 @@
               placeholder="Dashboard name"
               value="Dashboard"
             />
+            <button id="sidebar-collapse-btn" type="button" class="sidebar-toggle-btn" title="Collapse panel" aria-label="Collapse panel" aria-expanded="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
           </div>
           <div>
             <div class="sidebar-section-title">Available Queries</div>
@@ -82,6 +85,9 @@
             <strong>⚙</strong> icon on any widget to configure it.
           </p>
         </aside>
+        <button id="sidebar-expand-btn" type="button" class="sidebar-expand-btn" title="Show panel" aria-label="Show panel">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
         <div class="editor-canvas">
           <div class="grid-stack" id="dashboard-grid"></div>
         </div>

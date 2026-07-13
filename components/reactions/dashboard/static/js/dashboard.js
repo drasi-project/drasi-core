@@ -9,6 +9,7 @@ import {
   AGGREGATION_MODES,
   resizeAllCharts,
   disposeWidgetChart,
+  snapshotRowToAddDiff,
 } from "./widgets.js";
 import { openModal, closeModal, showToast } from "./modal.js";
 
@@ -534,8 +535,8 @@ export class DashboardDesigner {
         const runtime = this.runtimeByWidgetId.get(widget.id) ?? createWidgetRuntime();
         // Only populate if the runtime has no data yet
         if (runtime.rows.length === 0 && runtime.aggregation === null) {
-          for (const row of rows) {
-            applyResultDiff(runtime, { op: "add", data: row });
+          for (const entry of rows) {
+            applyResultDiff(runtime, snapshotRowToAddDiff(entry));
           }
           if (aggregation !== null) {
             applyResultDiff(runtime, { op: "aggregation", after: aggregation });
