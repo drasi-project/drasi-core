@@ -6,11 +6,49 @@ A Drasi reaction plugin that invokes MySQL stored procedures when continuous que
 
 The MySQL Stored Procedure reaction enables you to:
 - Execute different stored procedures for ADD, UPDATE, and DELETE operations
-- Map query result fields to stored procedure parameters using `@after.fieldName` and `@before.fieldName` syntax
-- Configure default templates for all queries or per-query routes for specific queries
+- Map query result fields to stored procedure parameters using Handlebars templates with safe positional parameter binding (`{{param ...}}`)
+- Configure a default template for all queries, or per-query routes for specific queries
 - Handle multiple queries with different stored procedure configurations
 - Automatically retry failed procedure calls with exponential backoff
 - Configure connection pooling and timeouts
+
+## How Templating Works
+
+Command templates are rendered with [Handlebars](https://handlebarsjs.com/) in **strict mode**. Two helpers are provided:
+
+- `{{param <path>}}` — resolves the referenced value from the template context, appends it to the ordered parameter list, and emits a `?` placeholder into the rendered SQL. Values are bound **positionally** by the MySQL driver — they are never interpolated into the SQL string, so the reaction is safe against SQL injection and preserves value types (numbers stay numbers, strings stay strings). Objects and arrays are bound whole as JSON.
+- `{{json <path>}}` — serializes the referenced value to a JSON string inline in the rendered text (useful when a procedure expects a JSON document as a single argument, combined with `{{param ...}}`).
+
+A template such as:
+
+```
+CALL add_user({{param after.id}}, {{param after.name}}, {{param after.email}})
+```
+
+renders to the SQL `CALL add_user(?, ?, ?)` with the three values bound in order.
+
+### Template Context
+
+Every render is given the following context keys:
+
+| Key | Description |
+|-----|-------------|
+| `query_id` | The originating query id |
+| `query_name` | Alias of `query_id` |
+| `operation` | `ADD`, `UPDATE`, or `DELETE` |
+| `timestamp` | Result timestamp (RFC 3339) |
+| `metadata` | Result metadata map |
+| `after` | The new row (ADD/UPDATE) |
+| `before` | The previous row (UPDATE/DELETE) |
+| `data` | The raw result payload |
+
+Use dot notation for nested access, e.g. `{{param after.location.city}}`.
+
+### Strict Mode and Render Failures
+
+Templates are validated (compiled) at construction time; an invalid template causes `build()` to fail. Because rendering runs in strict mode, referencing a field that is absent from the context produces a render error. When a render fails at runtime, that single event is logged and skipped — it does not stop the reaction, and subsequent events continue to be processed.
+
+To bind an explicit `null`, reference a field whose value is JSON `null`; it is bound as SQL `NULL`. Referencing a *missing* field is treated as an error (and skips the event).
 
 ## Installation
 
@@ -75,9 +113,9 @@ async fn main() -> anyhow::Result<()> {
         .with_password("password")
         .with_query("user-changes")
         .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
-            updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
-            deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+            added: Some(TemplateSpec::new("CALL add_user({{param after.id}}, {{param after.name}}, {{param after.email}})")),
+            updated: Some(TemplateSpec::new("CALL update_user({{param after.id}}, {{param after.name}}, {{param after.email}})")),
+            deleted: Some(TemplateSpec::new("CALL delete_user({{param before.id}})")),
         })
         .build()
         .await?;
@@ -99,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
 
 ### Builder API
 
-#### Traditional Username/Password Authentication
+#### Username/Password Authentication
 
 Use a default template that applies to all queries:
 
@@ -115,9 +153,9 @@ let reaction = MySqlStoredProcReaction::builder("my-reaction")
     .with_ssl(true)  // Enable SSL/TLS
     .with_query("query1")
     .with_default_template(QueryConfig {
-        added: Some(TemplateSpec::new("CALL add_record(@after.id, @after.name)")),
-        updated: Some(TemplateSpec::new("CALL update_record(@after.id, @after.name)")),
-        deleted: Some(TemplateSpec::new("CALL delete_record(@before.id)")),
+        added: Some(TemplateSpec::new("CALL add_record({{param after.id}}, {{param after.name}})")),
+        updated: Some(TemplateSpec::new("CALL update_record({{param after.id}}, {{param after.name}})")),
+        deleted: Some(TemplateSpec::new("CALL delete_record({{param before.id}})")),
     })
     .with_command_timeout_ms(30000)
     .with_retry_attempts(3)
@@ -148,9 +186,9 @@ let reaction = MySqlStoredProcReaction::builder("my-reaction")
     .with_ssl(true)  // Required for Azure
     .with_query("query1")
     .with_default_template(QueryConfig {
-        added: Some(TemplateSpec::new("CALL add_record(@after.id, @after.name)")),
-        updated: Some(TemplateSpec::new("CALL update_record(@after.id, @after.name)")),
-        deleted: Some(TemplateSpec::new("CALL delete_record(@before.id)")),
+        added: Some(TemplateSpec::new("CALL add_record({{param after.id}}, {{param after.name}})")),
+        updated: Some(TemplateSpec::new("CALL update_record({{param after.id}}, {{param after.name}})")),
+        deleted: Some(TemplateSpec::new("CALL delete_record({{param before.id}})")),
     })
     .build()
     .await?;
@@ -181,9 +219,9 @@ let reaction = MySqlStoredProcReaction::builder("my-reaction")
     .with_ssl(true)  // Recommended for RDS
     .with_query("query1")
     .with_default_template(QueryConfig {
-        added: Some(TemplateSpec::new("CALL add_record(@after.id, @after.name)")),
-        updated: Some(TemplateSpec::new("CALL update_record(@after.id, @after.name)")),
-        deleted: Some(TemplateSpec::new("CALL delete_record(@before.id)")),
+        added: Some(TemplateSpec::new("CALL add_record({{param after.id}}, {{param after.name}})")),
+        updated: Some(TemplateSpec::new("CALL update_record({{param after.id}}, {{param after.name}})")),
+        deleted: Some(TemplateSpec::new("CALL delete_record({{param before.id}})")),
     })
     .build()
     .await?;
@@ -203,15 +241,15 @@ let reaction = MySqlStoredProcReaction::builder("my-reaction")
     .with_identity_provider(identity_provider)
     .with_query("query1")
     .with_default_template(QueryConfig {
-        added: Some(TemplateSpec::new("CALL add_record(@after.id, @after.name)")),
-        updated: Some(TemplateSpec::new("CALL update_record(@after.id, @after.name)")),
-        deleted: Some(TemplateSpec::new("CALL delete_record(@before.id)")),
+        added: Some(TemplateSpec::new("CALL add_record({{param after.id}}, {{param after.name}})")),
+        updated: Some(TemplateSpec::new("CALL update_record({{param after.id}}, {{param after.name}})")),
+        deleted: Some(TemplateSpec::new("CALL delete_record({{param before.id}})")),
     })
     .build()
     .await?;
 ```
 
-> **Note:** When using identity providers, do not call `.with_user()` or `.with_password()`. The identity provider handles authentication automatically.
+> **Note:** When using identity providers, do not call `.with_user()` or `.with_password()`. The identity provider handles authentication automatically. A `user` is only required when no identity provider is configured.
 >
 > See the [Identity Provider README](../../../lib/src/identity/README.md) for detailed setup instructions for Azure AD and AWS IAM authentication.
 
@@ -232,19 +270,21 @@ let reaction = MySqlStoredProcReaction::builder("my-reaction")
     .with_query("order-changes")
     // Default template for most queries
     .with_default_template(QueryConfig {
-        added: Some(TemplateSpec::new("CALL default_add(@after.id)")),
+        added: Some(TemplateSpec::new("CALL default_add({{param after.id}})")),
         updated: None,
         deleted: None,
     })
     // Special route for critical queries
     .with_route("order-changes", QueryConfig {
-        added: Some(TemplateSpec::new("CALL process_order(@after.order_id, @after.total)")),
-        updated: Some(TemplateSpec::new("CALL update_order(@after.order_id, @after.status)")),
-        deleted: Some(TemplateSpec::new("CALL cancel_order(@before.order_id)")),
+        added: Some(TemplateSpec::new("CALL process_order({{param after.order_id}}, {{param after.total}})")),
+        updated: Some(TemplateSpec::new("CALL update_order({{param after.order_id}}, {{param after.status}})")),
+        deleted: Some(TemplateSpec::new("CALL cancel_order({{param before.order_id}})")),
     })
     .build()
     .await?;
 ```
+
+Route keys are validated at construction time: every key must match a subscribed query id (or the last dotted segment of one). An unknown route key causes `build()` to fail.
 
 ### Configuration Options
 
@@ -252,8 +292,8 @@ let reaction = MySqlStoredProcReaction::builder("my-reaction")
 |--------|-------------|------|---------|
 | `hostname` | Database hostname | `String` | `"localhost"` |
 | `port` | Database port | `u16` | `3306` |
-| `user` | Database user | `String` | Required |
-| `password` | Database password | `String` | Required |
+| `user` | Database user (required unless an identity provider is configured) | `String` | Required |
+| `password` | Database password | `String` | Required (unless identity provider) |
 | `database` | Database name | `String` | Required |
 | `ssl` | Enable SSL/TLS | `bool` | `false` |
 | `default_template` | Default template for all queries | `Option<QueryConfig>` | `None` |
@@ -263,96 +303,44 @@ let reaction = MySqlStoredProcReaction::builder("my-reaction")
 
 ## Parameter Mapping
 
-### Context-Aware Field Access
+### ADD Operations
 
-The reaction uses context-aware field mapping with `@after` and `@before` prefixes:
-
-#### ADD Operations
-Use `@after.fieldName` to access the newly added data:
+Use `{{param after.<field>}}` to access the newly added row:
 
 ```rust
 QueryConfig {
-    added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
+    added: Some(TemplateSpec::new("CALL add_user({{param after.id}}, {{param after.name}}, {{param after.email}})")),
     updated: None,
     deleted: None,
 }
 ```
 
-Query result for ADD:
-```json
-{
-  "type": "add",
-  "data": {
-    "id": 1,
-    "name": "Alice",
-    "email": "alice@example.com"
-  }
-}
-```
+For a result row `{"id": 1, "name": "Alice", "email": "alice@example.com"}`, this renders `CALL add_user(?, ?, ?)` and binds `1`, `Alice`, and `alice@example.com` in order.
 
-Executes:
-```sql
-CALL add_user(1, 'Alice', 'alice@example.com')
-```
+### UPDATE Operations
 
-#### UPDATE Operations
-Use `@before.fieldName` for old values and `@after.fieldName` for new values:
+Use `{{param before.<field>}}` for old values and `{{param after.<field>}}` for new values. The reaction forwards the query result's real `before` and `after` rows, so both are available independently:
 
 ```rust
 QueryConfig {
     added: None,
-    updated: Some(TemplateSpec::new("CALL update_user(@after.id, @before.email, @after.email)")),
+    updated: Some(TemplateSpec::new("CALL update_user({{param after.id}}, {{param before.email}}, {{param after.email}})")),
     deleted: None,
 }
 ```
 
-Query result for UPDATE:
-```json
-{
-  "type": "update",
-  "data": {
-    "before": {
-      "id": 1,
-      "email": "alice@oldmail.com"
-    },
-    "after": {
-      "id": 1,
-      "email": "alice@newmail.com"
-    }
-  }
-}
-```
+For a diff with `before = {"id": 1, "email": "alice@oldmail.com"}` and `after = {"id": 1, "email": "alice@newmail.com"}`, this binds `1`, `alice@oldmail.com`, and `alice@newmail.com`.
 
-Executes:
-```sql
-CALL update_user(1, 'alice@oldmail.com', 'alice@newmail.com')
-```
+### DELETE Operations
 
-#### DELETE Operations
-Use `@before.fieldName` to access the deleted data:
+Use `{{param before.<field>}}` to access the deleted row:
 
 ```rust
 QueryConfig {
     added: None,
     updated: None,
-    deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+    deleted: Some(TemplateSpec::new("CALL delete_user({{param before.id}})")),
 }
-```
-
-Query result for DELETE:
-```json
-{
-  "type": "delete",
-  "data": {
-    "id": 1,
-    "name": "Alice"
-  }
-}
-```
-
-Executes:
-```sql
-CALL delete_user(1)
 ```
 
 ### Nested Field Access
@@ -360,34 +348,25 @@ CALL delete_user(1)
 Access deeply nested fields using dot notation:
 
 ```rust
-TemplateSpec::new("CALL add_address(@after.user.id, @after.location.city, @after.location.floor)")
+TemplateSpec::new("CALL add_address({{param after.user.id}}, {{param after.location.city}}, {{param after.location.floor}})")
 ```
 
-Query result:
-```json
-{
-  "user": {
-    "id": 123
-  },
-  "location": {
-    "city": "Seattle",
-    "floor": 5
-  }
-}
+### Binding Objects as JSON
+
+To pass an object or array to a procedure as a single JSON argument, reference the object with `{{param ...}}` (it is bound whole as JSON), or embed it inline with `{{json ...}}`:
+
+```rust
+TemplateSpec::new("CALL store_doc({{param after.id}}, {{param after.payload}})")
 ```
 
-Executes:
-```sql
-CALL add_address(123, 'Seattle', 5)
-```
+## Template Resolution Priority
 
-## Template Routing Priority
+When a query result arrives, the reaction selects a template for the operation using the following order:
 
-When a query result arrives, the reaction determines which stored procedure to call using the following priority:
-
-1. **Query-specific route**: If a route exists for the query ID, use its template
-2. **Default template**: If no route exists, use the default template
-3. **Skip**: If neither exists for the operation type, skip processing
+1. **Full query id route** — `routes[<query_id>]`
+2. **Last dotted segment route** — `routes[<last segment of query_id>]` (e.g. a route keyed `my_query` matches a query id `source.my_query`)
+3. **Default template** — `default_template`
+4. **Skip** — if none of the above provides a template for the operation, the event is skipped
 
 Example:
 
@@ -400,15 +379,15 @@ let reaction = MySqlStoredProcReaction::builder("my-reaction")
     .with_password("secret")
     // Default template - used by most queries
     .with_default_template(QueryConfig {
-        added: Some(TemplateSpec::new("CALL default_add(@after.id)")),
-        updated: Some(TemplateSpec::new("CALL default_update(@after.id)")),
+        added: Some(TemplateSpec::new("CALL default_add({{param after.id}})")),
+        updated: Some(TemplateSpec::new("CALL default_update({{param after.id}})")),
         deleted: None,  // No default for deletes
     })
     // Special handling for critical-query
     .with_route("critical-query", QueryConfig {
-        added: Some(TemplateSpec::new("CALL critical_add(@after.id, @after.priority)")),
+        added: Some(TemplateSpec::new("CALL critical_add({{param after.id}}, {{param after.priority}})")),
         updated: None,  // Falls back to default_update
-        deleted: Some(TemplateSpec::new("CALL critical_delete(@before.id)")),
+        deleted: Some(TemplateSpec::new("CALL critical_delete({{param before.id}})")),
     })
     .with_query("normal-query")
     .with_query("critical-query")
@@ -431,6 +410,8 @@ The reaction includes automatic retry logic with exponential backoff:
 - **Subsequent retries**: 200ms, 400ms, 800ms, etc.
 - **Max retries**: Configurable (default: 3)
 - **Timeout**: Configurable per command (default: 30s)
+
+A template that fails to render (e.g. references a missing field) logs a warning and skips only that event; processing continues.
 
 ## Connection Pooling
 

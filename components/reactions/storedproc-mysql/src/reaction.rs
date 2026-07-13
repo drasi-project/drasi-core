@@ -16,21 +16,20 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
-use tokio::task::JoinHandle;
+use tokio::sync::RwLock;
 
 use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::config::{MySqlStoredProcReactionConfig, QueryConfig};
 use crate::executor::MySqlExecutor;
-use crate::parser::ParameterParser;
+use crate::render::CommandRenderer;
 use drasi_lib::reactions::common::OperationType;
 
 /// MySQL Stored Procedure reaction
@@ -41,15 +40,12 @@ pub struct MySqlStoredProcReaction {
     pub(crate) base: ReactionBase,
     config: MySqlStoredProcReactionConfig,
     executor: RwLock<Option<Arc<MySqlExecutor>>>,
-    parser: ParameterParser,
-    task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl std::fmt::Debug for MySqlStoredProcReaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MySqlStoredProcReaction")
             .field("config", &self.config)
-            .field("parser", &self.parser)
             .finish()
     }
 }
@@ -107,6 +103,8 @@ impl MySqlStoredProcReaction {
     ) -> Result<Self> {
         // Validate configuration
         config.validate()?;
+        // Reject route keys that don't match a subscribed query.
+        config.validate_routes(&queries)?;
 
         // Create reaction base
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
@@ -125,134 +123,190 @@ impl MySqlStoredProcReaction {
             base,
             config,
             executor: RwLock::new(None),
-            parser: ParameterParser::new(),
-            task_handle: Arc::new(Mutex::new(None)),
         })
     }
 
-    /// Prepare context data with after/before fields based on operation type
-    fn prepare_context(operation: OperationType, data: &serde_json::Value) -> serde_json::Value {
-        use serde_json::json;
-
-        match operation {
-            OperationType::Add => {
-                // For ADD, data goes into "after"
-                json!({
-                    "after": data.clone()
-                })
-            }
-            OperationType::Update => {
-                // For UPDATE, check if data already has before/after fields
-                if let Some(obj) = data.as_object() {
-                    let mut context = serde_json::Map::new();
-                    if let Some(before) = obj.get("before") {
-                        context.insert("before".to_string(), before.clone());
-                    }
-                    if let Some(after) = obj.get("after") {
-                        context.insert("after".to_string(), after.clone());
-                    }
-                    // If no before/after, treat entire data as after
-                    if context.is_empty() {
-                        context.insert("after".to_string(), data.clone());
-                    }
-                    json!(context)
-                } else {
-                    json!({
-                        "after": data.clone()
-                    })
-                }
-            }
-            OperationType::Delete => {
-                // For DELETE, data goes into "before"
-                json!({
-                    "before": data.clone()
-                })
-            }
+    /// Build the template render context for a single diff item.
+    ///
+    /// Populates the standard context keys required by the Reaction Developer
+    /// Guide §11: `query_id`/`query_name`, `operation`, `timestamp`,
+    /// `metadata`, and the operation-appropriate `before`/`after`/`data`.
+    fn build_context(
+        query_id: &str,
+        operation: OperationType,
+        timestamp: &str,
+        metadata: &HashMap<String, Value>,
+        before: Option<&Value>,
+        after: Option<&Value>,
+        data: Option<&Value>,
+    ) -> Value {
+        let mut context = serde_json::Map::new();
+        context.insert("query_id".to_string(), json!(query_id));
+        context.insert("query_name".to_string(), json!(query_id));
+        context.insert(
+            "operation".to_string(),
+            json!(operation.as_str().to_uppercase()),
+        );
+        context.insert("timestamp".to_string(), json!(timestamp));
+        context.insert(
+            "metadata".to_string(),
+            json!(metadata
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<serde_json::Map<_, _>>()),
+        );
+        if let Some(before) = before {
+            context.insert("before".to_string(), before.clone());
         }
+        if let Some(after) = after {
+            context.insert("after".to_string(), after.clone());
+        }
+        if let Some(data) = data {
+            context.insert("data".to_string(), data.clone());
+        }
+        Value::Object(context)
     }
 
-    /// Spawn the processing task that handles query results
-    fn spawn_processing_task(&self, executor: Arc<MySqlExecutor>) -> JoinHandle<()> {
+    /// Spawn the processing task that renders and executes commands.
+    fn spawn_processing_task(
+        &self,
+        executor: Arc<MySqlExecutor>,
+        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> tokio::task::JoinHandle<()> {
         let priority_queue = self.base.priority_queue.clone();
-        let parser = self.parser.clone();
         let config = self.config.clone();
         let reaction_id = self.base.id.clone();
 
         tokio::spawn(async move {
+            let renderer = CommandRenderer::new();
             info!("[{reaction_id}] Starting processing loop");
+
             loop {
-                // Dequeue next result (blocks until available)
-                let query_result_arc = priority_queue.dequeue().await;
-                let query_result = (*query_result_arc).clone();
+                // Dequeue the next result, or break promptly on shutdown.
+                let query_result_arc = tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => {
+                        debug!("[{reaction_id}] Shutdown signal received");
+                        break;
+                    }
+                    result = priority_queue.dequeue() => result,
+                };
+                let query_result = query_result_arc.as_ref();
+                let timestamp = query_result.timestamp.to_rfc3339();
 
                 debug!(
                     "[{}] Processing result from query: {}",
                     reaction_id, query_result.query_id
                 );
 
-                // Process each result item in the batch
+                // Process each result item in the batch (empty batch = no-op).
                 for result_item in &query_result.results {
-                    let aggregation_data;
-                    let (operation, data_value, result_type) = match result_item {
-                        ResultDiff::Add { data, .. } => (OperationType::Add, data, "ADD"),
-                        ResultDiff::Update { data, .. } => (OperationType::Update, data, "UPDATE"),
-                        ResultDiff::Delete { data, .. } => (OperationType::Delete, data, "DELETE"),
-                        ResultDiff::Aggregation { before, after, .. } => {
-                            aggregation_data = json!({
-                                "before": before,
-                                "after": after,
-                            });
-                            (OperationType::Update, &aggregation_data, "AGGREGATION")
-                        }
+                    // Map the diff variant to (operation, context fields).
+                    let (operation, result_type, context) = match result_item {
+                        ResultDiff::Add { data, .. } => (
+                            OperationType::Add,
+                            "ADD",
+                            Self::build_context(
+                                &query_result.query_id,
+                                OperationType::Add,
+                                &timestamp,
+                                &query_result.metadata,
+                                None,
+                                Some(data),
+                                None,
+                            ),
+                        ),
+                        ResultDiff::Update {
+                            data,
+                            before,
+                            after,
+                            ..
+                        } => (
+                            OperationType::Update,
+                            "UPDATE",
+                            Self::build_context(
+                                &query_result.query_id,
+                                OperationType::Update,
+                                &timestamp,
+                                &query_result.metadata,
+                                Some(before),
+                                Some(after),
+                                Some(data),
+                            ),
+                        ),
+                        ResultDiff::Delete { data, .. } => (
+                            OperationType::Delete,
+                            "DELETE",
+                            Self::build_context(
+                                &query_result.query_id,
+                                OperationType::Delete,
+                                &timestamp,
+                                &query_result.metadata,
+                                Some(data),
+                                None,
+                                None,
+                            ),
+                        ),
+                        ResultDiff::Aggregation { before, after, .. } => (
+                            OperationType::Update,
+                            "AGGREGATION",
+                            Self::build_context(
+                                &query_result.query_id,
+                                OperationType::Update,
+                                &timestamp,
+                                &query_result.metadata,
+                                before.as_ref(),
+                                Some(after),
+                                None,
+                            ),
+                        ),
                         ResultDiff::Noop => continue,
                     };
 
-                    // Get the command template for this query and operation type
-                    let command = config.get_command_template(&query_result.query_id, operation);
-
-                    // Execute the stored procedure if a command is configured
-                    if let Some(cmd) = command {
-                        // Prepare context with after/before fields based on operation type
-                        let context = Self::prepare_context(operation, data_value);
-                        debug!(
-                            "[{reaction_id}] Context data: {}",
-                            serde_json::to_string_pretty(&context)
-                                .unwrap_or_else(|_| "<<invalid>>".to_string())
-                        );
-
-                        // Parse command and extract parameters
-                        match parser.parse_command(&cmd, &context) {
-                            Ok((proc_name, params)) => {
-                                debug!(
-                                    "[{reaction_id}] Executing procedure: {proc_name} with {params_len} parameters for {result_type} operation",
-                                    params_len = params.len()
-                                );
-
-                                // Execute stored procedure
-                                match executor.execute_procedure(&proc_name, params).await {
-                                    Ok(()) => {
-                                        debug!(
-                                            "[{reaction_id}] Successfully executed {proc_name} for {result_type} operation"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        error!(
-                                            "[{reaction_id}] Failed to execute {proc_name}: {e}"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!("[{reaction_id}] Failed to parse command: {e}");
-                            }
-                        }
-                    } else {
+                    // Resolve the command template for this query/operation.
+                    let Some(template) =
+                        config.resolve_command_template(&query_result.query_id, operation)
+                    else {
                         debug!(
                             "[{reaction_id}] No command configured for {result_type} operation, skipping"
                         );
+                        continue;
+                    };
+
+                    // Render the command with positional parameter binding.
+                    let rendered = match renderer.render(&template, &context) {
+                        Ok(rendered) => rendered,
+                        Err(e) => {
+                            warn!(
+                                "[{reaction_id}] Failed to render command for {result_type} operation: {e}; skipping event"
+                            );
+                            continue;
+                        }
+                    };
+
+                    debug!(
+                        "[{reaction_id}] Executing '{}' with {} parameters for {result_type} operation",
+                        rendered.sql,
+                        rendered.params.len()
+                    );
+
+                    match executor
+                        .execute_command(&rendered.sql, rendered.params)
+                        .await
+                    {
+                        Ok(()) => {
+                            debug!(
+                                "[{reaction_id}] Successfully executed command for {result_type} operation"
+                            );
+                        }
+                        Err(e) => {
+                            error!("[{reaction_id}] Failed to execute command: {e}");
+                        }
                     }
                 }
             }
+
+            info!("[{reaction_id}] Processing loop stopped");
         })
     }
 }
@@ -322,6 +376,12 @@ impl Reaction for MySqlStoredProcReaction {
 
     async fn start(&self) -> Result<()> {
         log_component_start("MySQL StoredProc Reaction", &self.base.id);
+        self.base
+            .set_status(
+                ComponentStatus::Starting,
+                Some("Starting MySQL StoredProc reaction".to_string()),
+            )
+            .await;
 
         info!(
             "[{}] Starting MySQL StoredProc reaction for {}",
@@ -338,9 +398,18 @@ impl Reaction for MySqlStoredProcReaction {
         // Store executor for later use
         *self.executor.write().await = Some(executor.clone());
 
-        // Spawn processing task
-        let task = self.spawn_processing_task(executor);
-        *self.task_handle.lock().await = Some(task);
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("MySQL StoredProc reaction started".to_string()),
+            )
+            .await;
+
+        // Spawn processing task with a shutdown channel so stop_common can
+        // interrupt the loop promptly.
+        let shutdown_rx = self.base.create_shutdown_channel().await;
+        let task = self.spawn_processing_task(executor, shutdown_rx);
+        self.base.set_processing_task(task).await;
 
         info!(
             "[{}] MySQL StoredProc reaction started successfully",
@@ -352,10 +421,13 @@ impl Reaction for MySqlStoredProcReaction {
     async fn stop(&self) -> Result<()> {
         info!("[{}] Stopping MySQL StoredProc reaction", self.base.id);
 
-        // Abort the processing task
-        if let Some(handle) = self.task_handle.lock().await.take() {
-            handle.abort();
-        }
+        self.base.stop_common().await?;
+        self.base
+            .set_status(
+                ComponentStatus::Stopped,
+                Some("MySQL StoredProc reaction stopped".to_string()),
+            )
+            .await;
 
         info!("[{}] MySQL StoredProc reaction stopped", self.base.id);
         Ok(())
@@ -493,6 +565,11 @@ impl MySqlStoredProcReactionBuilder {
         self
     }
 
+    /// Add a query to subscribe to (alias for [`with_query`](Self::with_query)).
+    pub fn from_query(self, query_id: impl Into<String>) -> Self {
+        self.with_query(query_id)
+    }
+
     /// Set all queries to subscribe to
     pub fn with_queries(mut self, queries: Vec<String>) -> Self {
         self.queries = queries;
@@ -532,17 +609,23 @@ impl MySqlStoredProcReactionBuilder {
     /// Set the stored procedure name (shortcut for simple configurations)
     ///
     /// Creates default templates that call the specified procedure with:
-    /// - added: passes @after data
-    /// - updated: passes @before and @after data
-    /// - deleted: passes @before data
+    /// - added: binds the whole `after` row
+    /// - updated: binds the whole `before` and `after` rows
+    /// - deleted: binds the whole `before` row
     pub fn with_stored_procedure(mut self, proc_name: impl Into<String>) -> Self {
         use crate::config::TemplateSpec;
 
         let proc = proc_name.into();
         let query_config = QueryConfig {
-            added: Some(TemplateSpec::new(format!("CALL {proc}(@after)"))),
-            updated: Some(TemplateSpec::new(format!("CALL {proc}(@before, @after)"))),
-            deleted: Some(TemplateSpec::new(format!("CALL {proc}(@before)"))),
+            added: Some(TemplateSpec::new(format!(
+                "CALL {proc}({{{{param after}}}})"
+            ))),
+            updated: Some(TemplateSpec::new(format!(
+                "CALL {proc}({{{{param before}}}}, {{{{param after}}}})"
+            ))),
+            deleted: Some(TemplateSpec::new(format!(
+                "CALL {proc}({{{{param before}}}})"
+            ))),
         };
         self.config.default_template = Some(query_config);
         self
