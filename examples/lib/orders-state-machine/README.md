@@ -12,12 +12,62 @@ the way from NEW to DELIVERED on a live dashboard).
 | **Stored-procedure reaction** (`order-advancer`) | When an order enters a stage, calls `schedule_advance(orderId)` to schedule the next step. |
 | **Dashboard reaction** | Visualizes the live order states on a web UI at `:3002`. |
 
-```text
-Postgres (orders, payments,   ──▶ orders-db ──▶ 6 stage queries ──┬──▶ state machine source (order-state-source) ──▶ dashboard queries ──▶ dashboard (:3002)
-          stock_picks, shipments)                                  └──▶ stored-proc reaction ──▶ CALL schedule_advance(...)
-       ▲                                                                                    │
-       └──────────────────── pacing driver: SELECT advance_due_orders() ◀───────────────────┘
+The pipeline wires two sources, eight continuous queries, and two reactions
+(node colors below distinguish **sources**, **queries**, and **reactions**):
+
+```mermaid
+flowchart LR
+    pg[("Postgres<br/>orders · payments<br/>stock_picks · shipments")]
+    ui["Dashboard UI<br/>:3002"]
+    pace["pacing driver<br/>(2 Hz loop)"]
+
+    subgraph sources[Sources]
+        ordersdb["orders-db<br/>(Postgres CDC)"]
+        smsrc["order-state-source<br/>(state machine source)"]
+    end
+
+    subgraph queries[Queries]
+        subgraph stages[stage queries]
+            draft["draft-orders"]
+            confirmed["confirmed-orders"]
+            paid["paid-orders"]
+            picked["picked-orders"]
+            shipped["shipped-orders"]
+            delivered["delivered-orders"]
+        end
+        allstates["order-states-all"]
+        delstates["delivered-states"]
+    end
+
+    subgraph reactions[Reactions]
+        advancer["order-advancer<br/>(stored-proc)"]
+        dash["orders-dashboard"]
+    end
+
+    pg -->|CDC| ordersdb
+    ordersdb --> draft & confirmed & paid & picked & shipped & delivered
+    draft & confirmed & paid & picked & shipped & delivered --> smsrc
+    draft & confirmed & paid & picked & shipped & delivered --> advancer
+    smsrc --> allstates & delstates
+    allstates & delstates --> dash
+    dash --> ui
+    advancer -.->|CALL schedule_advance| pg
+    pace -.->|SELECT advance_due_orders| pg
+
+    classDef source fill:#e3f2fd,stroke:#1565c0,color:#0d1b2a;
+    classDef query fill:#f3e5f5,stroke:#6a1b9a,color:#0d1b2a;
+    classDef reaction fill:#e8f5e9,stroke:#2e7d32,color:#0d1b2a;
+    classDef ext fill:#eceff1,stroke:#455a64,color:#0d1b2a;
+    class ordersdb,smsrc source;
+    class draft,confirmed,paid,picked,shipped,delivered,allstates,delstates query;
+    class advancer,dash reaction;
+    class pg,ui,pace ext;
 ```
+
+Solid arrows are Drasi subscriptions (source → query → consumer); dashed arrows
+are the self-driving feedback loop back into Postgres (the stored-proc reaction
+schedules the next stage, and the pacing driver applies due advancements), which
+CDC then streams back in through `orders-db`.
 
 ## The state machine is a *source*
 
