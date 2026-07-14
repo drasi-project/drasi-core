@@ -47,17 +47,15 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use drasi_lib::{DrasiLib, Query};
-use drasi_source_http::HttpSource;
 use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
+use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
+use drasi_source_http::HttpSource;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging - set RUST_LOG=debug for more detail
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info")
-    ).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     println!("========================================");
     println!("  DrasiLib Builder Example");
@@ -69,8 +67,7 @@ async fn main() -> Result<()> {
     // The ScriptFile bootstrap provider loads initial stock data from a JSONL
     // file. This data is used to populate the query when it first starts.
 
-    let bootstrap_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("bootstrap_data.jsonl");
+    let bootstrap_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bootstrap_data.jsonl");
 
     println!("Loading bootstrap data from: {}", bootstrap_path.display());
 
@@ -104,13 +101,15 @@ async fn main() -> Result<()> {
     // results whenever the underlying data changes.
 
     let all_prices_query = Query::cypher("all-prices")
-        .query(r#"
+        .query(
+            r#"
             MATCH (sp:stock_prices)
             RETURN sp.symbol AS symbol,
                    sp.price AS price,
                    sp.previous_close AS previous_close,
                    sp.volume AS volume
-        "#)
+        "#,
+        )
         .from_source("stock-prices")
         .auto_start(true)
         .enable_bootstrap(true)
@@ -122,13 +121,21 @@ async fn main() -> Result<()> {
     // The LogReaction prints query results directly to the console.
     // Templates use Handlebars syntax to format each event type.
 
+    let default_template = QueryConfig {
+        added: Some(TemplateSpec::new(
+           "[+] {{after.symbol}}: ${{after.price}} (prev: ${{after.previous_close}}, vol: {{after.volume}})",
+        )),
+        updated: Some(TemplateSpec::new(
+            "[~] {{after.symbol}}: ${{before.price}} -> ${{after.price}} (vol: {{after.volume}})",
+        )),
+        deleted: Some(TemplateSpec::new(
+            "[-] {{before.symbol}} removed",
+        )),
+    };
+
     let log_reaction = LogReaction::builder("console-logger")
         .from_query("all-prices")
-        .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new("[+] {{after.symbol}}: ${{after.price}} (prev: ${{after.previous_close}}, vol: {{after.volume}})")),
-            updated: Some(TemplateSpec::new("[~] {{after.symbol}}: ${{before.price}} -> ${{after.price}} (vol: {{after.volume}})")),
-            deleted: Some(TemplateSpec::new("[-] {{before.symbol}} removed")),
-        })
+        .with_default_template(default_template)
         .build()?;
 
     // =========================================================================
@@ -144,7 +151,7 @@ async fn main() -> Result<()> {
             .with_query(all_prices_query)
             .with_reaction(log_reaction)
             .build()
-            .await?
+            .await?,
     );
 
     // =========================================================================
