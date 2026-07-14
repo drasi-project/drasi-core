@@ -47,8 +47,12 @@ pub use common::{QueryConfig, TemplateSpec};
 ///
 /// - `{{param <path>}}` binds the value at `<path>` (for example
 ///   `after.id`) as a positional parameter and emits a `?` placeholder.
-///   Objects and arrays are bound whole and stored as JSON.
-/// - `{{json <path>}}` writes the JSON serialization of a value inline.
+///   Objects and arrays are bound whole and stored as JSON. Prefer this for
+///   any untrusted value.
+/// - `{{json <path>}}` writes the JSON serialization of a value **inline into
+///   the SQL text**. It is not parameterized, so it is **not** injection- or
+///   quoting-safe; only use it for trusted values, and prefer
+///   `{{param <path>}}` (which binds objects whole as JSON) for source data.
 ///
 /// ## Example with Default Template
 ///

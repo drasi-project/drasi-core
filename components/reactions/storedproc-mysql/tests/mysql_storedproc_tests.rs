@@ -164,17 +164,25 @@ async fn get_log_count(config: &MysqlConfig) -> i64 {
     count
 }
 
-/// Wait until the sensor_log row count reaches `expected`, or time out.
+/// Wait until the sensor_log row count reaches `expected`, panicking if the
+/// count is not reached within `timeout_ms` so tests fail on a missing write
+/// instead of silently passing.
 async fn wait_for_log_count(config: &MysqlConfig, expected: i64, timeout_ms: u64) {
     let step = 100;
     let mut waited = 0;
+    let mut last_count = 0;
     while waited < timeout_ms {
-        if get_log_count(config).await >= expected {
+        last_count = get_log_count(config).await;
+        if last_count >= expected {
             return;
         }
         sleep(Duration::from_millis(step)).await;
         waited += step;
     }
+    panic!(
+        "Timed out after {timeout_ms}ms waiting for sensor_log count to reach {expected}; \
+         last observed count was {last_count}"
+    );
 }
 
 fn make_query_result(query_id: &str, diffs: Vec<ResultDiff>) -> QueryResult {
@@ -298,7 +306,7 @@ fn test_config_validation_rejects_invalid_template() {
 }
 
 #[test]
-fn test_config_validation_ok_with_identity_provider_and_empty_user() {
+fn test_config_validation_ok_with_user_and_no_identity_provider() {
     // A user is only required when there is no identity provider. We can't
     // easily construct an IdentityProvider here, so this asserts the inverse
     // path via validate(): with a user set and no provider, validation passes.
@@ -578,6 +586,79 @@ async fn test_e2e_update_binds_before_and_after_independently() {
     assert_eq!(entries[0].sensor_id, "sensor-2");
     assert_eq!(entries[0].old_temperature, Some(10.0));
     assert_eq!(entries[0].new_temperature, Some(42.0));
+
+    mysql.cleanup().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_e2e_aggregation_binds_before_and_after() {
+    // ResultDiff::Aggregation maps to the UPDATE operation and must bind the
+    // aggregation's `before` and `after` rows through the `updated` template.
+    let mysql = setup_mysql().await;
+    let config = mysql.config().clone();
+    setup_stored_procedures(&config).await;
+
+    let reaction = build_started_reaction(&config, sensor_default_template()).await;
+
+    let qr = make_query_result(
+        "sensor-query",
+        vec![ResultDiff::Aggregation {
+            before: Some(json!({"sensor_id": "sensor-agg", "temperature": 1.0})),
+            after: json!({"sensor_id": "sensor-agg", "temperature": 2.0}),
+            row_signature: 0,
+        }],
+    );
+    reaction.enqueue_query_result(qr).await.expect("enqueue");
+    wait_for_log_count(&config, 1, 5000).await;
+    reaction.stop().await.expect("stop");
+
+    let entries = get_log_entries(&config).await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].operation, "UPDATE");
+    assert_eq!(entries[0].sensor_id, "sensor-agg");
+    assert_eq!(entries[0].old_temperature, Some(1.0));
+    assert_eq!(entries[0].new_temperature, Some(2.0));
+
+    mysql.cleanup().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_e2e_aggregation_without_before_binds_after_only() {
+    // An aggregation with `before: None` must not crash: build_context passes
+    // `before.as_ref()` (None), and an after-only template renders and executes
+    // normally.
+    let mysql = setup_mysql().await;
+    let config = mysql.config().clone();
+    setup_stored_procedures(&config).await;
+
+    // `updated` references only `after`, so a missing `before` does not error.
+    let template = QueryConfig {
+        added: None,
+        updated: Some(TemplateSpec::new(
+            "CALL log_sensor_added({{param after.sensor_id}}, {{param after.temperature}})",
+        )),
+        deleted: None,
+    };
+    let reaction = build_started_reaction(&config, template).await;
+
+    let qr = make_query_result(
+        "sensor-query",
+        vec![ResultDiff::Aggregation {
+            before: None,
+            after: json!({"sensor_id": "sensor-agg-none", "temperature": 7.5}),
+            row_signature: 0,
+        }],
+    );
+    reaction.enqueue_query_result(qr).await.expect("enqueue");
+    wait_for_log_count(&config, 1, 5000).await;
+    reaction.stop().await.expect("stop");
+
+    let entries = get_log_entries(&config).await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].sensor_id, "sensor-agg-none");
+    assert_eq!(entries[0].new_temperature, Some(7.5));
 
     mysql.cleanup().await;
 }

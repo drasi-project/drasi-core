@@ -16,8 +16,8 @@ The MySQL Stored Procedure reaction enables you to:
 
 Command templates are rendered with [Handlebars](https://handlebarsjs.com/) in **strict mode**. Two helpers are provided:
 
-- `{{param <path>}}` — resolves the referenced value from the template context, appends it to the ordered parameter list, and emits a `?` placeholder into the rendered SQL. Values are bound **positionally** by the MySQL driver — they are never interpolated into the SQL string, so the reaction is safe against SQL injection and preserves value types (numbers stay numbers, strings stay strings). Objects and arrays are bound whole as JSON.
-- `{{json <path>}}` — serializes the referenced value to a JSON string inline in the rendered text (useful when a procedure expects a JSON document as a single argument, combined with `{{param ...}}`).
+- `{{param <path>}}` — resolves the referenced value from the template context, appends it to the ordered parameter list, and emits a `?` placeholder into the rendered SQL. Values referenced with `{{param}}` are bound **positionally** by the MySQL driver — they are never interpolated into the SQL string, so they are safe against SQL injection and preserve value types (numbers stay numbers, strings stay strings). Objects and arrays are bound whole as JSON. **Use `{{param ...}}` for any untrusted value.**
+- `{{json <path>}}` — serializes the referenced value to a JSON string and **inlines it directly into the rendered SQL text** (useful when a procedure expects a JSON document as a single argument). Because the result is interpolated into the SQL rather than bound as a parameter, it is **not** protected against SQL injection or quoting problems: a string that contains a single quote (`'`) will break out of a surrounding SQL string literal, and untrusted data could inject SQL. Only use `{{json ...}}` for values you control; for anything derived from source data, prefer `{{param <path>}}`, which binds the object whole as JSON safely.
 
 A template such as:
 
@@ -353,11 +353,13 @@ TemplateSpec::new("CALL add_address({{param after.user.id}}, {{param after.locat
 
 ### Binding Objects as JSON
 
-To pass an object or array to a procedure as a single JSON argument, reference the object with `{{param ...}}` (it is bound whole as JSON), or embed it inline with `{{json ...}}`:
+To pass an object or array to a procedure as a single JSON argument, reference the object with `{{param ...}}` (it is bound whole as JSON):
 
 ```rust
 TemplateSpec::new("CALL store_doc({{param after.id}}, {{param after.payload}})")
 ```
+
+`{{param ...}}` is the recommended way to pass JSON, because the value is bound as a parameter and is never interpolated into the SQL text. The `{{json ...}}` helper also exists for cases where a JSON literal must appear inline in the SQL, but it interpolates the serialized value directly into the statement and is therefore **not** injection- or quoting-safe (see [How Templating Works](#how-templating-works)); only use it with trusted values.
 
 ## Template Resolution Priority
 
