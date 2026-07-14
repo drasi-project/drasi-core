@@ -1,0 +1,163 @@
+### ============================================================================
+### DrasiLib Shell Reaction Example - REST Client
+### ============================================================================
+### Use with VS Code REST Client extension or similar tools.
+###
+### The HTTP source listens on port 9000 and accepts events at:
+###   POST /sources/sensors/events       (single event)
+###   POST /sources/sensors/events/batch (multiple events)
+###
+### Each event triggers the shell reaction which invokes
+### `/usr/bin/python3 main.py`. Replace that command in main.rs with your own script.
+### ============================================================================
+
+### Health check - verify the HTTP source is running
+GET http://localhost:9000/health
+
+###
+
+### ============================================================================
+### INSERT OPERATIONS
+### ============================================================================
+
+### Add sensor_01 — triggers [ADD] in the shell reaction
+POST http://localhost:9000/sources/sensors/events
+Content-Type: application/json
+
+{
+  "operation": "insert",
+  "element": {
+    "type": "node",
+    "id": "sensor_01",
+    "labels": ["sensors"],
+    "properties": {
+      "id": "sensor_01",
+      "temperature": 54.5,
+      "location": "room-a"
+    }
+  }
+}
+
+###
+
+### ============================================================================
+### UPDATE OPERATIONS
+### ============================================================================
+
+### Update sensor_01 temperature — triggers [UPDATE] in the shell reaction
+POST http://localhost:9000/sources/sensors/events
+Content-Type: application/json
+
+{
+  "operation": "update",
+  "element": {
+    "type": "node",
+    "id": "sensor_01",
+    "labels": ["sensors"],
+    "properties": {
+      "id": "sensor_01",
+      "temperature": 25.1,
+      "location": "room-a"
+    }
+  }
+}
+
+###
+
+### Add sensor_02 in a different room
+POST http://localhost:9000/sources/sensors/events
+Content-Type: application/json
+
+{
+  "operation": "insert",
+  "element": {
+    "type": "node",
+    "id": "sensor_02",
+    "labels": ["sensors"],
+    "properties": {
+      "id": "sensor_02",
+      "temperature": 19.8,
+      "location": "room-b"
+    }
+  }
+}
+
+###
+
+### Update sensor_02 — temperature spike
+POST http://localhost:9000/sources/sensors/events
+Content-Type: application/json
+
+{
+  "operation": "update",
+  "element": {
+    "type": "node",
+    "id": "sensor_02",
+    "labels": ["sensors"],
+    "properties": {
+      "id": "sensor_02",
+      "temperature": 38.5,
+      "location": "room-b"
+    }
+  }
+}
+
+###
+
+### ============================================================================
+### DELETE OPERATIONS
+### ============================================================================
+
+### Delete sensor_01 — triggers [DELETE] in the shell reaction
+POST http://localhost:9000/sources/sensors/events
+Content-Type: application/json
+
+{
+  "operation": "delete",
+  "element": {
+    "type": "node",
+    "id": "sensor_01",
+    "labels": ["sensors"]
+  }
+}
+
+###
+
+### ============================================================================
+### BATCH OPERATIONS
+### ============================================================================
+
+### Add multiple sensors at once
+POST http://localhost:9000/sources/sensors/events/batch
+Content-Type: application/json
+
+{
+  "events": [
+    {
+      "operation": "insert",
+      "element": {
+        "type": "node",
+        "id": "sensor_03",
+        "labels": ["sensors"],
+        "properties": {
+          "id": "sensor_03",
+          "temperature": 21.0,
+          "location": "room-c"
+        }
+      }
+    },
+    {
+      "operation": "insert",
+      "element": {
+        "type": "node",
+        "id": "sensor_04",
+        "labels": ["sensors"],
+        "properties": {
+          "id": "sensor_04",
+          "temperature": 23.3,
+          "location": "room-d"
+        }
+      }
+    }
+  ]
+}
