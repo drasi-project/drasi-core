@@ -28,7 +28,9 @@ use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_application::ApplicationReaction;
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 use drasi_source_state_machine::config::{EnterCondition, Op, StateDef};
-use drasi_source_state_machine::{StateMachineSource, StateMachineSourceConfig};
+use drasi_source_state_machine::{
+    StateMachineSource, StateMachineSourceBuilder, StateMachineSourceConfig,
+};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -333,6 +335,118 @@ async fn fresh_subscriber_bootstraps_from_persisted_state() {
     assert!(
         found,
         "fresh subscriber should bootstrap the PAID order from persisted state"
+    );
+
+    core.stop().await.unwrap();
+}
+
+/// Regression test for the robust query-consumption engine: a query result emitted
+/// *before* the source subscribes must still be processed via **outbox catch-up**.
+///
+/// A bare live-forwarding source (the earlier design) would miss it. The shared
+/// consumption engine replays the query's outbox from the checkpoint on fresh
+/// start, so the source catches up.
+#[tokio::test]
+async fn source_catches_up_on_results_emitted_before_it_subscribes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        drasi_state_store_redb::RedbStateStoreProvider::new(tmp.path().join("state.redb")).unwrap(),
+    );
+
+    let (source, handle) = ApplicationSource::new(
+        "orders",
+        ApplicationSourceConfig {
+            properties: HashMap::new(),
+            durability: None,
+        },
+    )
+    .unwrap();
+
+    // Start with ONLY the application source + stage queries — no state machine
+    // source yet, so the draft-orders result lands in the query outbox before any
+    // state machine subscription exists.
+    let mut builder = DrasiLib::builder()
+        .with_id("sm-catchup-test")
+        .with_state_store_provider(store.clone())
+        .with_source(source);
+    for q in stage_queries() {
+        builder = builder.with_query(q);
+    }
+    let core = Arc::new(builder.build().await.unwrap());
+    core.start().await.unwrap();
+
+    // Emit a draft order BEFORE the state machine source exists/subscribes.
+    handle
+        .send_node_insert(
+            "o1",
+            vec!["Order"],
+            PropertyMapBuilder::new()
+                .with_string("id", "o1")
+                .with_bool("is_draft", true)
+                .with_bool("paid", false)
+                .build(),
+        )
+        .await
+        .unwrap();
+
+    // Wait until draft-orders has processed it (it is now in the query's outbox).
+    let mut in_query = false;
+    for _ in 0..100 {
+        if let Ok(results) = core.get_query_results("draft-orders").await {
+            if results
+                .iter()
+                .any(|r| r.get("orderId").and_then(|v| v.as_str()) == Some("o1"))
+            {
+                in_query = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        in_query,
+        "draft-orders should have processed o1 before the source subscribes"
+    );
+
+    // NOW add the state machine source + a downstream query and start the source.
+    // Add it with auto_start=false so wiring (and thus catch-up) happens
+    // deterministically when we call start_source below.
+    let sm_source = StateMachineSourceBuilder::new("order-state-source")
+        .with_config(state_machine_config())
+        .with_auto_start(false)
+        .build()
+        .unwrap();
+    core.add_source(sm_source).await.unwrap();
+    core.add_query(
+        Query::cypher("order-states")
+            .query("MATCH (o:OrderState) RETURN o.orderId AS orderId, o.state AS state")
+            .from_source("order-state-source")
+            .auto_start(true)
+            .build(),
+    )
+    .await
+    .unwrap();
+    core.start_source("order-state-source").await.unwrap();
+
+    // The source must catch up on the draft-orders result emitted before it
+    // subscribed, transitioning o1 to NEW. A live-only forwarder would miss it.
+    let mut found = false;
+    for _ in 0..100 {
+        if let Ok(results) = core.get_query_results("order-states").await {
+            if results.iter().any(|r| {
+                r.get("orderId").and_then(|v| v.as_str()) == Some("o1")
+                    && r.get("state").and_then(|v| v.as_str()) == Some("NEW")
+            }) {
+                found = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        found,
+        "state machine source should catch up on the pre-subscription draft-orders \
+         result and set o1=NEW"
     );
 
     core.stop().await.unwrap();
