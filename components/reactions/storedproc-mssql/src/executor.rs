@@ -142,7 +142,7 @@ impl MsSqlExecutor {
     /// the statement.
     pub async fn execute_command(&self, command: &str, parameters: Vec<Value>) -> Result<()> {
         let command = command.to_string();
-        let params = parameters.clone();
+        let params = parameters;
         let client = self.client.clone();
         let cmd_timeout = self.command_timeout;
 
@@ -169,6 +169,12 @@ impl MsSqlExecutor {
                         // depend on the magnitude of a particular row's value.
                         if let Some(i) = n.as_i64() {
                             query.bind(i);
+                        } else if let Some(u) = n.as_u64() {
+                            // A u64 that does not fit in i64 (> i64::MAX) cannot
+                            // be represented by SQL BIGINT. Bind its exact decimal
+                            // form as a string rather than falling through to f64,
+                            // which would silently lose integer precision.
+                            query.bind(u.to_string());
                         } else if let Some(f) = n.as_f64() {
                             query.bind(f);
                         } else {

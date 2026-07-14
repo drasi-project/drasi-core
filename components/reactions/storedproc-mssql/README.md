@@ -264,6 +264,12 @@ command with missing data.
 - `{{json <path>}}` renders the value at `<path>` as a JSON string. Combine it with
   `param` to bind a whole object, e.g. `EXEC ingest {{param (json after)}}`.
 
+  > **Warning:** `{{json}}` writes plain text into the rendered SQL and does not
+  > escape SQL metacharacters (such as the single quote in `O'Brien`). Using it
+  > directly inside a SQL literal (`EXEC proc '{{json after}}'`) interpolates
+  > unescaped data into the statement and reintroduces SQL injection. Always bind
+  > it through `param` instead: `EXEC proc {{param (json after)}}`.
+
 ### Nested field access
 
 ```rust

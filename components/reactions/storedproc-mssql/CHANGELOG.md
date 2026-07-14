@@ -34,9 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SQL-injection / value-corruption risk and preserving values verbatim (including
   strings containing quotes and semicolons).
 - Integer values are bound consistently as `BIGINT` rather than being narrowed to
-  32 bits, preventing silent truncation of large integers.
+  32 bits, preventing silent truncation of large integers. Unsigned integers that
+  exceed `i64::MAX` (which `BIGINT` cannot represent) are bound as their exact
+  decimal string instead of being coerced to `FLOAT`, preserving integer
+  precision for large `u64` row fields.
 - Corrected the tiberius parameter placeholders to the driver's uppercase
   `@P{n}` form (previously lowercase `@p{n}`, which was never exercised end-to-end).
+- The `{{json}}` helper now rejects a field that is absent from the current row
+  instead of serializing it to the string `"null"`, which would otherwise be
+  interpolated into the SQL text (`{{json missing}}`) or bound as the literal
+  string `"null"` (`{{param (json missing)}}`). Both now fail the render and skip
+  the event, matching the `{{param}}` helper's strict-mode contract.
 
 ### Added
 

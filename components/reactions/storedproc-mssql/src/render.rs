@@ -23,15 +23,23 @@
 //!   the driver, never interpolated into the SQL text, so they cannot alter the
 //!   statement regardless of their contents.
 //! - `{{json <path>}}` renders the value at `<path>` as a JSON string. Use it
-//!   to embed a whole object literally in the rendered text, or (more commonly)
 //!   as the argument to `{{param}}` — e.g. `{{param (json after)}}` — to bind an
 //!   object as a JSON string parameter.
 //!
+//!   **Warning:** `{{json}}` writes its result into the template output as
+//!   plain text, and JSON does not escape SQL metacharacters (for example the
+//!   single quote in `O'Brien`). Using it directly inside a SQL literal, e.g.
+//!   `EXEC proc '{{json after}}'`, interpolates unescaped data into the SQL
+//!   text and reintroduces the injection risk this module exists to prevent.
+//!   Always bind it instead: `EXEC proc {{param (json after)}}`.
+//!
 //! Rendering runs in Handlebars strict mode, so a template that references a
 //! field which is absent from the current row fails to render rather than
-//! silently binding an empty value. The caller treats a render failure as a
-//! skipped event (logged) instead of executing a command built from missing
-//! data.
+//! silently binding an empty value. Both the `param` and `json` helpers also
+//! reject a missing field explicitly, since Handlebars strict mode does not
+//! apply to values passed as helper arguments. The caller treats a render
+//! failure as a skipped event (logged) instead of executing a command built
+//! from missing data.
 
 use anyhow::{anyhow, Result};
 use handlebars::{
@@ -115,6 +123,17 @@ pub(crate) fn build_context(
 }
 
 /// Register the `{{json}}` helper: renders its argument as a JSON string.
+///
+/// **Warning:** this helper writes the serialized value into the template
+/// output *as plain text*. JSON does not escape SQL metacharacters (e.g. the
+/// single quote in `O'Brien`), so using `{{json <path>}}` directly inside a SQL
+/// literal reintroduces SQL injection. Always combine it with `{{param}}` so the
+/// value is bound through the driver rather than interpolated:
+///
+/// ```text
+/// SAFE:   EXEC proc {{param (json after)}}
+/// UNSAFE: EXEC proc '{{json after}}'
+/// ```
 fn register_json_helper(handlebars: &mut Handlebars<'static>) {
     handlebars.register_helper(
         "json",
@@ -128,6 +147,23 @@ fn register_json_helper(handlebars: &mut Handlebars<'static>) {
                 let value = h
                     .param(0)
                     .ok_or(RenderErrorReason::ParamNotFoundForIndex("json", 0))?;
+                // Strict binding: a referenced field that is absent from the
+                // current row must fail the render rather than serializing to
+                // the string "null" (which would either be interpolated into
+                // the SQL text for `{{json missing}}` or bound as the literal
+                // string "null" for `{{param (json missing)}}`). Handlebars
+                // strict mode does not apply to values passed as helper
+                // arguments, so enforce it here as the `param` helper does.
+                if value.is_value_missing() {
+                    return Err(RenderErrorReason::Other(format!(
+                        "json references a field that is missing from the current row: {}",
+                        value
+                            .context_path()
+                            .map(|p| p.join("."))
+                            .unwrap_or_else(|| "<unknown>".to_string())
+                    ))
+                    .into());
+                }
                 let rendered =
                     serde_json::to_string(value.value()).unwrap_or_else(|_| "null".to_string());
                 out.write(&rendered)?;
@@ -308,6 +344,47 @@ mod tests {
     }
 
     #[test]
+    fn aggregation_with_before_has_before_after_and_no_data() {
+        let qr = query_result(
+            "q",
+            ResultDiff::Aggregation {
+                before: Some(json!({"key": "a", "count": 1})),
+                after: json!({"key": "a", "count": 2}),
+                row_signature: 0,
+            },
+        );
+        let (op, ctx) = build_context(&qr, &qr.results[0]).unwrap();
+        // An aggregation is reported as an UPDATE.
+        assert_eq!(op, OperationType::Update);
+        assert_eq!(ctx["operation"], json!("UPDATE"));
+        assert_eq!(ctx["before"], json!({"key": "a", "count": 1}));
+        assert_eq!(ctx["after"], json!({"key": "a", "count": 2}));
+        // Unlike Update, an Aggregation carries no raw `data` payload.
+        assert!(!ctx.contains_key("data"));
+    }
+
+    #[test]
+    fn aggregation_without_before_omits_before_key() {
+        let qr = query_result(
+            "q",
+            ResultDiff::Aggregation {
+                before: None,
+                after: json!({"key": "a", "count": 1}),
+                row_signature: 0,
+            },
+        );
+        let (op, ctx) = build_context(&qr, &qr.results[0]).unwrap();
+        assert_eq!(op, OperationType::Update);
+        assert_eq!(ctx["after"], json!({"key": "a", "count": 1}));
+        // With no prior value the `before` key is absent, so a template that
+        // references `before` fails to render (strict mode) rather than binding
+        // a null. Confirm that intended behaviour.
+        assert!(!ctx.contains_key("before"));
+        assert!(render_command("EXEC agg {{param after.count}}", &ctx).is_ok());
+        assert!(render_command("EXEC agg {{param before.count}}", &ctx).is_err());
+    }
+
+    #[test]
     fn render_binds_positional_params_in_order() {
         let ctx = build_context(
             &query_result(
@@ -402,6 +479,29 @@ mod tests {
 
         let result = render_command("EXEC add_user {{param after.missing}}", &ctx);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn render_json_missing_field_errors_in_strict_mode() {
+        let (_op, ctx) = build_context(
+            &query_result(
+                "q",
+                ResultDiff::Add {
+                    data: json!({"id": 1}),
+                    row_signature: 0,
+                },
+            ),
+            &ResultDiff::Add {
+                data: json!({"id": 1}),
+                row_signature: 0,
+            },
+        )
+        .unwrap();
+
+        // Direct use must not interpolate the string "null" into the SQL text.
+        assert!(render_command("EXEC ingest {{json after.missing}}", &ctx).is_err());
+        // Combined use must not bind the literal string "null" as a parameter.
+        assert!(render_command("EXEC ingest {{param (json after.missing)}}", &ctx).is_err());
     }
 
     #[test]

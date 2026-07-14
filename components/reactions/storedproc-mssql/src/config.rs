@@ -50,6 +50,9 @@ pub use common::{OperationType, QueryConfig, TemplateSpec};
 ///   parameter and renders the matching placeholder.
 /// - `{{json <path>}}` renders the value at `<path>` as a JSON string; combine
 ///   it with `param` (e.g. `{{param (json after)}}`) to bind a whole object.
+///   Do not use `{{json <path>}}` directly inside a SQL literal: it writes
+///   unescaped text and would reintroduce SQL injection. Always bind it via
+///   `param`.
 ///
 /// Rendering runs in strict mode: a template referencing a field that is absent
 /// from the current row fails to render, and the event is skipped rather than a
@@ -220,7 +223,11 @@ impl MsSqlStoredProcReactionConfig {
     /// the full three-step resolution order (per-query id → last dotted segment
     /// → default template). The [`TemplateRouting`] trait default only covers
     /// steps 1 and 3, so this adds the last-segment lookup in between.
-    pub fn resolve_template_spec(
+    ///
+    /// Internal helper backing [`Self::get_command_template`], which is the
+    /// public entry point. Kept crate-private because it returns a borrow of the
+    /// internal [`TemplateSpec`] type.
+    pub(crate) fn resolve_template_spec(
         &self,
         query_id: &str,
         operation: OperationType,
