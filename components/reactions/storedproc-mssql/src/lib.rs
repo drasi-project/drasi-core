@@ -20,21 +20,24 @@
 //! continuous query results change. It supports different procedures for
 //! ADD, UPDATE, and DELETE operations.
 //!
+//! Commands are Handlebars templates. Row data is passed to a procedure with
+//! the `{{param}}` helper, which binds each value as a positional parameter
+//! (`@P1`, `@P2`, …) through the driver rather than interpolating it into the
+//! SQL text. The `{{json}}` helper serializes a value to a JSON string.
+//!
 //! # Example
 //!
 //! ```rust,ignore
 //! use drasi_reaction_storedproc_mssql::{MsSqlStoredProcReaction, QueryConfig, TemplateSpec};
 //!
 //! let default_template = QueryConfig {
-//!     added: Some(TemplateSpec {
-//!         template: "EXEC add_user @after.id, @after.name, @after.email".to_string(),
-//!     }),
-//!     updated: Some(TemplateSpec {
-//!         template: "EXEC update_user @after.id, @after.name, @after.email".to_string(),
-//!     }),
-//!     deleted: Some(TemplateSpec {
-//!         template: "EXEC delete_user @before.id".to_string(),
-//!     }),
+//!     added: Some(TemplateSpec::new(
+//!         "EXEC add_user {{param after.id}}, {{param after.name}}, {{param after.email}}",
+//!     )),
+//!     updated: Some(TemplateSpec::new(
+//!         "EXEC update_user {{param after.id}}, {{param after.name}}, {{param after.email}}",
+//!     )),
+//!     deleted: Some(TemplateSpec::new("EXEC delete_user {{param before.id}}")),
 //! };
 //!
 //! let reaction = MsSqlStoredProcReaction::builder("user-sync")
@@ -47,14 +50,12 @@
 pub mod config;
 pub mod descriptor;
 pub mod executor;
-pub mod parser;
 pub mod reaction;
+pub(crate) mod render;
 
 pub use config::{MsSqlStoredProcReactionConfig, QueryConfig, TemplateSpec};
 pub use reaction::MsSqlStoredProcReaction;
 
-/// Dynamic plugin entry point.
-///
 /// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(

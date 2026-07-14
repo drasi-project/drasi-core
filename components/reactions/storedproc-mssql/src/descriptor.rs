@@ -26,7 +26,9 @@ use crate::{MsSqlStoredProcReaction, QueryConfig, TemplateSpec};
 #[schema(as = reaction::storedproc_mssql::StoredProcTemplateSpec)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct StoredProcTemplateSpecDto {
-    /// Handlebars template string for the stored procedure command.
+    /// Handlebars command template. Bind row fields as positional parameters
+    /// with the `{{param <path>}}` helper (e.g.
+    /// `EXEC add_user {{param after.id}}, {{param after.name}}`).
     pub template: String,
 }
 

@@ -6,7 +6,7 @@ A Drasi reaction plugin that invokes MS SQL Server stored procedures when contin
 
 The MS SQL Server Stored Procedure reaction enables you to:
 - Execute different stored procedures for ADD, UPDATE, and DELETE operations
-- Map query result fields to stored procedure parameters using `@fieldName` syntax
+- Bind query result fields to stored procedure parameters using Handlebars `{{param ...}}` templates
 - Handle multiple queries with a single reaction
 - Automatically retry failed procedure calls with exponential backoff
 - Configure connection parameters and timeouts
@@ -18,6 +18,26 @@ Add the dependency to your `Cargo.toml`:
 ```toml
 [dependencies]
 drasi-reaction-storedproc-mssql = { path = "path/to/drasi-core/components/reactions/storedproc-mssql" }
+```
+
+### TLS backend
+
+Connecting to SQL Server with `ssl = true` (`.with_ssl(true)`) requires a TLS
+backend. This crate exposes two mutually exclusive Cargo features, with
+`native-tls` enabled by default:
+
+| Feature      | Backend                                   | Default |
+|--------------|-------------------------------------------|---------|
+| `native-tls` | platform TLS (OpenSSL / Secure Transport) | ✅       |
+| `rustls`     | rustls                                    |         |
+
+The default works out of the box on Linux. Use rustls instead when the platform
+TLS stack rejects the server handshake — notably **macOS**, whose Secure
+Transport stack fails the TLS handshake against SQL Server 2022:
+
+```toml
+[dependencies]
+drasi-reaction-storedproc-mssql = { path = "...", default-features = false, features = ["rustls"] }
 ```
 
 ## Quick Start
@@ -74,9 +94,9 @@ async fn main() -> anyhow::Result<()> {
             "YourPassword123!"
         )
         .with_query("user-changes")
-        .with_added_command("EXEC add_user @id, @name, @email")
-        .with_updated_command("EXEC update_user @id, @name, @email")
-        .with_deleted_command("EXEC delete_user @id")
+        .with_added_command("EXEC add_user {{param after.id}}, {{param after.name}}, {{param after.email}}")
+        .with_updated_command("EXEC update_user {{param after.id}}, {{param after.name}}, {{param after.email}}")
+        .with_deleted_command("EXEC delete_user {{param before.id}}")
         .build()
         .await?;
 
@@ -108,9 +128,9 @@ let reaction = MsSqlStoredProcReaction::builder("my-reaction")
     .with_password("YourPassword123!")
     .with_ssl(true)  // Enable TLS encryption
     .with_query("query1")
-    .with_added_command("EXEC add_record @id, @name")
-    .with_updated_command("EXEC update_record @id, @name")
-    .with_deleted_command("EXEC delete_record @id")
+    .with_added_command("EXEC add_record {{param after.id}}, {{param after.name}}")
+    .with_updated_command("EXEC update_record {{param after.id}}, {{param after.name}}")
+    .with_deleted_command("EXEC delete_record {{param before.id}}")
     .with_command_timeout_ms(30000)
     .with_retry_attempts(3)
     .build()
@@ -139,9 +159,9 @@ let reaction = MsSqlStoredProcReaction::builder("my-reaction")
     .with_identity_provider(identity_provider)
     .with_ssl(true)  // Required for Azure
     .with_query("query1")
-    .with_added_command("EXEC add_record @id, @name")
-    .with_updated_command("EXEC update_record @id, @name")
-    .with_deleted_command("EXEC delete_record @id")
+    .with_added_command("EXEC add_record {{param after.id}}, {{param after.name}}")
+    .with_updated_command("EXEC update_record {{param after.id}}, {{param after.name}}")
+    .with_deleted_command("EXEC delete_record {{param before.id}}")
     .build()
     .await?;
 ```
@@ -159,9 +179,9 @@ let reaction = MsSqlStoredProcReaction::builder("my-reaction")
     .with_database("mydb")
     .with_identity_provider(identity_provider)
     .with_query("query1")
-    .with_added_command("EXEC add_record @id, @name")
-    .with_updated_command("EXEC update_record @id, @name")
-    .with_deleted_command("EXEC delete_record @id")
+    .with_added_command("EXEC add_record {{param after.id}}, {{param after.name}}")
+    .with_updated_command("EXEC update_record {{param after.id}}, {{param after.name}}")
+    .with_deleted_command("EXEC delete_record {{param before.id}}")
     .build()
     .await?;
 ```
@@ -182,21 +202,28 @@ let reaction = MsSqlStoredProcReaction::builder("my-reaction")
 | `password` | Database password | `String` | Required |
 | `database` | Database name | `String` | Required |
 | `ssl` | Enable TLS encryption | `bool` | `false` |
-| `added_command` | Procedure for ADD operations | `Option<String>` | `None` |
-| `updated_command` | Procedure for UPDATE operations | `Option<String>` | `None` |
-| `deleted_command` | Procedure for DELETE operations | `Option<String>` | `None` |
+| `default_template` | Command templates applied to all queries unless overridden | `Option<QueryConfig>` | `None` |
+| `routes` | Per-query command templates (keyed by query id) | `Map<String, QueryConfig>` | `{}` |
 | `command_timeout_ms` | Command timeout | `u64` | `30000` |
 | `retry_attempts` | Number of retries | `u32` | `3` |
 
-## Parameter Mapping
+Each `QueryConfig` holds optional `added`, `updated`, and `deleted` command
+templates. The `with_added_command` / `with_updated_command` /
+`with_deleted_command` builder setters populate the `default_template`.
 
-Use the `@fieldName` syntax in your command to reference fields from query results. The reaction will automatically map them to MS SQL parameters:
+## Templating
+
+Commands are [Handlebars](https://handlebarsjs.com/) templates that render to a
+SQL batch (typically an `EXEC` statement). Instead of interpolating values into
+the SQL text, use the `{{param <path>}}` helper to bind each value as a
+positional SQL parameter through the driver:
 
 ```rust
-.with_added_command("EXEC add_user @id, @name, @email")
+.with_added_command("EXEC add_user {{param after.id}}, {{param after.name}}, {{param after.email}}")
 ```
 
-Query result:
+Given the query result row:
+
 ```json
 {
   "id": 1,
@@ -205,17 +232,42 @@ Query result:
 }
 ```
 
-Executes:
+the reaction renders and executes:
+
 ```sql
-EXEC add_user @p1=1, @p2='Alice', @p3='alice@example.com'
+EXEC add_user @P1, @P2, @P3   -- bound: @P1=1, @P2='Alice', @P3='alice@example.com'
 ```
 
-**Note**: The `@fieldName` in your command is a placeholder syntax. The actual SQL uses `@p1, @p2, @p3` parameter names internally.
+Because every value is bound as a parameter, contents such as quotes and
+semicolons are stored verbatim and cannot alter the executed SQL.
 
-### Nested Field Access
+### Template context
+
+Templates have access to the following keys:
+
+- `after` — the row after the change (ADD and UPDATE)
+- `before` — the row before the change (UPDATE and DELETE)
+- `data` — the raw data field (UPDATE)
+- `query_name` / `query_id` — the id of the query that produced the result
+- `operation` — the operation type (`"ADD"`, `"UPDATE"`, or `"DELETE"`)
+- `timestamp` — the result timestamp (RFC3339)
+- `metadata` — the result metadata map
+
+Rendering runs in **strict mode**: a template that references a field absent from
+the current row fails to render and the event is skipped rather than executing a
+command with missing data.
+
+### Helpers
+
+- `{{param <path>}}` binds the value at `<path>` as a positional SQL parameter and
+  renders the matching placeholder.
+- `{{json <path>}}` renders the value at `<path>` as a JSON string. Combine it with
+  `param` to bind a whole object, e.g. `EXEC ingest {{param (json after)}}`.
+
+### Nested field access
 
 ```rust
-.with_added_command("EXEC add_address @user.id, @address.city")
+.with_added_command("EXEC add_address {{param after.user.id}}, {{param after.address.city}}")
 ```
 
 ## Error Handling
