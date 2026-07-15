@@ -19,11 +19,38 @@ use axum::response::IntoResponse;
 use drasi_lib::channels::{QueryResult, ResultDiff};
 use futures::{SinkExt, StreamExt};
 use log::{debug, error, warn};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, watch, RwLock};
+
+/// Serialize a `row_signature` (`u64`) as a JSON **string**.
+///
+/// JavaScript `Number` only represents integers exactly up to 2^53−1, but
+/// `row_signature` is a full 64-bit hash. Sending it as a string preserves all
+/// 64 bits so the browser can compare identities without precision loss.
+fn serialize_row_signature<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&value.to_string())
+}
+
+/// Deserialize a `row_signature` from either a JSON string or number.
+///
+/// Strings are the canonical form (see [`serialize_row_signature`]); numbers are
+/// accepted for resilience.
+fn deserialize_row_signature<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    use serde::de::Error as _;
+    match Value::deserialize(deserializer)? {
+        Value::String(s) => s.parse::<u64>().map_err(D::Error::custom),
+        Value::Number(n) => n
+            .as_u64()
+            .ok_or_else(|| D::Error::custom("row_signature is not a u64")),
+        Value::Null => Ok(0),
+        other => Err(D::Error::custom(format!(
+            "unexpected row_signature type: {other}"
+        ))),
+    }
+}
 
 /// Supported client-to-server WebSocket messages.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -37,6 +64,16 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WebSocketResultDiff {
     pub op: String,
+    /// The row's engine-stamped `row_signature` — the canonical row identity.
+    /// Serialized as `k` (a JSON string to preserve all 64 bits in the browser);
+    /// `0` means unknown (clients fall back to id/equality).
+    #[serde(
+        rename = "k",
+        default,
+        serialize_with = "serialize_row_signature",
+        deserialize_with = "deserialize_row_signature"
+    )]
+    pub row_signature: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,15 +131,23 @@ impl HubMessage {
             .results
             .iter()
             .map(|result_diff| match result_diff {
-                ResultDiff::Add { data, .. } => WebSocketResultDiff {
+                ResultDiff::Add {
+                    data,
+                    row_signature,
+                } => WebSocketResultDiff {
                     op: "add".to_string(),
+                    row_signature: *row_signature,
                     data: Some(data.clone()),
                     before: None,
                     after: None,
                     grouping_keys: None,
                 },
-                ResultDiff::Delete { data, .. } => WebSocketResultDiff {
+                ResultDiff::Delete {
+                    data,
+                    row_signature,
+                } => WebSocketResultDiff {
                     op: "delete".to_string(),
+                    row_signature: *row_signature,
                     data: Some(data.clone()),
                     before: None,
                     after: None,
@@ -113,16 +158,22 @@ impl HubMessage {
                     before,
                     after,
                     grouping_keys,
-                    ..
+                    row_signature,
                 } => WebSocketResultDiff {
                     op: "update".to_string(),
+                    row_signature: *row_signature,
                     data: Some(data.clone()),
                     before: Some(before.clone()),
                     after: Some(after.clone()),
                     grouping_keys: grouping_keys.clone(),
                 },
-                ResultDiff::Aggregation { before, after, .. } => WebSocketResultDiff {
+                ResultDiff::Aggregation {
+                    before,
+                    after,
+                    row_signature,
+                } => WebSocketResultDiff {
                     op: "aggregation".to_string(),
+                    row_signature: *row_signature,
                     data: None,
                     before: before.clone(),
                     after: Some(after.clone()),
@@ -130,6 +181,7 @@ impl HubMessage {
                 },
                 ResultDiff::Noop => WebSocketResultDiff {
                     op: "noop".to_string(),
+                    row_signature: 0,
                     data: None,
                     before: None,
                     after: None,
@@ -178,10 +230,27 @@ impl WebSocketHub {
     }
 }
 
+/// A single accumulated snapshot row paired with its canonical identity.
+///
+/// `row_signature` is the engine-stamped identity (`0` when unknown, in which
+/// case matching falls back to an `id`/equality heuristic on `data`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SnapshotRow {
+    #[serde(
+        rename = "k",
+        default,
+        serialize_with = "serialize_row_signature",
+        deserialize_with = "deserialize_row_signature"
+    )]
+    pub row_signature: u64,
+    #[serde(rename = "v")]
+    pub data: Value,
+}
+
 /// Snapshot of accumulated query results, separating rows from aggregation state.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct QuerySnapshot {
-    pub rows: Vec<Value>,
+    pub rows: Vec<SnapshotRow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregation: Option<Value>,
 }
@@ -217,6 +286,11 @@ impl QuerySnapshotStore {
         }
     }
 
+    /// The configured per-query row cap.
+    pub fn max_rows_per_query(&self) -> usize {
+        self.max_rows_per_query
+    }
+
     /// Apply a query result's diffs to the accumulated snapshot.
     pub async fn apply(&self, query_result: &QueryResult) {
         let mut snapshots = self.snapshots.write().await;
@@ -224,25 +298,78 @@ impl QuerySnapshotStore {
 
         for diff in &query_result.results {
             match diff {
-                ResultDiff::Add { data, .. } => {
-                    snapshot.rows.push(data.clone());
+                ResultDiff::Add {
+                    data,
+                    row_signature,
+                } => {
+                    // Insert-of-an-existing-element is an upsert in drasi: replace
+                    // an existing row with the same identity instead of appending a
+                    // duplicate (see issue #605).
+                    upsert_row(&mut snapshot.rows, *row_signature, data);
                 }
-                ResultDiff::Delete { data, .. } => {
-                    if let Some(idx) = find_row_index(&snapshot.rows, data) {
+                ResultDiff::Delete {
+                    data,
+                    row_signature,
+                } => {
+                    if let Some(idx) = find_row_index(&snapshot.rows, *row_signature, data) {
                         snapshot.rows.remove(idx);
                     }
                 }
-                ResultDiff::Update { before, after, .. } => {
-                    if let Some(idx) = find_row_index(&snapshot.rows, before) {
-                        snapshot.rows[idx] = after.clone();
+                ResultDiff::Update {
+                    before,
+                    after,
+                    row_signature,
+                    ..
+                } => {
+                    // The row_signature is stable across an update; match on it,
+                    // falling back to the `before` payload when it is unknown.
+                    if let Some(idx) = find_row_index(&snapshot.rows, *row_signature, before) {
+                        snapshot.rows[idx] = SnapshotRow {
+                            row_signature: *row_signature,
+                            data: after.clone(),
+                        };
                     } else {
-                        snapshot.rows.push(after.clone());
+                        snapshot.rows.push(SnapshotRow {
+                            row_signature: *row_signature,
+                            data: after.clone(),
+                        });
                     }
                 }
                 ResultDiff::Aggregation { after, .. } => {
                     snapshot.aggregation = Some(after.clone());
                 }
                 ResultDiff::Noop => {}
+            }
+        }
+
+        // Evict oldest rows if over limit (FIFO)
+        if snapshot.rows.len() > self.max_rows_per_query {
+            let excess = snapshot.rows.len() - self.max_rows_per_query;
+            snapshot.rows.drain(..excess);
+        }
+    }
+
+    /// Seed the accumulated snapshot for a query with bootstrap rows.
+    ///
+    /// Used to populate the store from the initial bootstrap snapshot so the live
+    /// WebSocket stream starts from the same baseline the fallback fetcher reads
+    /// (see issue #605). Rows carry their `row_signature` so subsequent live diffs
+    /// match them by identity. To avoid clobbering newer live data that may have
+    /// already arrived, this only inserts rows whose identity is not already
+    /// present; existing rows are left untouched. Respects `max_rows_per_query`.
+    pub async fn seed_rows(&self, query_id: &str, rows: Vec<(u64, Value)>) {
+        if rows.is_empty() {
+            return;
+        }
+        let mut snapshots = self.snapshots.write().await;
+        let snapshot = snapshots.entry(query_id.to_string()).or_default();
+
+        for (row_signature, data) in rows {
+            if find_row_index(&snapshot.rows, row_signature, &data).is_none() {
+                snapshot.rows.push(SnapshotRow {
+                    row_signature,
+                    data,
+                });
             }
         }
 
@@ -269,12 +396,40 @@ impl QuerySnapshotStore {
     }
 }
 
-fn find_row_index(rows: &[Value], target: &Value) -> Option<usize> {
-    // Match by "id" field if present, otherwise by full equality.
-    if let Some(target_id) = target.get("id") {
-        rows.iter().position(|r| r.get("id") == Some(target_id))
+/// Insert or replace a row by its identity.
+fn upsert_row(rows: &mut Vec<SnapshotRow>, row_signature: u64, data: &Value) {
+    if let Some(idx) = find_row_index(rows, row_signature, data) {
+        rows[idx] = SnapshotRow {
+            row_signature,
+            data: data.clone(),
+        };
     } else {
-        rows.iter().position(|r| r == target)
+        rows.push(SnapshotRow {
+            row_signature,
+            data: data.clone(),
+        });
+    }
+}
+
+/// Find a row by its canonical identity.
+///
+/// Matches on `row_signature` (the engine-stamped identity) when it is known
+/// (non-zero); otherwise — or when the signature search misses (e.g. a row was
+/// seeded with signature `0` via the FFI backward-compat fallback) — falls back
+/// to matching by the `id` field, then by full data equality.
+fn find_row_index(rows: &[SnapshotRow], row_signature: u64, data: &Value) -> Option<usize> {
+    if row_signature != 0 {
+        if let Some(idx) = rows.iter().position(|r| r.row_signature == row_signature) {
+            return Some(idx);
+        }
+        // Fall through: a previously-seeded row may carry signature 0, so match
+        // it by id/equality rather than appending a duplicate.
+    }
+    if let Some(target_id) = data.get("id") {
+        rows.iter()
+            .position(|r| r.data.get("id") == Some(target_id))
+    } else {
+        rows.iter().position(|r| &r.data == data)
     }
 }
 
@@ -291,11 +446,17 @@ pub async fn ws_upgrade(
     ws: WebSocketUpgrade,
     hub: WebSocketHub,
     query_ids: Vec<String>,
+    shutdown_rx: watch::Receiver<bool>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, hub, query_ids))
+    ws.on_upgrade(move |socket| handle_socket(socket, hub, query_ids, shutdown_rx))
 }
 
-async fn handle_socket(socket: WebSocket, hub: WebSocketHub, query_ids: Vec<String>) {
+async fn handle_socket(
+    socket: WebSocket,
+    hub: WebSocketHub,
+    query_ids: Vec<String>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
     let (mut sender, mut receiver) = socket.split();
     let mut hub_receiver = hub.subscribe();
 
@@ -382,6 +543,12 @@ async fn handle_socket(socket: WebSocket, hub: WebSocketHub, query_ids: Vec<Stri
     tokio::select! {
         _ = &mut send_task => receive_task.abort(),
         _ = &mut receive_task => send_task.abort(),
+        // Server shutdown: terminate both tasks so the connection closes and the
+        // axum graceful-shutdown can complete promptly.
+        _ = shutdown_rx.wait_for(|signalled| *signalled) => {
+            send_task.abort();
+            receive_task.abort();
+        }
     }
 }
 
@@ -453,5 +620,28 @@ mod tests {
         assert_eq!(parsed["results"][0]["op"], "add");
         assert_eq!(parsed["results"][1]["op"], "update");
         assert_eq!(parsed["results"][2]["op"], "delete");
+        // row_signature is serialized as a string under `k` (64-bit precision-safe).
+        assert_eq!(parsed["results"][0]["k"], "0");
+    }
+
+    #[test]
+    fn test_row_signature_serialized_as_string_roundtrips() {
+        let big = 12_345_678_901_234_567_890u64; // > 2^53, would lose precision as a JSON number
+        let diff = WebSocketResultDiff {
+            op: "add".to_string(),
+            row_signature: big,
+            data: Some(serde_json::json!({"id": 1})),
+            before: None,
+            after: None,
+            grouping_keys: None,
+        };
+        let json = serde_json::to_value(&diff).unwrap();
+        assert_eq!(json["k"], serde_json::Value::String(big.to_string()));
+        let back: WebSocketResultDiff = serde_json::from_value(json).unwrap();
+        assert_eq!(back.row_signature, big);
+        // Also accepts a numeric form on the wire for resilience.
+        let from_num: WebSocketResultDiff =
+            serde_json::from_str(r#"{"op":"add","k":42,"data":{"id":1}}"#).unwrap();
+        assert_eq!(from_num.row_signature, 42);
     }
 }
