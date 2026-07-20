@@ -242,7 +242,116 @@ async fn static_rocksdb_index_persists_across_restart() -> Result<()> {
     Ok(())
 }
 
-/// Proves the `with_default_index_provider` path that `drasi-server` uses for its
+/// Proves the fix for issue #627: after `DrasiLib::shutdown()`, the RocksDB
+/// process-exclusive lock on the data directory is released, so a **brand-new**
+/// `DrasiLib` + provider can reopen the **same** on-disk path **within the same
+/// process** and recover the prior query state — without re-ingesting any source
+/// events.
+///
+/// This is exactly the scenario the sibling `..._persists_across_restart` test
+/// documents as previously unsupported: before the fix, the query runtime kept the
+/// RocksDB handles alive for the whole `DrasiLib` lifetime, so reopening the path in
+/// the same process failed with `LOCK: No locks available`.
+///
+/// The first engine is intentionally kept alive (held in an `Arc`) across the
+/// reopen: the fix must free the lock on `shutdown()` itself, not rely on the whole
+/// `DrasiLib` being dropped (internal Arcs can keep it alive past `shutdown()`).
+#[tokio::test]
+async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Result<()> {
+    let data_dir = TempDir::new()?;
+    let backend_config = json!({
+        "kind": "rocksdb",
+        "path": data_dir.path().to_string_lossy(),
+        "enableArchive": false,
+    });
+
+    // ---- First engine: ingest rows, then shut down permanently. ----
+    let provider1 = build_provider_from_config(&backend_config).await;
+    let (source1, handle1) = MockSource::new("people-src")?;
+    let core1 = Arc::new(
+        DrasiLib::builder()
+            .with_id("static-rocksdb-1")
+            .with_index_provider("rocks-1", provider1)
+            .with_source(source1)
+            // Bootstrap disabled so that, after reopen, rows can only come from the
+            // persisted RocksDB index — proving durability rather than re-bootstrap.
+            .with_query(
+                Query::cypher("people")
+                    .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+                    .from_source("people-src")
+                    .auto_start(true)
+                    .enable_bootstrap(false)
+                    .with_storage_backend(StorageBackendRef::Named("rocks-1".to_string()))
+                    .build(),
+            )
+            .build()
+            .await?,
+    );
+
+    core1.start().await?;
+
+    insert_person(&handle1, "p1", "Alice", 30).await?;
+    insert_person(&handle1, "p2", "Bob", 25).await?;
+    insert_person(&handle1, "p3", "Carol", 41).await?;
+    let results = wait_for_results(&core1, "people", 3).await;
+    assert_eq!(results.len(), 3, "first engine should ingest 3 rows");
+
+    // Permanent teardown — this must release the RocksDB lock even though `core1`
+    // (and its provider) remain alive below.
+    core1.shutdown().await?;
+
+    // ---- Second engine: reopen the SAME path in the SAME process. ----
+    // A fresh provider on the same on-disk path; this open acquires the RocksDB
+    // LOCK, which only succeeds if the first engine's `shutdown()` released it.
+    let provider2 = build_provider_from_config(&backend_config).await;
+    let (source2, _handle2) = MockSource::new("people-src")?;
+    let core2 = Arc::new(
+        DrasiLib::builder()
+            .with_id("static-rocksdb-2")
+            .with_index_provider("rocks-1", provider2)
+            .with_source(source2)
+            .with_query(
+                Query::cypher("people")
+                    .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+                    .from_source("people-src")
+                    .auto_start(true)
+                    .enable_bootstrap(false)
+                    .with_storage_backend(StorageBackendRef::Named("rocks-1".to_string()))
+                    .build(),
+            )
+            .build()
+            .await?,
+    );
+
+    // If the lock were still held, `start()` would fail while building the indexes
+    // ("Failed to build indexes" / "No locks available").
+    core2
+        .start()
+        .await
+        .expect("second engine should open the same RocksDB path after shutdown released the lock");
+
+    // No re-ingestion: results must be recovered from the persisted index.
+    let recovered = wait_for_results(&core2, "people", 3).await;
+    let names: Vec<&str> = recovered
+        .iter()
+        .filter_map(|r| r["name"].as_str())
+        .collect();
+    assert_eq!(
+        recovered.len(),
+        3,
+        "reopened engine should recover the persisted rows without re-ingestion, got: {recovered:?}"
+    );
+    assert!(names.contains(&"Alice"), "missing Alice in {recovered:?}");
+    assert!(names.contains(&"Bob"), "missing Bob in {recovered:?}");
+    assert!(names.contains(&"Carol"), "missing Carol in {recovered:?}");
+
+    core2.shutdown().await?;
+
+    // Keep the first engine alive until the very end so the test proves the lock was
+    // freed by `shutdown()` rather than by dropping `core1`.
+    drop(core1);
+    Ok(())
+}
 /// instance-wide `persist_index` flag: a query with **no** `storage_backend` is
 /// transparently backed by the default RocksDB provider (rather than falling back
 /// to in-memory), and that data is durable across a query stop/start cycle.
