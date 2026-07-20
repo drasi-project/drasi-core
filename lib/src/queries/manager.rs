@@ -2555,7 +2555,10 @@ impl Query for DrasiQuery {
         // Defensive: if the query was never stopped (e.g. left in a terminal Error
         // state), the FutureQueueSource may still hold a clone of the backend future
         // queue. `stop()` normally takes it already, in which case this is a no-op.
-        if let Some(fq) = self.future_queue_source.write().await.take() {
+        // Take the value out first so the write-lock guard is dropped before the
+        // `.await` below (never hold a lock across an await point).
+        let future_queue_source = self.future_queue_source.write().await.take();
+        if let Some(fq) = future_queue_source {
             fq.stop().await;
         }
 
@@ -2943,8 +2946,12 @@ impl QueryManager {
             .collect();
 
         for id in query_ids {
-            if let Ok(query) = self.get_query_instance(&id).await {
-                query.release_persistent_handles().await;
+            match self.get_query_instance(&id).await {
+                Ok(query) => query.release_persistent_handles().await,
+                Err(e) => warn!(
+                    "Failed to release persistent index handles for query '{id}' during \
+                     shutdown: {e}. A persistent backend may keep its exclusive lock held."
+                ),
             }
         }
     }
