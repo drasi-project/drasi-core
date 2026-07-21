@@ -27,9 +27,6 @@ on:
         required: false
         type: boolean
         default: false
-  push:
-    branches:
-      - drasi-e2e-nightly
 
 permissions:
   # Least privilege by default; elevated scopes are granted per-job below.
@@ -97,14 +94,13 @@ jobs:
     secrets: inherit
 
   # If any job in the nightly failed, open (or update) a tracking issue so the
-  # failure is visible without watching Actions. Runs on scheduled/manual runs
-  # only (not on the branch-testing `push` trigger) to avoid noise while iterating.
+  # failure is visible without watching Actions.
   # Dedupes: if an open issue with the `nightly-failure` label already exists, it
   # adds a comment instead of opening a new one.
   report-failure:
     name: Report nightly failure
     needs: [release-dry-run, publish-plugins]
-    if: ${{ always() && github.event_name != 'push' && contains(needs.*.result, 'failure') }}
+    if: ${{ always() && contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-latest
     # Only this job writes the tracking issue.
     permissions:
