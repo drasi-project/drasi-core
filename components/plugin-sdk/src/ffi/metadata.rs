@@ -30,7 +30,11 @@ use super::types::FfiStr;
 /// - `0.10.0`: source change / bootstrap events now cross the boundary as
 ///   serialized (MessagePack) payloads instead of reinterpreted `repr(Rust)`
 ///   opaque pointers (fixes #602 cross-cdylib heap corruption).
-pub const FFI_SDK_VERSION: &str = "0.10.0";
+/// - `0.11.0`: snapshot rows cross the snapshot iterator as a
+///   `KeyedSnapshotRow { k: <row_signature>, v: <row> }` JSON envelope instead
+///   of a bare row, so the engine's canonical `row_signature` survives FFI
+///   (fixes #605 duplicate dashboard rows on the plugin path).
+pub const FFI_SDK_VERSION: &str = "0.11.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");

@@ -261,9 +261,9 @@ impl Reaction for ReactionProxy {
         )
         .map(crate::identity_bridge::IdentityProviderVtableBuilder::build);
 
-        let ip_ptr = identity_vtable
-            .map(|v| Box::into_raw(Box::new(v)) as *const _)
-            .unwrap_or(std::ptr::null());
+        let ip_ptr: *mut drasi_plugin_sdk::ffi::identity::IdentityProviderVtable = identity_vtable
+            .map(|v| Box::into_raw(Box::new(v)))
+            .unwrap_or(std::ptr::null_mut());
 
         let snapshot_fetcher_vtable = context
             .snapshot_fetcher
@@ -278,7 +278,7 @@ impl Reaction for ReactionProxy {
             instance_id: instance_id_ffi,
             component_id: component_id_ffi,
             state_store: ss_ptr,
-            identity_provider: ip_ptr,
+            identity_provider: ip_ptr as *const _,
             log_callback: Some(crate::callbacks::instance_log_callback),
             log_ctx: ctx_ptr,
             lifecycle_callback: Some(crate::callbacks::instance_lifecycle_callback),
@@ -288,6 +288,21 @@ impl Reaction for ReactionProxy {
         };
 
         (self.vtable.initialize_fn)(self.vtable.state, &ffi_ctx as *const FfiRuntimeContext);
+
+        // Reclaim the identity-provider vtable struct we allocated for `ip_ptr`. This is a
+        // transient pointer: the plugin SDK (>= 0.10.0) copies the vtable fields by value in
+        // `FfiIdentityProviderProxy::new` during `initialize_fn` and never retains `ip_ptr`,
+        // so it is safe to free the struct here. Plugins built against SDK < 0.10.0 retained
+        // the raw pointer; they are rejected by the loader's exact major.minor version gate
+        // (see `validate_plugin_metadata` in `host-sdk/src/loader.rs`), which prevents a
+        // use-after-free. This frees only the `IdentityProviderVtable` struct (no `Drop`
+        // impl) — the underlying state remains owned by the plugin proxy and is released via
+        // `drop_fn` when that proxy is dropped.
+        if !ip_ptr.is_null() {
+            unsafe {
+                drop(Box::from_raw(ip_ptr));
+            }
+        }
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -536,10 +551,10 @@ extern "C" fn snapshot_iter_next(iter_ctx: *mut c_void) -> drasi_plugin_sdk::ffi
         (Some(rt), Some(s)) => (rt, s),
         _ => return drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
     };
-    use tokio_stream::StreamExt;
-    match rt.block_on(stream.next()) {
-        Some(row) => {
-            let json = serde_json::to_string(&row).unwrap_or_else(|_| "null".into());
+    match rt.block_on(stream.next_keyed()) {
+        Some((sig, row)) => {
+            let envelope = drasi_lib::queries::output_state::KeyedSnapshotRow { k: sig, v: row };
+            let json = serde_json::to_string(&envelope).unwrap_or_else(|_| "null".into());
             drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(json)
         }
         None => drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
