@@ -14,7 +14,22 @@ jobs:
       # rustls-webpki 0.101.7 vulns — aws-smithy-http-client 1.1.13 bundles both
       # rustls 0.21 and 0.23 backends; workspace feature unification activates both.
       # Cannot resolve without upstream AWS SDK dropping the old rustls-0-21 backend.
+      #
+      # quick-xml < 0.41 DoS advisories:
+      #   RUSTSEC-2026-0194 (quadratic duplicate-attribute-name check)
+      #   RUSTSEC-2026-0195 (unbounded namespace allocation in NsReader)
+      # Both fixed in quick-xml >= 0.41. quick-xml enters the tree from multiple
+      # sources: as a direct dependency of drasi-source-http (0.37) and
+      # drasi-bootstrap-http (0.31), and transitively via azure_core 0.21.0, which
+      # pins "^0.31" (pulled in by drasi-reaction-azure-storage). Bumping our direct
+      # deps alone would not remove the azure_core-pinned 0.31.0, so clearing these
+      # fully requires a major Azure SDK upgrade. These are DoS advisories in the
+      # XML parser used by the optional HTTP/Azure source/bootstrap plugins, whose
+      # input may come from external endpoints; accepted as a known risk pending
+      # the Azure SDK upgrade.
       audit-args: >-
         --ignore RUSTSEC-2026-0098
         --ignore RUSTSEC-2026-0099
         --ignore RUSTSEC-2026-0104
+        --ignore RUSTSEC-2026-0194
+        --ignore RUSTSEC-2026-0195
