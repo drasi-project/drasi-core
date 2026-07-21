@@ -281,30 +281,66 @@ jobs:
         env:
           OCI_REGISTRY_USERNAME: ${{ github.actor }}
           OCI_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          # Pass free-form inputs through the environment (not string-interpolated
+          # into the script body) so their values can't alter the command.
+          INPUT_REGISTRY: ${{ inputs.registry }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PRE_RELEASE: ${{ inputs.pre_release }}
+          INPUT_SIGN: ${{ inputs.sign }}
+          TARGET: ${{ matrix.target }}
+          ARCH_SUFFIX: ${{ matrix.arch_suffix }}
         run: |
-          ARGS="--release --target ${{ matrix.target }} --registry ${{ inputs.registry }} --arch-suffix ${{ matrix.arch_suffix }}"
-          if [ "${{ inputs.sign }}" = "true" ]; then
-            ARGS="$ARGS --sign"
+          # Defence in depth: reject anything outside the expected charset before
+          # the value reaches the command line.
+          if [ -n "$INPUT_TAG" ] && ! [[ "$INPUT_TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "Invalid tag format: $INPUT_TAG" >&2; exit 1
+          fi
+          if [ -n "$INPUT_PRE_RELEASE" ] && ! [[ "$INPUT_PRE_RELEASE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "Invalid pre_release format: $INPUT_PRE_RELEASE" >&2; exit 1
+          fi
+          if ! [[ "$INPUT_REGISTRY" =~ ^[A-Za-z0-9._/:-]+$ ]]; then
+            echo "Invalid registry format: $INPUT_REGISTRY" >&2; exit 1
+          fi
+          # Build the args as an array so each element is passed verbatim (no
+          # word-splitting or globbing).
+          ARGS=(--release --target "$TARGET" --registry "$INPUT_REGISTRY" --arch-suffix "$ARCH_SUFFIX")
+          if [ "$INPUT_SIGN" = "true" ]; then
+            ARGS+=(--sign)
           fi
           # --tag and --pre-release are mutually exclusive; --tag wins when set.
-          if [ -n "${{ inputs.tag }}" ]; then
-            ARGS="$ARGS --tag ${{ inputs.tag }}"
-          elif [ -n "${{ inputs.pre_release }}" ]; then
-            ARGS="$ARGS --pre-release ${{ inputs.pre_release }}"
+          if [ -n "$INPUT_TAG" ]; then
+            ARGS+=(--tag "$INPUT_TAG")
+          elif [ -n "$INPUT_PRE_RELEASE" ]; then
+            ARGS+=(--pre-release "$INPUT_PRE_RELEASE")
           fi
-          cargo run -p xtask -- publish-plugins $ARGS
+          cargo run -p xtask -- publish-plugins "${ARGS[@]}"
 
       - name: Publish plugins (dry run)
         if: ${{ inputs.dry_run }}
         shell: bash
+        env:
+          INPUT_REGISTRY: ${{ inputs.registry }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PRE_RELEASE: ${{ inputs.pre_release }}
+          TARGET: ${{ matrix.target }}
+          ARCH_SUFFIX: ${{ matrix.arch_suffix }}
         run: |
-          ARGS="--release --target ${{ matrix.target }} --registry ${{ inputs.registry }} --arch-suffix ${{ matrix.arch_suffix }} --dry-run"
-          if [ -n "${{ inputs.tag }}" ]; then
-            ARGS="$ARGS --tag ${{ inputs.tag }}"
-          elif [ -n "${{ inputs.pre_release }}" ]; then
-            ARGS="$ARGS --pre-release ${{ inputs.pre_release }}"
+          if [ -n "$INPUT_TAG" ] && ! [[ "$INPUT_TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "Invalid tag format: $INPUT_TAG" >&2; exit 1
           fi
-          cargo run -p xtask -- publish-plugins $ARGS
+          if [ -n "$INPUT_PRE_RELEASE" ] && ! [[ "$INPUT_PRE_RELEASE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "Invalid pre_release format: $INPUT_PRE_RELEASE" >&2; exit 1
+          fi
+          if ! [[ "$INPUT_REGISTRY" =~ ^[A-Za-z0-9._/:-]+$ ]]; then
+            echo "Invalid registry format: $INPUT_REGISTRY" >&2; exit 1
+          fi
+          ARGS=(--release --target "$TARGET" --registry "$INPUT_REGISTRY" --arch-suffix "$ARCH_SUFFIX" --dry-run)
+          if [ -n "$INPUT_TAG" ]; then
+            ARGS+=(--tag "$INPUT_TAG")
+          elif [ -n "$INPUT_PRE_RELEASE" ]; then
+            ARGS+=(--pre-release "$INPUT_PRE_RELEASE")
+          fi
+          cargo run -p xtask -- publish-plugins "${ARGS[@]}"
 
   set-public-visibility:
     name: Set Package Visibility to Public

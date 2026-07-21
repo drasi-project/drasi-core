@@ -37,10 +37,14 @@ runs:
     - name: Install release-plz
       shell: bash
       run: |
-        curl -sSfL https://github.com/release-plz/release-plz/releases/download/release-plz-v0.3.157/release-plz-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
+        # Match the runner arch (uname -m returns x86_64 / aarch64), which lines
+        # up with release-plz's musl asset naming, so this works on amd64 and arm64.
+        ARCH="$(uname -m)"
+        curl -sSfL "https://github.com/release-plz/release-plz/releases/download/release-plz-v0.3.157/release-plz-${ARCH}-unknown-linux-musl.tar.gz" | tar xz -C /usr/local/bin
 
     - name: Install cargo-semver-checks
       shell: bash
       run: |
-        curl -sSfL https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.45.0/cargo-semver-checks-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
+        ARCH="$(uname -m)"
+        curl -sSfL "https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.45.0/cargo-semver-checks-${ARCH}-unknown-linux-musl.tar.gz" | tar xz -C /usr/local/bin
         cargo-semver-checks --version
