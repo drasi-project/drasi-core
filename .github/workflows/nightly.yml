@@ -1,18 +1,9 @@
-name: Nightly E2E (Producer)
+name: Nightly Build
 
-# Producer half of the end-to-end nightly pipeline. Runs in drasi-core because
-# this is where the change under test originates. It:
-#   1. resolves the current main HEAD SHA (the "nightly" version of the crates),
-#   2. runs the release-plz dry-run as a release health signal,
-#   3. publishes the plugins to a fixed, overwritable OCI tag via workflow_call,
-#   4. calls drasi-server's nightly-e2e.yml (cross-repo workflow_call) to build
-#      the server against this SHA and run the integration e2e.
-#
-# The SHA and the plugin images both come from the same workflow run (same commit),
-# so the git-dependency overlay and the OCI plugins the server pulls are always
-# consistent.
-#
-# See docs/nightly-e2e/README.md for the full design.
+# Nightly pipeline for drasi-core. It:
+#   1. runs the release-plz dry-run as a release health signal,
+#   2. builds and publishes the plugins from main's HEAD to a fixed, overwritable
+#      OCI tag via workflow_call.
 
 on:
   schedule:
@@ -31,11 +22,6 @@ on:
         required: false
         type: boolean
         default: false
-      skip_server_e2e:
-        description: 'Skip calling the drasi-server e2e (build/publish only)'
-        required: false
-        type: boolean
-        default: false
       skip_publish_plugins:
         description: 'Skip publishing plugins (reuse already-published nightly tag)'
         required: false
@@ -50,40 +36,14 @@ permissions:
   contents: read
 
 jobs:
-  resolve-sha:
-    name: Resolve main SHA
-    runs-on: ubuntu-latest
-    outputs:
-      sha: ${{ steps.rev.outputs.sha }}
-      plugin_tag: ${{ steps.rev.outputs.plugin_tag }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          # Always pin the nightly to main's HEAD, regardless of the ref this
-          # workflow was dispatched from.
-          ref: main
-          fetch-depth: 0
-
-      - name: Resolve HEAD SHA and plugin tag
-        id: rev
-        run: |
-          SHA=$(git rev-parse HEAD)
-          TAG='${{ inputs.plugin_tag || 'drasi-nightly-test' }}'
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "plugin_tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Nightly core SHA: $SHA"
-          echo "Nightly plugin tag: $TAG"
-
   # Release-dry-run signal: run the release tooling in dry-run mode to catch
   # packaging / semver / changelog breakage early. Uses the shared
   # install-release-tools composite action (same pinned versions as release-plz.yml)
   # and runs only `release-plz update`, which publishes nothing. A failure here
   # fails the nightly and, because the rest of the chain depends on it, stops the
-  # plugin publish + e2e.
+  # plugin publish.
   release-dry-run:
     name: Release dry-run (release-plz)
-    needs: resolve-sha
     if: ${{ inputs.skip_release_dry_run != true }}
     runs-on: ubuntu-latest
     steps:
@@ -105,7 +65,7 @@ jobs:
 
   publish-plugins:
     name: Publish nightly plugins
-    needs: [resolve-sha, release-dry-run]
+    needs: release-dry-run
     # Elevated scopes needed by the called publish-plugins.yml (OCI push + cosign
     # keyless). A called workflow's token can't exceed the calling job's grants.
     permissions:
@@ -118,18 +78,15 @@ jobs:
     # [skip-plugins] / skip_publish_plugins reuse an already-published nightly tag.
     if: >-
       ${{ always()
-        && needs.resolve-sha.result == 'success'
         && needs.release-dry-run.result != 'failure'
         && needs.release-dry-run.result != 'cancelled'
         && inputs.skip_publish_plugins != true
         && !contains(github.event.head_commit.message || '', '[skip-plugins]') }}
     uses: ./.github/workflows/publish-plugins.yml
     with:
-      tag: ${{ needs.resolve-sha.outputs.plugin_tag }}
-      # Build plugins from the exact SHA resolve-sha pinned, so the published
-      # images match the core_sha handed to the drasi-server e2e (not the
-      # triggering ref, which differs on push/workflow_dispatch from a branch).
-      ref: ${{ needs.resolve-sha.outputs.sha }}
+      tag: ${{ inputs.plugin_tag || 'drasi-nightly-test' }}
+      # Always build the nightly plugins from main's HEAD.
+      ref: main
       # Nightly -test channel: skip cosign signing to avoid orphaned signatures
       # on each tag overwrite.
       sign: false
@@ -139,37 +96,6 @@ jobs:
       skip_visibility: true
     secrets: inherit
 
-  # Call drasi-server's nightly-e2e reusable workflow directly. Using a reusable
-  # workflow call (instead of repository_dispatch) means:
-  #   - no PAT needed (GITHUB_TOKEN is used across the org),
-  #   - a real needs: ordering edge (runs only after plugins are published),
-  #   - the e2e result surfaces inside this drasi-core run.
-  # The @ref pins which version of the consumer runs; point it at the branch while
-  # testing, then switch to @main once merged. server_ref tells the consumer which
-  # drasi-server ref to check out (required because a cross-repo call runs in this
-  # caller's context).
-  call-server-e2e:
-    name: drasi-server e2e
-    needs: [resolve-sha, publish-plugins]
-    # contents: read to call the reusable workflow; packages: read so the consumer
-    # can pull the nightly plugin images. A called workflow's token can't exceed
-    # the calling job's grants.
-    permissions:
-      contents: read
-      packages: read
-    # Run when resolve-sha succeeded and publish-plugins did not fail. Using
-    # always() + result checks so a *skipped* publish-plugins (e.g. [skip-plugins])
-    # still lets the e2e run against the already-published tag.
-    if: ${{ always() && inputs.skip_server_e2e != true && needs.resolve-sha.result == 'success' && needs.publish-plugins.result != 'failure' && needs.publish-plugins.result != 'cancelled' }}
-    uses: drasi-project/drasi-server/.github/workflows/nightly-e2e.yml@drasi-e2e-nightly
-    with:
-      core_sha: ${{ needs.resolve-sha.outputs.sha }}
-      plugin_tag: ${{ needs.resolve-sha.outputs.plugin_tag }}
-      registry: ghcr.io/drasi-project
-      server_repo: drasi-project/drasi-server
-      server_ref: drasi-e2e-nightly
-    secrets: inherit
-
   # If any job in the nightly failed, open (or update) a tracking issue so the
   # failure is visible without watching Actions. Runs on scheduled/manual runs
   # only (not on the branch-testing `push` trigger) to avoid noise while iterating.
@@ -177,7 +103,7 @@ jobs:
   # adds a comment instead of opening a new one.
   report-failure:
     name: Report nightly failure
-    needs: [resolve-sha, release-dry-run, publish-plugins, call-server-e2e]
+    needs: [release-dry-run, publish-plugins]
     if: ${{ always() && github.event_name != 'push' && contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-latest
     # Only this job writes the tracking issue.
@@ -195,7 +121,7 @@ jobs:
               .filter(([, v]) => v.result === 'failure')
               .map(([k]) => k);
             const body = [
-              `The nightly E2E run failed.`,
+              `The nightly build failed.`,
               ``,
               `- **Run:** ${runUrl}`,
               `- **Failed jobs:** ${failed.join(', ') || 'unknown'}`,
@@ -208,7 +134,7 @@ jobs:
               await github.rest.issues.createLabel({
                 owner: context.repo.owner, repo: context.repo.repo,
                 name: label, color: 'b60205',
-                description: 'Automated nightly E2E failure',
+                description: 'Automated nightly build failure',
               });
             } catch (e) { /* label already exists */ }
 
@@ -227,7 +153,7 @@ jobs:
             } else {
               const created = await github.rest.issues.create({
                 owner: context.repo.owner, repo: context.repo.repo,
-                title: `Nightly E2E failed (${new Date().toISOString().slice(0, 10)})`,
+                title: `Nightly build failed (${new Date().toISOString().slice(0, 10)})`,
                 body, labels: [label],
               });
               core.notice(`Opened nightly-failure issue #${created.data.number}`);

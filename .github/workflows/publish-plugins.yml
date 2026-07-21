@@ -126,7 +126,7 @@ jobs:
         with:
           # Empty ref falls back to the triggering ref (release-plz / manual runs).
           # The nightly passes the resolved main SHA so plugins are built from the
-          # same commit as core_sha handed to the drasi-server e2e.
+          # same commit as the resolved nightly SHA.
           ref: ${{ inputs.ref }}
           fetch-depth: 0
 
