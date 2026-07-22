@@ -35,6 +35,9 @@ async-trait = "0.1"
 
 # MySQL
 mysql_async = { version = "0.37", default-features = false, features = ["default"] }
+# vendored OpenSSL: build from source so mysql_async's native-tls cross-compiles
+# under cargo-zigbuild (glibc-pinned -gnu plugins) without host openssl headers.
+openssl = { version = "0.10", features = ["vendored"] }
 
 # Utilities
 serde = { version = "1.0", features = ["derive"] }

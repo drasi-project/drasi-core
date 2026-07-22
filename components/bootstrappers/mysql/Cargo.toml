@@ -44,6 +44,9 @@ serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 ordered-float = "3.0"
 mysql_async = "0.37"
+# vendored OpenSSL: build from source so mysql_async's native-tls cross-compiles
+# under cargo-zigbuild (glibc-pinned -gnu plugins) without host openssl headers.
+openssl = { version = "0.10", features = ["vendored"] }
 mysql_common = "0.37"
 bytes = "1.0"
 

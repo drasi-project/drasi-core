@@ -36,6 +36,9 @@ drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 tiberius = { version = "0.12", features = ["chrono", "rust_decimal"] }
+# vendored OpenSSL: build from source so tiberius' native-tls cross-compiles
+# under cargo-zigbuild (glibc-pinned -gnu plugins) without host openssl headers.
+openssl = { version = "0.10", features = ["vendored"] }
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 async-trait = "0.1"

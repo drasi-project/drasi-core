@@ -38,6 +38,9 @@ tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chron
 postgres-types = { version = "0.2", features = ["derive"] }
 postgres-native-tls = "0.5"
 native-tls = "0.2"
+# vendored OpenSSL: build from source so native-tls cross-compiles under
+# cargo-zigbuild (glibc-pinned -gnu plugins) without host openssl headers.
+openssl = { version = "0.10", features = ["vendored"] }
 bytes = "1.0"
 
 # Utilities

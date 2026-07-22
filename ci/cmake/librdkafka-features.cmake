@@ -29,9 +29,30 @@
 #
 # This file is wired in via the `CMAKE_TOOLCHAIN_FILE` / target-specific
 # `CMAKE_TOOLCHAIN_FILE_<triple>` environment variables that the `cmake` crate
-# reads. It only constrains optional features and deliberately does NOT set the
-# compiler or `CMAKE_SYSTEM_NAME`, so it does not turn an otherwise native build
-# into a cross build.
+# reads. It only constrains optional features and deliberately does NOT set
+# `CMAKE_SYSTEM_NAME`, so it does not turn an otherwise native build into a cross
+# build.
+
+# Compiler wiring for cargo-zigbuild (-gnu glibc-pinned) builds.
+#
+# `cmake-rs` suppresses its own `-DCMAKE_<LANG>_COMPILER` defines whenever a
+# toolchain file is supplied, so without this block CMake falls back to the host
+# `cc` (gcc) while `cargo-zigbuild` injects clang/zig-style flags such as
+# `--target=<triple>` into `CMAKE_C_FLAGS` — which gcc rejects, breaking the
+# compiler check. cargo-zigbuild exports `CC_<triple>` / `CXX_<triple>` (triple
+# with `-` replaced by `_`) pointing at its `zig cc` wrapper for the target;
+# wire those in here so librdkafka compiles with the same zig toolchain (and
+# glibc floor) as the rest of the link. Only the target's variable is defined at
+# build time, so at most one branch takes effect; on non-zigbuild builds none do
+# and CMake's normal detection is used.
+foreach(_zig_triple x86_64_unknown_linux_gnu aarch64_unknown_linux_gnu)
+  if(DEFINED ENV{CC_${_zig_triple}})
+    set(CMAKE_C_COMPILER "$ENV{CC_${_zig_triple}}")
+  endif()
+  if(DEFINED ENV{CXX_${_zig_triple}})
+    set(CMAKE_CXX_COMPILER "$ENV{CXX_${_zig_triple}}")
+  endif()
+endforeach()
 
 # Keep zlib (matches rdkafka-sys `-DWITH_ZLIB=1`) and the bundled lz4.
 set(WITH_ZLIB ON CACHE BOOL "" FORCE)
