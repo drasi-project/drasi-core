@@ -129,6 +129,12 @@ impl LifecycleManager {
             info!("All auto-start queries started successfully");
         }
 
+        // Now that queries are running, wire up any query-consuming sources
+        // (those returning a non-empty `subscribed_query_ids()`) so they begin
+        // receiving continuous-query results. Downstream queries that read from
+        // such a source already subscribed to it during the Queries phase.
+        self.source_manager.wire_all_query_subscriptions().await;
+
         // Notify sources that all initial subscriptions are done. Sources that
         // held back upstream feedback (e.g., Postgres flush-fence) can now
         // resume normal advancement based on the min-watermark of all handles.

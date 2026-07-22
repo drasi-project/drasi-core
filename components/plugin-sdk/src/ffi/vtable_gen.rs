@@ -889,6 +889,72 @@ pub fn build_source_vtable<T: Source + 'static>(
         })
     }
 
+    extern "C" fn subscribed_query_ids_fn<T: Source + 'static>(
+        state: *const c_void,
+    ) -> FfiStringArray {
+        let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        FfiStringArray::from_vec(w.inner.subscribed_query_ids())
+    }
+
+    extern "C" fn start_result_push_fn<T: Source + 'static>(
+        state: *mut c_void,
+        callback: FfiResultPushCallbackFn,
+        callback_ctx: *mut c_void,
+    ) {
+        // Push-based result delivery (mirrors the reaction path). The host
+        // provides a blocking callback that returns the next QueryResult pointer
+        // (or null on shutdown). The plugin spawns a forwarder that calls the
+        // callback via spawn_blocking (to avoid starving async workers), then
+        // enqueues each result into the source's priority queue.
+        let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        let handle = (w.runtime_handle)().handle().clone();
+        let ctx_raw = callback_ctx as usize;
+        let ptr = SendPtr(state as *const SourceWrapper<T>);
+        handle.spawn(async move {
+            // Always signal the host (via a sentinel callback) when the forwarder
+            // stops touching the wrapper, so the host can safely free it.
+            struct SentinelOnDrop {
+                ctx_raw: usize,
+                callback: FfiResultPushCallbackFn,
+            }
+            impl Drop for SentinelOnDrop {
+                fn drop(&mut self) {
+                    let cb = self.callback;
+                    let ctx = self.ctx_raw as *mut c_void;
+                    #[allow(clippy::manual_dangling_ptr)]
+                    let sentinel = 1usize as *mut c_void;
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cb(ctx, sentinel);
+                    }));
+                }
+            }
+            let _sentinel_guard = SentinelOnDrop { ctx_raw, callback };
+            loop {
+                let ctx_val = ctx_raw;
+                let result_ptr = tokio::task::spawn_blocking(move || {
+                    SendMutPtr(callback(ctx_val as *mut c_void, std::ptr::null_mut()))
+                })
+                .await;
+                let result_ptr = match result_ptr {
+                    Ok(p) => p.as_ptr(),
+                    Err(_) => break,
+                };
+                if result_ptr.is_null() {
+                    break;
+                }
+                let query_result =
+                    match unsafe { decode_ffi_query_result(result_ptr as *mut FfiQueryResult) } {
+                        Some(qr) => qr,
+                        None => continue,
+                    };
+                let inner = unsafe { ptr.as_ref() };
+                if let Err(e) = inner.inner.enqueue_query_result(query_result).await {
+                    log::error!("Failed to enqueue query result: {e}");
+                }
+            }
+        });
+    }
+
     let cached_id = source.id().to_string();
     let cached_type_name = source.type_name().to_string();
 
@@ -925,6 +991,8 @@ pub fn build_source_vtable<T: Source + 'static>(
         set_bootstrap_provider_fn: set_bootstrap_provider_fn::<T>,
         supports_replay_fn: supports_replay_fn::<T>,
         remove_position_handle_fn: remove_position_handle_fn::<T>,
+        subscribed_query_ids_fn: subscribed_query_ids_fn::<T>,
+        start_result_push_fn: start_result_push_fn::<T>,
         drop_fn: drop_fn::<T>,
     }
 }
@@ -1272,6 +1340,80 @@ pub fn build_source_vtable_from_boxed(
         })
     }
 
+    extern "C" fn subscribed_query_ids_fn(state: *const c_void) -> FfiStringArray {
+        let w = unsafe { &*(state as *const DynSourceWrapper) };
+        FfiStringArray::from_vec(w.inner.subscribed_query_ids())
+    }
+
+    extern "C" fn start_result_push_fn(
+        state: *mut c_void,
+        callback: FfiResultPushCallbackFn,
+        callback_ctx: *mut c_void,
+    ) {
+        ffi_guard((), || {
+            // Push-based result delivery (mirrors the reaction path). The host
+            // provides a blocking callback that returns the next QueryResult
+            // pointer (or null on shutdown). The plugin spawns a forwarder that
+            // pulls each result and enqueues it into the source's priority queue.
+            //
+            // The forwarder references the wrapper through a raw `SendPtr`; the
+            // host's `SourceProxy` guarantees the wrapper is not freed (drop_fn)
+            // until the forwarder has signalled completion via the sentinel
+            // callback, so the pointer stays valid for the forwarder's lifetime.
+            let w = unsafe { &*(state as *const DynSourceWrapper) };
+            let handle = (w.runtime_handle)().handle().clone();
+            let ctx_raw = callback_ctx as usize;
+            let ptr = SendPtr(state as *const DynSourceWrapper);
+
+            // Drop guard: always send the sentinel callback when the forwarder
+            // stops touching the wrapper — even on panic or task cancellation —
+            // so the host's Drop never blocks past its timeout.
+            struct SentinelOnDrop {
+                ctx_raw: usize,
+                callback: FfiResultPushCallbackFn,
+            }
+            impl Drop for SentinelOnDrop {
+                fn drop(&mut self) {
+                    let cb = self.callback;
+                    let ctx = self.ctx_raw as *mut c_void;
+                    #[allow(clippy::manual_dangling_ptr)]
+                    let sentinel = 1usize as *mut c_void;
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cb(ctx, sentinel);
+                    }));
+                }
+            }
+
+            handle.spawn(async move {
+                let _sentinel_guard = SentinelOnDrop { ctx_raw, callback };
+                loop {
+                    let ctx_val = ctx_raw;
+                    let result_ptr = tokio::task::spawn_blocking(move || {
+                        SendMutPtr(callback(ctx_val as *mut c_void, std::ptr::null_mut()))
+                    })
+                    .await;
+                    let result_ptr = match result_ptr {
+                        Ok(p) => p.as_ptr(),
+                        Err(_) => break,
+                    };
+                    if result_ptr.is_null() {
+                        break;
+                    }
+                    let query_result =
+                        match unsafe { decode_ffi_query_result(result_ptr as *mut FfiQueryResult) }
+                        {
+                            Some(qr) => qr,
+                            None => continue,
+                        };
+                    let inner = unsafe { ptr.as_ref() };
+                    if let Err(e) = inner.inner.enqueue_query_result(query_result).await {
+                        log::error!("Failed to enqueue query result: {e}");
+                    }
+                }
+            });
+        });
+    }
+
     let cached_id = source.id().to_string();
     let cached_type_name = source.type_name().to_string();
 
@@ -1308,6 +1450,8 @@ pub fn build_source_vtable_from_boxed(
         set_bootstrap_provider_fn,
         supports_replay_fn,
         remove_position_handle_fn,
+        subscribed_query_ids_fn,
+        start_result_push_fn,
         drop_fn,
     }
 }

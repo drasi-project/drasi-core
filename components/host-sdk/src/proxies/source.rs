@@ -28,9 +28,10 @@ use drasi_lib::schema::SourceSchema;
 use drasi_lib::sources::Source;
 use drasi_lib::{ComponentStatus, DispatchMode, SourceRuntimeContext};
 use drasi_plugin_sdk::descriptor::SourcePluginDescriptor;
+use drasi_plugin_sdk::ffi::payload::encode_query_result;
 use drasi_plugin_sdk::ffi::{
-    FfiComponentStatus, FfiDispatchMode, FfiRuntimeContext, FfiStr, SourcePluginVtable,
-    SourceVtable,
+    FfiComponentStatus, FfiDispatchMode, FfiQueryResult, FfiResultPushCallbackFn,
+    FfiRuntimeContext, FfiStr, SourcePluginVtable, SourceVtable,
 };
 use libloading::Library;
 
@@ -68,6 +69,93 @@ extern "C" fn host_executor(future_ptr: *mut c_void) -> *mut c_void {
     .unwrap_or(std::ptr::null_mut())
 }
 
+/// Context for the push-based query-result callback used to feed a
+/// query-consuming source's `enqueue_query_result` across the FFI boundary.
+///
+/// Mirrors the equivalent machinery in the reaction proxy: the host holds the
+/// receiving end of a channel; the plugin's forwarder task pulls each
+/// `QueryResult` via [`result_push_callback`], which blocks on `rx.recv()`.
+struct ResultPushContext {
+    rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<drasi_lib::channels::QueryResult>>>,
+    /// Signaled when the plugin-side forwarder task has fully exited its loop and
+    /// will no longer access the source wrapper. The forwarder signals this by
+    /// calling the callback one final time with a non-null sentinel parameter.
+    forwarder_done: std::sync::Mutex<bool>,
+    forwarder_done_cv: std::sync::Condvar,
+}
+
+fn signal_forwarder_done(context: &ResultPushContext) {
+    if let Ok(mut done) = context.forwarder_done.lock() {
+        *done = true;
+        context.forwarder_done_cv.notify_all();
+    }
+}
+
+/// Frees a serialized `QueryResult` byte buffer produced by the host in
+/// [`result_push_callback_inner`]. Called by the consuming plugin after it has
+/// deserialized its own copy.
+extern "C" fn drop_query_result_bytes(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() && len > 0 {
+        unsafe {
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+        }
+    }
+}
+
+/// Callback invoked by the plugin's forwarder task to receive the next
+/// `QueryResult`. Blocks until a result is available. Returns null on channel
+/// close (shutdown). A non-null `sentinel` signals that the forwarder has fully
+/// exited and will not access the source wrapper again.
+///
+/// Wrapped in `catch_unwind` because this is `extern "C"` — panics unwinding
+/// across the FFI boundary are undefined behavior.
+extern "C" fn result_push_callback(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c_void {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        result_push_callback_inner(ctx, sentinel)
+    }))
+    .unwrap_or_else(|_| {
+        let context = unsafe { &*(ctx as *const ResultPushContext) };
+        signal_forwarder_done(context);
+        std::ptr::null_mut()
+    })
+}
+
+fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c_void {
+    let context = unsafe { &*(ctx as *const ResultPushContext) };
+
+    // Sentinel call: the forwarder has exited its loop.
+    if !sentinel.is_null() {
+        signal_forwarder_done(context);
+        return std::ptr::null_mut();
+    }
+
+    let guard = context
+        .rx
+        .lock()
+        .expect("result_push_callback lock poisoned");
+    if let Some(ref rx) = *guard {
+        match rx.recv() {
+            Ok(result) => {
+                // Serialize the QueryResult for cross-cdylib transfer — never hand
+                // the plugin a reinterpreted `repr(Rust)` pointer (issue #602).
+                let bytes = encode_query_result(&result);
+                let payload_len = bytes.len();
+                let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+                Box::into_raw(Box::new(FfiQueryResult {
+                    payload_ptr,
+                    payload_len,
+                    payload_drop_fn: Some(drop_query_result_bytes),
+                })) as *mut c_void
+            }
+            // Channel closed — return null so the forwarder breaks and then sends
+            // the sentinel.
+            Err(_) => std::ptr::null_mut(),
+        }
+    } else {
+        std::ptr::null_mut()
+    }
+}
+
 /// Wraps a `SourceVtable` into a DrasiLib `Source` trait implementation.
 ///
 /// The host creates this proxy when the plugin factory produces a `SourceVtable`.
@@ -79,6 +167,12 @@ pub struct SourceProxy {
     cached_type_name: String,
     /// Keeps the per-instance callback context alive for the lifetime of this proxy.
     _callback_ctx: std::sync::Mutex<Option<Arc<crate::callbacks::InstanceCallbackContext>>>,
+    /// Channel for push-based query-result delivery. Created on start, closed on
+    /// stop/drop. Only used by query-consuming sources.
+    result_tx:
+        std::sync::Mutex<Option<std::sync::mpsc::SyncSender<drasi_lib::channels::QueryResult>>>,
+    /// Keeps the push callback context alive for the lifetime of the forwarder.
+    _push_ctx: std::sync::Mutex<Option<Arc<ResultPushContext>>>,
     /// Per-source identity provider set programmatically via
     /// [`Source::set_identity_provider`]. When present, it takes precedence over
     /// any instance-wide provider supplied via
@@ -100,6 +194,8 @@ impl SourceProxy {
             cached_id,
             cached_type_name,
             _callback_ctx: std::sync::Mutex::new(None),
+            result_tx: std::sync::Mutex::new(None),
+            _push_ctx: std::sync::Mutex::new(None),
             identity_provider: std::sync::Mutex::new(None),
         }
     }
@@ -162,6 +258,30 @@ impl Source for SourceProxy {
     }
 
     async fn start(&self) -> anyhow::Result<()> {
+        // For query-consuming sources, set up push-based result delivery before
+        // starting the source, so query results forwarded by the host reach the
+        // plugin's `enqueue_query_result` across the FFI boundary. Ordinary
+        // sources (no subscribed queries) skip this entirely.
+        if !self.subscribed_query_ids().is_empty() {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<drasi_lib::channels::QueryResult>(256);
+            {
+                let mut guard = self.result_tx.lock().expect("result_tx lock poisoned");
+                *guard = Some(tx);
+            }
+            let push_ctx = Arc::new(ResultPushContext {
+                rx: std::sync::Mutex::new(Some(rx)),
+                forwarder_done: std::sync::Mutex::new(false),
+                forwarder_done_cv: std::sync::Condvar::new(),
+            });
+            // Use Arc::as_ptr — the Arc stays alive in _push_ctx for the proxy's life.
+            let ctx_ptr = Arc::as_ptr(&push_ctx) as *mut c_void;
+            {
+                let mut guard = self._push_ctx.lock().expect("_push_ctx lock poisoned");
+                *guard = Some(push_ctx);
+            }
+            (self.vtable.start_result_push_fn)(self.vtable.state, result_push_callback, ctx_ptr);
+        }
+
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let start_fn = self.vtable.start_fn;
         let result = std::thread::spawn(move || (start_fn)(state.as_ptr()))
@@ -171,12 +291,42 @@ impl Source for SourceProxy {
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
+        // Close the result channel sender to unblock the plugin forwarder's
+        // callback (its rx.recv() returns Err, the callback returns null, and the
+        // forwarder breaks out of its loop). The forwarder task is joined in Drop
+        // via the sentinel signal before the wrapper is freed.
+        {
+            let mut guard = self.result_tx.lock().expect("result_tx lock poisoned");
+            *guard = None;
+        }
+
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let stop_fn = self.vtable.stop_fn;
         let result = std::thread::spawn(move || (stop_fn)(state.as_ptr()))
             .join()
             .map_err(|_| anyhow::anyhow!("Thread panicked"))?;
         unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
+    }
+
+    fn subscribed_query_ids(&self) -> Vec<String> {
+        let arr = (self.vtable.subscribed_query_ids_fn)(self.vtable.state as *const c_void);
+        unsafe { arr.into_vec() }
+    }
+
+    async fn enqueue_query_result(
+        &self,
+        result: drasi_lib::channels::QueryResult,
+    ) -> anyhow::Result<()> {
+        let guard = self.result_tx.lock().expect("result_tx lock poisoned");
+        if let Some(ref tx) = *guard {
+            tx.send(result)
+                .map_err(|_| anyhow::anyhow!("Result channel closed"))?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Source not started — result channel not initialized"
+            ))
+        }
     }
 
     async fn status(&self) -> ComponentStatus {
@@ -547,11 +697,54 @@ impl Source for SourceProxy {
 
 impl Drop for SourceProxy {
     fn drop(&mut self) {
-        // Run plugin drop on the shared worker thread to avoid TLS destructor
-        // races on macOS arm64 (see drop_worker module for details).
-        let drop_fn = self.vtable.drop_fn;
-        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
-        super::drop_worker::execute_drop_fn(drop_fn, state);
+        // Close the result channel to unblock the plugin forwarder (if any), then
+        // wait for it to fully exit before freeing the wrapper. This mirrors the
+        // ReactionProxy coordination: the plugin forwarder references the wrapper
+        // through a raw pointer, so drop_fn must not run until the forwarder has
+        // signalled (via the sentinel callback) that it will no longer touch it.
+        {
+            if let Ok(mut guard) = self.result_tx.lock() {
+                *guard = None;
+            }
+        }
+
+        let forwarder_exited = if let Ok(guard) = self._push_ctx.lock() {
+            if let Some(ref ctx) = *guard {
+                let done = ctx.forwarder_done.lock().expect("forwarder_done lock");
+                let (done, timeout) = ctx
+                    .forwarder_done_cv
+                    .wait_timeout_while(done, std::time::Duration::from_secs(5), |done| !*done)
+                    .expect("forwarder_done condvar wait");
+                !timeout.timed_out() && *done
+            } else {
+                true // No push context → forwarder was never started
+            }
+        } else {
+            false // Lock poisoned
+        };
+
+        if forwarder_exited {
+            // Run plugin drop on the shared worker thread to avoid TLS destructor
+            // races on macOS arm64 (see drop_worker module for details).
+            let drop_fn = self.vtable.drop_fn;
+            let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
+            super::drop_worker::execute_drop_fn(drop_fn, state);
+        } else {
+            // Timeout or error — leak the source wrapper rather than risk a
+            // use-after-free while the forwarder may still be running.
+            log::warn!(
+                "SourceProxy::drop: forwarder did not exit within timeout; \
+                 leaking source wrapper to prevent use-after-free"
+            );
+        }
+
+        // Leak the push context Arc so the forwarder's in-flight spawn_blocking
+        // callback (on the timeout path) cannot dereference freed memory.
+        if let Ok(mut guard) = self._push_ctx.lock() {
+            if let Some(ctx) = guard.take() {
+                std::mem::forget(ctx);
+            }
+        }
 
         // Bug C fix: leak the per-instance callback context Arc unconditionally.
         // The strong reference handed to the plugin via `Arc::into_raw` in

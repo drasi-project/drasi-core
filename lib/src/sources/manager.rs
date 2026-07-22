@@ -26,13 +26,17 @@ use std::collections::BTreeMap;
 use crate::channels::*;
 use crate::component_graph::{ComponentGraph, ComponentKind, ComponentUpdateSender};
 use crate::config::SourceRuntime;
+use crate::consumption::{ConsumptionEngine, QueryConsumer, SourceConsumer};
 use crate::context::SourceRuntimeContext;
 use crate::identity::IdentityProvider;
 use crate::managers::{ComponentLogKey, ComponentLogRegistry};
+use crate::metrics::LifecycleMetrics;
+use crate::reactions::QueryProvider;
 use crate::schema::SourceSchema;
 use crate::sources::Source;
 use crate::state_store::StateStoreProvider;
 use crate::wal::WalProvider;
+use std::collections::HashMap;
 
 // Convert JSON value to ElementValue
 pub fn convert_json_to_element_value(value: &Value) -> ElementValue {
@@ -85,6 +89,13 @@ pub struct SourceManager {
     /// Managers send transitional states (Starting, Stopping, Reconfiguring) here;
     /// the loop applies them to the graph and records events automatically.
     update_tx: ComponentUpdateSender,
+    /// Provider used to obtain query instances so query-consuming sources can
+    /// subscribe to continuous-query results. Injected after construction.
+    query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
+    /// Forwarder tasks that pump query results into query-consuming sources,
+    /// keyed by source id. Aborted when the source stops.
+    subscription_tasks: Arc<RwLock<HashMap<String, Vec<tokio::task::AbortHandle>>>>,
+    engine: ConsumptionEngine,
 }
 
 impl SourceManager {
@@ -100,14 +111,33 @@ impl SourceManager {
         graph: Arc<RwLock<ComponentGraph>>,
         update_tx: ComponentUpdateSender,
     ) -> Self {
+        let instance_id = instance_id.into();
+        let state_store = Arc::new(RwLock::new(None));
+        let query_provider = Arc::new(RwLock::new(None));
+        let subscription_tasks = Arc::new(RwLock::new(HashMap::new()));
+        let metrics = Arc::new(RwLock::new(HashMap::new()));
+        let lifecycle_metrics = Arc::new(LifecycleMetrics::new());
+        let engine = ConsumptionEngine::new(
+            instance_id.clone(),
+            graph.clone(),
+            query_provider.clone(),
+            state_store.clone(),
+            subscription_tasks.clone(),
+            metrics,
+            lifecycle_metrics,
+        );
+
         Self {
-            instance_id: instance_id.into(),
-            state_store: Arc::new(RwLock::new(None)),
+            instance_id,
+            state_store,
             identity_provider: Arc::new(RwLock::new(None)),
             wal_provider: Arc::new(RwLock::new(None)),
             log_registry,
             graph,
             update_tx,
+            query_provider,
+            subscription_tasks,
+            engine,
         }
     }
 
@@ -115,7 +145,7 @@ impl SourceManager {
     ///
     /// This allows sources to access the state store when they are added.
     pub async fn inject_state_store(&self, state_store: Arc<dyn StateStoreProvider>) {
-        *self.state_store.write().await = Some(state_store);
+        self.engine.inject_state_store(state_store).await;
     }
 
     /// Inject the identity provider (called after DrasiLib is fully constructed)
@@ -131,6 +161,85 @@ impl SourceManager {
     /// for crash recovery and replay.
     pub async fn inject_wal_provider(&self, wal_provider: Arc<dyn WalProvider>) {
         *self.wal_provider.write().await = Some(wal_provider);
+    }
+
+    /// Inject the query provider (called after DrasiLib is fully constructed).
+    ///
+    /// This lets query-consuming sources (those returning a non-empty
+    /// [`Source::subscribed_query_ids`](crate::sources::Source::subscribed_query_ids))
+    /// subscribe to continuous-query results, mirroring the reaction model.
+    pub async fn inject_query_provider(&self, query_provider: Arc<dyn QueryProvider>) {
+        *self.query_provider.write().await = Some(query_provider);
+    }
+
+    /// Wire query subscriptions for every source that declares them.
+    ///
+    /// Called by the lifecycle after all queries have started, so query-consuming
+    /// sources begin receiving results. Best-effort: individual failures are
+    /// logged and do not abort the batch.
+    pub async fn wire_all_query_subscriptions(&self) {
+        let source_ids: Vec<String> = {
+            let graph = self.graph.read().await;
+            graph
+                .list_by_kind(&ComponentKind::Source)
+                .into_iter()
+                .map(|(id, _status)| id)
+                .collect()
+        };
+
+        for id in source_ids {
+            if let Err(e) = self.wire_query_subscriptions(&id).await {
+                warn!("Failed to wire query subscriptions for source '{id}': {e}");
+            }
+        }
+    }
+
+    /// Subscribe the given source to its declared queries and spawn forwarders
+    /// that pump each query's results into `source.enqueue_query_result()`.
+    ///
+    /// Idempotent: if the source already has active forwarders, this is a no-op.
+    pub async fn wire_query_subscriptions(&self, id: &str) -> Result<()> {
+        let source = match self.get_source_instance(id).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        let query_ids = source.subscribed_query_ids();
+        if query_ids.is_empty() {
+            return Ok(());
+        }
+
+        // Idempotency: skip if forwarders are already running for this source.
+        {
+            let tasks = self.subscription_tasks.read().await;
+            if tasks.get(id).map(|v| !v.is_empty()).unwrap_or(false) {
+                return Ok(());
+            }
+        }
+
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+        let consumer = Arc::new(SourceConsumer(source.clone())) as Arc<dyn QueryConsumer>;
+        if let Err(e) = self
+            .engine
+            .subscribe_and_bootstrap(id, consumer, gate_rx)
+            .await
+        {
+            self.engine.abort_subscription_tasks(id).await;
+            return Err(e);
+        }
+
+        let _ = gate_tx.send(true);
+
+        info!(
+            "Wired {} query subscription(s) for source '{id}'",
+            query_ids.len()
+        );
+        Ok(())
+    }
+
+    /// Abort and drop any query-result forwarder tasks for the given source.
+    async fn abort_query_subscriptions(&self, id: &str) {
+        self.engine.abort_subscription_tasks(id).await;
     }
 
     pub async fn get_source_instance(&self, id: &str) -> Option<Arc<dyn Source>> {
@@ -193,7 +302,20 @@ impl SourceManager {
                 })?;
 
         crate::managers::lifecycle_helpers::start_component(&self.graph, &id, "source", &source)
-            .await
+            .await?;
+
+        // Wire query subscriptions for query-consuming sources. At runtime the
+        // subscribed queries are expected to already be running; during batch
+        // startup the lifecycle calls `wire_all_query_subscriptions()` after all
+        // queries have started instead (this is a no-op then, since queries may
+        // not be up yet and wiring is idempotent).
+        if !source.subscribed_query_ids().is_empty() {
+            if let Err(e) = self.wire_query_subscriptions(&id).await {
+                warn!("Failed to wire query subscriptions for source '{id}': {e}");
+            }
+        }
+
+        Ok(())
     }
 
     /// Stop a running source by ID, transitioning it to the Stopped state.
@@ -207,6 +329,9 @@ impl SourceManager {
                 .ok_or_else(|| {
                     anyhow::Error::new(crate::managers::ComponentNotFoundError::new("source", &id))
                 })?;
+
+        // Abort any query-result forwarders before stopping the source itself.
+        self.abort_query_subscriptions(&id).await;
 
         crate::managers::lifecycle_helpers::stop_component(&self.graph, &id, "source", &source)
             .await
@@ -281,6 +406,7 @@ impl SourceManager {
     ///
     /// The caller should validate dependencies via `graph.can_remove()` before calling this.
     pub async fn teardown_source(&self, id: String, cleanup: bool) -> Result<()> {
+        let id_clone = id.clone();
         crate::managers::lifecycle_helpers::teardown_component::<Arc<dyn Source>, _, _>(
             &self.graph,
             &id,
@@ -289,7 +415,7 @@ impl SourceManager {
             &self.instance_id,
             &self.log_registry,
             cleanup,
-            || async {},
+            || self.abort_query_subscriptions(&id_clone),
         )
         .await
     }
@@ -327,7 +453,7 @@ impl SourceManager {
                 &id,
                 "source",
                 &old_source,
-                || async {},
+                || self.abort_query_subscriptions(&id),
                 || async {
                     let new_source: Arc<dyn Source> = Arc::new(new_source);
                     let mut context = SourceRuntimeContext::new(
