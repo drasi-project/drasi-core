@@ -29,8 +29,9 @@ use std::sync::Arc;
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime};
 use ordered_float::OrderedFloat;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Default)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub enum ElementValue {
     #[default]
     Null,
@@ -226,7 +227,7 @@ impl TryInto<ElementPropertyMap> for &VariableValue {
     }
 }
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ElementPropertyMap {
     values: BTreeMap<Arc<str>, ElementValue>,
 }

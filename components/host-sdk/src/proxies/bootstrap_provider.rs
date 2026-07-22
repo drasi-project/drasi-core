@@ -25,6 +25,7 @@ use drasi_lib::bootstrap::{
 use drasi_lib::channels::events::{BootstrapEvent, BootstrapEventSender};
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_plugin_sdk::descriptor::BootstrapPluginDescriptor;
+use drasi_plugin_sdk::ffi::payload::consume_bootstrap_event;
 use drasi_plugin_sdk::ffi::{
     BootstrapPluginVtable, BootstrapProviderVtable, FfiBootstrapEvent, FfiBootstrapSender, FfiStr,
 };
@@ -188,10 +189,17 @@ fn build_ffi_bootstrap_sender(event_tx: BootstrapEventSender) -> FfiBootstrapSen
                 return -1;
             }
             let ffi_event = unsafe { &*event };
-            let bootstrap_event =
-                unsafe { *Box::from_raw(ffi_event.opaque as *mut BootstrapEvent) };
-            // Free the FFI envelope but not the opaque (we took ownership)
+            // Decode the serialized payload into a host-owned BootstrapEvent and
+            // free the plugin's buffer via its own deallocator (issue #602: never
+            // reinterpret/drop the plugin's repr(Rust) memory). The canonical
+            // consumer also bounds the size and null-guards the drop fn.
+            let decoded = unsafe { consume_bootstrap_event(ffi_event) };
+            // Free the FFI envelope itself (#[repr(C)] POD).
             unsafe { drop(Box::from_raw(event)) };
+            let Some(bootstrap_event) = decoded else {
+                // Undecodable payload: skip this event, keep the stream alive.
+                return 0;
+            };
             match tx.send(bootstrap_event) {
                 Ok(()) => 0,
                 Err(_) => -1,

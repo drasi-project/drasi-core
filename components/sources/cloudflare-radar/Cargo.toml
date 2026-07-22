@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-cloudflare-radar"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Cloudflare Radar source plugin for Drasi"
@@ -40,7 +40,7 @@ log = "0.4"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
 chrono = { version = "0.4", features = ["serde"] }
 url = "2"
 

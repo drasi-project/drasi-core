@@ -323,7 +323,7 @@ async fn run_poll_loop(
 
 fn should_run_full_sweep(state: &PollState, full_sweep_interval: u32) -> bool {
     (state.events_by_id.is_empty() && state.last_poll_time.is_none())
-        || state.poll_count % full_sweep_interval == 0
+        || state.poll_count.is_multiple_of(full_sweep_interval)
 }
 
 async fn dispatch_change(
@@ -744,7 +744,7 @@ mod tests {
 
     #[test]
     fn latest_event_timestamp_uses_most_recent_event_time() {
-        let events = vec![
+        let events = [
             Open511Event {
                 id: "event-1".to_string(),
                 status: "ACTIVE".to_string(),

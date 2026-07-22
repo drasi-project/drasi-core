@@ -381,14 +381,21 @@ impl ReplicationStream {
             }
             WalMessage::Commit(tx_info) => {
                 // Commit the transaction — stamp all changes with the commit LSN
-                // for atomic checkpoint semantics
+                // (the atomic ordering key) plus a distinct in-transaction offset
+                // so the per-subscriber high-water-mark filter does not collapse
+                // multiple changes that share the same commit LSN (issue #599).
                 if let Some(changes) = self.pending_transaction.take() {
-                    for (change, _) in changes {
-                        self.dispatch_change(change, tx_info.commit_lsn).await;
+                    let change_count = changes.len();
+                    for (offset, (change, _)) in changes.into_iter().enumerate() {
+                        let position = super::connection::commit_position_bytes(
+                            tx_info.commit_lsn,
+                            offset as u64,
+                        );
+                        self.dispatch_change(change, position).await;
                     }
                     debug!(
-                        "Committed transaction {} with LSN {:x}",
-                        tx_info.xid, tx_info.commit_lsn
+                        "Committed transaction {} with LSN {:x} ({} change(s))",
+                        tx_info.xid, tx_info.commit_lsn, change_count
                     );
                 }
             }
@@ -413,7 +420,10 @@ impl ReplicationStream {
                     if let Some(tx) = &mut self.pending_transaction {
                         tx.push((change, self.read_lsn));
                     } else {
-                        self.dispatch_change(change, self.read_lsn).await;
+                        // Defensive: pgoutput always wraps changes in Begin/Commit,
+                        // but keep the encoding uniform (16-byte position) if not.
+                        let position = super::connection::commit_position_bytes(self.read_lsn, 0);
+                        self.dispatch_change(change, position).await;
                     }
                 }
             }
@@ -429,7 +439,8 @@ impl ReplicationStream {
                     if let Some(tx) = &mut self.pending_transaction {
                         tx.push((change, self.read_lsn));
                     } else {
-                        self.dispatch_change(change, self.read_lsn).await;
+                        let position = super::connection::commit_position_bytes(self.read_lsn, 0);
+                        self.dispatch_change(change, position).await;
                     }
                 }
             }
@@ -441,7 +452,8 @@ impl ReplicationStream {
                     if let Some(tx) = &mut self.pending_transaction {
                         tx.push((change, self.read_lsn));
                     } else {
-                        self.dispatch_change(change, self.read_lsn).await;
+                        let position = super::connection::commit_position_bytes(self.read_lsn, 0);
+                        self.dispatch_change(change, position).await;
                     }
                 }
             }
@@ -653,20 +665,22 @@ impl ReplicationStream {
             // by all subscribers.  Using read_lsn here would advance the
             // slot watermark past un-checkpointed query positions, causing
             // PositionUnavailable on crash+restart.
+            //
+            // Positions are 16 bytes (`[ commit_lsn | offset ]`); only the
+            // leading commit_lsn drives WAL feedback. The in-transaction offset
+            // is irrelevant to the slot watermark.
             let confirmed_lsn = match self.base.compute_confirmed_source_position().await {
-                Some(bytes) if bytes.len() == 8 => {
-                    let arr: [u8; 8] = bytes[..8].try_into().expect("length already checked");
-                    u64::from_be_bytes(arr)
-                }
-                Some(bytes) => {
-                    warn!(
-                        "[{}] Confirmed source position has unexpected length {} (expected 8); \
-                             not advancing flush_lsn",
-                        self.source_id,
-                        bytes.len()
-                    );
-                    0
-                }
+                Some(bytes) => match super::connection::position_bytes_to_lsn(&bytes) {
+                    Ok(lsn) => lsn,
+                    Err(e) => {
+                        warn!(
+                            "[{}] Confirmed source position could not be decoded ({}); \
+                                 not advancing flush_lsn",
+                            self.source_id, e
+                        );
+                        0
+                    }
+                },
                 None => 0, // No confirmed position yet — don't advance
             };
 
@@ -715,9 +729,13 @@ impl ReplicationStream {
 
     /// Dispatch a single change event through the framework's `dispatch_event()`.
     ///
-    /// Sets `source_position` to the 8-byte big-endian WAL LSN so the checkpoint
-    /// framework can persist the position for recovery/replay.
-    async fn dispatch_change(&self, change: SourceChange, lsn: u64) {
+    /// The `position` parameter is the opaque 16-byte source-position
+    /// (`[ commit_lsn | in-transaction offset ]`) the checkpoint framework
+    /// persists for recovery/replay and the per-subscriber high-water-mark
+    /// filter uses for dedup. Each change in a transaction shares the same
+    /// `commit_lsn` but carries a distinct offset so none are suppressed
+    /// (issue #599).
+    async fn dispatch_change(&self, change: SourceChange, position: bytes::Bytes) {
         let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
         profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
@@ -728,8 +746,8 @@ impl ReplicationStream {
             profiling,
         );
 
-        // Attach the WAL LSN as opaque source_position bytes for checkpoint/recovery
-        wrapper.set_source_position(super::connection::lsn_to_position_bytes(lsn));
+        // Attach the opaque source_position bytes for checkpoint/recovery and replay dedup
+        wrapper.set_source_position(position);
 
         // Use dispatch_event() which stamps the monotonic sequence
         if let Err(e) = self.base.dispatch_event(wrapper).await {

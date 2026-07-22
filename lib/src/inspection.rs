@@ -618,7 +618,7 @@ impl InspectionAPI {
         all_events.extend(self.reaction_manager.get_all_events().await);
 
         // Sort by timestamp
-        all_events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        all_events.sort_by_key(|a| a.timestamp);
 
         Ok(stream::iter(all_events))
     }

@@ -94,19 +94,14 @@ impl KafkaSourceConfig {
 }
 
 /// Auto offset reset behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AutoOffsetReset {
     /// Start from the beginning of the topic
+    #[default]
     Earliest,
     /// Start from the end of the topic (only new messages)
     Latest,
-}
-
-impl Default for AutoOffsetReset {
-    fn default() -> Self {
-        Self::Earliest
-    }
 }
 
 /// Builder for constructing a KafkaSource.

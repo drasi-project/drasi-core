@@ -29,25 +29,39 @@ If a trait method is added/changed in `drasi-lib`, you need to update **both sid
 2. **Host-side** — The corresponding proxy file in this directory (implement the new
    trait method by dispatching through the vtable)
 
-### Opaque pointer reconstruction
+### Rich event payloads cross as serialized bytes (issue #602)
 
-Several proxies reconstruct Rust types from opaque `*mut c_void` pointers:
+`SourceEventWrapper`, `BootstrapEvent`, and `QueryResult` are `repr(Rust)` types
+that embed `bytes::Bytes` / `Arc<str>`. They cross the boundary **by value as
+serialized MessagePack bytes**, NOT as reinterpreted opaque pointers:
 
-- `change_receiver.rs:57` — `Box::from_raw(opaque as *mut SourceEventWrapper)`
-- `change_receiver.rs:198` — `Box::from_raw(opaque as *mut BootstrapEvent)`
-- `bootstrap_provider.rs:142` — `Box::from_raw(opaque as *mut BootstrapEvent)`
+- `change_receiver.rs` — `decode_source_event` / `decode_bootstrap_event`
+  deserialize the host's own value from `FfiSourceEvent.payload_ptr` /
+  `FfiBootstrapEvent.payload_ptr`, then free the plugin's buffer via the
+  plugin-supplied `payload_drop_fn`.
+- `reaction.rs` — `QueryResult` is serialized (`encode_query_result`) into an
+  `FfiQueryResult` buffer; the plugin deserializes its own copy.
+- Reconstruction helpers live in `drasi_plugin_sdk::ffi::payload`
+  (`decode_source_event_payload`, `decode_bootstrap_event_payload`,
+  `decode_query_result`).
 
-`ReactionProxy` transfers ownership **to** the plugin via opaque pointers:
+> **Never** `Box::from_raw` / `Box::into_raw` / `std::ptr::read` / `&*ptr`-read a
+> `repr(Rust)` payload type across the cdylib boundary. `repr(Rust)` has no stable
+> cross-compilation layout, and `bytes::Bytes` carries a `&'static` vtable valid
+> only in the producing module — doing so caused #602's heap corruption
+> (`free(): invalid pointer`). The `#[repr(C)]` **envelope** structs
+> (`FfiSourceEvent`, `FfiBootstrapEvent`, `FfiQueryResult`) themselves are POD and
+> may be freed across the boundary with `Box::from_raw`.
 
-- `reaction.rs` — `Box::into_raw(Box::new(query_result)) as *mut c_void` passed to
-  `enqueue_query_result_fn`. The plugin takes ownership via `Box::from_raw`.
+**Safety**: The SDK version check (`loader.rs`) validates only the `#[repr(C)]`
+envelope/vtable ABI — it does **not** and cannot guarantee `repr(Rust)` payload
+layout agreement. That is why payloads must be serialized.
 
-**Safety**: These casts are only valid if the plugin and host agree on the type's memory
-layout. This is enforced by SDK version validation in `loader.rs`.
-
-If you change the definition of `SourceEventWrapper`, `BootstrapEvent`, or any other
-opaque-pointer type (in `drasi-core/core/src/models/` or `drasi-core/lib/src/channels/`),
-you **must** bump `FFI_SDK_VERSION` in `components/plugin-sdk/src/ffi/metadata.rs`.
+If you change the definition of `SourceEventWrapper`, `BootstrapEvent`,
+`QueryResult`, or the payload structs (in `drasi-core/core/src/models/`,
+`drasi-core/lib/src/channels/`, or `plugin-sdk/src/ffi/payload.rs`), keep their
+`serde` derives intact and bump `FFI_SDK_VERSION` in
+`components/plugin-sdk/src/ffi/metadata.rs`.
 
 ### `Arc<Library>` lifetime management
 

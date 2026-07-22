@@ -38,10 +38,18 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest-8-cores
             arch_suffix: linux-amd64
+            # Pin the glibc floor for the -gnu build via cargo-zigbuild so the
+            # published artifacts load on older distros (RHEL/UBI 8, Debian 10+,
+            # Ubuntu 18.04+, Amazon Linux 2/2023). Without this the floor is
+            # "whatever the runner ships" (currently glibc 2.39 on ubuntu-24.04),
+            # which pulls in pidfd_* weak symbols and breaks common distros.
+            zigbuild: true
+            glibc: '2.28'
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest-8-cores
+            os: ubuntu-24.04-arm
             arch_suffix: linux-arm64
-            cross: true
+            zigbuild: true
+            glibc: '2.28'
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest-8-cores
             arch_suffix: linux-musl-amd64
@@ -74,18 +82,24 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq libjq-dev protobuf-compiler
+          # The Kafka plugins bundle a minimal static librdkafka. On every Linux
+          # target the build now forces WITH_CURL/SSL=0 (cross targets via their
+          # Docker toolchain fragment; the zigbuild -gnu targets via
+          # CMAKE_TOOLCHAIN_FILE=ci/cmake/librdkafka-features.cmake set in the
+          # build step), so no host curl/openssl is needed.
+          sudo apt-get install -y jq libjq-dev protobuf-compiler cmake
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install jq protobuf
+          brew install jq protobuf cmake
 
       - name: Install system dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install protoc -y
+          choco install cmake -y --installargs 'ADD_CMAKE_TO_PATH=System'
           vcpkg install openssl:x64-windows-static-md
           echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
           echo "OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md" >> $env:GITHUB_ENV
@@ -93,7 +107,9 @@ jobs:
 
       - name: Set JQ_LIB_DIR (Linux)
         if: runner.os == 'Linux'
-        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+        # $(uname -m) is x86_64 on amd64 runners and aarch64 on arm64 runners,
+        # which matches the Debian multiarch lib path on both.
+        run: echo "JQ_LIB_DIR=/usr/lib/$(uname -m)-linux-gnu" >> $GITHUB_ENV
 
       - name: Set JQ_LIB_DIR (macOS)
         if: runner.os == 'macOS'
@@ -109,6 +125,16 @@ jobs:
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross --tag v0.2.4
 
+      - name: Install zig and cargo-zigbuild (for glibc-pinned -gnu builds)
+        if: matrix.zigbuild
+        # cargo-zigbuild lets us pin an explicit glibc floor for the whole link
+        # (e.g. x86_64-unknown-linux-gnu.2.28), which neutralizes the pidfd_*
+        # GLIBC_2.39 weak-symbol bump and yields portable binaries. See
+        # https://github.com/rust-cross/cargo-zigbuild
+        run: |
+          pip install ziglang==0.13.0
+          cargo install cargo-zigbuild --version 0.19.8 --locked
+
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
@@ -118,7 +144,71 @@ jobs:
         run: echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Build plugins
-        run: cargo run -p xtask -- build-plugins --release --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          # For -gnu targets, append the glibc-version suffix so cargo-zigbuild
+          # pins the floor (e.g. x86_64-unknown-linux-gnu.2.28). xtask strips the
+          # suffix again for artifact paths and OCI metadata.
+          BUILD_TARGET="${{ matrix.target }}"
+          if [ -n "${{ matrix.zigbuild }}" ] && [ -n "${{ matrix.glibc }}" ]; then
+            BUILD_TARGET="${{ matrix.target }}.${{ matrix.glibc }}"
+
+            # Constrain the bundled librdkafka build to a minimal static feature
+            # set (no host curl/openssl) — the same fragment the cross targets
+            # use. Without this, zig cc would detect the host curl/openssl and
+            # enable WITH_OAUTHBEARER_OIDC, which both fails to find headers and
+            # would reintroduce glibc-versioned libcurl/libssl symbols, defeating
+            # the pinned floor. The env var is keyed by the *base* triple (the
+            # one Cargo/rdkafka-sys sees) with '-' replaced by '_'.
+            TOOLCHAIN_ENV="CMAKE_TOOLCHAIN_FILE_$(echo '${{ matrix.target }}' | tr '-' '_')"
+            echo "${TOOLCHAIN_ENV}=${PWD}/ci/cmake/librdkafka-features.cmake" >> "$GITHUB_ENV"
+            export "${TOOLCHAIN_ENV}=${PWD}/ci/cmake/librdkafka-features.cmake"
+          fi
+          cargo run -p xtask -- build-plugins --release --target "$BUILD_TARGET"
+
+      - name: Verify glibc floor (-gnu plugins)
+        if: matrix.zigbuild
+        shell: bash
+        # Guard against glibc-floor regressions: assert every built -gnu plugin's
+        # highest required GLIBC symbol is <= the agreed floor. Fails the release
+        # otherwise so a stray high-glibc dependency can't ship silently.
+        # See drasi-project/drasi-core#601.
+        env:
+          GLIBC_FLOOR: ${{ matrix.glibc }}
+        run: |
+          set -euo pipefail
+          command -v objdump >/dev/null 2>&1 || { echo "::error::objdump not found (install binutils)"; exit 1; }
+          PLUGINS_DIR="target/${{ matrix.target }}/release/plugins"
+          if [ ! -d "$PLUGINS_DIR" ]; then
+            echo "::error::Plugins directory not found: $PLUGINS_DIR"
+            exit 1
+          fi
+
+          # Highest glibc symbol we tolerate, as a sortable version.
+          FLOOR="GLIBC_${GLIBC_FLOOR}"
+          FAILED=0
+          shopt -s nullglob
+          for so in "$PLUGINS_DIR"/*.so; do
+            MAX=$(objdump -T "$so" 2>/dev/null \
+              | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' \
+              | sort -V | tail -1 || true)
+            if [ -z "$MAX" ]; then
+              echo "OK   $(basename "$so"): no GLIBC version symbols"
+              continue
+            fi
+            HIGHEST=$(printf '%s\n%s\n' "$FLOOR" "$MAX" | sort -V | tail -1)
+            if [ "$HIGHEST" != "$FLOOR" ]; then
+              echo "::error::$(basename "$so") requires $MAX (> floor $FLOOR)"
+              FAILED=1
+            else
+              echo "OK   $(basename "$so"): max $MAX (<= $FLOOR)"
+            fi
+          done
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::One or more -gnu plugins exceed the glibc floor $FLOOR."
+            exit 1
+          fi
 
       - name: Publish plugins (per-architecture tag)
         if: ${{ !inputs.dry_run }}
@@ -167,23 +257,46 @@ jobs:
 
       - name: Set packages to public
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The default GITHUB_TOKEN cannot administer org-level container
+          # package visibility (those endpoints return 404). A PAT (classic)
+          # with write:packages, or a GitHub App token with org packages:write,
+          # is required. Configure a PACKAGES_ADMIN_TOKEN secret; we fall back
+          # to GITHUB_TOKEN only so the step doesn't fail to start.
+          GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          REGISTRY="${{ inputs.registry }}"
-          ORG="${REGISTRY#*/}"
+          set -euo pipefail
+          ORG="drasi-project"
+
+          FAILED=0
+
+          set_public() {
+            local pkg="$1"
+            local encoded
+            encoded=$(printf '%s' "$pkg" | sed 's|/|%2F|g')
+            echo "Setting ${ORG}/${pkg} to public..."
+            if ! gh api --method PATCH \
+              "/orgs/${ORG}/packages/container/${encoded}" \
+              -f visibility=public; then
+              echo "::error::Failed to set ${ORG}/${pkg} to public"
+              FAILED=1
+            fi
+          }
+
           # Set plugin directory to public
-          echo "Setting ${ORG}/drasi-plugin-directory to public..."
-          gh api --method PATCH \
-            "/orgs/${ORG}/packages/container/drasi-plugin-directory" \
-            -f visibility=public \
-            2>/dev/null || echo "  (skipped — may already be public or insufficient permissions)"
-          # Set each plugin package to public
-          PLUGINS=$(cargo run -p xtask -- list-plugins 2>/dev/null | grep '^\s' | awk '{print $1}')
+          set_public "drasi-plugin-directory"
+
+          # Set each plugin package to public. list-plugins prints plugin lines
+          # as "  <type>/<kind> v<version> (<path>)"; match only those so the
+          # indented "SDK: ..." summary line is excluded.
+          PLUGINS=$(cargo run -p xtask -- list-plugins \
+            | { grep -E '^[[:space:]]+[a-z-]+/[^[:space:]]+ v[0-9]' || true; } \
+            | awk '{print $1}')
           for PLUGIN in $PLUGINS; do
-            ENCODED=$(echo "$PLUGIN" | sed 's|/|%2F|g')
-            echo "Setting ${ORG}/${PLUGIN} to public..."
-            gh api --method PATCH \
-              "/orgs/${ORG}/packages/container/${ENCODED}" \
-              -f visibility=public \
-              2>/dev/null || echo "  (skipped — may already be public or insufficient permissions)"
+            set_public "$PLUGIN"
           done
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::One or more packages could not be set to public."
+            echo "If these are 404/permission errors, ensure PACKAGES_ADMIN_TOKEN is set to a token that can administer org packages."
+            exit 1
+          fi

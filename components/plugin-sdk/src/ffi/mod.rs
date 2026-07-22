@@ -33,6 +33,7 @@ pub mod callbacks;
 pub mod identity;
 pub mod identity_proxy;
 pub mod metadata;
+pub mod payload;
 pub mod secret_store;
 pub mod snapshot_fetcher_proxy;
 pub mod state_store_proxy;
@@ -50,6 +51,7 @@ pub use callbacks::{
 pub use metadata::{
     PluginMetadata, BUILD_TIMESTAMP, FFI_SDK_VERSION, GIT_COMMIT_SHA, TARGET_TRIPLE,
 };
+pub use payload::{BootstrapEventPayload, SourceEventPayload};
 pub use types::{
     catch_panic_ffi, now_us, AsyncExecutorFn, FfiChangeOp, FfiComponentStatus, FfiCreateResult,
     FfiDispatchMode, FfiGetResult, FfiOwnedStr, FfiResult, FfiStr, FfiStringArray, SendMutPtr,
@@ -70,10 +72,10 @@ pub use vtables::{
     FfiBootstrapResultCallbackFn, FfiBootstrapResultReceiver, FfiBootstrapSender,
     FfiBootstrapWriteCheckpointFn, FfiChangePushCallbackFn, FfiChangeReceiver, FfiCheckpoint,
     FfiCheckpointResult, FfiOutboxIterator, FfiOutboxIteratorResponse, FfiPluginRegistration,
-    FfiResultPushCallbackFn, FfiRuntimeContext, FfiSnapshotIterator, FfiSnapshotIteratorResponse,
-    FfiSourceEvent, FfiSubscriptionResponse, IdentityProviderPluginVtable, ReactionPluginVtable,
-    ReactionVtable, SecretStorePluginVtable, SnapshotFetcherVtable, SourcePluginVtable,
-    SourceVtable, StateStoreVtable, WalProviderVtable,
+    FfiQueryResult, FfiResultPushCallbackFn, FfiRuntimeContext, FfiSnapshotIterator,
+    FfiSnapshotIteratorResponse, FfiSourceEvent, FfiSubscriptionResponse,
+    IdentityProviderPluginVtable, ReactionPluginVtable, ReactionVtable, SecretStorePluginVtable,
+    SnapshotFetcherVtable, SourcePluginVtable, SourceVtable, StateStoreVtable, WalProviderVtable,
 };
 
 pub use bootstrap_proxy::FfiBootstrapProviderProxy;

@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-bootstrap-platform"
-version = "0.2.9"
+version = "0.2.10"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Platform bootstrap plugin for Drasi"
@@ -37,7 +37,7 @@ utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
-reqwest = { version = "0.11", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

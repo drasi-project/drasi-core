@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-storedproc-mysql"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "MySQL Stored Procedure reaction plugin for Drasi"
@@ -34,7 +34,7 @@ tokio = { version = "1.0", features = ["full"] }
 async-trait = "0.1"
 
 # MySQL
-mysql_async = { version = "0.36", default-features = false, features = ["default"] }
+mysql_async = { version = "0.37", default-features = false, features = ["default"] }
 
 # Utilities
 serde = { version = "1.0", features = ["derive"] }

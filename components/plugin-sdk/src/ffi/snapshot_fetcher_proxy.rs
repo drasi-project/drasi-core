@@ -88,7 +88,7 @@ impl drasi_lib::SnapshotFetcher for FfiSnapshotFetcherProxy {
         let stream = make_snapshot_stream(resp.iterator);
 
         Ok(
-            drasi_lib::queries::output_state::SnapshotStream::from_stream(
+            drasi_lib::queries::output_state::SnapshotStream::from_keyed_stream(
                 stream,
                 as_of_sequence,
                 config_hash,

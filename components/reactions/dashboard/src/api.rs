@@ -15,7 +15,7 @@
 //! REST API handlers for dashboard CRUD and query metadata.
 
 use crate::storage::{DashboardConfig, DashboardStorage, DashboardWidget, GridOptions};
-use crate::websocket::{QuerySnapshot, QuerySnapshotStore};
+use crate::websocket::{QuerySnapshot, QuerySnapshotStore, SnapshotRow};
 use anyhow::anyhow;
 use axum::{
     body::{to_bytes, Body},
@@ -279,8 +279,15 @@ async fn get_query_snapshot(
     // Fall back to the internal snapshot fetcher if configured and local snapshot is empty.
     if let Some(ref fetcher) = state.snapshot_fetcher {
         if let Ok(stream) = fetcher.fetch_snapshot(&query_id).await {
-            let rows = stream.collect_vec().await;
-            if !rows.is_empty() {
+            let keyed = stream.collect_keyed_vec().await;
+            if !keyed.is_empty() {
+                let rows = keyed
+                    .into_iter()
+                    .map(|(row_signature, data)| SnapshotRow {
+                        row_signature,
+                        data,
+                    })
+                    .collect();
                 return Ok(Json(QuerySnapshot {
                     rows,
                     aggregation: None,

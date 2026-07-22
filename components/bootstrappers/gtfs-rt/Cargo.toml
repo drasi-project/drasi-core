@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-bootstrap-gtfs-rt"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "GTFS-Realtime bootstrap plugin for Drasi"
@@ -38,7 +38,7 @@ drasi-source-gtfs-rt = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
-reqwest = { version = "0.11", features = ["rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 gtfs-realtime = "0.2"
 prost = "0.14"
 serde = { version = "1.0", features = ["derive"] }

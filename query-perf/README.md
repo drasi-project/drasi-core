@@ -11,7 +11,7 @@ Before running these scenarios, ensure the following requirements are met.
 
 ## Rust Toolchain
 
-- This project uses Rust 1.88.0 (pinned in `rust-toolchain.toml`). If you have [rustup](https://rustup.rs/) installed, the correct version will be selected automatically.
+- This project uses Rust 1.95.0 (pinned in `rust-toolchain.toml`). If you have [rustup](https://rustup.rs/) installed, the correct version will be selected automatically.
 - Verify with:
 - Verify with:
   ```bash

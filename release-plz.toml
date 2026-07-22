@@ -12,6 +12,15 @@ git_release_type = "prod"
 
 # Publishing settings
 publish = true
+# Skip the isolated `cargo publish` verification build. That build re-resolves
+# the crate's full dependency graph (including dev-dependencies) from crates.io.
+# release-plz orders publishing by [dependencies]/[build-dependencies] only and
+# ignores [dev-dependencies] (they may form cycles), so a crate can be published
+# before an internal crate it only dev-depends on has landed on crates.io,
+# causing the verify build to fail with "no matching version". The whole
+# workspace is already built and tested in CI on every PR, so this verify step
+# is redundant. Matches `cargo publish --no-verify` used in publish-crate.yml.
+publish_no_verify = true
 
 # PR settings
 pr_labels = ["release"]

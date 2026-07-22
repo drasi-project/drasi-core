@@ -60,20 +60,15 @@ pub struct AzureKeyVaultConfigDto {
     pub client_secret: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AzureAuthMethod {
+    #[default]
     ManagedIdentity,
     ManagedIdentityUserAssigned,
     WorkloadIdentity,
     DeveloperTools,
     ClientSecret,
-}
-
-impl Default for AzureAuthMethod {
-    fn default() -> Self {
-        Self::ManagedIdentity
-    }
 }
 
 #[derive(utoipa::OpenApi)]

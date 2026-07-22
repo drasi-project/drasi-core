@@ -709,9 +709,11 @@ impl DrasiLibBuilder {
                 metadata.insert(key, serde_json::to_string(&value).unwrap_or_default());
             }
             let mut graph = core.component_graph.write().await;
-            if let Err(e) =
-                graph.register_bootstrap_provider(&bp_id, metadata, &[source_id.clone()])
-            {
+            if let Err(e) = graph.register_bootstrap_provider(
+                &bp_id,
+                metadata,
+                std::slice::from_ref(&source_id),
+            ) {
                 log::warn!(
                     "Failed to register bootstrap provider metadata for source '{source_id}': {e}"
                 );
