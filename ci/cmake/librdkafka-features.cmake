@@ -54,6 +54,31 @@ foreach(_zig_triple x86_64_unknown_linux_gnu aarch64_unknown_linux_gnu)
   endif()
 endforeach()
 
+# Work around an upstream librdkafka bug so the -gnu zigbuild compiles.
+#
+# `src/rdkafka_conf.c` includes the curl header unconditionally:
+#   #ifdef WITH_OAUTHBEARER_OIDC
+#   #include <curl/curl.h>
+#   #endif
+# but the generated `config.h` defines `WITH_OAUTHBEARER_OIDC` via
+# `#cmakedefine01`, which ALWAYS emits `#define WITH_OAUTHBEARER_OIDC 0` (or 1).
+# `#ifdef` on an always-defined macro is always true, so `<curl/curl.h>` is
+# included even though we build with `WITH_CURL=OFF` / OIDC disabled. A native
+# gcc build finds the host header (libcurl-dev is preinstalled on the runners),
+# but the `cargo-zigbuild` zig sysroot ships no curl headers, so the build fails
+# with "curl/curl.h: file not found".
+#
+# Put a self-contained empty stub `<curl/curl.h>` (ci/cmake/rdkafka-stubs) on the
+# include path so the stray include resolves. `WITH_OAUTHBEARER_OIDC` is 0, so no
+# curl symbols are referenced or linked and the pinned glibc floor is unaffected.
+# Append (not overwrite) so the flags cmake-rs already set (e.g. the zig
+# `--target`) are preserved; re-includes just add a harmless duplicate `-I`.
+set(_rdk_curl_stub_dir "${CMAKE_CURRENT_LIST_DIR}/rdkafka-stubs")
+foreach(_rdk_lang C CXX)
+  set(CMAKE_${_rdk_lang}_FLAGS "${CMAKE_${_rdk_lang}_FLAGS} -I${_rdk_curl_stub_dir}"
+      CACHE STRING "" FORCE)
+endforeach()
+
 # Keep zlib (matches rdkafka-sys `-DWITH_ZLIB=1`) and the bundled lz4.
 set(WITH_ZLIB ON CACHE BOOL "" FORCE)
 
