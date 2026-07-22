@@ -442,7 +442,7 @@ async fn standard_delete_template_receives_before() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn standard_continues_after_server_error_response() {
+async fn standard_continues_after_server_error_under_auto_skip_gap() {
     let server = mock_server::start().await;
     Mock::given(method("POST"))
         .and(path("/changes/q1"))
@@ -450,10 +450,14 @@ async fn standard_continues_after_server_error_response() {
         .mount(&server)
         .await;
 
+    // Under AutoSkipGap, a sustained 5xx failure is skipped and the loop keeps
+    // running (favoring uptime). Under the default Strict policy the reaction
+    // would fail-stop instead — see `standard_fail_stops_on_server_error_under_strict`.
     let r = Arc::new(
         HttpReaction::builder("standard-5xx")
             .with_base_url(server.uri())
             .with_query("q1")
+            .with_recovery_policy(drasi_lib::recovery::ReactionRecoveryPolicy::AutoSkipGap)
             .build()
             .unwrap(),
     );
@@ -463,7 +467,7 @@ async fn standard_continues_after_server_error_response() {
     enqueue_add(&r, "q1", json!({"id": 1})).await;
     wait_for_requests(&server, 1, 2000).await;
 
-    // A second result must still be delivered (the loop did not exit).
+    // A second result must still be attempted (the loop did not exit).
     enqueue_add(&r, "q1", json!({"id": 2})).await;
     wait_for_requests(&server, 4, 3000).await;
     r.stop().await.unwrap();
@@ -479,6 +483,45 @@ async fn standard_continues_after_server_error_response() {
         "reaction should process the second event after a 5xx response, got {} requests",
         reqs.len()
     );
+}
+
+#[tokio::test]
+async fn standard_fail_stops_on_server_error_under_strict() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    // Default (Strict) policy: a sustained 5xx delivery failure must drive the
+    // reaction to Error without advancing the checkpoint, so it replays from the
+    // outbox on restart.
+    let r = Arc::new(
+        HttpReaction::builder("standard-5xx-strict")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+
+    // The reaction should transition to Error within the retry window.
+    let mut errored = false;
+    for _ in 0..50 {
+        if matches!(r.status().await, ComponentStatus::Error) {
+            errored = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        errored,
+        "reaction must fail-stop (Error) on sustained 5xx delivery failure under Strict"
+    );
+    r.stop().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,6 +1316,91 @@ async fn standard_drops_permanent_4xx_and_continues() {
         "permanent 4xx must be attempted exactly once each (no retries)"
     );
     assert!(matches!(r.status().await, ComponentStatus::Running));
+    r.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn standard_auth_rejection_fail_stops_and_does_not_drop_event() {
+    // An expired/invalid credential surfaces as 401. Unlike a genuinely
+    // permanent 4xx, an auth failure must NOT silently drop the event (it can be
+    // fixed by refreshing the credential and replaying). Under the default
+    // Strict policy the reaction fail-stops so the un-acked event survives.
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("auth-401")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+
+    let mut errored = false;
+    for _ in 0..50 {
+        if matches!(r.status().await, ComponentStatus::Error) {
+            errored = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        errored,
+        "a 401 auth rejection must fail-stop (Error) under Strict, not drop the event"
+    );
+    r.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn adaptive_auth_rejection_fail_stops_and_does_not_drop_event() {
+    // Adaptive (batched) delivery goes through `send_coalesced_batch`, a
+    // different call path from the standard loop's `process_result`. A 401 on the
+    // batch endpoint must still surface as a sustained failure (not a poison
+    // drop), so under the default Strict policy the reaction fail-stops.
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/batch"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("adaptive-auth-401")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_adaptive(AdaptiveBatchConfig {
+                adaptive_min_batch_size: 1,
+                adaptive_max_batch_size: 16,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 50,
+            })
+            .with_batch_endpoint("/batch")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+
+    let mut errored = false;
+    for _ in 0..50 {
+        if matches!(r.status().await, ComponentStatus::Error) {
+            errored = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        errored,
+        "a 401 on the batch endpoint must fail-stop (Error) under Strict, not drop the batch"
+    );
     r.stop().await.unwrap();
 }
 

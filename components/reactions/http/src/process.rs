@@ -14,7 +14,7 @@
 
 //! Per-result HTTP delivery used by both standard and adaptive runtime loops.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use handlebars::Handlebars;
 use log::{debug, error, warn};
 use reqwest::{
@@ -31,6 +31,43 @@ use crate::output::{DefaultChangeNotification, Operation};
 
 const MAX_DELIVERY_ATTEMPTS: usize = 3;
 const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Maximum length of a downstream-supplied string (response body, rendered URL)
+/// allowed into a log line.
+const MAX_LOG_FIELD_LEN: usize = 512;
+
+/// Bound and sanitize a downstream-controlled string before logging it: cap the
+/// length and strip control characters (notably CR/LF) so a hostile or
+/// misconfigured server cannot bloat logs or inject fake log lines.
+fn truncate_for_log(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .take(MAX_LOG_FIELD_LEN)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if s.chars().count() > MAX_LOG_FIELD_LEN {
+        out.push('…');
+    }
+    out
+}
+
+/// Outcome of attempting to deliver a single result to its HTTP target.
+///
+/// `Err` is reserved for **transient/sustained** failures that warrant the
+/// reaction's recovery policy: 5xx and other retryable statuses after the retry
+/// budget is exhausted, connection errors, and **auth/permission rejections**
+/// (401/403/407 — recoverable by refreshing a credential, so the event must
+/// replay rather than be lost). Only genuinely **permanent "poison"** conditions
+/// (most 4xx — 400/404/405/422/…, SSRF-blocked or unresolvable URLs, invalid
+/// method/auth-token config) resolve to `Ok(Dropped)`: they can never succeed on
+/// replay, so the event is dropped and the checkpoint advances past it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeliveryOutcome {
+    /// The downstream accepted the request.
+    Delivered,
+    /// The event was permanently undeliverable and dropped.
+    Dropped,
+}
 
 /// Build a [`Handlebars`] registry pre-loaded with the `json` helper used
 /// across all HTTP templates.
@@ -179,7 +216,7 @@ pub(crate) async fn process_result(
     notification: &DefaultChangeNotification,
     query_name: &str,
     reaction_name: &str,
-) -> Result<()> {
+) -> Result<DeliveryOutcome> {
     let result_type = notification.op_str();
     let context = build_context(notification);
 
@@ -193,11 +230,21 @@ pub(crate) async fn process_result(
             format!("/changes/{query_name}")
         }
     };
-    let full_url = resolve_http_url(base_url, &rendered_spec_url).with_context(|| {
-        format!(
-            "[{reaction_name}] rejecting rendered URL '{rendered_spec_url}' for query '{query_name}'"
-        )
-    })?;
+    // A rejected URL (SSRF guard / unparseable) is a permanent misconfiguration
+    // for this event: drop it rather than fail-stopping and replaying forever.
+    // The rendered URL can carry attacker-controllable, templated content, so it
+    // is sanitized before logging (and the full value is never emitted raw).
+    let full_url = match resolve_http_url(base_url, &rendered_spec_url) {
+        Ok(url) => url,
+        Err(e) => {
+            error!(
+                "[{reaction_name}] Rejecting rendered URL for query '{query_name}' \
+                 ({result_type}): {} — dropping event",
+                truncate_for_log(&format!("{e:#}"))
+            );
+            return Ok(DeliveryOutcome::Dropped);
+        }
+    };
 
     // Render body. Empty template => emit the standard change-notification envelope.
     let body = if !call_spec.template.is_empty() {
@@ -221,13 +268,28 @@ pub(crate) async fn process_result(
     let mut headers = HeaderMap::new();
     headers.insert("Content-Type", HeaderValue::from_static("application/json"));
     if let Some(token) = token {
-        headers.insert(
-            "Authorization",
-            HeaderValue::from_str(&format!("Bearer {token}"))?,
-        );
+        match HeaderValue::from_str(&format!("Bearer {token}")) {
+            Ok(value) => {
+                headers.insert("Authorization", value);
+            }
+            Err(e) => {
+                error!(
+                    "[{reaction_name}] Invalid auth token for query '{query_name}' ({result_type}): {e} — dropping event"
+                );
+                return Ok(DeliveryOutcome::Dropped);
+            }
+        }
     }
     for (key, value) in &call_spec.extension.headers {
-        let header_name = HeaderName::from_bytes(key.as_bytes())?;
+        let header_name = match HeaderName::from_bytes(key.as_bytes()) {
+            Ok(name) => name,
+            Err(e) => {
+                warn!(
+                    "[{reaction_name}] Header '{key}' is not a valid header name for query '{query_name}' ({result_type}): {e} — dropping header"
+                );
+                continue;
+            }
+        };
         let rendered_value = match handlebars.render_template(value, &context) {
             Ok(v) => v,
             Err(e) => {
@@ -249,7 +311,16 @@ pub(crate) async fn process_result(
         headers.insert(header_name, header_value);
     }
 
-    let method = parse_http_method(&call_spec.extension.method)?;
+    let method = match parse_http_method(&call_spec.extension.method) {
+        Ok(method) => method,
+        Err(e) => {
+            error!(
+                "[{reaction_name}] Invalid HTTP method '{}' for query '{query_name}' ({result_type}): {e} — dropping event",
+                call_spec.extension.method
+            );
+            return Ok(DeliveryOutcome::Dropped);
+        }
+    };
 
     debug!("[{reaction_name}] Sending {method} request to {full_url}");
     send_with_retry(
@@ -273,17 +344,24 @@ pub(crate) async fn post_default_notification(
     notification: &DefaultChangeNotification,
     query_name: &str,
     reaction_name: &str,
-) -> Result<()> {
+) -> Result<DeliveryOutcome> {
     let full_url = format!("{base_url}/changes/{query_name}");
     let body = serde_json::to_string(notification)?;
 
     let mut headers = HeaderMap::new();
     headers.insert("Content-Type", HeaderValue::from_static("application/json"));
     if let Some(token) = token {
-        headers.insert(
-            "Authorization",
-            HeaderValue::from_str(&format!("Bearer {token}"))?,
-        );
+        match HeaderValue::from_str(&format!("Bearer {token}")) {
+            Ok(value) => {
+                headers.insert("Authorization", value);
+            }
+            Err(e) => {
+                error!(
+                    "[{reaction_name}] Invalid auth token for query '{query_name}': {e} — dropping event"
+                );
+                return Ok(DeliveryOutcome::Dropped);
+            }
+        }
     }
 
     debug!("[{reaction_name}] Default-notification POST to {full_url}");
@@ -307,7 +385,7 @@ pub(crate) async fn send_with_retry(
     body: String,
     reaction_name: &str,
     description: &str,
-) -> Result<()> {
+) -> Result<DeliveryOutcome> {
     let mut backoff = INITIAL_RETRY_BACKOFF;
 
     for attempt in 1..=MAX_DELIVERY_ATTEMPTS {
@@ -327,36 +405,57 @@ pub(crate) async fn send_with_retry(
                 );
 
                 if status.is_success() {
-                    return Ok(());
+                    return Ok(DeliveryOutcome::Delivered);
                 }
 
-                let error_body = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "Unable to read response body".to_string());
-
-                if is_retryable_status(status) && attempt < MAX_DELIVERY_ATTEMPTS {
-                    warn!(
-                        "[{reaction_name}] Transient {description} failure with status {} on attempt {attempt}: {error_body}; retrying",
-                        status.as_u16()
-                    );
-                    tokio::time::sleep(backoff).await;
-                    backoff = backoff.saturating_mul(2);
-                    continue;
-                }
-
-                if is_retryable_status(status) {
-                    return Err(anyhow!(
-                        "{description} failed after {MAX_DELIVERY_ATTEMPTS} attempts with status {}: {error_body}",
-                        status.as_u16()
-                    ));
-                }
-
-                error!(
-                    "[{reaction_name}] Permanent {description} failure with status {}: {error_body}; dropping event",
-                    status.as_u16()
+                // Truncate and sanitize the downstream body before it ever
+                // reaches a log line: an adversarial or misconfigured server can
+                // return a multi-MB body or embed CRLF to bloat logs / inject
+                // fake log lines.
+                let error_body = truncate_for_log(
+                    &response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Unable to read response body".to_string()),
                 );
-                return Ok(());
+
+                match classify_status(status) {
+                    StatusClass::Retryable if attempt < MAX_DELIVERY_ATTEMPTS => {
+                        warn!(
+                            "[{reaction_name}] Transient {description} failure with status {} on attempt {attempt}: {error_body}; retrying",
+                            status.as_u16()
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = backoff.saturating_mul(2);
+                        continue;
+                    }
+                    StatusClass::Retryable => {
+                        return Err(anyhow!(
+                            "{description} failed after {MAX_DELIVERY_ATTEMPTS} attempts with status {}: {error_body}",
+                            status.as_u16()
+                        ));
+                    }
+                    StatusClass::AuthReject => {
+                        // Auth/permission rejection (401/403/407). Retrying the
+                        // same request in place won't help, but the event must
+                        // NOT be dropped: the credential can be refreshed and the
+                        // event replayed from the outbox. Surface as a sustained
+                        // failure so the reaction's recovery policy applies
+                        // (Strict fail-stops; AutoSkipGap skips).
+                        return Err(anyhow!(
+                            "{description} rejected with status {} ({error_body}); auth/permission \
+                             failure — applying recovery policy rather than dropping the event",
+                            status.as_u16()
+                        ));
+                    }
+                    StatusClass::Permanent => {
+                        error!(
+                            "[{reaction_name}] Permanent {description} failure with status {}: {error_body}; dropping event",
+                            status.as_u16()
+                        );
+                        return Ok(DeliveryOutcome::Dropped);
+                    }
+                }
             }
             Err(e) if attempt < MAX_DELIVERY_ATTEMPTS => {
                 warn!(
@@ -374,6 +473,37 @@ pub(crate) async fn send_with_retry(
     }
 
     unreachable!("retry loop always returns")
+}
+
+/// How a non-2xx HTTP response status should be handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusClass {
+    /// Transient — retry in place, then surface as a sustained failure if the
+    /// retry budget is exhausted (5xx, 408, 409, 425, 429).
+    Retryable,
+    /// Auth/permission rejection (401, 403, 407). Retrying the same request in
+    /// place won't help, but the event must not be dropped — refreshing the
+    /// credential and replaying fixes it. Surfaced as a sustained failure so the
+    /// recovery policy applies.
+    AuthReject,
+    /// Genuinely permanent for this event (other 4xx — 400/404/405/422/…). The
+    /// event is poison: dropped, with the checkpoint advancing past it.
+    Permanent,
+}
+
+fn classify_status(status: StatusCode) -> StatusClass {
+    if is_retryable_status(status) {
+        StatusClass::Retryable
+    } else if matches!(
+        status,
+        StatusCode::UNAUTHORIZED
+            | StatusCode::FORBIDDEN
+            | StatusCode::PROXY_AUTHENTICATION_REQUIRED
+    ) {
+        StatusClass::AuthReject
+    } else {
+        StatusClass::Permanent
+    }
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
@@ -496,5 +626,19 @@ mod tests {
                 "{code} should NOT be retryable"
             );
         }
+    }
+
+    #[test]
+    fn truncate_for_log_caps_length_and_strips_control_chars() {
+        // CRLF and other control characters are replaced with spaces (no log
+        // injection); a normal short string is returned unchanged.
+        assert_eq!(truncate_for_log("ok"), "ok");
+        assert_eq!(truncate_for_log("a\r\nb\tc"), "a  b c");
+
+        // Over-long input is truncated and marked with an ellipsis.
+        let long = "x".repeat(MAX_LOG_FIELD_LEN + 50);
+        let out = truncate_for_log(&long);
+        assert_eq!(out.chars().count(), MAX_LOG_FIELD_LEN + 1); // +1 for '…'
+        assert!(out.ends_with('…'));
     }
 }

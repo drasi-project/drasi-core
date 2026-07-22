@@ -23,6 +23,8 @@ use log::info;
 use drasi_lib::channels::ComponentStatus;
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::reactions::common::CheckpointState;
+use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::Reaction;
 
 pub use super::config::{
@@ -79,10 +81,14 @@ impl GrpcReaction {
         config: GrpcReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
+        recovery_policy: Option<ReactionRecoveryPolicy>,
     ) -> Self {
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
+        }
+        if let Some(policy) = recovery_policy {
+            params = params.with_recovery_policy(policy);
         }
         Self {
             base: ReactionBase::new(params),
@@ -168,6 +174,11 @@ impl Reaction for GrpcReaction {
 
         let shutdown_rx = self.base.create_shutdown_channel().await;
         let reaction_name = self.base.id.clone();
+        let checkpoints = CheckpointState::load(&self.base).await;
+        let policy = self
+            .base
+            .recovery_policy
+            .unwrap_or_else(|| self.default_recovery_policy());
         let base = self.base.clone_shared();
         let config = self.config.clone();
 
@@ -183,6 +194,8 @@ impl Reaction for GrpcReaction {
                     base,
                     config,
                     shutdown_rx,
+                    checkpoints,
+                    policy,
                 };
                 tokio::spawn(async move { runner_fixed::run(params).await })
             }
@@ -193,6 +206,8 @@ impl Reaction for GrpcReaction {
                     base,
                     config,
                     shutdown_rx,
+                    checkpoints,
+                    policy,
                 };
                 tokio::spawn(async move { runner_adaptive::run(params).await })
             }
@@ -222,5 +237,24 @@ impl Reaction for GrpcReaction {
         result: drasi_lib::channels::QueryResult,
     ) -> anyhow::Result<()> {
         self.base.enqueue_query_result(result).await
+    }
+
+    /// The gRPC reaction is a stateless **trigger** reaction:
+    /// it fires per-change side effects and does not require a durable state store.
+    fn is_durable(&self) -> bool {
+        false
+    }
+
+    /// Trigger reactions must not replay historical state on a fresh start — that
+    /// would fire side effects for the entire query history.
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        false
+    }
+
+    /// At-least-once delivery: on a sustained delivery failure the reaction fails
+    /// fast so the un-acked batch replays from the query outbox on restart.
+    /// Operators can override to `AutoSkipGap` for uptime-over-completeness.
+    fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
+        ReactionRecoveryPolicy::Strict
     }
 }

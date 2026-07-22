@@ -50,6 +50,27 @@ fn builder_defaults() {
 }
 
 #[test]
+fn http_recovery_archetype_defaults() {
+    let r = HttpReactionBuilder::new("test").build().unwrap();
+    // HTTP is a stateless at-least-once trigger reaction (archetype 2a).
+    assert!(!r.is_durable());
+    assert!(!r.needs_snapshot_on_fresh_start());
+    assert_eq!(r.default_recovery_policy(), ReactionRecoveryPolicy::Strict);
+}
+
+#[test]
+fn http_builder_recovery_policy_override() {
+    let r = HttpReactionBuilder::new("test")
+        .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap)
+        .build()
+        .unwrap();
+    assert_eq!(
+        r.base.recovery_policy,
+        Some(ReactionRecoveryPolicy::AutoSkipGap)
+    );
+}
+
+#[test]
 fn builder_with_queries_and_token() {
     let r = HttpReaction::builder("r")
         .with_base_url("https://api.example.com") // DevSkim: ignore DS137138
