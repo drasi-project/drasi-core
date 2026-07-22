@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-mysql"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "MySQL source plugin for Drasi"
