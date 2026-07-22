@@ -43,8 +43,19 @@ middleware-unwind = ["drasi-middleware/unwind"]
 # Convenience feature to enable all middleware
 middleware-all = ["drasi-middleware/all"]
 
+# Use bundled-jq so docs.rs doesn't need a system libjq (mirrors drasi-middleware).
+# middleware-all enables drasi-middleware/all which pulls in the non-bundled `jq`
+# feature (dynamic link against system libjq), which is unavailable on docs.rs.
 [package.metadata.docs.rs]
-features = ["middleware-all"]
+features = [
+    "middleware-bundled-jq",
+    "middleware-decoder",
+    "middleware-map",
+    "middleware-parse-json",
+    "middleware-promote",
+    "middleware-relabel",
+    "middleware-unwind",
+]
 
 [lib]
 name = "drasi_lib"
