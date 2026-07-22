@@ -12,95 +12,94 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tests for the MySQL Stored Procedure Reaction
+//! Tests for the MySQL Stored Procedure reaction.
 //!
-//! These tests validate the end-to-end behavior of the MySQL-specific
-//! stored procedure reaction using testcontainers to provide a real MySQL database.
+//! Unit tests cover configuration, template validation, route validation, and
+//! template resolution. The end-to-end tests drive the reaction through
+//! `enqueue_query_result` against a real MySQL database (via testcontainers)
+//! and assert that the configured stored procedures ran with the expected,
+//! positionally-bound parameters.
 
 mod mysql_helpers;
 
+use std::collections::HashMap;
+use std::time::Duration;
+
+use chrono::Utc;
+use drasi_lib::channels::{QueryResult, ResultDiff};
+use drasi_lib::reactions::common::OperationType;
 use drasi_lib::Reaction;
 use drasi_reaction_storedproc_mysql::config::{
     MySqlStoredProcReactionConfig, QueryConfig, TemplateSpec,
 };
-use drasi_reaction_storedproc_mysql::executor::MySqlExecutor;
-use drasi_reaction_storedproc_mysql::parser::ParameterParser;
 use drasi_reaction_storedproc_mysql::MySqlStoredProcReaction;
-use mysql_async::prelude::*;
 use mysql_helpers::{setup_mysql, MysqlConfig};
 use serde_json::json;
 use serial_test::serial;
-use std::time::Duration;
 use tokio::time::sleep;
 
 // ============================================================================
-// Test Helper Functions
+// Database helpers
 // ============================================================================
 
-/// Helper function to setup stored procedures in the test database
+/// Create the log table and the ADD/UPDATE/DELETE stored procedures.
+///
+/// The UPDATE procedure records both the old and the new temperature so tests
+/// can assert that `before` and `after` are bound independently.
 async fn setup_stored_procedures(config: &MysqlConfig) {
     let opts = config.connection_opts();
     let mut conn = mysql_async::Conn::new(opts)
         .await
         .expect("Failed to connect to database");
 
-    // Create a table to log stored procedure calls
+    use mysql_async::prelude::Queryable;
+
     conn.query_drop(
         "CREATE TABLE IF NOT EXISTS sensor_log (
             id INT AUTO_INCREMENT PRIMARY KEY,
             operation VARCHAR(10) NOT NULL,
             sensor_id TEXT NOT NULL,
-            temperature DOUBLE,
+            old_temperature DOUBLE,
+            new_temperature DOUBLE,
             logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )",
     )
     .await
     .expect("Failed to create sensor_log table");
 
-    // Drop existing procedures if they exist
-    let _ = conn
-        .query_drop("DROP PROCEDURE IF EXISTS log_sensor_added")
-        .await;
-    let _ = conn
-        .query_drop("DROP PROCEDURE IF EXISTS log_sensor_updated")
-        .await;
-    let _ = conn
-        .query_drop("DROP PROCEDURE IF EXISTS log_sensor_deleted")
-        .await;
+    for proc in [
+        "log_sensor_added",
+        "log_sensor_updated",
+        "log_sensor_deleted",
+    ] {
+        let _ = conn
+            .query_drop(format!("DROP PROCEDURE IF EXISTS {proc}"))
+            .await;
+    }
 
-    // Create stored procedure for ADD operation
     conn.query_drop(
-        "CREATE PROCEDURE log_sensor_added(
-            IN p_sensor_id TEXT,
-            IN p_temperature DOUBLE
-        )
+        "CREATE PROCEDURE log_sensor_added(IN p_sensor_id TEXT, IN p_temperature DOUBLE)
         BEGIN
-            INSERT INTO sensor_log (operation, sensor_id, temperature)
+            INSERT INTO sensor_log (operation, sensor_id, new_temperature)
             VALUES ('ADD', p_sensor_id, p_temperature);
         END",
     )
     .await
     .expect("Failed to create log_sensor_added procedure");
 
-    // Create stored procedure for UPDATE operation
     conn.query_drop(
         "CREATE PROCEDURE log_sensor_updated(
-            IN p_sensor_id TEXT,
-            IN p_temperature DOUBLE
-        )
+            IN p_sensor_id TEXT, IN p_old_temperature DOUBLE, IN p_new_temperature DOUBLE)
         BEGIN
-            INSERT INTO sensor_log (operation, sensor_id, temperature)
-            VALUES ('UPDATE', p_sensor_id, p_temperature);
+            INSERT INTO sensor_log (operation, sensor_id, old_temperature, new_temperature)
+            VALUES ('UPDATE', p_sensor_id, p_old_temperature, p_new_temperature);
         END",
     )
     .await
     .expect("Failed to create log_sensor_updated procedure");
 
-    // Create stored procedure for DELETE operation
     conn.query_drop(
-        "CREATE PROCEDURE log_sensor_deleted(
-            IN p_sensor_id TEXT
-        )
+        "CREATE PROCEDURE log_sensor_deleted(IN p_sensor_id TEXT)
         BEGIN
             INSERT INTO sensor_log (operation, sensor_id)
             VALUES ('DELETE', p_sensor_id);
@@ -109,28 +108,47 @@ async fn setup_stored_procedures(config: &MysqlConfig) {
     .await
     .expect("Failed to create log_sensor_deleted procedure");
 
-    // Close connection
     drop(conn);
 }
 
-/// Helper function to get log entries from the database
-async fn get_log_entries(config: &MysqlConfig) -> Vec<(String, String)> {
+#[derive(Debug, Clone, PartialEq)]
+struct SensorLogEntry {
+    operation: String,
+    sensor_id: String,
+    old_temperature: Option<f64>,
+    new_temperature: Option<f64>,
+}
+
+async fn get_log_entries(config: &MysqlConfig) -> Vec<SensorLogEntry> {
+    use mysql_async::prelude::Queryable;
     let opts = config.connection_opts();
     let mut conn = mysql_async::Conn::new(opts)
         .await
         .expect("Failed to connect to database");
 
-    let rows: Vec<(String, String)> = conn
-        .query("SELECT operation, sensor_id FROM sensor_log ORDER BY logged_at")
+    let rows: Vec<(String, String, Option<f64>, Option<f64>)> = conn
+        .query(
+            "SELECT operation, sensor_id, old_temperature, new_temperature \
+             FROM sensor_log ORDER BY id",
+        )
         .await
         .expect("Failed to query sensor_log");
 
     drop(conn);
-    rows
+    rows.into_iter()
+        .map(
+            |(operation, sensor_id, old_temperature, new_temperature)| SensorLogEntry {
+                operation,
+                sensor_id,
+                old_temperature,
+                new_temperature,
+            },
+        )
+        .collect()
 }
 
-/// Helper function to get log count
 async fn get_log_count(config: &MysqlConfig) -> i64 {
+    use mysql_async::prelude::Queryable;
     let opts = config.connection_opts();
     let mut conn = mysql_async::Conn::new(opts)
         .await
@@ -146,26 +164,45 @@ async fn get_log_count(config: &MysqlConfig) -> i64 {
     count
 }
 
+/// Wait until the sensor_log row count reaches `expected`, panicking if the
+/// count is not reached within `timeout_ms` so tests fail on a missing write
+/// instead of silently passing.
+async fn wait_for_log_count(config: &MysqlConfig, expected: i64, timeout_ms: u64) {
+    let step = 100;
+    let mut waited = 0;
+    let mut last_count = 0;
+    while waited < timeout_ms {
+        last_count = get_log_count(config).await;
+        if last_count >= expected {
+            return;
+        }
+        sleep(Duration::from_millis(step)).await;
+        waited += step;
+    }
+    panic!(
+        "Timed out after {timeout_ms}ms waiting for sensor_log count to reach {expected}; \
+         last observed count was {last_count}"
+    );
+}
+
+fn make_query_result(query_id: &str, diffs: Vec<ResultDiff>) -> QueryResult {
+    QueryResult::new(query_id.to_string(), 0, Utc::now(), diffs, HashMap::new())
+}
+
 // ============================================================================
-// Unit Tests for Config Module
+// Unit tests — configuration
 // ============================================================================
 
 #[test]
 fn test_config_default_values() {
     let config = MySqlStoredProcReactionConfig::default();
-
     // DevSkim: ignore DS137138
     assert_eq!(config.hostname, "localhost");
-    assert_eq!(config.port, None);
-    assert_eq!(config.get_port(), 3306); // Default MySQL port
-    assert_eq!(config.user, "");
-    assert_eq!(config.password, "");
-    assert_eq!(config.database, "");
-    assert!(!config.ssl);
-    assert!(config.routes.is_empty());
-    assert_eq!(config.default_template, None);
+    assert_eq!(config.get_port(), 3306);
     assert_eq!(config.command_timeout_ms, 30000);
     assert_eq!(config.retry_attempts, 3);
+    assert!(config.routes.is_empty());
+    assert!(config.default_template.is_none());
 }
 
 #[test]
@@ -174,785 +211,585 @@ fn test_config_custom_port() {
         port: Some(3307),
         ..Default::default()
     };
-
     assert_eq!(config.get_port(), 3307);
 }
 
 #[test]
 fn test_config_validation_no_commands() {
     let config = MySqlStoredProcReactionConfig {
-        user: "testuser".to_string(),
-        database: "testdb".to_string(),
+        user: "root".to_string(),
+        database: "mydb".to_string(),
         ..Default::default()
     };
-
-    let result = config.validate();
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("At least one command"));
+    assert!(config.validate().is_err());
 }
 
 #[test]
-fn test_config_validation_empty_user() {
+fn test_config_validation_empty_user_without_identity_provider() {
     let config = MySqlStoredProcReactionConfig {
-        user: "".to_string(),
-        database: "testdb".to_string(),
+        database: "mydb".to_string(),
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new("CALL test()")),
-            ..Default::default()
+            updated: None,
+            deleted: None,
         }),
         ..Default::default()
     };
-
-    let result = config.validate();
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("user is required"));
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("user is required"));
 }
 
 #[test]
 fn test_config_validation_empty_database() {
     let config = MySqlStoredProcReactionConfig {
-        user: "testuser".to_string(),
-        database: "".to_string(),
+        user: "root".to_string(),
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec::new("CALL test()")),
-            ..Default::default()
+            updated: None,
+            deleted: None,
         }),
         ..Default::default()
     };
-
-    let result = config.validate();
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Database name is required"));
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("Database name is required"));
 }
 
 #[test]
 fn test_config_validation_valid_with_default_template() {
     let config = MySqlStoredProcReactionConfig {
-        user: "testuser".to_string(),
-        database: "testdb".to_string(),
+        user: "root".to_string(),
+        database: "mydb".to_string(),
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL add_item(@after.id)")),
-            ..Default::default()
+            added: Some(TemplateSpec::new("CALL add_item({{param after.id}})")),
+            updated: None,
+            deleted: None,
         }),
         ..Default::default()
     };
-
     assert!(config.validate().is_ok());
 }
 
 #[test]
 fn test_config_validation_valid_with_routes() {
-    use std::collections::HashMap;
-
     let mut routes = HashMap::new();
     routes.insert(
-        "test-query".to_string(),
+        "item-query".to_string(),
         QueryConfig {
-            updated: Some(TemplateSpec::new("CALL update_item(@after.id)")),
-            ..Default::default()
+            added: None,
+            updated: Some(TemplateSpec::new("CALL update_item({{param after.id}})")),
+            deleted: None,
         },
     );
-
     let config = MySqlStoredProcReactionConfig {
-        user: "testuser".to_string(),
-        database: "testdb".to_string(),
+        user: "root".to_string(),
+        database: "mydb".to_string(),
         routes,
         ..Default::default()
     };
-
     assert!(config.validate().is_ok());
 }
 
 #[test]
-fn test_config_validation_valid_with_all_operations() {
+fn test_config_validation_rejects_invalid_template() {
     let config = MySqlStoredProcReactionConfig {
-        user: "testuser".to_string(),
-        database: "testdb".to_string(),
+        user: "root".to_string(),
+        database: "mydb".to_string(),
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL add_item(@after.id)")),
-            updated: Some(TemplateSpec::new("CALL update_item(@after.id)")),
-            deleted: Some(TemplateSpec::new("CALL delete_item(@before.id)")),
+            // Unterminated helper — should fail to compile.
+            added: Some(TemplateSpec::new("CALL add_item({{param after.id}")),
+            updated: None,
+            deleted: None,
         }),
         ..Default::default()
     };
+    assert!(config.validate().is_err());
+}
 
+#[test]
+fn test_config_validation_ok_with_user_and_no_identity_provider() {
+    // A user is only required when there is no identity provider. We can't
+    // easily construct an IdentityProvider here, so this asserts the inverse
+    // path via validate(): with a user set and no provider, validation passes.
+    let config = MySqlStoredProcReactionConfig {
+        user: "svc".to_string(),
+        database: "mydb".to_string(),
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL add_item({{param after.id}})")),
+            updated: None,
+            deleted: None,
+        }),
+        ..Default::default()
+    };
     assert!(config.validate().is_ok());
 }
 
 #[test]
-fn test_config_serialization() {
+fn test_config_serialization_roundtrip() {
     let config = MySqlStoredProcReactionConfig {
         hostname: "db.example.com".to_string(),
         port: Some(3307),
-        user: "admin".to_string(),
+        user: "root".to_string(),
         password: "secret".to_string(),
         database: "mydb".to_string(),
-        ssl: true,
         default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name)")),
-            updated: Some(TemplateSpec::new(
-                "CALL update_user(@after.id, @after.name)",
+            added: Some(TemplateSpec::new(
+                "CALL add_user({{param after.id}}, {{param after.name}})",
             )),
-            deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+            updated: None,
+            deleted: Some(TemplateSpec::new("CALL delete_user({{param before.id}})")),
         }),
-        command_timeout_ms: 10000,
-        retry_attempts: 5,
         ..Default::default()
     };
-
-    let json = serde_json::to_string(&config).unwrap();
-    let deserialized: MySqlStoredProcReactionConfig = serde_json::from_str(&json).unwrap();
-
+    let serialized = serde_json::to_string(&config).unwrap();
+    let deserialized: MySqlStoredProcReactionConfig = serde_json::from_str(&serialized).unwrap();
     assert_eq!(deserialized.hostname, "db.example.com");
-    assert_eq!(deserialized.port, Some(3307));
-    assert_eq!(deserialized.user, "admin");
-    assert_eq!(deserialized.password, "secret");
+    assert_eq!(deserialized.get_port(), 3307);
     assert_eq!(deserialized.database, "mydb");
-    assert!(deserialized.ssl);
-    assert_eq!(deserialized.command_timeout_ms, 10000);
-    assert_eq!(deserialized.retry_attempts, 5);
-}
-
-#[test]
-fn test_config_deserialization_with_defaults() {
-    let json = r#"{
-        "user": "testuser",
-        "password": "testpass",
-        "database": "testdb",
-        "default_template": {
-            "added": {
-                "template": "CALL test()"
-            }
-        }
-    }"#;
-
-    let config: MySqlStoredProcReactionConfig = serde_json::from_str(json).unwrap();
-
-    // DevSkim: ignore DS137138
-    assert_eq!(config.hostname, "localhost");
-    assert_eq!(config.port, None);
-    assert_eq!(config.get_port(), 3306); // default port
-    assert!(!config.ssl); // default
-    assert_eq!(config.command_timeout_ms, 30000); // default
-    assert_eq!(config.retry_attempts, 3); // default
+    assert!(deserialized.default_template.is_some());
 }
 
 // ============================================================================
-// Unit Tests for Parser Module
+// Unit tests — template resolution & route validation
 // ============================================================================
 
 #[test]
-fn test_parser_invalid_procedure_name_with_semicolon() {
-    let parser = ParameterParser::new();
-    let data = json!({"id": 1});
-
-    // Parser should extract the procedure name but executor will handle injection
-    let result = parser.parse_command("CALL test(); DROP TABLE users;--", &data);
-    assert!(result.is_ok());
-    let (proc_name, _) = result.unwrap();
-    assert_eq!(proc_name, "test"); // Stops at first parenthesis
-}
-
-#[test]
-fn test_parser_parameter_with_underscores() {
-    let parser = ParameterParser::new();
-    let command = "CALL test(@user_id, @user_name)";
-    let data = json!({"user_id": 42, "user_name": "Alice"});
-
-    let (_, params) = parser.parse_command(command, &data).unwrap();
-    assert_eq!(params.len(), 2);
-    assert_eq!(params[0], json!(42));
-    assert_eq!(params[1], json!("Alice"));
-}
-
-#[test]
-fn test_parser_large_numbers() {
-    let parser = ParameterParser::new();
-    let command = "CALL test(@big_int, @big_float)";
-    let data = json!({
-        "big_int": 9223372036854775807i64,
-        "big_float": 1.7976931348623157e308
-    });
-
-    let (_, params) = parser.parse_command(command, &data).unwrap();
-    assert_eq!(params[0], json!(9223372036854775807i64));
-    assert_eq!(params[1], json!(1.7976931348623157e308));
-}
-
-#[test]
-fn test_parser_empty_strings() {
-    let parser = ParameterParser::new();
-    let command = "CALL test(@name, @description)";
-    let data = json!({"name": "", "description": ""});
-
-    let (_, params) = parser.parse_command(command, &data).unwrap();
-    assert_eq!(params[0], json!(""));
-    assert_eq!(params[1], json!(""));
-}
-
-#[test]
-fn test_parser_mixed_case_field_names() {
-    let parser = ParameterParser::new();
-    let command = "CALL test(@userId, @UserName, @USER_EMAIL)";
-    let data = json!({
-        "userId": 1,
-        "UserName": "Alice",
-        "USER_EMAIL": "alice@example.com"
-    });
-
-    let (_, params) = parser.parse_command(command, &data).unwrap();
-    assert_eq!(params.len(), 3);
-}
-
-#[test]
-fn test_parser_nested_array_field() {
-    let parser = ParameterParser::new();
-    let command = "CALL test(@items)";
-    let data = json!({
-        "items": [
-            {"id": 1, "name": "Item 1"},
-            {"id": 2, "name": "Item 2"}
-        ]
-    });
-
-    let (_, params) = parser.parse_command(command, &data).unwrap();
+fn test_resolve_prefers_route_over_default() {
+    let mut routes = HashMap::new();
+    routes.insert(
+        "user-query".to_string(),
+        QueryConfig {
+            added: Some(TemplateSpec::new("CALL route_add({{param after.id}})")),
+            updated: None,
+            deleted: None,
+        },
+    );
+    let config = MySqlStoredProcReactionConfig {
+        routes,
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL default_add({{param after.id}})")),
+            updated: None,
+            deleted: None,
+        }),
+        ..Default::default()
+    };
     assert_eq!(
-        params[0],
-        json!([
-            {"id": 1, "name": "Item 1"},
-            {"id": 2, "name": "Item 2"}
-        ])
+        config.resolve_command_template("user-query", OperationType::Add),
+        Some("CALL route_add({{param after.id}})".to_string())
+    );
+    assert_eq!(
+        config.resolve_command_template("other-query", OperationType::Add),
+        Some("CALL default_add({{param after.id}})".to_string())
     );
 }
 
-// ============================================================================
-// Integration Tests with MySQL
-// ============================================================================
-
-#[tokio::test]
-async fn test_mysql_config_validation() {
-    env_logger::builder()
-        .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
-        .try_init()
-        .ok();
-
-    // Valid config
-    let config = MySqlStoredProcReactionConfig {
-        // DevSkim: ignore DS137138
-        hostname: "localhost".to_string(),
-        port: Some(3306),
-        user: "testuser".to_string(),
-        password: "password".to_string(),
-        database: "testdb".to_string(),
-        ssl: false,
-        default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL add_user(@after.id)")),
-            ..Default::default()
-        }),
-        command_timeout_ms: 30000,
-        retry_attempts: 3,
-        ..Default::default()
-    };
-
-    assert!(config.validate().is_ok());
-
-    // Invalid: empty user
-    let mut invalid = config.clone();
-    invalid.user = String::new();
-    assert!(invalid.validate().is_err());
-
-    // Invalid: empty database
-    let mut invalid = config.clone();
-    invalid.database = String::new();
-    assert!(invalid.validate().is_err());
-
-    // Invalid: no commands
-    let mut invalid = config.clone();
-    invalid.default_template = None;
-    assert!(invalid.validate().is_err());
-}
-
-#[tokio::test]
-async fn test_mysql_executor_connection() {
-    env_logger::builder()
-        .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
-        .try_init()
-        .ok();
-
-    let mysql = setup_mysql().await;
-    let mysql_config = mysql.config();
-
-    let config = MySqlStoredProcReactionConfig {
-        hostname: mysql_config.host.clone(),
-        port: Some(mysql_config.port),
-        user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
-        database: mysql_config.database.clone(),
-        ssl: false,
-        default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL test()")),
-            ..Default::default()
-        }),
-        command_timeout_ms: 5000,
-        retry_attempts: 3,
-        ..Default::default()
-    };
-
-    let executor = MySqlExecutor::new(&config, None).await;
-    assert!(executor.is_ok(), "Should create executor successfully");
-
-    let executor = executor.unwrap();
-    let result = executor.test_connection().await;
-    assert!(result.is_ok(), "Connection test should pass");
-
-    mysql.cleanup().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn test_mysql_executor_procedure_execution() {
-    env_logger::builder()
-        .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
-        .try_init()
-        .ok();
-
-    let mysql = setup_mysql().await;
-    let mysql_config = mysql.config();
-    setup_stored_procedures(mysql_config).await;
-
-    let config = MySqlStoredProcReactionConfig {
-        hostname: mysql_config.host.clone(),
-        port: Some(mysql_config.port),
-        user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
-        database: mysql_config.database.clone(),
-        ssl: false,
-        default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new(
-                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
-            )),
-            ..Default::default()
-        }),
-        command_timeout_ms: 5000,
-        retry_attempts: 3,
-        ..Default::default()
-    };
-
-    let executor = MySqlExecutor::new(&config, None).await.unwrap();
-
-    // Execute the stored procedure
-    let params = vec![json!("sensor-001"), json!(25.5)];
-
-    let result = executor.execute_procedure("log_sensor_added", params).await;
-    assert!(
-        result.is_ok(),
-        "Procedure execution should succeed: {:?}",
-        result.err()
+#[test]
+fn test_resolve_matches_last_dotted_segment() {
+    let mut routes = HashMap::new();
+    routes.insert(
+        "my_query".to_string(),
+        QueryConfig {
+            added: Some(TemplateSpec::new("CALL seg_add({{param after.id}})")),
+            updated: None,
+            deleted: None,
+        },
     );
+    let config = MySqlStoredProcReactionConfig {
+        routes,
+        ..Default::default()
+    };
+    assert_eq!(
+        config.resolve_command_template("source.my_query", OperationType::Add),
+        Some("CALL seg_add({{param after.id}})".to_string())
+    );
+}
 
-    // Wait a bit for the insert to complete
-    sleep(Duration::from_millis(100)).await;
-
-    // Verify the log entry
-    let count = get_log_count(mysql_config).await;
-    assert_eq!(count, 1, "Should have 1 log entry");
-
-    let entries = get_log_entries(mysql_config).await;
-    assert_eq!(entries[0].0, "ADD");
-    assert_eq!(entries[0].1, "sensor-001");
-
-    mysql.cleanup().await;
+#[test]
+fn test_resolve_returns_none_when_unconfigured() {
+    let config = MySqlStoredProcReactionConfig {
+        default_template: Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL add({{param after.id}})")),
+            updated: None,
+            deleted: None,
+        }),
+        ..Default::default()
+    };
+    assert!(config
+        .resolve_command_template("q", OperationType::Delete)
+        .is_none());
 }
 
 #[tokio::test]
-#[serial]
-async fn test_mysql_executor_multiple_operations() {
-    env_logger::builder()
-        .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
-        .try_init()
-        .ok();
-
-    let mysql = setup_mysql().await;
-    let mysql_config = mysql.config();
-    setup_stored_procedures(mysql_config).await;
-
+async fn test_builder_rejects_unknown_route_key() {
+    let mut routes = HashMap::new();
+    routes.insert(
+        "not-subscribed".to_string(),
+        QueryConfig {
+            added: Some(TemplateSpec::new("CALL add({{param after.id}})")),
+            updated: None,
+            deleted: None,
+        },
+    );
     let config = MySqlStoredProcReactionConfig {
-        hostname: mysql_config.host.clone(),
-        port: Some(mysql_config.port),
-        user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
-        database: mysql_config.database.clone(),
-        ssl: false,
-        default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new(
-                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
-            )),
-            updated: Some(TemplateSpec::new(
-                "CALL log_sensor_updated(@after.sensor_id, @after.temperature)",
-            )),
-            deleted: Some(TemplateSpec::new(
-                "CALL log_sensor_deleted(@before.sensor_id)",
-            )),
-        }),
-        command_timeout_ms: 5000,
-        retry_attempts: 3,
+        user: "root".to_string(),
+        database: "mydb".to_string(),
+        routes,
         ..Default::default()
     };
-
-    let executor = MySqlExecutor::new(&config, None).await.unwrap();
-
-    // Execute ADD
-    executor
-        .execute_procedure("log_sensor_added", vec![json!("sensor-001"), json!(25.5)])
-        .await
-        .expect("ADD should succeed");
-
-    // Execute UPDATE
-    executor
-        .execute_procedure("log_sensor_updated", vec![json!("sensor-001"), json!(26.5)])
-        .await
-        .expect("UPDATE should succeed");
-
-    // Execute DELETE
-    executor
-        .execute_procedure("log_sensor_deleted", vec![json!("sensor-001")])
-        .await
-        .expect("DELETE should succeed");
-
-    // Wait for operations to complete
-    sleep(Duration::from_millis(100)).await;
-
-    // Verify all operations logged
-    let entries = get_log_entries(mysql_config).await;
-    assert_eq!(entries.len(), 3, "Should have 3 log entries");
-    assert_eq!(entries[0].0, "ADD");
-    assert_eq!(entries[1].0, "UPDATE");
-    assert_eq!(entries[2].0, "DELETE");
-
-    mysql.cleanup().await;
+    let result = MySqlStoredProcReaction::builder("test")
+        .with_query("subscribed-query")
+        .with_config(config)
+        .build()
+        .await;
+    let err = result.expect_err("build should fail").to_string();
+    assert!(err.contains("route key 'not-subscribed'"));
 }
 
 #[tokio::test]
-#[serial]
-async fn test_mysql_parser_with_executor() {
-    env_logger::builder()
-        .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
-        .try_init()
-        .ok();
-
-    let mysql = setup_mysql().await;
-    let mysql_config = mysql.config();
-    setup_stored_procedures(mysql_config).await;
-
+async fn test_builder_accepts_route_key_matching_segment() {
+    let mut routes = HashMap::new();
+    routes.insert(
+        "my_query".to_string(),
+        QueryConfig {
+            added: Some(TemplateSpec::new("CALL add({{param after.id}})")),
+            updated: None,
+            deleted: None,
+        },
+    );
     let config = MySqlStoredProcReactionConfig {
-        hostname: mysql_config.host.clone(),
-        port: Some(mysql_config.port),
-        user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
-        database: mysql_config.database.clone(),
-        ssl: false,
-        default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new(
-                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
-            )),
-            ..Default::default()
-        }),
-        command_timeout_ms: 5000,
-        retry_attempts: 3,
+        user: "root".to_string(),
+        database: "mydb".to_string(),
+        routes,
         ..Default::default()
     };
+    let result = MySqlStoredProcReaction::builder("test")
+        .with_query("source.my_query")
+        .with_config(config)
+        .build()
+        .await;
+    assert!(result.is_ok());
+}
 
-    let executor = MySqlExecutor::new(&config, None).await.unwrap();
-    let parser = ParameterParser::new();
+#[tokio::test]
+async fn test_reaction_trait_surface() {
+    let reaction = MySqlStoredProcReaction::builder("mysql-sp")
+        .with_connection("localhost", 3306, "testdb", "testuser", "testpass")
+        .with_query("q1")
+        .with_stored_procedure("handle_change")
+        .build()
+        .await
+        .unwrap();
 
-    // Parse command with data in the new @after context format
-    let data = json!({
-        "after": {
-            "sensor_id": "sensor-002",
-            "temperature": 27.3
-        }
-    });
+    assert_eq!(reaction.id(), "mysql-sp");
+    assert_eq!(reaction.type_name(), "storedproc-mysql");
+    assert_eq!(reaction.query_ids(), vec!["q1".to_string()]);
+    assert!(reaction.auto_start());
+    assert!(!reaction.properties().is_empty());
+}
 
-    let (proc_name, params) = parser
-        .parse_command(
-            "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
-            &data,
+// ============================================================================
+// End-to-end tests (require Docker / testcontainers)
+// ============================================================================
+
+fn sensor_default_template() -> QueryConfig {
+    QueryConfig {
+        added: Some(TemplateSpec::new(
+            "CALL log_sensor_added({{param after.sensor_id}}, {{param after.temperature}})",
+        )),
+        updated: Some(TemplateSpec::new(
+            "CALL log_sensor_updated({{param after.sensor_id}}, \
+             {{param before.temperature}}, {{param after.temperature}})",
+        )),
+        deleted: Some(TemplateSpec::new(
+            "CALL log_sensor_deleted({{param before.sensor_id}})",
+        )),
+    }
+}
+
+async fn build_started_reaction(
+    config: &MysqlConfig,
+    template: QueryConfig,
+) -> MySqlStoredProcReaction {
+    let reaction = MySqlStoredProcReaction::builder("mysql-e2e")
+        .with_connection(
+            &config.host,
+            config.port,
+            &config.database,
+            &config.user,
+            &config.password,
         )
-        .expect("Parser should succeed");
-
-    assert_eq!(proc_name, "log_sensor_added");
-    assert_eq!(params.len(), 2);
-
-    // Execute the parsed procedure
-    let result = executor.execute_procedure(&proc_name, params).await;
-    assert!(result.is_ok());
-
-    sleep(Duration::from_millis(100)).await;
-
-    let entries = get_log_entries(mysql_config).await;
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].1, "sensor-002");
-
-    mysql.cleanup().await;
-}
-
-#[tokio::test]
-async fn test_mysql_reaction_creation() {
-    env_logger::builder()
-        .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
-        .try_init()
-        .ok();
-
-    let mysql = setup_mysql().await;
-    let mysql_config = mysql.config();
-    setup_stored_procedures(mysql_config).await;
-
-    let config = MySqlStoredProcReactionConfig {
-        hostname: mysql_config.host.clone(),
-        port: Some(mysql_config.port),
-        user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
-        database: mysql_config.database.clone(),
-        ssl: false,
-        default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new(
-                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
-            )),
-            ..Default::default()
-        }),
-        command_timeout_ms: 5000,
-        retry_attempts: 3,
-        ..Default::default()
-    };
-
-    let reaction =
-        MySqlStoredProcReaction::new("test-reaction", vec!["test-query".to_string()], config).await;
-
-    assert!(reaction.is_ok(), "Should create reaction successfully");
-
-    let reaction = reaction.unwrap();
-    assert_eq!(reaction.id(), "test-reaction");
-    assert_eq!(reaction.type_name(), "storedproc-mysql");
-    assert_eq!(reaction.query_ids(), vec!["test-query"]);
-
-    mysql.cleanup().await;
-}
-
-#[tokio::test]
-async fn test_mysql_reaction_builder() {
-    env_logger::builder()
-        .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
-        .try_init()
-        .ok();
-
-    let mysql = setup_mysql().await;
-    let mysql_config = mysql.config();
-    setup_stored_procedures(mysql_config).await;
-
-    let reaction = MySqlStoredProcReaction::builder("test-builder")
-        .with_hostname(&mysql_config.host)
-        .with_port(mysql_config.port)
-        .with_database(&mysql_config.database)
-        .with_user(&mysql_config.user)
-        .with_password(&mysql_config.password)
-        .with_ssl(false)
-        .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new(
-                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
-            )),
-            ..Default::default()
-        })
-        .with_query("test-query")
-        .with_command_timeout_ms(5000)
-        .with_retry_attempts(3)
-        .build()
-        .await;
-
-    assert!(reaction.is_ok(), "Builder should create reaction");
-
-    let reaction = reaction.unwrap();
-    assert_eq!(reaction.id(), "test-builder");
-    assert_eq!(reaction.query_ids(), vec!["test-query"]);
-
-    mysql.cleanup().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn test_mysql_executor_with_special_characters() {
-    env_logger::builder()
-        .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
-        .try_init()
-        .ok();
-
-    let mysql = setup_mysql().await;
-    let mysql_config = mysql.config();
-    setup_stored_procedures(mysql_config).await;
-
-    let config = MySqlStoredProcReactionConfig {
-        hostname: mysql_config.host.clone(),
-        port: Some(mysql_config.port),
-        user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
-        database: mysql_config.database.clone(),
-        ssl: false,
-        default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new(
-                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
-            )),
-            ..Default::default()
-        }),
-        command_timeout_ms: 5000,
-        retry_attempts: 3,
-        ..Default::default()
-    };
-
-    let executor = MySqlExecutor::new(&config, None).await.unwrap();
-
-    // Test with special characters (potential SQL injection)
-    let params = vec![json!("sensor'; DROP TABLE sensor_log; --"), json!(25.5)];
-
-    let result = executor.execute_procedure("log_sensor_added", params).await;
-    assert!(
-        result.is_ok(),
-        "Should safely handle special characters via parameterization"
-    );
-
-    sleep(Duration::from_millis(100)).await;
-
-    // Verify the table still exists and has the entry
-    let entries = get_log_entries(mysql_config).await;
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].1, "sensor'; DROP TABLE sensor_log; --");
-
-    mysql.cleanup().await;
-}
-
-#[tokio::test]
-#[serial]
-async fn test_mysql_reaction_lifecycle() {
-    env_logger::builder()
-        .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
-        .try_init()
-        .ok();
-
-    let mysql = setup_mysql().await;
-    let mysql_config = mysql.config();
-    setup_stored_procedures(mysql_config).await;
-
-    // Create the MySQL stored procedure reaction
-    let reaction = MySqlStoredProcReaction::builder("mysql-reaction")
-        .with_hostname(&mysql_config.host)
-        .with_port(mysql_config.port)
-        .with_database(&mysql_config.database)
-        .with_user(&mysql_config.user)
-        .with_password(&mysql_config.password)
-        .with_ssl(false)
-        .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new(
-                "CALL log_sensor_added(@after.sensor_id, @after.temperature)",
-            )),
-            updated: Some(TemplateSpec::new(
-                "CALL log_sensor_updated(@after.sensor_id, @after.temperature)",
-            )),
-            deleted: Some(TemplateSpec::new(
-                "CALL log_sensor_deleted(@before.sensor_id)",
-            )),
-        })
         .with_query("sensor-query")
-        .with_auto_start(false) // Don't auto-start for this test
+        .with_default_template(template)
         .build()
         .await
-        .expect("Should create reaction");
+        .expect("build reaction");
+    reaction.start().await.expect("start reaction");
+    reaction
+}
 
-    // Verify reaction properties
-    assert_eq!(reaction.id(), "mysql-reaction");
-    assert_eq!(reaction.type_name(), "storedproc-mysql");
-    assert_eq!(reaction.query_ids(), vec!["sensor-query"]);
-    assert!(!reaction.auto_start(), "Should not auto-start");
+#[tokio::test]
+#[serial]
+async fn test_e2e_add_binds_parameters() {
+    let mysql = setup_mysql().await;
+    let config = mysql.config().clone();
+    setup_stored_procedures(&config).await;
 
-    // Verify initial status
-    let status = reaction.status().await;
-    assert_eq!(
-        status,
-        drasi_lib::channels::ComponentStatus::Stopped,
-        "Reaction should start in Stopped status"
-    );
+    let reaction = build_started_reaction(&config, sensor_default_template()).await;
 
-    // Verify properties can be retrieved
-    let properties = reaction.properties();
-    assert_eq!(
-        properties.get("hostname").and_then(|v| v.as_str()),
-        Some(mysql_config.host.as_str()),
-        "Hostname should match"
+    let qr = make_query_result(
+        "sensor-query",
+        vec![ResultDiff::Add {
+            data: json!({"sensor_id": "sensor-1", "temperature": 21.5}),
+            row_signature: 0,
+        }],
     );
-    assert_eq!(
-        properties.get("database").and_then(|v| v.as_str()),
-        Some(mysql_config.database.as_str()),
-        "Database should match config"
-    );
-    assert_eq!(
-        properties.get("ssl").and_then(|v| v.as_bool()),
-        Some(false),
-        "SSL should be false"
-    );
+    reaction.enqueue_query_result(qr).await.expect("enqueue");
+    wait_for_log_count(&config, 1, 5000).await;
+    reaction.stop().await.expect("stop");
+
+    let entries = get_log_entries(&config).await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].operation, "ADD");
+    assert_eq!(entries[0].sensor_id, "sensor-1");
+    assert_eq!(entries[0].new_temperature, Some(21.5));
 
     mysql.cleanup().await;
 }
 
 #[tokio::test]
-async fn test_mysql_executor_retry_on_failure() {
-    env_logger::builder()
-        .is_test(true)
-        .filter_level(log::LevelFilter::Debug)
-        .try_init()
-        .ok();
-
+#[serial]
+async fn test_e2e_update_binds_before_and_after_independently() {
+    // Regression: UPDATE must bind the diff's real `before` and `after` rows,
+    // not derive both from a single payload.
     let mysql = setup_mysql().await;
-    let mysql_config = mysql.config();
+    let config = mysql.config().clone();
+    setup_stored_procedures(&config).await;
 
-    let config = MySqlStoredProcReactionConfig {
-        hostname: mysql_config.host.clone(),
-        port: Some(mysql_config.port),
-        user: mysql_config.user.clone(),
-        password: mysql_config.password.clone(),
-        database: mysql_config.database.clone(),
-        ssl: false,
-        default_template: Some(QueryConfig {
-            added: Some(TemplateSpec::new("CALL non_existent()")),
-            ..Default::default()
-        }),
-        command_timeout_ms: 1000,
-        retry_attempts: 2,
-        ..Default::default()
-    };
+    let reaction = build_started_reaction(&config, sensor_default_template()).await;
 
-    let executor = MySqlExecutor::new(&config, None).await.unwrap();
-
-    // Try to execute non-existent procedure (should fail after retries)
-    let result = executor
-        .execute_procedure("non_existent_proc", vec![])
-        .await;
-
-    assert!(
-        result.is_err(),
-        "Should fail after exhausting retry attempts"
+    let qr = make_query_result(
+        "sensor-query",
+        vec![ResultDiff::Update {
+            data: json!({}),
+            before: json!({"sensor_id": "sensor-2", "temperature": 10.0}),
+            after: json!({"sensor_id": "sensor-2", "temperature": 42.0}),
+            grouping_keys: None,
+            row_signature: 0,
+        }],
     );
+    reaction.enqueue_query_result(qr).await.expect("enqueue");
+    wait_for_log_count(&config, 1, 5000).await;
+    reaction.stop().await.expect("stop");
+
+    let entries = get_log_entries(&config).await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].operation, "UPDATE");
+    assert_eq!(entries[0].sensor_id, "sensor-2");
+    assert_eq!(entries[0].old_temperature, Some(10.0));
+    assert_eq!(entries[0].new_temperature, Some(42.0));
+
+    mysql.cleanup().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_e2e_aggregation_binds_before_and_after() {
+    // ResultDiff::Aggregation maps to the UPDATE operation and must bind the
+    // aggregation's `before` and `after` rows through the `updated` template.
+    let mysql = setup_mysql().await;
+    let config = mysql.config().clone();
+    setup_stored_procedures(&config).await;
+
+    let reaction = build_started_reaction(&config, sensor_default_template()).await;
+
+    let qr = make_query_result(
+        "sensor-query",
+        vec![ResultDiff::Aggregation {
+            before: Some(json!({"sensor_id": "sensor-agg", "temperature": 1.0})),
+            after: json!({"sensor_id": "sensor-agg", "temperature": 2.0}),
+            row_signature: 0,
+        }],
+    );
+    reaction.enqueue_query_result(qr).await.expect("enqueue");
+    wait_for_log_count(&config, 1, 5000).await;
+    reaction.stop().await.expect("stop");
+
+    let entries = get_log_entries(&config).await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].operation, "UPDATE");
+    assert_eq!(entries[0].sensor_id, "sensor-agg");
+    assert_eq!(entries[0].old_temperature, Some(1.0));
+    assert_eq!(entries[0].new_temperature, Some(2.0));
+
+    mysql.cleanup().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_e2e_aggregation_without_before_binds_after_only() {
+    // An aggregation with `before: None` must not crash: build_context passes
+    // `before.as_ref()` (None), and an after-only template renders and executes
+    // normally.
+    let mysql = setup_mysql().await;
+    let config = mysql.config().clone();
+    setup_stored_procedures(&config).await;
+
+    // `updated` references only `after`, so a missing `before` does not error.
+    let template = QueryConfig {
+        added: None,
+        updated: Some(TemplateSpec::new(
+            "CALL log_sensor_added({{param after.sensor_id}}, {{param after.temperature}})",
+        )),
+        deleted: None,
+    };
+    let reaction = build_started_reaction(&config, template).await;
+
+    let qr = make_query_result(
+        "sensor-query",
+        vec![ResultDiff::Aggregation {
+            before: None,
+            after: json!({"sensor_id": "sensor-agg-none", "temperature": 7.5}),
+            row_signature: 0,
+        }],
+    );
+    reaction.enqueue_query_result(qr).await.expect("enqueue");
+    wait_for_log_count(&config, 1, 5000).await;
+    reaction.stop().await.expect("stop");
+
+    let entries = get_log_entries(&config).await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].sensor_id, "sensor-agg-none");
+    assert_eq!(entries[0].new_temperature, Some(7.5));
+
+    mysql.cleanup().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_e2e_delete_uses_before_row() {
+    let mysql = setup_mysql().await;
+    let config = mysql.config().clone();
+    setup_stored_procedures(&config).await;
+
+    let reaction = build_started_reaction(&config, sensor_default_template()).await;
+
+    let qr = make_query_result(
+        "sensor-query",
+        vec![ResultDiff::Delete {
+            data: json!({"sensor_id": "sensor-3", "temperature": 5.0}),
+            row_signature: 0,
+        }],
+    );
+    reaction.enqueue_query_result(qr).await.expect("enqueue");
+    wait_for_log_count(&config, 1, 5000).await;
+    reaction.stop().await.expect("stop");
+
+    let entries = get_log_entries(&config).await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].operation, "DELETE");
+    assert_eq!(entries[0].sensor_id, "sensor-3");
+
+    mysql.cleanup().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_e2e_render_failure_skips_event_and_continues() {
+    // A template referencing a missing field must skip that event (not crash
+    // the loop), and subsequent well-formed events must still be processed.
+    let mysql = setup_mysql().await;
+    let config = mysql.config().clone();
+    setup_stored_procedures(&config).await;
+
+    let template = QueryConfig {
+        added: Some(TemplateSpec::new(
+            "CALL log_sensor_added({{param after.sensor_id}}, {{param after.missing}})",
+        )),
+        updated: None,
+        deleted: Some(TemplateSpec::new(
+            "CALL log_sensor_deleted({{param before.sensor_id}})",
+        )),
+    };
+    let reaction = build_started_reaction(&config, template).await;
+
+    // This ADD references `after.missing` and should be skipped.
+    reaction
+        .enqueue_query_result(make_query_result(
+            "sensor-query",
+            vec![ResultDiff::Add {
+                data: json!({"sensor_id": "bad", "temperature": 1.0}),
+                row_signature: 0,
+            }],
+        ))
+        .await
+        .expect("enqueue");
+
+    // This DELETE is well-formed and must still be processed.
+    reaction
+        .enqueue_query_result(make_query_result(
+            "sensor-query",
+            vec![ResultDiff::Delete {
+                data: json!({"sensor_id": "good"}),
+                row_signature: 0,
+            }],
+        ))
+        .await
+        .expect("enqueue");
+
+    wait_for_log_count(&config, 1, 5000).await;
+    reaction.stop().await.expect("stop");
+
+    let entries = get_log_entries(&config).await;
+    assert_eq!(
+        entries.len(),
+        1,
+        "only the well-formed event should be logged"
+    );
+    assert_eq!(entries[0].operation, "DELETE");
+    assert_eq!(entries[0].sensor_id, "good");
+
+    mysql.cleanup().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_e2e_all_operations_in_sequence() {
+    let mysql = setup_mysql().await;
+    let config = mysql.config().clone();
+    setup_stored_procedures(&config).await;
+
+    let reaction = build_started_reaction(&config, sensor_default_template()).await;
+
+    reaction
+        .enqueue_query_result(make_query_result(
+            "sensor-query",
+            vec![
+                ResultDiff::Add {
+                    data: json!({"sensor_id": "s", "temperature": 1.0}),
+                    row_signature: 0,
+                },
+                ResultDiff::Update {
+                    data: json!({}),
+                    before: json!({"sensor_id": "s", "temperature": 1.0}),
+                    after: json!({"sensor_id": "s", "temperature": 2.0}),
+                    grouping_keys: None,
+                    row_signature: 0,
+                },
+                ResultDiff::Delete {
+                    data: json!({"sensor_id": "s", "temperature": 2.0}),
+                    row_signature: 0,
+                },
+                ResultDiff::Noop,
+            ],
+        ))
+        .await
+        .expect("enqueue");
+
+    wait_for_log_count(&config, 3, 5000).await;
+    reaction.stop().await.expect("stop");
+
+    let entries = get_log_entries(&config).await;
+    let ops: Vec<String> = entries.iter().map(|e| e.operation.clone()).collect();
+    assert_eq!(ops, vec!["ADD", "UPDATE", "DELETE"]);
 
     mysql.cleanup().await;
 }

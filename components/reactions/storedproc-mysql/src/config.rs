@@ -24,21 +24,35 @@ pub use common::{QueryConfig, TemplateSpec};
 
 /// Configuration for the MySQL Stored Procedure reaction
 ///
-/// Supports Handlebars templates for stored procedure commands.
-/// Commands use @after.fieldName and @before.fieldName syntax to reference query result fields.
+/// Stored procedure commands are Handlebars templates. Field values are bound
+/// as positional parameters with the `{{param <path>}}` helper — they are never
+/// substituted into the SQL text — so commands are safe against SQL injection.
 ///
 /// Commands can be configured at two levels:
-/// 1. **Default templates**: Applied to all queries unless overridden (using `default_template`)
-/// 2. **Per-query templates**: Override default for specific queries (using `routes`)
+/// 1. **Default template**: Applied to any query without a route (using `default_template`)
+/// 2. **Per-query templates**: Override the default for specific queries (using `routes`)
 ///
-/// ## Template Variables
+/// ## Template context
 ///
-/// Templates have access to the following variables:
-/// - `after` - The data after the change (available for ADD and UPDATE)
-/// - `before` - The data before the change (available for UPDATE and DELETE)
-/// - `data` - The raw data field (available for UPDATE)
-/// - `query_name` - The name of the query that produced the result
-/// - `operation` - The operation type ("ADD", "UPDATE", or "DELETE")
+/// Every command template is rendered against a context with these keys:
+/// - `after` - The row after the change (ADD and UPDATE)
+/// - `before` - The row before the change (UPDATE and DELETE)
+/// - `data` - The raw `data` payload of an UPDATE diff
+/// - `query_id` / `query_name` - The id of the query that produced the result
+/// - `operation` - The operation type (`"ADD"`, `"UPDATE"`, or `"DELETE"`)
+/// - `timestamp` - The result timestamp (RFC3339)
+/// - `metadata` - The result metadata map
+///
+/// ## Template helpers
+///
+/// - `{{param <path>}}` binds the value at `<path>` (for example
+///   `after.id`) as a positional parameter and emits a `?` placeholder.
+///   Objects and arrays are bound whole and stored as JSON. Prefer this for
+///   any untrusted value.
+/// - `{{json <path>}}` writes the JSON serialization of a value **inline into
+///   the SQL text**. It is not parameterized, so it is **not** injection- or
+///   quoting-safe; only use it for trusted values, and prefer
+///   `{{param <path>}}` (which binds objects whole as JSON) for source data.
 ///
 /// ## Example with Default Template
 ///
@@ -49,9 +63,13 @@ pub use common::{QueryConfig, TemplateSpec};
 ///     user: "root".to_string(),
 ///     password: "password".to_string(),
 ///     default_template: Some(QueryConfig {
-///         added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
-///         updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
-///         deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+///         added: Some(TemplateSpec::new(
+///             "CALL add_user({{param after.id}}, {{param after.name}}, {{param after.email}})",
+///         )),
+///         updated: Some(TemplateSpec::new(
+///             "CALL update_user({{param after.id}}, {{param after.name}}, {{param after.email}})",
+///         )),
+///         deleted: Some(TemplateSpec::new("CALL delete_user({{param before.id}})")),
 ///     }),
 ///     ..Default::default()
 /// };
@@ -64,9 +82,13 @@ pub use common::{QueryConfig, TemplateSpec};
 ///
 /// let mut routes = HashMap::new();
 /// routes.insert("user-query".to_string(), QueryConfig {
-///     added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
-///     updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
-///     deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+///     added: Some(TemplateSpec::new(
+///         "CALL add_user({{param after.id}}, {{param after.name}})",
+///     )),
+///     updated: Some(TemplateSpec::new(
+///         "CALL update_user({{param after.id}}, {{param after.name}})",
+///     )),
+///     deleted: Some(TemplateSpec::new("CALL delete_user({{param before.id}})")),
 /// });
 ///
 /// let config = MySqlStoredProcReactionConfig {
@@ -92,11 +114,11 @@ pub struct MySqlStoredProcReactionConfig {
     #[serde(skip)]
     pub identity_provider: Option<Box<dyn IdentityProvider>>,
 
-    /// Database user (deprecated: use identity_provider instead)
+    /// Database user (used when no identity provider is configured)
     #[serde(default)]
     pub user: String,
 
-    /// Database password (deprecated: use identity_provider instead)
+    /// Database password (used when no identity provider is configured)
     #[serde(default)]
     pub password: String,
 
@@ -190,28 +212,53 @@ impl MySqlStoredProcReactionConfig {
         self.port.unwrap_or(3306)
     }
 
-    /// Get the command template for a specific query and operation type
+    /// Resolve the command template for a specific query and operation type.
     ///
-    /// Priority order:
-    /// 1. Query-specific route template
-    /// 2. Default template
-    pub fn get_command_template(
+    /// Resolution order (per the Reaction Developer Guide §11):
+    /// 1. `routes[query_id]` for the operation.
+    /// 2. `routes[last dotted segment of query_id]` for the operation.
+    /// 3. `default_template` for the operation.
+    ///
+    /// Empty templates are treated as "not configured" and skipped.
+    pub fn resolve_command_template(
         &self,
         query_id: &str,
         operation: common::OperationType,
     ) -> Option<String> {
-        // Try to get from routes or default_template first
-        let spec = self.get_template_spec(query_id, operation);
-        if let Some(spec) = spec {
-            return Some(spec.template.clone());
+        // 1. Full query id route.
+        if let Some(template) = self
+            .routes
+            .get(query_id)
+            .and_then(|qc| spec_for_operation(qc, operation))
+        {
+            return Some(template);
         }
-        None
+
+        // 2. Last dotted segment route (e.g. `routes.my_query` for `source.my_query`).
+        if let Some(segment) = query_id.rsplit('.').next() {
+            if segment != query_id {
+                if let Some(template) = self
+                    .routes
+                    .get(segment)
+                    .and_then(|qc| spec_for_operation(qc, operation))
+                {
+                    return Some(template);
+                }
+            }
+        }
+
+        // 3. Default template.
+        self.default_template
+            .as_ref()
+            .and_then(|qc| spec_for_operation(qc, operation))
     }
 
-    /// Validate the configuration
+    /// Validate the configuration.
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.user.is_empty() {
-            anyhow::bail!("Database user is required");
+        // A user is only required when no identity provider is configured;
+        // identity-provider authentication resolves credentials at runtime.
+        if self.identity_provider.is_none() && self.user.is_empty() {
+            anyhow::bail!("Database user is required when no identity provider is configured");
         }
         if self.database.is_empty() {
             anyhow::bail!("Database name is required");
@@ -227,6 +274,59 @@ impl MySqlStoredProcReactionConfig {
             );
         }
 
+        // Compile every configured template so invalid templates are rejected
+        // at construction time rather than on the first inbound event.
+        for (query_id, query_config) in &self.routes {
+            validate_query_config_templates(query_config)
+                .map_err(|e| anyhow::anyhow!("route '{query_id}': {e}"))?;
+        }
+        if let Some(default_template) = &self.default_template {
+            validate_query_config_templates(default_template)
+                .map_err(|e| anyhow::anyhow!("default_template: {e}"))?;
+        }
+
         Ok(())
     }
+
+    /// Validate that every `routes` key corresponds to a subscribed query id
+    /// (or to the last dotted segment of one).
+    pub fn validate_routes(&self, query_ids: &[String]) -> anyhow::Result<()> {
+        for key in self.routes.keys() {
+            let matches = query_ids.iter().any(|id| {
+                id == key || id.rsplit('.').next().map(|seg| seg == key).unwrap_or(false)
+            });
+            if !matches {
+                anyhow::bail!(
+                    "route key '{key}' does not match any subscribed query id; \
+                     configured queries: {query_ids:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Return the (non-empty) template for an operation from a `QueryConfig`.
+fn spec_for_operation(qc: &QueryConfig, operation: common::OperationType) -> Option<String> {
+    let spec = match operation {
+        common::OperationType::Add => qc.added.as_ref(),
+        common::OperationType::Update => qc.updated.as_ref(),
+        common::OperationType::Delete => qc.deleted.as_ref(),
+    }?;
+    if spec.template.trim().is_empty() {
+        None
+    } else {
+        Some(spec.template.clone())
+    }
+}
+
+/// Compile-validate every template present in a `QueryConfig`.
+fn validate_query_config_templates(qc: &QueryConfig) -> anyhow::Result<()> {
+    for spec in [qc.added.as_ref(), qc.updated.as_ref(), qc.deleted.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        crate::render::CommandRenderer::validate_template(&spec.template)?;
+    }
+    Ok(())
 }

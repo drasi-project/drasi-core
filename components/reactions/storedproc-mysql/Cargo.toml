@@ -39,7 +39,7 @@ mysql_async = { version = "0.37", default-features = false, features = ["default
 # Utilities
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-regex = "1.10"
+handlebars = "5.1"
 log = "0.4"
 anyhow = "1.0"
 drasi-plugin-sdk = { workspace = true }
@@ -49,6 +49,7 @@ utoipa = { workspace = true }
 tokio-test = "0.4"
 env_logger = "0.10.0"
 serial_test = "3.0"
+chrono = "0.4"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["mysql"] }
 shared-tests = { path = "../../../shared-tests" }
