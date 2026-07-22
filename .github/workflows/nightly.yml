@@ -82,8 +82,9 @@ jobs:
     uses: ./.github/workflows/publish-plugins.yml
     with:
       tag: ${{ inputs.plugin_tag || 'drasi-nightly-test' }}
-      # Always build the nightly plugins from main's HEAD.
-      ref: main
+      # TEMPORARY (testing): build from the branch to validate the xtask zigbuild
+      # fix before it lands on main. Revert to `main` once the fix is merged.
+      ref: drasi-e2e-nightly
       # Nightly -test channel: skip cosign signing to avoid orphaned signatures
       # on each tag overwrite.
       sign: false
