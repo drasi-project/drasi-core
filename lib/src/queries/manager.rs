@@ -242,6 +242,19 @@ pub trait Query: Send + Sync {
     fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
         None
     }
+
+    /// Release the persistent index-backend handles this query retains, **without**
+    /// deleting any on-disk data.
+    ///
+    /// Persistent backends (e.g. RocksDB, which holds a process-exclusive lock on its
+    /// data directory) keep that resource pinned until every clone of their shared
+    /// handle is dropped. A query retains some of those handles for its whole lifetime,
+    /// so they are only freed when the whole `DrasiLib` is dropped. This method drops
+    /// those in-memory handles so the backend can release its lock during a permanent
+    /// shutdown, while leaving persisted state intact for a future reopen.
+    ///
+    /// Default: no-op — volatile/in-memory queries hold no such handles.
+    async fn release_persistent_handles(&self) {}
 }
 
 /// Bootstrap phase tracking for each source
@@ -2530,6 +2543,29 @@ impl Query for DrasiQuery {
     fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
         Some(self.output_metrics.clone())
     }
+
+    async fn release_persistent_handles(&self) {
+        // Drop the persistent handles created by the index backend. For a shared
+        // backend like RocksDB (one `OptimisticTransactionDB` cloned into every
+        // index/store/writer), these are the only backend clones the query still
+        // retains after `stop()`; dropping them lets the backend release its
+        // exclusive lock. On-disk data is left untouched, so a future reopen of the
+        // same path recovers the prior state.
+
+        // Defensive: if the query was never stopped (e.g. left in a terminal Error
+        // state), the FutureQueueSource may still hold a clone of the backend future
+        // queue. `stop()` normally takes it already, in which case this is a no-op.
+        // Take the value out first so the write-lock guard is dropped before the
+        // `.await` below (never hold a lock across an await point).
+        let future_queue_source = self.future_queue_source.write().await.take();
+        if let Some(fq) = future_queue_source {
+            fq.stop().await;
+        }
+
+        *self.checkpoint_store.write().await = None;
+        *self.outbox_writer.write().await = None;
+        *self.live_results_writer.write().await = None;
+    }
 }
 
 pub struct QueryManager {
@@ -2887,6 +2923,37 @@ impl QueryManager {
         }
 
         Ok(())
+    }
+
+    /// Release persistent index-backend handles for every query runtime, without
+    /// deleting any on-disk data.
+    ///
+    /// Intended for permanent shutdown ([`crate::DrasiLib::shutdown`]). Persistent
+    /// backends such as RocksDB hold a process-exclusive lock on their data directory
+    /// until every clone of their shared handle is dropped; queries retain some of
+    /// those handles for their whole lifetime, so without this they are only freed
+    /// when the entire `DrasiLib` is dropped. Clearing them here lets the backend
+    /// release its lock while leaving persisted state intact for a future reopen.
+    ///
+    /// Callers should stop components first so the transient handles held by
+    /// per-query tasks are already dropped by the time this runs.
+    pub async fn release_all_persistent_handles(&self) {
+        let query_ids: Vec<String> = self
+            .list_queries()
+            .await
+            .into_iter()
+            .map(|(id, _status)| id)
+            .collect();
+
+        for id in query_ids {
+            match self.get_query_instance(&id).await {
+                Ok(query) => query.release_persistent_handles().await,
+                Err(e) => warn!(
+                    "Failed to release persistent index handles for query '{id}' during \
+                     shutdown: {e}. A persistent backend may keep its exclusive lock held."
+                ),
+            }
+        }
     }
 
     /// List all registered queries with their current lifecycle status.
