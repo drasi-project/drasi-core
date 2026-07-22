@@ -6,7 +6,7 @@ A Drasi reaction plugin that invokes PostgreSQL stored procedures when continuou
 
 The PostgreSQL Stored Procedure reaction enables you to:
 - Execute different stored procedures for ADD, UPDATE, and DELETE operations
-- Map query result fields to stored procedure parameters using `@fieldName` syntax
+- Build stored-procedure commands from [Handlebars](https://handlebarsjs.com/) templates, binding query-result fields as safe positional SQL parameters via the `{{param ...}}` helper
 - Handle multiple queries with a single reaction
 - Automatically retry failed procedure calls with exponential backoff
 - Configure connection parameters and timeouts
@@ -57,9 +57,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_query("user-changes")
         .with_default_template(QueryConfig {
-            added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
-            updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
-            deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+            added: Some(TemplateSpec::new("CALL add_user({{param after.id}}, {{param after.name}}, {{param after.email}})")),
+            updated: Some(TemplateSpec::new("CALL update_user({{param after.id}}, {{param after.name}}, {{param after.email}})")),
+            deleted: Some(TemplateSpec::new("CALL delete_user({{param before.id}})")),
         })
         .build()
         .await?;
@@ -81,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
 
 ### Builder API
 
-#### Traditional Username/Password Authentication
+#### Username/Password Authentication
 
 ```rust
 let reaction = PostgresStoredProcReaction::builder("my-reaction")
@@ -93,9 +93,9 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
     .with_ssl(true)  // Enable SSL/TLS
     .with_query("query1")
     .with_default_template(QueryConfig {
-        added: Some(TemplateSpec::new("CALL add_record(@after.id, @after.name)")),
-        updated: Some(TemplateSpec::new("CALL update_record(@after.id, @after.name)")),
-        deleted: Some(TemplateSpec::new("CALL delete_record(@before.id)")),
+        added: Some(TemplateSpec::new("CALL add_record({{param after.id}}, {{param after.name}})")),
+        updated: Some(TemplateSpec::new("CALL update_record({{param after.id}}, {{param after.name}})")),
+        deleted: Some(TemplateSpec::new("CALL delete_record({{param before.id}})")),
     })
     .with_command_timeout_ms(30000)
     .with_retry_attempts(3)
@@ -126,9 +126,9 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
     .with_ssl(true)  // Required for Azure
     .with_query("query1")
     .with_default_template(QueryConfig {
-        added: Some(TemplateSpec::new("CALL add_record(@after.id, @after.name)")),
-        updated: Some(TemplateSpec::new("CALL update_record(@after.id, @after.name)")),
-        deleted: Some(TemplateSpec::new("CALL delete_record(@before.id)")),
+        added: Some(TemplateSpec::new("CALL add_record({{param after.id}}, {{param after.name}})")),
+        updated: Some(TemplateSpec::new("CALL update_record({{param after.id}}, {{param after.name}})")),
+        deleted: Some(TemplateSpec::new("CALL delete_record({{param before.id}})")),
     })
     .build()
     .await?;
@@ -159,9 +159,9 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
     .with_ssl(true)  // Recommended for RDS
     .with_query("query1")
     .with_default_template(QueryConfig {
-        added: Some(TemplateSpec::new("CALL add_record(@after.id, @after.name)")),
-        updated: Some(TemplateSpec::new("CALL update_record(@after.id, @after.name)")),
-        deleted: Some(TemplateSpec::new("CALL delete_record(@before.id)")),
+        added: Some(TemplateSpec::new("CALL add_record({{param after.id}}, {{param after.name}})")),
+        updated: Some(TemplateSpec::new("CALL update_record({{param after.id}}, {{param after.name}})")),
+        deleted: Some(TemplateSpec::new("CALL delete_record({{param before.id}})")),
     })
     .build()
     .await?;
@@ -181,9 +181,9 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
     .with_identity_provider(identity_provider)
     .with_query("query1")
     .with_default_template(QueryConfig {
-        added: Some(TemplateSpec::new("CALL add_record(@after.id, @after.name)")),
-        updated: Some(TemplateSpec::new("CALL update_record(@after.id, @after.name)")),
-        deleted: Some(TemplateSpec::new("CALL delete_record(@before.id)")),
+        added: Some(TemplateSpec::new("CALL add_record({{param after.id}}, {{param after.name}})")),
+        updated: Some(TemplateSpec::new("CALL update_record({{param after.id}}, {{param after.name}})")),
+        deleted: Some(TemplateSpec::new("CALL delete_record({{param before.id}})")),
     })
     .build()
     .await?;
@@ -208,25 +208,41 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
 | `command_timeout_ms` | Command timeout | `u64` | `30000` |
 | `retry_attempts` | Number of retries | `u32` | `3` |
 
-## Parameter Mapping
+## Command Templates
 
-Templates use the `@` syntax to reference fields from query results. The reaction provides different data contexts based on the operation type:
+Stored-procedure commands are [Handlebars](https://handlebarsjs.com/) templates. Every
+template is compiled when the reaction is built, so an invalid template fails fast at
+construction time rather than at runtime.
 
-- **ADD operations**: Use `@after.field` to access the new data
-- **UPDATE operations**: Use `@after.field` for new data, `@before.field` for old data
-- **DELETE operations**: Use `@before.field` to access the deleted data
+### Template context
 
-### Example
+Each template is rendered against a standard context with these keys:
+
+| Key | Description | Available for |
+|-----|-------------|---------------|
+| `after` | The post-change row | ADD, UPDATE |
+| `before` | The pre-change row | UPDATE, DELETE |
+| `data` | The raw `data` payload of an Update diff | UPDATE |
+| `query_id` / `query_name` | The id of the query that produced the result (aliases holding the same value) | all |
+| `operation` | `"ADD"`, `"UPDATE"`, or `"DELETE"` | all |
+| `timestamp` | RFC3339 result timestamp | all |
+| `metadata` | Result metadata map | all |
+
+### Binding values with `{{param}}`
+
+Reference a field with the `{{param <expr>}}` helper. Instead of inlining the value into
+the SQL text, the helper appends the resolved value to the command's positional bind
+parameters and emits a `$N` placeholder. Untrusted row data therefore can never alter the
+command structure — it is always sent to PostgreSQL as a bound parameter.
+
+For example, with this template:
 
 ```rust
-.with_default_template(QueryConfig {
-    added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
-    updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
-    deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
-})
+TemplateSpec::new("CALL add_user({{param after.id}}, {{param after.name}}, {{param after.email}})")
 ```
 
-Query result for ADD operation:
+and this ADD result row:
+
 ```json
 {
   "id": 1,
@@ -235,33 +251,62 @@ Query result for ADD operation:
 }
 ```
 
-Executes:
+the reaction executes the SQL:
+
 ```sql
-CALL add_user(1, 'Alice', 'alice@example.com')
+CALL add_user($1, $2, $3)
 ```
 
-### Nested Field Access
+with `$1 = 1`, `$2 = "Alice"`, `$3 = "alice@example.com"` bound as parameters.
+
+### Nested field access
 
 Access nested fields using dot notation:
 
 ```rust
-TemplateSpec::new("CALL add_address(@after.user.id, @after.address.city)")
+TemplateSpec::new("CALL add_address({{param after.user.id}}, {{param after.address.city}})")
 ```
+
+### Binding a whole object as JSONB
+
+To pass an entire object to a `jsonb` argument, reference it with `{{param}}` directly.
+The object is bound as a single positional JSONB parameter, so it is safe even for
+untrusted row data:
+
+```rust
+TemplateSpec::new("CALL ingest_record({{param after}})")
+```
+
+Only `{{param <expr>}}` may emit a value into the rendered SQL. Bare (`{{expr}}`) and raw
+(`{{{expr}}}`) interpolation, as well as other helpers, are rejected when the reaction is
+built so row data can never be inlined into SQL text. Write the procedure name and any
+other structure as literal text in the template.
+
+### Render failures and SQL safety
+
+If a template references a missing field, or otherwise fails to render, the reaction logs
+the error and **skips** that event rather than executing partial or unsafe SQL. If no
+template is configured for an operation, the event is skipped.
+
+## Template Resolution Order
+
+For each `(query_id, operation)` the reaction resolves the command template in this order:
+
+1. a `routes` entry keyed by the **full** query id,
+2. a `routes` entry keyed by the query id's **last dotted segment** (so `source.my_query`
+   can be routed via a `my_query` key),
+3. the shared `default_template`.
+
+If none of these supplies a template for the operation, the event is skipped. Every
+`routes` key must match a subscribed query id (or its last dotted segment); an unmatched
+key is rejected when the reaction is built.
 
 ### Per-Query Templates
 
-You can configure different templates for specific queries using the `routes` field or the builder's `with_route` method:
+Configure different templates for specific queries using the `routes` field or the
+builder's `with_route` method:
 
 ```rust
-use std::collections::HashMap;
-
-let mut routes = HashMap::new();
-routes.insert("user-query".to_string(), QueryConfig {
-    added: Some(TemplateSpec::new("CALL user_added(@after.id, @after.name)")),
-    updated: None,
-    deleted: None,
-});
-
 let reaction = PostgresStoredProcReaction::builder("my-reaction")
     .with_hostname("localhost")
     .with_database("mydb")
@@ -269,7 +314,7 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
     .with_password("secret")
     .with_query("user-query")
     .with_route("user-query", QueryConfig {
-        added: Some(TemplateSpec::new("CALL user_added(@after.id, @after.name)")),
+        added: Some(TemplateSpec::new("CALL user_added({{param after.id}}, {{param after.name}})")),
         ..Default::default()  // updated and deleted will use default template
     })
     .build()
@@ -296,20 +341,20 @@ let reaction = PostgresStoredProcReaction::builder("multi-query-sensor-sync")
     // Default template - applies to "high-temp" and "low-temp"
     .with_default_template(QueryConfig {
         added: Some(TemplateSpec::new(
-            "CALL log_sensor_added(@after.id, @after.temperature, @after.timestamp)"
+            "CALL log_sensor_added({{param after.id}}, {{param after.temperature}}, {{param after.timestamp}})"
         )),
         updated: Some(TemplateSpec::new(
-            "CALL log_sensor_updated(@after.id, @after.temperature)"
+            "CALL log_sensor_updated({{param after.id}}, {{param after.temperature}})"
         )),
         deleted: Some(TemplateSpec::new(
-            "CALL log_sensor_deleted(@before.id)"
+            "CALL log_sensor_deleted({{param before.id}})"
         )),
     })
     // Custom route for critical temperature readings
     // Only handles ADD operations, falls back to default for UPDATE/DELETE
     .with_route("critical-temp", QueryConfig {
         added: Some(TemplateSpec::new(
-            "CALL log_critical_alert(@after.id, @after.temperature, @after.timestamp)"
+            "CALL log_critical_alert({{param after.id}}, {{param after.temperature}}, {{param after.timestamp}})"
         )),
         ..Default::default()  // updated and deleted will use default template
     })
@@ -351,17 +396,17 @@ let reaction = PostgresStoredProcReaction::builder("multi-query-sync")
     .with_query("order-changes")
     // Default template applies to "user-changes" and "order-changes"
     .with_default_template(QueryConfig {
-        added: Some(TemplateSpec::new("CALL log_entity_added(@after.id, @after.type)")),
-        updated: Some(TemplateSpec::new("CALL log_entity_updated(@after.id, @after.type)")),
-        deleted: Some(TemplateSpec::new("CALL log_entity_deleted(@before.id, @before.type)")),
+        added: Some(TemplateSpec::new("CALL log_entity_added({{param after.id}}, {{param after.type}})")),
+        updated: Some(TemplateSpec::new("CALL log_entity_updated({{param after.id}}, {{param after.type}})")),
+        deleted: Some(TemplateSpec::new("CALL log_entity_deleted({{param before.id}}, {{param before.type}})")),
     })
     // Override "product-changes" with specific procedures
     .with_route("product-changes", QueryConfig {
         added: Some(TemplateSpec::new(
-            "CALL sync_product_added(@after.product_id, @after.name, @after.price, @after.inventory)"
+            "CALL sync_product_added({{param after.product_id}}, {{param after.name}}, {{param after.price}}, {{param after.inventory}})"
         )),
         updated: Some(TemplateSpec::new(
-            "CALL sync_product_updated(@after.product_id, @after.price, @after.inventory)"
+            "CALL sync_product_updated({{param after.product_id}}, {{param after.price}}, {{param after.inventory}})"
         )),
         ..Default::default()  // deleted will fall back to default template
     })
@@ -374,19 +419,19 @@ let reaction = PostgresStoredProcReaction::builder("multi-query-sync")
 **How it works:**
 
 1. **"user-changes" query** → Uses default template
-   - Add: `CALL log_entity_added(@after.id, @after.type)`
-   - Update: `CALL log_entity_updated(@after.id, @after.type)`
-   - Delete: `CALL log_entity_deleted(@before.id, @before.type)`
+   - Add: `CALL log_entity_added({{param after.id}}, {{param after.type}})`
+   - Update: `CALL log_entity_updated({{param after.id}}, {{param after.type}})`
+   - Delete: `CALL log_entity_deleted({{param before.id}}, {{param before.type}})`
 
 2. **"product-changes" query** → Uses custom route (with fallback to default for delete)
-   - Add: `CALL sync_product_added(@after.product_id, @after.name, @after.price, @after.inventory)`
-   - Update: `CALL sync_product_updated(@after.product_id, @after.price, @after.inventory)`
-   - Delete: `CALL log_entity_deleted(@before.id, @before.type)` *(falls back to default)*
+   - Add: `CALL sync_product_added({{param after.product_id}}, {{param after.name}}, {{param after.price}}, {{param after.inventory}})`
+   - Update: `CALL sync_product_updated({{param after.product_id}}, {{param after.price}}, {{param after.inventory}})`
+   - Delete: `CALL log_entity_deleted({{param before.id}}, {{param before.type}})` *(falls back to default)*
 
 3. **"order-changes" query** → Uses default template
-   - Add: `CALL log_entity_added(@after.id, @after.type)`
-   - Update: `CALL log_entity_updated(@after.id, @after.type)`
-   - Delete: `CALL log_entity_deleted(@before.id, @before.type)`
+   - Add: `CALL log_entity_added({{param after.id}}, {{param after.type}})`
+   - Update: `CALL log_entity_updated({{param after.id}}, {{param after.type}})`
+   - Delete: `CALL log_entity_deleted({{param before.id}}, {{param before.type}})`
 
 **Note:** If a route specifies `None` for an operation (like `deleted: None` for product-changes), the reaction will check the default template. If the default template also has `None` for that operation, no procedure will be called.
 

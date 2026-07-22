@@ -18,7 +18,12 @@
 //!
 //! This plugin implements reactions that invoke PostgreSQL stored procedures when
 //! continuous query results change. It supports different procedures for
-//! ADD, UPDATE, and DELETE operations using Handlebars templates.
+//! ADD, UPDATE, and DELETE operations using [Handlebars] command templates.
+//!
+//! Argument values are referenced with the `{{param <expr>}}` helper, which binds
+//! them as positional SQL parameters (`$1`, `$2`, …) so untrusted row data can
+//! never alter the command structure. `{{param <expr>}}` is the only allowed
+//! interpolation; bare and raw interpolation are rejected at configuration time.
 //!
 //! # Example
 //!
@@ -29,24 +34,25 @@
 //!     .with_connection("localhost", 5432, "mydb", "postgres", "password")
 //!     .with_query("user-changes")
 //!     .with_default_template(QueryConfig {
-//!         added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
-//!         updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
-//!         deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+//!         added: Some(TemplateSpec::new("CALL add_user({{param after.id}}, {{param after.name}}, {{param after.email}})")),
+//!         updated: Some(TemplateSpec::new("CALL update_user({{param after.id}}, {{param after.name}}, {{param after.email}})")),
+//!         deleted: Some(TemplateSpec::new("CALL delete_user({{param before.id}})")),
 //!     })
-//!     .build()?;
+//!     .build()
+//!     .await?;
 //! ```
+//!
+//! [Handlebars]: https://crates.io/crates/handlebars
 
 pub mod config;
 pub mod descriptor;
 pub mod executor;
-pub mod parser;
 pub mod reaction;
+pub(crate) mod render;
 
 pub use config::{PostgresStoredProcReactionConfig, QueryConfig, TemplateSpec};
 pub use reaction::PostgresStoredProcReaction;
 
-/// Dynamic plugin entry point.
-///
 /// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
