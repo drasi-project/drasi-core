@@ -201,10 +201,17 @@ jobs:
           cargo install cargo-zigbuild --version 0.19.8 --locked
 
       - name: Install cosign
+        # Only needed to sign published artifacts; the OCI push itself
+        # authenticates via OCI_REGISTRY_USERNAME/PASSWORD (see xtask), so skip
+        # the cosign download entirely when not signing (e.g. the nightly).
+        if: ${{ inputs.sign }}
         uses: sigstore/cosign-installer@v3
 
       - name: Login to GHCR
-        if: ${{ !inputs.dry_run }}
+        # cosign login only writes docker config for cosign's own signing pushes;
+        # the plugin publish uses explicit env credentials, so this is only
+        # required on the signing path.
+        if: ${{ inputs.sign && !inputs.dry_run }}
         shell: bash
         run: echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
 
