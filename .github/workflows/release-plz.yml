@@ -18,6 +18,8 @@ on:
         default: false
 
 permissions:
+  # Defaults for the release-plz job (create release PRs, push tags/commits).
+  # The downstream publish-plugins job grants its own packages/id-token scopes.
   pull-requests: write
   contents: write
 
@@ -29,6 +31,10 @@ jobs:
     name: Release-plz
     runs-on: ubuntu-latest-8-cores
     environment: drasi-core-release
+    outputs:
+      # 'true' only when this run actually published crates (release commit or
+      # force_publish, and not a dry run). Gates the downstream publish-plugins job.
+      published: ${{ steps.publish_result.outputs.published }}
     
     steps:
       - name: Checkout code
@@ -36,30 +42,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq libjq-dev protobuf-compiler
-
-      - name: Set JQ_LIB_DIR
-        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-
-      - name: Install Rust toolchain
-        run: rustup show
-
-      - name: Configure Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-                  
-      - name: Install release-plz
-        run: |
-          curl -sSfL https://github.com/release-plz/release-plz/releases/download/release-plz-v0.3.157/release-plz-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
-
-      - name: Install cargo-semver-checks
-        run: |
-          curl -sSfL https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.45.0/cargo-semver-checks-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
-          cargo-semver-checks --version
+      - name: Install release tools
+        uses: ./.github/actions/install-release-tools
 
       # Check if this commit is from a release PR (commit message starts with "chore: release" or similar)
       - name: Check if release commit
@@ -93,6 +77,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
+      # Runs only after a successful publish (same condition as above, and this
+      # step is reached only if 'Publish crates' did not fail). Its output gates
+      # the downstream publish-plugins job.
+      - name: Mark published
+        id: publish_result
+        if: ${{ (steps.check_release.outputs.is_release == 'true' || inputs.force_publish == true) && inputs.dry_run != true }}
+        run: echo "published=true" >> "$GITHUB_OUTPUT"
+
       # Dry run mode - preview what would happen
       - name: Dry run - preview version bumps
         if: ${{ inputs.dry_run == true }}
@@ -106,3 +98,22 @@ jobs:
           echo "To create a release PR, run this workflow with dry_run=false."
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # After a successful crate publish, build and publish the plugin OCI images so
+  # the crates on crates.io and the plugin images in GHCR stay in lockstep for a
+  # release. Skipped for release-PR-creation commits and dry runs (published != 'true').
+  publish-plugins:
+    name: Publish plugins
+    needs: release-plz
+    if: ${{ needs.release-plz.outputs.published == 'true' }}
+    # Elevated scopes needed by the called publish-plugins.yml (OCI push + cosign
+    # keyless). A called workflow's token can't exceed the calling job's grants.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/publish-plugins.yml
+    with:
+      sign: true
+      dry_run: false
+    secrets: inherit

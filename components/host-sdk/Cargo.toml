@@ -40,7 +40,7 @@ pem = { version = "3", optional = true }
 base64 = { version = "0.22", optional = true }
 
 # Optional: HTTP fetching support
-reqwest = { version = "0.12", optional = true }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls"] }
 url = { version = "2", optional = true }
 
 # Optional: filesystem watcher support
