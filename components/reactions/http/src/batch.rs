@@ -21,17 +21,22 @@
 //! no body template applies.
 
 use anyhow::Result;
-use log::debug;
+use log::{debug, warn};
 use reqwest::{
     header::{HeaderMap, HeaderValue},
     Client, Method,
 };
 
 use crate::output::BatchEnvelope;
-use crate::process::send_with_retry;
+use crate::process::{send_with_retry, DeliveryOutcome};
 
 /// POST a coalesced batch to `{base_url}{batch_endpoint}` as a single
 /// [`BatchEnvelope`] (`{ "batch": [ … ] }`).
+///
+/// Returns the [`DeliveryOutcome`]: `Delivered` when the server accepted the
+/// batch, or `Dropped` when it was permanently rejected (a poison batch). The
+/// caller advances the checkpoint in both cases, but the distinction is surfaced
+/// so a permanent rejection is logged as such rather than as a success.
 pub(crate) async fn send_coalesced_batch(
     client: &Client,
     base_url: &str,
@@ -39,7 +44,7 @@ pub(crate) async fn send_coalesced_batch(
     token: &Option<String>,
     items: Vec<serde_json::Value>,
     reaction_name: &str,
-) -> Result<()> {
+) -> Result<DeliveryOutcome> {
     let total = items.len();
     let envelope = BatchEnvelope { batch: items };
 
@@ -57,7 +62,7 @@ pub(crate) async fn send_coalesced_batch(
 
     debug!("[{reaction_name}] Sending coalesced batch of {total} results to {batch_url}");
 
-    send_with_retry(
+    let outcome = send_with_retry(
         client,
         Method::POST,
         batch_url,
@@ -68,6 +73,14 @@ pub(crate) async fn send_coalesced_batch(
     )
     .await?;
 
-    debug!("[{reaction_name}] Batch sent successfully");
-    Ok(())
+    match outcome {
+        DeliveryOutcome::Delivered => {
+            debug!("[{reaction_name}] Batch of {total} results sent successfully")
+        }
+        DeliveryOutcome::Dropped => warn!(
+            "[{reaction_name}] Coalesced batch of {total} results permanently rejected by the \
+             server (poison drop); advancing past it"
+        ),
+    }
+    Ok(outcome)
 }

@@ -45,11 +45,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Endpoint and batching invariants are validated at construction, including
   positive fixed/adaptive batch sizes and adaptive min/max ordering.
 - Fixed batching isolates pending batches by `(query_id, metadata)` to avoid data
-  misattribution. On exhausted delivery the batch is logged and dropped and the
-  reaction keeps running (reconnecting on the next batch) rather than transitioning
-  to `Error`.
+  misattribution.
 - Adaptive batching forwards items to the adaptive batcher immediately, so
   low-volume single-query items flush after the configured wait window.
+- **Resumable delivery (at-least-once).** Both fixed and adaptive runners now
+  advance a per-query checkpoint driven by successful (acked) delivery: a
+  sequence is only checkpointed once the batch containing its terminal item is
+  acked, so a result split across batches is never partially advanced. On
+  restart the host `ReactionManager` forwarder skips results at or below the
+  persisted checkpoint, so the reaction only persists checkpoints and relies on
+  the framework for dedup.
+- **Recovery policy** is configurable per instance via
+  `GrpcReactionBuilder::with_recovery_policy` or the descriptor `recoveryPolicy`
+  field (`strict` | `auto_skip_gap`). Under `strict` (default) a sustained
+  delivery failure (after the retry/reconnect budget is exhausted) fail-stops the
+  reaction (`Error`) so the un-acked batch replays from the query outbox on
+  restart; under `auto_skip_gap` the failed batch is skipped and the reaction
+  keeps running (favoring uptime).
 - New typed builder API (`GrpcReaction::builder(...)`) with
   `with_fixed_batching`, `with_adaptive_batching`, `with_output_templates`,
   `with_output_format`, per-field adaptive setters (`with_min_batch_size`,

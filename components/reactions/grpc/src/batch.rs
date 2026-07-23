@@ -41,14 +41,33 @@ impl BatchKey {
 pub(crate) struct PendingBatch {
     pub key: BatchKey,
     pub items: Vec<ProtoQueryResultItem>,
+    /// Max sequence whose **terminal** item is in this batch. The checkpoint
+    /// only advances to a sequence once its terminal item has been acked.
+    pub completed_seq: Option<u64>,
+    /// Max sequence of any item in this batch (used when skipping under
+    /// AutoSkipGap to advance past dropped data).
+    pub seen_seq: u64,
 }
 
 impl PendingBatch {
-    pub(crate) fn new(key: BatchKey, item: ProtoQueryResultItem) -> Self {
+    pub(crate) fn new(key: BatchKey, item: ProtoQueryResultItem, is_terminal: bool) -> Self {
+        let seq = item.sequence;
         Self {
             key,
             items: vec![item],
+            completed_seq: is_terminal.then_some(seq),
+            seen_seq: seq,
         }
+    }
+
+    /// Append an item, updating the terminal/seen sequence trackers.
+    pub(crate) fn push(&mut self, item: ProtoQueryResultItem, is_terminal: bool) {
+        let seq = item.sequence;
+        self.seen_seq = self.seen_seq.max(seq);
+        if is_terminal {
+            self.completed_seq = Some(self.completed_seq.map_or(seq, |c| c.max(seq)));
+        }
+        self.items.push(item);
     }
 
     pub(crate) fn can_accept(&self, key: &BatchKey) -> bool {
@@ -123,11 +142,36 @@ mod tests {
     #[test]
     fn pending_batch_starts_with_one_item_and_accepts_matching_key() {
         let key = BatchKey::new("q", meta(&[("x", "1")]));
-        let batch = PendingBatch::new(key.clone(), item());
+        let batch = PendingBatch::new(key.clone(), item(), true);
         assert_eq!(batch.items.len(), 1);
         assert!(batch.can_accept(&key));
         assert!(batch.can_accept(&BatchKey::new("q", meta(&[("x", "1")]))));
         assert!(!batch.can_accept(&BatchKey::new("q", meta(&[("x", "2")]))));
+    }
+
+    #[test]
+    fn pending_batch_tracks_terminal_and_seen_sequences() {
+        let key = BatchKey::new("q", meta(&[("x", "1")]));
+        let mut item_a = item();
+        item_a.sequence = 5;
+        // First item is non-terminal at seq 5.
+        let mut batch = PendingBatch::new(key, item_a, false);
+        assert_eq!(batch.seen_seq, 5);
+        assert_eq!(batch.completed_seq, None);
+
+        // Terminal item at seq 7 marks 7 as fully completed.
+        let mut item_b = item();
+        item_b.sequence = 7;
+        batch.push(item_b, true);
+        assert_eq!(batch.seen_seq, 7);
+        assert_eq!(batch.completed_seq, Some(7));
+
+        // A later non-terminal item at seq 9 advances `seen` but not `completed`.
+        let mut item_c = item();
+        item_c.sequence = 9;
+        batch.push(item_c, false);
+        assert_eq!(batch.seen_seq, 9);
+        assert_eq!(batch.completed_seq, Some(7));
     }
 
     #[test]

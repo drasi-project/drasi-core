@@ -125,6 +125,9 @@ impl Recorder {
 
 struct MockReactionService {
     recorder: Recorder,
+    /// When set, `process_results` returns an error instead of recording —
+    /// lets recovery tests simulate a downstream outage at runtime.
+    failing: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[tonic::async_trait]
@@ -133,6 +136,10 @@ impl ReactionService for MockReactionService {
         &self,
         request: Request<ProcessResultsRequest>,
     ) -> Result<Response<ProcessResultsResponse>, Status> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Status::unavailable("injected downstream outage"));
+        }
+
         // Snapshot ASCII headers (binary entries intentionally dropped).
         let metadata_headers: std::collections::HashMap<String, String> = request
             .metadata()
@@ -194,6 +201,7 @@ impl ReactionService for MockReactionService {
 pub struct MockServer {
     pub endpoint: String,
     pub recorder: Recorder,
+    failing: std::sync::Arc<std::sync::atomic::AtomicBool>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     handle: tokio::task::JoinHandle<()>,
 }
@@ -206,12 +214,20 @@ impl MockServer {
         }
         let _ = self.handle.await;
     }
+
+    /// Toggle the simulated downstream outage. While `true`, every
+    /// `process_results` call returns an error (and records nothing).
+    pub fn set_failing(&self, failing: bool) {
+        self.failing
+            .store(failing, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Spin up a mock `ReactionService` server bound to an ephemeral
 /// loopback port.
 pub async fn start() -> MockServer {
     let recorder = Recorder::new();
+    let failing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral loopback port");
@@ -221,6 +237,7 @@ pub async fn start() -> MockServer {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let service = MockReactionService {
         recorder: recorder.clone(),
+        failing: failing.clone(),
     };
 
     let handle = tokio::spawn(async move {
@@ -235,6 +252,7 @@ pub async fn start() -> MockServer {
     MockServer {
         endpoint,
         recorder,
+        failing,
         shutdown_tx: Some(shutdown_tx),
         handle,
     }
