@@ -36,9 +36,6 @@ drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 tiberius = { version = "0.12", features = ["chrono", "rust_decimal"] }
-# vendored OpenSSL: build from source so tiberius' native-tls cross-compiles
-# under cargo-zigbuild (glibc-pinned -gnu plugins) without host openssl headers.
-openssl = { version = "0.10", features = ["vendored"] }
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 async-trait = "0.1"
@@ -56,3 +53,10 @@ bytes = "1"
 [features]
 # default = []
 dynamic-plugin = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# native-tls uses OpenSSL only on Linux (Windows: SChannel, macOS: Secure
+# Transport). Vendor it there so the glibc-pinned cargo-zigbuild -gnu plugins
+# build without host OpenSSL headers; scoping it off Windows/macOS avoids
+# unnecessary and toolchain-sensitive OpenSSL-from-source builds.
+openssl = { version = "0.10", features = ["vendored"] }

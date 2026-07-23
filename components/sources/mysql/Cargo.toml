@@ -45,9 +45,6 @@ tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 ordered-float = "3.0"
 mysql_async = { version = "0.37", features = ["binlog"] }
-# vendored OpenSSL: build from source so mysql_async's native-tls cross-compiles
-# under cargo-zigbuild (glibc-pinned -gnu plugins) without host openssl headers.
-openssl = { version = "0.10", features = ["vendored"] }
 mysql_common = { version = "0.37", features = ["binlog"] }
 futures-util = "0.3"
 bytes = "1.0"
@@ -64,3 +61,10 @@ drasi-bootstrap-mysql = { workspace = true }
 drasi-index-rocksdb = { workspace = true }
 env_logger = "0.11"
 tempfile = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# native-tls uses OpenSSL only on Linux (Windows: SChannel, macOS: Secure
+# Transport). Vendor it there so the glibc-pinned cargo-zigbuild -gnu plugins
+# build without host OpenSSL headers; scoping it off Windows/macOS avoids
+# unnecessary and toolchain-sensitive OpenSSL-from-source builds.
+openssl = { version = "0.10", features = ["vendored"] }

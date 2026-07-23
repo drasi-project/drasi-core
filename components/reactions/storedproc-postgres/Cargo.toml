@@ -38,9 +38,6 @@ tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chron
 postgres-types = { version = "0.2", features = ["derive"] }
 postgres-native-tls = "0.5"
 native-tls = "0.2"
-# vendored OpenSSL: build from source so native-tls cross-compiles under
-# cargo-zigbuild (glibc-pinned -gnu plugins) without host openssl headers.
-openssl = { version = "0.10", features = ["vendored"] }
 bytes = "1.0"
 
 # Utilities
@@ -68,3 +65,10 @@ workspace = true
 [features]
 # default = []
 dynamic-plugin = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# native-tls uses OpenSSL only on Linux (Windows: SChannel, macOS: Secure
+# Transport). Vendor it there so the glibc-pinned cargo-zigbuild -gnu plugins
+# build without host OpenSSL headers; scoping it off Windows/macOS avoids
+# unnecessary and toolchain-sensitive OpenSSL-from-source builds.
+openssl = { version = "0.10", features = ["vendored"] }

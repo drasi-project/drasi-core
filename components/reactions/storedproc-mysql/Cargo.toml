@@ -35,9 +35,6 @@ async-trait = "0.1"
 
 # MySQL
 mysql_async = { version = "0.37", default-features = false, features = ["default"] }
-# vendored OpenSSL: build from source so mysql_async's native-tls cross-compiles
-# under cargo-zigbuild (glibc-pinned -gnu plugins) without host openssl headers.
-openssl = { version = "0.10", features = ["vendored"] }
 
 # Utilities
 serde = { version = "1.0", features = ["derive"] }
@@ -63,3 +60,10 @@ workspace = true
 [features]
 # default = []
 dynamic-plugin = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# native-tls uses OpenSSL only on Linux (Windows: SChannel, macOS: Secure
+# Transport). Vendor it there so the glibc-pinned cargo-zigbuild -gnu plugins
+# build without host OpenSSL headers; scoping it off Windows/macOS avoids
+# unnecessary and toolchain-sensitive OpenSSL-from-source builds.
+openssl = { version = "0.10", features = ["vendored"] }
