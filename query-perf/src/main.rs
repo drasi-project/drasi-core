@@ -31,7 +31,7 @@ use drasi_index_rocksdb::{
     element_index::{RocksDbElementIndex, RocksIndexOptions},
     open_unified_db,
     result_index::RocksDbResultIndex,
-    RocksDbSessionControl, RocksDbSessionState,
+    RocksDbSessionControl, RocksDbSessionState, RocksDbTuning,
 };
 use drasi_query_cypher::CypherParser;
 
@@ -117,7 +117,7 @@ async fn main() {
 
         // Open shared RocksDB if either index type needs it (avoids LOCK conflict
         // from opening the same unified DB path twice)
-        let (rocks_db, rocks_session_state) = if test_run_config.element_index_type
+        let (rocks_db, rocks_session_state, rocks_tuning) = if test_run_config.element_index_type
             == IndexType::RocksDB
             || test_run_config.result_index_type == IndexType::RocksDB
         {
@@ -129,11 +129,12 @@ async fn main() {
                 Ok(p) => p,
                 Err(_) => "test-data".to_string(),
             };
-            let db = open_unified_db(&path, &query_id, &options).unwrap();
+            let tuning = RocksDbTuning::default();
+            let db = open_unified_db(&path, &query_id, &options, &tuning).unwrap();
             let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
-            (Some(db), Some(session_state))
+            (Some(db), Some(session_state), Some(tuning))
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         // Configure the correct element index
@@ -154,7 +155,12 @@ async fn main() {
 
                 let db = rocks_db.clone().unwrap();
                 let session_state = rocks_session_state.clone().unwrap();
-                let element_index = RocksDbElementIndex::new(db, options, session_state);
+                let element_index = RocksDbElementIndex::new(
+                    db,
+                    options,
+                    rocks_tuning.clone().unwrap(),
+                    session_state,
+                );
                 element_index.clear().await.unwrap();
 
                 builder.with_element_index(Arc::new(element_index))
@@ -174,7 +180,7 @@ async fn main() {
             IndexType::RocksDB => {
                 let db = rocks_db.unwrap();
                 let session_state = rocks_session_state.clone().unwrap();
-                let ari = RocksDbResultIndex::new(db, session_state);
+                let ari = RocksDbResultIndex::new(db, rocks_tuning.clone().unwrap(), session_state);
                 ari.clear().await.unwrap();
 
                 builder.with_result_index(Arc::new(ari))

@@ -34,8 +34,10 @@ use tokio::task;
 pub(crate) const LIVE_RESULTS_CF: &str = "live_results";
 
 /// Returns the column family descriptor for the live_results CF.
-pub(crate) fn live_results_cf_descriptor() -> ColumnFamilyDescriptor {
-    let opts = Options::default();
+pub(crate) fn live_results_cf_descriptor(
+    tuning: &crate::tuning::RocksDbTuning,
+) -> ColumnFamilyDescriptor {
+    let opts = tuning.base_cf_options(false);
     ColumnFamilyDescriptor::new(LIVE_RESULTS_CF, opts)
 }
 

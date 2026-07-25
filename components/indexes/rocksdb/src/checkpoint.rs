@@ -46,8 +46,10 @@ const CONFIG_HASH_KEY: &str = "config_hash";
 const RESULT_SEQUENCE_PREFIX: &str = "result_sequence:";
 
 /// Returns the column family descriptor for the stream_state CF.
-pub(crate) fn stream_state_cf_descriptor() -> ColumnFamilyDescriptor {
-    let mut opts = Options::default();
+pub(crate) fn stream_state_cf_descriptor(
+    tuning: &crate::tuning::RocksDbTuning,
+) -> ColumnFamilyDescriptor {
+    let mut opts = tuning.base_cf_options(false);
     opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(16));
     ColumnFamilyDescriptor::new(STREAM_STATE_CF, opts)
 }

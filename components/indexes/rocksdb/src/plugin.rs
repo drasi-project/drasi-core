@@ -42,6 +42,7 @@ use crate::future_queue::{self, RocksDbFutureQueue};
 use crate::live_results::{self, RocksDbLiveResultsWriter};
 use crate::outbox::{self, RocksDbOutboxWriter};
 use crate::result_index::{self, RocksDbResultIndex};
+use crate::tuning::RocksDbTuning;
 use crate::{RocksDbSessionControl, RocksDbSessionState};
 
 /// Open a unified RocksDB database with all column families needed for a query.
@@ -62,6 +63,7 @@ pub fn open_unified_db(
     path: &str,
     query_id: &str,
     options: &RocksIndexOptions,
+    tuning: &RocksDbTuning,
 ) -> Result<Arc<OptimisticTransactionDB>, IndexError> {
     // `query_id` is used directly as a directory name under `path`. Reject values
     // that could escape the base directory or otherwise misbehave as a path
@@ -82,7 +84,10 @@ pub fn open_unified_db(
     let mut db_opts = Options::default();
     db_opts.create_if_missing(true);
     db_opts.create_missing_column_families(true);
-    db_opts.set_db_write_buffer_size(128 * 1024 * 1024);
+    // Memtable memory is bounded globally by the shared WriteBufferManager
+    // rather than a per-DB db_write_buffer_size, so the budget holds across
+    // however many query DBs share this tuning.
+    db_opts.set_write_buffer_manager(&tuning.write_buffer_manager);
     db_opts.set_use_direct_reads(options.direct_io);
     db_opts.set_use_direct_io_for_flush_and_compaction(options.direct_io);
 
@@ -92,12 +97,18 @@ pub fn open_unified_db(
         None => return Err(IndexError::NotSupported),
     };
 
-    let mut cfs = element_index::element_cf_descriptors(options);
-    cfs.extend(result_index::result_cf_descriptors());
-    cfs.extend(future_queue::future_queue_cf_descriptors());
-    cfs.push(checkpoint::stream_state_cf_descriptor());
-    cfs.push(outbox::outbox_cf_descriptor());
-    cfs.push(live_results::live_results_cf_descriptor());
+    let mut cfs = element_index::element_cf_descriptors(options, tuning);
+    cfs.extend(result_index::result_cf_descriptors(tuning));
+    cfs.extend(future_queue::future_queue_cf_descriptors(tuning));
+    cfs.push(checkpoint::stream_state_cf_descriptor(tuning));
+    cfs.push(outbox::outbox_cf_descriptor(tuning));
+    cfs.push(live_results::live_results_cf_descriptor(tuning));
+    // The default CF is created implicitly when absent; declare it explicitly
+    // so it uses the shared cache and small buffers instead of RocksDB defaults.
+    cfs.push(rocksdb::ColumnFamilyDescriptor::new(
+        "default",
+        tuning.base_cf_options(false),
+    ));
 
     let db = OptimisticTransactionDB::open_cf_descriptors(&db_opts, db_path, cfs)
         .map_err(IndexError::other)?;
@@ -127,6 +138,7 @@ pub struct RocksDbIndexProvider {
     path: PathBuf,
     enable_archive: bool,
     direct_io: bool,
+    tuning: RocksDbTuning,
 }
 
 impl RocksDbIndexProvider {
@@ -144,10 +156,26 @@ impl RocksDbIndexProvider {
     /// let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
     /// ```
     pub fn new<P: Into<PathBuf>>(path: P, enable_archive: bool, direct_io: bool) -> Self {
+        Self::with_tuning(path, enable_archive, direct_io, RocksDbTuning::default())
+    }
+
+    /// Create a provider with explicit memory tuning.
+    ///
+    /// Pass clones of the same `RocksDbTuning` to several providers to share
+    /// one block cache and write buffer budget across all of them (e.g.
+    /// process-wide across instances). Archive should be left off unless
+    /// queries use the past() functions.
+    pub fn with_tuning<P: Into<PathBuf>>(
+        path: P,
+        enable_archive: bool,
+        direct_io: bool,
+        tuning: RocksDbTuning,
+    ) -> Self {
         Self {
             path: path.into(),
             enable_archive,
             direct_io,
+            tuning,
         }
     }
 
@@ -176,7 +204,7 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
             direct_io: self.direct_io,
         };
 
-        let db = open_unified_db(&path, query_id, &options).map_err(|e| {
+        let db = open_unified_db(&path, query_id, &options, &self.tuning).map_err(|e| {
             log::error!(
                 "Failed to open unified RocksDB for query '{query_id}' at path '{path}': {e}"
             );
@@ -189,10 +217,19 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
         let element_index = Arc::new(RocksDbElementIndex::new(
             db.clone(),
             options,
+            self.tuning.clone(),
             session_state.clone(),
         ));
-        let result_index = Arc::new(RocksDbResultIndex::new(db.clone(), session_state.clone()));
-        let future_queue = Arc::new(RocksDbFutureQueue::new(db.clone(), session_state.clone()));
+        let result_index = Arc::new(RocksDbResultIndex::new(
+            db.clone(),
+            self.tuning.clone(),
+            session_state.clone(),
+        ));
+        let future_queue = Arc::new(RocksDbFutureQueue::new(
+            db.clone(),
+            self.tuning.clone(),
+            session_state.clone(),
+        ));
         let checkpoint_store = Arc::new(RocksDbCheckpointStore::new(db.clone(), session_state));
         let outbox_writer = Arc::new(RocksDbOutboxWriter::new(db.clone()));
         let live_results_writer = Arc::new(RocksDbLiveResultsWriter::new(db));
@@ -290,7 +327,7 @@ mod tests {
         };
 
         let path = temp_dir.path().to_string_lossy().to_string();
-        let result = open_unified_db(&path, "test_query", &options);
+        let result = open_unified_db(&path, "test_query", &options, &RocksDbTuning::default());
         assert!(result.is_ok());
     }
 
@@ -304,7 +341,7 @@ mod tests {
         let path = temp_dir.path().to_string_lossy().to_string();
 
         for bad in ["", ".", "..", "a/b", "../escape", "a\\b", "with\0nul"] {
-            let result = open_unified_db(&path, bad, &options);
+            let result = open_unified_db(&path, bad, &options, &RocksDbTuning::default());
             assert!(
                 result.is_err(),
                 "query_id '{bad}' should be rejected as a path segment"

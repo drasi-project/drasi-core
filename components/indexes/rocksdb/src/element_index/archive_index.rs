@@ -217,7 +217,10 @@ impl ElementArchiveIndex for RocksDbElementIndex {
                     return Err(IndexError::other(err));
                 }
             }
-            if let Err(err) = context.db.create_cf(ARCHIVE_CF, &get_archive_cf_options()) {
+            if let Err(err) = context
+                .db
+                .create_cf(ARCHIVE_CF, &get_archive_cf_options(&context.tuning))
+            {
                 return Err(IndexError::other(err));
             }
             Ok(())
@@ -246,8 +249,8 @@ pub fn insert_archive(
     }
 }
 
-pub(crate) fn get_archive_cf_options() -> Options {
-    let mut opts = Options::default();
+pub(crate) fn get_archive_cf_options(tuning: &crate::tuning::RocksDbTuning) -> Options {
+    let mut opts = tuning.base_cf_options(true);
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
     opts
 }

@@ -37,6 +37,7 @@ use rocksdb::{
 use tokio::task;
 
 use crate::storage_models::{StoredValueAccumulator, StoredValueAccumulatorContainer};
+use crate::tuning::RocksDbTuning;
 use crate::RocksDbSessionState;
 
 /// RocksDB accumulator index store
@@ -46,21 +47,29 @@ use crate::RocksDbSessionState;
 ///     - sorted-sets [set_id + value] -> count {8 byte prefix (set_id)}
 pub struct RocksDbResultIndex {
     db: Arc<OptimisticTransactionDB>,
+    tuning: RocksDbTuning,
     session_state: Arc<RocksDbSessionState>,
 }
 
 const VALUES_CF: &str = "values";
 const SETS_CF: &str = "sorted-sets";
 const METADATA_CF: &str = "metadata";
-const VALUES_BLOCK_CACHE_SIZE: u64 = 32;
 
 impl RocksDbResultIndex {
     /// Create a new RocksDbResultIndex from a shared database handle.
     ///
     /// The database must already have the required column families created.
     /// Use `open_unified_db()` to open a database with all required CFs.
-    pub fn new(db: Arc<OptimisticTransactionDB>, session_state: Arc<RocksDbSessionState>) -> Self {
-        RocksDbResultIndex { db, session_state }
+    pub fn new(
+        db: Arc<OptimisticTransactionDB>,
+        tuning: RocksDbTuning,
+        session_state: Arc<RocksDbSessionState>,
+    ) -> Self {
+        RocksDbResultIndex {
+            db,
+            tuning,
+            session_state,
+        }
     }
 }
 
@@ -140,12 +149,13 @@ impl AccumulatorIndex for RocksDbResultIndex {
 
     async fn clear(&self) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let tuning = self.tuning.clone();
         let task = task::spawn_blocking(move || {
             if let Err(err) = db.drop_cf(VALUES_CF) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(VALUES_CF, &get_value_cf_options()) {
+            if let Err(err) = db.create_cf(VALUES_CF, &get_value_cf_options(&tuning)) {
                 return Err(IndexError::other(err));
             }
 
@@ -153,7 +163,7 @@ impl AccumulatorIndex for RocksDbResultIndex {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(SETS_CF, &get_lss_cf_options()) {
+            if let Err(err) = db.create_cf(SETS_CF, &get_lss_cf_options(&tuning)) {
                 return Err(IndexError::other(err));
             }
             Ok(())
@@ -364,32 +374,30 @@ impl ResultSequenceCounter for RocksDbResultIndex {
     }
 }
 
-pub(crate) fn get_lss_cf_options() -> Options {
-    let mut lss_opts = Options::default();
+pub(crate) fn get_lss_cf_options(tuning: &RocksDbTuning) -> Options {
+    let mut lss_opts = tuning.base_cf_options(false);
     lss_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
     lss_opts.set_merge_operator_associative("increment", increment_merge);
     lss_opts.set_compaction_filter("remove0", compact);
     lss_opts
 }
 
-pub(crate) fn get_value_cf_options() -> Options {
-    let mut values_opts = Options::default();
-    values_opts.optimize_for_point_lookup(VALUES_BLOCK_CACHE_SIZE);
-    values_opts
+pub(crate) fn get_value_cf_options(tuning: &RocksDbTuning) -> Options {
+    tuning.point_lookup_cf_options(true)
 }
 
-pub(crate) fn get_metadata_cf_options() -> Options {
-    let mut values_opts = Options::default();
-    values_opts.optimize_for_point_lookup(1);
-    values_opts
+pub(crate) fn get_metadata_cf_options(tuning: &RocksDbTuning) -> Options {
+    tuning.point_lookup_cf_options(false)
 }
 
 /// Collect all column family descriptors needed by the result index.
-pub(crate) fn result_cf_descriptors() -> Vec<rocksdb::ColumnFamilyDescriptor> {
+pub(crate) fn result_cf_descriptors(
+    tuning: &RocksDbTuning,
+) -> Vec<rocksdb::ColumnFamilyDescriptor> {
     vec![
-        rocksdb::ColumnFamilyDescriptor::new(VALUES_CF, get_value_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(SETS_CF, get_lss_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(METADATA_CF, get_metadata_cf_options()),
+        rocksdb::ColumnFamilyDescriptor::new(VALUES_CF, get_value_cf_options(tuning)),
+        rocksdb::ColumnFamilyDescriptor::new(SETS_CF, get_lss_cf_options(tuning)),
+        rocksdb::ColumnFamilyDescriptor::new(METADATA_CF, get_metadata_cf_options(tuning)),
     ]
 }
 

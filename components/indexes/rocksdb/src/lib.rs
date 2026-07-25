@@ -31,6 +31,7 @@
 //!     .build()?;
 //! ```
 
+mod budget_monitor;
 pub mod checkpoint;
 #[cfg(feature = "plugin-descriptor")]
 mod descriptor;
@@ -42,6 +43,7 @@ mod plugin;
 pub mod result_index;
 mod session_state;
 mod storage_models;
+pub mod tuning;
 
 // Re-export the plugin provider and unified DB opener for easy access
 pub use checkpoint::RocksDbCheckpointStore;
@@ -49,6 +51,7 @@ pub use live_results::RocksDbLiveResultsWriter;
 pub use outbox::RocksDbOutboxWriter;
 pub use plugin::open_unified_db;
 pub use plugin::RocksDbIndexProvider;
+pub use tuning::RocksDbTuning;
 
 #[cfg(feature = "plugin-descriptor")]
 pub use descriptor::{RocksDbIndexConfigDto, RocksDbIndexDescriptor};

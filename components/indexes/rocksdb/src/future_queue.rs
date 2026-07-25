@@ -39,6 +39,7 @@ use crate::RocksDbSessionState;
 ///     - findex [(position_in_query + group_signature) + hash(future_element_ref)] -> due_time {12 byte prefix (position_in_query(4) + group_signature(8))}
 pub struct RocksDbFutureQueue {
     db: Arc<OptimisticTransactionDB>,
+    tuning: crate::tuning::RocksDbTuning,
     session_state: Arc<RocksDbSessionState>,
 }
 
@@ -50,8 +51,16 @@ impl RocksDbFutureQueue {
     ///
     /// The database must already have the required column families created.
     /// Use `open_unified_db()` to open a database with all required CFs.
-    pub fn new(db: Arc<OptimisticTransactionDB>, session_state: Arc<RocksDbSessionState>) -> Self {
-        Self { db, session_state }
+    pub fn new(
+        db: Arc<OptimisticTransactionDB>,
+        tuning: crate::tuning::RocksDbTuning,
+        session_state: Arc<RocksDbSessionState>,
+    ) -> Self {
+        Self {
+            db,
+            tuning,
+            session_state,
+        }
     }
 }
 
@@ -256,12 +265,13 @@ impl FutureQueue for RocksDbFutureQueue {
 
     async fn clear(&self) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let tuning = self.tuning.clone();
         let task = task::spawn_blocking(move || {
             if let Err(err) = db.drop_cf(QUEUE_CF) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(QUEUE_CF, &get_fqueue_cf_options()) {
+            if let Err(err) = db.create_cf(QUEUE_CF, &get_fqueue_cf_options(&tuning)) {
                 return Err(IndexError::other(err));
             }
 
@@ -269,7 +279,7 @@ impl FutureQueue for RocksDbFutureQueue {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(INDEX_CF, &get_findex_cf_options()) {
+            if let Err(err) = db.create_cf(INDEX_CF, &get_findex_cf_options(&tuning)) {
                 return Err(IndexError::other(err));
             }
             Ok(())
@@ -342,22 +352,24 @@ fn encode_index_prefix(position_in_query: u32, group_signature: u64) -> [u8; 12]
     buf
 }
 
-pub(crate) fn get_fqueue_cf_options() -> Options {
-    let mut opts = Options::default();
+pub(crate) fn get_fqueue_cf_options(tuning: &crate::tuning::RocksDbTuning) -> Options {
+    let mut opts = tuning.base_cf_options(false);
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
     opts
 }
 
-pub(crate) fn get_findex_cf_options() -> Options {
-    let mut opts = Options::default();
+pub(crate) fn get_findex_cf_options(tuning: &crate::tuning::RocksDbTuning) -> Options {
+    let mut opts = tuning.base_cf_options(false);
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(12));
     opts
 }
 
 /// Collect all column family descriptors needed by the future queue.
-pub(crate) fn future_queue_cf_descriptors() -> Vec<rocksdb::ColumnFamilyDescriptor> {
+pub(crate) fn future_queue_cf_descriptors(
+    tuning: &crate::tuning::RocksDbTuning,
+) -> Vec<rocksdb::ColumnFamilyDescriptor> {
     vec![
-        rocksdb::ColumnFamilyDescriptor::new(QUEUE_CF, get_fqueue_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(INDEX_CF, get_findex_cf_options()),
+        rocksdb::ColumnFamilyDescriptor::new(QUEUE_CF, get_fqueue_cf_options(tuning)),
+        rocksdb::ColumnFamilyDescriptor::new(INDEX_CF, get_findex_cf_options(tuning)),
     ]
 }

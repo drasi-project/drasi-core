@@ -34,6 +34,7 @@ use crate::storage_models::{
     StoredElement, StoredElementContainer, StoredElementMetadata, StoredElementReference,
     StoredRelation, StoredValue, StoredValueMap,
 };
+use crate::tuning::RocksDbTuning;
 use crate::RocksDbSessionState;
 
 mod archive_index;
@@ -54,6 +55,7 @@ pub struct Context {
     db: Arc<OptimisticTransactionDB>,
     join_spec_by_label: RwLock<JoinSpecByLabel>,
     options: RocksIndexOptions,
+    tuning: RocksDbTuning,
     session_state: Arc<RocksDbSessionState>,
 }
 
@@ -68,7 +70,6 @@ const SLOT_CF: &str = "slots";
 const INBOUND_CF: &str = "inbound";
 const OUTBOUND_CF: &str = "outbound";
 const PARTIAL_CF: &str = "partial";
-const ELEMENT_BLOCK_CACHE_SIZE: u64 = 32;
 
 impl RocksDbElementIndex {
     /// Create a new RocksDbElementIndex from a shared database handle.
@@ -78,6 +79,7 @@ impl RocksDbElementIndex {
     pub fn new(
         db: Arc<OptimisticTransactionDB>,
         options: RocksIndexOptions,
+        tuning: RocksDbTuning,
         session_state: Arc<RocksDbSessionState>,
     ) -> Self {
         RocksDbElementIndex {
@@ -85,6 +87,7 @@ impl RocksDbElementIndex {
                 db,
                 join_spec_by_label: RwLock::new(HashMap::new()),
                 options,
+                tuning,
                 session_state,
             }),
         }
@@ -326,30 +329,36 @@ impl ElementIndex for RocksDbElementIndex {
 
             if let Err(err) = context
                 .db
-                .create_cf(ELEMENTS_CF, &get_elements_cf_options())
-            {
-                return Err(IndexError::other(err));
-            }
-
-            if let Err(err) = context.db.create_cf(SLOT_CF, &get_elements_cf_options()) {
-                return Err(IndexError::other(err));
-            }
-
-            if let Err(err) = context
-                .db
-                .create_cf(INBOUND_CF, &get_inout_index_cf_options())
+                .create_cf(ELEMENTS_CF, &get_elements_cf_options(&context.tuning))
             {
                 return Err(IndexError::other(err));
             }
 
             if let Err(err) = context
                 .db
-                .create_cf(OUTBOUND_CF, &get_inout_index_cf_options())
+                .create_cf(SLOT_CF, &get_elements_cf_options(&context.tuning))
             {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context.db.create_cf(PARTIAL_CF, &get_partial_cf_options()) {
+            if let Err(err) = context
+                .db
+                .create_cf(INBOUND_CF, &get_inout_index_cf_options(&context.tuning))
+            {
+                return Err(IndexError::other(err));
+            }
+
+            if let Err(err) = context
+                .db
+                .create_cf(OUTBOUND_CF, &get_inout_index_cf_options(&context.tuning))
+            {
+                return Err(IndexError::other(err));
+            }
+
+            if let Err(err) = context
+                .db
+                .create_cf(PARTIAL_CF, &get_partial_cf_options(&context.tuning))
+            {
                 return Err(IndexError::other(err));
             }
 
@@ -370,40 +379,39 @@ impl ElementIndex for RocksDbElementIndex {
     }
 }
 
-pub(crate) fn get_partial_cf_options() -> Options {
-    let mut partial_opts = Options::default();
+pub(crate) fn get_partial_cf_options(tuning: &RocksDbTuning) -> Options {
+    let mut partial_opts = tuning.base_cf_options(false);
     partial_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
     partial_opts
 }
 
-pub(crate) fn get_inout_index_cf_options() -> Options {
-    let mut inout_bound_opts = Options::default();
+pub(crate) fn get_inout_index_cf_options(tuning: &RocksDbTuning) -> Options {
+    let mut inout_bound_opts = tuning.base_cf_options(true);
     inout_bound_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(18));
     inout_bound_opts
 }
 
-pub(crate) fn get_elements_cf_options() -> Options {
-    let mut elements_opts = Options::default();
-    elements_opts.optimize_for_point_lookup(ELEMENT_BLOCK_CACHE_SIZE);
-    elements_opts
+pub(crate) fn get_elements_cf_options(tuning: &RocksDbTuning) -> Options {
+    tuning.point_lookup_cf_options(true)
 }
 
 /// Collect all column family descriptors needed by the element index.
 pub(crate) fn element_cf_descriptors(
     options: &RocksIndexOptions,
+    tuning: &RocksDbTuning,
 ) -> Vec<rocksdb::ColumnFamilyDescriptor> {
     let mut cfs = vec![
-        rocksdb::ColumnFamilyDescriptor::new(ELEMENTS_CF, get_elements_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(SLOT_CF, get_elements_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(INBOUND_CF, get_inout_index_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(OUTBOUND_CF, get_inout_index_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(PARTIAL_CF, get_partial_cf_options()),
+        rocksdb::ColumnFamilyDescriptor::new(ELEMENTS_CF, get_elements_cf_options(tuning)),
+        rocksdb::ColumnFamilyDescriptor::new(SLOT_CF, get_elements_cf_options(tuning)),
+        rocksdb::ColumnFamilyDescriptor::new(INBOUND_CF, get_inout_index_cf_options(tuning)),
+        rocksdb::ColumnFamilyDescriptor::new(OUTBOUND_CF, get_inout_index_cf_options(tuning)),
+        rocksdb::ColumnFamilyDescriptor::new(PARTIAL_CF, get_partial_cf_options(tuning)),
     ];
 
     if options.archive_enabled {
         cfs.push(rocksdb::ColumnFamilyDescriptor::new(
             archive_index::ARCHIVE_CF,
-            archive_index::get_archive_cf_options(),
+            archive_index::get_archive_cf_options(tuning),
         ));
     }
 

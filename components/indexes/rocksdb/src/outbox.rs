@@ -31,8 +31,10 @@ use tokio::task;
 pub(crate) const OUTBOX_CF: &str = "outbox";
 
 /// Returns the column family descriptor for the outbox CF.
-pub(crate) fn outbox_cf_descriptor() -> ColumnFamilyDescriptor {
-    let opts = Options::default();
+pub(crate) fn outbox_cf_descriptor(
+    tuning: &crate::tuning::RocksDbTuning,
+) -> ColumnFamilyDescriptor {
+    let opts = tuning.base_cf_options(false);
     ColumnFamilyDescriptor::new(OUTBOX_CF, opts)
 }
 

@@ -24,7 +24,7 @@ use std::sync::Arc;
 use drasi_core::interface::{LiveResultsWriter, OutboxWriter, RowMutation};
 use drasi_index_rocksdb::{
     element_index::RocksIndexOptions, open_unified_db, RocksDbLiveResultsWriter,
-    RocksDbOutboxWriter,
+    RocksDbOutboxWriter, RocksDbTuning,
 };
 use tempfile::TempDir;
 
@@ -34,7 +34,8 @@ fn open_db(path: &str, query_id: &str) -> Arc<rocksdb::OptimisticTransactionDB> 
         archive_enabled: false,
         direct_io: false,
     };
-    open_unified_db(path, query_id, &options).expect("Failed to open RocksDB")
+    open_unified_db(path, query_id, &options, &RocksDbTuning::default())
+        .expect("Failed to open RocksDB")
 }
 
 // ─── OutboxWriter Tests ──────────────────────────────────────────────────────

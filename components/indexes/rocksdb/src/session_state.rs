@@ -306,6 +306,7 @@ mod tests {
     use super::*;
     use crate::element_index::RocksIndexOptions;
     use crate::open_unified_db;
+    use crate::tuning::RocksDbTuning;
 
     fn setup_test_db() -> (tempfile::TempDir, Arc<OptimisticTransactionDB>) {
         let dir = tempfile::TempDir::new().expect("failed to create temp dir");
@@ -313,8 +314,13 @@ mod tests {
             archive_enabled: false,
             direct_io: false,
         };
-        let db = open_unified_db(dir.path().to_str().expect("path"), "test", &options)
-            .expect("failed to open db");
+        let db = open_unified_db(
+            dir.path().to_str().expect("path"),
+            "test",
+            &options,
+            &RocksDbTuning::default(),
+        )
+        .expect("failed to open db");
         (dir, db)
     }
 
