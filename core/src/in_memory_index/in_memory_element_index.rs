@@ -81,7 +81,14 @@ impl InMemoryElementIndex {
 
     async fn clear_slot_affinity(&self, element: &Element) -> Result<(), IndexError> {
         let mut af_guard = self.slot_affinity.write().await;
-        let affinity = af_guard.entry(element.get_reference().clone()).or_default();
+        // Remove the entry rather than draining it in place, otherwise an empty
+        // HashSet is retained for every element that is ever deleted, leaking
+        // memory proportional to total element churn. Callers that update a live
+        // element (`set_element`) re-insert affinity via `set_slot_affinity`.
+        let affinity = match af_guard.remove(element.get_reference()) {
+            Some(affinity) => affinity,
+            None => return Ok(()),
+        };
 
         match element {
             Element::Node {
@@ -90,7 +97,7 @@ impl InMemoryElementIndex {
             } => {
                 let mut guard = self.element_by_slot.write().await;
 
-                for old_slot in affinity.drain() {
+                for old_slot in affinity {
                     guard.remove(&(old_slot, metadata.reference.clone()));
                 }
             }
@@ -103,7 +110,7 @@ impl InMemoryElementIndex {
                 let mut in_guard = self.element_by_slot_in.write().await;
                 let mut out_guard = self.element_by_slot_out.write().await;
 
-                for old_slot in affinity.drain() {
+                for old_slot in affinity {
                     if let Some(set) = in_guard.get_mut(&(old_slot, in_node.clone())) {
                         set.remove(&metadata.reference);
                     }
@@ -1118,5 +1125,78 @@ mod tests {
             let partial_joins = guard.get(&(query_join.id.clone(), existing_hash)).unwrap();
             assert!(partial_joins.get(join_key).unwrap().contains(&existing_ref));
         }
+    }
+
+    /// Regression test for the `slot_affinity` memory leak: after an element is
+    /// deleted, no empty `slot_affinity` entry should be retained for it.
+    #[tokio::test]
+    async fn test_delete_element_prunes_slot_affinity() {
+        let index = InMemoryElementIndex::new();
+
+        let element_ref = ElementReference::new("source1", "node1");
+        let element = create_test_node("source1", "node1", "Person");
+
+        index.set_element(&element, &vec![0, 1]).await.unwrap();
+
+        // A live element should have a slot_affinity entry.
+        {
+            let guard = index.slot_affinity.read().await;
+            assert!(guard.contains_key(&element_ref));
+        }
+
+        index.delete_element(&element_ref).await.unwrap();
+
+        // After deletion the entry must be removed entirely, not left empty.
+        {
+            let guard = index.slot_affinity.read().await;
+            assert!(
+                !guard.contains_key(&element_ref),
+                "slot_affinity should not retain an entry for a deleted element"
+            );
+        }
+    }
+
+    /// High-churn scenario: repeatedly creating and deleting distinct elements
+    /// must not cause `slot_affinity` to grow without bound.
+    #[tokio::test]
+    async fn test_element_churn_does_not_grow_slot_affinity() {
+        let index = InMemoryElementIndex::new();
+
+        for i in 0..1000 {
+            let element_id = format!("node{i}");
+            let element_ref = ElementReference::new("source1", &element_id);
+            let element = create_test_node("source1", &element_id, "Person");
+
+            index.set_element(&element, &vec![0]).await.unwrap();
+            index.delete_element(&element_ref).await.unwrap();
+        }
+
+        let guard = index.slot_affinity.read().await;
+        assert!(
+            guard.is_empty(),
+            "slot_affinity should be empty after all churned elements are deleted, but had {} entries",
+            guard.len()
+        );
+    }
+
+    /// Updating a live element must keep its `slot_affinity` entry intact, since
+    /// `set_element` clears then re-inserts affinity.
+    #[tokio::test]
+    async fn test_update_element_retains_slot_affinity() {
+        let index = InMemoryElementIndex::new();
+
+        let element_ref = ElementReference::new("source1", "node1");
+        let element = create_test_node("source1", "node1", "Person");
+
+        index.set_element(&element, &vec![0]).await.unwrap();
+
+        // Update the same element with a different slot affinity.
+        index.set_element(&element, &vec![1, 2]).await.unwrap();
+
+        let guard = index.slot_affinity.read().await;
+        let affinity = guard
+            .get(&element_ref)
+            .expect("live element should retain a slot_affinity entry after update");
+        assert_eq!(affinity, &HashSet::from([1, 2]));
     }
 }
