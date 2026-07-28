@@ -81,7 +81,12 @@ impl InMemoryElementIndex {
 
     async fn clear_slot_affinity(&self, element: &Element) -> Result<(), IndexError> {
         let mut af_guard = self.slot_affinity.write().await;
-        let affinity = af_guard.entry(element.get_reference().clone()).or_default();
+        let element_ref = element.get_reference();
+        let affinity = match af_guard.get_mut(element_ref) {
+            Some(affinity) => affinity,
+            // No recorded affinity means there is nothing to clear.
+            None => return Ok(()),
+        };
 
         match element {
             Element::Node {
@@ -122,6 +127,10 @@ impl InMemoryElementIndex {
                 }
             }
         };
+
+        // The affinity set was fully drained above; remove its entry so the
+        // slot_affinity map does not retain empty sets for deleted elements.
+        af_guard.remove(element_ref);
 
         Ok(())
     }
@@ -1187,7 +1196,6 @@ mod tests {
         }
     }
 
-<<<<<<< HEAD
     /// Regression test for issue #641: emptied partial-join containers must be
     /// pruned so `partial_joins` does not grow unbounded for high-cardinality /
     /// high-churn join values.
@@ -1312,7 +1320,8 @@ mod tests {
             )
             .await;
         assert!(versions.is_ok());
-=======
+    }
+
     /// Regression test for issue #642: deleting a relation must prune the now-empty
     /// `(slot, node)` entries from `element_by_slot_in` / `element_by_slot_out` instead
     /// of leaving empty `HashSet`s behind, which would leak memory over time.
@@ -1360,6 +1369,43 @@ mod tests {
             index.element_by_slot_out.read().await.is_empty(),
             "element_by_slot_out should be empty after all relations are deleted"
         );
+        assert!(
+            index.slot_affinity.read().await.is_empty(),
+            "slot_affinity should be empty after all relations are deleted"
+        );
+    }
+
+    /// Regression test for the multi-slot case: a relation assigned to several slots must
+    /// have every `(slot, node)` entry pruned on delete, since `clear_slot_affinity`
+    /// iterates over all slots in the affinity set.
+    #[tokio::test]
+    async fn test_slot_maps_pruned_multi_slot() {
+        let index = InMemoryElementIndex::new();
+
+        let rel = create_test_relation("source1", "rel1", "KNOWS", "in1", "out1");
+        index.set_element(&rel, &vec![0, 1, 2]).await.unwrap();
+
+        // One (slot, node) entry per slot for both in and out maps.
+        assert_eq!(index.element_by_slot_in.read().await.len(), 3);
+        assert_eq!(index.element_by_slot_out.read().await.len(), 3);
+
+        index
+            .delete_element(&ElementReference::new("source1", "rel1"))
+            .await
+            .unwrap();
+
+        assert!(
+            index.element_by_slot_in.read().await.is_empty(),
+            "all in-slot entries should be pruned across every slot"
+        );
+        assert!(
+            index.element_by_slot_out.read().await.is_empty(),
+            "all out-slot entries should be pruned across every slot"
+        );
+        assert!(
+            index.slot_affinity.read().await.is_empty(),
+            "slot_affinity should be pruned for the deleted relation"
+        );
     }
 
     /// Ensure pruning does not drop a shared `(slot, node)` entry while another relation
@@ -1402,6 +1448,5 @@ mod tests {
 
         assert!(index.element_by_slot_in.read().await.is_empty());
         assert!(index.element_by_slot_out.read().await.is_empty());
->>>>>>> 857010df (Fix memory leak in InMemoryElementIndex slot maps)
     }
 }
