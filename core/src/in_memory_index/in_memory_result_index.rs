@@ -172,6 +172,10 @@ impl LazySortedSetStore for InMemoryResultIndex {
             set.remove(&value);
         }
 
+        if set.is_empty() {
+            data.remove(&set_id);
+        }
+
         Ok(())
     }
 }
@@ -194,5 +198,57 @@ impl ResultSequenceCounter for InMemoryResultIndex {
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
         let data = self.sequence.read().await;
         Ok(data.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ordered_float::OrderedFloat;
+
+    #[tokio::test]
+    async fn increment_value_count_prunes_emptied_set_id() {
+        let index = InMemoryResultIndex::new();
+        let set_id = 42u64;
+        let value = OrderedFloat(1.5f64);
+
+        // Add a value, then drive its count back to zero.
+        index.increment_value_count(set_id, value, 1).await.unwrap();
+        index
+            .increment_value_count(set_id, value, -1)
+            .await
+            .unwrap();
+
+        // The value is gone...
+        assert_eq!(index.get_value_count(set_id, value).await.unwrap(), 0);
+        assert_eq!(index.get_next(set_id, None).await.unwrap(), None);
+
+        // ...and the now-empty inner BTreeMap must not be retained.
+        let data = index.sorted_sets.read().await;
+        assert!(
+            !data.contains_key(&set_id),
+            "emptied set_id should be pruned from sorted_sets"
+        );
+        assert!(data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn increment_value_count_retains_nonempty_set_id() {
+        let index = InMemoryResultIndex::new();
+        let set_id = 7u64;
+        let a = OrderedFloat(1.0f64);
+        let b = OrderedFloat(2.0f64);
+
+        index.increment_value_count(set_id, a, 1).await.unwrap();
+        index.increment_value_count(set_id, b, 1).await.unwrap();
+
+        // Remove only one value; the set_id must remain because b still has a count.
+        index.increment_value_count(set_id, a, -1).await.unwrap();
+
+        assert_eq!(index.get_value_count(set_id, a).await.unwrap(), 0);
+        assert_eq!(index.get_value_count(set_id, b).await.unwrap(), 1);
+
+        let data = index.sorted_sets.read().await;
+        assert!(data.contains_key(&set_id));
     }
 }
