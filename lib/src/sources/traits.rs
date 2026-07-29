@@ -263,6 +263,32 @@ pub trait Source: Send + Sync {
         settings: crate::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse>;
 
+    /// The IDs of continuous queries whose results feed this source.
+    ///
+    /// Most sources ingest data from an external system and return an empty
+    /// list (the default). Sources that instead derive their graph from the
+    /// results of one or more continuous queries — e.g. a state machine that
+    /// maps query results to entity-state nodes — return those query IDs here.
+    ///
+    /// After the source starts and its subscribed queries are running, the host
+    /// subscribes on the source's behalf and forwards each result via
+    /// [`enqueue_query_result`](Source::enqueue_query_result). This mirrors the
+    /// query-subscription model used by reactions.
+    fn subscribed_query_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Enqueue a query result for processing.
+    ///
+    /// The host calls this to forward query results to the source after
+    /// subscribing on its behalf (see [`subscribed_query_ids`](Source::subscribed_query_ids)).
+    /// The default implementation is a no-op. Sources that consume query results
+    /// should delegate to
+    /// [`SourceBase::enqueue_query_result`](crate::sources::base::SourceBase::enqueue_query_result).
+    async fn enqueue_query_result(&self, _result: QueryResult) -> Result<()> {
+        Ok(())
+    }
+
     /// Downcast helper for testing - allows access to concrete types
     fn as_any(&self) -> &dyn std::any::Any;
 
@@ -406,6 +432,14 @@ impl Source for Box<dyn Source + 'static> {
         settings: crate::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
         (**self).subscribe(settings).await
+    }
+
+    fn subscribed_query_ids(&self) -> Vec<String> {
+        (**self).subscribed_query_ids()
+    }
+
+    async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+        (**self).enqueue_query_result(result).await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

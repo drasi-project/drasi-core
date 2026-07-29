@@ -62,3 +62,7 @@ serial_test = "3"
 im = "15"
 tokio-stream = "0.1"
 async-stream = "0.3"
+# End-to-end dynamic source query-subscription test dependencies
+drasi-source-application = { path = "../sources/application" }
+drasi-reaction-application = { path = "../reactions/application" }
+drasi-state-store-redb = { path = "../state_stores/redb" }

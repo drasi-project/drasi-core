@@ -1,0 +1,30 @@
+[package]
+name = "orders-state-machine-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Drasi example: a self-driving order lifecycle with the state machine source, Postgres, a stored-procedure reaction, and a dashboard"
+
+# Keep this crate independent from the parent workspace
+[workspace]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+drasi-source-postgres = { path = "../../../components/sources/postgres" }
+drasi-bootstrap-postgres = { path = "../../../components/bootstrappers/postgres" }
+drasi-source-state-machine = { path = "../../../components/sources/state-machine" }
+drasi-reaction-storedproc-postgres = { path = "../../../components/reactions/storedproc-postgres" }
+drasi-reaction-dashboard = { path = "../../../components/reactions/dashboard" }
+drasi-state-store-redb = { path = "../../../components/state_stores/redb" }
+
+anyhow = "1.0"
+env_logger = "0.11"
+log = "0.4"
+serde_json = "1.0"
+serde_yaml = "0.9"
+tokio = { version = "1.6", features = ["full"] }
+tokio-postgres = "0.7"
+
+[[bin]]
+name = "orders-state-machine-example"
+path = "main.rs"

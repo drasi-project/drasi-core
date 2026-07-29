@@ -355,6 +355,17 @@ drasi_ffi_primitives::ffi_vtable! {
         /// handle. The source can stop tracking the resume position for this
         /// query.
         fn remove_position_handle_fn(state: *mut, query_id: FfiStr) -> FfiResult,
+
+        // Host-managed query subscription forwarding (push-based)
+        /// Returns the IDs of the continuous queries whose results feed this
+        /// source (empty for ordinary sources). Mirrors the reaction
+        /// `query_ids_fn`.
+        fn subscribed_query_ids_fn(state: *const) -> FfiStringArray,
+        /// The host calls this once to start push-based query-result delivery.
+        /// The plugin spawns a forwarder task that reads from the host callback
+        /// and calls `source.enqueue_query_result()` for each item. Mirrors the
+        /// reaction `start_result_push_fn`.
+        fn start_result_push_fn(state: *mut, callback: FfiResultPushCallbackFn, callback_ctx: *mut c_void),
     }
 }
 

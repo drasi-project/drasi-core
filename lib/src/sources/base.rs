@@ -83,6 +83,11 @@ pub struct SourceBaseParams {
     pub bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>,
     /// Whether this source should auto-start - defaults to true
     pub auto_start: bool,
+    /// Capacity of the query-result priority queue - defaults to 10000.
+    ///
+    /// Only relevant for sources that subscribe to continuous-query results
+    /// (see [`Source::subscribed_query_ids`](crate::sources::Source::subscribed_query_ids)).
+    pub priority_queue_capacity: Option<usize>,
 }
 
 impl std::fmt::Debug for SourceBaseParams {
@@ -114,6 +119,7 @@ impl SourceBaseParams {
             state_store: None,
             bootstrap_provider: None,
             auto_start: true,
+            priority_queue_capacity: None,
         }
     }
 
@@ -153,6 +159,14 @@ impl SourceBaseParams {
     /// started manually via `start_source()`.
     pub fn with_auto_start(mut self, auto_start: bool) -> Self {
         self.auto_start = auto_start;
+        self
+    }
+
+    /// Set the capacity of the query-result priority queue.
+    ///
+    /// Only relevant for sources that subscribe to continuous-query results.
+    pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
+        self.priority_queue_capacity = Some(capacity);
         self
     }
 }
@@ -267,6 +281,11 @@ pub struct SourceBase {
     /// [`SourceBase::take_pending_initial_bootstrap`] to decide whether to wait
     /// for the snapshot boundary. Reset by `reset_bootstrap_boundary` on start.
     pending_initial_bootstrap: Arc<AtomicBool>,
+    /// Timestamp-ordered queue of query results for sources that subscribe to
+    /// continuous queries. Populated by [`SourceBase::enqueue_query_result`]
+    /// (called by the host's forwarder) and drained by the source's own
+    /// processing loop. Unused by sources that do not subscribe to queries.
+    pub priority_queue: PriorityQueue<QueryResult>,
 }
 
 /// Publish a bootstrap-to-CDC boundary token into a `watch` sender using the
@@ -345,6 +364,7 @@ impl SourceBase {
             bootstrap_boundary: Arc::new(tokio::sync::watch::channel(None).0),
             has_bootstrap_provider: Arc::new(AtomicBool::new(has_bootstrap_provider)),
             pending_initial_bootstrap: Arc::new(AtomicBool::new(false)),
+            priority_queue: PriorityQueue::new(params.priority_queue_capacity.unwrap_or(10000)),
         })
     }
 
@@ -638,6 +658,7 @@ impl SourceBase {
             bootstrap_boundary: self.bootstrap_boundary.clone(),
             has_bootstrap_provider: self.has_bootstrap_provider.clone(),
             pending_initial_bootstrap: self.pending_initial_bootstrap.clone(),
+            priority_queue: self.priority_queue.clone(),
         }
     }
 
@@ -668,6 +689,17 @@ impl SourceBase {
     /// Get the source ID
     pub fn get_id(&self) -> &str {
         &self.id
+    }
+
+    /// Enqueue a query result for processing.
+    ///
+    /// The host calls this (via [`Source::enqueue_query_result`](crate::sources::Source::enqueue_query_result))
+    /// to forward results from the source's subscribed queries. Results are held
+    /// in a timestamp-ordered priority queue and should be drained by the source's
+    /// own processing loop via `self.base.priority_queue.dequeue()`.
+    pub async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+        self.priority_queue.enqueue_wait(Arc::new(result)).await;
+        Ok(())
     }
 
     /// Create a streaming receiver for a query subscription

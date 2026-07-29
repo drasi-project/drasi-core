@@ -51,6 +51,7 @@ build-test-plugins:
 	cargo build --lib -p drasi-reaction-sse --features drasi-reaction-sse/dynamic-plugin
 	cargo build --lib -p drasi-reaction-snapshot-test
 	cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
+	cargo build --lib -p drasi-source-state-machine --features drasi-source-state-machine/dynamic-plugin
 	@mkdir -p $(PLUGIN_OUT_DIR)
 	@echo "=== Copying plugins to $(PLUGIN_OUT_DIR) ==="
 	@for ext in dylib so dll; do \
@@ -59,11 +60,13 @@ build-test-plugins:
 		         target/debug/libdrasi_reaction_sse.$$ext \
 		         target/debug/libdrasi_reaction_snapshot_test.$$ext \
 		         target/debug/libdrasi_identity_test.$$ext \
+		         target/debug/libdrasi_source_state_machine.$$ext \
 		         target/debug/drasi_source_mock.$$ext \
 		         target/debug/drasi_reaction_log.$$ext \
 		         target/debug/drasi_reaction_sse.$$ext \
 		         target/debug/drasi_reaction_snapshot_test.$$ext \
-		         target/debug/drasi_identity_test.$$ext; do \
+		         target/debug/drasi_identity_test.$$ext \
+		         target/debug/drasi_source_state_machine.$$ext; do \
 			[ -f "$$f" ] && cp "$$f" $(PLUGIN_OUT_DIR)/ || true; \
 		done; \
 	done
@@ -73,6 +76,7 @@ build-test-plugins:
 test-host-sdk: build-test-plugins
 	@echo "=== Running host-sdk integration tests ==="
 	cargo test -p drasi-host-sdk --test integration_test -- --test-threads=1
+	cargo test -p drasi-host-sdk --test source_query_subscription_e2e -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
 
 # Deterministic cross-cdylib layout-mismatch regression for issue #602.

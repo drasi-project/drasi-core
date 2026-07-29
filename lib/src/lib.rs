@@ -58,6 +58,8 @@ pub mod identity;
 /// Recovery policy and error types for checkpoint-based recovery
 pub mod recovery;
 
+pub mod consumption;
+
 // ============================================================================
 // Internal Modules (crate-private, but visible to integration tests)
 // ============================================================================
