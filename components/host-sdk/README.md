@@ -65,15 +65,17 @@ The result is that the rest of the server code works with normal Rust trait obje
 ### Loading plugins
 
 ```rust
-use drasi_host_sdk::{PluginLoader, PluginLoaderConfig};
+use drasi_host_sdk::{PluginLoader, PluginLoaderConfig, DEFAULT_PLUGIN_FILE_PATTERNS};
 
 let config = PluginLoaderConfig {
     plugin_dir: PathBuf::from("./plugins"),
-    file_patterns: vec![
-        "libdrasi_source_*".to_string(),
-        "libdrasi_reaction_*".to_string(),
-        "libdrasi_bootstrap_*".to_string(),
-    ],
+    // Discovers every plugin type (source, reaction, bootstrap, secret-store,
+    // identity, and any future type) via the shared `drasi_` prefix. Supply a
+    // narrower list only if you deliberately want to load a subset.
+    file_patterns: DEFAULT_PLUGIN_FILE_PATTERNS
+        .iter()
+        .map(|p| p.to_string())
+        .collect(),
 };
 
 let loader = PluginLoader::new(config);
@@ -151,7 +153,7 @@ The `OciRegistryClient` supports downloading plugins from OCI registries and opt
 
 ## Plugin Load Sequence
 
-1. **Discovery** — scans the plugin directory for files matching configured glob patterns (e.g., `libdrasi_source_*`), groups them by base name (stripping all known extensions: `.dylib`, `.so`, `.dll`, `.rlib`, `.rmeta`, `.d`)
+1. **Discovery** — scans the plugin directory for files matching configured glob patterns (the `DEFAULT_PLUGIN_FILE_PATTERNS` — `libdrasi_*` / `drasi_*` — match every plugin type), groups them by base name (stripping all known extensions: `.dylib`, `.so`, `.dll`, `.rlib`, `.rmeta`, `.d`)
 2. **Extension filtering** — for each plugin group, selects only cdylib files (`.dylib`, `.so`, `.dll`). Non-cdylib Cargo artifacts (`.rlib`, `.d`, `.rmeta`) are silently ignored. If multiple cdylib extensions exist for the same plugin, an error is logged and the plugin is skipped (ambiguous)
 3. **Library open** — `libloading::Library::new(path)` loads the `.so`/`.dylib`/`.dll`
 4. **Metadata validation** — resolves `drasi_plugin_metadata()` symbol, checks SDK version (major.minor match) and target triple
