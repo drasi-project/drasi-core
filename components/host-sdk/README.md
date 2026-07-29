@@ -65,17 +65,15 @@ The result is that the rest of the server code works with normal Rust trait obje
 ### Loading plugins
 
 ```rust
-use drasi_host_sdk::{PluginLoader, PluginLoaderConfig, DEFAULT_PLUGIN_FILE_PATTERNS};
+use std::path::PathBuf;
+use drasi_host_sdk::{PluginLoader, PluginLoaderConfig, default_plugin_file_patterns};
 
 let config = PluginLoaderConfig {
     plugin_dir: PathBuf::from("./plugins"),
     // Discovers every plugin type (source, reaction, bootstrap, secret-store,
     // identity, and any future type) via the shared `drasi_` prefix. Supply a
     // narrower list only if you deliberately want to load a subset.
-    file_patterns: DEFAULT_PLUGIN_FILE_PATTERNS
-        .iter()
-        .map(|p| p.to_string())
-        .collect(),
+    file_patterns: default_plugin_file_patterns(),
 };
 
 let loader = PluginLoader::new(config);
