@@ -15,9 +15,11 @@
 //! Common functionality shared across reaction implementations.
 
 pub mod base;
+pub mod checkpoint_state;
 pub mod config;
 pub mod templates;
 
 pub use base::ReactionBase;
+pub use checkpoint_state::{batch_checkpoint_candidates, CheckpointState, FailureAction};
 pub use config::AdaptiveBatchConfig;
 pub use templates::{OperationType, QueryConfig, TemplateRouting, TemplateSpec};
