@@ -414,9 +414,7 @@ impl MqttConnection {
                 }
                 Err(e) => {
                     trial += 1;
-                    error!(
-                        "Failed to connect using MQTT v5 options on trial {trial}: {e:?}",
-                    );
+                    error!("Failed to connect using MQTT v5 options on trial {trial}: {e:?}",);
                     // delay before retrying
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
@@ -457,9 +455,7 @@ impl MqttConnection {
                 }
                 Err(e) => {
                     trial += 1;
-                    error!(
-                        "Failed to connect using MQTT v3 options on trial {trial}: {e:?}",
-                    );
+                    error!("Failed to connect using MQTT v3 options on trial {trial}: {e:?}",);
                     // delay before retrying
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }

@@ -624,7 +624,7 @@ async fn test_mqtt_reconnection_and_loopbackoff() -> Result<()> {
 
     wait_for_source_running(&core, &source_slot_name).await?;
 
-    // stop the contianer to trigger reconnection attempts
+    // stop the container to trigger reconnection attempts
     guard.cleanup().await;
     tokio::time::sleep(Duration::from_secs(16)).await; // wait for a few seconds to allow the core to attempt reconnections
 
