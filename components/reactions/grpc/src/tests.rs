@@ -37,6 +37,32 @@ fn test_grpc_builder_defaults() {
 }
 
 #[test]
+fn test_grpc_recovery_archetype_defaults() {
+    use drasi_lib::recovery::ReactionRecoveryPolicy;
+    let reaction = GrpcReactionBuilder::new("test-reaction").build().unwrap();
+    // gRPC is a stateless at-least-once trigger reaction (archetype 2a).
+    assert!(!reaction.is_durable());
+    assert!(!reaction.needs_snapshot_on_fresh_start());
+    assert_eq!(
+        reaction.default_recovery_policy(),
+        ReactionRecoveryPolicy::Strict
+    );
+}
+
+#[test]
+fn test_grpc_builder_recovery_policy_override() {
+    use drasi_lib::recovery::ReactionRecoveryPolicy;
+    let reaction = GrpcReactionBuilder::new("test-reaction")
+        .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap)
+        .build()
+        .unwrap();
+    assert_eq!(
+        reaction.base.recovery_policy,
+        Some(ReactionRecoveryPolicy::AutoSkipGap)
+    );
+}
+
+#[test]
 fn test_grpc_builder_custom_values() {
     let reaction = GrpcReaction::builder("test-reaction")
         .with_endpoint("grpc://api.example.com:50052")
@@ -580,7 +606,7 @@ mod integration {
     use crate::test_server;
     use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
     use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-    use drasi_lib::reactions::common::AdaptiveBatchConfig;
+    use drasi_lib::reactions::common::{AdaptiveBatchConfig, CheckpointState};
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -770,8 +796,271 @@ mod integration {
         ReactionBase::new(ReactionBaseParams::new("test-grpc", vec!["q1".to_string()]))
     }
 
+    /// A base wired to an in-memory state store (via the runtime context) and
+    /// set Running, so tests can pre-seed and inspect persisted checkpoints with
+    /// `base.read_checkpoint` / `base.write_checkpoint`.
+    async fn running_base_with_store() -> ReactionBase {
+        let base = running_base();
+        let store = std::sync::Arc::new(drasi_lib::MemoryStateStoreProvider::new());
+        let (graph, _rx) = drasi_lib::component_graph::ComponentGraph::new("test-instance");
+        let context = drasi_lib::context::ReactionRuntimeContext::new(
+            "test-instance",
+            "test-grpc",
+            Some(store),
+            graph.update_sender(),
+            None,
+        );
+        base.initialize(context).await;
+        set_running(&base).await;
+        base
+    }
+
+    /// Build a `QueryResult` with an explicit per-query sequence and `count`
+    /// Add diffs.
+    fn query_result_seq(query_id: &str, count: usize, sequence: u64) -> QueryResult {
+        let results = (0..count)
+            .map(|i| ResultDiff::Add {
+                data: serde_json::json!({ "id": i }),
+                row_signature: 0,
+            })
+            .collect();
+        QueryResult::new(
+            query_id.to_string(),
+            sequence,
+            chrono::Utc::now(),
+            results,
+            HashMap::new(),
+        )
+    }
+
     async fn set_running(base: &ReactionBase) {
         base.set_status(ComponentStatus::Running, None).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fixed_runner_persists_checkpoint_after_delivery() {
+        let server = test_server::start().await;
+        let base = running_base_with_store().await;
+
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        let config = config_for(
+            server.endpoint.clone(),
+            BatchingConfig::Fixed {
+                batch_size: 2,
+                batch_flush_timeout_ms: 10_000,
+            },
+        );
+        let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
+            reaction_name: "test-grpc".to_string(),
+            batch_size: 2,
+            batch_flush_timeout_ms: 10_000,
+            base: base.clone_shared(),
+            config,
+            shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
+        }));
+
+        // A result at sequence 7 with two diffs flushes one batch.
+        base.enqueue_query_result(query_result_seq("q1", 2, 7))
+            .await
+            .unwrap();
+
+        let total = server
+            .recorder
+            .wait_for_items(2, Duration::from_secs(5))
+            .await;
+        assert_eq!(total, 2);
+
+        // The checkpoint should advance to the delivered sequence.
+        let cp = wait_for_checkpoint(&base, "q1", 7, Duration::from_secs(5)).await;
+        assert_eq!(cp, Some(7), "checkpoint must persist the acked sequence");
+
+        let _ = sd_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fixed_runner_does_not_advance_checkpoint_for_split_result_tail() {
+        // A single QueryResult whose diffs span two batches must not advance the
+        // checkpoint until the batch containing its terminal item is acked.
+        let server = test_server::start().await;
+        let base = running_base_with_store().await;
+
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        // batch_size=2 with a 3-diff result forces a split: [d0,d1] then [d2].
+        let config = config_for(
+            server.endpoint.clone(),
+            BatchingConfig::Fixed {
+                batch_size: 2,
+                batch_flush_timeout_ms: 10_000,
+            },
+        );
+        let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
+            reaction_name: "test-grpc".to_string(),
+            batch_size: 2,
+            batch_flush_timeout_ms: 10_000,
+            base: base.clone_shared(),
+            config,
+            shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
+        }));
+
+        base.enqueue_query_result(query_result_seq("q1", 3, 9))
+            .await
+            .unwrap();
+
+        // All three items are delivered (across two batches).
+        let total = server
+            .recorder
+            .wait_for_items(3, Duration::from_secs(5))
+            .await;
+        assert_eq!(total, 3);
+
+        // Only after the terminal item is acked does the checkpoint reach 9 —
+        // never a partial/over-advanced value.
+        let cp = wait_for_checkpoint(&base, "q1", 9, Duration::from_secs(5)).await;
+        assert_eq!(cp, Some(9));
+
+        let _ = sd_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adaptive_runner_persists_checkpoint_after_delivery() {
+        let server = test_server::start().await;
+        let base = running_base_with_store().await;
+
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        let config = config_for(
+            server.endpoint.clone(),
+            BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
+        );
+        let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
+            reaction_name: "test-grpc".to_string(),
+            adaptive: AdaptiveBatchConfig::default(),
+            base: base.clone_shared(),
+            config,
+            shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
+        }));
+
+        // A result at sequence 7 with two diffs is delivered as a coalesced batch.
+        base.enqueue_query_result(query_result_seq("q1", 2, 7))
+            .await
+            .unwrap();
+        let total = server
+            .recorder
+            .wait_for_items(2, Duration::from_secs(5))
+            .await;
+        assert_eq!(total, 2);
+
+        // The batcher advances the checkpoint to the acked sequence.
+        let cp = wait_for_checkpoint(&base, "q1", 7, Duration::from_secs(5)).await;
+        assert_eq!(
+            cp,
+            Some(7),
+            "adaptive runner must persist the acked sequence"
+        );
+
+        let _ = sd_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adaptive_runner_does_not_advance_checkpoint_for_split_result_tail() {
+        // A 3-diff result with adaptive_max_batch_size = 2 can be coalesced into
+        // more than one batch. Terminal-item tracking must ensure the checkpoint
+        // only reaches the result's sequence once the batch carrying its terminal
+        // item is acked — never a partial/over-advanced value.
+        let server = test_server::start().await;
+        let base = running_base_with_store().await;
+
+        let adaptive = AdaptiveBatchConfig {
+            adaptive_min_batch_size: 1,
+            adaptive_max_batch_size: 2,
+            adaptive_window_size: 10,
+            adaptive_batch_timeout_ms: 50,
+        };
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        let config = config_for(
+            server.endpoint.clone(),
+            BatchingConfig::adaptive(adaptive.clone()),
+        );
+        let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
+            reaction_name: "test-grpc".to_string(),
+            adaptive,
+            base: base.clone_shared(),
+            config,
+            shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
+        }));
+
+        base.enqueue_query_result(query_result_seq("q1", 3, 9))
+            .await
+            .unwrap();
+
+        // All three items are delivered (possibly across two coalesced batches).
+        let total = server
+            .recorder
+            .wait_for_items(3, Duration::from_secs(5))
+            .await;
+        assert_eq!(total, 3);
+
+        // The final checkpoint reaches exactly 9 — proving the terminal item's
+        // sequence was the one checkpointed, not an intermediate value.
+        let cp = wait_for_checkpoint(&base, "q1", 9, Duration::from_secs(5)).await;
+        assert_eq!(cp, Some(9));
+
+        let _ = sd_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        server.shutdown().await;
+    }
+
+    /// Poll the persisted checkpoint until it reaches `expected` or times out.
+    async fn wait_for_checkpoint(
+        base: &ReactionBase,
+        query_id: &str,
+        expected: u64,
+        timeout: Duration,
+    ) -> Option<u64> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let cp = base
+                .read_checkpoint(query_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|c| c.sequence);
+            if cp == Some(expected) || tokio::time::Instant::now() >= deadline {
+                return cp;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Poll the reaction status until it reaches `target` or the timeout elapses.
+    async fn wait_for_status(
+        base: &ReactionBase,
+        target: ComponentStatus,
+        timeout: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if base.get_status().await == target {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -795,6 +1084,8 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
         base.enqueue_query_result(query_result("q1", 2))
@@ -833,6 +1124,8 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
         // One item, well below batch_size — only the flush timer can deliver it.
@@ -872,6 +1165,8 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
         base.enqueue_query_result(query_result("query-a", 3))
@@ -897,12 +1192,14 @@ mod integration {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn fixed_runner_drops_batch_and_stays_running_on_delivery_failure() {
-        // Drop-and-continue (A2/A3): when delivery exhausts its retry budget the
-        // batch is dropped and the reaction MUST stay Running rather than going
-        // to Error. The server rejects the first 4 requests — exactly what the
-        // first batch consumes with max_retries=3 (4 attempts) — then accepts,
-        // so a later batch is still delivered, proving the reaction kept running.
+    async fn fixed_runner_skips_batch_and_stays_running_under_auto_skip_gap() {
+        // Under the AutoSkipGap recovery policy, a delivery that exhausts its
+        // retry budget drops the batch and the reaction MUST stay Running rather
+        // than going to Error. The server rejects the first 4 requests — exactly
+        // what the first batch consumes with max_retries=3 (4 attempts) — then
+        // accepts, so a later batch is still delivered, proving the reaction
+        // kept running. (Under the default Strict policy it would fail-stop;
+        // see `fixed_runner_fail_stops_on_delivery_failure_under_strict`.)
         let server = test_server::start_with_failures(4).await;
         let base = running_base();
         set_running(&base).await;
@@ -922,6 +1219,8 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::AutoSkipGap,
         }));
 
         // First batch: the server rejects every retry, so the batch is dropped.
@@ -933,12 +1232,12 @@ mod integration {
         assert_eq!(
             base.get_status().await,
             ComponentStatus::Running,
-            "reaction must stay Running after a dropped batch (drop-and-continue)"
+            "reaction must stay Running after a skipped batch under AutoSkipGap"
         );
 
         // Later batch: the server now accepts, so it is delivered — proof the
         // reaction kept running after dropping the first batch.
-        base.enqueue_query_result(query_result("q1", 1))
+        base.enqueue_query_result(query_result("q1", 2))
             .await
             .unwrap();
         let total = server
@@ -947,6 +1246,50 @@ mod integration {
             .await;
         assert_eq!(total, 1, "a later batch is delivered after continuing");
         assert_eq!(base.get_status().await, ComponentStatus::Running);
+
+        let _ = sd_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fixed_runner_fail_stops_on_delivery_failure_under_strict() {
+        // Under the default Strict policy, a delivery that exhausts its retry
+        // budget must set the reaction to Error (fail-stop) without advancing the
+        // checkpoint, so the batch replays from the outbox on restart.
+        let server = test_server::start_with_failures(100).await;
+        let base = running_base();
+        set_running(&base).await;
+
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        let config = config_for(
+            server.endpoint.clone(),
+            BatchingConfig::Fixed {
+                batch_size: 1,
+                batch_flush_timeout_ms: 10_000,
+            },
+        );
+        let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
+            reaction_name: "test-grpc".to_string(),
+            batch_size: 1,
+            batch_flush_timeout_ms: 10_000,
+            base: base.clone_shared(),
+            config,
+            shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
+        }));
+
+        base.enqueue_query_result(query_result("q1", 1))
+            .await
+            .unwrap();
+
+        // The reaction should transition to Error within the retry/backoff window.
+        let errored = wait_for_status(&base, ComponentStatus::Error, Duration::from_secs(5)).await;
+        assert!(
+            errored,
+            "reaction must fail-stop (Error) on sustained delivery failure under Strict"
+        );
 
         let _ = sd_tx.send(());
         let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
@@ -972,6 +1315,8 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
         // >= 100 items for one query triggers the early forward path.
@@ -1007,6 +1352,8 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
         }));
 
         base.enqueue_query_result(query_result("query-a", 3))
@@ -1031,11 +1378,11 @@ mod integration {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn adaptive_runner_drops_batch_and_stays_running_on_delivery_failure() {
-        // Drop-and-continue (A2/A3) for the adaptive runner: a delivery that
-        // exhausts its retry budget drops the batch and the reaction stays
-        // Running. The server rejects the first 4 requests (what one batch
-        // consumes with max_retries=3) then accepts.
+    async fn adaptive_runner_skips_batch_and_stays_running_under_auto_skip_gap() {
+        // Under the AutoSkipGap recovery policy, a delivery that exhausts its
+        // retry budget drops the batch and the reaction stays Running. The server
+        // rejects the first 4 requests (what one batch consumes with
+        // max_retries=3) then accepts.
         let server = test_server::start_with_failures(4).await;
         let base = running_base();
         set_running(&base).await;
@@ -1051,6 +1398,8 @@ mod integration {
             base: base.clone_shared(),
             config,
             shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::AutoSkipGap,
         }));
 
         // First item: every retry is rejected, so the batch is dropped.
@@ -1061,11 +1410,11 @@ mod integration {
         assert_eq!(
             base.get_status().await,
             ComponentStatus::Running,
-            "adaptive reaction must stay Running after a dropped batch"
+            "adaptive reaction must stay Running after a skipped batch under AutoSkipGap"
         );
 
         // Later item: the server now accepts, proving the reaction kept running.
-        base.enqueue_query_result(query_result("q1", 1))
+        base.enqueue_query_result(query_result("q1", 2))
             .await
             .unwrap();
         let total = server
@@ -1074,6 +1423,44 @@ mod integration {
             .await;
         assert_eq!(total, 1);
         assert_eq!(base.get_status().await, ComponentStatus::Running);
+
+        let _ = sd_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adaptive_runner_fail_stops_on_delivery_failure_under_strict() {
+        // Under the default Strict policy, a sustained delivery failure must set
+        // the reaction to Error (fail-stop) without advancing the checkpoint.
+        let server = test_server::start_with_failures(100).await;
+        let base = running_base();
+        set_running(&base).await;
+
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        let config = config_for(
+            server.endpoint.clone(),
+            BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
+        );
+        let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
+            reaction_name: "test-grpc".to_string(),
+            adaptive: AdaptiveBatchConfig::default(),
+            base: base.clone_shared(),
+            config,
+            shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
+        }));
+
+        base.enqueue_query_result(query_result("q1", 1))
+            .await
+            .unwrap();
+
+        let errored = wait_for_status(&base, ComponentStatus::Error, Duration::from_secs(5)).await;
+        assert!(
+            errored,
+            "adaptive reaction must fail-stop (Error) on sustained delivery failure under Strict"
+        );
 
         let _ = sd_tx.send(());
         let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;

@@ -132,37 +132,29 @@ impl MsSqlExecutor {
         Ok(())
     }
 
-    /// Execute a stored procedure with the given parameters
-    pub async fn execute_procedure(
-        &self,
-        procedure_name: &str,
-        parameters: Vec<Value>,
-    ) -> Result<()> {
-        let proc_name = procedure_name.to_string();
-        let params = parameters.clone();
+    /// Execute a rendered command with the given ordered parameters.
+    ///
+    /// The `command` is the SQL batch produced by rendering a command template
+    /// (typically `EXEC <proc> @P1, @P2, …`). Parameters are bound positionally
+    /// through the driver in the order they appear in `parameters`, matching the
+    /// `@P1`, `@P2`, … placeholders emitted by the `{{param}}` template helper.
+    /// Values are never interpolated into the SQL text, so row data cannot alter
+    /// the statement.
+    pub async fn execute_command(&self, command: &str, parameters: Vec<Value>) -> Result<()> {
+        let command = command.to_string();
+        let params = parameters;
         let client = self.client.clone();
         let cmd_timeout = self.command_timeout;
 
         self.execute_with_retry(|| async {
             let mut client = client.write().await;
 
-            // Build the EXEC statement for MS SQL
-            // MS SQL uses @p1, @p2, @p3 for parameter placeholders
-            let param_placeholders: Vec<String> =
-                (1..=params.len()).map(|i| format!("@p{i}")).collect();
-
-            let query_str = if param_placeholders.is_empty() {
-                format!("EXEC {proc_name}")
-            } else {
-                format!("EXEC {} {}", proc_name, param_placeholders.join(", "))
-            };
-
-            debug!("Executing: {} with {} parameters", query_str, params.len());
+            debug!("Executing: {} with {} parameters", command, params.len());
 
             // Build parameterized query
-            let mut query = Query::new(query_str);
+            let mut query = Query::new(command.clone());
 
-            // Bind parameters - tiberius requires explicit type binding
+            // Bind parameters - tiberius requires explicit type binding.
             for param in params.iter() {
                 match param {
                     Value::Null => {
@@ -172,13 +164,17 @@ impl MsSqlExecutor {
                         query.bind(*b);
                     }
                     Value::Number(n) => {
+                        // Bind integers as BIGINT and reals as FLOAT
+                        // consistently, so a parameter's SQL type does not
+                        // depend on the magnitude of a particular row's value.
                         if let Some(i) = n.as_i64() {
-                            // Try to fit in i32, otherwise use i64
-                            if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
-                                query.bind(i as i32);
-                            } else {
-                                query.bind(i);
-                            }
+                            query.bind(i);
+                        } else if let Some(u) = n.as_u64() {
+                            // A u64 that does not fit in i64 (> i64::MAX) cannot
+                            // be represented by SQL BIGINT. Bind its exact decimal
+                            // form as a string rather than falling through to f64,
+                            // which would silently lose integer precision.
+                            query.bind(u.to_string());
                         } else if let Some(f) = n.as_f64() {
                             query.bind(f);
                         } else {
@@ -189,19 +185,19 @@ impl MsSqlExecutor {
                         query.bind(s.as_str());
                     }
                     Value::Array(_) | Value::Object(_) => {
-                        // For complex types, pass as JSON string
+                        // Complex values are bound as their JSON string form.
                         query.bind(param.to_string());
                     }
                 }
             }
 
-            // Execute the stored procedure
+            // Execute the command
             timeout(cmd_timeout, query.execute(&mut *client))
                 .await
-                .map_err(|_| anyhow!("Procedure execution timed out after {cmd_timeout:?}"))?
-                .map_err(|e| anyhow!("Failed to execute procedure: {e}"))?;
+                .map_err(|_| anyhow!("Command execution timed out after {cmd_timeout:?}"))?
+                .map_err(|e| anyhow!("Failed to execute command: {e}"))?;
 
-            debug!("Procedure executed successfully");
+            debug!("Command executed successfully");
             Ok(())
         })
         .await
