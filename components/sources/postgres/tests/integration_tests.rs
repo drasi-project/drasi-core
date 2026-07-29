@@ -748,6 +748,7 @@ async fn test_cdc_autodetected_composite_primary_key_correlates() -> Result<()> 
     Ok(())
 }
 
+/// Extract the trailing integer primary key from an element id of the form
 /// `table:pk` (e.g. `users:42` → 42).
 fn element_id_int(element_id: &str) -> Option<i64> {
     element_id.rsplit(':').next()?.parse::<i64>().ok()
