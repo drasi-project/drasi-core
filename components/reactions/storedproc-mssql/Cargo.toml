@@ -34,13 +34,19 @@ tokio = { version = "1.0", features = ["full"] }
 async-trait = "0.1"
 
 # MS SQL Server
+#
+# `default-features = false` drops tiberius's built-in `winauth` (Windows-only)
+# and its default `native-tls` backend so the TLS backend can be selected via
+# this crate's own features (see `[features]`). A TLS backend MUST be enabled
+# for `ssl = true` connections to SQL Server; the `native-tls` feature is on by
+# default. `tds73` and `chrono` are always required.
 tiberius = { version = "0.12", default-features = false, features = ["tds73", "chrono"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 
 # Utilities
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-regex = "1.10"
+handlebars = "5.1"
 log = "0.4"
 anyhow = "1.0"
 drasi-plugin-sdk = { workspace = true }
@@ -50,6 +56,7 @@ utoipa = { workspace = true }
 tokio-test = "0.4"
 env_logger = "0.10.0"
 serial_test = "3.0"
+chrono = "0.4"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["mssql_server"] }
 shared-tests = { path = "../../../shared-tests" }
@@ -59,5 +66,12 @@ workspace = true
 
 
 [features]
-# default = []
+# A TLS backend is required to connect to SQL Server with `ssl = true`. Exactly
+# one backend should be enabled; `native-tls` is on by default. To use rustls
+# instead (e.g. on platforms where the system TLS stack rejects the server's
+# handshake, such as macOS Secure Transport against SQL Server 2022), build with
+# `--no-default-features --features rustls`.
+default = ["native-tls"]
+native-tls = ["tiberius/native-tls"]
+rustls = ["tiberius/rustls"]
 dynamic-plugin = []
