@@ -474,6 +474,7 @@ JOIN pg_namespace n ON c.relnamespace = n.oid
 JOIN pg_attribute a ON a.attrelid = c.oid
 WHERE con.contype = 'p'
   AND a.attnum = ANY(con.conkey)
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
 ORDER BY n.nspname, c.relname, array_position(con.conkey, a.attnum)
 ```
 

@@ -425,12 +425,28 @@ pub(crate) async fn query_table_primary_keys(
 
     let rows = client.query(query, &[]).await?;
 
-    let mut primary_keys: HashMap<String, Vec<String>> = HashMap::new();
-    for row in rows {
-        let schema: String = row.get(0);
-        let table: String = row.get(1);
-        let column: String = row.get(2);
+    Ok(build_primary_key_map(rows.iter().map(|row| {
+        (
+            row.get::<_, String>(0),
+            row.get::<_, String>(1),
+            row.get::<_, String>(2),
+        )
+    })))
+}
 
+/// Build the table-name → primary-key-columns map from catalog rows of
+/// `(schema_name, table_name, column_name)`, ordered by primary-key position.
+///
+/// The map key uses the same convention `generate_element_id` uses when
+/// composing CDC element IDs: the bare relation name for tables in the `public`
+/// schema, and `{schema}.{table}` otherwise. This is factored out of
+/// [`query_table_primary_keys`] so the naming convention can be unit-tested
+/// without a live PostgreSQL connection.
+fn build_primary_key_map(
+    rows: impl IntoIterator<Item = (String, String, String)>,
+) -> HashMap<String, Vec<String>> {
+    let mut primary_keys: HashMap<String, Vec<String>> = HashMap::new();
+    for (schema, table, column) in rows {
         let table_key = if schema == "public" {
             table
         } else {
@@ -440,7 +456,7 @@ pub(crate) async fn query_table_primary_keys(
         primary_keys.entry(table_key).or_default().push(column);
     }
 
-    Ok(primary_keys)
+    primary_keys
 }
 
 async fn introspect_postgres_schema(config: &PostgresSourceConfig) -> Result<Option<SourceSchema>> {
@@ -1268,6 +1284,55 @@ impl PostgresSourceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod primary_key_map {
+        use super::*;
+
+        fn row(schema: &str, table: &str, column: &str) -> (String, String, String) {
+            (schema.to_string(), table.to_string(), column.to_string())
+        }
+
+        #[test]
+        fn public_schema_uses_bare_table_name() {
+            let map = build_primary_key_map([row("public", "users", "id")]);
+            assert_eq!(map.get("users"), Some(&vec!["id".to_string()]));
+            // The `public` schema must not be prefixed onto the key.
+            assert!(!map.contains_key("public.users"));
+        }
+
+        #[test]
+        fn non_public_schema_is_qualified() {
+            let map = build_primary_key_map([row("inventory", "products", "sku")]);
+            assert_eq!(
+                map.get("inventory.products"),
+                Some(&vec!["sku".to_string()])
+            );
+            assert!(!map.contains_key("products"));
+        }
+
+        #[test]
+        fn composite_key_preserves_column_order() {
+            // Rows arrive ordered by primary-key position; the map must keep that
+            // order so composite element IDs are stable.
+            let map = build_primary_key_map([
+                row("public", "order_items", "order_id"),
+                row("public", "order_items", "line_no"),
+            ]);
+            assert_eq!(
+                map.get("order_items"),
+                Some(&vec!["order_id".to_string(), "line_no".to_string()])
+            );
+        }
+
+        #[test]
+        fn multiple_tables_are_kept_separate() {
+            let map =
+                build_primary_key_map([row("public", "users", "id"), row("sales", "orders", "id")]);
+            assert_eq!(map.len(), 2);
+            assert_eq!(map.get("users"), Some(&vec!["id".to_string()]));
+            assert_eq!(map.get("sales.orders"), Some(&vec!["id".to_string()]));
+        }
+    }
 
     mod construction {
         use super::*;

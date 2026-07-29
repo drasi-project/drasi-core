@@ -31,12 +31,13 @@ use drasi_source_postgres::{
     PostgresReplicationSource, PostgresSourceConfig, SslMode, TableKeyConfig,
 };
 use postgres_helpers::{
-    create_bool_test_table, create_decimal_test_table, create_logical_replication_slot,
-    create_publication, create_test_table, create_test_table_replica_identity_default,
-    create_timestamptz_test_table, delete_test_row, execute_batch, grant_replication,
-    grant_table_access, insert_bool_test_row, insert_decimal_test_row, insert_test_row,
+    create_bool_test_table, create_composite_key_table, create_decimal_test_table,
+    create_logical_replication_slot, create_publication, create_test_table,
+    create_test_table_replica_identity_default, create_timestamptz_test_table,
+    delete_composite_row, delete_test_row, execute_batch, grant_replication, grant_table_access,
+    insert_bool_test_row, insert_composite_row, insert_decimal_test_row, insert_test_row,
     insert_timestamptz_test_row, quote_ident, setup_replication_postgres, update_all_rows_name,
-    update_bool_test_row, update_test_row,
+    update_bool_test_row, update_composite_qty, update_test_row,
 };
 use serial_test::serial;
 use std::collections::{HashMap, HashSet};
@@ -104,32 +105,79 @@ async fn build_core(
     build_core_inner(config, slot_name, true).await
 }
 
-/// Build a test core. When `configure_table_keys` is false, no `table_keys` are
-/// configured on either the source or bootstrap provider, forcing element IDs to
-/// come from auto-detected primary keys (regression coverage for issue #654).
+/// Build a test core for the default `users` table. When `configure_table_keys`
+/// is false, no `table_keys` are configured on either the source or bootstrap
+/// provider, forcing element IDs to come from auto-detected primary keys
+/// (regression coverage for issue #654).
 async fn build_core_inner(
     config: &postgres_helpers::ReplicationPostgresConfig,
     slot_name: String,
     configure_table_keys: bool,
 ) -> Result<(Arc<DrasiLib>, ApplicationReactionHandle)> {
+    let table_keys = if configure_table_keys {
+        vec![("id".to_string())]
+    } else {
+        vec![]
+    };
+    build_core_custom(
+        config,
+        slot_name,
+        &[TEST_TABLE.to_string()],
+        "MATCH (u:users) RETURN u.id AS id, u.name AS name",
+        &table_keys
+            .iter()
+            .map(|c| (TEST_TABLE, c.as_str()))
+            .collect::<Vec<_>>(),
+    )
+    .await
+}
+
+/// Build a test core for an arbitrary set of tables and query.
+///
+/// `key_columns` is a flat list of `(table, column)` pairs used to configure
+/// `table_keys` on both the source and bootstrap provider; pass an empty slice
+/// to rely purely on auto-detected primary keys.
+async fn build_core_custom(
+    config: &postgres_helpers::ReplicationPostgresConfig,
+    slot_name: String,
+    tables: &[String],
+    cypher: &str,
+    key_columns: &[(&str, &str)],
+) -> Result<(Arc<DrasiLib>, ApplicationReactionHandle)> {
+    let mut source_keys: HashMap<String, Vec<String>> = HashMap::new();
+    for (table, column) in key_columns {
+        source_keys
+            .entry((*table).to_string())
+            .or_default()
+            .push((*column).to_string());
+    }
+
+    let source_table_keys: Vec<TableKeyConfig> = source_keys
+        .iter()
+        .map(|(table, cols)| TableKeyConfig {
+            table: table.clone(),
+            key_columns: cols.clone(),
+        })
+        .collect();
+    let bootstrap_table_keys: Vec<BootstrapTableKeyConfig> = source_keys
+        .iter()
+        .map(|(table, cols)| BootstrapTableKeyConfig {
+            table: table.clone(),
+            key_columns: cols.clone(),
+        })
+        .collect();
+
     let source_config = PostgresSourceConfig {
         host: config.host.clone(),
         port: config.port,
         database: config.database.clone(),
         user: config.user.clone(),
         password: config.password.clone(),
-        tables: vec![TEST_TABLE.to_string()],
+        tables: tables.to_vec(),
         slot_name,
         publication_name: TEST_PUBLICATION.to_string(),
         ssl_mode: SslMode::Disable,
-        table_keys: if configure_table_keys {
-            vec![TableKeyConfig {
-                table: TEST_TABLE.to_string(),
-                key_columns: vec!["id".to_string()],
-            }]
-        } else {
-            vec![]
-        },
+        table_keys: source_table_keys,
     };
 
     let bootstrap_config = PostgresBootstrapConfig {
@@ -142,14 +190,7 @@ async fn build_core_inner(
         slot_name: source_config.slot_name.clone(),
         publication_name: source_config.publication_name.clone(),
         ssl_mode: BootstrapSslMode::Disable,
-        table_keys: if configure_table_keys {
-            vec![BootstrapTableKeyConfig {
-                table: TEST_TABLE.to_string(),
-                key_columns: vec!["id".to_string()],
-            }]
-        } else {
-            vec![]
-        },
+        table_keys: bootstrap_table_keys,
     };
 
     let bootstrap_provider = PostgresBootstrapProvider::new(bootstrap_config);
@@ -160,12 +201,7 @@ async fn build_core_inner(
         .build()?;
 
     let query = Query::cypher("test-query")
-        .query(
-            r#"
-            MATCH (u:users)
-            RETURN u.id AS id, u.name AS name
-            "#,
-        )
+        .query(cypher)
         .from_source("pg-test-source")
         .auto_start(true)
         .enable_bootstrap(true)
@@ -645,6 +681,65 @@ async fn test_cdc_autodetected_primary_key_correlates_update_and_delete() -> Res
 
     // The DELETE must reference the same element id and remove the node.
     delete_test_row(&client, TEST_TABLE, 1).await?;
+    wait_for_query_results(&core, "test-query", |results| results.is_empty()).await?;
+
+    core.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
+/// Regression test for issue #654 (composite-key variant): CDC element IDs for a
+/// table with a **composite** primary key must be stable across
+/// INSERT/UPDATE/DELETE, using the auto-detected `(order_id, line_no)` key with
+/// no `table_keys` configured. This exercises the `_`-join path in element-id
+/// generation that a single-column key does not.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_cdc_autodetected_composite_primary_key_correlates() -> Result<()> {
+    init_logging();
+
+    const COMPOSITE_TABLE: &str = "order_items";
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_composite_key_table(&client, COMPOSITE_TABLE).await?;
+    grant_table_access(&client, COMPOSITE_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[COMPOSITE_TABLE.to_string()]).await?;
+
+    let slot_name = slot_name();
+    create_logical_replication_slot(&client, &slot_name).await?;
+
+    // No `table_keys` configured — the composite PK must be auto-detected.
+    let (core, _handle) = build_core_custom(
+        pg.config(),
+        slot_name,
+        &[COMPOSITE_TABLE.to_string()],
+        "MATCH (o:order_items) RETURN o.order_id AS order_id, o.line_no AS line_no, o.qty AS qty",
+        &[],
+    )
+    .await?;
+    core.start().await?;
+
+    // INSERT (order_id=1, line_no=5, qty=10) → one row appears.
+    insert_composite_row(&client, COMPOSITE_TABLE, 1, 5, 10).await?;
+    wait_for_query_results(&core, "test-query", |results| {
+        results.len() == 1 && results[0].get("qty") == Some(&10.into())
+    })
+    .await?;
+
+    // UPDATE qty → still exactly one row (same composite element id), new qty.
+    update_composite_qty(&client, COMPOSITE_TABLE, 1, 5, 20).await?;
+    wait_for_query_results(&core, "test-query", |results| {
+        results.len() == 1 && results[0].get("qty") == Some(&20.into())
+    })
+    .await?;
+
+    // DELETE → row removed via the same composite element id.
+    delete_composite_row(&client, COMPOSITE_TABLE, 1, 5).await?;
     wait_for_query_results(&core, "test-query", |results| results.is_empty()).await?;
 
     core.stop().await?;
