@@ -102,7 +102,13 @@
 //!
 //! ## Node Mapping
 //!
-//! - **Element ID**: `{schema}:{table}:{primary_key_value}` (e.g., `public:users:123`)
+//! - **Element ID**: `{table}:{primary_key_value}` (e.g., `users:123`). For
+//!   composite keys the values are joined with `_` (e.g., `order_items:1_5`), and
+//!   tables outside the `public` schema are qualified as
+//!   `{schema}.{table}:{primary_key_value}`. Primary keys are auto-detected from
+//!   the PostgreSQL system catalogs on connect; `table_keys` config overrides the
+//!   detected keys, and a random UUID is used only as a last resort for keyless
+//!   tables.
 //! - **Labels**: `[{table_name}]` (e.g., `["users"]`)
 //! - **Properties**: All columns from the row (column names become property keys)
 //!
@@ -136,7 +142,7 @@
 //!     "type": "Insert",
 //!     "element": {
 //!         "metadata": {
-//!             "element_id": "public:users:1",
+//!             "element_id": "users:1",
 //!             "source_id": "pg-source",
 //!             "labels": ["users"],
 //!             "effective_from": 1699900000000000
@@ -319,11 +325,13 @@ fn postgres_type_to_property_type(data_type: &str) -> Option<PropertyType> {
     }
 }
 
-async fn introspect_postgres_schema(config: &PostgresSourceConfig) -> Result<Option<SourceSchema>> {
-    if config.tables.is_empty() {
-        return Ok(None);
-    }
-
+/// Establish a regular (non-replication) libpq connection to PostgreSQL using
+/// the source configuration's SSL settings.
+///
+/// The replication-protocol connection used for streaming WAL cannot run
+/// ordinary SQL queries, so schema introspection and primary-key detection use
+/// a separate standard connection created here.
+async fn connect_pg_client(config: &PostgresSourceConfig) -> Result<tokio_postgres::Client> {
     let mut pg_config = tokio_postgres::Config::new();
     pg_config.host(&config.host);
     pg_config.port(config.port);
@@ -333,7 +341,7 @@ async fn introspect_postgres_schema(config: &PostgresSourceConfig) -> Result<Opt
         pg_config.password(&config.password);
     }
 
-    let client = match config.ssl_mode {
+    match config.ssl_mode {
         SslMode::Require => {
             pg_config.ssl_mode(tokio_postgres::config::SslMode::Require);
             let tls_connector = native_tls::TlsConnector::builder()
@@ -343,14 +351,14 @@ async fn introspect_postgres_schema(config: &PostgresSourceConfig) -> Result<Opt
                 .map_err(|e| anyhow!("Failed to create TLS connector: {e}"))?;
             let connector = MakeTlsConnector::new(tls_connector);
 
-            debug!("Schema introspection: connecting with SSL (require)");
+            debug!("PostgreSQL query connection: connecting with SSL (require)");
             let (client, connection) = pg_config.connect(connector).await?;
             tokio::spawn(async move {
                 if let Err(e) = connection.await {
-                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                    log::warn!("PostgreSQL query connection closed: {e}");
                 }
             });
-            client
+            Ok(client)
         }
         SslMode::Prefer => {
             // Try TLS first, fall back to plaintext
@@ -362,26 +370,85 @@ async fn introspect_postgres_schema(config: &PostgresSourceConfig) -> Result<Opt
             let connector = MakeTlsConnector::new(tls_connector);
 
             pg_config.ssl_mode(tokio_postgres::config::SslMode::Prefer);
-            debug!("Schema introspection: connecting with SSL (prefer)");
+            debug!("PostgreSQL query connection: connecting with SSL (prefer)");
             let (client, connection) = pg_config.connect(connector).await?;
             tokio::spawn(async move {
                 if let Err(e) = connection.await {
-                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                    log::warn!("PostgreSQL query connection closed: {e}");
                 }
             });
-            client
+            Ok(client)
         }
         SslMode::Disable => {
-            debug!("Schema introspection: connecting without SSL");
+            debug!("PostgreSQL query connection: connecting without SSL");
             let (client, connection) = pg_config.connect(tokio_postgres::NoTls).await?;
             tokio::spawn(async move {
                 if let Err(e) = connection.await {
-                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                    log::warn!("PostgreSQL query connection closed: {e}");
                 }
             });
-            client
+            Ok(client)
         }
-    };
+    }
+}
+
+/// Query primary-key columns for all user tables from the PostgreSQL system
+/// catalogs.
+///
+/// The returned map is keyed by table name using the same convention the CDC
+/// stream uses when generating element IDs: the bare relation name for tables in
+/// the `public` schema, and `{schema}.{table}` otherwise. Column order follows
+/// the primary-key definition order.
+///
+/// This lets the replication stream generate stable, primary-key-derived element
+/// IDs without requiring explicit `table_keys` configuration, so INSERT / UPDATE
+/// / DELETE events for the same row correlate to the same node.
+pub(crate) async fn query_table_primary_keys(
+    config: &PostgresSourceConfig,
+) -> Result<HashMap<String, Vec<String>>> {
+    let client = connect_pg_client(config).await?;
+
+    // pg_constraint-based lookup (matches the bootstrap provider) so that the CDC
+    // and bootstrap element-id encodings agree.
+    let query = "SELECT \
+            n.nspname AS schema_name, \
+            c.relname AS table_name, \
+            a.attname AS column_name \
+         FROM pg_constraint con \
+         JOIN pg_class c ON con.conrelid = c.oid \
+         JOIN pg_namespace n ON c.relnamespace = n.oid \
+         JOIN pg_attribute a ON a.attrelid = c.oid \
+         WHERE con.contype = 'p' \
+             AND a.attnum = ANY(con.conkey) \
+             AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+         ORDER BY n.nspname, c.relname, array_position(con.conkey, a.attnum)";
+
+    let rows = client.query(query, &[]).await?;
+
+    let mut primary_keys: HashMap<String, Vec<String>> = HashMap::new();
+    for row in rows {
+        let schema: String = row.get(0);
+        let table: String = row.get(1);
+        let column: String = row.get(2);
+
+        let table_key = if schema == "public" {
+            table
+        } else {
+            format!("{schema}.{table}")
+        };
+
+        primary_keys.entry(table_key).or_default().push(column);
+    }
+
+    Ok(primary_keys)
+}
+
+async fn introspect_postgres_schema(config: &PostgresSourceConfig) -> Result<Option<SourceSchema>> {
+    if config.tables.is_empty() {
+        return Ok(None);
+    }
+
+    let client = connect_pg_client(config).await?;
 
     let mut nodes = Vec::new();
 

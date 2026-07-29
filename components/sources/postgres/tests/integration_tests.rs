@@ -101,6 +101,17 @@ async fn build_core(
     config: &postgres_helpers::ReplicationPostgresConfig,
     slot_name: String,
 ) -> Result<(Arc<DrasiLib>, ApplicationReactionHandle)> {
+    build_core_inner(config, slot_name, true).await
+}
+
+/// Build a test core. When `configure_table_keys` is false, no `table_keys` are
+/// configured on either the source or bootstrap provider, forcing element IDs to
+/// come from auto-detected primary keys (regression coverage for issue #654).
+async fn build_core_inner(
+    config: &postgres_helpers::ReplicationPostgresConfig,
+    slot_name: String,
+    configure_table_keys: bool,
+) -> Result<(Arc<DrasiLib>, ApplicationReactionHandle)> {
     let source_config = PostgresSourceConfig {
         host: config.host.clone(),
         port: config.port,
@@ -111,10 +122,14 @@ async fn build_core(
         slot_name,
         publication_name: TEST_PUBLICATION.to_string(),
         ssl_mode: SslMode::Disable,
-        table_keys: vec![TableKeyConfig {
-            table: TEST_TABLE.to_string(),
-            key_columns: vec!["id".to_string()],
-        }],
+        table_keys: if configure_table_keys {
+            vec![TableKeyConfig {
+                table: TEST_TABLE.to_string(),
+                key_columns: vec!["id".to_string()],
+            }]
+        } else {
+            vec![]
+        },
     };
 
     let bootstrap_config = PostgresBootstrapConfig {
@@ -127,10 +142,14 @@ async fn build_core(
         slot_name: source_config.slot_name.clone(),
         publication_name: source_config.publication_name.clone(),
         ssl_mode: BootstrapSslMode::Disable,
-        table_keys: vec![BootstrapTableKeyConfig {
-            table: TEST_TABLE.to_string(),
-            key_columns: vec!["id".to_string()],
-        }],
+        table_keys: if configure_table_keys {
+            vec![BootstrapTableKeyConfig {
+                table: TEST_TABLE.to_string(),
+                key_columns: vec!["id".to_string()],
+            }]
+        } else {
+            vec![]
+        },
     };
 
     let bootstrap_provider = PostgresBootstrapProvider::new(bootstrap_config);
@@ -576,7 +595,64 @@ async fn test_full_crud_cycle() -> Result<()> {
     Ok(())
 }
 
-/// Extract the trailing integer primary key from an element id of the form
+/// Regression test for issue #654: without any `table_keys` configuration, CDC
+/// change events must derive a **stable** element id from the auto-detected
+/// primary key so that INSERT/UPDATE/DELETE correlate to the same node.
+///
+/// Before the fix, `table_primary_keys` was never populated, so every change fell
+/// through to a random UUID element id. An UPDATE then looked like a brand-new
+/// node (leaving a phantom "before" row in the result set) and a DELETE referenced
+/// an id that was never added (removing nothing). This test fails on that old
+/// behavior because it asserts the result set collapses to a single updated row
+/// and then to empty.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_cdc_autodetected_primary_key_correlates_update_and_delete() -> Result<()> {
+    init_logging();
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_test_table(&client, TEST_TABLE).await?;
+    grant_table_access(&client, TEST_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
+
+    let slot_name = slot_name();
+    create_logical_replication_slot(&client, &slot_name).await?;
+
+    // Note: no `table_keys` configured — element IDs must come from the
+    // auto-detected `id` primary key.
+    let (core, _handle) = build_core_inner(pg.config(), slot_name, false).await?;
+    core.start().await?;
+
+    insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
+    wait_for_query_results(&core, "test-query", |results| {
+        results
+            .iter()
+            .any(|row| row.get("name") == Some(&"Alice".into()))
+    })
+    .await?;
+
+    // The UPDATE must mutate the existing node in place: exactly one row with the
+    // new name, not a phantom pair of {Alice, Alice Updated}.
+    update_test_row(&client, TEST_TABLE, 1, "Alice Updated").await?;
+    wait_for_query_results(&core, "test-query", |results| {
+        results.len() == 1 && results[0].get("name") == Some(&"Alice Updated".into())
+    })
+    .await?;
+
+    // The DELETE must reference the same element id and remove the node.
+    delete_test_row(&client, TEST_TABLE, 1).await?;
+    wait_for_query_results(&core, "test-query", |results| results.is_empty()).await?;
+
+    core.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
 /// `table:pk` (e.g. `users:42` → 42).
 fn element_id_int(element_id: &str) -> Option<i64> {
     element_id.rsplit(':').next()?.parse::<i64>().ok()
@@ -726,9 +802,8 @@ async fn test_bootstrap_cdc_handover_has_no_overlap_or_gap() -> Result<()> {
     }
 
     // No gap: every post-boundary change was delivered exactly once. The
-    // concurrent insert's decoded key is not asserted here because the
-    // Postgres CDC element-id encoding for newly inserted integer keys differs
-    // from the bootstrap encoding; the structural counts below are what matter.
+    // concurrent insert's decoded key is not asserted here; this test focuses on
+    // structural delivery counts across the bootstrap/CDC handover boundary.
     let total_inserts: usize = inserts.values().sum();
     assert_eq!(
         total_inserts, 1,
