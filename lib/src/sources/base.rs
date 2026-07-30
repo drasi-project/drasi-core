@@ -34,7 +34,7 @@ use log::{debug, error, info, warn};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tracing::Instrument;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
@@ -201,6 +201,25 @@ pub struct SourceBase {
     /// Monotonically increasing counter for assigning event sequences.
     /// The framework stamps every dispatched event with this sequence.
     next_sequence: Arc<AtomicU64>,
+    /// Serializes the *sequence-assignment → timestamp-normalization → enqueue*
+    /// window per source so that events reach subscribers in the same order as
+    /// their assigned sequence numbers.
+    ///
+    /// Without this, two concurrent `dispatch_event` / `dispatch_events_batch`
+    /// calls can assign sequences in one order but reach the query-side
+    /// priority queue in the opposite order. `SequenceDedup` then treats the
+    /// later-delivered, lower-numbered event as an already-processed replay and
+    /// silently drops it (issue #640).
+    ///
+    /// The guarded value is the last timestamp stamped on a dispatched event.
+    /// The priority queue is a min-heap keyed on the wrapper timestamp, so each
+    /// event's timestamp is clamped to be strictly greater than the previous
+    /// one — keeping per-source timestamps monotonic in sequence order so the
+    /// heap never reorders same-source events relative to their sequence. The
+    /// wrapper timestamp is used only for merge ordering (the query consumer
+    /// never reads it; event-time semantics use `effective_from`), so nudging
+    /// it forward by nanoseconds when the wall clock stalls is harmless.
+    dispatch_order: Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
     /// Original raw config JSON from the descriptor, preserving ConfigValue
     /// envelopes (secrets, env vars) for lossless persistence roundtrips.
     raw_config: Option<serde_json::Value>,
@@ -337,6 +356,7 @@ impl SourceBase {
             identity_provider: Arc::new(RwLock::new(None)),
             position_handles: Arc::new(RwLock::new(HashMap::new())),
             next_sequence: Arc::new(AtomicU64::new(1)),
+            dispatch_order: Arc::new(Mutex::new(chrono::DateTime::<chrono::Utc>::MIN_UTC)),
             raw_config: None,
             subscriber_notify: Arc::new(Notify::new()),
             subscriber_resume_positions: Arc::new(RwLock::new(HashMap::new())),
@@ -630,6 +650,7 @@ impl SourceBase {
             identity_provider: self.identity_provider.clone(),
             position_handles: self.position_handles.clone(),
             next_sequence: self.next_sequence.clone(),
+            dispatch_order: self.dispatch_order.clone(),
             raw_config: self.raw_config.clone(),
             subscriber_notify: self.subscriber_notify.clone(),
             subscriber_resume_positions: self.subscriber_resume_positions.clone(),
@@ -1202,6 +1223,27 @@ impl SourceBase {
     /// to prevent memory issues, preserving the last good position.
     pub const MAX_SOURCE_POSITION_BYTES: usize = 65_536;
 
+    /// Return a dispatch timestamp strictly greater than `*last`, using
+    /// `candidate` when it already advances past `*last` and otherwise nudging
+    /// forward by one nanosecond. Updates `*last` to the returned value.
+    ///
+    /// Called while holding the `dispatch_order` lock so per-source dispatch
+    /// timestamps stay strictly increasing in sequence order — the priority
+    /// queue is a min-heap keyed on this timestamp, so this prevents it from
+    /// reordering same-source events relative to their sequence (#640).
+    fn next_monotonic_timestamp(
+        last: &mut chrono::DateTime<chrono::Utc>,
+        candidate: chrono::DateTime<chrono::Utc>,
+    ) -> chrono::DateTime<chrono::Utc> {
+        let next = if candidate > *last {
+            candidate
+        } else {
+            *last + chrono::Duration::nanoseconds(1)
+        };
+        *last = next;
+        next
+    }
+
     /// Dispatch a SourceEventWrapper to all subscribers.
     ///
     /// This is a generic method for dispatching any SourceEvent.
@@ -1223,6 +1265,13 @@ impl SourceBase {
             }
         }
 
+        // Serialize the sequence-assignment → timestamp-normalization → enqueue
+        // window per source. Holding this guard across the dispatch loop
+        // guarantees the event with sequence N is fully enqueued before N+1 is
+        // assigned, so concurrent dispatches reach subscribers in sequence order
+        // and SequenceDedup never mistakes a reordered event for a replay (#640).
+        let mut last_dispatch_ts = self.dispatch_order.lock().await;
+
         // Framework assigns the monotonic sequence (skip if pre-set by WAL)
         if let Some(seq) = wrapper.sequence {
             // Pre-set by WAL — advance counter to maintain monotonicity
@@ -1231,6 +1280,10 @@ impl SourceBase {
         } else {
             wrapper.sequence = Some(self.next_sequence.fetch_add(1, Ordering::Relaxed));
         }
+
+        // Keep per-source timestamps strictly increasing in sequence order so
+        // the timestamp-keyed priority queue cannot reorder same-source events.
+        wrapper.timestamp = Self::next_monotonic_timestamp(&mut last_dispatch_ts, wrapper.timestamp);
 
         // Record sequence→source_position mapping for confirmed-position lookups.
         if let (Some(seq), Some(ref pos)) = (wrapper.sequence, &wrapper.source_position) {
@@ -1307,6 +1360,11 @@ impl SourceBase {
             return Ok(());
         }
 
+        // Serialize this batch against other dispatches on the same source so
+        // the whole batch reaches subscribers in sequence order (#640). Acquire
+        // the ordering lock outermost (before dispatchers/comparator) to keep a
+        // consistent lock order with dispatch_event and avoid deadlock.
+        let mut last_dispatch_ts = self.dispatch_order.lock().await;
         let dispatchers = self.dispatchers.read().await;
         let comparator = self.position_comparator.read().await;
 
@@ -1330,6 +1388,11 @@ impl SourceBase {
             } else {
                 wrapper.sequence = Some(self.next_sequence.fetch_add(1, Ordering::Relaxed));
             }
+
+            // Keep per-source timestamps strictly increasing in sequence order
+            // so the timestamp-keyed priority queue preserves that order.
+            wrapper.timestamp =
+                Self::next_monotonic_timestamp(&mut last_dispatch_ts, wrapper.timestamp);
 
             // Record sequence→source_position mapping for confirmed-position lookups.
             if let (Some(seq), Some(ref pos)) = (wrapper.sequence, &wrapper.source_position) {
@@ -2155,6 +2218,129 @@ mod tests {
 
         assert_eq!(s2, s1 + 1, "sequences must be monotonically increasing");
         assert_eq!(s3, s2 + 1, "sequences must be monotonically increasing");
+    }
+
+    #[test]
+    fn next_monotonic_timestamp_is_strictly_increasing() {
+        use chrono::{Duration, Utc};
+
+        let mut last = chrono::DateTime::<Utc>::MIN_UTC;
+
+        let t1 = Utc::now();
+        let r1 = SourceBase::next_monotonic_timestamp(&mut last, t1);
+        assert_eq!(r1, t1, "a candidate ahead of `last` is used verbatim");
+        assert_eq!(last, t1);
+
+        // Equal candidate must be nudged strictly forward.
+        let r2 = SourceBase::next_monotonic_timestamp(&mut last, t1);
+        assert_eq!(r2, t1 + Duration::nanoseconds(1));
+        assert!(r2 > r1);
+
+        // A candidate that goes backwards (reversed wall clock) must still
+        // advance past the previous timestamp.
+        let earlier = t1 - Duration::seconds(5);
+        let r3 = SourceBase::next_monotonic_timestamp(&mut last, earlier);
+        assert!(r3 > r2, "reversed candidate must not rewind the clock");
+
+        // A genuinely later candidate is used as-is.
+        let much_later = t1 + Duration::seconds(5);
+        let r4 = SourceBase::next_monotonic_timestamp(&mut last, much_later);
+        assert_eq!(r4, much_later);
+        assert!(r4 > r3);
+    }
+
+    /// Regression test for issue #640: dispatching changes concurrently on a
+    /// single source must not silently drop any via `SequenceDedup`.
+    ///
+    /// Before the per-source dispatch serialization, two concurrent
+    /// `dispatch_source_change` calls could assign sequences in one order but
+    /// reach the subscriber in the opposite order. The query processor's
+    /// `SequenceDedup` then treats the later-delivered, lower-numbered event as
+    /// an already-processed replay and drops it. With serialized dispatch,
+    /// delivery order matches sequence order, so nothing is dropped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_dispatch_preserves_sequence_order() {
+        const EVENTS_PER_TRIAL: u64 = 50;
+        const TRIALS: usize = 20;
+
+        for trial in 0..TRIALS {
+            let params = SourceBaseParams::new("concurrent-src")
+                .with_dispatch_mode(DispatchMode::Channel);
+            let base = SourceBase::new(params).unwrap();
+            let mut receiver = base.create_streaming_receiver().await.unwrap();
+
+            // Fan out one dispatch per task, exactly like a plugin source that
+            // spawns a task per incoming record (or `asyncio.gather`).
+            let mut handles = Vec::new();
+            for _ in 0..EVENTS_PER_TRIAL {
+                let dispatch_base = base.clone_shared();
+                handles.push(tokio::spawn(async move {
+                    let change = drasi_core::models::SourceChange::Insert {
+                        element: drasi_core::models::Element::Node {
+                            metadata: drasi_core::models::ElementMetadata {
+                                reference: drasi_core::models::ElementReference::new(
+                                    "concurrent-src",
+                                    "n1",
+                                ),
+                                labels: Arc::from([Arc::from("Label")]),
+                                effective_from: 0,
+                            },
+                            properties: drasi_core::models::ElementPropertyMap::new(),
+                        },
+                    };
+                    dispatch_base.dispatch_source_change(change).await.unwrap();
+                }));
+            }
+            for handle in handles {
+                handle.await.unwrap();
+            }
+
+            // Drain the subscriber in delivery order and run the events through a
+            // fresh `SequenceDedup`, mirroring the query processor loop.
+            let mut dedup = crate::queries::SequenceDedup::default();
+            let mut delivered_sequences = Vec::new();
+            let mut delivered_timestamps = Vec::new();
+            let mut dropped = 0usize;
+            for _ in 0..EVENTS_PER_TRIAL {
+                let event = receiver.recv().await.unwrap();
+                let seq = event.sequence.expect("dispatched event must have a sequence");
+                if dedup.should_skip("concurrent-src", Some(seq)) {
+                    dropped += 1;
+                    continue;
+                }
+                dedup.advance("concurrent-src", seq);
+                delivered_sequences.push(seq);
+                delivered_timestamps.push(event.timestamp);
+            }
+
+            assert_eq!(
+                dropped, 0,
+                "trial {trial}: SequenceDedup dropped {dropped} concurrently dispatched event(s)"
+            );
+            assert_eq!(
+                delivered_sequences.len() as u64,
+                EVENTS_PER_TRIAL,
+                "trial {trial}: every dispatched change must be delivered"
+            );
+
+            // Delivery order must match sequence order (strictly increasing),
+            // and per-source timestamps must be strictly increasing so the
+            // timestamp-keyed priority queue cannot reorder them either.
+            for pair in delivered_sequences.windows(2) {
+                assert!(
+                    pair[1] > pair[0],
+                    "trial {trial}: sequences delivered out of order: {} then {}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+            for pair in delivered_timestamps.windows(2) {
+                assert!(
+                    pair[1] > pair[0],
+                    "trial {trial}: timestamps delivered out of order"
+                );
+            }
+        }
     }
 
     #[tokio::test]
