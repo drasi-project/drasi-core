@@ -783,7 +783,8 @@ pub fn build_source_vtable<T: Source + 'static>(
             // The FFI vtable does not (yet) marshal the checkpoint sequence, so
             // dynamically-loaded plugins default to None here. In-process sources
             // that delegate to `SourceBase::subscribe_with_bootstrap` receive it
-            // via the native path.
+            // via the native path. The host proxy logs a warning when it has to
+            // drop a `resume_sequence` here (see host-sdk SourceProxy::subscribe).
             resume_sequence: None,
         };
 
@@ -1178,7 +1179,8 @@ pub fn build_source_vtable_from_boxed(
             // The FFI vtable does not (yet) marshal the checkpoint sequence, so
             // dynamically-loaded plugins default to None here. In-process sources
             // that delegate to `SourceBase::subscribe_with_bootstrap` receive it
-            // via the native path.
+            // via the native path. The host proxy logs a warning when it has to
+            // drop a `resume_sequence` here (see host-sdk SourceProxy::subscribe).
             resume_sequence: None,
         };
 

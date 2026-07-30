@@ -212,6 +212,25 @@ impl Source for SourceProxy {
             None => (std::ptr::null(), 0u32),
         };
 
+        // The FFI subscribe ABI does not yet marshal `resume_sequence`, so a
+        // dynamically-loaded plugin source cannot advance its in-memory sequence
+        // counter above the query's dedup high-water mark on resume. When the
+        // source also has no durable `resume_from` position of its own, the first
+        // `resume_sequence` post-restart events would be stamped 1..=seq and
+        // silently deduplicated away (issue #664). Surface the gap in logs until
+        // the ABI is extended to carry the checkpoint sequence.
+        if let Some(seq) = settings.resume_sequence {
+            if settings.resume_from.is_none() {
+                log::warn!(
+                    "SourceProxy::subscribe('{}') for query '{}': FFI ABI does not marshal \
+                     resume_sequence ({seq}); this dynamically-loaded source may silently drop \
+                     the first {seq} post-restart events. Pending an ABI extension.",
+                    settings.source_id,
+                    settings.query_id,
+                );
+            }
+        }
+
         let resp_ptr = (self.vtable.subscribe_fn)(
             self.vtable.state,
             source_id_ffi,
