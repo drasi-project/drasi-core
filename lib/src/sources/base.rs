@@ -1283,7 +1283,8 @@ impl SourceBase {
 
         // Keep per-source timestamps strictly increasing in sequence order so
         // the timestamp-keyed priority queue cannot reorder same-source events.
-        wrapper.timestamp = Self::next_monotonic_timestamp(&mut last_dispatch_ts, wrapper.timestamp);
+        wrapper.timestamp =
+            Self::next_monotonic_timestamp(&mut last_dispatch_ts, wrapper.timestamp);
 
         // Record sequence→source_position mapping for confirmed-position lookups.
         if let (Some(seq), Some(ref pos)) = (wrapper.sequence, &wrapper.source_position) {
@@ -2264,8 +2265,8 @@ mod tests {
         const TRIALS: usize = 20;
 
         for trial in 0..TRIALS {
-            let params = SourceBaseParams::new("concurrent-src")
-                .with_dispatch_mode(DispatchMode::Channel);
+            let params =
+                SourceBaseParams::new("concurrent-src").with_dispatch_mode(DispatchMode::Channel);
             let base = SourceBase::new(params).unwrap();
             let mut receiver = base.create_streaming_receiver().await.unwrap();
 
@@ -2303,7 +2304,9 @@ mod tests {
             let mut dropped = 0usize;
             for _ in 0..EVENTS_PER_TRIAL {
                 let event = receiver.recv().await.unwrap();
-                let seq = event.sequence.expect("dispatched event must have a sequence");
+                let seq = event
+                    .sequence
+                    .expect("dispatched event must have a sequence");
                 if dedup.should_skip("concurrent-src", Some(seq)) {
                     dropped += 1;
                     continue;
