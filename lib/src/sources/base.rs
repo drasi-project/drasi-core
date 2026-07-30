@@ -1227,7 +1227,7 @@ impl SourceBase {
     /// `candidate` when it already advances past `*last` and otherwise nudging
     /// forward by one nanosecond. Updates `*last` to the returned value.
     ///
-    /// Called while holding the `dispatch_order` lock so per-source dispatch
+    /// Called while holding the `dispatch_order` lock, so per-source dispatch
     /// timestamps stay strictly increasing in sequence order — the priority
     /// queue is a min-heap keyed on this timestamp, so this prevents it from
     /// reordering same-source events relative to their sequence (#640).
@@ -1238,7 +1238,11 @@ impl SourceBase {
         let next = if candidate > *last {
             candidate
         } else {
-            *last + chrono::Duration::nanoseconds(1)
+            // `checked_add_signed` keeps this panic-free; `None` only occurs at
+            // the far edge of the representable range, where `*last` is already
+            // effectively "infinitely far in the future".
+            last.checked_add_signed(chrono::Duration::nanoseconds(1))
+                .unwrap_or(*last)
         };
         *last = next;
         next
@@ -1337,6 +1341,11 @@ impl SourceBase {
         }
         drop(comparator);
         drop(dispatchers);
+        // The ordering-critical window ends once every subscriber has been
+        // enqueued above; the high-water-mark bookkeeping below is unordered,
+        // so release the dispatch lock now to reduce contention with concurrent
+        // dispatches on this source.
+        drop(last_dispatch_ts);
 
         // Advance high-water marks for dispatchers that received this event.
         // For dispatchers that already had an entry (cleared_indices), this
@@ -2341,6 +2350,97 @@ mod tests {
                 assert!(
                     pair[1] > pair[0],
                     "trial {trial}: timestamps delivered out of order"
+                );
+            }
+        }
+    }
+
+    /// Regression test for issue #640, batch path: `dispatch_events_batch`
+    /// received the same serialization fix as `dispatch_event`. Dispatching
+    /// batches concurrently on one source must likewise deliver every event in
+    /// strictly increasing sequence order with nothing dropped by
+    /// `SequenceDedup`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_batch_dispatch_preserves_sequence_order() {
+        const BATCHES_PER_TRIAL: u64 = 20;
+        const EVENTS_PER_BATCH: u64 = 3;
+        const TRIALS: usize = 20;
+
+        let make_batch = || {
+            (0..EVENTS_PER_BATCH)
+                .map(|_| {
+                    let change = drasi_core::models::SourceChange::Insert {
+                        element: drasi_core::models::Element::Node {
+                            metadata: drasi_core::models::ElementMetadata {
+                                reference: drasi_core::models::ElementReference::new(
+                                    "concurrent-batch-src",
+                                    "n1",
+                                ),
+                                labels: Arc::from([Arc::from("Label")]),
+                                effective_from: 0,
+                            },
+                            properties: drasi_core::models::ElementPropertyMap::new(),
+                        },
+                    };
+                    SourceEventWrapper::new(
+                        "concurrent-batch-src".to_string(),
+                        SourceEvent::Change(change),
+                        chrono::Utc::now(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for trial in 0..TRIALS {
+            let params = SourceBaseParams::new("concurrent-batch-src")
+                .with_dispatch_mode(DispatchMode::Channel);
+            let base = SourceBase::new(params).unwrap();
+            let mut receiver = base.create_streaming_receiver().await.unwrap();
+
+            let mut handles = Vec::new();
+            for _ in 0..BATCHES_PER_TRIAL {
+                let dispatch_base = base.clone_shared();
+                let batch = make_batch();
+                handles.push(tokio::spawn(async move {
+                    dispatch_base.dispatch_events_batch(batch).await.unwrap();
+                }));
+            }
+            for handle in handles {
+                handle.await.unwrap();
+            }
+
+            let total = BATCHES_PER_TRIAL * EVENTS_PER_BATCH;
+            let mut dedup = crate::queries::SequenceDedup::default();
+            let mut delivered = Vec::new();
+            let mut dropped = 0usize;
+            for _ in 0..total {
+                let event = receiver.recv().await.unwrap();
+                let seq = event
+                    .sequence
+                    .expect("dispatched event must have a sequence");
+                if dedup.should_skip("concurrent-batch-src", Some(seq)) {
+                    dropped += 1;
+                    continue;
+                }
+                dedup.advance("concurrent-batch-src", seq);
+                delivered.push(seq);
+            }
+
+            assert_eq!(
+                dropped, 0,
+                "trial {trial}: SequenceDedup dropped {dropped} batched event(s)"
+            );
+            assert_eq!(
+                delivered.len() as u64,
+                total,
+                "trial {trial}: every batched change must be delivered"
+            );
+            for pair in delivered.windows(2) {
+                assert!(
+                    pair[1] > pair[0],
+                    "trial {trial}: batched sequences delivered out of order: {} then {}",
+                    pair[0],
+                    pair[1]
                 );
             }
         }
