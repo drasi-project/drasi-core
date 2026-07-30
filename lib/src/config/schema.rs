@@ -160,6 +160,7 @@ pub struct SourceSubscriptionConfig {
 ///     relations: ["PLACED_BY"].iter().map(|s| s.to_string()).collect(),
 ///     resume_from: None,
 ///     request_position_handle: false,
+///     resume_sequence: None,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -176,6 +177,15 @@ pub struct SourceSubscriptionSettings {
     /// If true, the query requests a shared `Arc<AtomicU64>` position handle in the
     /// `SubscriptionResponse` for reporting its durably-processed position back to the source.
     pub request_position_handle: bool,
+    /// If set, the resuming query has a dedup high-water mark at this sequence and
+    /// will discard any event with `sequence <= resume_sequence`. Sources that
+    /// restart their monotonic sequence counter from scratch in a new process
+    /// (e.g. those with no durable `source_position` of their own) must advance
+    /// their counter above this value so post-restart events are not silently
+    /// deduplicated away. `SourceBase::subscribe_with_bootstrap_context` honours
+    /// this automatically; unlike `resume_from`, it is populated whenever a
+    /// checkpoint exists, independent of whether a durable position was stored.
+    pub resume_sequence: Option<u64>,
 }
 
 /// Root configuration for drasi-lib

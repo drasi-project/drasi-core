@@ -780,6 +780,11 @@ pub fn build_source_vtable<T: Source + 'static>(
             relations,
             resume_from,
             request_position_handle,
+            // The FFI vtable does not (yet) marshal the checkpoint sequence, so
+            // dynamically-loaded plugins default to None here. In-process sources
+            // that delegate to `SourceBase::subscribe_with_bootstrap` receive it
+            // via the native path.
+            resume_sequence: None,
         };
 
         let handle = (w.runtime_handle)().handle().clone();
@@ -1170,6 +1175,11 @@ pub fn build_source_vtable_from_boxed(
             relations,
             resume_from,
             request_position_handle,
+            // The FFI vtable does not (yet) marshal the checkpoint sequence, so
+            // dynamically-loaded plugins default to None here. In-process sources
+            // that delegate to `SourceBase::subscribe_with_bootstrap` receive it
+            // via the native path.
+            resume_sequence: None,
         };
 
         let handle = (w.runtime_handle)().handle().clone();

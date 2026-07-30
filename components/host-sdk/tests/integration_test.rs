@@ -2858,6 +2858,7 @@ async fn test_cdylib_source_dispatches_events() {
         relations: std::collections::HashSet::new(),
         resume_from: None,
         request_position_handle: false,
+        resume_sequence: None,
     };
     let sub = source.subscribe(settings).await.expect("Should subscribe");
     let receiver = sub.receiver;
@@ -2938,6 +2939,7 @@ async fn test_stress_rapid_subscribe_drop_under_load() {
             relations: std::collections::HashSet::new(),
             resume_from: None,
             request_position_handle: false,
+            resume_sequence: None,
         };
         let sub = source.subscribe(settings).await.expect("Should subscribe");
         let mut receiver = sub.receiver;
@@ -3072,6 +3074,7 @@ async fn test_ffi_subscribe_position_handle() {
         relations: std::collections::HashSet::new(),
         resume_from: None,
         request_position_handle: true,
+        resume_sequence: None,
     };
     let sub = source
         .subscribe(settings_with)
@@ -3105,6 +3108,7 @@ async fn test_ffi_subscribe_position_handle() {
         relations: std::collections::HashSet::new(),
         resume_from: None,
         request_position_handle: false,
+        resume_sequence: None,
     };
     let sub2 = source
         .subscribe(settings_without)
@@ -3141,6 +3145,7 @@ async fn test_ffi_resume_from_skips_bootstrap() {
         relations: std::collections::HashSet::new(),
         resume_from: Some(resume_bytes),
         request_position_handle: true,
+        resume_sequence: None,
     };
     let sub = source
         .subscribe(settings)
@@ -3219,6 +3224,7 @@ async fn test_ffi_bootstrap_result_receiver_delivers_result() {
         relations: std::collections::HashSet::new(),
         resume_from: None,
         request_position_handle: true,
+        resume_sequence: None,
     };
     let sub = source
         .subscribe(settings)
@@ -3370,6 +3376,7 @@ async fn test_ffi_checkpoint_persist_and_resume_from() {
         relations: std::collections::HashSet::new(),
         resume_from: None,
         request_position_handle: true,
+        resume_sequence: None,
     };
     let sub = source2
         .subscribe(settings)
