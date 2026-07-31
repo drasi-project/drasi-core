@@ -117,10 +117,46 @@ pub struct CapturedLifecycle {
     pub message: String,
 }
 
+/// Maximum entries retained in the captured log store. Every plugin log
+/// record is copied here; without a bound an event-heavy workload retains
+/// gigabytes of log copies for the life of the process (measured: 2.7 GB
+/// live heap on a 10k-event replay). ~1000 entries keeps the diagnostic
+/// window useful at a ~0.5 MB ceiling.
+pub const CAPTURED_LOGS_CAP: usize = 1000;
+
 /// Access the global captured log store (for testing/diagnostics).
-pub fn captured_logs() -> &'static Mutex<Vec<CapturedLog>> {
-    static LOGS: OnceLock<Mutex<Vec<CapturedLog>>> = OnceLock::new();
-    LOGS.get_or_init(|| Mutex::new(Vec::new()))
+///
+/// Bounded ring: once [`CAPTURED_LOGS_CAP`] is reached, the oldest entry is
+/// dropped per push.
+pub fn captured_logs() -> &'static Mutex<std::collections::VecDeque<CapturedLog>> {
+    static LOGS: OnceLock<Mutex<std::collections::VecDeque<CapturedLog>>> = OnceLock::new();
+    LOGS.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
+}
+
+/// Capture one plugin log record into the bounded diagnostic store.
+///
+/// Applies the same visibility filter as the forwarding path (`log::log!`):
+/// records below the host logger's max level are not retained, so
+/// sub-filter-level plugin traffic (DEBUG/TRACE on an INFO host) costs
+/// nothing. `LevelFilter::Off` (no logger initialized, e.g. in tests)
+/// captures everything, preserving test behavior.
+fn capture_log(level: FfiLogLevel, plugin_id: &str, message: &str) {
+    let max = log::max_level();
+    if max != log::LevelFilter::Off && ffi_log_level_to_std_level(level) > max {
+        return;
+    }
+    // `ok()`-style guard: never panic in an extern "C" caller if the Mutex
+    // was poisoned by a prior test/thread panic.
+    if let Ok(mut logs) = captured_logs().lock() {
+        if logs.len() >= CAPTURED_LOGS_CAP {
+            logs.pop_front();
+        }
+        logs.push_back(CapturedLog {
+            level,
+            plugin_id: plugin_id.to_string(),
+            message: message.to_string(),
+        });
+    }
 }
 
 /// Access the global captured lifecycle event store (for testing/diagnostics).
@@ -206,16 +242,8 @@ pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEnt
             message
         );
 
-        // Always capture for diagnostics (use `ok()` to avoid panicking in extern "C"
-        // if the Mutex was poisoned by a prior test/thread panic — a panic here would
-        // be a non-unwinding abort since this is an extern "C" function)
-        if let Ok(mut logs) = captured_logs().lock() {
-            logs.push(CapturedLog {
-                level,
-                plugin_id: plugin_id.clone(),
-                message: message.clone(),
-            });
-        }
+        // Capture for diagnostics — bounded, level-filtered (see capture_log).
+        capture_log(level, &plugin_id, &message);
 
         // Route into DrasiLib's ComponentLogRegistry if we have both context and instance info
         if !ctx.is_null() && !instance_id.is_empty() && !component_id.is_empty() {
@@ -339,14 +367,8 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
             message
         );
 
-        // Capture for diagnostics (use `ok()` to avoid panicking in extern "C")
-        if let Ok(mut logs) = captured_logs().lock() {
-            logs.push(CapturedLog {
-                level,
-                plugin_id: plugin_id.clone(),
-                message: message.clone(),
-            });
-        }
+        // Capture for diagnostics — bounded, level-filtered (see capture_log).
+        capture_log(level, &plugin_id, &message);
 
         // Route into ComponentLogRegistry
         if !ctx.is_null() {
@@ -442,4 +464,28 @@ pub fn instance_log_callback_fn() -> LogCallbackFn {
 /// Get the per-instance lifecycle callback function pointer.
 pub fn instance_lifecycle_callback_fn() -> LifecycleCallbackFn {
     instance_lifecycle_callback
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[test]
+    fn captured_logs_are_bounded_to_cap() {
+        {
+            let mut logs = captured_logs().lock().unwrap_or_else(|e| e.into_inner());
+            logs.clear();
+        }
+        for i in 0..(CAPTURED_LOGS_CAP + 250) {
+            capture_log(FfiLogLevel::Info, "test-plugin", &format!("msg {i}"));
+        }
+        let logs = captured_logs().lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(logs.len(), CAPTURED_LOGS_CAP);
+        // Oldest entries were dropped: the first retained message is #250.
+        assert_eq!(logs.front().unwrap().message, "msg 250");
+        assert_eq!(
+            logs.back().unwrap().message,
+            format!("msg {}", CAPTURED_LOGS_CAP + 249)
+        );
+    }
 }
