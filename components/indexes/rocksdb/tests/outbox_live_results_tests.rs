@@ -29,7 +29,7 @@ use drasi_index_rocksdb::{
 use tempfile::TempDir;
 
 /// Helper: open a RocksDB database at the given path with a test query ID.
-fn open_db(path: &str, query_id: &str) -> Arc<rocksdb::OptimisticTransactionDB> {
+fn open_db(path: &str, query_id: &str) -> Arc<drasi_index_rocksdb::IndexDb> {
     let options = RocksIndexOptions {
         archive_enabled: false,
         direct_io: false,
