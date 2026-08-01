@@ -22,7 +22,8 @@ use indexmap::IndexMap;
 use libloading::{Library, Symbol};
 
 use drasi_plugin_sdk::ffi::{
-    ConfigResolverFn, FfiPluginRegistration, LifecycleCallbackFn, LogCallbackFn, PluginMetadata,
+    ConfigResolverFn, FfiLogLevelFilter, FfiPluginRegistration, LifecycleCallbackFn, LogCallbackFn,
+    PluginMetadata,
 };
 
 use crate::proxies::bootstrap_provider::BootstrapPluginProxy;
@@ -58,6 +59,9 @@ pub struct LoadedPlugin {
     pub file_path: PathBuf,
     /// Config resolver injection function pointer (saved from FfiPluginRegistration).
     set_config_resolver_fn: extern "C" fn(*mut c_void, ConfigResolverFn),
+    /// Log level injection function pointer (saved from FfiPluginRegistration).
+    /// `None` for plugins built against an SDK older than 0.12.0.
+    set_log_level_fn: Option<extern "C" fn(FfiLogLevelFilter)>,
     /// Keep the library loaded.
     _library: Arc<Library>,
 }
@@ -80,6 +84,19 @@ impl LoadedPlugin {
     /// even after the `LoadedPlugin` is consumed.
     pub fn config_resolver_injection_fn(&self) -> extern "C" fn(*mut c_void, ConfigResolverFn) {
         self.set_config_resolver_fn
+    }
+
+    /// Report a log level to the plugin. Records more verbose than this level
+    /// are dropped inside the plugin before formatting or crossing the FFI.
+    ///
+    /// The loader already reports [`crate::callbacks::effective_host_log_level`]
+    /// at load time; hosts can call this to override it or to re-apply after
+    /// their logging setup changes. No-op for plugins built against an SDK
+    /// older than 0.12.0.
+    pub fn set_log_level(&self, level: FfiLogLevelFilter) {
+        if let Some(f) = self.set_log_level_fn {
+            f(level);
+        }
     }
 }
 
@@ -362,6 +379,26 @@ pub fn load_plugin_from_path(
         None
     };
 
+    // NOTE: `set_log_level` is a trailing field appended for SDK 0.12.0; gate
+    // access on the plugin's reported `sdk_version` like the identity fields
+    // above, since reading it from an older (smaller) layout is UB.
+    let set_log_level_fn: Option<extern "C" fn(FfiLogLevelFilter)> = if plugin_sdk_version
+        .as_deref()
+        .and_then(parse_semver)
+        .map(|v| v >= MIN_SDK_VERSION_WITH_SET_LOG_LEVEL)
+        .unwrap_or(false)
+    {
+        Some(registration.set_log_level)
+    } else {
+        None
+    };
+
+    // Report the host's effective log level so the plugin can drop
+    // filtered-out records before formatting or crossing the FFI.
+    if let Some(f) = set_log_level_fn {
+        f(crate::callbacks::effective_host_log_level());
+    }
+
     // Now safe to forget the registration — we own all arrays
     std::mem::forget(registration);
 
@@ -401,6 +438,7 @@ pub fn load_plugin_from_path(
         metadata_info,
         file_path: path.to_path_buf(),
         set_config_resolver_fn,
+        set_log_level_fn,
         _library: lib,
     })
 }
@@ -439,6 +477,10 @@ fn read_plugin_metadata(lib: &Library) -> Option<String> {
 /// — reading those trailing fields for such plugins would be undefined
 /// behavior, so the loader treats identity provider plugins as absent.
 const MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS: (u32, u32, u32) = (0, 6, 0);
+
+/// Minimum plugin SDK version whose `FfiPluginRegistration` carries the
+/// trailing `set_log_level` field.
+const MIN_SDK_VERSION_WITH_SET_LOG_LEVEL: (u32, u32, u32) = (0, 12, 0);
 
 /// Parse a SemVer version string into `(major, minor, patch)`, ignoring any
 /// pre-release / build metadata. Returns `None` on malformed input.
