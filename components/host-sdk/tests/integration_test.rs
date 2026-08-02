@@ -18,19 +18,30 @@
 //! the full dynamic loading pipeline: metadata validation, callback wiring,
 //! descriptor factory invocation, and trait method dispatch through FFI vtables.
 //!
-//! **Prerequisites**: Build the cdylib plugins before running these tests:
+//! **Prerequisites**: These tests load plugins from `target/debug/plugins/`,
+//! not `target/debug/`. Build AND copy them in one step with:
 //!
 //! ```sh
 //! cd /path/to/drasi-core
+//! make build-test-plugins
+//! ```
+//!
+//! Or build individually and copy the resulting `.so`/`.dylib`/`.dll` files
+//! into `target/debug/plugins/` yourself:
+//!
+//! ```sh
 //! cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
 //! cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
+//! cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
 //! ```
 
 use std::path::{Path, PathBuf};
 
 use drasi_host_sdk::callbacks;
 use drasi_host_sdk::loader::{load_plugin_from_path, PluginLoader, PluginLoaderConfig};
-use drasi_plugin_sdk::descriptor::{ReactionPluginDescriptor, SourcePluginDescriptor};
+use drasi_plugin_sdk::descriptor::{
+    BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor,
+};
 use serial_test::serial;
 
 /// Locate the drasi-core build output directory.
@@ -3536,4 +3547,164 @@ async fn test_ffi_checkpoint_persist_and_resume_from() {
 
     source2.stop().await.expect("Should stop source2");
     println!("Phase 2 complete: verified position_handle and supports_replay through FFI");
+}
+
+// ============================================================================
+// Bootstrap provider plugin: push-based FFI contract across a real cdylib
+// ============================================================================
+//
+// The bootstrap_provider_ffi_test suite drives the push contract in-process;
+// these tests load the scriptfile bootstrap plugin as a real cdylib so the
+// contract is exercised across an actual dylib boundary (separate allocator,
+// separate tokio), the failure class behind issue #602.
+
+/// Write a JSONL bootstrap script with `node_count` nodes.
+fn write_bootstrap_script(node_count: usize) -> (tempfile::TempDir, PathBuf) {
+    use std::io::Write;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bootstrap.jsonl");
+    let mut f = std::fs::File::create(&path).expect("create script file");
+    writeln!(
+        f,
+        r#"{{"kind": "Header", "start_time": "2024-01-01T00:00:00Z", "description": "cdylib bootstrap test"}}"#
+    )
+    .expect("write header");
+    for i in 0..node_count {
+        writeln!(
+            f,
+            r#"{{"kind": "Node", "id": "n{i}", "labels": ["Item"], "properties": {{"idx": {i}}}}}"#
+        )
+        .expect("write node");
+    }
+    writeln!(f, r#"{{"kind": "Finish", "description": "done"}}"#).expect("write finish");
+    (dir, path)
+}
+
+/// Load the scriptfile bootstrap plugin and create a provider for `script`.
+async fn load_scriptfile_provider(
+    script: &Path,
+) -> (
+    drasi_host_sdk::loader::LoadedPlugin,
+    Box<dyn drasi_lib::bootstrap::BootstrapProvider>,
+) {
+    let path = require_plugin("drasi-bootstrap-scriptfile");
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Failed to load scriptfile bootstrap plugin");
+
+    assert!(
+        !plugin.bootstrap_plugins.is_empty(),
+        "scriptfile plugin should register a bootstrap descriptor"
+    );
+    let descriptor = &plugin.bootstrap_plugins[0];
+    assert_eq!(descriptor.kind(), "scriptfile");
+
+    let config = serde_json::json!({ "filePaths": [script.to_string_lossy()] });
+    let provider = descriptor
+        .create_bootstrap_provider(&config, &serde_json::json!({}))
+        .await
+        .expect("create_bootstrap_provider across cdylib failed");
+    (plugin, provider)
+}
+
+fn bootstrap_request() -> drasi_lib::bootstrap::BootstrapRequest {
+    drasi_lib::bootstrap::BootstrapRequest {
+        query_id: "cdylib-bootstrap-query".to_string(),
+        node_labels: vec![],
+        relation_labels: vec![],
+        request_id: "cdylib-bootstrap-request".to_string(),
+    }
+}
+
+/// Full bootstrap round-trip across the cdylib boundary: every node in the
+/// script arrives as an event and the provider result reports the count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn test_bootstrap_plugin_streams_across_cdylib() {
+    if !plugin_exists("drasi-bootstrap-scriptfile") {
+        eprintln!("SKIP: drasi-bootstrap-scriptfile not built as cdylib");
+        panic!("SKIP: drasi-bootstrap-scriptfile not built as cdylib");
+    }
+    const N: usize = 2_000;
+    let (_dir, script) = write_bootstrap_script(N);
+    let (_plugin, provider) = load_scriptfile_provider(&script).await;
+
+    let ctx = drasi_lib::bootstrap::BootstrapContext::new_minimal(
+        "itest-server".to_string(),
+        "scriptfile-src".to_string(),
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let drain = tokio::spawn(async move {
+        let mut n = 0usize;
+        while rx.recv().await.is_some() {
+            n += 1;
+        }
+        n
+    });
+
+    let result = provider
+        .bootstrap(bootstrap_request(), &ctx, tx, None)
+        .await
+        .expect("bootstrap across cdylib failed");
+
+    assert_eq!(result.event_count, N, "provider must report all events");
+    assert_eq!(
+        drain.await.unwrap(),
+        N,
+        "all events must cross the boundary"
+    );
+}
+
+/// Backpressure across the cdylib boundary: with a stalled consumer the
+/// bootstrap must stay open (bounded in-flight) instead of running to
+/// completion into unbounded buffers; releasing the consumer drains all
+/// events losslessly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn test_bootstrap_plugin_backpressure_across_cdylib() {
+    if !plugin_exists("drasi-bootstrap-scriptfile") {
+        eprintln!("SKIP: drasi-bootstrap-scriptfile not built as cdylib");
+        panic!("SKIP: drasi-bootstrap-scriptfile not built as cdylib");
+    }
+    // Must exceed provider channel (100) + consumer bridge (256) + the
+    // query-side channel below (100), so a completed bootstrap would prove
+    // unbounded buffering somewhere in the chain.
+    const N: usize = 5_000;
+    let (_dir, script) = write_bootstrap_script(N);
+    let (_plugin, provider) = load_scriptfile_provider(&script).await;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let boot = tokio::spawn(async move {
+        let ctx = drasi_lib::bootstrap::BootstrapContext::new_minimal(
+            "itest-server".to_string(),
+            "scriptfile-src".to_string(),
+        );
+        provider
+            .bootstrap(bootstrap_request(), &ctx, tx, None)
+            .await
+    });
+
+    // Consumer stalled: the bootstrap must still be in flight after a pause.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert!(
+        !boot.is_finished(),
+        "bootstrap must stall under backpressure across the cdylib boundary"
+    );
+
+    // Release: drain everything and confirm nothing was lost.
+    let mut drained = 0usize;
+    while rx.recv().await.is_some() {
+        drained += 1;
+    }
+    let result = boot
+        .await
+        .unwrap()
+        .expect("bootstrap across cdylib failed after release");
+    assert_eq!(result.event_count, N);
+    assert_eq!(drained, N, "all events must arrive after the stall");
 }
