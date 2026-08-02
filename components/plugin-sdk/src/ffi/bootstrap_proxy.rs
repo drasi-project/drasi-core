@@ -17,14 +17,21 @@
 //! Wraps a `BootstrapProviderVtable` (from another cdylib plugin or the host)
 //! into a local `BootstrapProvider` trait implementation. This is how a source
 //! plugin calls a bootstrap provider that lives in a different cdylib.
+//!
+//! The vtable's `bootstrap_fn` returns push-based receivers immediately; this
+//! proxy consumes them via [`BootstrapStreamConsumer`] and
+//! [`wrap_result_receiver`], forwarding events into the caller's bounded
+//! channel. Backpressure propagates through every link (see the
+//! `bootstrap_stream` module docs); nothing blocks an async worker.
 
-use std::ffi::c_void;
 use std::sync::Mutex;
 
-use super::types::{now_us, FfiStr};
-use super::vtables::{
-    BootstrapProviderVtable, FfiBootstrapEvent, FfiBootstrapResult, FfiBootstrapSender,
+use super::bootstrap_stream::{
+    release_bootstrap_receiver, release_result_receiver, wrap_result_receiver,
+    BootstrapStreamConsumer,
 };
+use super::types::FfiStr;
+use super::vtables::BootstrapProviderVtable;
 use drasi_lib::bootstrap::{BootstrapProvider, BootstrapResult};
 
 /// Plugin-side proxy: wraps a `BootstrapProviderVtable` into a local `BootstrapProvider`.
@@ -35,6 +42,15 @@ pub struct FfiBootstrapProviderProxy {
 unsafe impl Send for FfiBootstrapProviderProxy {}
 unsafe impl Sync for FfiBootstrapProviderProxy {}
 
+impl FfiBootstrapProviderProxy {
+    /// Wrap a provider vtable received across the FFI boundary.
+    pub fn new(vtable: BootstrapProviderVtable) -> Self {
+        Self {
+            vtable: Mutex::new(vtable),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl BootstrapProvider for FfiBootstrapProviderProxy {
     async fn bootstrap(
@@ -42,147 +58,93 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
         request: drasi_lib::bootstrap::BootstrapRequest,
         context: &drasi_lib::bootstrap::BootstrapContext,
         event_tx: drasi_lib::channels::events::BootstrapEventSender,
-        settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
+        _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
     ) -> anyhow::Result<BootstrapResult> {
-        // Extract vtable fields under the lock, then release immediately
-        let (vtable_state, vtable_bootstrap_fn) = {
-            let vtable = self.vtable.lock().expect("vtable mutex poisoned");
-            (vtable.state, vtable.bootstrap_fn)
-        };
-
-        let query_id = request.query_id.clone();
-        let node_labels: Vec<String> = request.node_labels.clone();
-        let relation_labels: Vec<String> = request.relation_labels.clone();
-        let request_id = request.request_id.clone();
-        let server_id = context.server_id.clone();
-        let source_id = context.source_id.clone();
-
-        // FFI sender callback — wraps tokio sender, called from the bootstrap thread
-        struct SenderState {
-            tx: std::sync::mpsc::Sender<drasi_lib::channels::events::BootstrapEvent>,
-        }
-
-        extern "C" fn send_fn(state: *mut c_void, event: *mut FfiBootstrapEvent) -> i32 {
-            let sender_state = unsafe { &*(state as *const SenderState) };
-            if event.is_null() {
-                return -1;
-            }
-            let ffi_event = unsafe { &*event };
-            // Decode the serialized payload into a plugin-owned BootstrapEvent and
-            // free the producer's buffer via its own deallocator (issue #602: never
-            // reinterpret/drop the other side's repr(Rust) memory). The canonical
-            // consumer also bounds the size and null-guards the drop fn.
-            let decoded = unsafe { crate::ffi::payload::consume_bootstrap_event(ffi_event) };
-            unsafe { drop(Box::from_raw(event)) };
-            let Some(bootstrap_event) = decoded else {
-                return 0;
+        // Start the provider and take ownership of the stream handles inside a
+        // block so no raw pointer is held across an await point.
+        //
+        // Unlike host-sdk's BootstrapProviderProxy, the consumers are built
+        // inline rather than on a dedicated thread: the vtable functions here
+        // are host-compiled, only spawn threads and return, and this caller is
+        // a long-lived plugin runtime worker — so the macOS TLS-destructor-at-
+        // thread-exit hazard that motivates the dedicated thread over there
+        // does not apply in this direction.
+        // The guard keeps the result callback context alive until the result
+        // is read.
+        let (consumer, (result_rx, _result_guard)) = {
+            let (vtable_state, vtable_bootstrap_fn) = {
+                let vtable = self.vtable.lock().expect("vtable mutex poisoned");
+                (vtable.state, vtable.bootstrap_fn)
             };
-            match sender_state.tx.send(bootstrap_event) {
-                Ok(()) => 0,
-                Err(_) => -1,
-            }
-        }
 
-        extern "C" fn drop_sender(state: *mut c_void) {
-            unsafe { drop(Box::from_raw(state as *mut SenderState)) };
-        }
-
-        // Use std::sync::mpsc so the vtable thread can send without async
-        let (std_tx, std_rx) =
-            std::sync::mpsc::channel::<drasi_lib::channels::events::BootstrapEvent>();
-
-        let sender_state = Box::new(SenderState { tx: std_tx });
-        let ffi_sender = Box::new(FfiBootstrapSender {
-            state: Box::into_raw(sender_state) as *mut c_void,
-            send_fn,
-            drop_fn: drop_sender,
-        });
-
-        // Spawn the vtable call on a background thread (breaks out of source's tokio).
-        let vtable_state_usize = vtable_state as usize;
-        let bootstrap_fn = vtable_bootstrap_fn;
-
-        // Channel to carry the FfiBootstrapResult pointer back (as usize for Send)
-        let (result_ptr_tx, result_ptr_rx) = std::sync::mpsc::channel::<usize>();
-
-        std::thread::spawn(move || {
-            let ffi_query_id = FfiStr::from_str(&query_id);
-            let ffi_node_labels: Vec<FfiStr> =
-                node_labels.iter().map(|s| FfiStr::from_str(s)).collect();
-            let ffi_rel_labels: Vec<FfiStr> = relation_labels
+            let node_ffi: Vec<FfiStr> = request
+                .node_labels
                 .iter()
                 .map(|s| FfiStr::from_str(s))
                 .collect();
-            let ffi_request_id = FfiStr::from_str(&request_id);
-            let ffi_server_id = FfiStr::from_str(&server_id);
-            let ffi_source_id = FfiStr::from_str(&source_id);
+            let rel_ffi: Vec<FfiStr> = request
+                .relation_labels
+                .iter()
+                .map(|s| FfiStr::from_str(s))
+                .collect();
 
-            let ffi_sender_ptr = Box::into_raw(ffi_sender);
-            let result_ptr = (bootstrap_fn)(
-                vtable_state_usize as *mut c_void,
-                ffi_query_id,
-                ffi_node_labels.as_ptr(),
-                ffi_node_labels.len(),
-                ffi_rel_labels.as_ptr(),
-                ffi_rel_labels.len(),
-                ffi_request_id,
-                ffi_server_id,
-                ffi_source_id,
-                ffi_sender_ptr,
+            // Non-blocking: spawns the provider and returns handles.
+            let stream_ptr = (vtable_bootstrap_fn)(
+                vtable_state,
+                FfiStr::from_str(&request.query_id),
+                node_ffi.as_ptr(),
+                node_ffi.len(),
+                rel_ffi.as_ptr(),
+                rel_ffi.len(),
+                FfiStr::from_str(&request.request_id),
+                FfiStr::from_str(&context.server_id),
+                FfiStr::from_str(&context.source_id),
             );
-            // Properly drop the FfiBootstrapSender: call drop_fn to free inner state
-            let ffi_sender = unsafe { Box::from_raw(ffi_sender_ptr) };
-            (ffi_sender.drop_fn)(ffi_sender.state);
-            let _ = result_ptr_tx.send(result_ptr as usize);
-        });
 
-        // Forward from std::sync::mpsc → tokio::sync::mpsc on a blocking thread.
-        let count = tokio::task::spawn_blocking(move || {
-            let mut count: usize = 0;
-            while let Ok(record) = std_rx.recv() {
-                if event_tx.blocking_send(record).is_err() {
-                    break;
+            if stream_ptr.is_null() {
+                anyhow::bail!("Bootstrap provider failed to start (null stream)");
+            }
+            let stream = unsafe { *Box::from_raw(stream_ptr) };
+            if stream.events.is_null() || stream.result.is_null() {
+                // Release whichever receiver was populated so neither its
+                // state nor the provider thread blocked on it leaks.
+                if !stream.events.is_null() {
+                    release_bootstrap_receiver(unsafe { *Box::from_raw(stream.events) });
                 }
-                count += 1;
-            }
-            count
-        })
-        .await
-        .expect("forwarding task panicked");
-
-        // Read the FfiBootstrapResult from the vtable thread
-        let ffi_result = result_ptr_rx.recv().ok().and_then(|ptr_usize| {
-            let ptr = ptr_usize as *mut FfiBootstrapResult;
-            if ptr.is_null() {
-                None
-            } else {
-                Some(unsafe { *Box::from_raw(ptr) })
-            }
-        });
-
-        let source_position = if let Some(ref r) = ffi_result {
-            if !r.source_position_ptr.is_null() && r.source_position_len > 0 {
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(r.source_position_ptr, r.source_position_len)
-                };
-                let owned = bytes::Bytes::copy_from_slice(bytes);
-                // Free the source position allocation
-                if let Some(drop_fn) = r.source_position_drop_fn {
-                    (drop_fn)(r.source_position_ptr as *mut u8, r.source_position_len);
+                if !stream.result.is_null() {
+                    release_result_receiver(unsafe { *Box::from_raw(stream.result) });
                 }
-                Some(owned)
-            } else {
-                None
+                anyhow::bail!("Bootstrap provider returned an incomplete stream");
             }
-        } else {
-            return Err(anyhow::anyhow!(
-                "Bootstrap provider returned null result (plugin-side bootstrap failed)"
-            ));
+            let events = unsafe { *Box::from_raw(stream.events) };
+            let result = unsafe { *Box::from_raw(stream.result) };
+
+            (
+                BootstrapStreamConsumer::new(events),
+                wrap_result_receiver(result),
+            )
         };
 
-        Ok(BootstrapResult {
-            event_count: count,
-            source_position,
-        })
+        // Drain every event into the caller's channel, then collect the
+        // provider's result. The consumer returns only after the producer's
+        // end-of-stream sentinel, so all events precede the result.
+        let forwarded = consumer.forward_into(&event_tx).await;
+        let outcome = result_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("Bootstrap result channel dropped without a result"))?;
+        let result = outcome?;
+
+        if result.event_count != forwarded {
+            log::warn!(
+                "Bootstrap event count mismatch: provider reported {} but {forwarded} events \
+                 were delivered",
+                result.event_count
+            );
+        }
+        log::debug!(
+            "FFI bootstrap stream complete: {forwarded} events forwarded, provider reported {}",
+            result.event_count
+        );
+        Ok(result)
     }
 }
