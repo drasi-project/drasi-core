@@ -366,13 +366,32 @@ impl InMemoryElementIndex {
     ) -> Result<(), IndexError> {
         let mut elements_to_delete = Vec::new();
         let value_hash = get_value_hash(value);
+        let outer_key = (query_join.id.clone(), value_hash);
         let mut partial_joins_guard = self.partial_joins.write().await;
-        let partial_joins = partial_joins_guard
-            .entry((query_join.id.clone(), value_hash))
-            .or_default();
+
+        // Look the entry up rather than inserting it. Using `entry(..).or_default()`
+        // on the delete path would create an empty outer container that is never
+        // reclaimed, causing unbounded growth for high-cardinality/high-churn joins.
+        let Some(partial_joins) = partial_joins_guard.get_mut(&outer_key) else {
+            log::warn!(
+                "delete_source_join: no partial joins for query_join {} (value_hash {}) - \
+                 element {:?} may not have been fully registered",
+                query_join.id,
+                value_hash,
+                old_element
+            );
+            return Ok(());
+        };
 
         let did_remove = match partial_joins.get_mut(join_key) {
-            Some(element_set) => element_set.remove(old_element),
+            Some(element_set) => {
+                let removed = element_set.remove(old_element);
+                // Drop the now-empty set so emptied containers don't accumulate.
+                if element_set.is_empty() {
+                    partial_joins.remove(join_key);
+                }
+                removed
+            }
             None => {
                 log::warn!(
                     "delete_source_join: join_key {:?} not found for element {:?} in query_join {} - \
@@ -401,6 +420,12 @@ impl InMemoryElementIndex {
                     }
                 }
             }
+        }
+
+        // Drop the outer (join_id, value_hash) entry once its inner map is empty.
+        let outer_now_empty = partial_joins.is_empty();
+        if outer_now_empty {
+            partial_joins_guard.remove(&outer_key);
         }
 
         drop(partial_joins_guard);
@@ -1017,6 +1042,16 @@ mod tests {
 
         // Should complete successfully (no-op) without panic
         assert!(result.is_ok());
+
+        // The delete path must NOT create an outer entry for a missing key,
+        // otherwise emptied/absent containers leak and grow unbounded (issue #641).
+        {
+            let guard = index.partial_joins.read().await;
+            assert!(
+                guard.is_empty(),
+                "delete_source_join on a missing key must not create partial_joins entries"
+            );
+        }
     }
 
     /// Test that delete_source_join correctly removes an element that was previously registered.
@@ -1063,11 +1098,15 @@ mod tests {
             .await;
         assert!(result.is_ok());
 
-        // Verify element was removed
+        // Verify the emptied containers were pruned: removing the last element for
+        // this (join_id, value_hash) should drop both the inner set and the outer
+        // entry rather than leaving empty containers behind (see issue #641).
         {
             let guard = index.partial_joins.read().await;
-            let partial_joins = guard.get(&(query_join.id.clone(), value_hash)).unwrap();
-            assert!(!partial_joins.get(join_key).unwrap().contains(&element_ref));
+            assert!(
+                guard.get(&(query_join.id.clone(), value_hash)).is_none(),
+                "outer partial_joins entry should be pruned once its last element is removed"
+            );
         }
     }
 
@@ -1118,5 +1157,74 @@ mod tests {
             let partial_joins = guard.get(&(query_join.id.clone(), existing_hash)).unwrap();
             assert!(partial_joins.get(join_key).unwrap().contains(&existing_ref));
         }
+    }
+
+    /// Regression test for issue #641: emptied partial-join containers must be
+    /// pruned so `partial_joins` does not grow unbounded for high-cardinality /
+    /// high-churn join values.
+    ///
+    /// Registers two elements under two distinct values, deletes the last element
+    /// for one value, and asserts that value's inner `HashSet` and outer entry are
+    /// both dropped while the other value remains intact.
+    #[tokio::test]
+    async fn test_delete_source_join_prunes_emptied_containers() {
+        let index = InMemoryElementIndex::new();
+
+        let query_join = QueryJoin {
+            id: "churn_join".to_string(),
+            keys: vec![QueryJoinKey {
+                label: "Label".to_string(),
+                property: "prop".to_string(),
+            }],
+        };
+        let join_key = &query_join.keys[0];
+
+        // Two elements registered under two different values (two outer entries).
+        let ref_a = ElementReference::new("test_source", "elem_a");
+        let value_a = ElementValue::String("value_a".into());
+        let hash_a = get_value_hash(&value_a);
+
+        let ref_b = ElementReference::new("test_source", "elem_b");
+        let value_b = ElementValue::String("value_b".into());
+        let hash_b = get_value_hash(&value_b);
+
+        {
+            let mut guard = index.partial_joins.write().await;
+            guard
+                .entry((query_join.id.clone(), hash_a))
+                .or_default()
+                .entry(join_key.clone())
+                .or_default()
+                .insert(ref_a.clone());
+            guard
+                .entry((query_join.id.clone(), hash_b))
+                .or_default()
+                .entry(join_key.clone())
+                .or_default()
+                .insert(ref_b.clone());
+        }
+
+        assert_eq!(index.partial_joins.read().await.len(), 2);
+
+        // Remove the only element for value_a.
+        index
+            .delete_source_join(&ref_a, &query_join, join_key, &value_a)
+            .await
+            .unwrap();
+
+        let guard = index.partial_joins.read().await;
+
+        // value_a's outer entry (and its now-empty inner set) must be gone.
+        assert!(
+            guard.get(&(query_join.id.clone(), hash_a)).is_none(),
+            "outer entry for the emptied value should be pruned"
+        );
+
+        // value_b must be untouched.
+        let remaining = guard
+            .get(&(query_join.id.clone(), hash_b))
+            .expect("outer entry for the still-populated value must remain");
+        assert!(remaining.get(join_key).unwrap().contains(&ref_b));
+        assert_eq!(guard.len(), 1, "only the emptied value should be pruned");
     }
 }
