@@ -76,7 +76,7 @@ impl SubscriptionSettingsBuilder {
                         bail!("No sources configured for query");
                     }
 
-                    // Sources filter requested labels against the data they own.
+                    // Broadcast to all sources; each source filters out labels it does not own.
                     for settings in settings_vec.iter_mut() {
                         settings.nodes.insert(node_label.clone());
                     }
@@ -113,48 +113,41 @@ impl SubscriptionSettingsBuilder {
                 }
             }
 
-            match matching_indices.len() {
-                0 => {
-                    // Not found in any source config
-                    // Check if this is a join relation
-                    if let Some(join_configs) = joins {
-                        if let Some(join_config) =
-                            join_configs.iter().find(|j| j.id == *relation_label)
-                        {
-                            // This is a join relation - verify that all node labels in the join keys
-                            // match node labels from the query
-                            for key in &join_config.keys {
-                                if !query_labels.node_labels.contains(&key.label) {
-                                    bail!(
-                                        "Join relation '{}' references node label '{}' which is not found in the query",
-                                        relation_label,
-                                        key.label
-                                    );
-                                }
-                            }
-                            // Join relation is valid, don't add to any source
-                            continue;
-                        }
-                    }
+            if matching_indices.len() > 1 {
+                bail!(
+                    "Relation label '{relation_label}' is configured in multiple sources. Each relation label must be assigned to exactly one source."
+                );
+            }
 
-                    if settings_vec.is_empty() {
-                        bail!("No sources configured for query");
-                    }
-
-                    // Sources filter requested labels against the data they own.
-                    for settings in settings_vec.iter_mut() {
-                        settings.relations.insert(relation_label.clone());
+            if let Some(join_config) = joins
+                .as_ref()
+                .and_then(|join_configs| join_configs.iter().find(|j| j.id == *relation_label))
+            {
+                for key in &join_config.keys {
+                    if !query_labels.node_labels.contains(&key.label) {
+                        bail!(
+                            "Join relation '{}' references node label '{}' which is not found in the query",
+                            relation_label,
+                            key.label
+                        );
                     }
                 }
-                1 => {
-                    // Found in exactly one source - already in the HashSet from initialization
-                    // Nothing to do, it's already there
+
+                // Synthetic join relations must never be requested from physical sources.
+                for settings in settings_vec.iter_mut() {
+                    settings.relations.remove(relation_label);
                 }
-                _ => {
-                    // Found in multiple sources - error
-                    bail!(
-                        "Relation label '{relation_label}' is configured in multiple sources. Each relation label must be assigned to exactly one source."
-                    );
+                continue;
+            }
+
+            if matching_indices.is_empty() {
+                if settings_vec.is_empty() {
+                    bail!("No sources configured for query");
+                }
+
+                // Broadcast to all sources; each source filters out labels it does not own.
+                for settings in settings_vec.iter_mut() {
+                    settings.relations.insert(relation_label.clone());
                 }
             }
         }
@@ -406,6 +399,42 @@ mod tests {
     }
 
     #[test]
+    fn test_configured_join_relation_not_added_to_source() {
+        let sources = vec![SourceSubscriptionConfig {
+            source_id: "source1".to_string(),
+            nodes: vec![],
+            relations: vec!["CUSTOMER".to_string()],
+            pipeline: vec![],
+        }];
+
+        let mut query_config = create_test_query_config(sources);
+        query_config.joins = Some(vec![QueryJoinConfig {
+            id: "CUSTOMER".to_string(),
+            keys: vec![
+                QueryJoinKeyConfig {
+                    label: "Order".to_string(),
+                    property: "customer_id".to_string(),
+                },
+                QueryJoinKeyConfig {
+                    label: "Customer".to_string(),
+                    property: "id".to_string(),
+                },
+            ],
+        }]);
+
+        let query_labels = QueryLabels {
+            node_labels: vec!["Order".to_string(), "Customer".to_string()],
+            relation_labels: vec!["CUSTOMER".to_string()],
+        };
+
+        let settings =
+            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels)
+                .unwrap();
+
+        assert!(!settings[0].relations.contains("CUSTOMER"));
+    }
+
+    #[test]
     fn test_cross_source_join_settings_are_order_independent() {
         fn build(source_ids: &[&str]) -> Vec<SourceSubscriptionSettings> {
             let sources = source_ids
@@ -434,7 +463,7 @@ mod tests {
 
             let query_labels = QueryLabels {
                 node_labels: vec!["orders".to_string(), "vehicles".to_string()],
-                relation_labels: vec!["PICKUP_BY".to_string()],
+                relation_labels: vec!["PICKUP_BY".to_string(), "CONTAINS".to_string()],
             };
 
             SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels)
@@ -457,8 +486,9 @@ mod tests {
             assert_eq!(forward_settings.nodes, reverse_settings.nodes);
             assert!(forward_settings.nodes.contains("orders"));
             assert!(forward_settings.nodes.contains("vehicles"));
-            assert!(forward_settings.relations.is_empty());
             assert_eq!(forward_settings.relations, reverse_settings.relations);
+            assert!(forward_settings.relations.contains("CONTAINS"));
+            assert!(!forward_settings.relations.contains("PICKUP_BY"));
         }
     }
 
