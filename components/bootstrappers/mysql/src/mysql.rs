@@ -33,8 +33,8 @@ use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 
 use crate::config::MySqlBootstrapConfig;
 use drasi_mysql_common::{
-    canonicalize_json_text, format_datetime, format_time, format_value_for_key, is_valid_identifier,
-    quote_identifier,
+    canonicalize_json_text, format_datetime, format_time, format_value_for_key,
+    is_valid_identifier, quote_identifier,
 };
 
 /// Binlog position captured during bootstrap snapshot.
