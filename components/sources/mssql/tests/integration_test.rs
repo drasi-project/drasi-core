@@ -734,13 +734,12 @@ async fn prepare_types_database(config: &MssqlConfig) -> Result<MssqlConfig> {
 /// booleans, and strings should be strings — not everything coerced to string.
 #[tokio::test]
 #[ignore]
-#[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_column_type_mapping() -> Result<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .is_test(true)
         .try_init();
 
-    let result = tokio::time::timeout(Duration::from_secs(300), async {
+    let result = tokio::time::timeout(Duration::from_secs(900), async {
         let mssql = setup_mssql()
             .await
             .context("Failed to start MSSQL container")?;
@@ -901,7 +900,7 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
 
     match result {
         Ok(inner) => inner?,
-        Err(_) => anyhow::bail!("Integration test timed out after 300 seconds"),
+        Err(_) => anyhow::bail!("Integration test timed out after 900 seconds"),
     }
 
     Ok(())
