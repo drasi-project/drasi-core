@@ -20,7 +20,6 @@ use ordered_float::OrderedFloat;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde_json::Value as JsonValue;
-use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -46,7 +45,6 @@ pub enum PostgresValue {
     Json(JsonValue),
     Jsonb(JsonValue),
     Array(Vec<PostgresValue>),
-    Composite(HashMap<String, PostgresValue>),
     Bytea(Vec<u8>),
 }
 
@@ -81,11 +79,6 @@ impl PostgresValue {
             PostgresValue::Json(j) | PostgresValue::Jsonb(j) => j.clone(),
             PostgresValue::Array(arr) => {
                 JsonValue::Array(arr.iter().map(|v| v.to_json()).collect())
-            }
-            PostgresValue::Composite(map) => {
-                let obj: serde_json::Map<String, JsonValue> =
-                    map.iter().map(|(k, v)| (k.clone(), v.to_json())).collect();
-                JsonValue::Object(obj)
             }
             PostgresValue::Bytea(bytes) => JsonValue::String(encode_base64(bytes)),
         }
@@ -126,13 +119,11 @@ impl PostgresValue {
             PostgresValue::Array(arr) => {
                 ElementValue::List(arr.iter().map(|v| v.to_element_value()).collect())
             }
-            PostgresValue::Composite(_) => {
-                ElementValue::String(Arc::from(self.to_json().to_string()))
-            }
             PostgresValue::Bytea(bytes) => ElementValue::String(Arc::from(encode_base64(bytes))),
         }
     }
 
+    /// Returns `true` if this value is [`PostgresValue::Null`].
     pub fn is_null(&self) -> bool {
         matches!(self, PostgresValue::Null)
     }
@@ -158,9 +149,7 @@ impl PostgresValue {
             PostgresValue::Time(t) => Some(t.to_string()),
             PostgresValue::Json(j) | PostgresValue::Jsonb(j) => Some(j.to_string()),
             PostgresValue::Bytea(bytes) => Some(encode_base64(bytes)),
-            PostgresValue::Array(_) | PostgresValue::Composite(_) => {
-                Some(self.to_json().to_string())
-            }
+            PostgresValue::Array(_) => Some(self.to_json().to_string()),
         }
     }
 }
@@ -262,5 +251,32 @@ mod tests {
             PostgresValue::Uuid(uuid).to_element_value(),
             ElementValue::String(Arc::from(uuid.to_string()))
         );
+    }
+
+    #[test]
+    fn json_to_element_value_is_string() {
+        let j = serde_json::json!({"k": 1});
+        let ev = PostgresValue::Json(j.clone()).to_element_value();
+        assert_eq!(ev, ElementValue::String(Arc::from(j.to_string())));
+        let evb = PostgresValue::Jsonb(j.clone()).to_element_value();
+        assert_eq!(evb, ElementValue::String(Arc::from(j.to_string())));
+    }
+
+    #[test]
+    fn array_to_element_value_is_list() {
+        let arr = PostgresValue::Array(vec![
+            PostgresValue::Int4(1),
+            PostgresValue::Null,
+            PostgresValue::Text("x".into()),
+        ]);
+        match arr.to_element_value() {
+            ElementValue::List(items) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], ElementValue::Integer(1));
+                assert_eq!(items[1], ElementValue::Null);
+                assert_eq!(items[2], ElementValue::String(Arc::from("x")));
+            }
+            other => panic!("expected List, got {other:?}"),
+        }
     }
 }

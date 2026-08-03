@@ -158,3 +158,42 @@ pub fn array_element_oid(array_oid: u32) -> Option<u32> {
 pub fn is_array_oid(oid: u32) -> bool {
     array_element_oid(oid).is_some()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn information_schema_integer() {
+        assert_eq!(oid_from_information_schema("integer", None), INT4);
+    }
+
+    #[test]
+    fn information_schema_array_int4() {
+        assert_eq!(
+            oid_from_information_schema("ARRAY", Some("_int4")),
+            INT4_ARRAY
+        );
+    }
+
+    #[test]
+    fn information_schema_array_unknown_defaults_to_text_array() {
+        assert_eq!(
+            oid_from_information_schema("ARRAY", Some("_unknown")),
+            TEXT_ARRAY
+        );
+    }
+
+    #[test]
+    fn information_schema_user_defined_uuid() {
+        assert_eq!(
+            oid_from_information_schema("USER-DEFINED", Some("uuid")),
+            UUID
+        );
+    }
+
+    #[test]
+    fn information_schema_unknown_defaults_to_text() {
+        assert_eq!(oid_from_information_schema("totally_unknown", None), TEXT);
+    }
+}

@@ -43,39 +43,39 @@ pub fn decode_text_to_postgres_value(text: &str, type_oid: u32) -> Result<Postgr
             let value = match trimmed {
                 "t" | "true" => true,
                 "f" | "false" => false,
-                _ => return Err(anyhow!("Invalid boolean value: {text}")),
+                _ => return Err(anyhow!("Invalid boolean value for OID {type_oid}")),
             };
             Ok(PostgresValue::Bool(value))
         }
         oid::INT2 => {
             Ok(PostgresValue::Int2(trimmed.parse::<i16>().map_err(
-                |e| anyhow!("Failed to parse int2 from '{text}': {e}"),
+                |e| anyhow!("Failed to parse int2 (OID {type_oid}): {e}"),
             )?))
         }
         oid::INT4 => {
             Ok(PostgresValue::Int4(trimmed.parse::<i32>().map_err(
-                |e| anyhow!("Failed to parse int4 from '{text}': {e}"),
+                |e| anyhow!("Failed to parse int4 (OID {type_oid}): {e}"),
             )?))
         }
         oid::INT8 => {
             Ok(PostgresValue::Int8(trimmed.parse::<i64>().map_err(
-                |e| anyhow!("Failed to parse int8 from '{text}': {e}"),
+                |e| anyhow!("Failed to parse int8 (OID {type_oid}): {e}"),
             )?))
         }
         oid::FLOAT4 => {
             Ok(PostgresValue::Float4(trimmed.parse::<f32>().map_err(
-                |e| anyhow!("Failed to parse float4 from '{text}': {e}"),
+                |e| anyhow!("Failed to parse float4 (OID {type_oid}): {e}"),
             )?))
         }
         oid::FLOAT8 => {
             Ok(PostgresValue::Float8(trimmed.parse::<f64>().map_err(
-                |e| anyhow!("Failed to parse float8 from '{text}': {e}"),
+                |e| anyhow!("Failed to parse float8 (OID {type_oid}): {e}"),
             )?))
         }
         oid::NUMERIC => {
             let value = Decimal::from_str_exact(trimmed)
                 .or_else(|_| trimmed.parse::<Decimal>())
-                .map_err(|e| anyhow!("Failed to parse numeric from '{text}': {e}"))?;
+                .map_err(|e| anyhow!("Failed to parse numeric (OID {type_oid}): {e}"))?;
             Ok(PostgresValue::Numeric(value))
         }
         oid::TEXT | oid::NAME => Ok(PostgresValue::Text(text.to_string())),
@@ -83,7 +83,7 @@ pub fn decode_text_to_postgres_value(text: &str, type_oid: u32) -> Result<Postgr
         oid::CHAR => Ok(PostgresValue::Char(text.trim_end().to_string())),
         oid::UUID => {
             let uuid = Uuid::parse_str(trimmed)
-                .map_err(|e| anyhow!("Failed to parse uuid from '{text}': {e}"))?;
+                .map_err(|e| anyhow!("Failed to parse uuid (OID {type_oid}): {e}"))?;
             Ok(PostgresValue::Uuid(uuid))
         }
         oid::TIMESTAMP => {
@@ -115,13 +115,13 @@ pub fn decode_text_to_postgres_value(text: &str, type_oid: u32) -> Result<Postgr
         }
         oid::JSON => {
             let value: JsonValue = serde_json::from_str(trimmed)
-                .map_err(|e| anyhow!("Failed to parse json from '{text}': {e}"))?;
+                .map_err(|e| anyhow!("Failed to parse json (OID {type_oid}): {e}"))?;
             Ok(PostgresValue::Json(value))
         }
         oid::JSONB => {
             // Text mode has no version byte
             let value: JsonValue = serde_json::from_str(trimmed)
-                .map_err(|e| anyhow!("Failed to parse jsonb from '{text}': {e}"))?;
+                .map_err(|e| anyhow!("Failed to parse jsonb (OID {type_oid}): {e}"))?;
             Ok(PostgresValue::Jsonb(value))
         }
         oid::BYTEA => {
@@ -235,7 +235,7 @@ pub fn string_element(s: impl AsRef<str>) -> ElementValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
+    use chrono::{DateTime, NaiveDate, Utc};
 
     #[test]
     fn decode_uuid_text() {
@@ -362,6 +362,59 @@ mod tests {
                 assert!(matches!(items[2], PostgresValue::Int4(3)));
             }
             other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_timestamptz_rfc3339() {
+        let pv =
+            decode_text_to_postgres_value("2024-06-15T10:30:45+02:00", oid::TIMESTAMPTZ).unwrap();
+        match pv {
+            PostgresValue::TimestampTz(ts) => {
+                assert_eq!(ts.to_rfc3339(), "2024-06-15T08:30:45+00:00");
+            }
+            other => panic!("expected TimestampTz, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_timestamptz_postgres_offset() {
+        let pv =
+            decode_text_to_postgres_value("2024-06-15 10:30:45.123456+02:00", oid::TIMESTAMPTZ)
+                .unwrap();
+        let expected = DateTime::parse_from_rfc3339("2024-06-15T10:30:45.123456+02:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        match pv {
+            PostgresValue::TimestampTz(ts) => {
+                assert_eq!(ts, expected);
+            }
+            other => panic!("expected TimestampTz, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_timestamptz_without_offset_assumes_utc() {
+        let pv = decode_text_to_postgres_value("2024-06-15 10:30:45", oid::TIMESTAMPTZ).unwrap();
+        match pv {
+            PostgresValue::TimestampTz(ts) => {
+                assert_eq!(ts.to_rfc3339(), "2024-06-15T10:30:45+00:00");
+            }
+            other => panic!("expected TimestampTz, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_timestamptz_offset_matches_rfc3339_instant() {
+        let a =
+            decode_text_to_postgres_value("2024-06-15T10:30:45+02:00", oid::TIMESTAMPTZ).unwrap();
+        let b =
+            decode_text_to_postgres_value("2024-06-15 10:30:45+02:00", oid::TIMESTAMPTZ).unwrap();
+        match (a, b) {
+            (PostgresValue::TimestampTz(ta), PostgresValue::TimestampTz(tb)) => {
+                assert_eq!(ta.timestamp_micros(), tb.timestamp_micros());
+            }
+            other => panic!("expected TimestampTz pair, got {other:?}"),
         }
     }
 }
