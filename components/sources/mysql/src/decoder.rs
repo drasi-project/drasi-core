@@ -318,8 +318,17 @@ fn mysql_value_to_element_value(value: &Value, ctx: Option<&ColumnContext>) -> E
         Value::Int(val) => convert_int(*val, col_type, fsp, ctx),
         Value::UInt(val) => {
             if matches!(col_type, Some(ColumnType::MYSQL_TYPE_ENUM)) {
-                let labels = ctx.and_then(|c| c.enum_labels.as_deref()).unwrap_or(&[]);
-                return ElementValue::String(Arc::from(enum_label(*val, labels)));
+                if let Some(labels) = ctx.and_then(|c| c.enum_labels.as_deref()) {
+                    if !labels.is_empty() {
+                        return ElementValue::String(Arc::from(enum_label(*val, labels)));
+                    }
+                }
+                // No label metadata: preserve the ordinal as an integer.
+                return if *val <= i64::MAX as u64 {
+                    ElementValue::Integer(*val as i64)
+                } else {
+                    ElementValue::String(Arc::from(val.to_string()))
+                };
             }
             if *val <= i64::MAX as u64 {
                 ElementValue::Integer(*val as i64)
@@ -346,14 +355,31 @@ fn convert_int(
 ) -> ElementValue {
     match col_type {
         Some(ColumnType::MYSQL_TYPE_ENUM) => {
-            let labels = ctx.and_then(|c| c.enum_labels.as_deref()).unwrap_or(&[]);
-            ElementValue::String(Arc::from(enum_label(val as u64, labels)))
+            if let Some(labels) = ctx.and_then(|c| c.enum_labels.as_deref()) {
+                if !labels.is_empty() {
+                    if let Ok(ordinal) = u64::try_from(val) {
+                        return ElementValue::String(Arc::from(enum_label(ordinal, labels)));
+                    }
+                }
+            }
+            // No label metadata (or negative ordinal): preserve prior integer behavior.
+            ElementValue::Integer(val)
         }
         Some(ColumnType::MYSQL_TYPE_TIMESTAMP | ColumnType::MYSQL_TYPE_TIMESTAMP2) => {
             ElementValue::String(Arc::from(format_timestamp_epoch(val, 0, fsp)))
         }
         _ => ElementValue::Integer(val),
     }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn convert_bytes(
@@ -373,8 +399,14 @@ fn convert_bytes(
             }
         }
         Some(ColumnType::MYSQL_TYPE_SET) => {
-            let labels = ctx.and_then(|c| c.set_labels.as_deref()).unwrap_or(&[]);
-            ElementValue::String(Arc::from(set_labels(bytes, labels)))
+            if let Some(labels) = ctx.and_then(|c| c.set_labels.as_deref()) {
+                if !labels.is_empty() {
+                    return ElementValue::String(Arc::from(set_labels(bytes, labels)));
+                }
+            }
+            // No label metadata: keep a stable hex representation of the bitmask
+            // rather than lossy UTF-8 or an empty string.
+            ElementValue::String(Arc::from(format!("0x{}", hex_encode(bytes))))
         }
         Some(ColumnType::MYSQL_TYPE_TIMESTAMP | ColumnType::MYSQL_TYPE_TIMESTAMP2) => {
             let text = String::from_utf8_lossy(bytes);
@@ -506,6 +538,20 @@ mod tests {
         // 0b101 = a,c
         let v = mysql_value_to_element_value(&Value::Bytes(vec![0b101]), Some(&c));
         assert_eq!(v, ElementValue::String(Arc::from("a,c")));
+    }
+
+    #[test]
+    fn test_set_without_labels_falls_back_to_hex() {
+        let c = ctx(ColumnType::MYSQL_TYPE_SET, None, None, None);
+        let v = mysql_value_to_element_value(&Value::Bytes(vec![0b101]), Some(&c));
+        assert_eq!(v, ElementValue::String(Arc::from("0x05")));
+    }
+
+    #[test]
+    fn test_enum_without_labels_keeps_integer() {
+        let c = ctx(ColumnType::MYSQL_TYPE_ENUM, None, None, None);
+        let v = mysql_value_to_element_value(&Value::Int(2), Some(&c));
+        assert_eq!(v, ElementValue::Integer(2));
     }
 
     #[test]

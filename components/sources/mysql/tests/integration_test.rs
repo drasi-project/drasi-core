@@ -281,8 +281,9 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
             tinyint_col TINYINT NOT NULL,
             bool_col BOOLEAN NOT NULL,
             date_col DATE NOT NULL,
-            time_col TIME NOT NULL,
+            time_col TIME(6) NOT NULL,
             datetime_col DATETIME(6) NOT NULL,
+            datetime_zero_col DATETIME(6) NOT NULL,
             timestamp_col TIMESTAMP NOT NULL,
             year_col YEAR NOT NULL,
             enum_col ENUM('red', 'green', 'blue') NOT NULL,
@@ -309,11 +310,12 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
     conn.query_drop(
         "INSERT INTO type_test
             (int_col, bigint_col, float_col, double_col, decimal_col, varchar_col,
-             tinyint_col, bool_col, date_col, time_col, datetime_col, timestamp_col,
-             year_col, enum_col, set_col, json_col, marker)
+             tinyint_col, bool_col, date_col, time_col, datetime_col, datetime_zero_col,
+             timestamp_col, year_col, enum_col, set_col, json_col, marker)
         VALUES
             (42, 9876543210, 3.14, 2.718281828, 99.95, 'hello',
-             7, TRUE, '2025-06-15', '13:45:30', '2025-06-15 13:45:30.123456', '2025-06-15 13:45:30',
+             7, TRUE, '2025-06-15', '13:45:30.123456', '2025-06-15 13:45:30.123456',
+             '2025-06-15 13:45:30.000000', '2025-06-15 13:45:30',
              2025, 'green', 'a,c', '{\"k\": 1}', 'v1')",
     )
     .await
@@ -369,6 +371,7 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
                 t.date_col AS date_col,
                 t.time_col AS time_col,
                 t.datetime_col AS datetime_col,
+                t.datetime_zero_col AS datetime_zero_col,
                 t.timestamp_col AS timestamp_col,
                 t.year_col AS year_col,
                 t.enum_col AS enum_col,
@@ -467,6 +470,7 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
         "date_col",
         "time_col",
         "datetime_col",
+        "datetime_zero_col",
         "timestamp_col",
         "year_col",
         "enum_col",
