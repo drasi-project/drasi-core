@@ -887,7 +887,10 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
         );
         let mut cdc_for_assert = cdc_data.clone();
         if let Some(obj) = cdc_for_assert.as_object_mut() {
-            obj.insert("varchar_val".to_string(), Value::String("hello".to_string()));
+            obj.insert(
+                "varchar_val".to_string(),
+                Value::String("hello".to_string()),
+            );
         }
         assert_types_test_row(&cdc_for_assert, "cdc")?;
 
@@ -909,9 +912,12 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
 /// Assert shared bootstrap/CDC type mapping for the TypesTest fixture row.
 fn assert_types_test_row(data: &Value, path: &str) -> Result<()> {
     let i64_field = |field: &str| -> Result<i64> {
-        data.get(field)
-            .and_then(|v| v.as_i64())
-            .with_context(|| format!("{path}.{field}: expected integer, got {:?}", data.get(field)))
+        data.get(field).and_then(|v| v.as_i64()).with_context(|| {
+            format!(
+                "{path}.{field}: expected integer, got {:?}",
+                data.get(field)
+            )
+        })
     };
     let f64_field = |field: &str| -> Result<f64> {
         data.get(field)
@@ -924,9 +930,12 @@ fn assert_types_test_row(data: &Value, path: &str) -> Result<()> {
             .with_context(|| format!("{path}.{field}: expected string, got {:?}", data.get(field)))
     };
     let bool_field = |field: &str| -> Result<bool> {
-        data.get(field)
-            .and_then(|v| v.as_bool())
-            .with_context(|| format!("{path}.{field}: expected boolean, got {:?}", data.get(field)))
+        data.get(field).and_then(|v| v.as_bool()).with_context(|| {
+            format!(
+                "{path}.{field}: expected boolean, got {:?}",
+                data.get(field)
+            )
+        })
     };
 
     anyhow::ensure!(i64_field("int_val")? == 42, "{path}.int_val mismatch");
@@ -938,7 +947,10 @@ fn assert_types_test_row(data: &Value, path: &str) -> Result<()> {
         i64_field("smallint_val")? == 256,
         "{path}.smallint_val mismatch"
     );
-    anyhow::ensure!(i64_field("tinyint_val")? == 7, "{path}.tinyint_val mismatch");
+    anyhow::ensure!(
+        i64_field("tinyint_val")? == 7,
+        "{path}.tinyint_val mismatch"
+    );
     anyhow::ensure!(bool_field("bit_val")?, "{path}.bit_val should be true");
 
     let float_val = f64_field("float_val")?;
