@@ -405,8 +405,9 @@ pub async fn insert_decimal_test_row(
 /// Table covering types that previously lost data or disagreed between bootstrap and CDC
 /// (issues #669, #670, #672).
 pub async fn create_type_parity_table(client: &Client, table_name: &str) -> Result<()> {
+    let table = quote_ident(table_name);
     let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {table_name} (
+        "CREATE TABLE IF NOT EXISTS {table} (
             id INTEGER PRIMARY KEY,
             u uuid,
             d date,
@@ -424,7 +425,7 @@ pub async fn create_type_parity_table(client: &Client, table_name: &str) -> Resu
         )"
     );
     execute_sql(client, &create_sql).await?;
-    let replica_sql = format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL");
+    let replica_sql = format!("ALTER TABLE {table} REPLICA IDENTITY FULL");
     execute_sql(client, &replica_sql).await?;
     Ok(())
 }

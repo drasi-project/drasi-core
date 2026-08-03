@@ -168,6 +168,10 @@ pub fn decode_column_value_text(text: &str, type_oid: i32) -> Result<ElementValu
 }
 
 /// Parse a PostgreSQL 1-D array text literal like `{1,2,NULL,"a"}`.
+///
+/// Quote markers are tracked separately from element content so a quoted
+/// `"NULL"` string is preserved while an unquoted `NULL` becomes
+/// [`PostgresValue::Null`].
 fn parse_array_text(text: &str, element_oid: u32) -> Result<PostgresValue> {
     let s = text.trim();
     let inner = if let Some(body) = s.strip_prefix('{').and_then(|x| x.strip_suffix('}')) {
@@ -185,6 +189,8 @@ fn parse_array_text(text: &str, element_oid: u32) -> Result<PostgresValue> {
     let mut cur = String::new();
     let mut in_quotes = false;
     let mut escape = false;
+    // True if this element used PG array double-quote delimiters.
+    let mut was_quoted = false;
     for c in inner.chars() {
         if escape {
             cur.push(c);
@@ -197,25 +203,27 @@ fn parse_array_text(text: &str, element_oid: u32) -> Result<PostgresValue> {
             }
             '"' => {
                 in_quotes = !in_quotes;
+                was_quoted = true;
             }
             ',' if !in_quotes => {
-                elements.push(parse_array_element(&cur, element_oid)?);
+                elements.push(parse_array_element(&cur, element_oid, was_quoted)?);
                 cur.clear();
+                was_quoted = false;
             }
             _ => cur.push(c),
         }
     }
-    elements.push(parse_array_element(&cur, element_oid)?);
+    elements.push(parse_array_element(&cur, element_oid, was_quoted)?);
 
     Ok(PostgresValue::Array(elements))
 }
 
-fn parse_array_element(raw: &str, element_oid: u32) -> Result<PostgresValue> {
+fn parse_array_element(raw: &str, element_oid: u32, was_quoted: bool) -> Result<PostgresValue> {
     let t = raw.trim();
-    if t.eq_ignore_ascii_case("NULL") && !t.starts_with('"') {
+    // Unquoted NULL is SQL null. Quoted "NULL" is the literal string (or typed value).
+    if !was_quoted && t.eq_ignore_ascii_case("NULL") {
         return Ok(PostgresValue::Null);
     }
-    // Strip surrounding quotes if present (already removed by parser for quoted)
     decode_text_to_postgres_value(t, element_oid)
 }
 
@@ -327,6 +335,33 @@ mod tests {
         match pv.to_element_value() {
             ElementValue::Float(f) => assert_eq!(f.into_inner(), 4200.0),
             other => panic!("expected Float, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_text_array_distinguishes_null_and_quoted_null() {
+        let pv = decode_text_to_postgres_value(r#"{NULL,"NULL","a"}"#, oid::TEXT_ARRAY).unwrap();
+        match pv {
+            PostgresValue::Array(items) => {
+                assert_eq!(items.len(), 3);
+                assert!(matches!(items[0], PostgresValue::Null));
+                assert!(matches!(items[1], PostgresValue::Text(ref s) if s == "NULL"));
+                assert!(matches!(items[2], PostgresValue::Text(ref s) if s == "a"));
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_int_array_null_element() {
+        let pv = decode_text_to_postgres_value("{1,NULL,3}", oid::INT4_ARRAY).unwrap();
+        match pv {
+            PostgresValue::Array(items) => {
+                assert!(matches!(items[0], PostgresValue::Int4(1)));
+                assert!(matches!(items[1], PostgresValue::Null));
+                assert!(matches!(items[2], PostgresValue::Int4(3)));
+            }
+            other => panic!("expected Array, got {other:?}"),
         }
     }
 }

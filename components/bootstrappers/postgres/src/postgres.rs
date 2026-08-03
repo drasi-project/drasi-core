@@ -795,27 +795,27 @@ fn row_column_to_postgres_value(row: &Row, idx: usize, type_oid: u32) -> Postgre
         1007 /* int4[] */ => match row.try_get::<_, Option<Vec<i32>>>(idx) {
             Ok(Some(v)) => PostgresValue::Array(v.into_iter().map(PostgresValue::Int4).collect()),
             Ok(None) => PostgresValue::Null,
-            Err(_) => try_array_as_text(row, idx),
+            Err(_) => try_array_as_text(row, idx, type_oid),
         },
         1009 /* text[] */ => match row.try_get::<_, Option<Vec<String>>>(idx) {
             Ok(Some(v)) => PostgresValue::Array(v.into_iter().map(PostgresValue::Text).collect()),
             Ok(None) => PostgresValue::Null,
-            Err(_) => try_array_as_text(row, idx),
+            Err(_) => try_array_as_text(row, idx, type_oid),
         },
         1016 /* int8[] */ => match row.try_get::<_, Option<Vec<i64>>>(idx) {
             Ok(Some(v)) => PostgresValue::Array(v.into_iter().map(PostgresValue::Int8).collect()),
             Ok(None) => PostgresValue::Null,
-            Err(_) => try_array_as_text(row, idx),
+            Err(_) => try_array_as_text(row, idx, type_oid),
         },
         1005 /* int2[] */ => match row.try_get::<_, Option<Vec<i16>>>(idx) {
             Ok(Some(v)) => PostgresValue::Array(v.into_iter().map(PostgresValue::Int2).collect()),
             Ok(None) => PostgresValue::Null,
-            Err(_) => try_array_as_text(row, idx),
+            Err(_) => try_array_as_text(row, idx, type_oid),
         },
         1000 /* bool[] */ => match row.try_get::<_, Option<Vec<bool>>>(idx) {
             Ok(Some(v)) => PostgresValue::Array(v.into_iter().map(PostgresValue::Bool).collect()),
             Ok(None) => PostgresValue::Null,
-            Err(_) => try_array_as_text(row, idx),
+            Err(_) => try_array_as_text(row, idx, type_oid),
         },
         _ => {
             // Unknown / other arrays: try string, else Null
@@ -843,9 +843,9 @@ fn row_column_to_postgres_value(row: &Row, idx: usize, type_oid: u32) -> Postgre
     }
 }
 
-fn try_array_as_text(row: &Row, idx: usize) -> PostgresValue {
+fn try_array_as_text(row: &Row, idx: usize, array_oid: u32) -> PostgresValue {
     match row.try_get::<_, Option<String>>(idx) {
-        Ok(Some(s)) => match drasi_postgres_common::decode_text_to_postgres_value(&s, 1009) {
+        Ok(Some(s)) => match drasi_postgres_common::decode_text_to_postgres_value(&s, array_oid) {
             Ok(v) => v,
             Err(_) => PostgresValue::Text(s),
         },
