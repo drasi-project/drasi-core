@@ -21,18 +21,35 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use mysql_async::Value;
-use mysql_common::binlog::{events::TableMapEvent, row::BinlogRow, value::BinlogValue};
+use mysql_common::binlog::events::{OptionalMetadataField, TableMapEvent};
+use mysql_common::binlog::row::BinlogRow;
+use mysql_common::binlog::value::BinlogValue;
+use mysql_common::constants::ColumnType;
 use ordered_float::OrderedFloat;
 
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
 
-use drasi_mysql_common::{format_value_for_key, TableKeyConfig};
+use drasi_mysql_common::{
+    canonicalize_json_text, enum_label, format_datetime, format_time, format_timestamp_epoch,
+    format_value_for_key, parse_timestamp_epoch_text, set_labels, TableKeyConfig,
+};
 
 pub struct MySqlDecoder {
     source_id: String,
     table_keys: HashMap<String, Vec<String>>,
+}
+
+/// Per-column conversion context derived from a TableMapEvent.
+struct ColumnContext {
+    col_type: Option<ColumnType>,
+    /// Fractional-second precision for temporal types, when known.
+    fsp: Option<u8>,
+    /// ENUM member labels (declaration order), when this column is ENUM.
+    enum_labels: Option<Vec<String>>,
+    /// SET member labels (declaration order), when this column is SET.
+    set_labels: Option<Vec<String>>,
 }
 
 impl MySqlDecoder {
@@ -88,6 +105,7 @@ impl MySqlDecoder {
         let mut key_parts: Vec<String> = Vec::new();
         let configured_keys = self.table_keys.get(table_name.as_str());
         let column_names = self.extract_column_names(row);
+        let column_contexts = build_column_contexts(table, row.len());
 
         let fallback_key = if configured_keys.is_none() && !column_names.is_empty() {
             column_names
@@ -103,8 +121,8 @@ impl MySqlDecoder {
                 .get(idx)
                 .cloned()
                 .unwrap_or_else(|| format!("col_{idx}"));
-            let col_type = table.get_column_type(idx).ok().flatten();
-            let value = self.value_at(row, fallback_row, idx, col_type)?;
+            let ctx = column_contexts.get(idx);
+            let value = self.value_at(row, fallback_row, idx, ctx)?;
 
             if let Some(keys) = configured_keys {
                 if keys.contains(&column_key) {
@@ -149,7 +167,7 @@ impl MySqlDecoder {
         row: &BinlogRow,
         fallback_row: Option<&BinlogRow>,
         idx: usize,
-        col_type: Option<mysql_common::constants::ColumnType>,
+        ctx: Option<&ColumnContext>,
     ) -> Result<ElementValue> {
         let value = row
             .as_ref(idx)
@@ -157,7 +175,7 @@ impl MySqlDecoder {
 
         match value {
             None => Ok(ElementValue::Null),
-            Some(value) => binlog_value_to_element_value(value, col_type),
+            Some(value) => binlog_value_to_element_value(value, ctx),
         }
     }
 
@@ -177,12 +195,108 @@ impl MySqlDecoder {
     }
 }
 
+/// Build per-column conversion context from TableMapEvent type/metadata + optional ENUM/SET labels.
+fn build_column_contexts(table: &TableMapEvent<'_>, column_count: usize) -> Vec<ColumnContext> {
+    // Optional metadata lists ENUM/SET definitions in column order among those types only.
+    let mut enum_defs: Vec<Vec<String>> = Vec::new();
+    let mut set_defs: Vec<Vec<String>> = Vec::new();
+
+    for meta in table.iter_optional_meta() {
+        let Ok(field) = meta else {
+            continue;
+        };
+        match field {
+            OptionalMetadataField::EnumStrValue(enums) => {
+                for entry in enums.iter_values().flatten() {
+                    enum_defs.push(
+                        entry
+                            .values()
+                            .iter()
+                            .map(|v| v.value().into_owned())
+                            .collect(),
+                    );
+                }
+            }
+            OptionalMetadataField::SetStrValue(sets) => {
+                for entry in sets.iter_values().flatten() {
+                    set_defs.push(
+                        entry
+                            .values()
+                            .iter()
+                            .map(|v| v.value().into_owned())
+                            .collect(),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut enum_idx = 0usize;
+    let mut set_idx = 0usize;
+    let mut contexts = Vec::with_capacity(column_count);
+
+    for idx in 0..column_count {
+        let col_type = table.get_column_type(idx).ok().flatten();
+        let fsp = temporal_fsp(table, idx, col_type);
+
+        let mut enum_labels = None;
+        let mut set_labels_opt = None;
+
+        if matches!(col_type, Some(ColumnType::MYSQL_TYPE_ENUM)) {
+            if let Some(labels) = enum_defs.get(enum_idx) {
+                enum_labels = Some(labels.clone());
+            }
+            enum_idx += 1;
+        } else if matches!(col_type, Some(ColumnType::MYSQL_TYPE_SET)) {
+            if let Some(labels) = set_defs.get(set_idx) {
+                set_labels_opt = Some(labels.clone());
+            }
+            set_idx += 1;
+        }
+
+        contexts.push(ColumnContext {
+            col_type,
+            fsp,
+            enum_labels,
+            set_labels: set_labels_opt,
+        });
+    }
+
+    contexts
+}
+
+fn temporal_fsp(
+    table: &TableMapEvent<'_>,
+    col_idx: usize,
+    col_type: Option<ColumnType>,
+) -> Option<u8> {
+    match col_type {
+        Some(
+            ColumnType::MYSQL_TYPE_TIMESTAMP2
+            | ColumnType::MYSQL_TYPE_DATETIME2
+            | ColumnType::MYSQL_TYPE_TIME2,
+        ) => table
+            .get_column_metadata(col_idx)
+            .and_then(|meta| meta.first().copied()),
+        // Non-*2 temporal types have no fractional seconds.
+        Some(
+            ColumnType::MYSQL_TYPE_TIMESTAMP
+            | ColumnType::MYSQL_TYPE_DATETIME
+            | ColumnType::MYSQL_TYPE_TIME
+            | ColumnType::MYSQL_TYPE_DATE
+            | ColumnType::MYSQL_TYPE_NEWDATE,
+        ) => Some(0),
+        _ => None,
+    }
+}
+
 fn binlog_value_to_element_value(
     value: &BinlogValue<'_>,
-    col_type: Option<mysql_common::constants::ColumnType>,
+    ctx: Option<&ColumnContext>,
 ) -> Result<ElementValue> {
     match value {
-        BinlogValue::Value(value) => Ok(mysql_value_to_element_value(value, col_type)),
+        BinlogValue::Value(value) => Ok(mysql_value_to_element_value(value, ctx)),
         BinlogValue::Jsonb(value) => {
             let json = serde_json::Value::try_from(value.clone())
                 .context("Failed to convert MySQL JSONB value to JSON")?;
@@ -194,26 +308,19 @@ fn binlog_value_to_element_value(
     }
 }
 
-fn mysql_value_to_element_value(
-    value: &Value,
-    col_type: Option<mysql_common::constants::ColumnType>,
-) -> ElementValue {
-    use mysql_common::constants::ColumnType;
+fn mysql_value_to_element_value(value: &Value, ctx: Option<&ColumnContext>) -> ElementValue {
+    let col_type = ctx.and_then(|c| c.col_type);
+    let fsp = ctx.and_then(|c| c.fsp);
 
     match value {
         Value::NULL => ElementValue::Null,
-        Value::Bytes(bytes) => {
-            // YEAR columns come as Bytes in binlog; parse as integer for consistency
-            if col_type == Some(ColumnType::MYSQL_TYPE_YEAR) {
-                let text = String::from_utf8_lossy(bytes);
-                if let Ok(val) = text.parse::<i64>() {
-                    return ElementValue::Integer(val);
-                }
-            }
-            ElementValue::String(Arc::from(String::from_utf8_lossy(bytes).into_owned()))
-        }
-        Value::Int(val) => ElementValue::Integer(*val),
+        Value::Bytes(bytes) => convert_bytes(bytes, col_type, fsp, ctx),
+        Value::Int(val) => convert_int(*val, col_type, fsp, ctx),
         Value::UInt(val) => {
+            if matches!(col_type, Some(ColumnType::MYSQL_TYPE_ENUM)) {
+                let labels = ctx.and_then(|c| c.enum_labels.as_deref()).unwrap_or(&[]);
+                return ElementValue::String(Arc::from(enum_label(*val, labels)));
+            }
             if *val <= i64::MAX as u64 {
                 ElementValue::Integer(*val as i64)
             } else {
@@ -222,15 +329,67 @@ fn mysql_value_to_element_value(
         }
         Value::Float(val) => ElementValue::Float(OrderedFloat(*val as f64)),
         Value::Double(val) => ElementValue::Float(OrderedFloat(*val)),
-        Value::Date(y, m, d, h, min, s, _) => ElementValue::String(Arc::from(format!(
-            "{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}"
-        ))),
-        Value::Time(_, days, hours, minutes, seconds, micros) => {
-            let total_hours = days * 24 + u32::from(*hours);
-            ElementValue::String(Arc::from(format!(
-                "{total_hours:03}:{minutes:02}:{seconds:02}.{micros:06}"
-            )))
+        Value::Date(y, m, d, h, min, s, micros) => ElementValue::String(Arc::from(
+            format_datetime(*y, *m, *d, *h, *min, *s, *micros, fsp),
+        )),
+        Value::Time(neg, days, hours, minutes, seconds, micros) => ElementValue::String(Arc::from(
+            format_time(*neg, *days, *hours, *minutes, *seconds, *micros, fsp),
+        )),
+    }
+}
+
+fn convert_int(
+    val: i64,
+    col_type: Option<ColumnType>,
+    fsp: Option<u8>,
+    ctx: Option<&ColumnContext>,
+) -> ElementValue {
+    match col_type {
+        Some(ColumnType::MYSQL_TYPE_ENUM) => {
+            let labels = ctx.and_then(|c| c.enum_labels.as_deref()).unwrap_or(&[]);
+            ElementValue::String(Arc::from(enum_label(val as u64, labels)))
         }
+        Some(ColumnType::MYSQL_TYPE_TIMESTAMP | ColumnType::MYSQL_TYPE_TIMESTAMP2) => {
+            ElementValue::String(Arc::from(format_timestamp_epoch(val, 0, fsp)))
+        }
+        _ => ElementValue::Integer(val),
+    }
+}
+
+fn convert_bytes(
+    bytes: &[u8],
+    col_type: Option<ColumnType>,
+    fsp: Option<u8>,
+    ctx: Option<&ColumnContext>,
+) -> ElementValue {
+    match col_type {
+        // YEAR columns come as Bytes in binlog; parse as integer for consistency
+        Some(ColumnType::MYSQL_TYPE_YEAR) => {
+            let text = String::from_utf8_lossy(bytes);
+            if let Ok(val) = text.parse::<i64>() {
+                ElementValue::Integer(val)
+            } else {
+                ElementValue::String(Arc::from(text.into_owned()))
+            }
+        }
+        Some(ColumnType::MYSQL_TYPE_SET) => {
+            let labels = ctx.and_then(|c| c.set_labels.as_deref()).unwrap_or(&[]);
+            ElementValue::String(Arc::from(set_labels(bytes, labels)))
+        }
+        Some(ColumnType::MYSQL_TYPE_TIMESTAMP | ColumnType::MYSQL_TYPE_TIMESTAMP2) => {
+            let text = String::from_utf8_lossy(bytes);
+            if let Some((secs, micros)) = parse_timestamp_epoch_text(&text) {
+                ElementValue::String(Arc::from(format_timestamp_epoch(secs, micros, fsp)))
+            } else {
+                // Already a formatted datetime, or unparsable — pass through.
+                ElementValue::String(Arc::from(text.into_owned()))
+            }
+        }
+        Some(ColumnType::MYSQL_TYPE_JSON) => {
+            let text = String::from_utf8_lossy(bytes);
+            ElementValue::String(Arc::from(canonicalize_json_text(&text)))
+        }
+        _ => ElementValue::String(Arc::from(String::from_utf8_lossy(bytes).into_owned())),
     }
 }
 
@@ -239,6 +398,20 @@ mod tests {
     use super::*;
     use mysql_async::Value;
     use ordered_float::OrderedFloat;
+
+    fn ctx(
+        col_type: ColumnType,
+        fsp: Option<u8>,
+        enum_labels: Option<Vec<String>>,
+        set_labels: Option<Vec<String>>,
+    ) -> ColumnContext {
+        ColumnContext {
+            col_type: Some(col_type),
+            fsp,
+            enum_labels,
+            set_labels,
+        }
+    }
 
     #[test]
     fn test_null() {
@@ -280,9 +453,21 @@ mod tests {
     }
 
     #[test]
-    fn test_date() {
-        let v = mysql_value_to_element_value(&Value::Date(2024, 6, 15, 13, 45, 30, 0), None);
+    fn test_date_without_fraction() {
+        let c = ctx(ColumnType::MYSQL_TYPE_DATETIME, Some(0), None, None);
+        let v = mysql_value_to_element_value(&Value::Date(2024, 6, 15, 13, 45, 30, 0), Some(&c));
         assert_eq!(v, ElementValue::String(Arc::from("2024-06-15 13:45:30")));
+    }
+
+    #[test]
+    fn test_date_with_micros() {
+        let c = ctx(ColumnType::MYSQL_TYPE_DATETIME2, Some(6), None, None);
+        let v =
+            mysql_value_to_element_value(&Value::Date(2025, 6, 15, 13, 45, 30, 123456), Some(&c));
+        assert_eq!(
+            v,
+            ElementValue::String(Arc::from("2025-06-15 13:45:30.123456"))
+        );
     }
 
     #[test]
@@ -293,11 +478,65 @@ mod tests {
 
     #[test]
     fn test_year_bytes_parsed_as_integer() {
-        use mysql_common::constants::ColumnType;
-        let v = mysql_value_to_element_value(
-            &Value::Bytes(b"2025".to_vec()),
-            Some(ColumnType::MYSQL_TYPE_YEAR),
-        );
+        let c = ctx(ColumnType::MYSQL_TYPE_YEAR, None, None, None);
+        let v = mysql_value_to_element_value(&Value::Bytes(b"2025".to_vec()), Some(&c));
         assert_eq!(v, ElementValue::Integer(2025));
+    }
+
+    #[test]
+    fn test_enum_ordinal_to_label() {
+        let c = ctx(
+            ColumnType::MYSQL_TYPE_ENUM,
+            None,
+            Some(vec!["red".into(), "green".into(), "blue".into()]),
+            None,
+        );
+        let v = mysql_value_to_element_value(&Value::Int(2), Some(&c));
+        assert_eq!(v, ElementValue::String(Arc::from("green")));
+    }
+
+    #[test]
+    fn test_set_bitmask_to_labels() {
+        let c = ctx(
+            ColumnType::MYSQL_TYPE_SET,
+            None,
+            None,
+            Some(vec!["a".into(), "b".into(), "c".into()]),
+        );
+        // 0b101 = a,c
+        let v = mysql_value_to_element_value(&Value::Bytes(vec![0b101]), Some(&c));
+        assert_eq!(v, ElementValue::String(Arc::from("a,c")));
+    }
+
+    #[test]
+    fn test_timestamp_epoch_int() {
+        let c = ctx(ColumnType::MYSQL_TYPE_TIMESTAMP, Some(0), None, None);
+        // 2025-06-15 13:45:30 UTC
+        let secs = chrono::DateTime::parse_from_rfc3339("2025-06-15T13:45:30Z")
+            .unwrap()
+            .timestamp();
+        let v = mysql_value_to_element_value(&Value::Int(secs), Some(&c));
+        assert_eq!(v, ElementValue::String(Arc::from("2025-06-15 13:45:30")));
+    }
+
+    #[test]
+    fn test_timestamp2_epoch_bytes() {
+        let c = ctx(ColumnType::MYSQL_TYPE_TIMESTAMP2, Some(6), None, None);
+        let secs = chrono::DateTime::parse_from_rfc3339("2025-06-15T13:45:30Z")
+            .unwrap()
+            .timestamp();
+        let payload = format!("{secs}.123456");
+        let v = mysql_value_to_element_value(&Value::Bytes(payload.into_bytes()), Some(&c));
+        assert_eq!(
+            v,
+            ElementValue::String(Arc::from("2025-06-15 13:45:30.123456"))
+        );
+    }
+
+    #[test]
+    fn test_json_bytes_canonicalized() {
+        let c = ctx(ColumnType::MYSQL_TYPE_JSON, None, None, None);
+        let v = mysql_value_to_element_value(&Value::Bytes(br#"{"k": 1}"#.to_vec()), Some(&c));
+        assert_eq!(v, ElementValue::String(Arc::from(r#"{"k":1}"#)));
     }
 }

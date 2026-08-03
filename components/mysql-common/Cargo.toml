@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-mysql-common"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Shared types for MySQL source and bootstrap plugins"
@@ -31,4 +31,6 @@ drasi-core.workspace = true
 anyhow = "1.0"
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ordered-float = "3.0"
