@@ -202,10 +202,7 @@ mod tests {
     fn test_format_timestamp_epoch() {
         // 2025-06-15 13:45:30 UTC
         let secs = 1_749_995_130i64;
-        assert_eq!(
-            format_timestamp_epoch(secs, 0, None),
-            "2025-06-15 13:45:30"
-        );
+        assert_eq!(format_timestamp_epoch(secs, 0, None), "2025-06-15 13:45:30");
         assert_eq!(
             format_timestamp_epoch(secs, 123456, Some(6)),
             "2025-06-15 13:45:30.123456"
@@ -214,7 +211,10 @@ mod tests {
 
     #[test]
     fn test_parse_timestamp_epoch_text() {
-        assert_eq!(parse_timestamp_epoch_text("1749995130"), Some((1749995130, 0)));
+        assert_eq!(
+            parse_timestamp_epoch_text("1749995130"),
+            Some((1749995130, 0))
+        );
         assert_eq!(
             parse_timestamp_epoch_text("1749995130.123456"),
             Some((1749995130, 123456))
