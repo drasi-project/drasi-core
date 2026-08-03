@@ -1974,3 +1974,244 @@ async fn test_postgres_stop_restart_recovers() -> Result<()> {
 
     Ok(())
 }
+
+/// Bootstrap ↔ CDC ElementValue parity for previously broken Postgres types
+/// (issues #669, #670, #672).
+///
+/// - Bootstrap must not Null-out uuid/date/time/json/jsonb/bytea/arrays
+/// - CDC must emit the row (not drop it) for uuid/date/time/jsonb
+/// - Both paths must produce identical ElementValues for the same stored values
+/// - NULL columns are present as ElementValue::Null on both paths
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_type_parity_bootstrap_and_cdc() -> Result<()> {
+    use drasi_core::models::ElementValue;
+    use ordered_float::OrderedFloat;
+    use postgres_helpers::{create_type_parity_table, insert_type_parity_row};
+
+    init_logging();
+
+    const TABLE: &str = "type_parity";
+    const PUBLICATION: &str = "drasi_type_parity_pub";
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_type_parity_table(&client, TABLE).await?;
+    grant_table_access(&client, TABLE, "postgres").await?;
+    create_publication(&client, PUBLICATION, &[TABLE.to_string()]).await?;
+
+    // Seed BEFORE slot → bootstrap path
+    insert_type_parity_row(&client, TABLE, 1).await?;
+
+    let slot = slot_name();
+    create_logical_replication_slot(&client, &slot).await?;
+
+    let source_config = PostgresSourceConfig {
+        host: pg.config().host.clone(),
+        port: pg.config().port,
+        database: pg.config().database.clone(),
+        user: pg.config().user.clone(),
+        password: pg.config().password.clone(),
+        tables: vec![TABLE.to_string()],
+        slot_name: slot.clone(),
+        publication_name: PUBLICATION.to_string(),
+        ssl_mode: SslMode::Disable,
+        table_keys: vec![TableKeyConfig {
+            table: TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+    let bootstrap_config = PostgresBootstrapConfig {
+        host: source_config.host.clone(),
+        port: source_config.port,
+        database: source_config.database.clone(),
+        user: source_config.user.clone(),
+        password: source_config.password.clone(),
+        tables: source_config.tables.clone(),
+        slot_name: source_config.slot_name.clone(),
+        publication_name: source_config.publication_name.clone(),
+        ssl_mode: BootstrapSslMode::Disable,
+        table_keys: vec![BootstrapTableKeyConfig {
+            table: TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+
+    let source = PostgresReplicationSource::builder("pg-type-parity-source")
+        .with_config(source_config)
+        .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
+        .build()?;
+
+    source.start().await?;
+    wait_for_source_running(&source).await;
+
+    let mut settings = subscription_settings("pg-type-parity-source", "q-type-parity", None, true);
+    settings.enable_bootstrap = true;
+    settings.nodes = HashSet::from([TABLE.to_string()]);
+    let response = source.subscribe(settings).await?;
+    let mut bootstrap_rx = response
+        .bootstrap_receiver
+        .expect("bootstrap_receiver required");
+    let mut cdc_rx = response.receiver;
+
+    // Collect bootstrap properties for id=1
+    let mut bootstrap_props: Option<drasi_core::models::ElementPropertyMap> = None;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(30), bootstrap_rx.recv()).await {
+            Ok(Some(event)) => {
+                if let SourceChange::Insert { element } = event.change {
+                    if element.get_property("id") == &ElementValue::Integer(1) {
+                        bootstrap_props = Some(element.get_properties().clone());
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(_) => panic!("Timed out draining bootstrap snapshot"),
+        }
+    }
+    let bootstrap_props =
+        bootstrap_props.expect("bootstrap should emit id=1 with typed properties");
+
+    // Assert bootstrap did not Null-out critical types (#670)
+    assert_ne!(
+        bootstrap_props.get("u"),
+        Some(&ElementValue::Null),
+        "bootstrap uuid must not be Null"
+    );
+    assert_eq!(
+        bootstrap_props.get("u"),
+        Some(&ElementValue::String(Arc::from(
+            "550e8400-e29b-41d4-a716-446655440000"
+        )))
+    );
+    assert_eq!(
+        bootstrap_props.get("d"),
+        Some(&ElementValue::String(Arc::from("2024-06-15")))
+    );
+    assert!(
+        matches!(bootstrap_props.get("t"), Some(ElementValue::String(s)) if s.starts_with("10:30:45")),
+        "bootstrap time: {:?}",
+        bootstrap_props.get("t")
+    );
+    assert!(
+        matches!(bootstrap_props.get("j"), Some(ElementValue::String(s)) if s.contains("\"k\"")),
+        "bootstrap json: {:?}",
+        bootstrap_props.get("j")
+    );
+    assert!(
+        matches!(bootstrap_props.get("jb"), Some(ElementValue::String(s)) if s.contains("\"k\"")),
+        "bootstrap jsonb: {:?}",
+        bootstrap_props.get("jb")
+    );
+    // bytea → base64 of raw bytes deadbeef
+    assert_eq!(
+        bootstrap_props.get("b"),
+        Some(&ElementValue::String(Arc::from("3q2+7w==")))
+    );
+    assert!(
+        matches!(bootstrap_props.get("ints"), Some(ElementValue::List(items)) if items.len() == 3),
+        "bootstrap int array: {:?}",
+        bootstrap_props.get("ints")
+    );
+    // numeric whole → Float
+    assert_eq!(
+        bootstrap_props.get("n_whole"),
+        Some(&ElementValue::Float(OrderedFloat(4200.0)))
+    );
+    // char trimmed
+    assert_eq!(
+        bootstrap_props.get("c"),
+        Some(&ElementValue::String(Arc::from("abc")))
+    );
+    // timestamp typed
+    assert!(
+        matches!(bootstrap_props.get("ts"), Some(ElementValue::LocalDateTime(_))),
+        "bootstrap ts: {:?}",
+        bootstrap_props.get("ts")
+    );
+    assert!(
+        matches!(bootstrap_props.get("tstz"), Some(ElementValue::ZonedDateTime(_))),
+        "bootstrap tstz: {:?}",
+        bootstrap_props.get("tstz")
+    );
+    // NULL present
+    assert_eq!(
+        bootstrap_props.get("maybe_null"),
+        Some(&ElementValue::Null),
+        "bootstrap must include Null property key"
+    );
+
+    // Insert identical row via CDC (#669 — must not drop)
+    insert_type_parity_row(&client, TABLE, 2).await?;
+
+    let mut cdc_props: Option<drasi_core::models::ElementPropertyMap> = None;
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(30) {
+        match tokio::time::timeout(Duration::from_millis(500), cdc_rx.recv()).await {
+            Ok(Ok(wrapper)) => {
+                if let SourceEvent::Change(SourceChange::Insert { element }) = &wrapper.event {
+                    if element.get_property("id") == &ElementValue::Integer(2) {
+                        cdc_props = Some(element.get_properties().clone());
+                        break;
+                    }
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => {}
+        }
+    }
+    let cdc_props = cdc_props.expect("CDC must emit insert for row with uuid/date/time/jsonb (#669)");
+
+    // Compare every property except id (1 vs 2) for bootstrap id=1 vs cdc id=2 (#672)
+    for key in [
+        "u", "d", "t", "j", "jb", "b", "ints", "n_whole", "n_frac", "c", "ts", "tstz", "maybe_null",
+    ] {
+        let b = bootstrap_props.get(key);
+        let c = cdc_props.get(key);
+        // For timestamptz, compare UTC instant rather than offset representation
+        if key == "tstz" {
+            match (b, c) {
+                (
+                    Some(ElementValue::ZonedDateTime(bt)),
+                    Some(ElementValue::ZonedDateTime(ct)),
+                ) => {
+                    assert_eq!(
+                        bt.timestamp_micros(),
+                        ct.timestamp_micros(),
+                        "tstz instant mismatch bootstrap={bt:?} cdc={ct:?}"
+                    );
+                }
+                other => panic!("tstz type mismatch: {other:?}"),
+            }
+            continue;
+        }
+        // json/jsonb string form may differ in whitespace; compare parsed JSON
+        if key == "j" || key == "jb" {
+            let bp = b.and_then(|v| match v {
+                ElementValue::String(s) => serde_json::from_str::<serde_json::Value>(s).ok(),
+                _ => None,
+            });
+            let cp = c.and_then(|v| match v {
+                ElementValue::String(s) => serde_json::from_str::<serde_json::Value>(s).ok(),
+                _ => None,
+            });
+            assert_eq!(bp, cp, "json key {key} mismatch bootstrap={b:?} cdc={c:?}");
+            continue;
+        }
+        assert_eq!(b, c, "property `{key}` mismatch: bootstrap={b:?} cdc={c:?}");
+    }
+
+    // CDC Null present
+    assert_eq!(
+        cdc_props.get("maybe_null"),
+        Some(&ElementValue::Null),
+        "CDC must include Null property key"
+    );
+
+    source.stop().await?;
+    pg.cleanup().await;
+    Ok(())
+}
