@@ -2128,12 +2128,18 @@ async fn test_type_parity_bootstrap_and_cdc() -> Result<()> {
     );
     // timestamp typed
     assert!(
-        matches!(bootstrap_props.get("ts"), Some(ElementValue::LocalDateTime(_))),
+        matches!(
+            bootstrap_props.get("ts"),
+            Some(ElementValue::LocalDateTime(_))
+        ),
         "bootstrap ts: {:?}",
         bootstrap_props.get("ts")
     );
     assert!(
-        matches!(bootstrap_props.get("tstz"), Some(ElementValue::ZonedDateTime(_))),
+        matches!(
+            bootstrap_props.get("tstz"),
+            Some(ElementValue::ZonedDateTime(_))
+        ),
         "bootstrap tstz: {:?}",
         bootstrap_props.get("tstz")
     );
@@ -2163,21 +2169,31 @@ async fn test_type_parity_bootstrap_and_cdc() -> Result<()> {
             Err(_) => {}
         }
     }
-    let cdc_props = cdc_props.expect("CDC must emit insert for row with uuid/date/time/jsonb (#669)");
+    let cdc_props =
+        cdc_props.expect("CDC must emit insert for row with uuid/date/time/jsonb (#669)");
 
     // Compare every property except id (1 vs 2) for bootstrap id=1 vs cdc id=2 (#672)
     for key in [
-        "u", "d", "t", "j", "jb", "b", "ints", "n_whole", "n_frac", "c", "ts", "tstz", "maybe_null",
+        "u",
+        "d",
+        "t",
+        "j",
+        "jb",
+        "b",
+        "ints",
+        "n_whole",
+        "n_frac",
+        "c",
+        "ts",
+        "tstz",
+        "maybe_null",
     ] {
         let b = bootstrap_props.get(key);
         let c = cdc_props.get(key);
         // For timestamptz, compare UTC instant rather than offset representation
         if key == "tstz" {
             match (b, c) {
-                (
-                    Some(ElementValue::ZonedDateTime(bt)),
-                    Some(ElementValue::ZonedDateTime(ct)),
-                ) => {
+                (Some(ElementValue::ZonedDateTime(bt)), Some(ElementValue::ZonedDateTime(ct))) => {
                     assert_eq!(
                         bt.timestamp_micros(),
                         ct.timestamp_micros(),

@@ -47,31 +47,31 @@ pub fn decode_text_to_postgres_value(text: &str, type_oid: u32) -> Result<Postgr
             };
             Ok(PostgresValue::Bool(value))
         }
-        oid::INT2 => Ok(PostgresValue::Int2(
-            trimmed
-                .parse::<i16>()
-                .map_err(|e| anyhow!("Failed to parse int2 from '{text}': {e}"))?,
-        )),
-        oid::INT4 => Ok(PostgresValue::Int4(
-            trimmed
-                .parse::<i32>()
-                .map_err(|e| anyhow!("Failed to parse int4 from '{text}': {e}"))?,
-        )),
-        oid::INT8 => Ok(PostgresValue::Int8(
-            trimmed
-                .parse::<i64>()
-                .map_err(|e| anyhow!("Failed to parse int8 from '{text}': {e}"))?,
-        )),
-        oid::FLOAT4 => Ok(PostgresValue::Float4(
-            trimmed
-                .parse::<f32>()
-                .map_err(|e| anyhow!("Failed to parse float4 from '{text}': {e}"))?,
-        )),
-        oid::FLOAT8 => Ok(PostgresValue::Float8(
-            trimmed
-                .parse::<f64>()
-                .map_err(|e| anyhow!("Failed to parse float8 from '{text}': {e}"))?,
-        )),
+        oid::INT2 => {
+            Ok(PostgresValue::Int2(trimmed.parse::<i16>().map_err(
+                |e| anyhow!("Failed to parse int2 from '{text}': {e}"),
+            )?))
+        }
+        oid::INT4 => {
+            Ok(PostgresValue::Int4(trimmed.parse::<i32>().map_err(
+                |e| anyhow!("Failed to parse int4 from '{text}': {e}"),
+            )?))
+        }
+        oid::INT8 => {
+            Ok(PostgresValue::Int8(trimmed.parse::<i64>().map_err(
+                |e| anyhow!("Failed to parse int8 from '{text}': {e}"),
+            )?))
+        }
+        oid::FLOAT4 => {
+            Ok(PostgresValue::Float4(trimmed.parse::<f32>().map_err(
+                |e| anyhow!("Failed to parse float4 from '{text}': {e}"),
+            )?))
+        }
+        oid::FLOAT8 => {
+            Ok(PostgresValue::Float8(trimmed.parse::<f64>().map_err(
+                |e| anyhow!("Failed to parse float8 from '{text}': {e}"),
+            )?))
+        }
         oid::NUMERIC => {
             let value = Decimal::from_str_exact(trimmed)
                 .or_else(|_| trimmed.parse::<Decimal>())

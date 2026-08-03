@@ -669,16 +669,17 @@ impl PgOutputDecoder {
                     || text == "null"
                     || text == "true"
                     || text == "false"
-                    || text.as_bytes().first().is_some_and(|b| b.is_ascii_digit() || *b == b'-');
-                let json_str = if oid_value == 3802
-                    && data.len() > 1
-                    && data[0] == 1
-                    && !looks_like_text_json
-                {
-                    String::from_utf8_lossy(&data[1..]).to_string()
-                } else {
-                    text.to_string()
-                };
+                    || text
+                        .as_bytes()
+                        .first()
+                        .is_some_and(|b| b.is_ascii_digit() || *b == b'-');
+                let json_str =
+                    if oid_value == 3802 && data.len() > 1 && data[0] == 1 && !looks_like_text_json
+                    {
+                        String::from_utf8_lossy(&data[1..]).to_string()
+                    } else {
+                        text.to_string()
+                    };
                 let value: JsonValue = serde_json::from_str(&json_str)?;
                 if oid_value == 3802 {
                     Ok(PostgresValue::Jsonb(value))

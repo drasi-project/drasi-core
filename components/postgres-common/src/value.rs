@@ -174,7 +174,10 @@ pub fn encode_base64(input: &[u8]) -> String {
 /// Parse PostgreSQL text-format bytea (`\xdeadbeef` or escaped).
 pub fn parse_bytea_text(text: &str) -> anyhow::Result<Vec<u8>> {
     let trimmed = text.trim();
-    if let Some(hex) = trimmed.strip_prefix("\\x").or_else(|| trimmed.strip_prefix(r"\x")) {
+    if let Some(hex) = trimmed
+        .strip_prefix("\\x")
+        .or_else(|| trimmed.strip_prefix(r"\x"))
+    {
         if hex.len() % 2 != 0 {
             anyhow::bail!("Odd-length bytea hex string");
         }
@@ -231,10 +234,7 @@ mod tests {
     fn bytea_is_base64_of_raw_bytes() {
         let bytes = vec![0xde, 0xad, 0xbe, 0xef];
         let ev = PostgresValue::Bytea(bytes.clone()).to_element_value();
-        assert_eq!(
-            ev,
-            ElementValue::String(Arc::from(encode_base64(&bytes)))
-        );
+        assert_eq!(ev, ElementValue::String(Arc::from(encode_base64(&bytes))));
         // Must not be JSON-quoted
         if let ElementValue::String(s) = ev {
             assert!(!s.starts_with('"'));

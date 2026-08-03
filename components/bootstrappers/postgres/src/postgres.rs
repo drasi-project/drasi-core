@@ -21,7 +21,7 @@ use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 use drasi_postgres_common::{
-    oid_from_information_schema, parse_bytea_text, PostgresValue, BYTEA, BOOL, CHAR, DATE, FLOAT4,
+    oid_from_information_schema, parse_bytea_text, PostgresValue, BOOL, BYTEA, CHAR, DATE, FLOAT4,
     FLOAT8, INT2, INT4, INT8, JSON, JSONB, NAME, NUMERIC, TEXT, TIME, TIMESTAMP, TIMESTAMPTZ, UUID,
     VARCHAR,
 };
@@ -735,7 +735,10 @@ fn row_column_to_postgres_value(row: &Row, idx: usize, type_oid: u32) -> Postgre
                 Ok(Some(v)) => $map(v),
                 Ok(None) => PostgresValue::Null,
                 Err(e) => {
-                    warn!("Failed to read column idx={idx} oid={type_oid} as {}: {e}", stringify!($t));
+                    warn!(
+                        "Failed to read column idx={idx} oid={type_oid} as {}: {e}",
+                        stringify!($t)
+                    );
                     // Last resort: string
                     match row.try_get::<_, Option<String>>(idx) {
                         Ok(Some(s)) => PostgresValue::Text(s),
