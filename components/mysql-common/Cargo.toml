@@ -26,9 +26,19 @@ categories = ["database"]
 [lints]
 workspace = true
 
+[features]
+# Enables a TLS backend (rustls) for MySQL connections. Off by default so that
+# builds without a system/vendored TLS backend still work; when disabled, the
+# SslMode::Require* variants return an error instead of panicking.
+tls = ["mysql_async/rustls-tls"]
+
 [dependencies]
 drasi-core.workspace = true
 anyhow = "1.0"
 log = "0.4"
+mysql_async = { version = "0.37" }
 serde = { version = "1.0", features = ["derive"] }
 ordered-float = "3.0"
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["macros", "rt"] }

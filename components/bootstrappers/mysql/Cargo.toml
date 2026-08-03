@@ -49,3 +49,7 @@ bytes = "1.0"
 
 [features]
 dynamic-plugin = []
+# Enables a TLS backend (rustls) so SslMode::Require* and IfAvailable can
+# negotiate TLS. Off by default; without it, IfAvailable connects in plaintext
+# and Require* returns an error instead of panicking.
+tls = ["mysql_async/rustls-tls", "drasi-mysql-common/tls"]

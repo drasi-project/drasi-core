@@ -14,6 +14,26 @@
 
 //! Shared configuration types for MySQL plugins.
 
+/// SSL mode for MySQL connections.
+///
+/// Shared by the MySQL source and bootstrap plugins. The actual TLS negotiation
+/// is performed by [`crate::connect::connect_with_ssl_mode`], which only attempts
+/// a TLS handshake when the crate is built with the `tls` feature enabled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SslMode {
+    /// Disable SSL encryption.
+    Disabled,
+    /// Try SSL but allow unencrypted connections.
+    #[default]
+    IfAvailable,
+    /// Require SSL encryption.
+    Require,
+    /// Require SSL with CA verification.
+    RequireVerifyCa,
+    /// Require SSL with CA and hostname verification.
+    RequireVerifyFull,
+}
+
 /// Table key configuration for MySQL sources and bootstrappers.
 ///
 /// Maps a table name to the columns that form its primary key,

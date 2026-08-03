@@ -33,7 +33,8 @@ use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 
 use crate::config::MySqlBootstrapConfig;
 use drasi_mysql_common::{
-    escape_identifier, format_value_for_key, is_valid_identifier, quote_identifier,
+    connect_with_ssl_mode, escape_identifier, format_value_for_key, is_valid_identifier,
+    quote_identifier,
 };
 
 /// Binlog position captured during bootstrap snapshot.
@@ -136,13 +137,17 @@ impl MySqlBootstrapHandler {
     }
 
     async fn connect(&self) -> Result<Conn> {
-        let opts = OptsBuilder::default()
-            .ip_or_hostname(&self.config.host)
-            .tcp_port(self.config.port)
-            .user(Some(&self.config.user))
-            .pass(Some(&self.config.password))
-            .db_name(Some(&self.config.database));
-        let conn = Conn::new(opts).await?;
+        let build_opts = || {
+            OptsBuilder::default()
+                .ip_or_hostname(&self.config.host)
+                .tcp_port(self.config.port)
+                .user(Some(&self.config.user))
+                .pass(Some(&self.config.password))
+                .db_name(Some(&self.config.database))
+        };
+        let conn = connect_with_ssl_mode(build_opts, self.config.ssl_mode)
+            .await
+            .context("Failed to connect to MySQL for bootstrap")?;
         Ok(conn)
     }
 
