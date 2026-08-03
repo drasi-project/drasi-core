@@ -28,5 +28,5 @@ pub use config::{is_valid_identifier, TableKeyConfig};
 pub use keys::{escape_identifier, format_value_for_key, quote_identifier};
 pub use types::{
     canonicalize_json_text, enum_label, format_datetime, format_time, format_timestamp_epoch,
-    parse_timestamp_epoch_text, set_labels,
+    normalize_time_text, parse_fractional_to_micros, parse_timestamp_epoch_text, set_labels,
 };
