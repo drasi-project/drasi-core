@@ -14,13 +14,14 @@
 
 use std::sync::Arc;
 
+use crate::IndexDb;
 use async_trait::async_trait;
 use drasi_core::{
     interface::{ElementArchiveIndex, ElementStream, IndexError},
     models::{Element, ElementReference, ElementTimestamp, TimestampBound, TimestampRange},
 };
 use prost::{bytes::Bytes, Message};
-use rocksdb::{OptimisticTransactionDB, Options, SliceTransform, Transaction};
+use rocksdb::{Options, SliceTransform, Transaction};
 use tokio::task;
 
 use crate::{
@@ -229,7 +230,7 @@ impl ElementArchiveIndex for RocksDbElementIndex {
 
 pub fn insert_archive(
     context: Arc<Context>,
-    txn: &Transaction<OptimisticTransactionDB>,
+    txn: &Transaction<IndexDb>,
     element_key: ReferenceHash,
     element: &Bytes,
     effective_from: u64,
@@ -248,6 +249,7 @@ pub fn insert_archive(
 
 pub(crate) fn get_archive_cf_options() -> Options {
     let mut opts = Options::default();
+    crate::bound_write_buffer_history(&mut opts);
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
     opts
 }
