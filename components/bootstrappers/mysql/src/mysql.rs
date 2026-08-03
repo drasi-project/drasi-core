@@ -33,7 +33,8 @@ use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 
 use crate::config::MySqlBootstrapConfig;
 use drasi_mysql_common::{
-    escape_identifier, format_value_for_key, is_valid_identifier, quote_identifier,
+    canonicalize_json_text, format_datetime, format_time, format_value_for_key, is_valid_identifier,
+    quote_identifier,
 };
 
 /// Binlog position captured during bootstrap snapshot.
@@ -142,7 +143,11 @@ impl MySqlBootstrapHandler {
             .user(Some(&self.config.user))
             .pass(Some(&self.config.password))
             .db_name(Some(&self.config.database));
-        let conn = Conn::new(opts).await?;
+        let mut conn = Conn::new(opts).await?;
+        // Pin session TZ to UTC so TIMESTAMP text matches CDC epoch→UTC formatting.
+        conn.query_drop("SET time_zone = '+00:00'")
+            .await
+            .context("Failed to set MySQL bootstrap session time_zone to UTC")?;
         Ok(conn)
     }
 
@@ -307,13 +312,22 @@ impl MySqlBootstrapHandler {
             }
             Some(mysql_async::Value::Float(val)) => ElementValue::Float(OrderedFloat(*val as f64)),
             Some(mysql_async::Value::Double(val)) => ElementValue::Float(OrderedFloat(*val)),
-            Some(mysql_async::Value::Date(y, m, d, h, min, s, _)) => ElementValue::String(
-                Arc::from(format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}")),
-            ),
-            Some(mysql_async::Value::Time(_, days, hours, minutes, seconds, micros)) => {
-                let total_hours = days * 24 + u32::from(*hours);
-                ElementValue::String(Arc::from(format!(
-                    "{total_hours:03}:{minutes:02}:{seconds:02}.{micros:06}"
+            Some(mysql_async::Value::Date(y, m, d, h, min, s, micros)) => {
+                let fsp = match col_type {
+                    ColumnType::MYSQL_TYPE_DATETIME2
+                    | ColumnType::MYSQL_TYPE_TIMESTAMP2
+                    | ColumnType::MYSQL_TYPE_TIME2 => None,
+                    ColumnType::MYSQL_TYPE_DATE | ColumnType::MYSQL_TYPE_NEWDATE => Some(0),
+                    _ if *micros == 0 => Some(0),
+                    _ => None,
+                };
+                ElementValue::String(Arc::from(format_datetime(
+                    *y, *m, *d, *h, *min, *s, *micros, fsp,
+                )))
+            }
+            Some(mysql_async::Value::Time(neg, days, hours, minutes, seconds, micros)) => {
+                ElementValue::String(Arc::from(format_time(
+                    *neg, *days, *hours, *minutes, *seconds, *micros, None,
                 )))
             }
             Some(mysql_async::Value::Bytes(bytes)) => {
@@ -359,28 +373,19 @@ impl MySqlBootstrapHandler {
                         ElementValue::String(Arc::from(format!("{text} 00:00:00")))
                     }
                     ColumnType::MYSQL_TYPE_TIME | ColumnType::MYSQL_TYPE_TIME2 => {
-                        // CDC formats time as "HHH:MM:SS.micros", normalize
-                        let parts: Vec<&str> = text.splitn(2, '.').collect();
-                        let time_part = parts[0];
-                        let micros = parts.get(1).unwrap_or(&"000000");
-                        let hms: Vec<&str> = time_part.split(':').collect();
-                        if hms.len() == 3 {
-                            let h: u32 = hms[0].parse().unwrap_or(0);
-                            let m: u32 = hms[1].parse().unwrap_or(0);
-                            let s: u32 = hms[2].parse().unwrap_or(0);
-                            let micros_val: u32 = micros.parse().unwrap_or(0);
-                            ElementValue::String(Arc::from(format!(
-                                "{h:03}:{m:02}:{s:02}.{micros_val:06}"
-                            )))
-                        } else {
-                            ElementValue::String(Arc::from(text.into_owned()))
-                        }
+                        // Normalize to "HHH:MM:SS[.ffffff]" to match CDC.
+                        normalize_bootstrap_time_text(&text)
                     }
                     ColumnType::MYSQL_TYPE_DATETIME | ColumnType::MYSQL_TYPE_DATETIME2 => {
+                        // Text protocol already includes fractional seconds when present.
                         ElementValue::String(Arc::from(text.into_owned()))
                     }
                     ColumnType::MYSQL_TYPE_TIMESTAMP | ColumnType::MYSQL_TYPE_TIMESTAMP2 => {
+                        // Session time_zone is UTC, so this matches CDC epoch→UTC formatting.
                         ElementValue::String(Arc::from(text.into_owned()))
+                    }
+                    ColumnType::MYSQL_TYPE_JSON => {
+                        ElementValue::String(Arc::from(canonicalize_json_text(&text)))
                     }
                     // All other types (VARCHAR, DECIMAL, ENUM, SET, BLOB, etc.) as strings
                     _ => ElementValue::String(Arc::from(text.into_owned())),
@@ -388,4 +393,37 @@ impl MySqlBootstrapHandler {
             }
         }
     }
+}
+
+fn normalize_bootstrap_time_text(text: &str) -> ElementValue {
+    let negative = text.starts_with('-');
+    let body = if negative { &text[1..] } else { text };
+    let parts: Vec<&str> = body.splitn(2, '.').collect();
+    let time_part = parts[0];
+    let frac = parts.get(1).copied().unwrap_or("");
+    let hms: Vec<&str> = time_part.split(':').collect();
+    if hms.len() != 3 {
+        return ElementValue::String(Arc::from(text.to_string()));
+    }
+    let h: u32 = hms[0].parse().unwrap_or(0);
+    let m: u8 = hms[1].parse().unwrap_or(0);
+    let s: u8 = hms[2].parse().unwrap_or(0);
+    let micros = parse_frac_to_micros(frac);
+    // Encode hours via days+hours so shared formatter can rebuild total hours.
+    let days = h / 24;
+    let hours = (h % 24) as u8;
+    ElementValue::String(Arc::from(format_time(
+        negative, days, hours, m, s, micros, None,
+    )))
+}
+
+fn parse_frac_to_micros(frac: &str) -> u32 {
+    if frac.is_empty() {
+        return 0;
+    }
+    let mut padded = frac.chars().take(6).collect::<String>();
+    while padded.len() < 6 {
+        padded.push('0');
+    }
+    padded.parse().unwrap_or(0)
 }
