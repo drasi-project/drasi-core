@@ -31,6 +31,9 @@ workspace = true
 # builds without a system/vendored TLS backend still work; when disabled, the
 # SslMode::Require* variants return an error instead of panicking.
 tls = ["mysql_async/rustls-tls"]
+# Enables serde/OpenAPI DTOs (e.g. SslModeDto) for plugin descriptors. Only the
+# descriptor crates need this, so utoipa stays optional.
+api = ["dep:utoipa"]
 
 [dependencies]
 drasi-core.workspace = true
@@ -39,6 +42,7 @@ log = "0.4"
 mysql_async = { version = "0.37" }
 serde = { version = "1.0", features = ["derive"] }
 ordered-float = "3.0"
+utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.0", features = ["macros", "rt"] }
+tokio = { version = "1.0", features = ["macros", "rt", "net"] }

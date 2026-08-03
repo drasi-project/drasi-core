@@ -39,7 +39,11 @@ pub struct MySqlBootstrapConfig {
     /// Tables to bootstrap
     pub tables: Vec<String>,
 
-    /// SSL mode
+    /// SSL/TLS mode for the MySQL connection.
+    ///
+    /// Defaults to [`SslMode::IfAvailable`]. When built without the `tls`
+    /// feature, `IfAvailable` connects in plaintext and the `Require*` variants
+    /// return an error instead of panicking.
     pub ssl_mode: SslMode,
 
     /// Table key configurations

@@ -34,6 +34,15 @@ use crate::config::SslMode;
 /// `Clone`, and [`SslMode::IfAvailable`] may need to build the options twice
 /// (once for the TLS attempt and once for the plaintext fallback).
 ///
+/// # `IfAvailable` fallback
+///
+/// With the `tls` feature, [`SslMode::IfAvailable`] first attempts a TLS
+/// connection. If that attempt fails with a **transport/TLS-level** error, it
+/// falls back to a plaintext connection. Server-side errors (authentication
+/// failures, access denied, unknown database, etc.) are propagated immediately
+/// instead — they would fail identically over plaintext, so retrying would only
+/// mask the real error and waste a connection attempt.
+///
 /// # Errors
 ///
 /// Returns an error if the connection cannot be established, or if a TLS-
@@ -47,7 +56,7 @@ where
     match mode {
         SslMode::Disabled => Ok(Conn::new(build_opts().ssl_opts(None)).await?),
         SslMode::IfAvailable => connect_if_available(build_opts).await,
-        SslMode::Require => connect_require(build_opts, RequireMode::Relaxed).await,
+        SslMode::Require => connect_require(build_opts, RequireMode::VerifyFull).await,
         SslMode::RequireVerifyCa => connect_require(build_opts, RequireMode::VerifyCa).await,
         SslMode::RequireVerifyFull => connect_require(build_opts, RequireMode::VerifyFull).await,
     }
@@ -60,9 +69,15 @@ where
 {
     match Conn::new(build_opts().ssl_opts(Some(relaxed_ssl_opts()))).await {
         Ok(conn) => Ok(conn),
+        // A server-side error (authentication failure, access denied, unknown
+        // database, etc.) would fail identically over a plaintext connection, so
+        // propagate it immediately rather than masking it behind a misleading
+        // "SSL failed" warning and wasting a second connection attempt. Only
+        // transport/TLS-level failures fall back to plaintext.
+        Err(err @ mysql_async::Error::Server(_)) => Err(err.into()),
         Err(ssl_error) => {
             log::warn!(
-                "SSL connection attempt failed, retrying without SSL: {ssl_error}"
+                "TLS connection attempt failed, falling back to a plaintext connection: {ssl_error}"
             );
             Ok(Conn::new(build_opts().ssl_opts(None)).await?)
         }
@@ -81,8 +96,11 @@ where
 
 #[cfg_attr(not(feature = "tls"), allow(dead_code))]
 enum RequireMode {
-    Relaxed,
+    /// Require TLS and verify the certificate chain, but **skip** hostname
+    /// validation (MySQL `--ssl-mode=VERIFY_CA`).
     VerifyCa,
+    /// Require TLS with full verification: certificate chain **and** hostname
+    /// (MySQL `--ssl-mode=VERIFY_IDENTITY`).
     VerifyFull,
 }
 
@@ -92,7 +110,6 @@ where
     F: Fn() -> OptsBuilder,
 {
     let ssl_opts = match require_mode {
-        RequireMode::Relaxed => relaxed_ssl_opts(),
         RequireMode::VerifyCa => verify_ca_ssl_opts(),
         RequireMode::VerifyFull => mysql_async::SslOpts::default(),
     };
@@ -121,6 +138,36 @@ fn relaxed_ssl_opts() -> mysql_async::SslOpts {
 #[cfg(feature = "tls")]
 fn verify_ca_ssl_opts() -> mysql_async::SslOpts {
     mysql_async::SslOpts::default().with_danger_skip_domain_validation(true)
+}
+
+#[cfg(all(test, feature = "tls"))]
+mod tls_tests {
+    use super::*;
+
+    /// With the `tls` feature, `IfAvailable` first attempts a TLS connection and
+    /// then falls back to a plaintext connection when that fails. The critical
+    /// invariant (the original bug) is that this path must **not panic**. Against
+    /// a non-listening address both the TLS attempt and the plaintext retry fail,
+    /// so the call returns `Err` from the second attempt rather than aborting.
+    #[tokio::test]
+    async fn if_available_falls_back_without_panicking() {
+        // Bind and immediately release a port so the connection attempt fails
+        // fast with "connection refused" instead of hanging.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let build_opts = || {
+            OptsBuilder::default()
+                .ip_or_hostname("127.0.0.1")
+                .tcp_port(port)
+        };
+        let result = connect_with_ssl_mode(build_opts, SslMode::IfAvailable).await;
+        assert!(
+            result.is_err(),
+            "expected a connection error after TLS+plaintext both failed"
+        );
+    }
 }
 
 #[cfg(all(test, not(feature = "tls")))]

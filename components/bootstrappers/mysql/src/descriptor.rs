@@ -16,10 +16,10 @@
 
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_plugin_sdk::prelude::*;
-use std::str::FromStr;
 use utoipa::OpenApi;
 
-use crate::{MySqlBootstrapConfig, MySqlBootstrapProvider, SslMode, TableKeyConfig};
+use crate::{MySqlBootstrapConfig, MySqlBootstrapProvider, TableKeyConfig};
+use drasi_mysql_common::SslModeDto;
 
 // ── DTO types ────────────────────────────────────────────────────────────────
 
@@ -70,6 +70,7 @@ pub struct MySqlBootstrapConfigDto {
     #[serde(default)]
     pub tables: Vec<String>,
 
+    /// SSL/TLS mode. Defaults to `if_available`.
     #[serde(default)]
     #[schema(value_type = SslModeDto)]
     pub ssl_mode: ConfigValue<SslModeDto>,
@@ -79,46 +80,7 @@ pub struct MySqlBootstrapConfigDto {
     pub table_keys: Vec<MySqlTableKeyConfigDto>,
 }
 
-/// SSL mode DTO (mirrors [`SslMode`]).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-#[schema(as = bootstrap::mysql::SslMode)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
-pub enum SslModeDto {
-    #[default]
-    Disabled,
-    IfAvailable,
-    Require,
-    RequireVerifyCa,
-    RequireVerifyFull,
-}
-
-impl FromStr for SslModeDto {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "disabled" => Ok(SslModeDto::Disabled),
-            "if_available" | "ifavailable" => Ok(SslModeDto::IfAvailable),
-            "require" => Ok(SslModeDto::Require),
-            "require_verify_ca" | "requireverifyca" => Ok(SslModeDto::RequireVerifyCa),
-            "require_verify_full" | "requireverifyfull" => Ok(SslModeDto::RequireVerifyFull),
-            _ => Err(format!("Invalid SSL mode: {s}")),
-        }
-    }
-}
-
-impl From<SslModeDto> for SslMode {
-    fn from(dto: SslModeDto) -> Self {
-        match dto {
-            SslModeDto::Disabled => SslMode::Disabled,
-            SslModeDto::IfAvailable => SslMode::IfAvailable,
-            SslModeDto::Require => SslMode::Require,
-            SslModeDto::RequireVerifyCa => SslMode::RequireVerifyCa,
-            SslModeDto::RequireVerifyFull => SslMode::RequireVerifyFull,
-        }
-    }
-}
+/// SSL mode DTO (`SslModeDto`) is shared from `drasi-mysql-common`.
 
 // ── Descriptor ───────────────────────────────────────────────────────────────
 

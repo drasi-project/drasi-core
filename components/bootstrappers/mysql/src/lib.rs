@@ -130,6 +130,8 @@ impl MySqlBootstrapBuilder {
         self
     }
 
+    /// Sets the SSL/TLS mode for the MySQL connection (default:
+    /// [`SslMode::IfAvailable`]).
     pub fn with_ssl_mode(mut self, ssl_mode: SslMode) -> Self {
         self.ssl_mode = ssl_mode;
         self

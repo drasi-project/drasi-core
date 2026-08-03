@@ -19,18 +19,58 @@
 /// Shared by the MySQL source and bootstrap plugins. The actual TLS negotiation
 /// is performed by [`crate::connect::connect_with_ssl_mode`], which only attempts
 /// a TLS handshake when the crate is built with the `tls` feature enabled.
+///
+/// # Certificate verification
+///
+/// The `tls` backend is rustls. [`SslMode::IfAvailable`] attempts opportunistic
+/// TLS **without** certificate verification and falls back to plaintext on
+/// failure, so it only protects against passive eavesdroppers. The `Require*`
+/// variants enforce TLS and verify the server: [`SslMode::Require`] and
+/// [`SslMode::RequireVerifyFull`] perform full certificate-chain **and**
+/// hostname verification, while [`SslMode::RequireVerifyCa`] verifies the chain
+/// but skips hostname validation. When built **without** the `tls` feature, no
+/// TLS is ever negotiated: [`SslMode::IfAvailable`] connects in plaintext and
+/// the `Require*` variants return an error.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SslMode {
-    /// Disable SSL encryption.
+    /// Disable SSL encryption — always connect in plaintext.
     Disabled,
-    /// Try SSL but allow unencrypted connections.
+    /// Try SSL but fall back to an unencrypted connection if it fails
+    /// (opportunistic TLS, equivalent to MySQL's `--ssl-mode=PREFERRED`).
+    ///
+    /// With the `tls` feature, TLS is attempted **without** certificate or
+    /// hostname verification (invalid certs accepted, hostname checks skipped),
+    /// falling back to plaintext on error. Without `tls`, connects in plaintext.
+    ///
+    /// # Security
+    ///
+    /// This mode is **not** safe against an active network attacker. Because it
+    /// silently downgrades to plaintext when the TLS handshake fails, an attacker
+    /// who disrupts the handshake (TCP reset, forged TLS alert) can strip TLS and
+    /// force a plaintext connection — exposing credentials and query data — while
+    /// only a `warn`-level log records the fallback. Use [`SslMode::Require`] (or
+    /// a verifying variant) in any environment where credentials must be
+    /// protected against active attackers.
     #[default]
     IfAvailable,
-    /// Require SSL encryption.
+    /// Require an encrypted connection **with full verification** of the server
+    /// certificate chain and hostname (equivalent to [`SslMode::RequireVerifyFull`]).
+    ///
+    /// Protects against both passive eavesdropping and active man-in-the-middle
+    /// attacks. If your server uses a self-signed certificate or one whose
+    /// hostname does not match, use [`SslMode::RequireVerifyCa`] (verify chain,
+    /// skip hostname) instead. Requires the `tls` feature; otherwise the
+    /// connection returns an error.
     Require,
-    /// Require SSL with CA verification.
+    /// Require SSL with CA (certificate chain) verification, but **skip** hostname
+    /// validation.
+    ///
+    /// Requires the `tls` feature; otherwise the connection returns an error.
     RequireVerifyCa,
-    /// Require SSL with CA and hostname verification.
+    /// Require SSL with full verification: CA (certificate chain) **and** hostname
+    /// validation.
+    ///
+    /// Requires the `tls` feature; otherwise the connection returns an error.
     RequireVerifyFull,
 }
 

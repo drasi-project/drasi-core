@@ -33,7 +33,7 @@ workspace = true
 drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
-drasi-mysql-common = { workspace = true }
+drasi-mysql-common = { workspace = true, features = ["api"] }
 utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
