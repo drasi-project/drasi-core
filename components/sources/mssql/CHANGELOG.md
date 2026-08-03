@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-- **mssql:** CDC datetime values are now `LocalDateTime`; datetimeoffset/money/date/time supported via shared converter ([#673](https://github.com/drasi-project/drasi-core/issues/673)) ([#674](https://github.com/drasi-project/drasi-core/issues/674))
+- **mssql:** CDC datetime values are now `LocalDateTime` (**BREAKING**: was a formatted `String`; Cypher that string-compares datetime properties must be updated); `datetimeoffset`/`money`/`date`/`time` supported via shared converter ([#673](https://github.com/drasi-project/drasi-core/issues/673)) ([#674](https://github.com/drasi-project/drasi-core/issues/674))
 
 ## [0.2.7] - 2026-07-08
 

@@ -670,12 +670,14 @@ async fn prepare_types_database(config: &MssqlConfig) -> Result<MssqlConfig> {
             RealVal REAL NOT NULL,
             DecimalVal DECIMAL(10,2) NOT NULL,
             MoneyVal MONEY NOT NULL,
+            SmallMoneyVal SMALLMONEY NOT NULL,
             VarcharVal VARCHAR(100) NOT NULL,
             NVarcharVal NVARCHAR(100) NOT NULL,
             GuidVal UNIQUEIDENTIFIER NOT NULL,
             BinaryVal VARBINARY(16) NOT NULL,
             DateTimeVal DATETIME NOT NULL,
             DateTime2Val DATETIME2(7) NOT NULL,
+            SmallDateTimeVal SMALLDATETIME NOT NULL,
             DateVal DATE NOT NULL,
             TimeVal TIME(7) NOT NULL,
             DateTimeOffsetVal DATETIMEOFFSET NOT NULL
@@ -779,13 +781,14 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
             &mut seed_client,
             "INSERT INTO dbo.TypesTest (
                 Id, IntVal, BigIntVal, SmallIntVal, TinyIntVal, BitVal,
-                FloatVal, RealVal, DecimalVal, MoneyVal, VarcharVal, NVarcharVal,
-                GuidVal, BinaryVal, DateTimeVal, DateTime2Val, DateVal, TimeVal, DateTimeOffsetVal
+                FloatVal, RealVal, DecimalVal, MoneyVal, SmallMoneyVal, VarcharVal, NVarcharVal,
+                GuidVal, BinaryVal, DateTimeVal, DateTime2Val, SmallDateTimeVal,
+                DateVal, TimeVal, DateTimeOffsetVal
              ) VALUES (
                 1, 42, 9876543210, 256, 7, 1,
-                3.15, 2.5, 99.95, 12.3400, 'hello', N'world',
+                3.15, 2.5, 99.95, 12.3400, 9.9900, 'hello', N'world',
                 '550e8400-e29b-41d4-a716-446655440000', 0xDEADBEEF,
-                '2024-06-15T10:30:45.123', '2024-06-15T10:30:45.1234567',
+                '2024-06-15T10:30:45.123', '2024-06-15T10:30:45.1234567', '2024-06-15T10:30:00',
                 '2024-06-15', '10:30:45.1234567', '2024-06-15T10:30:45.1234567+05:00'
              );",
         )
@@ -805,12 +808,14 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
                        t.RealVal AS real_val,
                        t.DecimalVal AS decimal_val,
                        t.MoneyVal AS money_val,
+                       t.SmallMoneyVal AS smallmoney_val,
                        t.VarcharVal AS varchar_val,
                        t.NVarcharVal AS nvarchar_val,
                        t.GuidVal AS guid_val,
                        t.BinaryVal AS binary_val,
                        t.DateTimeVal AS datetime_val,
                        t.DateTime2Val AS datetime2_val,
+                       t.SmallDateTimeVal AS smalldatetime_val,
                        t.DateVal AS date_val,
                        t.TimeVal AS time_val,
                        t.DateTimeOffsetVal AS datetimeoffset_val
@@ -973,6 +978,11 @@ fn assert_types_test_row(data: &Value, path: &str) -> Result<()> {
         (money_val - 12.34).abs() < 0.01,
         "{path}.money_val should be ~12.34, got: {money_val}"
     );
+    let smallmoney_val = f64_field("smallmoney_val")?;
+    anyhow::ensure!(
+        (smallmoney_val - 9.99).abs() < 0.01,
+        "{path}.smallmoney_val should be ~9.99, got: {smallmoney_val}"
+    );
 
     anyhow::ensure!(
         str_field("varchar_val")? == "hello",
@@ -993,8 +1003,10 @@ fn assert_types_test_row(data: &Value, path: &str) -> Result<()> {
         "{path}.binary_val hex mismatch: {binary}"
     );
 
-    assert_local_datetime_field(data, "datetime_val", path)?;
-    assert_local_datetime_field(data, "datetime2_val", path)?;
+    assert_local_datetime_field(data, "datetime_val", path, "10:30:45")?;
+    assert_local_datetime_field(data, "datetime2_val", path, "10:30:45")?;
+    // SMALLDATETIME has minute precision (seconds always 00).
+    assert_local_datetime_field(data, "smalldatetime_val", path, "10:30:00")?;
 
     anyhow::ensure!(
         str_field("date_val")? == "2024-06-15",
@@ -1011,71 +1023,59 @@ fn assert_types_test_row(data: &Value, path: &str) -> Result<()> {
     Ok(())
 }
 
-fn assert_local_datetime_field(data: &Value, field: &str, path: &str) -> Result<()> {
+/// ApplicationReaction serializes query results via `VariableValue` → JSON.
+/// `VariableValue::LocalDateTime` becomes a plain string using chrono's Display
+/// format (`YYYY-MM-DD HH:MM:SS[.f]` with a space, not `T`). That is distinct
+/// from the old CDC path which emitted ISO strings with `T`
+/// (`%Y-%m-%dT%H:%M:%S%.3f`). The `__drasi_v1_type__` envelope is only used by
+/// direct `ElementValue` serde and is not visible on this path.
+fn assert_local_datetime_field(
+    data: &Value,
+    field: &str,
+    path: &str,
+    expected_time: &str,
+) -> Result<()> {
     let value = data
         .get(field)
         .with_context(|| format!("{path}.{field}: missing field"))?;
-    if let Some(obj) = value.as_object() {
-        let type_tag = obj
-            .get("__drasi_v1_type__")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        anyhow::ensure!(
-            type_tag == "drasi.LocalDateTime",
-            "{path}.{field}: expected LocalDateTime envelope, got: {value}"
-        );
-        let raw = obj
-            .get("value")
-            .and_then(|v| v.as_str())
-            .with_context(|| format!("{path}.{field}: missing value in envelope"))?;
-        anyhow::ensure!(
-            raw.starts_with("2024-06-15") && raw.contains("10:30:45"),
-            "{path}.{field}: unexpected LocalDateTime value: {raw}"
-        );
-        return Ok(());
-    }
-    if let Some(s) = value.as_str() {
-        // Some reaction paths stringify temporal values.
-        anyhow::ensure!(
-            s.starts_with("2024-06-15") && s.contains("10:30:45"),
-            "{path}.{field}: unexpected datetime string: {s}"
-        );
-        return Ok(());
-    }
-    anyhow::bail!("{path}.{field}: expected LocalDateTime, got: {value}")
+    let raw = value.as_str().with_context(|| {
+        format!(
+            "{path}.{field}: expected LocalDateTime Display string from ApplicationReaction, got: {value}"
+        )
+    })?;
+    // Reject old CDC ISO-with-T format and bare non-temporal values.
+    anyhow::ensure!(
+        !raw.contains('T'),
+        "{path}.{field}: got ISO-with-T string (old CDC String mapping), expected LocalDateTime Display: {raw}"
+    );
+    anyhow::ensure!(
+        raw.starts_with("2024-06-15 ") && raw.contains(expected_time),
+        "{path}.{field}: unexpected LocalDateTime Display value: {raw}"
+    );
+    Ok(())
 }
 
+/// Same ApplicationReaction path as LocalDateTime: ZonedDateTime is stringified
+/// via chrono Display (not the ElementValue `__drasi_v1_type__` envelope).
 fn assert_zoned_datetime_field(data: &Value, field: &str, path: &str) -> Result<()> {
     let value = data
         .get(field)
         .with_context(|| format!("{path}.{field}: missing field"))?;
-    if let Some(obj) = value.as_object() {
-        let type_tag = obj
-            .get("__drasi_v1_type__")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        anyhow::ensure!(
-            type_tag == "drasi.ZonedDateTime",
-            "{path}.{field}: expected ZonedDateTime envelope, got: {value}"
-        );
-        let raw = obj
-            .get("value")
-            .and_then(|v| v.as_str())
-            .with_context(|| format!("{path}.{field}: missing value in envelope"))?;
-        anyhow::ensure!(
-            raw.contains("2024-06-15") && raw.contains("10:30:45"),
-            "{path}.{field}: unexpected ZonedDateTime value: {raw}"
-        );
-        return Ok(());
-    }
-    if let Some(s) = value.as_str() {
-        anyhow::ensure!(
-            s.contains("2024-06-15") && s.contains("10:30:45"),
-            "{path}.{field}: unexpected datetimeoffset string: {s}"
-        );
-        return Ok(());
-    }
-    anyhow::bail!("{path}.{field}: expected ZonedDateTime, got: {value}")
+    let raw = value.as_str().with_context(|| {
+        format!(
+            "{path}.{field}: expected ZonedDateTime Display string from ApplicationReaction, got: {value}"
+        )
+    })?;
+    anyhow::ensure!(
+        raw.contains("2024-06-15") && raw.contains("10:30:45"),
+        "{path}.{field}: unexpected ZonedDateTime Display value: {raw}"
+    );
+    // Offset should be present (+05:00 / +0500 depending on chrono Display).
+    anyhow::ensure!(
+        raw.contains('+') || raw.contains('Z'),
+        "{path}.{field}: expected timezone offset in ZonedDateTime Display: {raw}"
+    );
+    Ok(())
 }
 
 // ============================================================================

@@ -75,12 +75,10 @@ pub fn extract_column_value(row: &Row, col_idx: usize) -> Result<ElementValue> {
                 Ok(ElementValue::Null)
             }
         }
-        // money/smallmoney are decoded by tiberius as f64/f32.
+        // MONEY/SMALLMONEY decode as ColumnData::F64 in tiberius (scaled int / 1e4).
         ColumnType::Money | ColumnType::Money4 => {
             if let Ok(Some(val)) = row.try_get::<f64, _>(col_idx) {
                 Ok(ElementValue::Float(ordered_float::OrderedFloat(val)))
-            } else if let Ok(Some(val)) = row.try_get::<f32, _>(col_idx) {
-                Ok(ElementValue::Float(ordered_float::OrderedFloat(val as f64)))
             } else {
                 Ok(ElementValue::Null)
             }
