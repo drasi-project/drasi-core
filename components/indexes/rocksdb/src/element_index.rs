@@ -36,6 +36,7 @@ use crate::storage_models::{
     StoredRelation, StoredValue, StoredValueMap,
 };
 use crate::RocksDbSessionState;
+use crate::RocksIndexOptions;
 
 mod archive_index;
 
@@ -56,12 +57,6 @@ pub struct Context {
     join_spec_by_label: RwLock<JoinSpecByLabel>,
     options: RocksIndexOptions,
     session_state: Arc<RocksDbSessionState>,
-}
-
-#[derive(Clone, Copy)]
-pub struct RocksIndexOptions {
-    pub archive_enabled: bool,
-    pub direct_io: bool,
 }
 
 const ELEMENTS_CF: &str = "elements";
@@ -327,32 +322,38 @@ impl ElementIndex for RocksDbElementIndex {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context
-                .db
-                .create_cf(ELEMENTS_CF, &get_elements_cf_options())
-            {
+            if let Err(err) = context.db.create_cf(
+                ELEMENTS_CF,
+                &crate::sizing::sized(ELEMENTS_CF, get_elements_cf_options(), &context.options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context.db.create_cf(SLOT_CF, &get_elements_cf_options()) {
+            if let Err(err) = context.db.create_cf(
+                SLOT_CF,
+                &crate::sizing::sized(SLOT_CF, get_elements_cf_options(), &context.options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context
-                .db
-                .create_cf(INBOUND_CF, &get_inout_index_cf_options())
-            {
+            if let Err(err) = context.db.create_cf(
+                INBOUND_CF,
+                &crate::sizing::sized(INBOUND_CF, get_inout_index_cf_options(), &context.options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context
-                .db
-                .create_cf(OUTBOUND_CF, &get_inout_index_cf_options())
-            {
+            if let Err(err) = context.db.create_cf(
+                OUTBOUND_CF,
+                &crate::sizing::sized(OUTBOUND_CF, get_inout_index_cf_options(), &context.options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context.db.create_cf(PARTIAL_CF, &get_partial_cf_options()) {
+            if let Err(err) = context.db.create_cf(
+                PARTIAL_CF,
+                &crate::sizing::sized(PARTIAL_CF, get_partial_cf_options(), &context.options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
@@ -375,22 +376,18 @@ impl ElementIndex for RocksDbElementIndex {
 
 pub(crate) fn get_partial_cf_options() -> Options {
     let mut partial_opts = Options::default();
-    crate::bound_write_buffer_history(&mut partial_opts);
     partial_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
     partial_opts
 }
 
 pub(crate) fn get_inout_index_cf_options() -> Options {
     let mut inout_bound_opts = Options::default();
-    crate::bound_write_buffer_history(&mut inout_bound_opts);
     inout_bound_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(18));
     inout_bound_opts
 }
 
 pub(crate) fn get_elements_cf_options() -> Options {
-    let mut elements_opts = crate::point_lookup::point_lookup_cf_options(ELEMENT_BLOCK_CACHE_BYTES);
-    crate::bound_write_buffer_history(&mut elements_opts);
-    elements_opts
+    crate::point_lookup::point_lookup_cf_options(ELEMENT_BLOCK_CACHE_BYTES)
 }
 
 /// Collect all column family descriptors needed by the element index.
@@ -398,17 +395,18 @@ pub(crate) fn element_cf_descriptors(
     options: &RocksIndexOptions,
 ) -> Vec<rocksdb::ColumnFamilyDescriptor> {
     let mut cfs = vec![
-        rocksdb::ColumnFamilyDescriptor::new(ELEMENTS_CF, get_elements_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(SLOT_CF, get_elements_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(INBOUND_CF, get_inout_index_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(OUTBOUND_CF, get_inout_index_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(PARTIAL_CF, get_partial_cf_options()),
+        crate::sizing::descriptor(ELEMENTS_CF, get_elements_cf_options(), options),
+        crate::sizing::descriptor(SLOT_CF, get_elements_cf_options(), options),
+        crate::sizing::descriptor(INBOUND_CF, get_inout_index_cf_options(), options),
+        crate::sizing::descriptor(OUTBOUND_CF, get_inout_index_cf_options(), options),
+        crate::sizing::descriptor(PARTIAL_CF, get_partial_cf_options(), options),
     ];
 
     if options.archive_enabled {
-        cfs.push(rocksdb::ColumnFamilyDescriptor::new(
+        cfs.push(crate::sizing::descriptor(
             archive_index::ARCHIVE_CF,
             archive_index::get_archive_cf_options(),
+            options,
         ));
     }
 

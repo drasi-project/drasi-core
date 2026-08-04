@@ -33,8 +33,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use drasi_index_rocksdb::element_index::RocksIndexOptions;
 use drasi_index_rocksdb::open_unified_db;
+use drasi_index_rocksdb::RocksIndexOptions;
 
 /// Column families read only by exact key, which must carry the full
 /// point-lookup policy.
@@ -90,10 +90,7 @@ fn value<'a>(
 }
 
 fn open_and_parse(dir: &tempfile::TempDir, name: &str) -> HashMap<String, HashMap<String, String>> {
-    let options = RocksIndexOptions {
-        archive_enabled: true,
-        direct_io: false,
-    };
+    let options = RocksIndexOptions::new(true, false);
     let db = open_unified_db(dir.path().to_str().expect("utf-8 path"), name, &options)
         .expect("open unified db");
     let sections = parse_options_file(&dir.path().join(name));

@@ -46,6 +46,7 @@ use crate::RocksDbSessionState;
 pub struct RocksDbResultIndex {
     db: Arc<IndexDb>,
     session_state: Arc<RocksDbSessionState>,
+    options: crate::RocksIndexOptions,
 }
 
 const VALUES_CF: &str = "values";
@@ -62,9 +63,19 @@ impl RocksDbResultIndex {
     /// Create a new RocksDbResultIndex from a shared database handle.
     ///
     /// The database must already have the required column families created.
-    /// Use `open_unified_db()` to open a database with all required CFs.
-    pub fn new(db: Arc<IndexDb>, session_state: Arc<RocksDbSessionState>) -> Self {
-        RocksDbResultIndex { db, session_state }
+    /// Use `open_unified_db()` to open a database with all required CFs, and
+    /// pass the same options here so column families re-created by `clear()`
+    /// keep the sizing policy they were opened with.
+    pub fn new(
+        db: Arc<IndexDb>,
+        session_state: Arc<RocksDbSessionState>,
+        options: crate::RocksIndexOptions,
+    ) -> Self {
+        RocksDbResultIndex {
+            db,
+            session_state,
+            options,
+        }
     }
 }
 
@@ -144,12 +155,16 @@ impl AccumulatorIndex for RocksDbResultIndex {
 
     async fn clear(&self) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let options = self.options;
         let task = task::spawn_blocking(move || {
             if let Err(err) = db.drop_cf(VALUES_CF) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(VALUES_CF, &get_value_cf_options()) {
+            if let Err(err) = db.create_cf(
+                VALUES_CF,
+                &crate::sizing::sized(VALUES_CF, get_value_cf_options(), &options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
@@ -157,7 +172,10 @@ impl AccumulatorIndex for RocksDbResultIndex {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(SETS_CF, &get_lss_cf_options()) {
+            if let Err(err) = db.create_cf(
+                SETS_CF,
+                &crate::sizing::sized(SETS_CF, get_lss_cf_options(), &options),
+            ) {
                 return Err(IndexError::other(err));
             }
             Ok(())
@@ -370,7 +388,6 @@ impl ResultSequenceCounter for RocksDbResultIndex {
 
 pub(crate) fn get_lss_cf_options() -> Options {
     let mut lss_opts = Options::default();
-    crate::bound_write_buffer_history(&mut lss_opts);
     lss_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
     lss_opts.set_merge_operator_associative("increment", increment_merge);
     lss_opts.set_compaction_filter("remove0", compact);
@@ -378,24 +395,21 @@ pub(crate) fn get_lss_cf_options() -> Options {
 }
 
 pub(crate) fn get_value_cf_options() -> Options {
-    let mut values_opts = crate::point_lookup::point_lookup_cf_options(VALUES_BLOCK_CACHE_BYTES);
-    crate::bound_write_buffer_history(&mut values_opts);
-    values_opts
+    crate::point_lookup::point_lookup_cf_options(VALUES_BLOCK_CACHE_BYTES)
 }
 
 pub(crate) fn get_metadata_cf_options() -> Options {
-    let mut metadata_opts =
-        crate::point_lookup::point_lookup_cf_options(METADATA_BLOCK_CACHE_BYTES);
-    crate::bound_write_buffer_history(&mut metadata_opts);
-    metadata_opts
+    crate::point_lookup::point_lookup_cf_options(METADATA_BLOCK_CACHE_BYTES)
 }
 
 /// Collect all column family descriptors needed by the result index.
-pub(crate) fn result_cf_descriptors() -> Vec<rocksdb::ColumnFamilyDescriptor> {
+pub(crate) fn result_cf_descriptors(
+    options: &crate::RocksIndexOptions,
+) -> Vec<rocksdb::ColumnFamilyDescriptor> {
     vec![
-        rocksdb::ColumnFamilyDescriptor::new(VALUES_CF, get_value_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(SETS_CF, get_lss_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(METADATA_CF, get_metadata_cf_options()),
+        crate::sizing::descriptor(VALUES_CF, get_value_cf_options(), options),
+        crate::sizing::descriptor(SETS_CF, get_lss_cf_options(), options),
+        crate::sizing::descriptor(METADATA_CF, get_metadata_cf_options(), options),
     ]
 }
 

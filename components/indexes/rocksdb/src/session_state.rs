@@ -304,15 +304,12 @@ impl std::error::Error for SessionStateError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element_index::RocksIndexOptions;
     use crate::open_unified_db;
+    use crate::RocksIndexOptions;
 
     fn setup_test_db() -> (tempfile::TempDir, Arc<IndexDb>) {
         let dir = tempfile::TempDir::new().expect("failed to create temp dir");
-        let options = RocksIndexOptions {
-            archive_enabled: false,
-            direct_io: false,
-        };
+        let options = RocksIndexOptions::new(false, false);
         let db = open_unified_db(dir.path().to_str().expect("path"), "test", &options)
             .expect("failed to open db");
         (dir, db)
