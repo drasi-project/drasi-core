@@ -40,16 +40,19 @@ impl ElementArchiveIndex for RocksDbElementIndex {
         element_ref: &ElementReference,
         time: ElementTimestamp,
     ) -> Result<Option<Arc<Element>>, IndexError> {
+        if !self.context.options.archive_enabled {
+            return Err(IndexError::ArchiveNotEnabled);
+        }
         let context = self.context.clone();
         let element_key = super::hash_element_ref(element_ref);
         let mut key = element_key.to_vec();
         key.extend_from_slice(&time.to_be_bytes());
 
         let task = task::spawn_blocking(move || {
-            let archive_cf = context
-                .db
-                .cf_handle(ARCHIVE_CF)
-                .expect("Archive CF not found");
+            let archive_cf = match context.db.cf_handle(ARCHIVE_CF) {
+                Some(cf) => cf,
+                None => return Err(IndexError::ArchiveNotEnabled),
+            };
             context.session_state.with_txn(|txn| {
                 let mut iter = txn
                     .iterator_cf(
@@ -92,6 +95,9 @@ impl ElementArchiveIndex for RocksDbElementIndex {
         element_ref: &ElementReference,
         range: TimestampRange<ElementTimestamp>,
     ) -> Result<ElementStream, IndexError> {
+        if !self.context.options.archive_enabled {
+            return Err(IndexError::ArchiveNotEnabled);
+        }
         let context = self.context.clone();
         let element_key = super::hash_element_ref(element_ref);
 
@@ -101,10 +107,10 @@ impl ElementArchiveIndex for RocksDbElementIndex {
             TimestampBound::StartFromPrevious(from) => {
                 let context = context.clone();
                 let task = task::spawn_blocking(move || {
-                    let archive_cf = context
-                        .db
-                        .cf_handle(ARCHIVE_CF)
-                        .expect("Archive CF not found");
+                    let archive_cf = match context.db.cf_handle(ARCHIVE_CF) {
+                        Some(cf) => cf,
+                        None => return Err(IndexError::ArchiveNotEnabled),
+                    };
                     let mut start_key = element_key.clone().to_vec();
                     start_key.extend_from_slice(&from.to_be_bytes());
                     context.session_state.with_txn(|txn| {
@@ -147,10 +153,10 @@ impl ElementArchiveIndex for RocksDbElementIndex {
 
         let task = task::spawn_blocking(move || {
             start_key.extend_from_slice(&from_timestamp.to_be_bytes());
-            let archive_cf = context
-                .db
-                .cf_handle(ARCHIVE_CF)
-                .expect("Archive CF not found");
+            let archive_cf = match context.db.cf_handle(ARCHIVE_CF) {
+                Some(cf) => cf,
+                None => return Err(IndexError::ArchiveNotEnabled),
+            };
             context.session_state.with_txn(|txn| {
                 let mut results: Vec<Result<Arc<Element>, IndexError>> = Vec::new();
                 for item in txn.iterator_cf(
