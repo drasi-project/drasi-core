@@ -403,7 +403,22 @@ impl PgOutputDecoder {
         match oid_value {
             16 => {
                 // bool
-                Ok(PostgresValue::Bool(data[0] != 0))
+                // pgoutput streams column values in text format, so a boolean
+                // arrives as the ASCII bytes "t"/"f" (or "true"/"false"), not a
+                // binary 0x01/0x00. Decode from text, tolerating the binary form.
+                let value = match data {
+                    b"t" | b"true" => true,
+                    b"f" | b"false" => false,
+                    [1] => true,
+                    [0] => false,
+                    other => {
+                        return Err(anyhow!(
+                            "Failed to parse bool: unexpected bytes (len={})",
+                            other.len()
+                        ))
+                    }
+                };
+                Ok(PostgresValue::Bool(value))
             }
             21 => {
                 // int2
@@ -1056,6 +1071,8 @@ mod tests {
             ElementValue::String(Arc::from("hello world"))
         );
     }
+
+    #[test]
     fn test_decode_timestamptz_text_no_fractional_seconds() {
         // The `%.f` specifier is optional, so whole-second timestamps (which
         // PostgreSQL emits when subsecond precision is zero) must parse too.
@@ -1068,6 +1085,69 @@ mod tests {
                 assert_eq!(ts, Utc.with_ymd_and_hms(2026, 5, 13, 22, 3, 45).unwrap());
             }
             other => panic!("expected TimestampTz, got {other:?}"),
+        }
+    }
+
+    // ── decode_column_value: bool (OID 16) via streaming/pgoutput path ─
+    #[test]
+    fn test_decode_bool_text_true() {
+        let decoder = PgOutputDecoder::new();
+        // pgoutput streams booleans in text format as "t"/"f".
+        for input in [b"t".as_slice(), b"true".as_slice()] {
+            match decoder.decode_column_value(input, 16).unwrap() {
+                PostgresValue::Bool(b) => assert!(b, "expected true for {input:?}"),
+                other => panic!("expected Bool, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_decode_bool_text_false() {
+        let decoder = PgOutputDecoder::new();
+        // Regression test: "f" (0x66) is non-zero, so the old `data[0] != 0`
+        // logic incorrectly decoded it as true.
+        for input in [b"f".as_slice(), b"false".as_slice()] {
+            match decoder.decode_column_value(input, 16).unwrap() {
+                PostgresValue::Bool(b) => assert!(!b, "expected false for {input:?}"),
+                other => panic!("expected Bool, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_decode_bool_binary_fallback() {
+        // pgoutput always sends text, but binary bytes are tolerated defensively.
+        let decoder = PgOutputDecoder::new();
+        match decoder.decode_column_value(&[1], 16).unwrap() {
+            PostgresValue::Bool(b) => assert!(b),
+            other => panic!("expected Bool, got {other:?}"),
+        }
+        match decoder.decode_column_value(&[0], 16).unwrap() {
+            PostgresValue::Bool(b) => assert!(!b),
+            other => panic!("expected Bool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_bool_invalid_errors() {
+        let decoder = PgOutputDecoder::new();
+        // Inputs pgoutput never emits for a boolean must error rather than
+        // silently decode. Covers: unrecognised text, empty slice (no panic on
+        // len==0), case-sensitive/SQL literal forms not sent by pgoutput, and
+        // out-of-range binary bytes beyond the 0x00/0x01 fallback.
+        for input in [
+            b"maybe".as_slice(),
+            b"".as_slice(),
+            b"T".as_slice(),
+            b"TRUE".as_slice(),
+            b"y".as_slice(),
+            b"1".as_slice(),
+            b"\x02".as_slice(),
+        ] {
+            assert!(
+                decoder.decode_column_value(input, 16).is_err(),
+                "expected error decoding bool from {input:?}"
+            );
         }
     }
 }

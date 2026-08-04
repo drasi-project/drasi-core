@@ -59,3 +59,10 @@ tokio-test = "0.4"
 
 [features]
 dynamic-plugin = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# azure_core's reqwest pulls native-tls, which uses OpenSSL only on Linux
+# (Windows: SChannel, macOS: Secure Transport). Vendor it there so the
+# glibc-pinned cargo-zigbuild -gnu plugins build without host OpenSSL headers;
+# scoping it off Windows/macOS avoids unnecessary OpenSSL-from-source builds.
+openssl = { version = "0.10", features = ["vendored"] }

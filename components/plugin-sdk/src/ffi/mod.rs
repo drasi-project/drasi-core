@@ -46,7 +46,7 @@ pub mod wal_provider_proxy;
 // Re-export commonly used types at the ffi module level
 pub use callbacks::{
     ConfigResolverFn, FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel,
-    LifecycleCallbackFn, LogCallbackFn,
+    FfiLogLevelFilter, LifecycleCallbackFn, LogCallbackFn,
 };
 pub use metadata::{
     PluginMetadata, BUILD_TIMESTAMP, FFI_SDK_VERSION, GIT_COMMIT_SHA, TARGET_TRIPLE,

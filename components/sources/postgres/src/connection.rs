@@ -687,7 +687,7 @@ mod position_tests {
     fn snapshot_boundary_matches_commit_position_encoding() {
         for lsn in [0u64, 1, 0x0152_00b0, u64::MAX] {
             assert_eq!(
-                drasi_bootstrap_postgres::snapshot_position_bytes(lsn),
+                drasi_bootstrap_postgres::postgres::snapshot_position_bytes(lsn),
                 commit_position_bytes(lsn, u64::MAX),
                 "bootstrap snapshot boundary diverged from CDC position encoding for lsn={lsn:#x}"
             );

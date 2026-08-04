@@ -19,19 +19,16 @@ use async_trait::async_trait;
 use log::{debug, error, info};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
-use tokio::task::JoinHandle;
+use tokio::sync::RwLock;
 
-use drasi_lib::channels::{ComponentStatus, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::managers::log_component_start;
-use drasi_lib::reactions::common::OperationType;
 use drasi_lib::reactions::{Reaction, ReactionBase, ReactionBaseParams};
-use serde_json::json;
 
 use crate::config::{MsSqlStoredProcReactionConfig, QueryConfig};
 use crate::executor::MsSqlExecutor;
-use crate::parser::ParameterParser;
+use crate::render::{build_context, render_command};
 
 /// MS SQL Server Stored Procedure reaction
 ///
@@ -41,15 +38,12 @@ pub struct MsSqlStoredProcReaction {
     pub(crate) base: ReactionBase,
     config: MsSqlStoredProcReactionConfig,
     executor: RwLock<Option<Arc<MsSqlExecutor>>>,
-    parser: ParameterParser,
-    task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl std::fmt::Debug for MsSqlStoredProcReaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MsSqlStoredProcReaction")
             .field("config", &self.config)
-            .field("parser", &self.parser)
             .finish()
     }
 }
@@ -105,8 +99,8 @@ impl MsSqlStoredProcReaction {
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> Result<Self> {
-        // Validate configuration
-        config.validate()?;
+        // Validate configuration (including template compilation and route keys)
+        config.validate(&queries)?;
 
         // Create reaction base
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
@@ -125,136 +119,104 @@ impl MsSqlStoredProcReaction {
             base,
             config,
             executor: RwLock::new(None),
-            parser: ParameterParser::new(),
-            task_handle: Arc::new(Mutex::new(None)),
         })
     }
+}
 
-    /// Prepare context data with after/before fields based on operation type
-    fn prepare_context(operation: OperationType, data: &serde_json::Value) -> serde_json::Value {
-        use serde_json::json;
+/// Process a single dequeued [`QueryResult`]: render and execute a command for
+/// each diff item that has a configured template.
+async fn process_query_result(
+    reaction_id: &str,
+    config: &MsSqlStoredProcReactionConfig,
+    executor: &MsSqlExecutor,
+    query_result: &QueryResult,
+) {
+    debug!(
+        "[{reaction_id}] Processing {} result(s) from query: {}",
+        query_result.results.len(),
+        query_result.query_id
+    );
 
-        match operation {
-            OperationType::Add => {
-                // For ADD, data goes into "after"
-                json!({
-                    "after": data.clone()
-                })
+    for diff in &query_result.results {
+        // Noop items produce no context and no command.
+        if matches!(diff, ResultDiff::Noop) {
+            continue;
+        }
+
+        let Some((operation, context)) = build_context(query_result, diff) else {
+            continue;
+        };
+
+        // Resolve the command template for this query and operation type.
+        let Some(template) = config.get_command_template(&query_result.query_id, operation) else {
+            debug!(
+                "[{reaction_id}] No command configured for {} operation on query '{}', skipping",
+                context
+                    .get("operation")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?"),
+                query_result.query_id
+            );
+            continue;
+        };
+
+        if template.is_empty() {
+            continue;
+        }
+
+        // Render the command to SQL + ordered positional parameters.
+        // A render failure (e.g. a referenced field is missing under strict
+        // mode) skips this item rather than executing a command built from
+        // missing data.
+        let (command, params) = match render_command(&template, &context) {
+            Ok(rendered) => rendered,
+            Err(e) => {
+                error!("[{reaction_id}] Failed to render command template: {e}");
+                continue;
             }
-            OperationType::Update => {
-                // For UPDATE, check if data already has before/after fields
-                if let Some(obj) = data.as_object() {
-                    let mut context = serde_json::Map::new();
-                    if let Some(before) = obj.get("before") {
-                        context.insert("before".to_string(), before.clone());
-                    }
-                    if let Some(after) = obj.get("after") {
-                        context.insert("after".to_string(), after.clone());
-                    }
-                    // If no before/after, treat entire data as after
-                    if context.is_empty() {
-                        context.insert("after".to_string(), data.clone());
-                    }
-                    json!(context)
-                } else {
-                    json!({
-                        "after": data.clone()
-                    })
-                }
+        };
+
+        debug!(
+            "[{reaction_id}] Executing command with {} parameter(s): {command}",
+            params.len()
+        );
+
+        match executor.execute_command(&command, params).await {
+            Ok(()) => {
+                debug!("[{reaction_id}] Successfully executed command");
             }
-            OperationType::Delete => {
-                // For DELETE, data goes into "before"
-                json!({
-                    "before": data.clone()
-                })
+            Err(e) => {
+                error!("[{reaction_id}] Failed to execute command: {e}");
             }
         }
     }
+}
 
-    /// Spawn the processing task that handles query results
-    fn spawn_processing_task(&self, executor: Arc<MsSqlExecutor>) -> JoinHandle<()> {
-        let priority_queue = self.base.priority_queue.clone();
-        let parser = self.parser.clone();
-        let config = self.config.clone();
-        let reaction_id = self.base.id.clone();
+/// Run the processing loop until the shutdown signal fires or the queue closes.
+async fn run_processing_loop(
+    reaction_id: String,
+    base: ReactionBase,
+    config: MsSqlStoredProcReactionConfig,
+    executor: Arc<MsSqlExecutor>,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) {
+    info!("[{reaction_id}] Starting processing loop");
 
-        tokio::spawn(async move {
-            info!("[{reaction_id}] Starting processing loop");
-
-            loop {
-                // Dequeue next result (blocks until available)
-                let query_result_arc = priority_queue.dequeue().await;
-                let query_result = (*query_result_arc).clone();
-
-                debug!(
-                    "[{}] Processing result from query: {}",
-                    reaction_id, query_result.query_id
-                );
-
-                // Process each result item in the batch
-                for result_item in &query_result.results {
-                    let aggregation_data;
-                    let (operation, data_value, result_type) = match result_item {
-                        ResultDiff::Add { data, .. } => (OperationType::Add, data, "ADD"),
-                        ResultDiff::Update { data, .. } => (OperationType::Update, data, "UPDATE"),
-                        ResultDiff::Delete { data, .. } => (OperationType::Delete, data, "DELETE"),
-                        ResultDiff::Aggregation { before, after, .. } => {
-                            aggregation_data = json!({
-                                "before": before,
-                                "after": after,
-                            });
-                            (OperationType::Update, &aggregation_data, "AGGREGATION")
-                        }
-                        ResultDiff::Noop => continue,
-                    };
-
-                    // Get the command template for this query and operation type
-                    let command = config.get_command_template(&query_result.query_id, operation);
-
-                    // Execute the stored procedure if a command is configured
-                    if let Some(cmd) = command {
-                        // Prepare context with after/before fields based on operation type
-                        let context = Self::prepare_context(operation, data_value);
-                        debug!(
-                            "[{reaction_id}] Context data: {}",
-                            serde_json::to_string_pretty(&context)
-                                .unwrap_or_else(|_| "<<invalid>>".to_string())
-                        );
-
-                        // Parse command and extract parameters
-                        match parser.parse_command(&cmd, &context) {
-                            Ok((proc_name, params)) => {
-                                debug!(
-                                    "[{reaction_id}] Executing procedure: {proc_name} with {params_len} parameters for {result_type} operation",
-                                    params_len = params.len()
-                                );
-
-                                // Execute stored procedure
-                                match executor.execute_procedure(&proc_name, params).await {
-                                    Ok(()) => {
-                                        debug!(
-                                            "[{reaction_id}] Successfully executed {proc_name} for {result_type} operation"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        error!(
-                                            "[{reaction_id}] Failed to execute {proc_name}: {e}"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!("[{reaction_id}] Failed to parse command: {e}");
-                            }
-                        }
-                    } else {
-                        debug!(
-                            "[{reaction_id}] No command configured for {result_type} operation, skipping"
-                        );
-                    }
-                }
+    loop {
+        let query_result = tokio::select! {
+            biased;
+            _ = &mut shutdown_rx => {
+                debug!("[{reaction_id}] Received shutdown signal, exiting processing loop");
+                break;
             }
-        })
+            result = base.priority_queue.dequeue() => result,
+        };
+
+        if query_result.results.is_empty() {
+            continue;
+        }
+
+        process_query_result(&reaction_id, &config, &executor, query_result.as_ref()).await;
     }
 }
 
@@ -331,17 +293,51 @@ impl Reaction for MsSqlStoredProcReaction {
 
         // Create executor (deferred to start so identity_provider from context is available)
         let identity_provider = self.base.identity_provider().await;
-        let executor = Arc::new(MsSqlExecutor::new(&self.config, identity_provider).await?);
+        let executor = match MsSqlExecutor::new(&self.config, identity_provider).await {
+            Ok(executor) => Arc::new(executor),
+            Err(e) => {
+                self.base
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(format!("Failed to connect to MS SQL Server: {e}")),
+                    )
+                    .await;
+                return Err(e);
+            }
+        };
 
         // Test database connection
-        executor.test_connection().await?;
+        if let Err(e) = executor.test_connection().await {
+            self.base
+                .set_status(
+                    ComponentStatus::Error,
+                    Some(format!("MS SQL connection test failed: {e}")),
+                )
+                .await;
+            return Err(e);
+        }
 
         // Store executor for later use
         *self.executor.write().await = Some(executor.clone());
 
-        // Spawn processing task
-        let task = self.spawn_processing_task(executor);
-        *self.task_handle.lock().await = Some(task);
+        // Spawn the processing loop with a shutdown channel owned by the base,
+        // so `stop_common` can interrupt it promptly.
+        let shutdown_rx = self.base.create_shutdown_channel().await;
+        let handle = tokio::spawn(run_processing_loop(
+            self.base.id.clone(),
+            self.base.clone_shared(),
+            self.config.clone(),
+            executor,
+            shutdown_rx,
+        ));
+        self.base.set_processing_task(handle).await;
+
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("MS SQL Server StoredProc reaction running".to_string()),
+            )
+            .await;
 
         info!(
             "[{}] MS SQL Server StoredProc reaction started successfully",
@@ -355,17 +351,7 @@ impl Reaction for MsSqlStoredProcReaction {
             "[{}] Stopping MS SQL Server StoredProc reaction",
             self.base.id
         );
-
-        // Abort the processing task
-        if let Some(handle) = self.task_handle.lock().await.take() {
-            handle.abort();
-        }
-
-        info!(
-            "[{}] MS SQL Server StoredProc reaction stopped",
-            self.base.id
-        );
-        Ok(())
+        self.base.stop_common().await
     }
 
     async fn status(&self) -> ComponentStatus {
@@ -484,6 +470,45 @@ impl MsSqlStoredProcReactionBuilder {
         self
     }
 
+    /// Set the command template for ADD operations in the default template.
+    ///
+    /// The command is a Handlebars template; use `{{param after.<field>}}` to
+    /// bind row fields as positional parameters.
+    pub fn with_added_command(mut self, command: impl Into<String>) -> Self {
+        use crate::config::TemplateSpec;
+        self.config
+            .default_template
+            .get_or_insert_with(QueryConfig::default)
+            .added = Some(TemplateSpec::new(command));
+        self
+    }
+
+    /// Set the command template for UPDATE operations in the default template.
+    ///
+    /// The command is a Handlebars template; use `{{param before.<field>}}` /
+    /// `{{param after.<field>}}` to bind row fields as positional parameters.
+    pub fn with_updated_command(mut self, command: impl Into<String>) -> Self {
+        use crate::config::TemplateSpec;
+        self.config
+            .default_template
+            .get_or_insert_with(QueryConfig::default)
+            .updated = Some(TemplateSpec::new(command));
+        self
+    }
+
+    /// Set the command template for DELETE operations in the default template.
+    ///
+    /// The command is a Handlebars template; use `{{param before.<field>}}` to
+    /// bind row fields as positional parameters.
+    pub fn with_deleted_command(mut self, command: impl Into<String>) -> Self {
+        use crate::config::TemplateSpec;
+        self.config
+            .default_template
+            .get_or_insert_with(QueryConfig::default)
+            .deleted = Some(TemplateSpec::new(command));
+        self
+    }
+
     /// Add a route for a specific query ID
     pub fn with_route(mut self, query_id: impl Into<String>, config: QueryConfig) -> Self {
         self.config.routes.insert(query_id.into(), config);
@@ -534,18 +559,29 @@ impl MsSqlStoredProcReactionBuilder {
 
     /// Set the stored procedure name (shortcut for simple configurations)
     ///
-    /// Creates default templates that execute the specified procedure with:
-    /// - added: passes @after data
-    /// - updated: passes @before and @after data
-    /// - deleted: passes @before data
+    /// Creates default templates that execute the specified procedure, binding
+    /// the changed row as a single JSON parameter:
+    /// - added: passes the `after` row (as JSON)
+    /// - updated: passes the `before` and `after` rows (as JSON)
+    /// - deleted: passes the `before` row (as JSON)
+    ///
+    /// For per-field parameters, configure templates directly with
+    /// [`Self::with_default_template`] / [`Self::with_route`] using
+    /// `{{param after.<field>}}`.
     pub fn with_stored_procedure(mut self, proc_name: impl Into<String>) -> Self {
         use crate::config::TemplateSpec;
 
         let proc = proc_name.into();
         let query_config = QueryConfig {
-            added: Some(TemplateSpec::new(format!("EXEC {proc} @after"))),
-            updated: Some(TemplateSpec::new(format!("EXEC {proc} @before, @after"))),
-            deleted: Some(TemplateSpec::new(format!("EXEC {proc} @before"))),
+            added: Some(TemplateSpec::new(format!(
+                "EXEC {proc} {{{{param (json after)}}}}"
+            ))),
+            updated: Some(TemplateSpec::new(format!(
+                "EXEC {proc} {{{{param (json before)}}}}, {{{{param (json after)}}}}"
+            ))),
+            deleted: Some(TemplateSpec::new(format!(
+                "EXEC {proc} {{{{param (json before)}}}}"
+            ))),
         };
         self.config.default_template = Some(query_config);
         self
