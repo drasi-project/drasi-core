@@ -47,11 +47,12 @@ const CONFIG_HASH_KEY: &str = "config_hash";
 const RESULT_SEQUENCE_PREFIX: &str = "result_sequence:";
 
 /// Returns the column family descriptor for the stream_state CF.
-pub(crate) fn stream_state_cf_descriptor() -> ColumnFamilyDescriptor {
+pub(crate) fn stream_state_cf_descriptor(
+    options: &crate::RocksIndexOptions,
+) -> ColumnFamilyDescriptor {
     let mut opts = Options::default();
-    crate::bound_write_buffer_history(&mut opts);
     opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(16));
-    ColumnFamilyDescriptor::new(STREAM_STATE_CF, opts)
+    crate::sizing::descriptor(STREAM_STATE_CF, opts, options)
 }
 
 /// RocksDB-backed checkpoint store.

@@ -39,6 +39,7 @@ use crate::RocksDbSessionState;
 pub struct RocksDbFutureQueue {
     db: Arc<IndexDb>,
     session_state: Arc<RocksDbSessionState>,
+    options: crate::RocksIndexOptions,
 }
 
 const QUEUE_CF: &str = "fqueue";
@@ -48,9 +49,19 @@ impl RocksDbFutureQueue {
     /// Create a new RocksDbFutureQueue from a shared database handle.
     ///
     /// The database must already have the required column families created.
-    /// Use `open_unified_db()` to open a database with all required CFs.
-    pub fn new(db: Arc<IndexDb>, session_state: Arc<RocksDbSessionState>) -> Self {
-        Self { db, session_state }
+    /// Use `open_unified_db()` to open a database with all required CFs, and
+    /// pass the same options here so column families re-created by `clear()`
+    /// keep the sizing policy they were opened with.
+    pub fn new(
+        db: Arc<IndexDb>,
+        session_state: Arc<RocksDbSessionState>,
+        options: crate::RocksIndexOptions,
+    ) -> Self {
+        Self {
+            db,
+            session_state,
+            options,
+        }
     }
 }
 
@@ -255,12 +266,16 @@ impl FutureQueue for RocksDbFutureQueue {
 
     async fn clear(&self) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let options = self.options;
         let task = task::spawn_blocking(move || {
             if let Err(err) = db.drop_cf(QUEUE_CF) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(QUEUE_CF, &get_fqueue_cf_options()) {
+            if let Err(err) = db.create_cf(
+                QUEUE_CF,
+                &crate::sizing::sized(QUEUE_CF, get_fqueue_cf_options(), &options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
@@ -268,7 +283,10 @@ impl FutureQueue for RocksDbFutureQueue {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(INDEX_CF, &get_findex_cf_options()) {
+            if let Err(err) = db.create_cf(
+                INDEX_CF,
+                &crate::sizing::sized(INDEX_CF, get_findex_cf_options(), &options),
+            ) {
                 return Err(IndexError::other(err));
             }
             Ok(())
@@ -343,22 +361,22 @@ fn encode_index_prefix(position_in_query: u32, group_signature: u64) -> [u8; 12]
 
 pub(crate) fn get_fqueue_cf_options() -> Options {
     let mut opts = Options::default();
-    crate::bound_write_buffer_history(&mut opts);
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
     opts
 }
 
 pub(crate) fn get_findex_cf_options() -> Options {
     let mut opts = Options::default();
-    crate::bound_write_buffer_history(&mut opts);
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(12));
     opts
 }
 
 /// Collect all column family descriptors needed by the future queue.
-pub(crate) fn future_queue_cf_descriptors() -> Vec<rocksdb::ColumnFamilyDescriptor> {
+pub(crate) fn future_queue_cf_descriptors(
+    options: &crate::RocksIndexOptions,
+) -> Vec<rocksdb::ColumnFamilyDescriptor> {
     vec![
-        rocksdb::ColumnFamilyDescriptor::new(QUEUE_CF, get_fqueue_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(INDEX_CF, get_findex_cf_options()),
+        crate::sizing::descriptor(QUEUE_CF, get_fqueue_cf_options(), options),
+        crate::sizing::descriptor(INDEX_CF, get_findex_cf_options(), options),
     ]
 }
