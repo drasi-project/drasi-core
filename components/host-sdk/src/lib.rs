@@ -40,7 +40,7 @@ pub mod state_store_bridge;
 pub mod wal_provider_bridge;
 pub mod watcher;
 
-pub use callbacks::{CallbackContext, CapturedLifecycle, CapturedLog, InstanceCallbackContext};
+pub use callbacks::{CallbackContext, InstanceCallbackContext};
 pub use identity_bridge::IdentityProviderVtableBuilder;
 pub use loader::{
     is_plugin_binary, plugin_kind_from_filename, scan_plugin_metadata, LoadedPlugin, PluginLoader,

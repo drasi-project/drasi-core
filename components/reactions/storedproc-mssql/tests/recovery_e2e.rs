@@ -18,7 +18,9 @@ use shared_tests::recovery_test_helpers::exercise_strict_gap_failure;
 
 fn mssql_default_template() -> QueryConfig {
     QueryConfig {
-        added: Some(TemplateSpec::new("EXEC handle_person_add @after.name")),
+        added: Some(TemplateSpec::new(
+            "EXEC handle_person_add {{param after.name}}",
+        )),
         updated: None,
         deleted: None,
     }
