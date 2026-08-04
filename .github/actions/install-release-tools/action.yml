@@ -1,0 +1,50 @@
+name: Install release tools
+description: >-
+  Installs the pinned release tooling (release-plz + cargo-semver-checks) and its
+  system prerequisites (jq/libjq, protobuf, JQ_LIB_DIR, rustup, git identity).
+  Single source of truth for these versions, shared by release-plz.yml and the
+  nightly release-dry-run job.
+
+runs:
+  using: composite
+  steps:
+    - name: Install system dependencies
+      shell: bash
+      run: |
+        # The Microsoft apt repos preinstalled on GitHub runners intermittently
+        # serve a broken InRelease signature (NOSPLIT), failing apt-get update.
+        # We don't use them, so remove before updating.
+        sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources 2>/dev/null || true
+        sudo apt-get update
+        sudo apt-get install -y jq libjq-dev protobuf-compiler
+
+    - name: Set JQ_LIB_DIR
+      shell: bash
+      # Derive the multiarch lib path from uname -m so this works on amd64 and
+      # arm64 runners (matches publish-plugins.yml).
+      run: echo "JQ_LIB_DIR=/usr/lib/$(uname -m)-linux-gnu" >> "$GITHUB_ENV"
+
+    - name: Install Rust toolchain
+      shell: bash
+      run: rustup show
+
+    - name: Configure Git
+      shell: bash
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+    - name: Install release-plz
+      shell: bash
+      run: |
+        # Match the runner arch (uname -m returns x86_64 / aarch64), which lines
+        # up with release-plz's musl asset naming, so this works on amd64 and arm64.
+        ARCH="$(uname -m)"
+        curl -sSfL "https://github.com/release-plz/release-plz/releases/download/release-plz-v0.3.157/release-plz-${ARCH}-unknown-linux-musl.tar.gz" | tar xz -C /usr/local/bin
+
+    - name: Install cargo-semver-checks
+      shell: bash
+      run: |
+        ARCH="$(uname -m)"
+        curl -sSfL "https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.45.0/cargo-semver-checks-${ARCH}-unknown-linux-musl.tar.gz" | tar xz -C /usr/local/bin
+        cargo-semver-checks --version
