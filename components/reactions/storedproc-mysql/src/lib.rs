@@ -33,9 +33,13 @@
 //!     .with_password("password")
 //!     .with_query("user-changes")
 //!     .with_default_template(QueryConfig {
-//!         added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
-//!         updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
-//!         deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+//!         added: Some(TemplateSpec::new(
+//!             "CALL add_user({{param after.id}}, {{param after.name}}, {{param after.email}})",
+//!         )),
+//!         updated: Some(TemplateSpec::new(
+//!             "CALL update_user({{param after.id}}, {{param after.name}}, {{param after.email}})",
+//!         )),
+//!         deleted: Some(TemplateSpec::new("CALL delete_user({{param before.id}})")),
 //!     })
 //!     .build()?;
 //! ```
@@ -43,8 +47,8 @@
 pub mod config;
 pub mod descriptor;
 pub mod executor;
-pub mod parser;
 pub mod reaction;
+pub mod render;
 
 pub use config::{MySqlStoredProcReactionConfig, QueryConfig, TemplateSpec};
 pub use reaction::MySqlStoredProcReaction;
