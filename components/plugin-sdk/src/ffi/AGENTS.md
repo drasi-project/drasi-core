@@ -1,4 +1,4 @@
-# agents.md — drasi-core/components/plugin-sdk/src/ffi
+# AGENTS.md: drasi-core/components/plugin-sdk/src/ffi
 
 ## This directory implements the plugin side of the FFI boundary
 
@@ -14,8 +14,7 @@ This is the **most critical directory** in the dynamic plugin system. It defines
 
 ### Relationship to domain types
 
-Domain types from `drasi-core/core/src/models/` and `drasi-core/lib/src/` cross the
-FFI boundary through this directory. The general patterns are:
+Domain types from `drasi-core/core/src/models/` and `drasi-core/lib/src/` cross the FFI boundary through this directory. The general patterns are:
 
 | Domain type category | FFI pattern | Key file |
 |---------------------|-------------|----------|
@@ -27,48 +26,28 @@ FFI boundary through this directory. The general patterns are:
 
 ### When modifying vtables
 
-**Adding a method to a trait vtable is a breaking change** — it changes the layout of the
-`#[repr(C)]` struct. You must:
+**Adding a method to a trait vtable is a breaking change** — it changes the layout of the `#[repr(C)]` struct. You must:
 
 1. Add the field to the vtable struct in `vtables.rs`
 2. Implement the vtable function in `vtable_gen.rs`
 3. Update the host-side proxy in `components/host-sdk/src/proxies/`
-4. **Bump `FFI_SDK_VERSION`** in `metadata.rs` so the major.minor pair changes
-   (see "Version compatibility" below)
+4. **Bump `FFI_SDK_VERSION`** in `metadata.rs` so the major.minor pair changes (see "Version compatibility" below)
 
 ### When modifying FFI types
 
-If you change `FfiStr`, `FfiResult`, `FfiComponentStatus`, `FfiDispatchMode`, or any
-`#[repr(C)]` type:
+If you change `FfiStr`, `FfiResult`, `FfiComponentStatus`, `FfiDispatchMode`, or any `#[repr(C)]` type:
 
 1. Update the type definition in `types.rs`
 2. Update all vtable functions that use it in `vtable_gen.rs`
 3. Update all host-side proxies that consume it in `components/host-sdk/src/proxies/`
 4. Bump `FFI_SDK_VERSION` in `metadata.rs`
 
-### When adding new opaque pointer types
+### When adding a new event payload type
 
-If a new domain type needs to cross FFI as an opaque pointer:
+Do **not** transfer a `repr(Rust)` payload by boxing it and reconstructing it on the other side with `Box::from_raw`. That was the previous design and it is undefined behaviour: `repr(Rust)` has no stable layout across independently compiled cdylibs, and types like `bytes::Bytes` carry a `&'static` vtable pointer valid only in the producing module. It caused non-deterministic heap corruption. See the module docs in `payload.rs` and the `0.10.0` entry in `metadata.rs`.
 
-1. Define an `#[repr(C)]` envelope struct in `vtables.rs` (like `FfiSourceEvent`)
-2. Add wrapping logic in `vtable_gen.rs` (box the Rust type, store as `*mut c_void`)
-3. Add unwrapping logic in `components/host-sdk/src/proxies/` (cast back with `Box::from_raw`)
-4. Add a `drop_fn` field to the envelope for safe cleanup
-5. Bump `FFI_SDK_VERSION` in `metadata.rs`
+To add or change an event payload, extend `payload.rs` and decode only through its hardened entry points; a parallel codec silently loses the payload size cap and the null `drop_fn` guard. Its module docs are the contract for the wire pattern. Any wire-format change bumps `FFI_SDK_VERSION` in `metadata.rs`.
 
 ### Version compatibility
 
-`metadata.rs` defines `FFI_SDK_VERSION` which is checked at plugin load time.
-The host (`components/host-sdk/src/loader.rs`) validates that the **major.minor**
-versions match exactly; any difference rejects the plugin with a descriptive
-error before any unsafe FFI call.
-
-**Always bump the version when changing any `#[repr(C)]` type layout.** Because
-the loader compares the full `major.minor` pair, any ABI-breaking change must
-change at least the minor version:
-
-- **Pre-1.0 (current):** a minor bump (e.g. `0.8.x` → `0.9.0`) is sufficient and
-  is the convention for ABI-breaking changes while the SDK is unstable. The
-  patch component is reserved for ABI-compatible changes.
-- **Post-1.0:** ABI-breaking changes must bump the **major** version, matching
-  SemVer expectations once the SDK is declared stable.
+Bump semantics live on the `FFI_SDK_VERSION` constant in `metadata.rs`; read them there. Two things the edit sites do not teach: the load-time check is skipped (with only a warning) for a plugin that does not export `drasi_plugin_metadata`, and fields appended to the registration struct must be gated on the reported version, per the `MIN_SDK_VERSION_WITH_*` gates in `loader.rs`, or reads walk off the end of old-layout allocations.
