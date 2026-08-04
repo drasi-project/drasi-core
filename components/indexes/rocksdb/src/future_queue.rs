@@ -17,6 +17,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::IndexDb;
 use async_trait::async_trait;
 use drasi_core::{
     interface::{FutureElementRef, FutureQueue, IndexError, PushType},
@@ -24,9 +25,7 @@ use drasi_core::{
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
 use prost::{bytes::Bytes, Message};
-use rocksdb::{
-    AsColumnFamilyRef, OptimisticTransactionDB, Options, ReadOptions, SliceTransform, Transaction,
-};
+use rocksdb::{AsColumnFamilyRef, Options, ReadOptions, SliceTransform, Transaction};
 use tokio::task;
 
 use crate::storage_models::{StoredElementReference, StoredFutureElementRef};
@@ -38,7 +37,7 @@ use crate::RocksDbSessionState;
 ///     - fqueue [due_time + hash(future_element_ref)] -> future_element_ref {8 byte prefix (due_time)}
 ///     - findex [(position_in_query + group_signature) + hash(future_element_ref)] -> due_time {12 byte prefix (position_in_query(4) + group_signature(8))}
 pub struct RocksDbFutureQueue {
-    db: Arc<OptimisticTransactionDB>,
+    db: Arc<IndexDb>,
     session_state: Arc<RocksDbSessionState>,
 }
 
@@ -50,7 +49,7 @@ impl RocksDbFutureQueue {
     ///
     /// The database must already have the required column families created.
     /// Use `open_unified_db()` to open a database with all required CFs.
-    pub fn new(db: Arc<OptimisticTransactionDB>, session_state: Arc<RocksDbSessionState>) -> Self {
+    pub fn new(db: Arc<IndexDb>, session_state: Arc<RocksDbSessionState>) -> Self {
         Self { db, session_state }
     }
 }
@@ -302,7 +301,7 @@ fn parse_peek_head(
 }
 
 fn remove_internal(
-    txn: &Transaction<OptimisticTransactionDB>,
+    txn: &Transaction<IndexDb>,
     index_cf: &impl AsColumnFamilyRef,
     queue_cf: &impl AsColumnFamilyRef,
     index_prefix: [u8; 12],
@@ -344,12 +343,14 @@ fn encode_index_prefix(position_in_query: u32, group_signature: u64) -> [u8; 12]
 
 pub(crate) fn get_fqueue_cf_options() -> Options {
     let mut opts = Options::default();
+    crate::bound_write_buffer_history(&mut opts);
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
     opts
 }
 
 pub(crate) fn get_findex_cf_options() -> Options {
     let mut opts = Options::default();
+    crate::bound_write_buffer_history(&mut opts);
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(12));
     opts
 }
