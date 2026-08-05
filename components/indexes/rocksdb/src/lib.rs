@@ -67,6 +67,7 @@ pub mod future_queue;
 pub mod live_results;
 pub mod outbox;
 mod plugin;
+mod point_lookup;
 pub mod result_index;
 mod session_state;
 mod storage_models;
