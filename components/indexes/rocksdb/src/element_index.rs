@@ -69,7 +69,9 @@ const SLOT_CF: &str = "slots";
 const INBOUND_CF: &str = "inbound";
 const OUTBOUND_CF: &str = "outbound";
 const PARTIAL_CF: &str = "partial";
-const ELEMENT_BLOCK_CACHE_SIZE: u64 = 32;
+/// Block cache capacity for `elements` and `slots`. Each column family gets
+/// its own cache of this size, not a shared one.
+const ELEMENT_BLOCK_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
 impl RocksDbElementIndex {
     /// Create a new RocksDbElementIndex from a shared database handle.
@@ -386,9 +388,8 @@ pub(crate) fn get_inout_index_cf_options() -> Options {
 }
 
 pub(crate) fn get_elements_cf_options() -> Options {
-    let mut elements_opts = Options::default();
+    let mut elements_opts = crate::point_lookup::point_lookup_cf_options(ELEMENT_BLOCK_CACHE_BYTES);
     crate::bound_write_buffer_history(&mut elements_opts);
-    elements_opts.optimize_for_point_lookup(ELEMENT_BLOCK_CACHE_SIZE);
     elements_opts
 }
 
