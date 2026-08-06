@@ -19,19 +19,17 @@ use async_trait::async_trait;
 use log::{debug, error, info};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
-use tokio::task::JoinHandle;
+use tokio::sync::RwLock;
 
-use drasi_lib::channels::{ComponentStatus, ResultDiff};
+use drasi_lib::channels::ComponentStatus;
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::reactions::common::TemplateRouting;
 use drasi_lib::Reaction;
-use serde_json::json;
 
 use crate::config::{PostgresStoredProcReactionConfig, QueryConfig};
 use crate::executor::PostgresExecutor;
-use crate::parser::ParameterParser;
-use drasi_lib::reactions::common::OperationType;
+use crate::render;
 
 /// PostgreSQL Stored Procedure reaction
 ///
@@ -40,16 +38,14 @@ use drasi_lib::reactions::common::OperationType;
 pub struct PostgresStoredProcReaction {
     pub(crate) base: ReactionBase,
     config: PostgresStoredProcReactionConfig,
+    templates: Arc<HashMap<String, render::CompiledTemplate>>,
     executor: RwLock<Option<Arc<PostgresExecutor>>>,
-    parser: ParameterParser,
-    task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl std::fmt::Debug for PostgresStoredProcReaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PostgresStoredProcReaction")
             .field("config", &self.config)
-            .field("parser", &self.parser)
             .finish()
     }
 }
@@ -106,7 +102,10 @@ impl PostgresStoredProcReaction {
         auto_start: bool,
     ) -> Result<Self> {
         // Validate configuration
-        config.validate()?;
+        config.validate(&queries)?;
+
+        // Pre-compile all templates once so the render path never re-parses.
+        let templates = Arc::new(config.compile_templates()?);
 
         // Create reaction base
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
@@ -124,9 +123,8 @@ impl PostgresStoredProcReaction {
         Ok(Self {
             base,
             config,
+            templates,
             executor: RwLock::new(None),
-            parser: ParameterParser::new(),
-            task_handle: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -141,130 +139,102 @@ impl PostgresStoredProcReaction {
         }
     }
 
-    /// Prepare context data with after/before fields based on operation type
-    fn prepare_context(operation: OperationType, data: &serde_json::Value) -> serde_json::Value {
-        use serde_json::json;
+    /// Run the shutdown-aware processing loop until the runtime signals
+    /// shutdown or the queue closes.
+    async fn run_processing_loop(
+        base: ReactionBase,
+        config: PostgresStoredProcReactionConfig,
+        templates: Arc<HashMap<String, render::CompiledTemplate>>,
+        executor: Arc<PostgresExecutor>,
+        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let reaction_id = base.id.clone();
+        info!("[{reaction_id}] Starting processing loop");
 
-        match operation {
-            OperationType::Add => {
-                // For ADD, data goes into "after"
-                json!({
-                    "after": data.clone()
-                })
-            }
-            OperationType::Update => {
-                // For UPDATE, check if data already has before/after fields
-                if let Some(obj) = data.as_object() {
-                    let mut context = serde_json::Map::new();
-                    if let Some(before) = obj.get("before") {
-                        context.insert("before".to_string(), before.clone());
-                    }
-                    if let Some(after) = obj.get("after") {
-                        context.insert("after".to_string(), after.clone());
-                    }
-                    // If no before/after, treat entire data as after
-                    if context.is_empty() {
-                        context.insert("after".to_string(), data.clone());
-                    }
-                    json!(context)
-                } else {
-                    json!({
-                        "after": data.clone()
-                    })
+        loop {
+            let query_result_arc = tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => {
+                    debug!("[{reaction_id}] Received shutdown signal, exiting processing loop");
+                    break;
                 }
-            }
-            OperationType::Delete => {
-                // For DELETE, data goes into "before"
-                json!({
-                    "before": data.clone()
-                })
-            }
-        }
-    }
+                result = base.priority_queue.dequeue() => result,
+            };
+            let query_result = query_result_arc.as_ref();
 
-    /// Spawn the processing task that handles query results
-    fn spawn_processing_task(&self, executor: Arc<PostgresExecutor>) -> JoinHandle<()> {
-        let priority_queue = self.base.priority_queue.clone();
-        let parser = self.parser.clone();
-        let config = self.config.clone();
-        let reaction_id = self.base.id.clone();
+            // Empty result sets are no-ops.
+            if query_result.results.is_empty() {
+                continue;
+            }
 
-        tokio::spawn(async move {
-            info!("[{reaction_id}] Starting processing loop");
-            loop {
-                // Dequeue next result (blocks until available)
-                let query_result_arc = priority_queue.dequeue().await;
-                let query_result = (*query_result_arc).clone();
+            debug!(
+                "[{reaction_id}] Processing {} results from query: {}",
+                query_result.results.len(),
+                query_result.query_id
+            );
+
+            for result_item in &query_result.results {
+                // Noop variants carry no change; skip them.
+                let render_input = match render::build_render_input(query_result, result_item) {
+                    Some(input) => input,
+                    None => continue,
+                };
+
+                // Resolve the command template following the guide's route
+                // resolution order. No template configured -> nothing to run.
+                let spec = match config
+                    .get_template_spec(&query_result.query_id, render_input.operation)
+                {
+                    Some(spec) if !spec.template.is_empty() => spec,
+                    _ => {
+                        debug!(
+                                "[{reaction_id}] No command configured for {:?} operation on '{}', skipping",
+                                render_input.operation, query_result.query_id
+                            );
+                        continue;
+                    }
+                };
+
+                // Render the command to SQL + positional bind parameters using
+                // the pre-compiled template. On a render failure (e.g. a missing
+                // referenced field) we log and skip the event rather than
+                // executing partial or unsafe SQL.
+                let compiled = match templates.get(&spec.template) {
+                    Some(compiled) => compiled,
+                    None => {
+                        // Every configured template is compiled at construction,
+                        // so this should not happen; skip defensively.
+                        error!(
+                            "[{reaction_id}] No compiled template found for query '{}', skipping",
+                            query_result.query_id
+                        );
+                        continue;
+                    }
+                };
+                let (command, params) = match compiled.render(&render_input.context) {
+                    Ok(rendered) => rendered,
+                    Err(e) => {
+                        error!(
+                            "[{reaction_id}] Failed to render command for query '{}': {e}",
+                            query_result.query_id
+                        );
+                        continue;
+                    }
+                };
 
                 debug!(
-                    "[{}] Processing result from query: {}",
-                    reaction_id, query_result.query_id
+                    "[{reaction_id}] Executing command with {} parameters for {:?} operation",
+                    params.len(),
+                    render_input.operation
                 );
 
-                // Process each result item in the batch
-                for result_item in &query_result.results {
-                    let aggregation_data;
-                    let (operation, data_value, result_type) = match result_item {
-                        ResultDiff::Add { data, .. } => (OperationType::Add, data, "ADD"),
-                        ResultDiff::Update { data, .. } => (OperationType::Update, data, "UPDATE"),
-                        ResultDiff::Delete { data, .. } => (OperationType::Delete, data, "DELETE"),
-                        ResultDiff::Aggregation { before, after, .. } => {
-                            aggregation_data = json!({
-                                "before": before,
-                                "after": after,
-                            });
-                            (OperationType::Update, &aggregation_data, "AGGREGATION")
-                        }
-                        ResultDiff::Noop => continue,
-                    };
-
-                    // Get the command template for this query and operation type
-                    let command = config.get_command_template(&query_result.query_id, operation);
-
-                    // Execute the stored procedure if a command is configured
-                    if let Some(cmd) = command {
-                        // Prepare context with after/before fields based on operation type
-                        let context = Self::prepare_context(operation, data_value);
-                        debug!(
-                            "[{reaction_id}] Context data: {}",
-                            serde_json::to_string_pretty(&context)
-                                .unwrap_or_else(|_| "<<invalid>>".to_string())
-                        );
-
-                        // Parse command and extract parameters
-                        match parser.parse_command(&cmd, &context) {
-                            Ok((proc_name, params)) => {
-                                debug!(
-                                    "[{reaction_id}] Executing procedure: {proc_name} with {params_len} parameters for {result_type} operation",
-                                    params_len = params.len()
-                                );
-
-                                // Execute stored procedure
-                                match executor.execute_procedure(&proc_name, params).await {
-                                    Ok(()) => {
-                                        debug!(
-                                            "[{reaction_id}] Successfully executed {proc_name} for {result_type} operation"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        error!(
-                                            "[{reaction_id}] Failed to execute {proc_name}: {e}"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!("[{reaction_id}] Failed to parse command: {e}");
-                            }
-                        }
-                    } else {
-                        debug!(
-                            "[{reaction_id}] No command configured for {result_type} operation, skipping"
-                        );
-                    }
+                if let Err(e) = executor.execute_command(&command, params).await {
+                    error!("[{reaction_id}] Failed to execute command: {e}");
                 }
             }
-        })
+        }
+
+        info!("[{reaction_id}] PostgreSQL StoredProc processing loop stopped");
     }
 }
 
@@ -340,6 +310,8 @@ impl Reaction for PostgresStoredProcReaction {
             self.base.id, self.config.database
         );
 
+        self.base.set_status(ComponentStatus::Starting, None).await;
+
         // Create executor (deferred to start so identity_provider from context is available)
         let identity_provider = self.base.identity_provider().await;
         let executor = Arc::new(PostgresExecutor::new(&self.config, identity_provider).await?);
@@ -347,12 +319,20 @@ impl Reaction for PostgresStoredProcReaction {
         // Test database connection
         executor.test_connection().await?;
 
-        // Store executor for later use
+        // Store executor for later use (e.g. test_connection)
         *self.executor.write().await = Some(executor.clone());
 
-        // Spawn processing task
-        let task = self.spawn_processing_task(executor);
-        *self.task_handle.lock().await = Some(task);
+        // Create the shutdown channel and spawn the processing loop.
+        let shutdown_rx = self.base.create_shutdown_channel().await;
+        let base = self.base.clone_shared();
+        let config = self.config.clone();
+        let templates = Arc::clone(&self.templates);
+        let handle = tokio::spawn(async move {
+            Self::run_processing_loop(base, config, templates, executor, shutdown_rx).await;
+        });
+        self.base.set_processing_task(handle).await;
+
+        self.base.set_status(ComponentStatus::Running, None).await;
 
         info!(
             "[{}] PostgreSQL StoredProc reaction started successfully",
@@ -363,14 +343,7 @@ impl Reaction for PostgresStoredProcReaction {
 
     async fn stop(&self) -> Result<()> {
         info!("[{}] Stopping PostgreSQL StoredProc reaction", self.base.id);
-
-        // Abort the processing task
-        if let Some(handle) = self.task_handle.lock().await.take() {
-            handle.abort();
-        }
-
-        info!("[{}] PostgreSQL StoredProc reaction stopped", self.base.id);
-        Ok(())
+        self.base.stop_common().await
     }
 
     async fn status(&self) -> ComponentStatus {
@@ -505,6 +478,12 @@ impl PostgresStoredProcReactionBuilder {
         self
     }
 
+    /// Alias of [`with_query`](Self::with_query) for readability at call sites.
+    pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
+        self.queries.push(query_id.into());
+        self
+    }
+
     /// Set all queries to subscribe to
     pub fn with_queries(mut self, queries: Vec<String>) -> Self {
         self.queries = queries;
@@ -541,20 +520,38 @@ impl PostgresStoredProcReactionBuilder {
         self
     }
 
-    /// Set the stored procedure name (shortcut for simple configurations)
+    /// Configure a procedure that accepts the changed row as a single JSONB
+    /// argument (shortcut for the common "sync the whole row" case).
     ///
-    /// Creates default templates that call the specified procedure with:
-    /// - added: passes @after data
-    /// - updated: passes @before and @after data
-    /// - deleted: passes @before data
-    pub fn with_stored_procedure(mut self, proc_name: impl Into<String>) -> Self {
+    /// This creates default templates that call `proc_name` with the whole row
+    /// object bound as a single positional JSONB parameter:
+    /// - added: `CALL proc_name({{param after}})`
+    /// - updated: `CALL proc_name({{param before}}, {{param after}})`
+    /// - deleted: `CALL proc_name({{param before}})`
+    ///
+    /// # Important
+    ///
+    /// The procedure **must** accept a single `jsonb` argument (two for the
+    /// update case: `before` then `after`). It is *not* suitable for procedures
+    /// that take individual typed columns such as `(id INT, name TEXT)` — those
+    /// would fail with a type mismatch. For typed-argument procedures, configure
+    /// explicit templates via [`with_default_template`](Self::with_default_template)
+    /// or [`with_route`](Self::with_route) that reference each field, for example
+    /// `CALL add_user({{param after.id}}, {{param after.name}})`.
+    pub fn with_jsonb_procedure(mut self, proc_name: impl Into<String>) -> Self {
         use crate::config::TemplateSpec;
 
         let proc = proc_name.into();
         let query_config = QueryConfig {
-            added: Some(TemplateSpec::new(format!("CALL {proc}(@after)"))),
-            updated: Some(TemplateSpec::new(format!("CALL {proc}(@before, @after)"))),
-            deleted: Some(TemplateSpec::new(format!("CALL {proc}(@before)"))),
+            added: Some(TemplateSpec::new(format!(
+                "CALL {proc}({{{{param after}}}})"
+            ))),
+            updated: Some(TemplateSpec::new(format!(
+                "CALL {proc}({{{{param before}}}}, {{{{param after}}}})"
+            ))),
+            deleted: Some(TemplateSpec::new(format!(
+                "CALL {proc}({{{{param before}}}})"
+            ))),
         };
         self.config.default_template = Some(query_config);
         self
@@ -582,7 +579,7 @@ mod tests {
     async fn test_recovery_trait_defaults() {
         let reaction = PostgresStoredProcReaction::builder("test-postgres")
             .with_connection("localhost", 5432, "testdb", "testuser", "testpass")
-            .with_stored_procedure("test_proc")
+            .with_jsonb_procedure("test_proc")
             .build()
             .await
             .unwrap();
