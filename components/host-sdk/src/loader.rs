@@ -37,7 +37,12 @@ use crate::proxies::source::SourcePluginProxy;
 pub struct PluginLoaderConfig {
     /// Directory to scan for plugin shared libraries.
     pub plugin_dir: PathBuf,
-    /// File glob patterns to match (e.g., `["libdrasi_source_*", "libdrasi_reaction_*"]`).
+    /// File glob patterns to match.
+    ///
+    /// For the common "discover every plugin" case, use
+    /// [`default_plugin_file_patterns`] (or the [`DEFAULT_PLUGIN_FILE_PATTERNS`]
+    /// constant). Supply a narrower list only to deliberately load a subset,
+    /// e.g. `vec!["libdrasi_source_*".to_string()]`.
     pub file_patterns: Vec<String>,
 }
 
@@ -648,15 +653,32 @@ pub fn plugin_path(dir: &Path, name: &str) -> PathBuf {
 // ── Shared naming / discovery helpers ──
 
 /// Default file patterns for discovering Drasi cdylib plugins.
-/// Includes both Unix (`lib` prefix) and Windows (no prefix) naming conventions.
-pub const DEFAULT_PLUGIN_FILE_PATTERNS: &[&str] = &[
-    "libdrasi_source_*",
-    "libdrasi_reaction_*",
-    "libdrasi_bootstrap_*",
-    "drasi_source_*",
-    "drasi_reaction_*",
-    "drasi_bootstrap_*",
-];
+///
+/// These match the shared `drasi_` prefix generically rather than enumerating
+/// each plugin type. Every Drasi plugin follows the `drasi_<type>_<kind>`
+/// naming convention (`libdrasi_source_postgres`, `libdrasi_secret_store_file`,
+/// `libdrasi_identity_azure`, …), so any plugin — including types added in the
+/// future — is discovered without ever revisiting this list. The final say on a
+/// candidate's type comes from the FFI descriptors it registers at load time,
+/// not from its filename; a file that matches but does not export the plugin
+/// ABI fails to load with a logged error rather than being silently skipped.
+///
+/// Both naming conventions are covered: Unix artifacts carry a `lib` prefix
+/// (`libdrasi_*`) while Windows artifacts do not (`drasi_*`).
+pub const DEFAULT_PLUGIN_FILE_PATTERNS: &[&str] = &["libdrasi_*", "drasi_*"];
+
+/// The default plugin discovery patterns as an owned `Vec<String>`, ready to
+/// drop straight into [`PluginLoaderConfig::file_patterns`].
+///
+/// [`DEFAULT_PLUGIN_FILE_PATTERNS`] is a `&[&str]` while `file_patterns` is a
+/// `Vec<String>`, so this helper saves every call site from repeating the
+/// `.iter().map(|p| p.to_string()).collect()` conversion.
+pub fn default_plugin_file_patterns() -> Vec<String> {
+    DEFAULT_PLUGIN_FILE_PATTERNS
+        .iter()
+        .map(|p| p.to_string())
+        .collect()
+}
 
 /// Known shared library extensions for cdylib plugins.
 pub const PLUGIN_BINARY_EXTENSIONS: &[&str] = CDYLIB_EXTENSIONS;
@@ -959,6 +981,95 @@ mod tests {
         assert!(groups.contains_key("libdrasi_source_mock"));
         assert!(groups.contains_key("libdrasi_reaction_log"));
         assert!(!groups.contains_key("libdrasi_bootstrap_mock"));
+    }
+
+    #[test]
+    fn test_default_patterns_discover_all_plugin_types() {
+        // Regression test for #661: the default patterns must cover every
+        // plugin type, not just source/reaction/bootstrap. The last two
+        // entries here are types the loader does not model yet — they stand in
+        // for "some future plugin type" and must be discovered without touching
+        // DEFAULT_PLUGIN_FILE_PATTERNS, proving the defaults are future-proof.
+        let dir = setup_temp_dir(&[
+            "libdrasi_source_mock.dylib",
+            "libdrasi_reaction_log.dylib",
+            "libdrasi_bootstrap_postgres.dylib",
+            "libdrasi_secret_store_file.dylib",
+            "libdrasi_identity_test.dylib",
+            "libdrasi_index_backend_rocksdb.dylib",
+            "libdrasi_brand_new_type_example.dylib",
+        ]);
+        let patterns = default_plugin_file_patterns();
+        let groups = discover_plugin_candidates(dir.path(), &patterns);
+
+        assert_eq!(groups.len(), 7, "every drasi_* plugin must be discovered");
+        assert!(groups.contains_key("libdrasi_source_mock"));
+        assert!(groups.contains_key("libdrasi_reaction_log"));
+        assert!(groups.contains_key("libdrasi_bootstrap_postgres"));
+        assert!(groups.contains_key("libdrasi_secret_store_file"));
+        assert!(groups.contains_key("libdrasi_identity_test"));
+        assert!(groups.contains_key("libdrasi_index_backend_rocksdb"));
+        assert!(groups.contains_key("libdrasi_brand_new_type_example"));
+    }
+
+    #[test]
+    fn test_default_patterns_discover_windows_naming() {
+        // Windows artifacts have no `lib` prefix; the `drasi_*` pattern must
+        // cover every type there too, current and future.
+        let dir = setup_temp_dir(&[
+            "drasi_secret_store_file.dll",
+            "drasi_identity_test.dll",
+            "drasi_index_backend_rocksdb.dll",
+        ]);
+        let patterns = default_plugin_file_patterns();
+        let groups = discover_plugin_candidates(dir.path(), &patterns);
+
+        assert_eq!(groups.len(), 3);
+        assert!(groups.contains_key("drasi_secret_store_file"));
+        assert!(groups.contains_key("drasi_identity_test"));
+        assert!(groups.contains_key("drasi_index_backend_rocksdb"));
+    }
+
+    #[test]
+    fn test_default_patterns_ignore_non_drasi_libraries() {
+        // The generic `drasi_` prefix must not sweep up unrelated shared
+        // libraries that happen to sit alongside the plugins.
+        let dir = setup_temp_dir(&[
+            "libdrasi_source_mock.dylib",
+            "libssl.dylib",
+            "libcrypto.so",
+            "my_helper.dll",
+            "notes.txt",
+        ]);
+        let patterns = default_plugin_file_patterns();
+        let groups = discover_plugin_candidates(dir.path(), &patterns);
+
+        assert_eq!(groups.len(), 1);
+        assert!(groups.contains_key("libdrasi_source_mock"));
+    }
+
+    #[test]
+    fn test_matched_but_invalid_plugin_fails_to_load() {
+        // Complements the discovery tests: a file whose name matches the
+        // generic `drasi_` prefix but which is not a valid plugin binary must
+        // fail to load with an error, not be silently ignored. Silent skips
+        // are the failure mode #661 was about, so the error path matters.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("libdrasi_not_a_plugin.dylib");
+        fs::write(&path, b"this is not a valid shared library").unwrap();
+
+        let result = load_plugin_from_path(
+            &path,
+            std::ptr::null_mut(),
+            crate::callbacks::default_log_callback_fn(),
+            std::ptr::null_mut(),
+            crate::callbacks::default_lifecycle_callback_fn(),
+        );
+
+        assert!(
+            result.is_err(),
+            "a matched file that is not a valid plugin must fail to load, not be skipped silently"
+        );
     }
 
     #[test]
