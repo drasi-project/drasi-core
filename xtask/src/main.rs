@@ -508,8 +508,13 @@ fn build_plugins(args: &[String]) {
                         println!("  Building {name}...");
 
                         let mut cmd = build_command(build_tool.as_str());
+                        // `cargo zigbuild` is itself the build subcommand
+                        // (equivalent to `cargo build`), so only plain `cargo`
+                        // needs an explicit `build` here.
+                        if !use_zigbuild {
+                            cmd.arg("build");
+                        }
                         cmd.args([
-                            "build",
                             "--lib",
                             "--manifest-path",
                             manifest.to_str().expect("invalid manifest path"),

@@ -46,7 +46,7 @@ serde_yaml = "0.9"
 axum = "0.7"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tower-service = "0.3"
 hyper = "1.0"
 chrono = "0.4"

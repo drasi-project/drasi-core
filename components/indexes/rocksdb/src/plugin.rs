@@ -30,9 +30,10 @@
 //!     .build()?;
 //! ```
 
+use crate::IndexDb;
 use async_trait::async_trait;
 use drasi_core::interface::{CreatedIndexes, IndexBackendPlugin, IndexError, IndexSet};
-use rocksdb::{OptimisticTransactionDB, Options};
+use rocksdb::Options;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -46,7 +47,7 @@ use crate::{RocksDbSessionControl, RocksDbSessionState};
 
 /// Open a unified RocksDB database with all column families needed for a query.
 ///
-/// This creates a single `OptimisticTransactionDB` instance containing all
+/// This creates a single `IndexDb` instance containing all
 /// column families for element index, result index, and future queue.
 ///
 /// # Arguments
@@ -62,7 +63,7 @@ pub fn open_unified_db(
     path: &str,
     query_id: &str,
     options: &RocksIndexOptions,
-) -> Result<Arc<OptimisticTransactionDB>, IndexError> {
+) -> Result<Arc<IndexDb>, IndexError> {
     // `query_id` is used directly as a directory name under `path`. Reject values
     // that could escape the base directory or otherwise misbehave as a path
     // segment (separators, parent/current-dir references, NUL, or empty).
@@ -83,6 +84,7 @@ pub fn open_unified_db(
     db_opts.create_if_missing(true);
     db_opts.create_missing_column_families(true);
     db_opts.set_db_write_buffer_size(128 * 1024 * 1024);
+    crate::bound_write_buffer_history(&mut db_opts);
     db_opts.set_use_direct_reads(options.direct_io);
     db_opts.set_use_direct_io_for_flush_and_compaction(options.direct_io);
 
@@ -99,7 +101,18 @@ pub fn open_unified_db(
     cfs.push(outbox::outbox_cf_descriptor());
     cfs.push(live_results::live_results_cf_descriptor());
 
-    let db = OptimisticTransactionDB::open_cf_descriptors(&db_opts, db_path, cfs)
+    // The default CF is not covered by db_opts: rust-rocksdb opens it with
+    // fresh Options unless a descriptor is supplied, and an unset retention
+    // bound is sanitized to 128 MiB (caught by retention_bound_tests).
+    let mut default_cf_opts = Options::default();
+    crate::bound_write_buffer_history(&mut default_cf_opts);
+    cfs.push(rocksdb::ColumnFamilyDescriptor::new(
+        rocksdb::DEFAULT_COLUMN_FAMILY_NAME,
+        default_cf_opts,
+    ));
+
+    let txn_db_opts = rocksdb::TransactionDBOptions::default();
+    let db = IndexDb::open_cf_descriptors(&db_opts, &txn_db_opts, db_path, cfs)
         .map_err(IndexError::other)?;
     Ok(Arc::new(db))
 }
@@ -107,7 +120,7 @@ pub fn open_unified_db(
 /// RocksDB index backend provider.
 ///
 /// This provider creates RocksDB-backed indexes for persistent storage.
-/// All indexes for a query share a single `OptimisticTransactionDB` instance,
+/// All indexes for a query share a single `IndexDb` instance,
 /// reducing resource overhead and enabling cross-index atomic transactions.
 ///
 /// # Configuration

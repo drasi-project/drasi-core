@@ -22,12 +22,10 @@
 
 use std::sync::Arc;
 
+use crate::IndexDb;
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, LiveResultsWriter, RowMutation};
-use rocksdb::{
-    ColumnFamilyDescriptor, IteratorMode, OptimisticTransactionDB, Options,
-    WriteBatchWithTransaction,
-};
+use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, WriteBatchWithTransaction};
 use tokio::task;
 
 /// Column family name for live results data.
@@ -35,7 +33,8 @@ pub(crate) const LIVE_RESULTS_CF: &str = "live_results";
 
 /// Returns the column family descriptor for the live_results CF.
 pub(crate) fn live_results_cf_descriptor() -> ColumnFamilyDescriptor {
-    let opts = Options::default();
+    let mut opts = Options::default();
+    crate::bound_write_buffer_history(&mut opts);
     ColumnFamilyDescriptor::new(LIVE_RESULTS_CF, opts)
 }
 
@@ -70,11 +69,11 @@ fn make_prefix(query_id: &str) -> Vec<u8> {
 /// Stores serialized row data keyed by `(query_id, row_signature)`.
 /// Uses WriteBatch for atomic multi-row mutations.
 pub struct RocksDbLiveResultsWriter {
-    db: Arc<OptimisticTransactionDB>,
+    db: Arc<IndexDb>,
 }
 
 impl RocksDbLiveResultsWriter {
-    pub fn new(db: Arc<OptimisticTransactionDB>) -> Self {
+    pub fn new(db: Arc<IndexDb>) -> Self {
         Self { db }
     }
 }

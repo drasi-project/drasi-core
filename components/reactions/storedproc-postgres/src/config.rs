@@ -25,21 +25,31 @@ pub use common::{QueryConfig, TemplateSpec};
 
 /// Configuration for the PostgreSQL Stored Procedure reaction
 ///
-/// Supports Handlebars templates for stored procedure commands.
-/// Commands use @after.fieldName and @before.fieldName syntax to reference query result fields.
+/// Stored-procedure commands are configured as [Handlebars] templates. Argument
+/// values are referenced with the `{{param <expr>}}` helper, which binds them as
+/// positional SQL parameters (`$1`, `$2`, …) so untrusted row data can never
+/// alter the command structure. `{{param <expr>}}` is the only interpolation
+/// allowed in a template; bare (`{{expr}}`) and raw (`{{{expr}}}`) interpolation
+/// are rejected at configuration time so values cannot be inlined into SQL text.
+/// A whole object (for example `{{param after}}`) is bound as a single JSONB
+/// parameter.
 ///
 /// Commands can be configured at two levels:
 /// 1. **Default templates**: Applied to all queries unless overridden (using `default_template`)
-/// 2. **Per-query templates**: Override default for specific queries (using `routes`)
+/// 2. **Per-query templates**: Override the default for specific queries (using `routes`)
 ///
-/// ## Template Variables
+/// ## Template context
 ///
-/// Templates have access to the following variables:
-/// - `after` - The data after the change (available for ADD and UPDATE)
-/// - `before` - The data before the change (available for UPDATE and DELETE)
-/// - `data` - The raw data field (available for UPDATE)
-/// - `query_name` - The name of the query that produced the result
-/// - `operation` - The operation type ("ADD", "UPDATE", or "DELETE")
+/// Each template is rendered against a standard context with these keys:
+/// - `after` - The post-change row (available for ADD and UPDATE)
+/// - `before` - The pre-change row (available for UPDATE and DELETE)
+/// - `data` - The raw `data` payload of an Update diff (available for UPDATE)
+/// - `query_id` / `query_name` - The id of the query that produced the result.
+///   These are aliases that always hold the same value (`query_result.query_id`);
+///   both are provided for symmetry with other Drasi reactions.
+/// - `operation` - The operation type (`"ADD"`, `"UPDATE"`, or `"DELETE"`)
+/// - `timestamp` - RFC3339 result timestamp
+/// - `metadata` - The result's metadata map
 ///
 /// ## Example with Default Template
 ///
@@ -50,9 +60,9 @@ pub use common::{QueryConfig, TemplateSpec};
 ///     user: "postgres".to_string(),
 ///     password: "password".to_string(),
 ///     default_template: Some(QueryConfig {
-///         added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
-///         updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
-///         deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+///         added: Some(TemplateSpec::new("CALL add_user({{param after.id}}, {{param after.name}}, {{param after.email}})")),
+///         updated: Some(TemplateSpec::new("CALL update_user({{param after.id}}, {{param after.name}}, {{param after.email}})")),
+///         deleted: Some(TemplateSpec::new("CALL delete_user({{param before.id}})")),
 ///     }),
 ///     ..Default::default()
 /// };
@@ -65,9 +75,9 @@ pub use common::{QueryConfig, TemplateSpec};
 ///
 /// let mut routes = HashMap::new();
 /// routes.insert("user-query".to_string(), QueryConfig {
-///     added: Some(TemplateSpec::new("CALL add_user(@after.id, @after.name, @after.email)")),
-///     updated: Some(TemplateSpec::new("CALL update_user(@after.id, @after.name, @after.email)")),
-///     deleted: Some(TemplateSpec::new("CALL delete_user(@before.id)")),
+///     added: Some(TemplateSpec::new("CALL add_user({{param after.id}}, {{param after.name}}, {{param after.email}})")),
+///     updated: Some(TemplateSpec::new("CALL update_user({{param after.id}}, {{param after.name}}, {{param after.email}})")),
+///     deleted: Some(TemplateSpec::new("CALL delete_user({{param before.id}})")),
 /// });
 ///
 /// let config = PostgresStoredProcReactionConfig {
@@ -79,6 +89,8 @@ pub use common::{QueryConfig, TemplateSpec};
 ///     ..Default::default()
 /// };
 /// ```
+///
+/// [Handlebars]: https://crates.io/crates/handlebars
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PostgresStoredProcReactionConfig {
     /// Database hostname or IP address
@@ -93,11 +105,11 @@ pub struct PostgresStoredProcReactionConfig {
     #[serde(skip)]
     pub identity_provider: Option<Box<dyn IdentityProvider>>,
 
-    /// Database user (deprecated: use identity_provider instead)
+    /// Database user (used when no identity provider is configured)
     #[serde(default)]
     pub user: String,
 
-    /// Database password (deprecated: use identity_provider instead)
+    /// Database password (used when no identity provider is configured)
     #[serde(default)]
     pub password: String,
 
@@ -170,6 +182,49 @@ impl TemplateRouting for PostgresStoredProcReactionConfig {
     fn default_template(&self) -> Option<&QueryConfig> {
         self.default_template.as_ref()
     }
+
+    /// Resolve the command template for a `(query_id, operation)` pair following
+    /// the developer-guide resolution order:
+    ///
+    /// 1. per-query route keyed by the **full** query id,
+    /// 2. per-query route keyed by the **last dotted segment**,
+    /// 3. the shared `default_template`.
+    ///
+    /// Overrides the trait default (steps 1 and 3 only) so `source.my_query`
+    /// can be routed via a `my_query` key.
+    fn get_template_spec(
+        &self,
+        query_id: &str,
+        operation: common::OperationType,
+    ) -> Option<&TemplateSpec> {
+        if let Some(spec) = self
+            .routes
+            .get(query_id)
+            .and_then(|qc| Self::get_spec_from_config(qc, operation))
+        {
+            return Some(spec);
+        }
+
+        let segment = last_segment(query_id);
+        if segment != query_id {
+            if let Some(spec) = self
+                .routes
+                .get(segment)
+                .and_then(|qc| Self::get_spec_from_config(qc, operation))
+            {
+                return Some(spec);
+            }
+        }
+
+        self.default_template
+            .as_ref()
+            .and_then(|qc| Self::get_spec_from_config(qc, operation))
+    }
+}
+
+/// Last dotted segment of a query id (`source.q1` -> `q1`).
+fn last_segment(query_id: &str) -> &str {
+    query_id.rsplit('.').next().unwrap_or(query_id)
 }
 
 fn default_hostname() -> String {
@@ -191,26 +246,12 @@ impl PostgresStoredProcReactionConfig {
         self.port.unwrap_or(5432)
     }
 
-    /// Get the command template for a specific query and operation type
+    /// Validate the configuration.
     ///
-    /// Priority order:
-    /// 1. Query-specific route template
-    /// 2. Default template
-    pub fn get_command_template(
-        &self,
-        query_id: &str,
-        operation: common::OperationType,
-    ) -> Option<String> {
-        // Try to get from routes or default_template first
-        let spec = self.get_template_spec(query_id, operation);
-        if let Some(spec) = spec {
-            return Some(spec.template.clone());
-        }
-        None
-    }
-
-    /// Validate the configuration
-    pub fn validate(&self) -> anyhow::Result<()> {
+    /// Checks authentication, database name, that at least one command is
+    /// configured, that every template compiles, and that every `routes` key
+    /// matches a subscribed query id (or its last dotted segment).
+    pub fn validate(&self, query_ids: &[String]) -> anyhow::Result<()> {
         // Check authentication configuration
         if self.identity_provider.is_none() && self.user.is_empty() {
             anyhow::bail!("Either identity_provider or user/password must be provided");
@@ -230,6 +271,184 @@ impl PostgresStoredProcReactionConfig {
             );
         }
 
+        // Compile every template at construction time.
+        if let Some(default) = &self.default_template {
+            validate_query_config(default).map_err(|e| anyhow::anyhow!("default_template: {e}"))?;
+        }
+        for (key, qc) in &self.routes {
+            validate_query_config(qc).map_err(|e| anyhow::anyhow!("route '{key}': {e}"))?;
+
+            let matches = query_ids.iter().any(|q| q == key || last_segment(q) == key);
+            if !matches {
+                anyhow::bail!(
+                    "route '{key}' does not match any subscribed query id (or its last dotted segment)"
+                );
+            }
+        }
+
         Ok(())
+    }
+}
+
+/// Compile every template in a [`QueryConfig`].
+fn validate_query_config(config: &QueryConfig) -> anyhow::Result<()> {
+    for spec in [&config.added, &config.updated, &config.deleted]
+        .into_iter()
+        .flatten()
+    {
+        crate::render::validate_template(&spec.template)?;
+    }
+    Ok(())
+}
+
+impl PostgresStoredProcReactionConfig {
+    /// Pre-compile every configured (non-empty) template once, keyed by the
+    /// template string. The runtime render path looks templates up here so the
+    /// Handlebars parse cost is paid at construction time, not per event.
+    pub(crate) fn compile_templates(
+        &self,
+    ) -> anyhow::Result<HashMap<String, crate::render::CompiledTemplate>> {
+        let mut cache = HashMap::new();
+        let mut compile_all = |qc: &QueryConfig,
+                               cache: &mut HashMap<String, crate::render::CompiledTemplate>|
+         -> anyhow::Result<()> {
+            for spec in [&qc.added, &qc.updated, &qc.deleted].into_iter().flatten() {
+                if !spec.template.is_empty() && !cache.contains_key(&spec.template) {
+                    let compiled = crate::render::CompiledTemplate::compile(&spec.template)?;
+                    cache.insert(spec.template.clone(), compiled);
+                }
+            }
+            Ok(())
+        };
+
+        if let Some(default) = &self.default_template {
+            compile_all(default, &mut cache)?;
+        }
+        for qc in self.routes.values() {
+            compile_all(qc, &mut cache)?;
+        }
+        Ok(cache)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::OperationType;
+
+    fn base_config() -> PostgresStoredProcReactionConfig {
+        PostgresStoredProcReactionConfig {
+            user: "testuser".to_string(),
+            database: "testdb".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_rejects_invalid_template() {
+        let mut config = base_config();
+        config.default_template = Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL add_user({{param after.id)")),
+            updated: None,
+            deleted: None,
+        });
+
+        let err = config.validate(&[]).unwrap_err().to_string();
+        assert!(err.contains("default_template"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_route_key() {
+        let mut config = base_config();
+        let mut routes = HashMap::new();
+        routes.insert(
+            "unknown-query".to_string(),
+            QueryConfig {
+                added: Some(TemplateSpec::new("CALL add_user({{param after.id}})")),
+                updated: None,
+                deleted: None,
+            },
+        );
+        config.routes = routes;
+
+        let err = config
+            .validate(&["some-other-query".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown-query"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_route_key_matching_last_segment() {
+        let mut config = base_config();
+        let mut routes = HashMap::new();
+        routes.insert(
+            "my-query".to_string(),
+            QueryConfig {
+                added: Some(TemplateSpec::new("CALL add_user({{param after.id}})")),
+                updated: None,
+                deleted: None,
+            },
+        );
+        config.routes = routes;
+
+        assert!(config.validate(&["source.my-query".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn resolution_prefers_full_id_route_over_default() {
+        let mut config = base_config();
+        config.default_template = Some(QueryConfig {
+            added: Some(TemplateSpec::new("CALL default_add({{param after.id}})")),
+            updated: None,
+            deleted: None,
+        });
+        let mut routes = HashMap::new();
+        routes.insert(
+            "source.q1".to_string(),
+            QueryConfig {
+                added: Some(TemplateSpec::new("CALL route_add({{param after.id}})")),
+                updated: None,
+                deleted: None,
+            },
+        );
+        config.routes = routes;
+
+        let spec = config
+            .get_template_spec("source.q1", OperationType::Add)
+            .unwrap();
+        assert_eq!(spec.template, "CALL route_add({{param after.id}})");
+    }
+
+    #[test]
+    fn resolution_matches_last_segment_then_default() {
+        let mut config = base_config();
+        config.default_template = Some(QueryConfig {
+            added: None,
+            updated: Some(TemplateSpec::new("CALL default_update({{param after.id}})")),
+            deleted: None,
+        });
+        let mut routes = HashMap::new();
+        routes.insert(
+            "q1".to_string(),
+            QueryConfig {
+                added: Some(TemplateSpec::new("CALL segment_add({{param after.id}})")),
+                updated: None,
+                deleted: None,
+            },
+        );
+        config.routes = routes;
+
+        // ADD resolves via the last-segment route.
+        let add = config
+            .get_template_spec("source.q1", OperationType::Add)
+            .unwrap();
+        assert_eq!(add.template, "CALL segment_add({{param after.id}})");
+
+        // UPDATE has no route entry, so it falls back to the default template.
+        let update = config
+            .get_template_spec("source.q1", OperationType::Update)
+            .unwrap();
+        assert_eq!(update.template, "CALL default_update({{param after.id}})");
     }
 }
