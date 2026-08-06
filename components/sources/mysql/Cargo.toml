@@ -44,17 +44,13 @@ serde_json = "1.0"
 tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 ordered-float = "3.0"
-mysql_async = { version = "0.37", features = ["binlog"] }
+mysql_async = { version = "0.37", features = ["binlog", "rustls-tls", "ring"] }
 mysql_common = { version = "0.37", features = ["binlog"] }
 futures-util = "0.3"
 bytes = "1.0"
 
 [features]
 dynamic-plugin = []
-# Enables a TLS backend (rustls) so SslMode::Require* and IfAvailable can
-# negotiate TLS. Off by default; without it, IfAvailable connects in plaintext
-# and Require* returns an error instead of panicking.
-tls = ["mysql_async/rustls-tls", "drasi-mysql-common/tls"]
 
 [dev-dependencies]
 tokio-test = "0.4"

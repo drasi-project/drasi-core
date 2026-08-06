@@ -80,7 +80,7 @@ pub struct MySqlBootstrapConfigDto {
     pub table_keys: Vec<MySqlTableKeyConfigDto>,
 }
 
-/// SSL mode DTO (`SslModeDto`) is shared from `drasi-mysql-common`.
+// SSL mode DTO (`SslModeDto`) is shared from `drasi-mysql-common`.
 
 // ── Descriptor ───────────────────────────────────────────────────────────────
 

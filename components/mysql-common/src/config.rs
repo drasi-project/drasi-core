@@ -17,20 +17,19 @@
 /// SSL mode for MySQL connections.
 ///
 /// Shared by the MySQL source and bootstrap plugins. The actual TLS negotiation
-/// is performed by [`crate::connect::connect_with_ssl_mode`], which only attempts
-/// a TLS handshake when the crate is built with the `tls` feature enabled.
+/// is performed by [`crate::connect::connect_with_ssl_mode`]. A rustls TLS
+/// backend is always compiled in, so every mode below is available at runtime.
 ///
 /// # Certificate verification
 ///
-/// The `tls` backend is rustls. [`SslMode::IfAvailable`] attempts opportunistic
-/// TLS **without** certificate verification and falls back to plaintext on
-/// failure, so it only protects against passive eavesdroppers. The `Require*`
-/// variants enforce TLS and verify the server: [`SslMode::Require`] and
-/// [`SslMode::RequireVerifyFull`] perform full certificate-chain **and**
-/// hostname verification, while [`SslMode::RequireVerifyCa`] verifies the chain
-/// but skips hostname validation. When built **without** the `tls` feature, no
-/// TLS is ever negotiated: [`SslMode::IfAvailable`] connects in plaintext and
-/// the `Require*` variants return an error.
+/// The TLS backend is rustls. [`SslMode::IfAvailable`] and [`SslMode::Require`]
+/// negotiate TLS **without** certificate verification (they accept self-signed
+/// certs and skip hostname checks), so they only protect against passive
+/// eavesdroppers, not an active man-in-the-middle. The verifying variants
+/// authenticate the server: [`SslMode::RequireVerifyCa`] verifies the
+/// certificate chain but skips hostname validation, and
+/// [`SslMode::RequireVerifyFull`] performs full chain **and** hostname
+/// verification.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SslMode {
     /// Disable SSL encryption — always connect in plaintext.
@@ -38,9 +37,9 @@ pub enum SslMode {
     /// Try SSL but fall back to an unencrypted connection if it fails
     /// (opportunistic TLS, equivalent to MySQL's `--ssl-mode=PREFERRED`).
     ///
-    /// With the `tls` feature, TLS is attempted **without** certificate or
-    /// hostname verification (invalid certs accepted, hostname checks skipped),
-    /// falling back to plaintext on error. Without `tls`, connects in plaintext.
+    /// TLS is attempted **without** certificate or hostname verification
+    /// (invalid certs accepted, hostname checks skipped), falling back to
+    /// plaintext on error.
     ///
     /// # Security
     ///
@@ -53,24 +52,20 @@ pub enum SslMode {
     /// protected against active attackers.
     #[default]
     IfAvailable,
-    /// Require an encrypted connection **with full verification** of the server
-    /// certificate chain and hostname (equivalent to [`SslMode::RequireVerifyFull`]).
+    /// Require an encrypted connection, but **without** certificate or hostname
+    /// verification (accepts self-signed certs, skips hostname checks).
     ///
-    /// Protects against both passive eavesdropping and active man-in-the-middle
-    /// attacks. If your server uses a self-signed certificate or one whose
-    /// hostname does not match, use [`SslMode::RequireVerifyCa`] (verify chain,
-    /// skip hostname) instead. Requires the `tls` feature; otherwise the
-    /// connection returns an error.
+    /// Equivalent to MySQL's `--ssl-mode=REQUIRED`. Provides transport
+    /// encryption but **not** server authentication: it protects against passive
+    /// eavesdropping but **not** an active man-in-the-middle attacker who can
+    /// present any certificate. Use [`SslMode::RequireVerifyCa`] or
+    /// [`SslMode::RequireVerifyFull`] when server authenticity matters.
     Require,
     /// Require SSL with CA (certificate chain) verification, but **skip** hostname
     /// validation.
-    ///
-    /// Requires the `tls` feature; otherwise the connection returns an error.
     RequireVerifyCa,
     /// Require SSL with full verification: CA (certificate chain) **and** hostname
     /// validation.
-    ///
-    /// Requires the `tls` feature; otherwise the connection returns an error.
     RequireVerifyFull,
 }
 

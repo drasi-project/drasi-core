@@ -27,9 +27,7 @@ use crate::config::SslMode;
 ///
 /// Single source of truth for the `ssl_mode` config field shared by the MySQL
 /// source and bootstrap plugin descriptors.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = mysql::SslMode)]
 #[serde(rename_all = "snake_case")]
 pub enum SslModeDto {
@@ -92,8 +90,14 @@ mod tests {
         assert_eq!("require".parse(), Ok(SslModeDto::Require));
         assert_eq!("require_verify_ca".parse(), Ok(SslModeDto::RequireVerifyCa));
         assert_eq!("requireverifyca".parse(), Ok(SslModeDto::RequireVerifyCa));
-        assert_eq!("require_verify_full".parse(), Ok(SslModeDto::RequireVerifyFull));
-        assert_eq!("requireverifyfull".parse(), Ok(SslModeDto::RequireVerifyFull));
+        assert_eq!(
+            "require_verify_full".parse(),
+            Ok(SslModeDto::RequireVerifyFull)
+        );
+        assert_eq!(
+            "requireverifyfull".parse(),
+            Ok(SslModeDto::RequireVerifyFull)
+        );
     }
 
     #[test]

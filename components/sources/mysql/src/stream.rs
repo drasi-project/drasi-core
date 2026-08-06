@@ -557,7 +557,6 @@ impl ReplicationStream {
         }
     }
 
-
     async fn close_stream(stream: BinlogStream) {
         if let Err(err) = stream.close().await {
             debug!("Failed to close MySQL binlog stream cleanly: {err}");
