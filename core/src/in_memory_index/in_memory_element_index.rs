@@ -594,7 +594,7 @@ impl ElementArchiveIndex for InMemoryElementIndex {
         time: ElementTimestamp,
     ) -> Result<Option<Arc<Element>>, IndexError> {
         if !self.archive_enabled {
-            return Err(IndexError::NotSupported);
+            return Err(IndexError::ArchiveNotEnabled);
         }
 
         let guard = self.element_archive.read().await;
@@ -613,7 +613,7 @@ impl ElementArchiveIndex for InMemoryElementIndex {
         range: TimestampRange<ElementTimestamp>,
     ) -> Result<ElementStream, IndexError> {
         if !self.archive_enabled {
-            return Err(IndexError::NotSupported);
+            return Err(IndexError::ArchiveNotEnabled);
         }
 
         let from = range.from;
@@ -1226,5 +1226,62 @@ mod tests {
             .expect("outer entry for the still-populated value must remain");
         assert!(remaining.get(join_key).unwrap().contains(&ref_b));
         assert_eq!(guard.len(), 1, "only the emptied value should be pruned");
+    }
+
+    #[tokio::test]
+    async fn test_get_element_as_at_archive_disabled() {
+        let index = InMemoryElementIndex::new();
+        let result = index
+            .get_element_as_at(&ElementReference::new("source1", "node1"), 0)
+            .await;
+        assert!(matches!(result, Err(IndexError::ArchiveNotEnabled)));
+    }
+
+    #[tokio::test]
+    async fn test_get_element_versions_archive_disabled() {
+        let index = InMemoryElementIndex::new();
+        let result = index
+            .get_element_versions(
+                &ElementReference::new("source1", "node1"),
+                TimestampRange {
+                    from: TimestampBound::Included(0),
+                    to: 100,
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(IndexError::ArchiveNotEnabled)));
+    }
+
+    #[tokio::test]
+    async fn test_clear_archive_disabled_returns_not_supported() {
+        let index = InMemoryElementIndex::new();
+        let result = ElementArchiveIndex::clear(&index).await;
+        assert!(matches!(result, Err(IndexError::NotSupported)));
+    }
+
+    #[tokio::test]
+    async fn test_archive_reads_with_archive_enabled() {
+        let mut index = InMemoryElementIndex::new();
+        index.enable_archive();
+
+        let element = create_test_node("source1", "node1", "Person");
+        index.set_element(&element, &vec![0]).await.unwrap();
+
+        let as_at = index
+            .get_element_as_at(&ElementReference::new("source1", "node1"), 10)
+            .await
+            .unwrap();
+        assert!(as_at.is_some());
+
+        let versions = index
+            .get_element_versions(
+                &ElementReference::new("source1", "node1"),
+                TimestampRange {
+                    from: TimestampBound::Included(0),
+                    to: 100,
+                },
+            )
+            .await;
+        assert!(versions.is_ok());
     }
 }

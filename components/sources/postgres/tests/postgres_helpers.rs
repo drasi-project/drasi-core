@@ -303,6 +303,66 @@ pub async fn create_decimal_test_table(client: &Client, table_name: &str) -> Res
     Ok(())
 }
 
+/// Create a table with a two-column composite primary key
+/// `(order_id, line_no)` plus a `qty` payload column. Used to verify that CDC
+/// element IDs derived from composite auto-detected primary keys are stable
+/// across INSERT/UPDATE/DELETE.
+pub async fn create_composite_key_table(client: &Client, table_name: &str) -> Result<()> {
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS {table_name} (\n    order_id INTEGER NOT NULL,\n    line_no INTEGER NOT NULL,\n    qty INTEGER NOT NULL,\n    PRIMARY KEY (order_id, line_no)\n)"
+    );
+    execute_sql(client, &create_sql).await?;
+
+    let replica_sql = format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL");
+    execute_sql(client, &replica_sql).await?;
+
+    Ok(())
+}
+
+pub async fn insert_composite_row(
+    client: &Client,
+    table: &str,
+    order_id: i32,
+    line_no: i32,
+    qty: i32,
+) -> Result<()> {
+    let sql = format!(
+        "INSERT INTO {} (order_id, line_no, qty) VALUES ($1, $2, $3)",
+        quote_ident(table)
+    );
+    client.execute(&sql, &[&order_id, &line_no, &qty]).await?;
+    Ok(())
+}
+
+pub async fn update_composite_qty(
+    client: &Client,
+    table: &str,
+    order_id: i32,
+    line_no: i32,
+    qty: i32,
+) -> Result<()> {
+    let sql = format!(
+        "UPDATE {} SET qty = $1 WHERE order_id = $2 AND line_no = $3",
+        quote_ident(table)
+    );
+    client.execute(&sql, &[&qty, &order_id, &line_no]).await?;
+    Ok(())
+}
+
+pub async fn delete_composite_row(
+    client: &Client,
+    table: &str,
+    order_id: i32,
+    line_no: i32,
+) -> Result<()> {
+    let sql = format!(
+        "DELETE FROM {} WHERE order_id = $1 AND line_no = $2",
+        quote_ident(table)
+    );
+    client.execute(&sql, &[&order_id, &line_no]).await?;
+    Ok(())
+}
+
 pub async fn create_timestamptz_test_table(client: &Client, table_name: &str) -> Result<()> {
     let create_sql = format!(
         "CREATE TABLE IF NOT EXISTS {table_name} (\n    id INTEGER PRIMARY KEY,\n    created_at TIMESTAMPTZ NOT NULL\n)"

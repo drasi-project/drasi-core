@@ -51,7 +51,7 @@ drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 
 [dev-dependencies]
-reqwest = { version = "0.12", features = ["stream", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 drasi-core.workspace = true
 eventsource-stream = "0.2"
 futures-util = "0.3"

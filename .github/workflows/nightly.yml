@@ -1,0 +1,157 @@
+name: Nightly Build
+
+# Nightly pipeline for drasi-core. It:
+#   1. runs the release-plz dry-run as a release health signal,
+#   2. builds and publishes the plugins from main's HEAD to a fixed, overwritable
+#      OCI tag via workflow_call.
+
+on:
+  schedule:
+    # 14:00 UTC daily = 06:00 PST. GitHub cron is UTC and does not observe DST,
+    # so during PDT (summer) this fires at 07:00 local. Runs against main.
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+    inputs:
+      plugin_tag:
+        description: 'Fixed OCI tag for nightly plugins'
+        required: false
+        type: string
+        default: 'drasi-nightly-test'
+      skip_release_dry_run:
+        description: 'Skip the release-plz dry-run check'
+        required: false
+        type: boolean
+        default: false
+      skip_publish_plugins:
+        description: 'Skip publishing plugins (reuse already-published nightly tag)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  # Least privilege by default; elevated scopes are granted per-job below.
+  contents: read
+
+jobs:
+  # Release-dry-run signal: run the release tooling in dry-run mode to catch
+  # packaging / semver / changelog breakage early. Uses the shared
+  # install-release-tools composite action (same pinned versions as release-plz.yml)
+  # and runs only `release-plz update`, which publishes nothing. A failure here
+  # fails the nightly and, because the rest of the chain depends on it, stops the
+  # plugin publish.
+  release-dry-run:
+    name: Release dry-run (release-plz)
+    if: ${{ inputs.skip_release_dry_run != true }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Install release tools
+        uses: ./.github/actions/install-release-tools
+
+      - name: Release-plz dry-run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== release-plz update (dry-run: version bumps, changelog, semver checks) ==="
+          release-plz update
+          echo "=== release-plz dry-run passed ==="
+
+  publish-plugins:
+    name: Publish nightly plugins
+    needs: release-dry-run
+    # Elevated scopes needed by the called publish-plugins.yml (OCI push + cosign
+    # keyless). A called workflow's token can't exceed the calling job's grants.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    # Single chain: publish only after the release dry-run passes. always()
+    # so a *skipped* release-dry-run (skip_release_dry_run) still lets publishing
+    # proceed, while a *failed* release-dry-run blocks the rest of the nightly.
+    # [skip-plugins] / skip_publish_plugins reuse an already-published nightly tag.
+    if: >-
+      ${{ always()
+        && needs.release-dry-run.result != 'failure'
+        && needs.release-dry-run.result != 'cancelled'
+        && inputs.skip_publish_plugins != true
+        && !contains(github.event.head_commit.message || '', '[skip-plugins]') }}
+    uses: ./.github/workflows/publish-plugins.yml
+    with:
+      tag: ${{ inputs.plugin_tag || 'drasi-nightly-test' }}
+      # TEMPORARY (testing): build from the branch to validate the xtask zigbuild
+      # fix before it lands on main. Revert to `main` once the fix is merged.
+      ref: drasi-e2e-nightly
+      # Nightly -test channel: skip cosign signing to avoid orphaned signatures
+      # on each tag overwrite.
+      sign: false
+      dry_run: false
+      # Nightly test packages are already pullable; skip the org-admin visibility
+      # step (it needs a token that can administer org package visibility).
+      skip_visibility: true
+    secrets: inherit
+
+  # If any job in the nightly failed, open (or update) a tracking issue so the
+  # failure is visible without watching Actions.
+  # Dedupes: if an open issue with the `nightly-failure` label already exists, it
+  # adds a comment instead of opening a new one.
+  report-failure:
+    name: Report nightly failure
+    needs: [release-dry-run, publish-plugins]
+    if: ${{ always() && contains(needs.*.result, 'failure') }}
+    runs-on: ubuntu-latest
+    # Only this job writes the tracking issue.
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update failure issue
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const label = 'nightly-failure';
+            const results = ${{ toJSON(needs) }};
+            const failed = Object.entries(results)
+              .filter(([, v]) => v.result === 'failure')
+              .map(([k]) => k);
+            const body = [
+              `The nightly build failed.`,
+              ``,
+              `- **Run:** ${runUrl}`,
+              `- **Failed jobs:** ${failed.join(', ') || 'unknown'}`,
+              `- **Commit:** ${context.sha}`,
+              `- **Triggered by:** ${context.eventName}`,
+            ].join('\n');
+
+            // Ensure the label exists (ignore error if it already does).
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner, repo: context.repo.repo,
+                name: label, color: 'b60205',
+                description: 'Automated nightly build failure',
+              });
+            } catch (e) { /* label already exists */ }
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: label, per_page: 1,
+            });
+
+            if (existing.data.length > 0) {
+              const number = existing.data[0].number;
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: number, body,
+              });
+              core.notice(`Updated existing nightly-failure issue #${number}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: `Nightly build failed (${new Date().toISOString().slice(0, 10)})`,
+                body, labels: [label],
+              });
+              core.notice(`Opened nightly-failure issue #${created.data.number}`);
+            }

@@ -33,6 +33,78 @@ pub enum FfiLogLevel {
     Trace = 4,
 }
 
+/// Log level filter passed from the host to the plugin.
+///
+/// The host reports its effective log level through
+/// `FfiPluginRegistration::set_log_level`. Records more verbose than this
+/// level are dropped inside the plugin before they are formatted or cross
+/// the FFI boundary, so filtered-out logging costs almost nothing.
+///
+/// Discriminants order by verbosity: `Off` forwards nothing, `Trace`
+/// forwards everything.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiLogLevelFilter {
+    Off = 0,
+    Error = 1,
+    Warn = 2,
+    Info = 3,
+    Debug = 4,
+    Trace = 5,
+}
+
+impl FfiLogLevelFilter {
+    /// Convert to the `log` crate's `LevelFilter`.
+    pub fn to_level_filter(self) -> log::LevelFilter {
+        match self {
+            FfiLogLevelFilter::Off => log::LevelFilter::Off,
+            FfiLogLevelFilter::Error => log::LevelFilter::Error,
+            FfiLogLevelFilter::Warn => log::LevelFilter::Warn,
+            FfiLogLevelFilter::Info => log::LevelFilter::Info,
+            FfiLogLevelFilter::Debug => log::LevelFilter::Debug,
+            FfiLogLevelFilter::Trace => log::LevelFilter::Trace,
+        }
+    }
+
+    /// Convert from the `log` crate's `LevelFilter`.
+    pub fn from_level_filter(filter: log::LevelFilter) -> Self {
+        match filter {
+            log::LevelFilter::Off => FfiLogLevelFilter::Off,
+            log::LevelFilter::Error => FfiLogLevelFilter::Error,
+            log::LevelFilter::Warn => FfiLogLevelFilter::Warn,
+            log::LevelFilter::Info => FfiLogLevelFilter::Info,
+            log::LevelFilter::Debug => FfiLogLevelFilter::Debug,
+            log::LevelFilter::Trace => FfiLogLevelFilter::Trace,
+        }
+    }
+
+    /// Convert from a raw `u8` discriminant, clamping unknown values to `Trace`.
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0 => FfiLogLevelFilter::Off,
+            1 => FfiLogLevelFilter::Error,
+            2 => FfiLogLevelFilter::Warn,
+            3 => FfiLogLevelFilter::Info,
+            4 => FfiLogLevelFilter::Debug,
+            _ => FfiLogLevelFilter::Trace,
+        }
+    }
+
+    /// Whether a record at `level` passes this filter.
+    pub fn allows(self, level: FfiLogLevel) -> bool {
+        // Exhaustive: a new FfiLogLevel variant is a compile error here
+        // rather than a silent arithmetic drift between the two enums.
+        let level_as_filter = match level {
+            FfiLogLevel::Error => FfiLogLevelFilter::Error,
+            FfiLogLevel::Warn => FfiLogLevelFilter::Warn,
+            FfiLogLevel::Info => FfiLogLevelFilter::Info,
+            FfiLogLevel::Debug => FfiLogLevelFilter::Debug,
+            FfiLogLevel::Trace => FfiLogLevelFilter::Trace,
+        };
+        (level_as_filter as u8) <= self as u8
+    }
+}
+
 /// A log entry emitted by a plugin, delivered to the host via callback.
 /// All FfiStr fields are borrowed and only valid for the duration of the callback.
 #[repr(C)]

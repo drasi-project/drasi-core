@@ -807,4 +807,12 @@ pub struct FfiPluginRegistration {
     /// back through the host.
     pub set_config_resolver:
         extern "C" fn(ctx: *mut ::std::ffi::c_void, callback: super::callbacks::ConfigResolverFn),
+    /// Host calls this to report its effective log level. The plugin drops
+    /// records more verbose than this level before formatting them or
+    /// forwarding them across the FFI. Until called, the plugin forwards
+    /// everything (`Trace`).
+    ///
+    /// Appended for SDK 0.12.0; hosts must gate access on the plugin's
+    /// reported `sdk_version`.
+    pub set_log_level: extern "C" fn(level: super::callbacks::FfiLogLevelFilter),
 }
