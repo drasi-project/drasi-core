@@ -87,6 +87,7 @@ impl InMemoryElementIndex {
         // element (`set_element`) re-insert affinity via `set_slot_affinity`.
         let affinity = match af_guard.remove(element.get_reference()) {
             Some(affinity) => affinity,
+            // No recorded affinity means there is nothing to clear.
             None => return Ok(()),
         };
 
@@ -111,12 +112,20 @@ impl InMemoryElementIndex {
                 let mut out_guard = self.element_by_slot_out.write().await;
 
                 for old_slot in affinity {
-                    if let Some(set) = in_guard.get_mut(&(old_slot, in_node.clone())) {
+                    let in_key = (old_slot, in_node.clone());
+                    if let Some(set) = in_guard.get_mut(&in_key) {
                         set.remove(&metadata.reference);
+                        if set.is_empty() {
+                            in_guard.remove(&in_key);
+                        }
                     }
 
-                    if let Some(set) = out_guard.get_mut(&(old_slot, out_node.clone())) {
+                    let out_key = (old_slot, out_node.clone());
+                    if let Some(set) = out_guard.get_mut(&out_key) {
                         set.remove(&metadata.reference);
+                        if set.is_empty() {
+                            out_guard.remove(&out_key);
+                        }
                     }
                 }
             }
@@ -373,13 +382,32 @@ impl InMemoryElementIndex {
     ) -> Result<(), IndexError> {
         let mut elements_to_delete = Vec::new();
         let value_hash = get_value_hash(value);
+        let outer_key = (query_join.id.clone(), value_hash);
         let mut partial_joins_guard = self.partial_joins.write().await;
-        let partial_joins = partial_joins_guard
-            .entry((query_join.id.clone(), value_hash))
-            .or_default();
+
+        // Look the entry up rather than inserting it. Using `entry(..).or_default()`
+        // on the delete path would create an empty outer container that is never
+        // reclaimed, causing unbounded growth for high-cardinality/high-churn joins.
+        let Some(partial_joins) = partial_joins_guard.get_mut(&outer_key) else {
+            log::warn!(
+                "delete_source_join: no partial joins for query_join {} (value_hash {}) - \
+                 element {:?} may not have been fully registered",
+                query_join.id,
+                value_hash,
+                old_element
+            );
+            return Ok(());
+        };
 
         let did_remove = match partial_joins.get_mut(join_key) {
-            Some(element_set) => element_set.remove(old_element),
+            Some(element_set) => {
+                let removed = element_set.remove(old_element);
+                // Drop the now-empty set so emptied containers don't accumulate.
+                if element_set.is_empty() {
+                    partial_joins.remove(join_key);
+                }
+                removed
+            }
             None => {
                 log::warn!(
                     "delete_source_join: join_key {:?} not found for element {:?} in query_join {} - \
@@ -408,6 +436,12 @@ impl InMemoryElementIndex {
                     }
                 }
             }
+        }
+
+        // Drop the outer (join_id, value_hash) entry once its inner map is empty.
+        let outer_now_empty = partial_joins.is_empty();
+        if outer_now_empty {
+            partial_joins_guard.remove(&outer_key);
         }
 
         drop(partial_joins_guard);
@@ -576,7 +610,7 @@ impl ElementArchiveIndex for InMemoryElementIndex {
         time: ElementTimestamp,
     ) -> Result<Option<Arc<Element>>, IndexError> {
         if !self.archive_enabled {
-            return Err(IndexError::NotSupported);
+            return Err(IndexError::ArchiveNotEnabled);
         }
 
         let guard = self.element_archive.read().await;
@@ -595,7 +629,7 @@ impl ElementArchiveIndex for InMemoryElementIndex {
         range: TimestampRange<ElementTimestamp>,
     ) -> Result<ElementStream, IndexError> {
         if !self.archive_enabled {
-            return Err(IndexError::NotSupported);
+            return Err(IndexError::ArchiveNotEnabled);
         }
 
         let from = range.from;
@@ -1044,6 +1078,16 @@ mod tests {
 
         // Should complete successfully (no-op) without panic
         assert!(result.is_ok());
+
+        // The delete path must NOT create an outer entry for a missing key,
+        // otherwise emptied/absent containers leak and grow unbounded (issue #641).
+        {
+            let guard = index.partial_joins.read().await;
+            assert!(
+                guard.is_empty(),
+                "delete_source_join on a missing key must not create partial_joins entries"
+            );
+        }
     }
 
     /// Test that delete_source_join correctly removes an element that was previously registered.
@@ -1090,11 +1134,15 @@ mod tests {
             .await;
         assert!(result.is_ok());
 
-        // Verify element was removed
+        // Verify the emptied containers were pruned: removing the last element for
+        // this (join_id, value_hash) should drop both the inner set and the outer
+        // entry rather than leaving empty containers behind (see issue #641).
         {
             let guard = index.partial_joins.read().await;
-            let partial_joins = guard.get(&(query_join.id.clone(), value_hash)).unwrap();
-            assert!(!partial_joins.get(join_key).unwrap().contains(&element_ref));
+            assert!(
+                guard.get(&(query_join.id.clone(), value_hash)).is_none(),
+                "outer partial_joins entry should be pruned once its last element is removed"
+            );
         }
     }
 
@@ -1328,5 +1376,259 @@ mod tests {
             "slot_affinity should be empty after all churned relations are deleted, but had {} entries",
             guard.len()
         );
+    }
+
+    /// Regression test for issue #641: emptied partial-join containers must be
+    /// pruned so `partial_joins` does not grow unbounded for high-cardinality /
+    /// high-churn join values.
+    ///
+    /// Registers two elements under two distinct values, deletes the last element
+    /// for one value, and asserts that value's inner `HashSet` and outer entry are
+    /// both dropped while the other value remains intact.
+    #[tokio::test]
+    async fn test_delete_source_join_prunes_emptied_containers() {
+        let index = InMemoryElementIndex::new();
+
+        let query_join = QueryJoin {
+            id: "churn_join".to_string(),
+            keys: vec![QueryJoinKey {
+                label: "Label".to_string(),
+                property: "prop".to_string(),
+            }],
+        };
+        let join_key = &query_join.keys[0];
+
+        // Two elements registered under two different values (two outer entries).
+        let ref_a = ElementReference::new("test_source", "elem_a");
+        let value_a = ElementValue::String("value_a".into());
+        let hash_a = get_value_hash(&value_a);
+
+        let ref_b = ElementReference::new("test_source", "elem_b");
+        let value_b = ElementValue::String("value_b".into());
+        let hash_b = get_value_hash(&value_b);
+
+        {
+            let mut guard = index.partial_joins.write().await;
+            guard
+                .entry((query_join.id.clone(), hash_a))
+                .or_default()
+                .entry(join_key.clone())
+                .or_default()
+                .insert(ref_a.clone());
+            guard
+                .entry((query_join.id.clone(), hash_b))
+                .or_default()
+                .entry(join_key.clone())
+                .or_default()
+                .insert(ref_b.clone());
+        }
+
+        assert_eq!(index.partial_joins.read().await.len(), 2);
+
+        // Remove the only element for value_a.
+        index
+            .delete_source_join(&ref_a, &query_join, join_key, &value_a)
+            .await
+            .unwrap();
+
+        let guard = index.partial_joins.read().await;
+
+        // value_a's outer entry (and its now-empty inner set) must be gone.
+        assert!(
+            guard.get(&(query_join.id.clone(), hash_a)).is_none(),
+            "outer entry for the emptied value should be pruned"
+        );
+
+        // value_b must be untouched.
+        let remaining = guard
+            .get(&(query_join.id.clone(), hash_b))
+            .expect("outer entry for the still-populated value must remain");
+        assert!(remaining.get(join_key).unwrap().contains(&ref_b));
+        assert_eq!(guard.len(), 1, "only the emptied value should be pruned");
+    }
+
+    #[tokio::test]
+    async fn test_get_element_as_at_archive_disabled() {
+        let index = InMemoryElementIndex::new();
+        let result = index
+            .get_element_as_at(&ElementReference::new("source1", "node1"), 0)
+            .await;
+        assert!(matches!(result, Err(IndexError::ArchiveNotEnabled)));
+    }
+
+    #[tokio::test]
+    async fn test_get_element_versions_archive_disabled() {
+        let index = InMemoryElementIndex::new();
+        let result = index
+            .get_element_versions(
+                &ElementReference::new("source1", "node1"),
+                TimestampRange {
+                    from: TimestampBound::Included(0),
+                    to: 100,
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(IndexError::ArchiveNotEnabled)));
+    }
+
+    #[tokio::test]
+    async fn test_clear_archive_disabled_returns_not_supported() {
+        let index = InMemoryElementIndex::new();
+        let result = ElementArchiveIndex::clear(&index).await;
+        assert!(matches!(result, Err(IndexError::NotSupported)));
+    }
+
+    #[tokio::test]
+    async fn test_archive_reads_with_archive_enabled() {
+        let mut index = InMemoryElementIndex::new();
+        index.enable_archive();
+
+        let element = create_test_node("source1", "node1", "Person");
+        index.set_element(&element, &vec![0]).await.unwrap();
+
+        let as_at = index
+            .get_element_as_at(&ElementReference::new("source1", "node1"), 10)
+            .await
+            .unwrap();
+        assert!(as_at.is_some());
+
+        let versions = index
+            .get_element_versions(
+                &ElementReference::new("source1", "node1"),
+                TimestampRange {
+                    from: TimestampBound::Included(0),
+                    to: 100,
+                },
+            )
+            .await;
+        assert!(versions.is_ok());
+    }
+
+    /// Regression test for issue #642: deleting a relation must prune the now-empty
+    /// `(slot, node)` entries from `element_by_slot_in` / `element_by_slot_out` instead
+    /// of leaving empty `HashSet`s behind, which would leak memory over time.
+    #[tokio::test]
+    async fn test_slot_maps_pruned_after_relation_delete() {
+        let index = InMemoryElementIndex::new();
+
+        // Insert two relations that share the same slot but reference distinct nodes.
+        let rel1 = create_test_relation("source1", "rel1", "KNOWS", "in1", "out1");
+        let rel2 = create_test_relation("source1", "rel2", "KNOWS", "in2", "out2");
+        index.set_element(&rel1, &vec![0]).await.unwrap();
+        index.set_element(&rel2, &vec![0]).await.unwrap();
+
+        // Both relations should be indexed by their in/out nodes.
+        assert_eq!(index.element_by_slot_in.read().await.len(), 2);
+        assert_eq!(index.element_by_slot_out.read().await.len(), 2);
+
+        // Delete the first relation; its (slot, node) entries should be removed entirely,
+        // not left as empty sets.
+        index
+            .delete_element(&ElementReference::new("source1", "rel1"))
+            .await
+            .unwrap();
+
+        {
+            let in_guard = index.element_by_slot_in.read().await;
+            let out_guard = index.element_by_slot_out.read().await;
+            assert_eq!(in_guard.len(), 1, "empty in-slot entry should be pruned");
+            assert_eq!(out_guard.len(), 1, "empty out-slot entry should be pruned");
+            assert!(!in_guard.contains_key(&(0, ElementReference::new("source1", "in1"))));
+            assert!(!out_guard.contains_key(&(0, ElementReference::new("source1", "out1"))));
+        }
+
+        // Delete the second relation; both maps should now be empty.
+        index
+            .delete_element(&ElementReference::new("source1", "rel2"))
+            .await
+            .unwrap();
+
+        assert!(
+            index.element_by_slot_in.read().await.is_empty(),
+            "element_by_slot_in should be empty after all relations are deleted"
+        );
+        assert!(
+            index.element_by_slot_out.read().await.is_empty(),
+            "element_by_slot_out should be empty after all relations are deleted"
+        );
+        assert!(
+            index.slot_affinity.read().await.is_empty(),
+            "slot_affinity should be empty after all relations are deleted"
+        );
+    }
+
+    /// Regression test for the multi-slot case: a relation assigned to several slots must
+    /// have every `(slot, node)` entry pruned on delete, since `clear_slot_affinity`
+    /// iterates over all slots in the affinity set.
+    #[tokio::test]
+    async fn test_slot_maps_pruned_multi_slot() {
+        let index = InMemoryElementIndex::new();
+
+        let rel = create_test_relation("source1", "rel1", "KNOWS", "in1", "out1");
+        index.set_element(&rel, &vec![0, 1, 2]).await.unwrap();
+
+        // One (slot, node) entry per slot for both in and out maps.
+        assert_eq!(index.element_by_slot_in.read().await.len(), 3);
+        assert_eq!(index.element_by_slot_out.read().await.len(), 3);
+
+        index
+            .delete_element(&ElementReference::new("source1", "rel1"))
+            .await
+            .unwrap();
+
+        assert!(
+            index.element_by_slot_in.read().await.is_empty(),
+            "all in-slot entries should be pruned across every slot"
+        );
+        assert!(
+            index.element_by_slot_out.read().await.is_empty(),
+            "all out-slot entries should be pruned across every slot"
+        );
+        assert!(
+            index.slot_affinity.read().await.is_empty(),
+            "slot_affinity should be pruned for the deleted relation"
+        );
+    }
+
+    /// Ensure pruning does not drop a shared `(slot, node)` entry while another relation
+    /// still references that node.
+    #[tokio::test]
+    async fn test_slot_maps_retain_shared_node_entry() {
+        let index = InMemoryElementIndex::new();
+
+        // Two relations sharing the same in_node and out_node.
+        let rel1 = create_test_relation("source1", "rel1", "KNOWS", "in1", "out1");
+        let rel2 = create_test_relation("source1", "rel2", "KNOWS", "in1", "out1");
+        index.set_element(&rel1, &vec![0]).await.unwrap();
+        index.set_element(&rel2, &vec![0]).await.unwrap();
+
+        let in_key = (0, ElementReference::new("source1", "in1"));
+        let out_key = (0, ElementReference::new("source1", "out1"));
+
+        // Delete one relation: the shared entries must survive with the remaining ref.
+        index
+            .delete_element(&ElementReference::new("source1", "rel1"))
+            .await
+            .unwrap();
+
+        {
+            let in_guard = index.element_by_slot_in.read().await;
+            let out_guard = index.element_by_slot_out.read().await;
+            let in_set = in_guard.get(&in_key).expect("shared in entry retained");
+            let out_set = out_guard.get(&out_key).expect("shared out entry retained");
+            assert_eq!(in_set.len(), 1);
+            assert_eq!(out_set.len(), 1);
+            assert!(in_set.contains(&ElementReference::new("source1", "rel2")));
+            assert!(out_set.contains(&ElementReference::new("source1", "rel2")));
+        }
+
+        // Delete the last relation: entries should now be pruned.
+        index
+            .delete_element(&ElementReference::new("source1", "rel2"))
+            .await
+            .unwrap();
+
+        assert!(index.element_by_slot_in.read().await.is_empty());
+        assert!(index.element_by_slot_out.read().await.is_empty());
     }
 }

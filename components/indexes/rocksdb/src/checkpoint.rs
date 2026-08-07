@@ -29,10 +29,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::IndexDb;
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
-use rocksdb::{ColumnFamilyDescriptor, OptimisticTransactionDB, Options};
+use rocksdb::{ColumnFamilyDescriptor, Options};
 use tokio::task;
 
 use crate::RocksDbSessionState;
@@ -48,6 +49,7 @@ const RESULT_SEQUENCE_PREFIX: &str = "result_sequence:";
 /// Returns the column family descriptor for the stream_state CF.
 pub(crate) fn stream_state_cf_descriptor() -> ColumnFamilyDescriptor {
     let mut opts = Options::default();
+    crate::bound_write_buffer_history(&mut opts);
     opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(16));
     ColumnFamilyDescriptor::new(STREAM_STATE_CF, opts)
 }
@@ -57,12 +59,12 @@ pub(crate) fn stream_state_cf_descriptor() -> ColumnFamilyDescriptor {
 /// Shares a `RocksDbSessionState` with the result/element/future indexes so that
 /// `stage_checkpoint` writes land in the same transaction as index updates.
 pub struct RocksDbCheckpointStore {
-    db: Arc<OptimisticTransactionDB>,
+    db: Arc<IndexDb>,
     session_state: Arc<RocksDbSessionState>,
 }
 
 impl RocksDbCheckpointStore {
-    pub fn new(db: Arc<OptimisticTransactionDB>, session_state: Arc<RocksDbSessionState>) -> Self {
+    pub fn new(db: Arc<IndexDb>, session_state: Arc<RocksDbSessionState>) -> Self {
         Self { db, session_state }
     }
 }

@@ -17,6 +17,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::IndexDb;
 use async_trait::async_trait;
 use drasi_core::{
     evaluation::functions::aggregation::ValueAccumulator,
@@ -31,9 +32,7 @@ use prost::{
     bytes::{Bytes, BytesMut},
     Message,
 };
-use rocksdb::{
-    Direction, IteratorMode, MergeOperands, OptimisticTransactionDB, Options, SliceTransform,
-};
+use rocksdb::{Direction, IteratorMode, MergeOperands, Options, SliceTransform};
 use tokio::task;
 
 use crate::storage_models::{StoredValueAccumulator, StoredValueAccumulatorContainer};
@@ -45,7 +44,7 @@ use crate::RocksDbSessionState;
 ///     - values [set_id] -> ValueAccumulator
 ///     - sorted-sets [set_id + value] -> count {8 byte prefix (set_id)}
 pub struct RocksDbResultIndex {
-    db: Arc<OptimisticTransactionDB>,
+    db: Arc<IndexDb>,
     session_state: Arc<RocksDbSessionState>,
 }
 
@@ -59,7 +58,7 @@ impl RocksDbResultIndex {
     ///
     /// The database must already have the required column families created.
     /// Use `open_unified_db()` to open a database with all required CFs.
-    pub fn new(db: Arc<OptimisticTransactionDB>, session_state: Arc<RocksDbSessionState>) -> Self {
+    pub fn new(db: Arc<IndexDb>, session_state: Arc<RocksDbSessionState>) -> Self {
         RocksDbResultIndex { db, session_state }
     }
 }
@@ -366,6 +365,7 @@ impl ResultSequenceCounter for RocksDbResultIndex {
 
 pub(crate) fn get_lss_cf_options() -> Options {
     let mut lss_opts = Options::default();
+    crate::bound_write_buffer_history(&mut lss_opts);
     lss_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
     lss_opts.set_merge_operator_associative("increment", increment_merge);
     lss_opts.set_compaction_filter("remove0", compact);
@@ -374,12 +374,14 @@ pub(crate) fn get_lss_cf_options() -> Options {
 
 pub(crate) fn get_value_cf_options() -> Options {
     let mut values_opts = Options::default();
+    crate::bound_write_buffer_history(&mut values_opts);
     values_opts.optimize_for_point_lookup(VALUES_BLOCK_CACHE_SIZE);
     values_opts
 }
 
 pub(crate) fn get_metadata_cf_options() -> Options {
     let mut values_opts = Options::default();
+    crate::bound_write_buffer_history(&mut values_opts);
     values_opts.optimize_for_point_lookup(1);
     values_opts
 }
