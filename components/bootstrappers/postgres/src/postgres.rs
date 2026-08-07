@@ -797,29 +797,50 @@ fn row_column_to_postgres_value(row: &Row, idx: usize, type_oid: u32) -> Postgre
                 }
             }
         },
-        // Common 1-D arrays
-        1007 /* int4[] */ => match row.try_get::<_, Option<Vec<i32>>>(idx) {
-            Ok(Some(v)) => PostgresValue::Array(v.into_iter().map(PostgresValue::Int4).collect()),
+        // Common 1-D arrays. Use Vec<Option<T>> so NULL elements stay Null
+        // (Vec<T> cannot represent '{1,NULL,3}' and would fail try_get).
+        1007 /* int4[] */ => match row.try_get::<_, Option<Vec<Option<i32>>>>(idx) {
+            Ok(Some(v)) => PostgresValue::Array(
+                v.into_iter()
+                    .map(|o| o.map(PostgresValue::Int4).unwrap_or(PostgresValue::Null))
+                    .collect(),
+            ),
             Ok(None) => PostgresValue::Null,
             Err(_) => try_array_as_text(row, idx, type_oid),
         },
-        1009 /* text[] */ => match row.try_get::<_, Option<Vec<String>>>(idx) {
-            Ok(Some(v)) => PostgresValue::Array(v.into_iter().map(PostgresValue::Text).collect()),
+        1009 /* text[] */ => match row.try_get::<_, Option<Vec<Option<String>>>>(idx) {
+            Ok(Some(v)) => PostgresValue::Array(
+                v.into_iter()
+                    .map(|o| o.map(PostgresValue::Text).unwrap_or(PostgresValue::Null))
+                    .collect(),
+            ),
             Ok(None) => PostgresValue::Null,
             Err(_) => try_array_as_text(row, idx, type_oid),
         },
-        1016 /* int8[] */ => match row.try_get::<_, Option<Vec<i64>>>(idx) {
-            Ok(Some(v)) => PostgresValue::Array(v.into_iter().map(PostgresValue::Int8).collect()),
+        1016 /* int8[] */ => match row.try_get::<_, Option<Vec<Option<i64>>>>(idx) {
+            Ok(Some(v)) => PostgresValue::Array(
+                v.into_iter()
+                    .map(|o| o.map(PostgresValue::Int8).unwrap_or(PostgresValue::Null))
+                    .collect(),
+            ),
             Ok(None) => PostgresValue::Null,
             Err(_) => try_array_as_text(row, idx, type_oid),
         },
-        1005 /* int2[] */ => match row.try_get::<_, Option<Vec<i16>>>(idx) {
-            Ok(Some(v)) => PostgresValue::Array(v.into_iter().map(PostgresValue::Int2).collect()),
+        1005 /* int2[] */ => match row.try_get::<_, Option<Vec<Option<i16>>>>(idx) {
+            Ok(Some(v)) => PostgresValue::Array(
+                v.into_iter()
+                    .map(|o| o.map(PostgresValue::Int2).unwrap_or(PostgresValue::Null))
+                    .collect(),
+            ),
             Ok(None) => PostgresValue::Null,
             Err(_) => try_array_as_text(row, idx, type_oid),
         },
-        1000 /* bool[] */ => match row.try_get::<_, Option<Vec<bool>>>(idx) {
-            Ok(Some(v)) => PostgresValue::Array(v.into_iter().map(PostgresValue::Bool).collect()),
+        1000 /* bool[] */ => match row.try_get::<_, Option<Vec<Option<bool>>>>(idx) {
+            Ok(Some(v)) => PostgresValue::Array(
+                v.into_iter()
+                    .map(|o| o.map(PostgresValue::Bool).unwrap_or(PostgresValue::Null))
+                    .collect(),
+            ),
             Ok(None) => PostgresValue::Null,
             Err(_) => try_array_as_text(row, idx, type_oid),
         },

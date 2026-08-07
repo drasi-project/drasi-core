@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- Prefer text decode for float4/float8 when pgoutput payload is printable ASCII (same heuristic as int/time)
 - Omit unchanged TOAST (`b'u'`) properties instead of emitting Null so UPDATE does not clobber stored large values
 - Decode pgoutput **text** for uuid/date/time/jsonb/bytea so CDC no longer drops entire rows ([#669](https://github.com/drasi-project/drasi-core/issues/669))
 - Convert CDC properties via shared `PostgresValue::to_element_value` (preserve temporals; numeric→Float; include Null keys) for bootstrap parity ([#672](https://github.com/drasi-project/drasi-core/issues/672))

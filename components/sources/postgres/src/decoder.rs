@@ -502,34 +502,45 @@ impl PgOutputDecoder {
                 }
             }
             700 => {
-                // float4
-                if data.len() == 4 {
-                    // Binary format
-                    let mut cursor = Cursor::new(data);
-                    Ok(PostgresValue::Float4(cursor.read_f32::<BigEndian>()?))
-                } else {
-                    // Text format
+                // float4 — prefer text when payload is printable (pgoutput is text;
+                // length-4 text like "1.25" must not be read as IEEE bits).
+                if looks_like_utf8_text(data) {
                     let text = String::from_utf8_lossy(data);
                     let value = text
                         .trim()
                         .parse::<f32>()
-                        .map_err(|e| anyhow!("Failed to parse float4 from '{text}': {e}"))?;
+                        .map_err(|e| anyhow!("Failed to parse float4 (OID 700): {e}"))?;
+                    Ok(PostgresValue::Float4(value))
+                } else if data.len() == 4 {
+                    let mut cursor = Cursor::new(data);
+                    Ok(PostgresValue::Float4(cursor.read_f32::<BigEndian>()?))
+                } else {
+                    let text = String::from_utf8_lossy(data);
+                    let value = text
+                        .trim()
+                        .parse::<f32>()
+                        .map_err(|e| anyhow!("Failed to parse float4 (OID 700): {e}"))?;
                     Ok(PostgresValue::Float4(value))
                 }
             }
             701 => {
-                // float8
-                if data.len() == 8 {
-                    // Binary format
-                    let mut cursor = Cursor::new(data);
-                    Ok(PostgresValue::Float8(cursor.read_f64::<BigEndian>()?))
-                } else {
-                    // Text format
+                // float8 — same text-vs-binary disambiguation as float4 / int8.
+                if looks_like_utf8_text(data) {
                     let text = String::from_utf8_lossy(data);
                     let value = text
                         .trim()
                         .parse::<f64>()
-                        .map_err(|e| anyhow!("Failed to parse float8 from '{text}': {e}"))?;
+                        .map_err(|e| anyhow!("Failed to parse float8 (OID 701): {e}"))?;
+                    Ok(PostgresValue::Float8(value))
+                } else if data.len() == 8 {
+                    let mut cursor = Cursor::new(data);
+                    Ok(PostgresValue::Float8(cursor.read_f64::<BigEndian>()?))
+                } else {
+                    let text = String::from_utf8_lossy(data);
+                    let value = text
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|e| anyhow!("Failed to parse float8 (OID 701): {e}"))?;
                     Ok(PostgresValue::Float8(value))
                 }
             }
@@ -926,6 +937,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn decode_float4_text_not_binary_bits() {
+        let decoder = PgOutputDecoder::new();
+        // "1.25" is 4 bytes of ASCII — must not be read as f32 IEEE bits
+        let v = decoder
+            .decode_column_value(b"1.25", 700)
+            .expect("float4 text");
+        match v {
+            PostgresValue::Float4(f) => assert!((f - 1.25).abs() < 1e-6, "got {f}"),
+            other => panic!("expected Float4, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_float8_text_len8_not_binary_bits() {
+        let decoder = PgOutputDecoder::new();
+        // "1.234567" is 8 bytes — classic false binary length
+        let v = decoder
+            .decode_column_value(b"1.234567", 701)
+            .expect("float8 text");
+        match v {
+            PostgresValue::Float8(f) => assert!((f - 1.234567).abs() < 1e-9, "got {f}"),
+            other => panic!("expected Float8, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_decode_timestamptz_text_short_offset() {
         // PostgreSQL logical replication sends the short-form timezone offset.
         let decoder = PgOutputDecoder::new();
@@ -973,6 +1011,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn test_decode_timestamptz_text_short_negative_offset() {
         let decoder = PgOutputDecoder::new();
         let value = decoder
