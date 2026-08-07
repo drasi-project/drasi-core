@@ -357,7 +357,7 @@ impl PgOutputDecoder {
 
             let value = match tuple_type {
                 b'n' => PostgresValue::Null,
-                b'u' => PostgresValue::Null, // Unchanged TOAST value
+                b'u' => PostgresValue::UnchangedToast, // unchanged TOAST — omit property
                 b't' => {
                     let length = cursor.read_u32::<BigEndian>()? as usize;
                     // Ensure we have enough data to read

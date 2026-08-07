@@ -2231,3 +2231,277 @@ async fn test_type_parity_bootstrap_and_cdc() -> Result<()> {
     pg.cleanup().await;
     Ok(())
 }
+
+/// Regression: UPDATE that leaves a TOASTed column untouched must omit that
+/// property (not emit Null), so merge_missing_properties can keep the stored value.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_toast_unchanged_omitted_on_update() -> Result<()> {
+    use drasi_core::models::ElementValue;
+    use postgres_helpers::execute_sql;
+
+    init_logging();
+
+    const TABLE: &str = "toast_omit";
+    const PUBLICATION: &str = "drasi_toast_omit_pub";
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    execute_sql(
+        &client,
+        &format!(
+            "CREATE TABLE {TABLE} (
+                id INTEGER PRIMARY KEY,
+                big TEXT,
+                other TEXT
+            )"
+        ),
+    )
+    .await?;
+    execute_sql(
+        &client,
+        &format!("ALTER TABLE {TABLE} ALTER COLUMN big SET STORAGE EXTERNAL"),
+    )
+    .await?;
+    execute_sql(
+        &client,
+        &format!("ALTER TABLE {TABLE} REPLICA IDENTITY FULL"),
+    )
+    .await?;
+    grant_table_access(&client, TABLE, "postgres").await?;
+    create_publication(&client, PUBLICATION, &[TABLE.to_string()]).await?;
+
+    let big_val = "x".repeat(16 * 1024);
+    client
+        .execute(
+            &format!("INSERT INTO {TABLE} (id, big, other) VALUES ($1, $2, $3)"),
+            &[&1i32, &big_val.as_str(), &"before"],
+        )
+        .await?;
+
+    let slot = slot_name();
+    create_logical_replication_slot(&client, &slot).await?;
+
+    let source_config = PostgresSourceConfig {
+        host: pg.config().host.clone(),
+        port: pg.config().port,
+        database: pg.config().database.clone(),
+        user: pg.config().user.clone(),
+        password: pg.config().password.clone(),
+        tables: vec![TABLE.to_string()],
+        slot_name: slot.clone(),
+        publication_name: PUBLICATION.to_string(),
+        ssl_mode: SslMode::Disable,
+        table_keys: vec![TableKeyConfig {
+            table: TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+    let bootstrap_config = PostgresBootstrapConfig {
+        host: source_config.host.clone(),
+        port: source_config.port,
+        database: source_config.database.clone(),
+        user: source_config.user.clone(),
+        password: source_config.password.clone(),
+        tables: source_config.tables.clone(),
+        slot_name: source_config.slot_name.clone(),
+        publication_name: source_config.publication_name.clone(),
+        ssl_mode: BootstrapSslMode::Disable,
+        table_keys: vec![BootstrapTableKeyConfig {
+            table: TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+
+    let source = PostgresReplicationSource::builder("pg-toast-omit-source")
+        .with_config(source_config)
+        .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
+        .build()?;
+
+    source.start().await?;
+    wait_for_source_running(&source).await;
+
+    let mut settings = subscription_settings("pg-toast-omit-source", "q-toast-omit", None, true);
+    settings.enable_bootstrap = true;
+    settings.nodes = HashSet::from([TABLE.to_string()]);
+    let response = source.subscribe(settings).await?;
+    let mut bootstrap_rx = response
+        .bootstrap_receiver
+        .expect("bootstrap_receiver required");
+    let mut cdc_rx = response.receiver;
+
+    loop {
+        match tokio::time::timeout(Duration::from_secs(20), bootstrap_rx.recv()).await {
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+
+    client
+        .execute(
+            &format!("UPDATE {TABLE} SET other = $1 WHERE id = $2"),
+            &[&"after", &1i32],
+        )
+        .await?;
+
+    let mut saw_update = false;
+    let mut big_on_update: Option<ElementValue> = None;
+    let mut other_on_update: Option<ElementValue> = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), cdc_rx.recv()).await {
+            Ok(Ok(wrapper)) => {
+                if let SourceEvent::Change(SourceChange::Update { element }) = &wrapper.event {
+                    if element.get_property("id") == &ElementValue::Integer(1) {
+                        saw_update = true;
+                        big_on_update = element.get_properties().get("big").cloned();
+                        other_on_update = element.get_properties().get("other").cloned();
+                        break;
+                    }
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => {}
+        }
+    }
+
+    source.stop().await?;
+    pg.cleanup().await;
+
+    assert!(saw_update, "expected CDC UPDATE for id=1");
+    assert_eq!(
+        other_on_update,
+        Some(ElementValue::String(Arc::from("after")))
+    );
+    assert!(
+        big_on_update.is_none(),
+        "unchanged TOAST column must be omitted, got {big_on_update:?}"
+    );
+    Ok(())
+}
+
+/// Regression: domain-over-integer must bootstrap as Integer, not Null.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_domain_over_integer_bootstrap() -> Result<()> {
+    use drasi_core::models::ElementValue;
+    use postgres_helpers::execute_sql;
+
+    init_logging();
+
+    const TABLE: &str = "domain_int";
+    const PUBLICATION: &str = "drasi_domain_int_pub";
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    execute_sql(
+        &client,
+        "CREATE DOMAIN posint_dom AS integer CHECK (VALUE > 0)",
+    )
+    .await?;
+    execute_sql(
+        &client,
+        &format!(
+            "CREATE TABLE {TABLE} (
+                id INTEGER PRIMARY KEY,
+                n posint_dom
+            )"
+        ),
+    )
+    .await?;
+    execute_sql(
+        &client,
+        &format!("ALTER TABLE {TABLE} REPLICA IDENTITY FULL"),
+    )
+    .await?;
+    grant_table_access(&client, TABLE, "postgres").await?;
+    create_publication(&client, PUBLICATION, &[TABLE.to_string()]).await?;
+
+    execute_sql(
+        &client,
+        &format!("INSERT INTO {TABLE} (id, n) VALUES (1, 42::posint_dom)"),
+    )
+    .await?;
+
+    let slot = slot_name();
+    create_logical_replication_slot(&client, &slot).await?;
+
+    let source_config = PostgresSourceConfig {
+        host: pg.config().host.clone(),
+        port: pg.config().port,
+        database: pg.config().database.clone(),
+        user: pg.config().user.clone(),
+        password: pg.config().password.clone(),
+        tables: vec![TABLE.to_string()],
+        slot_name: slot.clone(),
+        publication_name: PUBLICATION.to_string(),
+        ssl_mode: SslMode::Disable,
+        table_keys: vec![TableKeyConfig {
+            table: TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+    let bootstrap_config = PostgresBootstrapConfig {
+        host: source_config.host.clone(),
+        port: source_config.port,
+        database: source_config.database.clone(),
+        user: source_config.user.clone(),
+        password: source_config.password.clone(),
+        tables: source_config.tables.clone(),
+        slot_name: source_config.slot_name.clone(),
+        publication_name: source_config.publication_name.clone(),
+        ssl_mode: BootstrapSslMode::Disable,
+        table_keys: vec![BootstrapTableKeyConfig {
+            table: TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+
+    let source = PostgresReplicationSource::builder("pg-domain-int-source")
+        .with_config(source_config)
+        .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
+        .build()?;
+
+    source.start().await?;
+    wait_for_source_running(&source).await;
+
+    let mut settings = subscription_settings("pg-domain-int-source", "q-domain-int", None, true);
+    settings.enable_bootstrap = true;
+    settings.nodes = HashSet::from([TABLE.to_string()]);
+    let response = source.subscribe(settings).await?;
+    let mut bootstrap_rx = response
+        .bootstrap_receiver
+        .expect("bootstrap_receiver required");
+
+    let mut n_val: Option<ElementValue> = None;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(30), bootstrap_rx.recv()).await {
+            Ok(Some(event)) => {
+                if let SourceChange::Insert { element } = event.change {
+                    if element.get_property("id") == &ElementValue::Integer(1) {
+                        n_val = element.get_properties().get("n").cloned();
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(_) => panic!("timeout draining bootstrap"),
+        }
+    }
+
+    source.stop().await?;
+    pg.cleanup().await;
+
+    assert_eq!(
+        n_val,
+        Some(ElementValue::Integer(42)),
+        "domain-over-integer must bootstrap as Integer(42), got {n_val:?}"
+    );
+    Ok(())
+}

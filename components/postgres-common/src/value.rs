@@ -46,6 +46,10 @@ pub enum PostgresValue {
     Jsonb(JsonValue),
     Array(Vec<PostgresValue>),
     Bytea(Vec<u8>),
+    /// Column present in a pgoutput tuple but value was not sent (unchanged TOAST).
+    /// Must not be mapped to [`ElementValue::Null`]; property should be omitted so
+    /// callers can preserve the previously stored value.
+    UnchangedToast,
 }
 
 impl PostgresValue {
@@ -53,6 +57,8 @@ impl PostgresValue {
     pub fn to_json(&self) -> JsonValue {
         match self {
             PostgresValue::Null => JsonValue::Null,
+            // Not a SQL NULL — omit at property-map layer; JSON null only if forced.
+            PostgresValue::UnchangedToast => JsonValue::Null,
             PostgresValue::Bool(b) => JsonValue::Bool(*b),
             PostgresValue::Int2(i) => JsonValue::Number((*i).into()),
             PostgresValue::Int4(i) => JsonValue::Number((*i).into()),
@@ -96,6 +102,8 @@ impl PostgresValue {
     pub fn to_element_value(&self) -> ElementValue {
         match self {
             PostgresValue::Null => ElementValue::Null,
+            // Callers must omit UnchangedToast properties; this arm is defensive only.
+            PostgresValue::UnchangedToast => ElementValue::Null,
             PostgresValue::Bool(b) => ElementValue::Bool(*b),
             PostgresValue::Int2(i) => ElementValue::Integer(*i as i64),
             PostgresValue::Int4(i) => ElementValue::Integer(*i as i64),
@@ -128,10 +136,15 @@ impl PostgresValue {
         matches!(self, PostgresValue::Null)
     }
 
+    /// Returns `true` if this is an unchanged TOAST placeholder from pgoutput (`b'u'`).
+    pub fn is_unchanged_toast(&self) -> bool {
+        matches!(self, PostgresValue::UnchangedToast)
+    }
+
     /// Stable string form for element ID key parts.
     pub fn to_key_string(&self) -> Option<String> {
         match self {
-            PostgresValue::Null => None,
+            PostgresValue::Null | PostgresValue::UnchangedToast => None,
             PostgresValue::Bool(b) => Some(b.to_string()),
             PostgresValue::Int2(i) => Some(i.to_string()),
             PostgresValue::Int4(i) => Some(i.to_string()),
@@ -278,5 +291,12 @@ mod tests {
             }
             other => panic!("expected List, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn unchanged_toast_is_not_sql_null() {
+        assert!(!PostgresValue::UnchangedToast.is_null());
+        assert!(PostgresValue::UnchangedToast.is_unchanged_toast());
+        assert_eq!(PostgresValue::UnchangedToast.to_key_string(), None);
     }
 }

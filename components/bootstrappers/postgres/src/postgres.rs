@@ -510,14 +510,20 @@ impl PostgresBootstrapHandler {
         transaction: &Transaction<'_>,
         table_name: &str,
     ) -> Result<Vec<ColumnInfo>> {
-        // Prefer pg_attribute.atttypid for accurate OIDs (arrays, domains, etc.).
+        // Prefer pg_attribute + pg_type: use atttypid, but resolve domains to typbasetype
+        // so CREATE DOMAIN ... AS integer reads as int4 (not an unknown domain OID).
         // Fall back to information_schema mapping if the catalog query fails.
         let catalog_result = transaction
             .query(
-                "SELECT a.attname AS column_name, a.atttypid::int4 AS type_oid
+                "SELECT a.attname AS column_name,
+                        CASE
+                          WHEN t.typtype = 'd' THEN t.typbasetype
+                          ELSE a.atttypid
+                        END::int4 AS type_oid
                  FROM pg_attribute a
                  JOIN pg_class c ON a.attrelid = c.oid
                  JOIN pg_namespace n ON c.relnamespace = n.oid
+                 JOIN pg_type t ON a.atttypid = t.oid
                  WHERE n.nspname = 'public'
                    AND c.relname = $1
                    AND a.attnum > 0

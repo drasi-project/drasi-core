@@ -485,6 +485,11 @@ impl ReplicationStream {
         let mut properties = drasi_core::models::ElementPropertyMap::new();
         for (i, value) in tuple.iter().enumerate() {
             if let Some(column) = relation.columns.get(i) {
+                // Unchanged TOAST is not SQL NULL — omit so merge_missing_properties can keep
+                // the previously stored value (do not clobber with Null).
+                if value.is_unchanged_toast() {
+                    continue;
+                }
                 properties.insert(&column.name, value.to_element_value());
             }
         }
@@ -535,6 +540,9 @@ impl ReplicationStream {
         // Process new tuple (after state) — include Null properties for parity with bootstrap
         for (i, column) in relation.columns.iter().enumerate() {
             if let Some(value) = new_tuple.get(i) {
+                if value.is_unchanged_toast() {
+                    continue;
+                }
                 after_properties.insert(&column.name, value.to_element_value());
             }
         }
