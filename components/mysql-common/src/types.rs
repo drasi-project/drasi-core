@@ -23,9 +23,6 @@
 
 use chrono::{TimeZone, Utc};
 
-/// Soft cap for JSON canonicalization to avoid unbounded heap allocation.
-const MAX_JSON_CANONICALIZE_BYTES: usize = 16 * 1024 * 1024;
-
 /// Format a MySQL DATETIME/DATE value.
 ///
 /// When `fsp` is `Some(n)`, always emit exactly `n` fractional digits (padded/truncated).
@@ -63,7 +60,14 @@ pub fn format_time(
 }
 
 /// Format a Unix-epoch TIMESTAMP (seconds + optional micros) as a UTC datetime string.
+///
+/// MySQL reserves epoch second 0 for the zero TIMESTAMP sentinel
+/// (`0000-00-00 00:00:00`), not Unix epoch. Map that back so CDC matches
+/// bootstrap text-protocol output.
 pub fn format_timestamp_epoch(secs: i64, micros: u32, fsp: Option<u8>) -> String {
+    if secs == 0 && micros == 0 {
+        return append_fractional("0000-00-00 00:00:00".to_string(), 0, fsp);
+    }
     match Utc.timestamp_opt(secs, micros.saturating_mul(1_000)) {
         chrono::LocalResult::Single(dt) => {
             let base = dt.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -162,12 +166,10 @@ pub fn set_labels(bitmask: &[u8], labels: &[String]) -> String {
 
 /// Canonicalize JSON text to compact `serde_json` form.
 ///
-/// Returns the original text if parsing fails or the payload exceeds
-/// [`MAX_JSON_CANONICALIZE_BYTES`].
+/// Returns the original text if parsing fails. Applied on both bootstrap and
+/// CDC paths so spacing/key formatting stay aligned (CDC Jsonb also goes
+/// through `serde_json::to_string`).
 pub fn canonicalize_json_text(text: &str) -> String {
-    if text.len() > MAX_JSON_CANONICALIZE_BYTES {
-        return text.to_string();
-    }
     match serde_json::from_str::<serde_json::Value>(text) {
         Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| text.to_string()),
         Err(_) => text.to_string(),
@@ -261,6 +263,12 @@ mod tests {
             format_timestamp_epoch(secs, 123456, Some(6)),
             "2025-06-15 13:45:30.123456"
         );
+        // MySQL zero TIMESTAMP sentinel (epoch second 0), not Unix epoch.
+        assert_eq!(format_timestamp_epoch(0, 0, None), "0000-00-00 00:00:00");
+        assert_eq!(
+            format_timestamp_epoch(0, 0, Some(6)),
+            "0000-00-00 00:00:00.000000"
+        );
     }
 
     #[test]
@@ -331,12 +339,5 @@ mod tests {
         assert_eq!(canonicalize_json_text(r#"[ 1, 2 ]"#), "[1,2]");
         // invalid JSON is left alone
         assert_eq!(canonicalize_json_text("not-json"), "not-json");
-    }
-
-    #[test]
-    fn test_canonicalize_json_text_rejects_oversized() {
-        let huge = format!("{{\"k\":\"{}\"}}", "x".repeat(MAX_JSON_CANONICALIZE_BYTES));
-        // Over the soft cap: returned unchanged (still valid JSON text, just not recompacted).
-        assert_eq!(canonicalize_json_text(&huge), huge);
     }
 }

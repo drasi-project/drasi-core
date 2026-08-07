@@ -285,6 +285,7 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
             datetime_col DATETIME(6) NOT NULL,
             datetime_zero_col DATETIME(6) NOT NULL,
             timestamp_col TIMESTAMP NOT NULL,
+            timestamp_zero_col TIMESTAMP NULL,
             year_col YEAR NOT NULL,
             enum_col ENUM('red', 'green', 'blue') NOT NULL,
             set_col SET('a', 'b', 'c') NOT NULL,
@@ -306,17 +307,20 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
         .unwrap();
     conn.query_drop("FLUSH PRIVILEGES").await.unwrap();
 
+    // Allow zero YEAR / TIMESTAMP sentinels for edge-case parity coverage.
+    conn.query_drop("SET SESSION sql_mode = ''").await.unwrap();
+
     // Insert a row BEFORE starting the source, so bootstrap will pick it up.
     conn.query_drop(
         "INSERT INTO type_test
             (int_col, bigint_col, float_col, double_col, decimal_col, varchar_col,
              tinyint_col, bool_col, date_col, time_col, datetime_col, datetime_zero_col,
-             timestamp_col, year_col, enum_col, set_col, json_col, marker)
+             timestamp_col, timestamp_zero_col, year_col, enum_col, set_col, json_col, marker)
         VALUES
             (42, 9876543210, 3.14, 2.718281828, 99.95, 'hello',
              7, TRUE, '2025-06-15', '13:45:30.123456', '2025-06-15 13:45:30.123456',
-             '2025-06-15 13:45:30.000000', '2025-06-15 13:45:30',
-             2025, 'green', 'a,c', '{\"k\": 1}', 'v1')",
+             '2025-06-15 13:45:30.000000', '2025-06-15 13:45:30', '0000-00-00 00:00:00',
+             0, 'green', 'a,c', '{\"k\": 1}', 'v1')",
     )
     .await
     .unwrap();
@@ -373,6 +377,7 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
                 t.datetime_col AS datetime_col,
                 t.datetime_zero_col AS datetime_zero_col,
                 t.timestamp_col AS timestamp_col,
+                t.timestamp_zero_col AS timestamp_zero_col,
                 t.year_col AS year_col,
                 t.enum_col AS enum_col,
                 t.set_col AS set_col,
@@ -472,6 +477,7 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
         "datetime_col",
         "datetime_zero_col",
         "timestamp_col",
+        "timestamp_zero_col",
         "year_col",
         "enum_col",
         "set_col",

@@ -368,6 +368,11 @@ fn convert_int(
         Some(ColumnType::MYSQL_TYPE_TIMESTAMP | ColumnType::MYSQL_TYPE_TIMESTAMP2) => {
             ElementValue::String(Arc::from(format_timestamp_epoch(val, 0, fsp)))
         }
+        // mysql_common maps YEAR wire byte 0 → 1900; bootstrap text is "0000" → 0.
+        // 1900 is outside the legal YEAR range, so remap back to 0 for parity.
+        Some(ColumnType::MYSQL_TYPE_YEAR) => {
+            ElementValue::Integer(if val == 1900 { 0 } else { val })
+        }
         _ => ElementValue::Integer(val),
     }
 }
@@ -389,11 +394,11 @@ fn convert_bytes(
     ctx: Option<&ColumnContext>,
 ) -> ElementValue {
     match col_type {
-        // YEAR columns come as Bytes in binlog; parse as integer for consistency
+        // YEAR may arrive as text ("2025"/"0000") or as mysql_common's 1900+offset form.
         Some(ColumnType::MYSQL_TYPE_YEAR) => {
             let text = String::from_utf8_lossy(bytes);
             if let Ok(val) = text.parse::<i64>() {
-                ElementValue::Integer(val)
+                ElementValue::Integer(if val == 1900 { 0 } else { val })
             } else {
                 ElementValue::String(Arc::from(text.into_owned()))
             }
@@ -513,6 +518,25 @@ mod tests {
         let c = ctx(ColumnType::MYSQL_TYPE_YEAR, None, None, None);
         let v = mysql_value_to_element_value(&Value::Bytes(b"2025".to_vec()), Some(&c));
         assert_eq!(v, ElementValue::Integer(2025));
+    }
+
+    #[test]
+    fn test_year_zero_remaps_mysql_common_offset() {
+        let c = ctx(ColumnType::MYSQL_TYPE_YEAR, None, None, None);
+        // mysql_common decodes YEAR wire byte 0 as Int(1900).
+        let v = mysql_value_to_element_value(&Value::Int(1900), Some(&c));
+        assert_eq!(v, ElementValue::Integer(0));
+        let v = mysql_value_to_element_value(&Value::Bytes(b"0000".to_vec()), Some(&c));
+        assert_eq!(v, ElementValue::Integer(0));
+        let v = mysql_value_to_element_value(&Value::Bytes(b"1900".to_vec()), Some(&c));
+        assert_eq!(v, ElementValue::Integer(0));
+    }
+
+    #[test]
+    fn test_timestamp_zero_sentinel() {
+        let c = ctx(ColumnType::MYSQL_TYPE_TIMESTAMP, Some(0), None, None);
+        let v = mysql_value_to_element_value(&Value::Int(0), Some(&c));
+        assert_eq!(v, ElementValue::String(Arc::from("0000-00-00 00:00:00")));
     }
 
     #[test]

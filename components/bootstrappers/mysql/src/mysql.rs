@@ -224,14 +224,12 @@ impl MySqlBootstrapHandler {
         context: &BootstrapContext,
         event_tx: &BootstrapEventSender,
     ) -> Result<usize> {
-        let column_fsp = self.load_column_fsp(conn, table_name).await?;
         let query = format!("SELECT * FROM {}", quote_identifier(table_name));
         let mut result = conn.query_iter(query).await?;
         let mut total = 0usize;
 
         while let Some(row) = result.next().await? {
-            let source_change =
-                self.row_to_source_change(&row, label, table_name, context, &column_fsp)?;
+            let source_change = self.row_to_source_change(&row, label, table_name, context)?;
             let event = BootstrapEvent {
                 source_id: context.source_id.clone(),
                 change: source_change,
@@ -246,54 +244,12 @@ impl MySqlBootstrapHandler {
         Ok(total)
     }
 
-    /// Load DATETIME/TIME/TIMESTAMP fractional-second precision per column.
-    ///
-    /// Needed so binary-protocol `Value::Date`/`Value::Time` paths can emit the same
-    /// trailing zeros that CDC produces from TableMap FSP metadata.
-    async fn load_column_fsp(
-        &self,
-        conn: &mut Conn,
-        table_name: &str,
-    ) -> Result<HashMap<String, u8>> {
-        let rows: Vec<Row> = conn
-            .exec(
-                "SELECT COLUMN_NAME, DATETIME_PRECISION \
-                 FROM information_schema.COLUMNS \
-                 WHERE TABLE_SCHEMA = DATABASE() \
-                   AND TABLE_NAME = ? \
-                   AND DATA_TYPE IN ('datetime', 'timestamp', 'time')",
-                (table_name,),
-            )
-            .await
-            .with_context(|| {
-                format!("Failed to load temporal column precision for table '{table_name}'")
-            })?;
-
-        let mut map = HashMap::new();
-        for row in rows {
-            let name: String = match row.get(0) {
-                Some(v) => v,
-                None => continue,
-            };
-            // DATETIME_PRECISION is NULL for non-fractional types in some versions;
-            // treat NULL as 0. MySQL may surface the value as integer widths beyond u8.
-            let precision = row
-                .get::<Option<u64>, _>(1)
-                .flatten()
-                .map(|v| v.min(6) as u8)
-                .unwrap_or(0);
-            map.insert(name, precision);
-        }
-        Ok(map)
-    }
-
     fn row_to_source_change(
         &self,
         row: &Row,
         label: &str,
         table_name: &str,
         context: &BootstrapContext,
-        column_fsp: &HashMap<String, u8>,
     ) -> Result<SourceChange> {
         let mut properties = ElementPropertyMap::new();
         let mut key_parts = Vec::new();
@@ -301,8 +257,7 @@ impl MySqlBootstrapHandler {
         let columns = row.columns_ref();
         for (idx, column) in columns.iter().enumerate() {
             let col_name = column.name_str().to_string();
-            let fsp = column_fsp.get(&col_name).copied();
-            let value = self.convert_column_value(row, idx, column.column_type(), fsp);
+            let value = self.convert_column_value(row, idx, column.column_type());
 
             if let Some(keys) = self.table_keys.get(table_name) {
                 if keys.contains(&col_name) {
@@ -341,16 +296,15 @@ impl MySqlBootstrapHandler {
 
     /// Converts a MySQL row value to an ElementValue using column type metadata.
     ///
-    /// The text protocol returns all values as `Value::Bytes`. We use the column
-    /// type to properly parse integers, floats, dates, etc. so that bootstrap
-    /// and CDC produce identical type mappings.
-    fn convert_column_value(
-        &self,
-        row: &Row,
-        idx: usize,
-        col_type: ColumnType,
-        column_fsp: Option<u8>,
-    ) -> ElementValue {
+    /// Bootstrap uses the text protocol (`query_iter`), which returns values as
+    /// `Value::Bytes`. We use the column type to parse integers, floats, dates,
+    /// etc. so bootstrap and CDC produce identical type mappings.
+    ///
+    /// `Value::Date` / `Value::Time` arms are retained for defensive completeness
+    /// if a binary-protocol path is ever used; text-protocol DATETIME/TIME
+    /// parity (including trailing zeros) comes from MySQL's text representation
+    /// and `normalize_time_text`.
+    fn convert_column_value(&self, row: &Row, idx: usize, col_type: ColumnType) -> ElementValue {
         match row.as_ref(idx) {
             None | Some(mysql_async::Value::NULL) => ElementValue::Null,
             Some(mysql_async::Value::Int(val)) => ElementValue::Integer(*val),
@@ -363,18 +317,13 @@ impl MySqlBootstrapHandler {
             }
             Some(mysql_async::Value::Float(val)) => ElementValue::Float(OrderedFloat(*val as f64)),
             Some(mysql_async::Value::Double(val)) => ElementValue::Float(OrderedFloat(*val)),
-            Some(mysql_async::Value::Date(y, m, d, h, min, s, micros)) => {
-                let fsp = match col_type {
-                    ColumnType::MYSQL_TYPE_DATE | ColumnType::MYSQL_TYPE_NEWDATE => Some(0),
-                    _ => column_fsp,
-                };
-                ElementValue::String(Arc::from(format_datetime(
-                    *y, *m, *d, *h, *min, *s, *micros, fsp,
-                )))
-            }
+            // Binary-protocol fallback only; text protocol uses the Bytes arm below.
+            Some(mysql_async::Value::Date(y, m, d, h, min, s, micros)) => ElementValue::String(
+                Arc::from(format_datetime(*y, *m, *d, *h, *min, *s, *micros, None)),
+            ),
             Some(mysql_async::Value::Time(neg, days, hours, minutes, seconds, micros)) => {
                 ElementValue::String(Arc::from(format_time(
-                    *neg, *days, *hours, *minutes, *seconds, *micros, column_fsp,
+                    *neg, *days, *hours, *minutes, *seconds, *micros, None,
                 )))
             }
             Some(mysql_async::Value::Bytes(bytes)) => {
