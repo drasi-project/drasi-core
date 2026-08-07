@@ -34,7 +34,10 @@ use super::types::FfiStr;
 ///   `KeyedSnapshotRow { k: <row_signature>, v: <row> }` JSON envelope instead
 ///   of a bare row, so the engine's canonical `row_signature` survives FFI
 ///   (fixes #605 duplicate dashboard rows on the plugin path).
-pub const FFI_SDK_VERSION: &str = "0.11.0";
+/// - `0.12.0`: `FfiPluginRegistration` gained a trailing `set_log_level`
+///   field. The host reports its effective log level and the plugin drops
+///   more verbose records before formatting or crossing the FFI (#685).
+pub const FFI_SDK_VERSION: &str = "0.12.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");

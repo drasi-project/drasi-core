@@ -630,6 +630,10 @@ macro_rules! export_plugin {
             );
         }
 
+        extern "C" fn __set_log_level_impl(level: $crate::ffi::FfiLogLevelFilter) {
+            $crate::ffi::tracing_bridge::set_forward_level(level);
+        }
+
         // ── Config resolver callback storage ──
         static __CONFIG_RESOLVER_CB: ::std::sync::atomic::AtomicPtr<()> =
             ::std::sync::atomic::AtomicPtr::new(::std::ptr::null_mut());
@@ -781,6 +785,7 @@ macro_rules! export_plugin {
                     set_log_callback: __set_log_callback_impl,
                     set_lifecycle_callback: __set_lifecycle_callback_impl,
                     set_config_resolver: __set_config_resolver_impl,
+                    set_log_level: __set_log_level_impl,
                 });
                 // Host takes ownership of the boxed-slice allocations. It will
                 // reclaim them via `Vec::from_raw_parts(ptr, len, len)` + drop.

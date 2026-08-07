@@ -24,21 +24,39 @@ pub use common::{OperationType, QueryConfig, TemplateSpec};
 
 /// Configuration for the MS SQL Server Stored Procedure reaction
 ///
-/// Supports Handlebars templates for stored procedure commands.
-/// Commands use @after.fieldName and @before.fieldName syntax to reference query result fields.
+/// Commands are Handlebars templates that render to a SQL batch (typically an
+/// `EXEC` statement). Row data is passed to the procedure with the `{{param}}`
+/// helper, which binds each value as a positional parameter (`@P1`, `@P2`, …)
+/// through the driver rather than interpolating it into the SQL text.
 ///
 /// Commands can be configured at two levels:
 /// 1. **Default templates**: Applied to all queries unless overridden (using `default_template`)
 /// 2. **Per-query templates**: Override default for specific queries (using `routes`)
 ///
-/// ## Template Variables
+/// ## Template context
 ///
-/// Templates have access to the following variables:
-/// - `after` - The data after the change (available for ADD and UPDATE)
-/// - `before` - The data before the change (available for UPDATE and DELETE)
+/// Templates have access to the following keys:
+/// - `after` - The row after the change (available for ADD and UPDATE)
+/// - `before` - The row before the change (available for UPDATE and DELETE)
 /// - `data` - The raw data field (available for UPDATE)
-/// - `query_name` - The name of the query that produced the result
+/// - `query_name` / `query_id` - The id of the query that produced the result
 /// - `operation` - The operation type ("ADD", "UPDATE", or "DELETE")
+/// - `timestamp` - The result timestamp (RFC3339)
+/// - `metadata` - The result metadata map
+///
+/// ## Template helpers
+///
+/// - `{{param <path>}}` binds the value at `<path>` as a positional SQL
+///   parameter and renders the matching placeholder.
+/// - `{{json <path>}}` renders the value at `<path>` as a JSON string; combine
+///   it with `param` (e.g. `{{param (json after)}}`) to bind a whole object.
+///   Do not use `{{json <path>}}` directly inside a SQL literal: it writes
+///   unescaped text and would reintroduce SQL injection. Always bind it via
+///   `param`.
+///
+/// Rendering runs in strict mode: a template referencing a field that is absent
+/// from the current row fails to render, and the event is skipped rather than a
+/// command being executed with missing data.
 ///
 /// ## Example with Default Template
 ///
@@ -49,9 +67,9 @@ pub use common::{OperationType, QueryConfig, TemplateSpec};
 ///     user: "sa".to_string(),
 ///     password: "password".to_string(),
 ///     default_template: Some(QueryConfig {
-///         added: Some(TemplateSpec::new("EXEC add_user @after.id, @after.name, @after.email")),
-///         updated: Some(TemplateSpec::new("EXEC update_user @after.id, @after.name, @after.email")),
-///         deleted: Some(TemplateSpec::new("EXEC delete_user @before.id")),
+///         added: Some(TemplateSpec::new("EXEC add_user {{param after.id}}, {{param after.name}}, {{param after.email}}")),
+///         updated: Some(TemplateSpec::new("EXEC update_user {{param after.id}}, {{param after.name}}, {{param after.email}}")),
+///         deleted: Some(TemplateSpec::new("EXEC delete_user {{param before.id}}")),
 ///     }),
 ///     ..Default::default()
 /// };
@@ -64,9 +82,9 @@ pub use common::{OperationType, QueryConfig, TemplateSpec};
 ///
 /// let mut routes = HashMap::new();
 /// routes.insert("user-query".to_string(), QueryConfig {
-///     added: Some(TemplateSpec::new("EXEC add_user @after.id, @after.name, @after.email")),
-///     updated: Some(TemplateSpec::new("EXEC update_user @after.id, @after.name, @after.email")),
-///     deleted: Some(TemplateSpec::new("EXEC delete_user @before.id")),
+///     added: Some(TemplateSpec::new("EXEC add_user {{param after.id}}, {{param after.name}}, {{param after.email}}")),
+///     updated: Some(TemplateSpec::new("EXEC update_user {{param after.id}}, {{param after.name}}, {{param after.email}}")),
+///     deleted: Some(TemplateSpec::new("EXEC delete_user {{param before.id}}")),
 /// });
 ///
 /// let config = MsSqlStoredProcReactionConfig {
@@ -192,20 +210,63 @@ impl MsSqlStoredProcReactionConfig {
 
     /// Get the command template for a specific query and operation type
     ///
-    /// Priority order:
-    /// 1. Query-specific route template
-    /// 2. Default template
+    /// Resolution order (developer-guide §11):
+    /// 1. `routes[query_id]` for the operation (full wire id).
+    /// 2. `routes[last dotted segment of query_id]` for the operation.
+    /// 3. `default_template` for the operation.
     pub fn get_command_template(&self, query_id: &str, operation: OperationType) -> Option<String> {
-        // Try to get from routes or default_template first
-        let spec = self.get_template_spec(query_id, operation);
-        if let Some(spec) = spec {
-            return Some(spec.template.clone());
-        }
-        None
+        self.resolve_template_spec(query_id, operation)
+            .map(|spec| spec.template.clone())
     }
 
-    /// Validate the configuration
-    pub fn validate(&self) -> anyhow::Result<()> {
+    /// Resolve the [`TemplateSpec`] for a `(query_id, operation)` pair following
+    /// the full three-step resolution order (per-query id → last dotted segment
+    /// → default template). The [`TemplateRouting`] trait default only covers
+    /// steps 1 and 3, so this adds the last-segment lookup in between.
+    ///
+    /// Internal helper backing [`Self::get_command_template`], which is the
+    /// public entry point. Kept crate-private because it returns a borrow of the
+    /// internal [`TemplateSpec`] type.
+    pub(crate) fn resolve_template_spec(
+        &self,
+        query_id: &str,
+        operation: OperationType,
+    ) -> Option<&TemplateSpec> {
+        if let Some(spec) = self
+            .routes
+            .get(query_id)
+            .and_then(|qc| Self::get_spec_from_config(qc, operation))
+        {
+            return Some(spec);
+        }
+
+        let segment = last_segment(query_id);
+        if segment != query_id {
+            if let Some(spec) = self
+                .routes
+                .get(segment)
+                .and_then(|qc| Self::get_spec_from_config(qc, operation))
+            {
+                return Some(spec);
+            }
+        }
+
+        self.default_template
+            .as_ref()
+            .and_then(|qc| Self::get_spec_from_config(qc, operation))
+    }
+
+    /// Validate the configuration against the reaction's subscribed queries.
+    ///
+    /// Called by the builder's `build()` so misconfiguration fails at
+    /// construction rather than on the first inbound event. Checks:
+    ///
+    /// 1. `user` and `database` are set.
+    /// 2. At least one command is configured (routes or default template).
+    /// 3. Every command template compiles as a Handlebars template.
+    /// 4. Every `routes` key matches a subscribed query id (or its last dotted
+    ///    segment).
+    pub fn validate(&self, query_ids: &[String]) -> anyhow::Result<()> {
         if self.user.is_empty() {
             anyhow::bail!("Database user is required");
         }
@@ -223,6 +284,43 @@ impl MsSqlStoredProcReactionConfig {
             );
         }
 
+        // Compile every template at construction time.
+        if let Some(default) = &self.default_template {
+            validate_query_config(default)
+                .map_err(|e| anyhow::anyhow!("invalid default template: {e}"))?;
+        }
+        for (key, qc) in &self.routes {
+            validate_query_config(qc)
+                .map_err(|e| anyhow::anyhow!("invalid template for route '{key}': {e}"))?;
+
+            let matches = query_ids.iter().any(|q| q == key || last_segment(q) == key);
+            if !matches {
+                anyhow::bail!(
+                    "route '{key}' does not match any subscribed query id (or its last dotted segment)"
+                );
+            }
+        }
+
         Ok(())
     }
+}
+
+/// Last dotted segment of a query id (`source.q1` → `q1`).
+fn last_segment(query_id: &str) -> &str {
+    query_id.rsplit('.').next().unwrap_or(query_id)
+}
+
+/// Compile every command template in a per-query config.
+fn validate_query_config(config: &QueryConfig) -> anyhow::Result<()> {
+    for (op, spec) in [
+        ("added", &config.added),
+        ("updated", &config.updated),
+        ("deleted", &config.deleted),
+    ] {
+        if let Some(spec) = spec {
+            crate::render::validate_template(&spec.template)
+                .map_err(|e| anyhow::anyhow!("'{op}': {e}"))?;
+        }
+    }
+    Ok(())
 }

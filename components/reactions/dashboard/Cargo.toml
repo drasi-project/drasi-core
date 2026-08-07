@@ -50,7 +50,7 @@ utoipa = { workspace = true }
 
 [dev-dependencies]
 drasi-core.workspace = true
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 env_logger = "0.11"
 tokio-test = "0.4"
