@@ -458,9 +458,14 @@ The source handles connection failures gracefully:
 
 ### Primary Key Detection
 
-During WAL streaming, the source uses primary key information from the relation metadata provided by PostgreSQL's logical replication protocol. For bootstrap, the configured bootstrap provider is responsible for primary key detection.
+On connect, the streaming source queries the PostgreSQL system catalogs to
+auto-detect each table's primary key columns, then derives a stable,
+primary-key-based element id for every CDC change. This means INSERT, UPDATE, and
+DELETE events for the same row share the same element id and correlate correctly,
+even without any `table_keys` configuration. The bootstrap provider performs the
+same catalog lookup, so bootstrap and CDC element ids agree.
 
-When using `PostgresBootstrapProvider`, it queries PostgreSQL system catalogs:
+The catalog query used for detection is:
 ```sql
 SELECT n.nspname, c.relname, a.attname
 FROM pg_constraint con
@@ -469,10 +474,13 @@ JOIN pg_namespace n ON c.relnamespace = n.oid
 JOIN pg_attribute a ON a.attrelid = c.oid
 WHERE con.contype = 'p'
   AND a.attnum = ANY(con.conkey)
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
 ORDER BY n.nspname, c.relname, array_position(con.conkey, a.attnum)
 ```
 
-User-configured `table_keys` override automatically detected primary keys in both streaming and bootstrap.
+User-configured `table_keys` override automatically detected primary keys in both
+streaming and bootstrap. A random UUID element id is used only as a last resort
+for tables that have no primary key and no configured `table_keys`.
 
 ## Troubleshooting
 
