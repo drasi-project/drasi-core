@@ -240,7 +240,9 @@ pub trait Source: Send + Sync {
     ///
     /// This is called by queries to receive data changes from this source.
     /// The source should return a receiver for streaming events and optionally
-    /// a bootstrap receiver for initial data.
+    /// a bootstrap receiver for initial data. Subscription labels without an
+    /// explicit source mapping are sent to every source; implementations must
+    /// filter out labels they do not own.
     ///
     /// # Important
     /// Implementations that maintain a sequence counter must recover its
