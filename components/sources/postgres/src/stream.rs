@@ -505,17 +505,17 @@ impl ReplicationStream {
             .get(&relation_id)
             .ok_or_else(|| anyhow!("No mapping for relation {relation_id}"))?;
 
-        // Convert tuple to properties
+        // Convert tuple to properties via canonical PostgresValue mapping (#672).
+        // Always insert keys, including Null, so bootstrap and CDC agree (#672 NULL).
         let mut properties = drasi_core::models::ElementPropertyMap::new();
         for (i, value) in tuple.iter().enumerate() {
             if let Some(column) = relation.columns.get(i) {
-                let json_value = value.to_json();
-                if !json_value.is_null() {
-                    properties.insert(
-                        &column.name,
-                        drasi_lib::sources::manager::convert_json_to_element_value(&json_value),
-                    );
+                // Unchanged TOAST is not SQL NULL — omit so merge_missing_properties can keep
+                // the previously stored value (do not clobber with Null).
+                if value.is_unchanged_toast() {
+                    continue;
                 }
+                properties.insert(&column.name, value.to_element_value());
             }
         }
 
@@ -562,16 +562,13 @@ impl ReplicationStream {
         // Note: We allow UPDATE without old_tuple to avoid converting to INSERT.
         let mut after_properties = drasi_core::models::ElementPropertyMap::new();
 
-        // Process new tuple (after state)
+        // Process new tuple (after state) — include Null properties for parity with bootstrap
         for (i, column) in relation.columns.iter().enumerate() {
             if let Some(value) = new_tuple.get(i) {
-                let json_value = value.to_json();
-                if !json_value.is_null() {
-                    after_properties.insert(
-                        &column.name,
-                        drasi_lib::sources::manager::convert_json_to_element_value(&json_value),
-                    );
+                if value.is_unchanged_toast() {
+                    continue;
                 }
+                after_properties.insert(&column.name, value.to_element_value());
             }
         }
 
@@ -659,12 +656,8 @@ impl ReplicationStream {
             for (i, column) in relation.columns.iter().enumerate() {
                 if keys.contains(&column.name) {
                     if let Some(value) = tuple.get(i) {
-                        let json_val = value.to_json();
-                        if !json_val.is_null() {
-                            // Remove quotes from JSON string representation
-                            let val_str = json_val.to_string();
-                            let cleaned = val_str.trim_matches('"');
-                            key_parts.push(cleaned.to_string());
+                        if let Some(part) = value.to_key_string() {
+                            key_parts.push(part);
                         }
                     }
                 }

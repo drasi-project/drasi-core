@@ -15,18 +15,22 @@
 use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ReadBytesExt};
 use chrono::{DateTime, NaiveDateTime, Utc};
+use drasi_postgres_common::decode_text_to_postgres_value;
+use drasi_postgres_common::parse_bytea_text;
 use log::{debug, warn};
 use postgres_types::Oid;
 use rust_decimal::Decimal;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
-use std::sync::Arc;
 use uuid::Uuid;
 
 use super::types::{
     ColumnInfo, PostgresValue, RelationInfo, ReplicaIdentity, TransactionInfo, WalMessage,
 };
+
+// Re-export for callers/tests that previously imported from this module.
+pub use drasi_postgres_common::decode_column_value_text;
 
 #[allow(dead_code)]
 const PGOUTPUT_VERSION: u32 = 1;
@@ -353,7 +357,7 @@ impl PgOutputDecoder {
 
             let value = match tuple_type {
                 b'n' => PostgresValue::Null,
-                b'u' => PostgresValue::Null, // Unchanged TOAST value
+                b'u' => PostgresValue::UnchangedToast, // unchanged TOAST — omit property
                 b't' => {
                     let length = cursor.read_u32::<BigEndian>()? as usize;
                     // Ensure we have enough data to read
@@ -380,7 +384,21 @@ impl PgOutputDecoder {
                         "Successfully read {} bytes for column {}, decoding type OID {}",
                         length, i, column.type_oid
                     );
-                    self.decode_column_value(&data, column.type_oid)?
+                    // Never abort the whole tuple for one bad column — degrade that
+                    // column and keep emitting the change (#669).
+                    match self.decode_column_value(&data, column.type_oid) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!(
+                                "Failed to decode column {} (oid={}): {e}; falling back to text/Null",
+                                column.name, column.type_oid
+                            );
+                            match std::str::from_utf8(&data) {
+                                Ok(s) => PostgresValue::Text(s.to_string()),
+                                Err(_) => PostgresValue::Null,
+                            }
+                        }
+                    }
                 }
                 _ => {
                     return Err(anyhow!(
@@ -421,13 +439,18 @@ impl PgOutputDecoder {
                 Ok(PostgresValue::Bool(value))
             }
             21 => {
-                // int2
-                if data.len() == 2 {
-                    // Binary format
+                // int2 — prefer text when payload is ASCII digits (pgoutput)
+                if looks_like_utf8_text(data) {
+                    let text = String::from_utf8_lossy(data);
+                    let value = text
+                        .trim()
+                        .parse::<i16>()
+                        .map_err(|e| anyhow!("Failed to parse int2 from '{text}': {e}"))?;
+                    Ok(PostgresValue::Int2(value))
+                } else if data.len() == 2 {
                     let mut cursor = Cursor::new(data);
                     Ok(PostgresValue::Int2(cursor.read_i16::<BigEndian>()?))
                 } else {
-                    // Text format
                     let text = String::from_utf8_lossy(data);
                     let value = text
                         .trim()
@@ -438,12 +461,17 @@ impl PgOutputDecoder {
             }
             23 => {
                 // int4
-                if data.len() == 4 {
-                    // Binary format
+                if looks_like_utf8_text(data) {
+                    let text = String::from_utf8_lossy(data);
+                    let value = text
+                        .trim()
+                        .parse::<i32>()
+                        .map_err(|e| anyhow!("Failed to parse int4 from '{text}': {e}"))?;
+                    Ok(PostgresValue::Int4(value))
+                } else if data.len() == 4 {
                     let mut cursor = Cursor::new(data);
                     Ok(PostgresValue::Int4(cursor.read_i32::<BigEndian>()?))
                 } else {
-                    // Text format - parse as string
                     let text = String::from_utf8_lossy(data);
                     let value = text
                         .trim()
@@ -454,12 +482,17 @@ impl PgOutputDecoder {
             }
             20 => {
                 // int8
-                if data.len() == 8 {
-                    // Binary format
+                if looks_like_utf8_text(data) {
+                    let text = String::from_utf8_lossy(data);
+                    let value = text
+                        .trim()
+                        .parse::<i64>()
+                        .map_err(|e| anyhow!("Failed to parse int8 from '{text}': {e}"))?;
+                    Ok(PostgresValue::Int8(value))
+                } else if data.len() == 8 {
                     let mut cursor = Cursor::new(data);
                     Ok(PostgresValue::Int8(cursor.read_i64::<BigEndian>()?))
                 } else {
-                    // Text format
                     let text = String::from_utf8_lossy(data);
                     let value = text
                         .trim()
@@ -469,34 +502,45 @@ impl PgOutputDecoder {
                 }
             }
             700 => {
-                // float4
-                if data.len() == 4 {
-                    // Binary format
-                    let mut cursor = Cursor::new(data);
-                    Ok(PostgresValue::Float4(cursor.read_f32::<BigEndian>()?))
-                } else {
-                    // Text format
+                // float4 — prefer text when payload is printable (pgoutput is text;
+                // length-4 text like "1.25" must not be read as IEEE bits).
+                if looks_like_utf8_text(data) {
                     let text = String::from_utf8_lossy(data);
                     let value = text
                         .trim()
                         .parse::<f32>()
-                        .map_err(|e| anyhow!("Failed to parse float4 from '{text}': {e}"))?;
+                        .map_err(|e| anyhow!("Failed to parse float4 (OID 700): {e}"))?;
+                    Ok(PostgresValue::Float4(value))
+                } else if data.len() == 4 {
+                    let mut cursor = Cursor::new(data);
+                    Ok(PostgresValue::Float4(cursor.read_f32::<BigEndian>()?))
+                } else {
+                    let text = String::from_utf8_lossy(data);
+                    let value = text
+                        .trim()
+                        .parse::<f32>()
+                        .map_err(|e| anyhow!("Failed to parse float4 (OID 700): {e}"))?;
                     Ok(PostgresValue::Float4(value))
                 }
             }
             701 => {
-                // float8
-                if data.len() == 8 {
-                    // Binary format
-                    let mut cursor = Cursor::new(data);
-                    Ok(PostgresValue::Float8(cursor.read_f64::<BigEndian>()?))
-                } else {
-                    // Text format
+                // float8 — same text-vs-binary disambiguation as float4 / int8.
+                if looks_like_utf8_text(data) {
                     let text = String::from_utf8_lossy(data);
                     let value = text
                         .trim()
                         .parse::<f64>()
-                        .map_err(|e| anyhow!("Failed to parse float8 from '{text}': {e}"))?;
+                        .map_err(|e| anyhow!("Failed to parse float8 (OID 701): {e}"))?;
+                    Ok(PostgresValue::Float8(value))
+                } else if data.len() == 8 {
+                    let mut cursor = Cursor::new(data);
+                    Ok(PostgresValue::Float8(cursor.read_f64::<BigEndian>()?))
+                } else {
+                    let text = String::from_utf8_lossy(data);
+                    let value = text
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|e| anyhow!("Failed to parse float8 (OID 701): {e}"))?;
                     Ok(PostgresValue::Float8(value))
                 }
             }
@@ -529,23 +573,31 @@ impl PgOutputDecoder {
                 Ok(PostgresValue::Char(s))
             }
             2950 => {
-                // uuid
-                if data.len() != 16 {
-                    return Err(anyhow!("Invalid UUID length: {}", data.len()));
+                // uuid — pgoutput sends text (36-char); binary is 16 bytes
+                if data.len() == 16 {
+                    let uuid = Uuid::from_slice(data)?;
+                    Ok(PostgresValue::Uuid(uuid))
+                } else {
+                    decode_text_to_postgres_value(&String::from_utf8_lossy(data), 2950)
                 }
-                let uuid = Uuid::from_slice(data)?;
-                Ok(PostgresValue::Uuid(uuid))
             }
             1114 => {
-                // timestamp
-                if data.len() == 8 {
-                    // Binary format
+                // timestamp — prefer text when ASCII (pgoutput)
+                if looks_like_utf8_text(data) {
+                    let text = String::from_utf8_lossy(data);
+                    let timestamp =
+                        NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f")
+                            .or_else(|_| {
+                                NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S")
+                            })
+                            .map_err(|e| anyhow!("Failed to parse timestamp from '{text}': {e}"))?;
+                    Ok(PostgresValue::Timestamp(timestamp))
+                } else if data.len() == 8 {
                     let mut cursor = Cursor::new(data);
                     let micros = cursor.read_i64::<BigEndian>()?;
                     let timestamp = postgres_epoch_to_naive_datetime(micros)?;
                     Ok(PostgresValue::Timestamp(timestamp))
                 } else {
-                    // Text format - parse PostgreSQL timestamp string
                     let text = String::from_utf8_lossy(data);
                     let timestamp =
                         NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f")
@@ -558,14 +610,7 @@ impl PgOutputDecoder {
             }
             1184 => {
                 // timestamptz
-                if data.len() == 8 {
-                    // Binary format
-                    let mut cursor = Cursor::new(data);
-                    let micros = cursor.read_i64::<BigEndian>()?;
-                    let timestamp = postgres_epoch_to_datetime(micros)?;
-                    Ok(PostgresValue::TimestampTz(timestamp))
-                } else {
-                    // Text format - parse PostgreSQL timestamptz string
+                if looks_like_utf8_text(data) {
                     let text = String::from_utf8_lossy(data);
                     let trimmed = text.trim();
                     // PostgreSQL's logical replication protocol may send the
@@ -576,46 +621,102 @@ impl PgOutputDecoder {
                     // 4-digit forms, so it is used as the fallback after rfc3339.
                     let timestamp = DateTime::parse_from_rfc3339(trimmed)
                         .or_else(|_| DateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f%#z"))
+                        .or_else(|_| DateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%#z"))
+                        .map_err(|e| anyhow!("Failed to parse timestamptz from '{text}': {e}"))?
+                        .with_timezone(&Utc);
+                    Ok(PostgresValue::TimestampTz(timestamp))
+                } else if data.len() == 8 {
+                    let mut cursor = Cursor::new(data);
+                    let micros = cursor.read_i64::<BigEndian>()?;
+                    let timestamp = postgres_epoch_to_datetime(micros)?;
+                    Ok(PostgresValue::TimestampTz(timestamp))
+                } else {
+                    let text = String::from_utf8_lossy(data);
+                    let trimmed = text.trim();
+                    let timestamp = DateTime::parse_from_rfc3339(trimmed)
+                        .or_else(|_| DateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f%#z"))
+                        .or_else(|_| DateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%#z"))
                         .map_err(|e| anyhow!("Failed to parse timestamptz from '{text}': {e}"))?
                         .with_timezone(&Utc);
                     Ok(PostgresValue::TimestampTz(timestamp))
                 }
             }
             1082 => {
-                // date
-                let mut cursor = Cursor::new(data);
-                let days = cursor.read_i32::<BigEndian>()?;
-                let date = postgres_epoch_to_date(days)?;
-                Ok(PostgresValue::Date(date))
+                // date — binary is 4-byte day count; pgoutput sends text YYYY-MM-DD.
+                // Prefer text when the payload is valid UTF-8 with a digit (e.g. "2024-06-15").
+                if looks_like_utf8_text(data) {
+                    decode_text_to_postgres_value(&String::from_utf8_lossy(data), 1082)
+                } else if data.len() == 4 {
+                    let mut cursor = Cursor::new(data);
+                    let days = cursor.read_i32::<BigEndian>()?;
+                    let date = postgres_epoch_to_date(days)?;
+                    Ok(PostgresValue::Date(date))
+                } else {
+                    decode_text_to_postgres_value(&String::from_utf8_lossy(data), 1082)
+                }
             }
             1083 => {
-                // time
-                let mut cursor = Cursor::new(data);
-                let micros = cursor.read_i64::<BigEndian>()?;
-                let time = postgres_time_to_naive_time(micros)?;
-                Ok(PostgresValue::Time(time))
+                // time — binary is 8-byte micros; pgoutput text is HH:MM:SS[.f].
+                // "10:30:45" is also 8 bytes, so never choose binary solely by length.
+                if looks_like_utf8_text(data) {
+                    decode_text_to_postgres_value(&String::from_utf8_lossy(data), 1083)
+                } else if data.len() == 8 {
+                    let mut cursor = Cursor::new(data);
+                    let micros = cursor.read_i64::<BigEndian>()?;
+                    let time = postgres_time_to_naive_time(micros)?;
+                    Ok(PostgresValue::Time(time))
+                } else {
+                    decode_text_to_postgres_value(&String::from_utf8_lossy(data), 1083)
+                }
             }
             114 | 3802 => {
-                // json, jsonb
-                let json_str = if oid_value == 3802 {
-                    // jsonb has a version byte
-                    String::from_utf8_lossy(&data[1..]).to_string()
-                } else {
-                    String::from_utf8_lossy(data).to_string()
-                };
+                // json / jsonb
+                // Binary jsonb has a 1-byte version prefix (0x01). Text mode (pgoutput)
+                // has no prefix — do not strip the leading '{'.
+                let text = String::from_utf8_lossy(data);
+                let looks_like_text_json = text.starts_with('{')
+                    || text.starts_with('[')
+                    || text.starts_with('"')
+                    || text == "null"
+                    || text == "true"
+                    || text == "false"
+                    || text
+                        .as_bytes()
+                        .first()
+                        .is_some_and(|b| b.is_ascii_digit() || *b == b'-');
+                let json_str =
+                    if oid_value == 3802 && data.len() > 1 && data[0] == 1 && !looks_like_text_json
+                    {
+                        String::from_utf8_lossy(&data[1..]).to_string()
+                    } else {
+                        text.to_string()
+                    };
                 let value: JsonValue = serde_json::from_str(&json_str)?;
-                Ok(PostgresValue::Json(value))
+                if oid_value == 3802 {
+                    Ok(PostgresValue::Jsonb(value))
+                } else {
+                    Ok(PostgresValue::Json(value))
+                }
             }
             17 => {
-                // bytea
-                Ok(PostgresValue::Bytea(data.to_vec()))
+                // bytea — pgoutput text form is \xHEX; binary is raw bytes
+                let as_text = String::from_utf8_lossy(data);
+                if as_text.starts_with("\\x") || as_text.starts_with(r"\x") {
+                    Ok(PostgresValue::Bytea(parse_bytea_text(&as_text)?))
+                } else {
+                    Ok(PostgresValue::Bytea(data.to_vec()))
+                }
             }
             _ => {
-                // Default to text representation for unknown types
-                warn!("Unknown type OID {oid_value}, treating as text");
-                Ok(PostgresValue::Text(
-                    String::from_utf8_lossy(data).to_string(),
-                ))
+                // Arrays and unknown types: try shared text decoder, else plain text
+                let text = String::from_utf8_lossy(data);
+                match decode_text_to_postgres_value(&text, oid_value) {
+                    Ok(v) => Ok(v),
+                    Err(_) => {
+                        warn!("Unknown type OID {oid_value}, treating as text");
+                        Ok(PostgresValue::Text(text.to_string()))
+                    }
+                }
             }
         }
     }
@@ -674,106 +775,17 @@ fn postgres_time_to_naive_time(micros: i64) -> Result<chrono::NaiveTime> {
         .ok_or_else(|| anyhow!("Invalid time"))
 }
 
-/// Decode a column value from text format (used by bootstrap)
-pub fn decode_column_value_text(
-    text: &str,
-    type_oid: i32,
-) -> Result<drasi_core::models::ElementValue> {
-    use drasi_core::models::ElementValue;
-
-    match type_oid as u32 {
-        16 => {
-            // bool
-            let value = text.parse::<bool>().or_else(|_| match text {
-                "t" => Ok(true),
-                "f" => Ok(false),
-                _ => Err(anyhow!("Invalid boolean value")),
-            })?;
-            Ok(ElementValue::Bool(value))
-        }
-        21 => {
-            // int2
-            let value = text.parse::<i16>()?;
-            Ok(ElementValue::Integer(value as i64))
-        }
-        23 => {
-            // int4
-            let value = text.parse::<i32>()?;
-            Ok(ElementValue::Integer(value as i64))
-        }
-        20 => {
-            // int8
-            let value = text.parse::<i64>()?;
-            Ok(ElementValue::Integer(value))
-        }
-        700 => {
-            // float4
-            let value = text.parse::<f32>()?;
-            Ok(ElementValue::Float(ordered_float::OrderedFloat(
-                value as f64,
-            )))
-        }
-        701 => {
-            // float8
-            let value = text.parse::<f64>()?;
-            Ok(ElementValue::Float(ordered_float::OrderedFloat(value)))
-        }
-        1700 => {
-            // numeric/decimal
-            let value = text.parse::<f64>()?;
-            Ok(ElementValue::Float(ordered_float::OrderedFloat(value)))
-        }
-        25 | 1043 | 19 => {
-            // text, varchar, name
-            Ok(ElementValue::String(Arc::from(text)))
-        }
-        1114 => {
-            // timestamp (without timezone)
-            // Parse only standard NaiveDateTime forms for OID 1114.
-            // If timezone-bearing text is present, treat it as malformed for
-            // this OID and preserve the original text as String.
-            if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f") {
-                Ok(ElementValue::LocalDateTime(dt))
-            } else if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S") {
-                Ok(ElementValue::LocalDateTime(dt))
-            } else {
-                // Fall back to string if parsing fails
-                Ok(ElementValue::String(Arc::from(text)))
-            }
-        }
-        1184 => {
-            // timestamptz — always produce ZonedDateTime to match CDC binary path.
-            // Try offset-aware formats first, then treat offset-less text as UTC.
-            if let Ok(dt) = DateTime::parse_from_rfc3339(text.trim()) {
-                Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
-            } else if let Ok(dt) = DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f%z") {
-                Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
-            } else if let Ok(dt) =
-                NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f")
-            {
-                // No offset in text but OID says timestamptz — assume UTC
-                Ok(ElementValue::ZonedDateTime(dt.and_utc().fixed_offset()))
-            } else if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S") {
-                // No offset in text but OID says timestamptz — assume UTC
-                Ok(ElementValue::ZonedDateTime(dt.and_utc().fixed_offset()))
-            } else {
-                // Fall back to string if parsing fails
-                Ok(ElementValue::String(Arc::from(text)))
-            }
-        }
-        1082 => {
-            // date
-            Ok(ElementValue::String(Arc::from(text)))
-        }
-        2950 => {
-            // uuid
-            Ok(ElementValue::String(Arc::from(text)))
-        }
-        _ => {
-            // Default to string for unknown types
-            Ok(ElementValue::String(Arc::from(text)))
-        }
+/// True when `data` is valid UTF-8 consisting only of printable/text-ish bytes.
+/// Used to disambiguate pgoutput text payloads from binary ones of the same length
+/// (e.g. time `"10:30:45"` is 8 bytes, same as binary int64 micros).
+fn looks_like_utf8_text(data: &[u8]) -> bool {
+    if data.is_empty() {
+        return false;
     }
+    std::str::from_utf8(data).is_ok_and(|s| {
+        s.chars()
+            .all(|c| c.is_ascii_graphic() || c == ' ' || c == '\t')
+    })
 }
 
 fn decode_numeric(data: &[u8]) -> Result<Decimal> {
@@ -842,6 +854,7 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use drasi_core::models::ElementValue;
+    use std::sync::Arc;
 
     // ── decode_column_value_text: timestamp (OID 1114) ─────────────────
 
@@ -879,11 +892,13 @@ mod tests {
 
     #[test]
     fn decode_timestamptz_rfc3339() {
+        // Canonical mapping normalizes timestamptz to UTC (matches CDC binary path).
         let ev = decode_column_value_text("2024-06-15T10:30:45+01:00", 1184).unwrap();
         match ev {
             ElementValue::ZonedDateTime(dt) => {
-                assert_eq!(dt.offset().local_minus_utc(), 3600);
-                assert_eq!(dt.naive_local().to_string(), "2024-06-15 10:30:45");
+                assert_eq!(dt.offset().local_minus_utc(), 0);
+                // 10:30:45+01:00 → 09:30:45 UTC
+                assert_eq!(dt.naive_utc().to_string(), "2024-06-15 09:30:45");
             }
             other => panic!("Expected ZonedDateTime, got {other:?}"),
         }
@@ -910,15 +925,45 @@ mod tests {
 
     #[test]
     fn decode_timestamptz_with_offset_format() {
+        // Canonical mapping normalizes to UTC; verify the instant is correct.
         let ev = decode_column_value_text("2024-06-15 10:30:45.123456+0200", 1184).unwrap();
         match ev {
             ElementValue::ZonedDateTime(dt) => {
-                assert_eq!(dt.offset().local_minus_utc(), 7200); // +02:00
+                assert_eq!(dt.offset().local_minus_utc(), 0);
+                // 10:30:45.123456+02:00 → 08:30:45.123456 UTC
+                assert_eq!(dt.naive_utc().to_string(), "2024-06-15 08:30:45.123456");
             }
             other => panic!("Expected ZonedDateTime, got {other:?}"),
         }
     }
 
+    #[test]
+    fn decode_float4_text_not_binary_bits() {
+        let decoder = PgOutputDecoder::new();
+        // "1.25" is 4 bytes of ASCII — must not be read as f32 IEEE bits
+        let v = decoder
+            .decode_column_value(b"1.25", 700)
+            .expect("float4 text");
+        match v {
+            PostgresValue::Float4(f) => assert!((f - 1.25).abs() < 1e-6, "got {f}"),
+            other => panic!("expected Float4, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_float8_text_len8_not_binary_bits() {
+        let decoder = PgOutputDecoder::new();
+        // "1.234567" is 8 bytes — classic false binary length
+        let v = decoder
+            .decode_column_value(b"1.234567", 701)
+            .expect("float8 text");
+        match v {
+            PostgresValue::Float8(f) => assert!((f - 1.234567).abs() < 1e-9, "got {f}"),
+            other => panic!("expected Float8, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_decode_timestamptz_text_short_offset() {
         // PostgreSQL logical replication sends the short-form timezone offset.
         let decoder = PgOutputDecoder::new();
@@ -966,6 +1011,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn test_decode_timestamptz_text_short_negative_offset() {
         let decoder = PgOutputDecoder::new();
         let value = decoder
@@ -1148,6 +1194,86 @@ mod tests {
                 decoder.decode_column_value(input, 16).is_err(),
                 "expected error decoding bool from {input:?}"
             );
+        }
+    }
+
+    // ── text-format decode for types that previously dropped CDC rows (#669) ─
+
+    #[test]
+    fn test_decode_uuid_text() {
+        let decoder = PgOutputDecoder::new();
+        let value = decoder
+            .decode_column_value(b"550e8400-e29b-41d4-a716-446655440000", 2950)
+            .expect("uuid text");
+        match value {
+            PostgresValue::Uuid(u) => {
+                assert_eq!(u.to_string(), "550e8400-e29b-41d4-a716-446655440000");
+            }
+            other => panic!("expected Uuid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_date_text() {
+        let decoder = PgOutputDecoder::new();
+        let value = decoder
+            .decode_column_value(b"2024-06-15", 1082)
+            .expect("date text");
+        match value {
+            PostgresValue::Date(d) => {
+                assert_eq!(d, NaiveDate::from_ymd_opt(2024, 6, 15).unwrap());
+            }
+            other => panic!("expected Date, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_time_text() {
+        let decoder = PgOutputDecoder::new();
+        let value = decoder
+            .decode_column_value(b"10:30:45.123456", 1083)
+            .expect("time text");
+        match value {
+            PostgresValue::Time(t) => assert_eq!(t.to_string(), "10:30:45.123456"),
+            other => panic!("expected Time, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_time_text_exactly_eight_bytes() {
+        // Regression: "10:30:45" is 8 bytes — same as binary int64 micros.
+        // Must not take the binary path (#669).
+        let decoder = PgOutputDecoder::new();
+        let value = decoder
+            .decode_column_value(b"10:30:45", 1083)
+            .expect("time text 8 bytes");
+        match value {
+            PostgresValue::Time(t) => assert_eq!(t.to_string(), "10:30:45"),
+            other => panic!("expected Time, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_jsonb_text_without_version_byte() {
+        let decoder = PgOutputDecoder::new();
+        let value = decoder
+            .decode_column_value(br#"{"k":1}"#, 3802)
+            .expect("jsonb text");
+        match value {
+            PostgresValue::Jsonb(v) => assert_eq!(v["k"], 1),
+            other => panic!("expected Jsonb, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_bytea_hex_text() {
+        let decoder = PgOutputDecoder::new();
+        let value = decoder
+            .decode_column_value(br"\xdeadbeef", 17)
+            .expect("bytea text");
+        match value {
+            PostgresValue::Bytea(b) => assert_eq!(b, vec![0xde, 0xad, 0xbe, 0xef]),
+            other => panic!("expected Bytea, got {other:?}"),
         }
     }
 }

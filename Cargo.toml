@@ -15,6 +15,7 @@ members = [
   "components/mysql-common",
   "components/kubernetes-common",
   "components/oracle-common",
+  "components/postgres-common",
   "components/sources/mapping",
 
   # Bootstrap Plugins
@@ -170,10 +171,10 @@ drasi-index-garnet = { version = "0.3.3", path = "components/indexes/garnet" }
 drasi-source-mssql = { version = "0.2.7", path = "components/sources/mssql" }
 drasi-bootstrap-mssql = { version = "0.2.10", path = "components/bootstrappers/mssql" }
 drasi-bootstrap-here-traffic = { version = "0.1.0", path = "components/bootstrappers/here-traffic" }
-drasi-bootstrap-postgres = { version = "0.2.10", path = "components/bootstrappers/postgres" }
+drasi-bootstrap-postgres = { version = "0.2.11", path = "components/bootstrappers/postgres" }
 drasi-bootstrap-cloudflare-radar = { version = "0.1.5", path = "components/bootstrappers/cloudflare-radar" }
 drasi-reaction-application = { version = "0.3.8", path = "components/reactions/application" }
-drasi-source-postgres = { version = "0.2.7", path = "components/sources/postgres" }
+drasi-source-postgres = { version = "0.2.8", path = "components/sources/postgres" }
 drasi-source-here-traffic = { version = "0.1.0", path = "components/sources/here-traffic" }
 drasi-source-application = { version = "0.2.7", path = "components/sources/application" }
 drasi-source-hyperliquid = { version = "0.1.6", path = "components/sources/hyperliquid" }
@@ -197,6 +198,7 @@ drasi-bootstrap-kubernetes = { version = "0.1.5", path = "components/bootstrappe
 drasi-source-oracle = { version = "0.1.5", path = "components/sources/oracle" }
 drasi-bootstrap-oracle = { version = "0.1.5", path = "components/bootstrappers/oracle" }
 drasi-oracle-common = { version = "0.1.6", path = "components/oracle-common" }
+drasi-postgres-common = { version = "0.1.0", path = "components/postgres-common" }
 drasi-source-mapping = { version = "0.1.4", path = "components/sources/mapping" }
 drasi-source-kafka = { version = "0.1.4", path = "components/sources/kafka" }
 drasi-bootstrap-kafka = { version = "0.1.4", path = "components/bootstrappers/kafka" }
