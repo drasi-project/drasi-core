@@ -897,6 +897,11 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
                 Value::String("hello".to_string()),
             );
         }
+        // Pin bootstrap ↔ CDC parity directly (the invariant this PR targets).
+        assert_eq!(
+            bootstrap_data, cdc_for_assert,
+            "bootstrap and CDC type mappings diverged"
+        );
         assert_types_test_row(&cdc_for_assert, "cdc")?;
 
         core.stop().await.context("Failed to stop DrasiLib")?;
