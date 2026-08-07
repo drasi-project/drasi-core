@@ -774,6 +774,7 @@ mod tests {
             relations: HashSet::new(),
             resume_from: Some(position_bytes.clone()),
             request_position_handle: true,
+            resume_sequence: None,
         };
         assert_eq!(settings.resume_from, Some(position_bytes));
         assert!(settings.request_position_handle);

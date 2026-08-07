@@ -1802,6 +1802,7 @@ mod tests {
                 relations: HashSet::new(),
                 resume_from: Some(bad_position),
                 request_position_handle: false,
+                resume_sequence: None,
             };
 
             let result = source.subscribe(settings).await;

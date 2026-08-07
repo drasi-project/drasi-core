@@ -37,6 +37,8 @@
 //! - [`impl_vtable_proxy!`] — Generate proxy structs that wrap vtables into method calls
 
 pub mod macros;
+pub mod marshal;
 pub mod types;
 
+pub use marshal::{decode_optional_u64, encode_optional_u64};
 pub use types::*;

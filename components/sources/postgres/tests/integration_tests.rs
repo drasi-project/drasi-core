@@ -1441,6 +1441,7 @@ fn subscription_settings(
         relations: HashSet::new(),
         resume_from,
         request_position_handle,
+        resume_sequence: None,
     }
 }
 

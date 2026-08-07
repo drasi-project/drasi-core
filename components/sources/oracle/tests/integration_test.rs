@@ -905,6 +905,7 @@ async fn test_oracle_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() -> R
             relations: HashSet::new(),
             resume_from: None,
             request_position_handle: true,
+            resume_sequence: None,
         };
         let response = source
             .subscribe(settings)

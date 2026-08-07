@@ -408,6 +408,7 @@ async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
             relations: HashSet::new(),
             resume_from: None,
             request_position_handle: true,
+            resume_sequence: None,
         };
         let response = source
             .subscribe(settings)
@@ -2011,6 +2012,7 @@ async fn subscribe_direct(
         relations: HashSet::new(),
         resume_from: None,
         request_position_handle: true,
+        resume_sequence: None,
     };
     let response = source
         .subscribe(settings)

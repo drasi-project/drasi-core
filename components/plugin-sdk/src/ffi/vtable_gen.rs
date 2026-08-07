@@ -748,6 +748,8 @@ pub fn build_source_vtable<T: Source + 'static>(
         resume_from_ptr: *const u8,
         resume_from_len: u32,
         request_position_handle: bool,
+        resume_sequence: u64,
+        resume_sequence_present: bool,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -780,6 +782,14 @@ pub fn build_source_vtable<T: Source + 'static>(
             relations,
             resume_from,
             request_position_handle,
+            // Reconstruct the optional checkpoint sequence from its (value,
+            // present) marshalling so a resuming source delegating to
+            // `SourceBase::subscribe_with_bootstrap` advances its counter above
+            // the query's dedup high-water mark (issue #664).
+            resume_sequence: drasi_ffi_primitives::decode_optional_u64(
+                resume_sequence,
+                resume_sequence_present,
+            ),
         };
 
         let handle = (w.runtime_handle)().handle().clone();
@@ -1138,6 +1148,8 @@ pub fn build_source_vtable_from_boxed(
         resume_from_ptr: *const u8,
         resume_from_len: u32,
         request_position_handle: bool,
+        resume_sequence: u64,
+        resume_sequence_present: bool,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -1170,6 +1182,14 @@ pub fn build_source_vtable_from_boxed(
             relations,
             resume_from,
             request_position_handle,
+            // Reconstruct the optional checkpoint sequence from its (value,
+            // present) marshalling so a resuming source delegating to
+            // `SourceBase::subscribe_with_bootstrap` advances its counter above
+            // the query's dedup high-water mark (issue #664).
+            resume_sequence: drasi_ffi_primitives::decode_optional_u64(
+                resume_sequence,
+                resume_sequence_present,
+            ),
         };
 
         let handle = (w.runtime_handle)().handle().clone();

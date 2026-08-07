@@ -582,6 +582,25 @@ impl SourceBase {
             .store(sequence.saturating_add(1), Ordering::Relaxed);
     }
 
+    /// Ensure the monotonic sequence counter is strictly above `sequence` so the
+    /// next dispatched event receives a sequence greater than it.
+    ///
+    /// Unlike [`set_next_sequence`](Self::set_next_sequence), which
+    /// unconditionally stores `sequence + 1`, this uses `fetch_max` and therefore
+    /// never lowers the counter. That makes it safe to call from multiple
+    /// concurrent subscribers resuming from different checkpoints, and safe to
+    /// call on a source that has already advanced its counter past `sequence`.
+    ///
+    /// This closes the checkpoint-restore gap: a resuming query restores its
+    /// dedup high-water mark (which discards events with `sequence <= mark`), but
+    /// a source with no durable position of its own restarts this counter at 1 in
+    /// every process. Without this bump the first `mark` post-restart events would
+    /// be stamped `1..=mark` and silently deduplicated away.
+    pub fn ensure_next_sequence_above(&self, sequence: u64) {
+        self.next_sequence
+            .fetch_max(sequence.saturating_add(1), Ordering::Relaxed);
+    }
+
     /// Returns whether a bootstrap provider is configured for this source.
     ///
     /// CDC sources use this to decide whether their start task should
@@ -819,6 +838,17 @@ impl SourceBase {
             settings.request_position_handle
         );
 
+        // Close the checkpoint-restore sequence gap. A resuming subscriber's dedup
+        // high-water mark survives the restart, but this source's monotonic
+        // sequence counter restarts at 1 in every process. Bump the counter above
+        // the checkpoint sequence so post-restart events are stamped with
+        // sequences greater than the mark and are not silently deduplicated away.
+        // `fetch_max` keeps this safe across multiple subscribers and never
+        // rewinds a counter the source has already advanced (e.g. a durable source
+        // that restored its own position).
+        if let Some(resume_seq) = settings.resume_sequence {
+            self.ensure_next_sequence_above(resume_seq);
+        }
         // Record that an initial bootstrap was requested so each CDC source's
         // start task knows to wait for the snapshot boundary. Set *before* the
         // dispatcher is registered below so it is visible once the task's
@@ -1809,6 +1839,7 @@ mod tests {
             relations: HashSet::new(),
             resume_from,
             request_position_handle,
+            resume_sequence: None,
         }
     }
 
@@ -2155,6 +2186,122 @@ mod tests {
 
         assert_eq!(s2, s1 + 1, "sequences must be monotonically increasing");
         assert_eq!(s3, s2 + 1, "sequences must be monotonically increasing");
+    }
+
+    // =========================================================================
+    // Sequence-counter recovery on subscribe (issue #664)
+    //
+    // A source with no durable position of its own restarts `next_sequence` at 1
+    // in every process. When a query resumes from a checkpoint, its dedup
+    // high-water mark survives the restart and discards events with
+    // `sequence <= mark`. `subscribe_with_bootstrap` must advance the counter
+    // above `settings.resume_sequence` so post-restart events are not dropped.
+    // =========================================================================
+
+    #[tokio::test]
+    async fn subscribe_with_resume_sequence_bumps_counter_above_checkpoint() {
+        let params = SourceBaseParams::new("resume-seq").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+
+        // Simulate resuming a query whose dedup high-water mark is 5.
+        let mut settings = make_settings("q1", false, None, false);
+        settings.resume_sequence = Some(5);
+
+        let response = base
+            .subscribe_with_bootstrap(&settings, "test")
+            .await
+            .unwrap();
+        let mut receiver = response.receiver;
+
+        // The first post-restart event must be stamped 6 (> 5), not 1.
+        base.dispatch_event(make_event("resume-seq", None))
+            .await
+            .unwrap();
+        let ev = receiver.recv().await.unwrap();
+        assert_eq!(
+            ev.sequence,
+            Some(6),
+            "first event after resuming at checkpoint 5 must be seq 6, not <= 5"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_without_resume_sequence_starts_counter_at_one() {
+        let params = SourceBaseParams::new("fresh-seq").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+
+        // No checkpoint to resume from — counter stays at its initial value.
+        let settings = make_settings("q1", false, None, false);
+        assert!(settings.resume_sequence.is_none());
+
+        let response = base
+            .subscribe_with_bootstrap(&settings, "test")
+            .await
+            .unwrap();
+        let mut receiver = response.receiver;
+
+        base.dispatch_event(make_event("fresh-seq", None))
+            .await
+            .unwrap();
+        let ev = receiver.recv().await.unwrap();
+        assert_eq!(ev.sequence, Some(1), "a fresh source must start at seq 1");
+    }
+
+    #[tokio::test]
+    async fn resume_sequence_bump_never_lowers_across_subscribers() {
+        let params = SourceBaseParams::new("multi-sub").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+
+        // First subscriber resumes at 5 -> counter bumped to 6.
+        let mut s1 = make_settings("q1", false, None, false);
+        s1.resume_sequence = Some(5);
+        let mut rx1 = base
+            .subscribe_with_bootstrap(&s1, "test")
+            .await
+            .unwrap()
+            .receiver;
+
+        // Second subscriber resumes at a *lower* checkpoint (2). `fetch_max` must
+        // not rewind the counter below where the first subscriber left it.
+        let mut s2 = make_settings("q2", false, None, false);
+        s2.resume_sequence = Some(2);
+        let _rx2 = base.subscribe_with_bootstrap(&s2, "test").await.unwrap();
+
+        base.dispatch_event(make_event("multi-sub", None))
+            .await
+            .unwrap();
+        let ev = rx1.recv().await.unwrap();
+        assert_eq!(
+            ev.sequence,
+            Some(6),
+            "a later lower-checkpoint subscriber must not rewind the counter"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_next_sequence_above_uses_fetch_max_semantics() {
+        let params = SourceBaseParams::new("fetch-max").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        let mut receiver = base.create_streaming_receiver().await.unwrap();
+
+        base.ensure_next_sequence_above(10);
+        base.dispatch_event(make_event("fetch-max", None))
+            .await
+            .unwrap();
+        let ev = receiver.recv().await.unwrap();
+        assert_eq!(ev.sequence, Some(11), "counter must advance above 10");
+
+        // A lower target must be ignored (never lowers the counter).
+        base.ensure_next_sequence_above(3);
+        base.dispatch_event(make_event("fetch-max", None))
+            .await
+            .unwrap();
+        let ev = receiver.recv().await.unwrap();
+        assert_eq!(
+            ev.sequence,
+            Some(12),
+            "a lower target must not rewind the counter"
+        );
     }
 
     #[tokio::test]
@@ -2627,6 +2774,7 @@ mod tests {
             request_position_handle: true,
             nodes: Default::default(),
             relations: Default::default(),
+            resume_sequence: None,
         };
 
         let response = base
@@ -2655,6 +2803,7 @@ mod tests {
             request_position_handle: true,
             nodes: Default::default(),
             relations: Default::default(),
+            resume_sequence: None,
         };
 
         let response = base
