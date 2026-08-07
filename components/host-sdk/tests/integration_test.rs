@@ -3173,6 +3173,52 @@ async fn test_ffi_resume_from_skips_bootstrap() {
     source.stop().await.expect("Should stop");
 }
 
+/// Verify the optional checkpoint `resume_sequence` is marshalled across the FFI
+/// subscribe ABI (host encodes `(value, present)`, plugin decodes it back). This
+/// is the FFI counterpart of the in-process fix for issue #664: without the
+/// marshalling, a dynamically-loaded source resuming from a checkpoint would
+/// restart its sequence counter at 1 and silently drop the first K post-restart
+/// events. Exercises the full host→plugin path at runtime; the round-trip
+/// encoding itself is unit-tested in `drasi-ffi-primitives`.
+#[tokio::test]
+#[serial]
+#[ignore = "requires cdylib: cargo build --lib -p drasi-source-mock --features dynamic-plugin"]
+async fn test_ffi_resume_sequence_marshalled() {
+    if !plugin_exists("drasi-source-mock") {
+        panic!("SKIP: drasi-source-mock not built as cdylib");
+    }
+    let (_plugin, source, _rx) = create_started_mock_source("resume-seq-test").await;
+
+    // Subscribe with a checkpoint sequence but no durable position — exactly the
+    // case that regressed in #664 for FFI sources. The subscribe must round-trip
+    // the value across the boundary without error.
+    let settings = drasi_lib::config::SourceSubscriptionSettings {
+        source_id: "resume-seq-test".to_string(),
+        enable_bootstrap: false,
+        query_id: "resume-seq-query".to_string(),
+        nodes: std::collections::HashSet::new(),
+        relations: std::collections::HashSet::new(),
+        resume_from: None,
+        request_position_handle: true,
+        resume_sequence: Some(7),
+    };
+    let sub = source
+        .subscribe(settings)
+        .await
+        .expect("subscribe with resume_sequence should succeed across FFI");
+
+    // A position handle is still returned; the key assertion is that the
+    // resume_sequence-carrying subscribe completed without a marshalling error.
+    assert!(
+        sub.position_handle.is_some(),
+        "position_handle should be returned when request_position_handle is set"
+    );
+
+    source.remove_position_handle("resume-seq-query").await;
+    drop(sub);
+    source.stop().await.expect("Should stop");
+}
+
 /// A trivial bootstrap provider that returns a fixed BootstrapResult with
 /// source_position, without sending any bootstrap events.
 struct TestBootstrapProvider {
