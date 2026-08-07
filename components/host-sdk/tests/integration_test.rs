@@ -84,6 +84,89 @@ fn plugin_exists(crate_name: &str) -> bool {
     dir.join(&filename).exists()
 }
 
+/// Test-owned log/lifecycle capture.
+///
+/// The log and lifecycle callbacks are parameters to `load_plugin_from_path`,
+/// so tests that need to observe what a plugin sends across the FFI install
+/// their own callbacks and assert on stores they own. The production
+/// callbacks (`default_log_callback` etc.) keep no capture state.
+mod test_capture {
+    use std::ffi::c_void;
+    use std::sync::{Mutex, OnceLock};
+
+    use drasi_plugin_sdk::ffi::{
+        FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel,
+    };
+
+    #[derive(Debug, Clone)]
+    pub struct TestLog {
+        pub level: FfiLogLevel,
+        #[allow(dead_code)]
+        pub plugin_id: String,
+        pub message: String,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct TestLifecycle {
+        #[allow(dead_code)]
+        pub component_id: String,
+        #[allow(dead_code)]
+        pub event_type: FfiLifecycleEventType,
+        #[allow(dead_code)]
+        pub message: String,
+    }
+
+    pub fn logs() -> &'static Mutex<Vec<TestLog>> {
+        static LOGS: OnceLock<Mutex<Vec<TestLog>>> = OnceLock::new();
+        LOGS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub fn lifecycles() -> &'static Mutex<Vec<TestLifecycle>> {
+        static EVENTS: OnceLock<Mutex<Vec<TestLifecycle>>> = OnceLock::new();
+        EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub fn clear() {
+        logs().lock().unwrap_or_else(|e| e.into_inner()).clear();
+        lifecycles()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    /// Capture the entry, then forward to the production callback so the
+    /// normal host paths (log framework, registry routing) stay exercised.
+    pub extern "C" fn log_callback(ctx: *mut c_void, entry: *const FfiLogEntry) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let e = unsafe { &*entry };
+            let record = TestLog {
+                level: e.level,
+                plugin_id: unsafe { e.plugin_id.to_string() },
+                message: unsafe { e.message.to_string() },
+            };
+            if let Ok(mut logs) = logs().lock() {
+                logs.push(record);
+            }
+        }));
+        drasi_host_sdk::callbacks::default_log_callback(ctx, entry);
+    }
+
+    pub extern "C" fn lifecycle_callback(ctx: *mut c_void, event: *const FfiLifecycleEvent) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let e = unsafe { &*event };
+            let record = TestLifecycle {
+                component_id: unsafe { e.component_id.to_string() },
+                event_type: e.event_type,
+                message: unsafe { e.message.to_string() },
+            };
+            if let Ok(mut events) = lifecycles().lock() {
+                events.push(record);
+            }
+        }));
+        drasi_host_sdk::callbacks::default_lifecycle_callback(ctx, event);
+    }
+}
+
 // ============================================================================
 // Plugin Loading Tests
 // ============================================================================
@@ -669,18 +752,15 @@ async fn test_log_callback_captures_plugin_logs() {
     }
     let path = require_plugin("drasi-source-mock");
 
-    // Clear captured logs
-    callbacks::captured_logs()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    // Clear the test capture stores
+    test_capture::clear();
 
     let plugin = load_plugin_from_path(
         &path,
         std::ptr::null_mut(),
-        callbacks::default_log_callback_fn(),
+        test_capture::log_callback,
         std::ptr::null_mut(),
-        callbacks::default_lifecycle_callback_fn(),
+        test_capture::lifecycle_callback,
     )
     .unwrap();
 
@@ -705,12 +785,12 @@ async fn test_log_callback_captures_plugin_logs() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // Check that some logs were captured (mock source logs on start/stop)
-    let logs = callbacks::captured_logs()
+    let logs = test_capture::logs()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     // We can't guarantee specific messages, but the callback mechanism should work
     // The lifecycle callback should at least fire
-    let lifecycles = callbacks::captured_lifecycles()
+    let lifecycles = test_capture::lifecycles()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     // Either logs or lifecycle events should be captured
@@ -987,15 +1067,6 @@ async fn test_plugin_logs_routed_to_log_registry() {
         log_count > 0,
         "Expected at least one log message in ComponentLogRegistry for key {log_key:?}",
     );
-
-    // Also check the diagnostic store (captured_logs) for completeness
-    let captured = callbacks::captured_logs()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    assert!(
-        !captured.is_empty(),
-        "Expected at least one captured log from plugin start/stop"
-    );
 }
 
 #[tokio::test]
@@ -1105,27 +1176,14 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
         statuses.contains(&&ComponentStatus::Running),
         "Expected Running/Started event, got: {statuses:?}"
     );
-
-    // Also check the diagnostic store for completeness
-    let captured = callbacks::captured_lifecycles()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let our_captured: Vec<_> = captured
-        .iter()
-        .filter(|e| e.component_id == "lifecycle-evt-source")
-        .collect();
-    assert!(
-        !our_captured.is_empty(),
-        "Expected lifecycle events in diagnostic store"
-    );
 }
 
 #[tokio::test]
 #[serial]
 async fn test_null_callback_context_does_not_crash() {
     //! Verify that when source.initialize() is NOT called (no per-instance callbacks),
-    //! logs still go to the diagnostic store and host log framework, and lifecycle events
-    //! go to the diagnostic store via global callbacks. No crash occurs.
+    //! logs still go to the host log framework and lifecycle events still reach the
+    //! global callbacks. No crash occurs.
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
         panic!("SKIP: drasi-source-mock not built as cdylib");
@@ -1159,14 +1217,14 @@ async fn test_null_callback_context_does_not_crash() {
 }
 
 // ============================================================================
-// Tracing bridge tests — verify log events at all levels are captured
+// Tracing bridge tests — verify log events reach the host callback
 // ============================================================================
 
 #[tokio::test]
 #[serial]
-async fn test_all_log_levels_captured_in_diagnostic_store() {
-    //! Verify that log events at all levels (info, warn, error, debug) emitted by a plugin
-    //! are captured in the diagnostic captured_logs store. The mock source emits info! during
+async fn test_plugin_logs_reach_host_callback() {
+    //! Verify that log events emitted by a plugin cross the FFI and reach the
+    //! host-provided log callback. The mock source emits info! during
     //! start/stop, verifying the tracing-log bridge works for the log crate.
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
@@ -1174,18 +1232,14 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
     }
     let path = require_plugin("drasi-source-mock");
 
-    // Clear diagnostic stores before test
-    callbacks::captured_logs()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    test_capture::clear();
 
     let plugin = load_plugin_from_path(
         &path,
         std::ptr::null_mut(),
-        callbacks::default_log_callback_fn(),
+        test_capture::log_callback,
         std::ptr::null_mut(),
-        callbacks::default_lifecycle_callback_fn(),
+        test_capture::lifecycle_callback,
     )
     .unwrap();
 
@@ -1204,7 +1258,7 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
     let _ = source.stop().await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let logs = callbacks::captured_logs()
+    let logs = test_capture::logs()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     // We should have at least the start and stop info logs
@@ -1230,27 +1284,116 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
 
 #[tokio::test]
 #[serial]
-async fn test_logs_without_initialize_reach_global_callback() {
-    //! When a source is NOT initialized (no per-instance callbacks), logs should
-    //! still reach the global callback and be captured in the diagnostic store.
-    //! This verifies the tracing bridge's global fallback path.
+async fn test_plugin_drops_records_below_host_level() {
+    //! Verify producer-side filtering: after the host reports a Warn level via
+    //! set_log_level, the plugin's info records no longer cross the FFI at all.
+    //! Raising the level back to Trace restores them.
+    use drasi_plugin_sdk::ffi::FfiLogLevelFilter;
+
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
         panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
 
-    callbacks::captured_logs()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    test_capture::clear();
 
     let plugin = load_plugin_from_path(
         &path,
         std::ptr::null_mut(),
-        callbacks::default_log_callback_fn(),
+        test_capture::log_callback,
         std::ptr::null_mut(),
-        callbacks::default_lifecycle_callback_fn(),
+        test_capture::lifecycle_callback,
+    )
+    .unwrap();
+
+    let config = serde_json::json!({
+        "dataType": { "type": "generic" },
+        "intervalMs": 500
+    });
+
+    // Restore Trace even if an assertion below panics: the cdylib's statics
+    // are shared process-wide (dlopen refcounting), so a leaked Warn level
+    // would cascade into later tests in this serial suite.
+    struct RestoreLevel<'a>(&'a drasi_host_sdk::loader::LoadedPlugin);
+    impl Drop for RestoreLevel<'_> {
+        fn drop(&mut self) {
+            self.0.set_log_level(FfiLogLevelFilter::Trace);
+        }
+    }
+    let _restore = RestoreLevel(&plugin);
+
+    // Phase 1: Warn level — the mock source's info logs must not cross the FFI.
+    plugin.set_log_level(FfiLogLevelFilter::Warn);
+
+    let source = plugin.source_plugins[0]
+        .create_source("filter-test", &config, false)
+        .await
+        .unwrap();
+    let _ = source.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let _ = source.stop().await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    {
+        let logs = test_capture::logs()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let leaked: Vec<_> = logs
+            .iter()
+            .filter(|l| l.message.contains("filter-test"))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "Expected no plugin logs below Warn to cross the FFI, got: {leaked:?}"
+        );
+    }
+
+    // Phase 2: Trace level — the same source's info logs cross again.
+    plugin.set_log_level(FfiLogLevelFilter::Trace);
+
+    let source2 = plugin.source_plugins[0]
+        .create_source("filter-test-open", &config, false)
+        .await
+        .unwrap();
+    let _ = source2.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let _ = source2.stop().await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let logs = test_capture::logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let visible: Vec<_> = logs
+        .iter()
+        .filter(|l| l.message.contains("filter-test-open"))
+        .collect();
+    assert!(
+        !visible.is_empty(),
+        "Expected plugin logs to cross the FFI again at Trace level"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_logs_without_initialize_reach_global_callback() {
+    //! When a source is NOT initialized (no per-instance callbacks), logs should
+    //! still reach the global callback. This verifies the tracing bridge's
+    //! global fallback path.
+    if !plugin_exists("drasi-source-mock") {
+        eprintln!("SKIP: drasi-source-mock not built as cdylib");
+        panic!("SKIP: drasi-source-mock not built as cdylib");
+    }
+    let path = require_plugin("drasi-source-mock");
+
+    test_capture::clear();
+
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        test_capture::log_callback,
+        std::ptr::null_mut(),
+        test_capture::lifecycle_callback,
     )
     .unwrap();
 
@@ -1270,7 +1413,7 @@ async fn test_logs_without_initialize_reach_global_callback() {
     let _ = source.stop().await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let logs = callbacks::captured_logs()
+    let logs = test_capture::logs()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let our_logs: Vec<_> = logs

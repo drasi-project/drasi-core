@@ -136,14 +136,14 @@ impl MySqlExecutor {
         Ok(())
     }
 
-    /// Execute a stored procedure with the given parameters
-    pub async fn execute_procedure(
-        &self,
-        procedure_name: &str,
-        parameters: Vec<Value>,
-    ) -> Result<()> {
-        let proc_name = procedure_name.to_string();
-        let params = parameters.clone();
+    /// Execute a rendered stored procedure command.
+    ///
+    /// `sql` is the fully rendered command text with `?` placeholders (for
+    /// example `CALL add_user(?, ?)`); `parameters` are the values to bind
+    /// positionally, in placeholder order.
+    pub async fn execute_command(&self, sql: &str, parameters: Vec<Value>) -> Result<()> {
+        let sql = sql.to_string();
+        let params = parameters;
         let pool = self.pool.clone();
         let cmd_timeout = self.command_timeout;
 
@@ -153,23 +153,13 @@ impl MySqlExecutor {
                 .await
                 .map_err(|e| anyhow!("Failed to get connection: {e}"))?;
 
-            // Build the CALL statement for MySQL
-            // MySQL uses ? for parameter placeholders
-            let param_placeholders: Vec<&str> = (0..params.len()).map(|_| "?").collect();
-
-            let query = if param_placeholders.is_empty() {
-                format!("CALL {proc_name}()")
-            } else {
-                format!("CALL {}({})", proc_name, param_placeholders.join(", "))
-            };
-
-            debug!("Executing: {} with {} parameters", query, params.len());
+            debug!("Executing: {} with {} parameters", sql, params.len());
 
             let mysql_params: Vec<mysql_async::Value> =
                 params.iter().map(|v| self.json_to_mysql_value(v)).collect();
 
-            // Execute the stored procedure
-            timeout(cmd_timeout, conn.exec_drop(&query, mysql_params))
+            // Execute the stored procedure with positional parameter binding.
+            timeout(cmd_timeout, conn.exec_drop(&sql, mysql_params))
                 .await
                 .map_err(|_| anyhow!("Procedure execution timed out after {cmd_timeout:?}"))?
                 .map_err(|e| anyhow!("Failed to execute procedure: {e}"))?;
