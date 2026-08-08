@@ -35,7 +35,8 @@
 //!
 //! ## Rules
 //!
-//! - **Public API methods** must return `crate::error::Result<T>` with `DrasiError` variants
+//! - **Public API methods** (on `DrasiLib`, the `*_ops` modules, `InspectionAPI`) must return
+//!   `crate::error::Result<T>` with `DrasiError` variants
 //! - **Internal modules** should use `anyhow::Result` with `.context("what failed")`
 //! - **Plugin trait implementations** should use `anyhow::Result` with `.context()`
 //! - **Never** use `anyhow!()` in public API methods — use `DrasiError` constructors
