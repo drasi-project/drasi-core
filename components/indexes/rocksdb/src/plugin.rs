@@ -38,11 +38,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::checkpoint::{self, RocksDbCheckpointStore};
-use crate::element_index::{self, RocksDbElementIndex, RocksIndexOptions};
+use crate::element_index::{self, RocksDbElementIndex};
 use crate::future_queue::{self, RocksDbFutureQueue};
 use crate::live_results::{self, RocksDbLiveResultsWriter};
 use crate::outbox::{self, RocksDbOutboxWriter};
 use crate::result_index::{self, RocksDbResultIndex};
+use crate::RocksIndexOptions;
 use crate::{RocksDbSessionControl, RocksDbSessionState};
 
 /// Open a unified RocksDB database with all column families needed for a query.
@@ -95,20 +96,20 @@ pub fn open_unified_db(
     };
 
     let mut cfs = element_index::element_cf_descriptors(options);
-    cfs.extend(result_index::result_cf_descriptors());
-    cfs.extend(future_queue::future_queue_cf_descriptors());
-    cfs.push(checkpoint::stream_state_cf_descriptor());
-    cfs.push(outbox::outbox_cf_descriptor());
-    cfs.push(live_results::live_results_cf_descriptor());
+    cfs.extend(result_index::result_cf_descriptors(options));
+    cfs.extend(future_queue::future_queue_cf_descriptors(options));
+    cfs.push(checkpoint::stream_state_cf_descriptor(options));
+    cfs.push(outbox::outbox_cf_descriptor(options));
+    cfs.push(live_results::live_results_cf_descriptor(options));
 
     // The default CF is not covered by db_opts: rust-rocksdb opens it with
-    // fresh Options unless a descriptor is supplied, and an unset retention
-    // bound is sanitized to 128 MiB (caught by retention_bound_tests).
-    let mut default_cf_opts = Options::default();
-    crate::bound_write_buffer_history(&mut default_cf_opts);
-    cfs.push(rocksdb::ColumnFamilyDescriptor::new(
+    // fresh Options unless a descriptor is supplied, so it goes through the
+    // same sizing policy (small buffer, derived arena, retention bound) as every
+    // other CF (caught by retention_bound_tests and cf_sizing_tests).
+    cfs.push(crate::sizing::descriptor(
         rocksdb::DEFAULT_COLUMN_FAMILY_NAME,
-        default_cf_opts,
+        Options::default(),
+        options,
     ));
 
     let txn_db_opts = rocksdb::TransactionDBOptions::default();
@@ -138,8 +139,7 @@ pub fn open_unified_db(
 /// ```
 pub struct RocksDbIndexProvider {
     path: PathBuf,
-    enable_archive: bool,
-    direct_io: bool,
+    options: RocksIndexOptions,
 }
 
 impl RocksDbIndexProvider {
@@ -159,9 +159,19 @@ impl RocksDbIndexProvider {
     pub fn new<P: Into<PathBuf>>(path: P, enable_archive: bool, direct_io: bool) -> Self {
         Self {
             path: path.into(),
-            enable_archive,
-            direct_io,
+            options: RocksIndexOptions::new(enable_archive, direct_io),
         }
+    }
+
+    /// Override the large and small write buffer sizes applied to the column
+    /// families (defaults: [`crate::DEFAULT_LARGE_WRITE_BUFFER_SIZE`],
+    /// [`crate::DEFAULT_SMALL_WRITE_BUFFER_SIZE`]). Arena block sizes are
+    /// derived from the buffer size (`write_buffer_size / 64`, clamped to
+    /// `[64 KiB, 1 MiB]`).
+    pub fn with_write_buffer_sizes(mut self, large: usize, small: usize) -> Self {
+        self.options.large_write_buffer_size = large;
+        self.options.small_write_buffer_size = small;
+        self
     }
 
     /// Get the configured path.
@@ -171,12 +181,12 @@ impl RocksDbIndexProvider {
 
     /// Check if archive is enabled.
     pub fn is_archive_enabled(&self) -> bool {
-        self.enable_archive
+        self.options.archive_enabled
     }
 
     /// Check if direct I/O is enabled.
     pub fn is_direct_io_enabled(&self) -> bool {
-        self.direct_io
+        self.options.direct_io
     }
 }
 
@@ -184,10 +194,7 @@ impl RocksDbIndexProvider {
 impl IndexBackendPlugin for RocksDbIndexProvider {
     async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
         let path = self.path.to_string_lossy().to_string();
-        let options = RocksIndexOptions {
-            archive_enabled: self.enable_archive,
-            direct_io: self.direct_io,
-        };
+        let options = self.options;
 
         let db = open_unified_db(&path, query_id, &options).map_err(|e| {
             log::error!(
@@ -204,8 +211,16 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
             options,
             session_state.clone(),
         ));
-        let result_index = Arc::new(RocksDbResultIndex::new(db.clone(), session_state.clone()));
-        let future_queue = Arc::new(RocksDbFutureQueue::new(db.clone(), session_state.clone()));
+        let result_index = Arc::new(RocksDbResultIndex::new(
+            db.clone(),
+            session_state.clone(),
+            options,
+        ));
+        let future_queue = Arc::new(RocksDbFutureQueue::new(
+            db.clone(),
+            session_state.clone(),
+            options,
+        ));
         let checkpoint_store = Arc::new(RocksDbCheckpointStore::new(db.clone(), session_state));
         let outbox_writer = Arc::new(RocksDbOutboxWriter::new(db.clone()));
         let live_results_writer = Arc::new(RocksDbLiveResultsWriter::new(db));
@@ -297,10 +312,7 @@ mod tests {
     #[test]
     fn test_open_unified_db() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let options = RocksIndexOptions {
-            archive_enabled: true,
-            direct_io: false,
-        };
+        let options = RocksIndexOptions::new(true, false);
 
         let path = temp_dir.path().to_string_lossy().to_string();
         let result = open_unified_db(&path, "test_query", &options);
@@ -310,10 +322,7 @@ mod tests {
     #[test]
     fn test_open_unified_db_rejects_unsafe_query_id() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let options = RocksIndexOptions {
-            archive_enabled: true,
-            direct_io: false,
-        };
+        let options = RocksIndexOptions::new(true, false);
         let path = temp_dir.path().to_string_lossy().to_string();
 
         for bad in ["", ".", "..", "a/b", "../escape", "a\\b", "with\0nul"] {

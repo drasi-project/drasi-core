@@ -22,16 +22,13 @@
 //! both a reintroduced zero and a column family the bound was never applied
 //! to.
 
-use drasi_index_rocksdb::element_index::RocksIndexOptions;
 use drasi_index_rocksdb::open_unified_db;
+use drasi_index_rocksdb::RocksIndexOptions;
 
 #[test]
 fn effective_retention_is_the_explicit_bound_on_every_cf() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let options = RocksIndexOptions {
-        archive_enabled: true,
-        direct_io: false,
-    };
+    let options = RocksIndexOptions::new(true, false);
     let db =
         open_unified_db(dir.path().to_str().unwrap(), "retention-test", &options).expect("open db");
 

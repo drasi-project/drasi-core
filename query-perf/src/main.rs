@@ -28,10 +28,8 @@ use drasi_index_garnet::{
     GarnetSessionState,
 };
 use drasi_index_rocksdb::{
-    element_index::{RocksDbElementIndex, RocksIndexOptions},
-    open_unified_db,
-    result_index::RocksDbResultIndex,
-    RocksDbSessionControl, RocksDbSessionState,
+    element_index::RocksDbElementIndex, open_unified_db, result_index::RocksDbResultIndex,
+    RocksDbSessionControl, RocksDbSessionState, RocksIndexOptions,
 };
 use drasi_query_cypher::CypherParser;
 
@@ -121,10 +119,7 @@ async fn main() {
             == IndexType::RocksDB
             || test_run_config.result_index_type == IndexType::RocksDB
         {
-            let options = RocksIndexOptions {
-                archive_enabled: false,
-                direct_io: false,
-            };
+            let options = RocksIndexOptions::new(false, false);
             let path = match env::var("ROCKS_PATH") {
                 Ok(p) => p,
                 Err(_) => "test-data".to_string(),
@@ -147,10 +142,7 @@ async fn main() {
                 builder.with_element_index(Arc::new(element_index))
             }
             IndexType::RocksDB => {
-                let options = RocksIndexOptions {
-                    archive_enabled: false,
-                    direct_io: false,
-                };
+                let options = RocksIndexOptions::new(false, false);
 
                 let db = rocks_db.clone().unwrap();
                 let session_state = rocks_session_state.clone().unwrap();
@@ -172,9 +164,10 @@ async fn main() {
                 builder.with_result_index(Arc::new(ari))
             }
             IndexType::RocksDB => {
+                let options = RocksIndexOptions::new(false, false);
                 let db = rocks_db.unwrap();
                 let session_state = rocks_session_state.clone().unwrap();
-                let ari = RocksDbResultIndex::new(db, session_state);
+                let ari = RocksDbResultIndex::new(db, session_state, options);
                 ari.clear().await.unwrap();
 
                 builder.with_result_index(Arc::new(ari))
