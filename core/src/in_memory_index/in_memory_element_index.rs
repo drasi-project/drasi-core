@@ -81,7 +81,15 @@ impl InMemoryElementIndex {
 
     async fn clear_slot_affinity(&self, element: &Element) -> Result<(), IndexError> {
         let mut af_guard = self.slot_affinity.write().await;
-        let affinity = af_guard.entry(element.get_reference().clone()).or_default();
+        // Remove the entry rather than draining it in place, otherwise an empty
+        // HashSet is retained for every element that is ever deleted, leaking
+        // memory proportional to total element churn. Callers that update a live
+        // element (`set_element`) re-insert affinity via `set_slot_affinity`.
+        let affinity = match af_guard.remove(element.get_reference()) {
+            Some(affinity) => affinity,
+            // No recorded affinity means there is nothing to clear.
+            None => return Ok(()),
+        };
 
         match element {
             Element::Node {
@@ -90,7 +98,7 @@ impl InMemoryElementIndex {
             } => {
                 let mut guard = self.element_by_slot.write().await;
 
-                for old_slot in affinity.drain() {
+                for old_slot in affinity {
                     guard.remove(&(old_slot, metadata.reference.clone()));
                 }
             }
@@ -103,13 +111,21 @@ impl InMemoryElementIndex {
                 let mut in_guard = self.element_by_slot_in.write().await;
                 let mut out_guard = self.element_by_slot_out.write().await;
 
-                for old_slot in affinity.drain() {
-                    if let Some(set) = in_guard.get_mut(&(old_slot, in_node.clone())) {
+                for old_slot in affinity {
+                    let in_key = (old_slot, in_node.clone());
+                    if let Some(set) = in_guard.get_mut(&in_key) {
                         set.remove(&metadata.reference);
+                        if set.is_empty() {
+                            in_guard.remove(&in_key);
+                        }
                     }
 
-                    if let Some(set) = out_guard.get_mut(&(old_slot, out_node.clone())) {
+                    let out_key = (old_slot, out_node.clone());
+                    if let Some(set) = out_guard.get_mut(&out_key) {
                         set.remove(&metadata.reference);
+                        if set.is_empty() {
+                            out_guard.remove(&out_key);
+                        }
                     }
                 }
             }
@@ -780,6 +796,26 @@ mod tests {
         }
     }
 
+    /// Helper function to create a test relation element
+    fn create_test_relation(
+        source_id: &str,
+        element_id: &str,
+        label: &str,
+        in_id: &str,
+        out_id: &str,
+    ) -> Element {
+        Element::Relation {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(source_id, element_id),
+                labels: Arc::from([Arc::from(label)]),
+                effective_from: 0,
+            },
+            in_node: ElementReference::new(source_id, in_id),
+            out_node: ElementReference::new(source_id, out_id),
+            properties: ElementPropertyMap::new(),
+        }
+    }
+
     /// Helper function to create a test node with a property
     fn create_test_node_with_property(
         source_id: &str,
@@ -1159,6 +1195,189 @@ mod tests {
         }
     }
 
+    /// Regression test for the `slot_affinity` memory leak: after an element is
+    /// deleted, no empty `slot_affinity` entry should be retained for it.
+    #[tokio::test]
+    async fn test_delete_element_prunes_slot_affinity() {
+        let index = InMemoryElementIndex::new();
+
+        let element_ref = ElementReference::new("source1", "node1");
+        let element = create_test_node("source1", "node1", "Person");
+
+        index.set_element(&element, &vec![0, 1]).await.unwrap();
+
+        // A live element should have a slot_affinity entry.
+        {
+            let guard = index.slot_affinity.read().await;
+            assert!(guard.contains_key(&element_ref));
+        }
+
+        index.delete_element(&element_ref).await.unwrap();
+
+        // After deletion the entry must be removed entirely, not left empty.
+        {
+            let guard = index.slot_affinity.read().await;
+            assert!(
+                !guard.contains_key(&element_ref),
+                "slot_affinity should not retain an entry for a deleted element"
+            );
+        }
+    }
+
+    /// High-churn scenario: repeatedly creating and deleting distinct elements
+    /// must not cause `slot_affinity` to grow without bound.
+    #[tokio::test]
+    async fn test_element_churn_does_not_grow_slot_affinity() {
+        let index = InMemoryElementIndex::new();
+
+        for i in 0..1000 {
+            let element_id = format!("node{i}");
+            let element_ref = ElementReference::new("source1", &element_id);
+            let element = create_test_node("source1", &element_id, "Person");
+
+            index.set_element(&element, &vec![0]).await.unwrap();
+            index.delete_element(&element_ref).await.unwrap();
+        }
+
+        let guard = index.slot_affinity.read().await;
+        assert!(
+            guard.is_empty(),
+            "slot_affinity should be empty after all churned elements are deleted, but had {} entries",
+            guard.len()
+        );
+    }
+
+    /// Updating a live element must keep its `slot_affinity` entry intact, since
+    /// `set_element` clears then re-inserts affinity.
+    #[tokio::test]
+    async fn test_update_element_retains_slot_affinity() {
+        let index = InMemoryElementIndex::new();
+
+        let element_ref = ElementReference::new("source1", "node1");
+        let element = create_test_node("source1", "node1", "Person");
+
+        index.set_element(&element, &vec![0]).await.unwrap();
+
+        // Update the same element with a different slot affinity.
+        index.set_element(&element, &vec![1, 2]).await.unwrap();
+
+        let guard = index.slot_affinity.read().await;
+        let affinity = guard
+            .get(&element_ref)
+            .expect("live element should retain a slot_affinity entry after update");
+        assert_eq!(affinity, &HashSet::from([1, 2]));
+    }
+
+    /// The early-return `None` path in `clear_slot_affinity` must be a no-op:
+    /// deleting an element twice (or one that was never inserted) should return
+    /// `Ok(())` without panicking and must not create a `slot_affinity` entry.
+    #[tokio::test]
+    async fn test_double_delete_no_slot_affinity_entry() {
+        let index = InMemoryElementIndex::new();
+
+        let element_ref = ElementReference::new("source1", "node1");
+        let element = create_test_node("source1", "node1", "Person");
+
+        index.set_element(&element, &vec![0]).await.unwrap();
+
+        // First delete removes the element and its affinity entry.
+        index.delete_element(&element_ref).await.unwrap();
+
+        // Second delete hits the `None` early-return path and must be a no-op.
+        let result = index.delete_element(&element_ref).await;
+        assert!(result.is_ok(), "double delete should not panic");
+
+        let guard = index.slot_affinity.read().await;
+        assert!(
+            !guard.contains_key(&element_ref),
+            "double delete must not leave a slot_affinity entry"
+        );
+    }
+
+    /// Deleting a relation must prune its `slot_affinity` entry as well as the
+    /// `element_by_slot_in` / `element_by_slot_out` reverse indexes.
+    #[tokio::test]
+    async fn test_delete_relation_prunes_slot_affinity_and_reverse_indexes() {
+        let index = InMemoryElementIndex::new();
+
+        // Insert the endpoint nodes and a relation between them.
+        let in_ref = ElementReference::new("source1", "in1");
+        let out_ref = ElementReference::new("source1", "out1");
+        let relation_ref = ElementReference::new("source1", "rel1");
+
+        index
+            .set_element(&create_test_node("source1", "in1", "Person"), &vec![0])
+            .await
+            .unwrap();
+        index
+            .set_element(&create_test_node("source1", "out1", "Person"), &vec![0])
+            .await
+            .unwrap();
+
+        let relation = create_test_relation("source1", "rel1", "KNOWS", "in1", "out1");
+        index.set_element(&relation, &vec![1]).await.unwrap();
+
+        // While live, the relation should be present in all three maps.
+        {
+            let af_guard = index.slot_affinity.read().await;
+            assert!(af_guard.contains_key(&relation_ref));
+
+            let in_guard = index.element_by_slot_in.read().await;
+            assert!(in_guard
+                .get(&(1, in_ref.clone()))
+                .is_some_and(|set| set.contains(&relation_ref)));
+
+            let out_guard = index.element_by_slot_out.read().await;
+            assert!(out_guard
+                .get(&(1, out_ref.clone()))
+                .is_some_and(|set| set.contains(&relation_ref)));
+        }
+
+        index.delete_element(&relation_ref).await.unwrap();
+
+        // After deletion no map should retain a reference to the relation.
+        {
+            let af_guard = index.slot_affinity.read().await;
+            assert!(
+                !af_guard.contains_key(&relation_ref),
+                "slot_affinity should not retain an entry for a deleted relation"
+            );
+
+            let in_guard = index.element_by_slot_in.read().await;
+            assert!(!in_guard
+                .get(&(1, in_ref.clone()))
+                .is_some_and(|set| set.contains(&relation_ref)));
+
+            let out_guard = index.element_by_slot_out.read().await;
+            assert!(!out_guard
+                .get(&(1, out_ref.clone()))
+                .is_some_and(|set| set.contains(&relation_ref)));
+        }
+    }
+
+    /// High-churn variant for relations: repeatedly creating and deleting
+    /// distinct relations must not cause `slot_affinity` to grow without bound.
+    #[tokio::test]
+    async fn test_relation_churn_does_not_grow_slot_affinity() {
+        let index = InMemoryElementIndex::new();
+
+        for i in 0..1000 {
+            let rel_id = format!("rel{i}");
+            let relation_ref = ElementReference::new("source1", &rel_id);
+            let relation = create_test_relation("source1", &rel_id, "KNOWS", "in1", "out1");
+
+            index.set_element(&relation, &vec![0]).await.unwrap();
+            index.delete_element(&relation_ref).await.unwrap();
+        }
+
+        let guard = index.slot_affinity.read().await;
+        assert!(
+            guard.is_empty(),
+            "slot_affinity should be empty after all churned relations are deleted, but had {} entries",
+            guard.len()
+        );
+    }
+
     /// Regression test for issue #641: emptied partial-join containers must be
     /// pruned so `partial_joins` does not grow unbounded for high-cardinality /
     /// high-churn join values.
@@ -1283,5 +1502,133 @@ mod tests {
             )
             .await;
         assert!(versions.is_ok());
+    }
+
+    /// Regression test for issue #642: deleting a relation must prune the now-empty
+    /// `(slot, node)` entries from `element_by_slot_in` / `element_by_slot_out` instead
+    /// of leaving empty `HashSet`s behind, which would leak memory over time.
+    #[tokio::test]
+    async fn test_slot_maps_pruned_after_relation_delete() {
+        let index = InMemoryElementIndex::new();
+
+        // Insert two relations that share the same slot but reference distinct nodes.
+        let rel1 = create_test_relation("source1", "rel1", "KNOWS", "in1", "out1");
+        let rel2 = create_test_relation("source1", "rel2", "KNOWS", "in2", "out2");
+        index.set_element(&rel1, &vec![0]).await.unwrap();
+        index.set_element(&rel2, &vec![0]).await.unwrap();
+
+        // Both relations should be indexed by their in/out nodes.
+        assert_eq!(index.element_by_slot_in.read().await.len(), 2);
+        assert_eq!(index.element_by_slot_out.read().await.len(), 2);
+
+        // Delete the first relation; its (slot, node) entries should be removed entirely,
+        // not left as empty sets.
+        index
+            .delete_element(&ElementReference::new("source1", "rel1"))
+            .await
+            .unwrap();
+
+        {
+            let in_guard = index.element_by_slot_in.read().await;
+            let out_guard = index.element_by_slot_out.read().await;
+            assert_eq!(in_guard.len(), 1, "empty in-slot entry should be pruned");
+            assert_eq!(out_guard.len(), 1, "empty out-slot entry should be pruned");
+            assert!(!in_guard.contains_key(&(0, ElementReference::new("source1", "in1"))));
+            assert!(!out_guard.contains_key(&(0, ElementReference::new("source1", "out1"))));
+        }
+
+        // Delete the second relation; both maps should now be empty.
+        index
+            .delete_element(&ElementReference::new("source1", "rel2"))
+            .await
+            .unwrap();
+
+        assert!(
+            index.element_by_slot_in.read().await.is_empty(),
+            "element_by_slot_in should be empty after all relations are deleted"
+        );
+        assert!(
+            index.element_by_slot_out.read().await.is_empty(),
+            "element_by_slot_out should be empty after all relations are deleted"
+        );
+        assert!(
+            index.slot_affinity.read().await.is_empty(),
+            "slot_affinity should be empty after all relations are deleted"
+        );
+    }
+
+    /// Regression test for the multi-slot case: a relation assigned to several slots must
+    /// have every `(slot, node)` entry pruned on delete, since `clear_slot_affinity`
+    /// iterates over all slots in the affinity set.
+    #[tokio::test]
+    async fn test_slot_maps_pruned_multi_slot() {
+        let index = InMemoryElementIndex::new();
+
+        let rel = create_test_relation("source1", "rel1", "KNOWS", "in1", "out1");
+        index.set_element(&rel, &vec![0, 1, 2]).await.unwrap();
+
+        // One (slot, node) entry per slot for both in and out maps.
+        assert_eq!(index.element_by_slot_in.read().await.len(), 3);
+        assert_eq!(index.element_by_slot_out.read().await.len(), 3);
+
+        index
+            .delete_element(&ElementReference::new("source1", "rel1"))
+            .await
+            .unwrap();
+
+        assert!(
+            index.element_by_slot_in.read().await.is_empty(),
+            "all in-slot entries should be pruned across every slot"
+        );
+        assert!(
+            index.element_by_slot_out.read().await.is_empty(),
+            "all out-slot entries should be pruned across every slot"
+        );
+        assert!(
+            index.slot_affinity.read().await.is_empty(),
+            "slot_affinity should be pruned for the deleted relation"
+        );
+    }
+
+    /// Ensure pruning does not drop a shared `(slot, node)` entry while another relation
+    /// still references that node.
+    #[tokio::test]
+    async fn test_slot_maps_retain_shared_node_entry() {
+        let index = InMemoryElementIndex::new();
+
+        // Two relations sharing the same in_node and out_node.
+        let rel1 = create_test_relation("source1", "rel1", "KNOWS", "in1", "out1");
+        let rel2 = create_test_relation("source1", "rel2", "KNOWS", "in1", "out1");
+        index.set_element(&rel1, &vec![0]).await.unwrap();
+        index.set_element(&rel2, &vec![0]).await.unwrap();
+
+        let in_key = (0, ElementReference::new("source1", "in1"));
+        let out_key = (0, ElementReference::new("source1", "out1"));
+
+        // Delete one relation: the shared entries must survive with the remaining ref.
+        index
+            .delete_element(&ElementReference::new("source1", "rel1"))
+            .await
+            .unwrap();
+
+        {
+            let in_guard = index.element_by_slot_in.read().await;
+            let out_guard = index.element_by_slot_out.read().await;
+            let in_set = in_guard.get(&in_key).expect("shared in entry retained");
+            let out_set = out_guard.get(&out_key).expect("shared out entry retained");
+            assert_eq!(in_set.len(), 1);
+            assert_eq!(out_set.len(), 1);
+            assert!(in_set.contains(&ElementReference::new("source1", "rel2")));
+            assert!(out_set.contains(&ElementReference::new("source1", "rel2")));
+        }
+
+        // Delete the last relation: entries should now be pruned.
+        index
+            .delete_element(&ElementReference::new("source1", "rel2"))
+            .await
+            .unwrap();
+
+        assert!(index.element_by_slot_in.read().await.is_empty());
+        assert!(index.element_by_slot_out.read().await.is_empty());
     }
 }
