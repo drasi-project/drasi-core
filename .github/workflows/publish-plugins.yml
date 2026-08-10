@@ -133,9 +133,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          # Empty ref falls back to the triggering ref (release-plz / manual runs).
-          # The nightly passes the resolved main SHA so plugins are built from the
-          # same commit as the resolved nightly SHA.
+          # Empty ref falls back to the triggering ref (release-plz, nightly, and
+          # manual runs).
           ref: ${{ inputs.ref }}
           fetch-depth: 0
 
@@ -145,7 +144,9 @@ jobs:
           # The Microsoft apt repos preinstalled on GitHub runners intermittently
           # serve a broken InRelease signature (NOSPLIT), failing apt-get update.
           # We don't use them, so remove before updating.
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources 2>/dev/null || true
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.li          The nightly workflow still contains configuration left over from testing the plugin zigbuild changes.
+          
+          Remove the temporary branch override, dead commit-message skip logic, and unused OIDC permission. Update related comments so the workflow builds from its triggering ref and accurately reflects the unsigned nightly publishing path.st.d/azure-cli.list /etc/apt/sources.list.d/azure-cli.sources 2>/dev/null || true
           sudo apt-get update
           # The Kafka plugins bundle a minimal static librdkafka. On every Linux
           # target the build now forces WITH_CURL/SSL=0 (cross targets via their
