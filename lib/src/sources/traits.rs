@@ -249,7 +249,11 @@ pub trait Source: Send + Sync {
     /// or the native `resume_from` position). Delegating to
     /// [`SourceBase::subscribe_with_replay()`](crate::sources::base::SourceBase::subscribe_with_replay)
     /// or [`SourceBase::subscribe_with_bootstrap()`](crate::sources::base::SourceBase::subscribe_with_bootstrap)
-    /// handles the base-level bookkeeping automatically.
+    /// handles the base-level bookkeeping automatically. In particular, a source
+    /// with no durable position of its own does not need to do anything: when the
+    /// query resumes from a checkpoint, `subscribe_with_bootstrap()` reads
+    /// `settings.resume_sequence` and advances the counter above the query's dedup
+    /// high-water mark so the first post-restart events are not silently dropped.
     ///
     /// # Arguments
     /// * `settings` - Subscription settings including query ID, text, and labels of interest

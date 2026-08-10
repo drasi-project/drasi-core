@@ -329,6 +329,7 @@ mod tests {
             relations: std::collections::HashSet::new(),
             resume_from: None,
             request_position_handle: false,
+            resume_sequence: None,
         };
         let sub = source.subscribe(settings).await.unwrap();
         let mut receiver = sub.receiver;
@@ -394,6 +395,7 @@ mod tests {
             relations: std::collections::HashSet::new(),
             resume_from: None,
             request_position_handle: false,
+            resume_sequence: None,
         };
         let sub = source.subscribe(settings).await.unwrap();
         let mut receiver = sub.receiver;
@@ -916,6 +918,7 @@ mod tests {
             relations: std::collections::HashSet::new(),
             resume_from: None,
             request_position_handle: false,
+            resume_sequence: None,
         };
         let sub = source.subscribe(settings).await.unwrap();
         let mut receiver = sub.receiver;
@@ -2405,6 +2408,266 @@ mod tests {
             stored_hash,
             Some(99999),
             "Old config hash should remain when clear_checkpoints fails on mismatch"
+        );
+    }
+
+    // ========================================================================
+    // Regression test for #664 — restart with a persistent index must not
+    // silently drop the first K changes when the source has no durable position.
+    // ========================================================================
+
+    /// A source that emits events with **no** `source_position` (so its
+    /// checkpoints carry a sequence but no durable position bytes) and delegates
+    /// its `subscribe` to [`SourceBase::subscribe_with_bootstrap`] so the
+    /// framework's sequence-counter recovery runs.
+    ///
+    /// [`Self::simulate_process_restart`] resets the monotonic counter to its
+    /// initial value, emulating a fresh process where the in-memory counter is
+    /// lost while the query's persistent checkpoint survives.
+    struct NoPositionTestSource {
+        base: SourceBase,
+    }
+
+    impl NoPositionTestSource {
+        fn new(id: &str) -> anyhow::Result<Self> {
+            Ok(Self {
+                base: SourceBase::new(SourceBaseParams::new(id))?,
+            })
+        }
+
+        /// Dispatch a Person insert with **no** `source_position`.
+        async fn inject(&self, key: &str) -> anyhow::Result<()> {
+            let change = drasi_core::models::SourceChange::Insert {
+                element: drasi_core::models::Element::Node {
+                    metadata: drasi_core::models::ElementMetadata {
+                        reference: drasi_core::models::ElementReference::new(
+                            self.base.get_id(),
+                            key,
+                        ),
+                        labels: Arc::new([Arc::from("Person")]),
+                        effective_from: 0,
+                    },
+                    properties: drasi_core::models::ElementPropertyMap::from(
+                        vec![(
+                            "name".to_string(),
+                            drasi_core::evaluation::variable_value::VariableValue::String(
+                                key.to_string(),
+                            ),
+                        )]
+                        .into_iter()
+                        .collect::<std::collections::BTreeMap<_, _>>(),
+                    ),
+                },
+            };
+            // Deliberately no source_position — this source has no durable
+            // position of its own.
+            let wrapper = SourceEventWrapper::new(
+                self.base.get_id().to_string(),
+                SourceEvent::Change(change),
+                chrono::Utc::now(),
+            );
+            self.base.dispatch_event(wrapper).await
+        }
+
+        /// Emulate a process restart: the in-memory sequence counter is lost and
+        /// restarts at 1 (the next dispatched event would be seq 1 again).
+        fn simulate_process_restart(&self) {
+            self.base.set_next_sequence(0);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Source for NoPositionTestSource {
+        fn id(&self) -> &str {
+            self.base.get_id()
+        }
+
+        fn type_name(&self) -> &str {
+            "no-position-test"
+        }
+
+        fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
+            std::collections::HashMap::new()
+        }
+
+        fn auto_start(&self) -> bool {
+            self.base.get_auto_start()
+        }
+
+        async fn start(&self) -> anyhow::Result<()> {
+            self.base
+                .set_status(ComponentStatus::Starting, Some("Starting".to_string()))
+                .await;
+            self.base
+                .set_status(ComponentStatus::Running, Some("Running".to_string()))
+                .await;
+            Ok(())
+        }
+
+        async fn stop(&self) -> anyhow::Result<()> {
+            self.base
+                .set_status(ComponentStatus::Stopping, Some("Stopping".to_string()))
+                .await;
+            self.base
+                .set_status(ComponentStatus::Stopped, Some("Stopped".to_string()))
+                .await;
+            Ok(())
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            self.base.status_handle().get_status().await
+        }
+
+        async fn subscribe(
+            &self,
+            settings: crate::config::SourceSubscriptionSettings,
+        ) -> anyhow::Result<SubscriptionResponse> {
+            // Delegate to the base helper so the framework's checkpoint-restore
+            // sequence bump (driven by settings.resume_sequence) is exercised.
+            self.base
+                .subscribe_with_bootstrap(&settings, "no-position-test")
+                .await
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
+            self.base.initialize(context).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_no_durable_position_source_not_dropped_after_restart() {
+        const K: usize = 3;
+
+        let (query_manager, source_manager, graph) =
+            create_test_env_with_persistent_backend().await;
+        let mut event_rx = graph.read().await.subscribe();
+
+        let source = NoPositionTestSource::new("nopos-src").unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
+        source_manager
+            .start_source("nopos-src".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "nopos-src",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let config = create_persistent_query_config("nopos-query", vec!["nopos-src".to_string()]);
+        add_query(&query_manager, &graph, config).await.unwrap();
+        query_manager
+            .start_query("nopos-query".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "nopos-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let source_instance = source_manager
+            .get_source_instance("nopos-src")
+            .await
+            .unwrap();
+        let test_source = source_instance
+            .as_any()
+            .downcast_ref::<NoPositionTestSource>()
+            .unwrap();
+
+        // Push K events — the framework stamps them seq 1..=K. Checkpoint -> K.
+        for i in 0..K {
+            test_source.inject(&format!("a{i}")).await.unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let query_instance = query_manager
+            .get_query_instance("nopos-query")
+            .await
+            .unwrap();
+        let cp_store = query_instance
+            .as_any()
+            .downcast_ref::<DrasiQuery>()
+            .unwrap()
+            .get_checkpoint_store()
+            .await
+            .expect("query should have a checkpoint store");
+        let cp = cp_store
+            .read_checkpoint("nopos-src")
+            .await
+            .unwrap()
+            .expect("checkpoint should exist after processing K events");
+        assert_eq!(
+            cp.sequence, K as u64,
+            "checkpoint should reach K before restart"
+        );
+        assert!(
+            cp.source_position.is_none(),
+            "this source stores no durable position"
+        );
+
+        // Stop the query.
+        query_manager
+            .stop_query("nopos-query".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "nopos-query",
+            ComponentStatus::Stopped,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        // Emulate a process restart: the source's in-memory sequence counter
+        // resets to 1 while the persistent checkpoint (seq=K) survives.
+        test_source.simulate_process_restart();
+
+        // Restart the query. It restores its dedup high-water mark (K) and, via
+        // the fix, hands `resume_sequence=K` to the source so the counter is
+        // bumped above K on subscribe.
+        query_manager
+            .start_query("nopos-query".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "nopos-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Push K brand-new events. Before the fix these would be stamped 1..=K and
+        // silently dropped by the dedup filter; with the fix they are stamped
+        // (K+1)..=2K and all land.
+        for i in 0..K {
+            test_source.inject(&format!("b{i}")).await.unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let cp_after = cp_store
+            .read_checkpoint("nopos-src")
+            .await
+            .unwrap()
+            .expect("checkpoint should still exist after restart");
+        assert_eq!(
+            cp_after.sequence,
+            (2 * K) as u64,
+            "all {K} post-restart events must be processed (checkpoint should advance to {}), \
+             got seq {}. A lower value means the first K post-restart events were silently dropped.",
+            2 * K,
+            cp_after.sequence
         );
     }
 }

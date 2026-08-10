@@ -356,9 +356,14 @@ drasi_ffi_primitives::ffi_vtable! {
         fn initialize_fn(state: *mut, ctx: *const FfiRuntimeContext),
 
         // Subscriptions
-        /// Subscribe with query_id, node_labels JSON, relation_labels JSON, and
-        /// optional resume_from position bytes.
-        fn subscribe_fn(state: *mut, source_id: FfiStr, enable_bootstrap: bool, query_id: FfiStr, nodes_json: FfiStr, relations_json: FfiStr, resume_from_ptr: *const u8, resume_from_len: u32, request_position_handle: bool) -> *mut FfiSubscriptionResponse,
+        /// Subscribe with query_id, node_labels JSON, relation_labels JSON,
+        /// optional resume_from position bytes, and the optional checkpoint
+        /// `resume_sequence` (carried as a value + present flag, since the ABI
+        /// cannot pass `Option<u64>` directly). `resume_sequence` lets a resuming
+        /// source advance its monotonic sequence counter above the query's dedup
+        /// high-water mark so the first post-restart events are not silently
+        /// dropped (issue #664).
+        fn subscribe_fn(state: *mut, source_id: FfiStr, enable_bootstrap: bool, query_id: FfiStr, nodes_json: FfiStr, relations_json: FfiStr, resume_from_ptr: *const u8, resume_from_len: u32, request_position_handle: bool, resume_sequence: u64, resume_sequence_present: bool) -> *mut FfiSubscriptionResponse,
 
         /// Host calls this to inject an external bootstrap provider (from another plugin).
         fn set_bootstrap_provider_fn(state: *mut, provider: *mut BootstrapProviderVtable),

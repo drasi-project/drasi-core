@@ -182,6 +182,7 @@ async fn test_grpc_crash_recovery_resumes_sequence() {
         relations: HashSet::new(),
         request_position_handle: true,
         resume_from: Some(bytes::Bytes::from(3u64.to_be_bytes().to_vec())),
+        resume_sequence: None,
     };
     let resp = source.subscribe(settings).await.unwrap();
     let mut rx = resp.receiver;

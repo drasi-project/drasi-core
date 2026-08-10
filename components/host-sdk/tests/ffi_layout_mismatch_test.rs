@@ -122,6 +122,7 @@ async fn mock_source_change_stream_survives_layout_mismatch() {
         relations: HashSet::new(),
         resume_from: None,
         request_position_handle: false,
+        resume_sequence: None,
     };
     let sub = source.subscribe(settings).await.expect("Should subscribe");
     let mut receiver = sub.receiver;
@@ -219,6 +220,7 @@ async fn mock_source_bootstrap_stream_survives_layout_mismatch() {
         relations: HashSet::new(),
         resume_from: None,
         request_position_handle: false,
+        resume_sequence: None,
     };
     let sub = source.subscribe(settings).await.expect("Should subscribe");
     let mut bootstrap_receiver = sub

@@ -472,6 +472,7 @@ async fn test_kafka_bootstrap_source_overlap_handover() {
         relations: HashSet::new(),
         resume_from: None,
         request_position_handle: true,
+        resume_sequence: None,
     };
     let response = source.subscribe(settings).await.unwrap();
     let mut bootstrap_rx = response

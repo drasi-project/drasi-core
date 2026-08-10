@@ -212,6 +212,14 @@ impl Source for SourceProxy {
             None => (std::ptr::null(), 0u32),
         };
 
+        // Marshal the optional checkpoint sequence as (value, present) since the
+        // ABI cannot carry `Option<u64>` directly. This lets a resuming plugin
+        // source advance its in-memory sequence counter above the query's dedup
+        // high-water mark, so the first K post-restart events are not silently
+        // deduplicated away — closing issue #664 for FFI-loaded sources too.
+        let (resume_sequence, resume_sequence_present) =
+            drasi_ffi_primitives::encode_optional_u64(settings.resume_sequence);
+
         let resp_ptr = (self.vtable.subscribe_fn)(
             self.vtable.state,
             source_id_ffi,
@@ -222,6 +230,8 @@ impl Source for SourceProxy {
             resume_from_ptr,
             resume_from_len,
             settings.request_position_handle,
+            resume_sequence,
+            resume_sequence_present,
         );
 
         if resp_ptr.is_null() {
