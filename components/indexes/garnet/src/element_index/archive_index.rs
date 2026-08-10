@@ -40,6 +40,9 @@ impl ElementArchiveIndex for GarnetElementIndex {
         element_ref: &ElementReference,
         time: ElementTimestamp,
     ) -> Result<Option<Arc<Element>>, IndexError> {
+        if !self.archive_enabled {
+            return Err(IndexError::ArchiveNotEnabled);
+        }
         let key = self.key_formatter.get_archive_key(element_ref);
 
         // Check buffer first (cheap: mutex + hashmap lookup) to decide
@@ -133,6 +136,9 @@ impl ElementArchiveIndex for GarnetElementIndex {
         element_ref: &ElementReference,
         range: TimestampRange<ElementTimestamp>,
     ) -> Result<ElementStream, IndexError> {
+        if !self.archive_enabled {
+            return Err(IndexError::ArchiveNotEnabled);
+        }
         let mut con = self.connection.clone();
         let key = self.key_formatter.get_archive_key(element_ref);
 
