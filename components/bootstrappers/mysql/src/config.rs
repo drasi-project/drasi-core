@@ -41,9 +41,8 @@ pub struct MySqlBootstrapConfig {
 
     /// SSL/TLS mode for the MySQL connection.
     ///
-    /// Defaults to [`SslMode::IfAvailable`]. When built without the `tls`
-    /// feature, `IfAvailable` connects in plaintext and the `Require*` variants
-    /// return an error instead of panicking.
+    /// Defaults to [`SslMode::IfAvailable`], which negotiates TLS when the server
+    /// offers it and falls back to plaintext otherwise.
     pub ssl_mode: SslMode,
 
     /// Table key configurations

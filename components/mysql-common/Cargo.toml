@@ -38,7 +38,7 @@ log = "0.4"
 # A rustls TLS backend (+ ring crypto provider) is always compiled in so every
 # SslMode works in shipped plugins (which are built without extra features).
 # rustls is pure Rust, so this needs no system OpenSSL.
-mysql_async = { version = "0.37", features = ["rustls-tls", "ring"] }
+mysql_async = { version = "0.37", features = ["rustls-tls", "ring", "tls12"] }
 serde = { version = "1.0", features = ["derive"] }
 ordered-float = "3.0"
 utoipa = { workspace = true, optional = true }

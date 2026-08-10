@@ -822,6 +822,53 @@ async fn test_if_available_negotiates_tls_against_real_server() {
     conn.disconnect().await.unwrap();
 }
 
+/// Regression test for the `tls12` feature: `mysql_async`'s `rustls-tls` alone
+/// pulls rustls with its defaults off, leaving the client TLS 1.3-only, so
+/// `Require` fails with a `ProtocolVersion` alert against a server restricted to
+/// TLS 1.2 (MySQL 5.7 and hardened 8.x deployments).
+///
+/// Run with:
+/// `cargo test -p drasi-source-mysql --test integration_test -- --ignored`
+#[tokio::test]
+#[ignore]
+#[allow(clippy::unwrap_used)]
+async fn test_require_connects_to_tls12_only_server() {
+    use drasi_mysql_common::{connect_with_ssl_mode, SslMode};
+    use mysql_async::prelude::Query;
+
+    let mysql_image = Mysql::default()
+        .with_env_var("MYSQL_DATABASE", "test")
+        .with_env_var("MYSQL_USER", "test")
+        .with_env_var("MYSQL_PASSWORD", "test")
+        .with_env_var("MYSQL_ROOT_PASSWORD", "root")
+        .with_cmd(vec!["--tls-version=TLSv1.2"]);
+
+    let container = mysql_image.start().await.unwrap();
+    let port = container.get_host_port_ipv4(3306).await.unwrap();
+
+    let build_opts = || {
+        mysql_async::OptsBuilder::default()
+            .ip_or_hostname("127.0.0.1")
+            .tcp_port(port)
+            .user(Some("test"))
+            .pass(Some("test"))
+            .db_name(Some("test"))
+    };
+
+    let mut conn = connect_with_ssl_mode(build_opts, SslMode::Require)
+        .await
+        .expect("Require should negotiate TLS 1.2 against a TLS1.2-only server");
+
+    let row: Option<(String, String)> = "SHOW SESSION STATUS LIKE 'Ssl_version'"
+        .first(&mut conn)
+        .await
+        .unwrap();
+    let version = row.map(|(_, value)| value).unwrap_or_default();
+    assert_eq!(version, "TLSv1.2", "expected a negotiated TLS 1.2 session");
+
+    conn.disconnect().await.unwrap();
+}
+
 /// Helper: wait for a specific change to appear in the subscription.
 async fn wait_for_change<F>(
     sub: &mut drasi_reaction_application::subscription::Subscription,
