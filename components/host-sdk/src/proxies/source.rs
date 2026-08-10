@@ -322,11 +322,29 @@ impl Source for SourceProxy {
                         return;
                     }
                     let ffi_result = unsafe { *Box::from_raw(result) };
+                    // Extract (and free) the provider error text unconditionally
+                    // so the buffer never leaks, whichever branch we take below.
+                    let error_text = if !ffi_result.error_ptr.is_null() && ffi_result.error_len > 0
+                    {
+                        let bytes = unsafe {
+                            std::slice::from_raw_parts(ffi_result.error_ptr, ffi_result.error_len)
+                        };
+                        let text = String::from_utf8_lossy(bytes).into_owned();
+                        if let Some(drop_fn) = ffi_result.error_drop_fn {
+                            (drop_fn)(ffi_result.error_ptr as *mut u8, ffi_result.error_len);
+                        }
+                        Some(text)
+                    } else {
+                        None
+                    };
                     if ffi_result.event_count < 0 {
-                        let _ = tx.send(Err(anyhow::anyhow!(
-                            "Bootstrap failed with code {}",
-                            ffi_result.event_count
-                        )));
+                        let _ = tx.send(Err(match error_text {
+                            Some(msg) => anyhow::anyhow!("Bootstrap failed: {msg}"),
+                            None => anyhow::anyhow!(
+                                "Bootstrap failed with code {}",
+                                ffi_result.event_count
+                            ),
+                        }));
                         return;
                     }
                     let source_position = if !ffi_result.source_position_ptr.is_null()

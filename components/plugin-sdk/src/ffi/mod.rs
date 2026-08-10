@@ -29,6 +29,7 @@
 //! - [`vtable_gen`] — Functions that wrap trait impls into vtables
 
 pub mod bootstrap_proxy;
+pub mod bootstrap_stream;
 pub mod callbacks;
 pub mod identity;
 pub mod identity_proxy;
@@ -69,7 +70,7 @@ pub use vtables::{
     BootstrapPluginVtable, BootstrapProviderVtable, FfiBootstrapContext, FfiBootstrapEvent,
     FfiBootstrapFetchOutboxFn, FfiBootstrapFetchSnapshotFn, FfiBootstrapPushCallbackFn,
     FfiBootstrapReadCheckpointFn, FfiBootstrapReceiver, FfiBootstrapResult,
-    FfiBootstrapResultCallbackFn, FfiBootstrapResultReceiver, FfiBootstrapSender,
+    FfiBootstrapResultCallbackFn, FfiBootstrapResultReceiver, FfiBootstrapStream,
     FfiBootstrapWriteCheckpointFn, FfiChangePushCallbackFn, FfiChangeReceiver, FfiCheckpoint,
     FfiCheckpointResult, FfiOutboxIterator, FfiOutboxIteratorResponse, FfiPluginRegistration,
     FfiQueryResult, FfiResultPushCallbackFn, FfiRuntimeContext, FfiSnapshotIterator,
@@ -79,6 +80,11 @@ pub use vtables::{
 };
 
 pub use bootstrap_proxy::FfiBootstrapProviderProxy;
+pub use bootstrap_stream::{
+    release_bootstrap_receiver, release_result_receiver, wrap_result_receiver,
+    BootstrapResultGuard, BootstrapStreamConsumer, BOOTSTRAP_BRIDGE_CAPACITY,
+    BOOTSTRAP_PROVIDER_CAPACITY,
+};
 pub use identity::{
     credentials_to_ffi, FfiCredentialType, FfiCredentials, FfiCredentialsResult,
     IdentityProviderVtable,
