@@ -27,7 +27,7 @@
 
 use std::ffi::c_void;
 use std::fmt;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
 use tracing::field::{Field, Visit};
 use tracing::Subscriber;
@@ -35,9 +35,37 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
-use super::callbacks::{FfiLogEntry, FfiLogLevel, LogCallbackFn};
+use super::callbacks::{FfiLogEntry, FfiLogLevel, FfiLogLevelFilter, LogCallbackFn};
 use super::types::FfiStr;
 use super::vtable_gen::{current_instance_log_ctx, InstanceLogContext};
+
+/// Maximum verbosity forwarded across the FFI, stored as the numeric value
+/// of [`FfiLogLevelFilter`]. Defaults to `Trace` (forward everything) until
+/// the host reports its effective level via `set_forward_level`.
+///
+/// `Relaxed` ordering is sufficient: this flag guards no other memory —
+/// readers compare the value and nothing else — and per-variable coherence
+/// already orders its updates. This matches `log::set_max_level` and
+/// tracing's `LevelFilter::current()`, which use `Relaxed` for the same
+/// advisory-filter pattern.
+static FORWARD_LEVEL: AtomicU8 = AtomicU8::new(FfiLogLevelFilter::Trace as u8);
+
+/// Set the maximum log level forwarded to the host.
+///
+/// Called from the `export_plugin!` macro when the host invokes
+/// `FfiPluginRegistration::set_log_level`. Besides gating the tracing layer,
+/// this sets the plugin's own `log` max level so `log` crate macros below
+/// the threshold return before formatting (the LogTracer bridge opens it at
+/// `Trace` during callback installation).
+pub fn set_forward_level(level: FfiLogLevelFilter) {
+    FORWARD_LEVEL.store(level as u8, Ordering::Relaxed);
+    log::set_max_level(level.to_level_filter());
+}
+
+/// The currently configured forwarding filter.
+pub fn forward_level() -> FfiLogLevelFilter {
+    FfiLogLevelFilter::from_u8(FORWARD_LEVEL.load(Ordering::Relaxed))
+}
 
 // Compile-time assertion that transmuting raw pointers to LogCallbackFn is safe.
 const _: () = assert!(
@@ -101,11 +129,6 @@ where
     }
 
     fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
-        // Extract the message from the event
-        let mut message_visitor = MessageVisitor::default();
-        event.record(&mut message_visitor);
-        let message = message_visitor.message;
-
         // Convert tracing level to FfiLogLevel
         let level = match *event.metadata().level() {
             tracing::Level::ERROR => FfiLogLevel::Error,
@@ -114,6 +137,17 @@ where
             tracing::Level::DEBUG => FfiLogLevel::Debug,
             tracing::Level::TRACE => FfiLogLevel::Trace,
         };
+
+        // Drop records more verbose than the host's effective level before
+        // doing any work: no message formatting, no FFI crossing.
+        if !forward_level().allows(level) {
+            return;
+        }
+
+        // Extract the message from the event
+        let mut message_visitor = MessageVisitor::default();
+        event.record(&mut message_visitor);
+        let message = message_visitor.message;
 
         // Extract component info from span hierarchy (set by .instrument(span))
         let span_info = ctx.event_span(event).and_then(|span| {
@@ -262,9 +296,96 @@ pub fn init_tracing_subscriber(
     // the tracing subscriber (which has span context for routing)
     let _ = tracing_log::LogTracer::init();
 
+    // LogTracer::init opens the log crate's max level at Trace. Re-apply the
+    // configured forwarding level in case the host reported it before
+    // installing the callback.
+    log::set_max_level(forward_level().to_level_filter());
+
     let layer = FfiTracingLayer::new(log_cb, log_ctx, plugin_id);
     let subscriber = tracing_subscriber::registry().with(layer);
 
     // set_global_default only affects this cdylib's tracing dispatcher
     let _ = tracing::subscriber::set_global_default(subscriber);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static TEST_LOG_CB: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+    static TEST_LOG_CTX: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+    fn captured() -> &'static Mutex<Vec<(FfiLogLevel, String)>> {
+        static STORE: std::sync::OnceLock<Mutex<Vec<(FfiLogLevel, String)>>> =
+            std::sync::OnceLock::new();
+        STORE.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    extern "C" fn capture_cb(_ctx: *mut c_void, entry: *const FfiLogEntry) {
+        let entry = unsafe { &*entry };
+        captured()
+            .lock()
+            .unwrap()
+            .push((entry.level, unsafe { entry.message.to_string() }));
+    }
+
+    #[test]
+    fn layer_drops_events_more_verbose_than_forward_level() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        TEST_LOG_CB.store(capture_cb as *mut (), Ordering::Release);
+        let layer = FfiTracingLayer::new(&TEST_LOG_CB, &TEST_LOG_CTX, "test-plugin");
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        // FORWARD_LEVEL and the `log` max level are process-global; restore
+        // them on drop so a failed assertion cannot leak state into other
+        // tests in this binary. Any future test mutating these statics must
+        // use the same guard pattern.
+        struct RestoreGlobals {
+            log_max: log::LevelFilter,
+        }
+        impl Drop for RestoreGlobals {
+            fn drop(&mut self) {
+                set_forward_level(FfiLogLevelFilter::Trace);
+                log::set_max_level(self.log_max);
+            }
+        }
+        let _restore = RestoreGlobals {
+            log_max: log::max_level(),
+        };
+
+        set_forward_level(FfiLogLevelFilter::Info);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!("trace record");
+            tracing::debug!("debug record");
+            tracing::info!("info record");
+            tracing::error!("error record");
+        });
+
+        {
+            let logs = captured().lock().unwrap();
+            let levels: Vec<FfiLogLevel> = logs.iter().map(|(l, _)| *l).collect();
+            assert!(
+                !levels.contains(&FfiLogLevel::Trace) && !levels.contains(&FfiLogLevel::Debug),
+                "sub-level records must not be forwarded, got {levels:?}"
+            );
+            assert!(levels.contains(&FfiLogLevel::Info));
+            assert!(levels.contains(&FfiLogLevel::Error));
+        }
+
+        captured().lock().unwrap().clear();
+    }
+
+    #[test]
+    fn level_filter_allows_matches_verbosity_ordering() {
+        let f = FfiLogLevelFilter::Info;
+        assert!(f.allows(FfiLogLevel::Error));
+        assert!(f.allows(FfiLogLevel::Warn));
+        assert!(f.allows(FfiLogLevel::Info));
+        assert!(!f.allows(FfiLogLevel::Debug));
+        assert!(!f.allows(FfiLogLevel::Trace));
+        assert!(!FfiLogLevelFilter::Off.allows(FfiLogLevel::Error));
+        assert!(FfiLogLevelFilter::Trace.allows(FfiLogLevel::Trace));
+    }
 }

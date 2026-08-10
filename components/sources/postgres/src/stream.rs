@@ -83,9 +83,10 @@ impl ReplicationStream {
         }
     }
 
-    // Note: table_primary_keys is initialized empty and remains so.
-    // Element IDs are generated from configured table_keys (in config.table_keys),
-    // or fall back to using all column values if no keys are configured.
+    // `table_primary_keys` is populated on connect by querying the PostgreSQL
+    // system catalogs (see `connect_and_setup`). Element IDs are generated from
+    // configured `table_keys` first, then these auto-detected primary keys, and
+    // finally fall back to a random UUID only for keyless tables.
 
     pub async fn run(
         &mut self,
@@ -161,6 +162,30 @@ impl ReplicationStream {
 
     async fn connect_and_setup(&mut self) -> Result<()> {
         info!("Connecting to PostgreSQL for replication");
+
+        // Auto-detect primary keys so CDC element IDs are stable across
+        // INSERT/UPDATE/DELETE for the same row without requiring explicit
+        // `table_keys` configuration. Best-effort: if the lookup fails we keep
+        // any previously detected keys and fall back to configured `table_keys`
+        // (or a random UUID) rather than aborting replication.
+        match super::query_table_primary_keys(&self.config).await {
+            Ok(primary_keys) => {
+                let table_count = primary_keys.len();
+                {
+                    let mut guard = self.table_primary_keys.write().await;
+                    *guard = primary_keys;
+                }
+                info!(
+                    "Auto-detected primary keys for {table_count} table(s) for element-id generation"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    "Failed to auto-detect primary keys ({error:#}); CDC element IDs will use \
+                     configured 'table_keys' or fall back to random UUIDs"
+                );
+            }
+        }
 
         // Create connection
         let mut conn = ReplicationConnection::connect(

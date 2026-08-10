@@ -717,7 +717,7 @@ DrasiLib uses a trait-based plugin system. Sources, reactions, bootstrap provide
 
 When using cdylib plugins (shared libraries), the plugin loader discovers and loads them from a configured directory:
 
-- Plugins are matched by glob patterns (e.g., `libdrasi_source_*`, `libdrasi_reaction_*`)
+- Plugins are matched by glob patterns; the defaults (`libdrasi_*` / `drasi_*`) discover every plugin type, so new types are picked up automatically
 - Only cdylib shared libraries are loaded: `.dylib` (macOS), `.so` (Linux), `.dll` (Windows)
 - Non-cdylib Cargo artifacts (`.rlib`, `.rmeta`, `.d`) that may exist alongside the cdylib are silently ignored
 - Each plugin must have exactly one cdylib file; if multiple cdylib extensions exist for the same base name, the loader reports an ambiguity error

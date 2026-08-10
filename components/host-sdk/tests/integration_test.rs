@@ -18,19 +18,30 @@
 //! the full dynamic loading pipeline: metadata validation, callback wiring,
 //! descriptor factory invocation, and trait method dispatch through FFI vtables.
 //!
-//! **Prerequisites**: Build the cdylib plugins before running these tests:
+//! **Prerequisites**: These tests load plugins from `target/debug/plugins/`,
+//! not `target/debug/`. Build AND copy them in one step with:
 //!
 //! ```sh
 //! cd /path/to/drasi-core
+//! make build-test-plugins
+//! ```
+//!
+//! Or build individually and copy the resulting `.so`/`.dylib`/`.dll` files
+//! into `target/debug/plugins/` yourself:
+//!
+//! ```sh
 //! cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
 //! cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
+//! cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
 //! ```
 
 use std::path::{Path, PathBuf};
 
 use drasi_host_sdk::callbacks;
 use drasi_host_sdk::loader::{load_plugin_from_path, PluginLoader, PluginLoaderConfig};
-use drasi_plugin_sdk::descriptor::{ReactionPluginDescriptor, SourcePluginDescriptor};
+use drasi_plugin_sdk::descriptor::{
+    BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor,
+};
 use serial_test::serial;
 
 /// Locate the drasi-core build output directory.
@@ -82,6 +93,89 @@ fn plugin_exists(crate_name: &str) -> bool {
     let dir = plugin_dir();
     let filename = plugin_filename(crate_name);
     dir.join(&filename).exists()
+}
+
+/// Test-owned log/lifecycle capture.
+///
+/// The log and lifecycle callbacks are parameters to `load_plugin_from_path`,
+/// so tests that need to observe what a plugin sends across the FFI install
+/// their own callbacks and assert on stores they own. The production
+/// callbacks (`default_log_callback` etc.) keep no capture state.
+mod test_capture {
+    use std::ffi::c_void;
+    use std::sync::{Mutex, OnceLock};
+
+    use drasi_plugin_sdk::ffi::{
+        FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel,
+    };
+
+    #[derive(Debug, Clone)]
+    pub struct TestLog {
+        pub level: FfiLogLevel,
+        #[allow(dead_code)]
+        pub plugin_id: String,
+        pub message: String,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct TestLifecycle {
+        #[allow(dead_code)]
+        pub component_id: String,
+        #[allow(dead_code)]
+        pub event_type: FfiLifecycleEventType,
+        #[allow(dead_code)]
+        pub message: String,
+    }
+
+    pub fn logs() -> &'static Mutex<Vec<TestLog>> {
+        static LOGS: OnceLock<Mutex<Vec<TestLog>>> = OnceLock::new();
+        LOGS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub fn lifecycles() -> &'static Mutex<Vec<TestLifecycle>> {
+        static EVENTS: OnceLock<Mutex<Vec<TestLifecycle>>> = OnceLock::new();
+        EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub fn clear() {
+        logs().lock().unwrap_or_else(|e| e.into_inner()).clear();
+        lifecycles()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    /// Capture the entry, then forward to the production callback so the
+    /// normal host paths (log framework, registry routing) stay exercised.
+    pub extern "C" fn log_callback(ctx: *mut c_void, entry: *const FfiLogEntry) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let e = unsafe { &*entry };
+            let record = TestLog {
+                level: e.level,
+                plugin_id: unsafe { e.plugin_id.to_string() },
+                message: unsafe { e.message.to_string() },
+            };
+            if let Ok(mut logs) = logs().lock() {
+                logs.push(record);
+            }
+        }));
+        drasi_host_sdk::callbacks::default_log_callback(ctx, entry);
+    }
+
+    pub extern "C" fn lifecycle_callback(ctx: *mut c_void, event: *const FfiLifecycleEvent) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let e = unsafe { &*event };
+            let record = TestLifecycle {
+                component_id: unsafe { e.component_id.to_string() },
+                event_type: e.event_type,
+                message: unsafe { e.message.to_string() },
+            };
+            if let Ok(mut events) = lifecycles().lock() {
+                events.push(record);
+            }
+        }));
+        drasi_host_sdk::callbacks::default_lifecycle_callback(ctx, event);
+    }
 }
 
 // ============================================================================
@@ -669,18 +763,15 @@ async fn test_log_callback_captures_plugin_logs() {
     }
     let path = require_plugin("drasi-source-mock");
 
-    // Clear captured logs
-    callbacks::captured_logs()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    // Clear the test capture stores
+    test_capture::clear();
 
     let plugin = load_plugin_from_path(
         &path,
         std::ptr::null_mut(),
-        callbacks::default_log_callback_fn(),
+        test_capture::log_callback,
         std::ptr::null_mut(),
-        callbacks::default_lifecycle_callback_fn(),
+        test_capture::lifecycle_callback,
     )
     .unwrap();
 
@@ -705,12 +796,12 @@ async fn test_log_callback_captures_plugin_logs() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // Check that some logs were captured (mock source logs on start/stop)
-    let logs = callbacks::captured_logs()
+    let logs = test_capture::logs()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     // We can't guarantee specific messages, but the callback mechanism should work
     // The lifecycle callback should at least fire
-    let lifecycles = callbacks::captured_lifecycles()
+    let lifecycles = test_capture::lifecycles()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     // Either logs or lifecycle events should be captured
@@ -987,15 +1078,6 @@ async fn test_plugin_logs_routed_to_log_registry() {
         log_count > 0,
         "Expected at least one log message in ComponentLogRegistry for key {log_key:?}",
     );
-
-    // Also check the diagnostic store (captured_logs) for completeness
-    let captured = callbacks::captured_logs()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    assert!(
-        !captured.is_empty(),
-        "Expected at least one captured log from plugin start/stop"
-    );
 }
 
 #[tokio::test]
@@ -1105,27 +1187,14 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
         statuses.contains(&&ComponentStatus::Running),
         "Expected Running/Started event, got: {statuses:?}"
     );
-
-    // Also check the diagnostic store for completeness
-    let captured = callbacks::captured_lifecycles()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let our_captured: Vec<_> = captured
-        .iter()
-        .filter(|e| e.component_id == "lifecycle-evt-source")
-        .collect();
-    assert!(
-        !our_captured.is_empty(),
-        "Expected lifecycle events in diagnostic store"
-    );
 }
 
 #[tokio::test]
 #[serial]
 async fn test_null_callback_context_does_not_crash() {
     //! Verify that when source.initialize() is NOT called (no per-instance callbacks),
-    //! logs still go to the diagnostic store and host log framework, and lifecycle events
-    //! go to the diagnostic store via global callbacks. No crash occurs.
+    //! logs still go to the host log framework and lifecycle events still reach the
+    //! global callbacks. No crash occurs.
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
         panic!("SKIP: drasi-source-mock not built as cdylib");
@@ -1159,14 +1228,14 @@ async fn test_null_callback_context_does_not_crash() {
 }
 
 // ============================================================================
-// Tracing bridge tests — verify log events at all levels are captured
+// Tracing bridge tests — verify log events reach the host callback
 // ============================================================================
 
 #[tokio::test]
 #[serial]
-async fn test_all_log_levels_captured_in_diagnostic_store() {
-    //! Verify that log events at all levels (info, warn, error, debug) emitted by a plugin
-    //! are captured in the diagnostic captured_logs store. The mock source emits info! during
+async fn test_plugin_logs_reach_host_callback() {
+    //! Verify that log events emitted by a plugin cross the FFI and reach the
+    //! host-provided log callback. The mock source emits info! during
     //! start/stop, verifying the tracing-log bridge works for the log crate.
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
@@ -1174,18 +1243,14 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
     }
     let path = require_plugin("drasi-source-mock");
 
-    // Clear diagnostic stores before test
-    callbacks::captured_logs()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    test_capture::clear();
 
     let plugin = load_plugin_from_path(
         &path,
         std::ptr::null_mut(),
-        callbacks::default_log_callback_fn(),
+        test_capture::log_callback,
         std::ptr::null_mut(),
-        callbacks::default_lifecycle_callback_fn(),
+        test_capture::lifecycle_callback,
     )
     .unwrap();
 
@@ -1204,7 +1269,7 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
     let _ = source.stop().await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let logs = callbacks::captured_logs()
+    let logs = test_capture::logs()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     // We should have at least the start and stop info logs
@@ -1230,27 +1295,116 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
 
 #[tokio::test]
 #[serial]
-async fn test_logs_without_initialize_reach_global_callback() {
-    //! When a source is NOT initialized (no per-instance callbacks), logs should
-    //! still reach the global callback and be captured in the diagnostic store.
-    //! This verifies the tracing bridge's global fallback path.
+async fn test_plugin_drops_records_below_host_level() {
+    //! Verify producer-side filtering: after the host reports a Warn level via
+    //! set_log_level, the plugin's info records no longer cross the FFI at all.
+    //! Raising the level back to Trace restores them.
+    use drasi_plugin_sdk::ffi::FfiLogLevelFilter;
+
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
         panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
 
-    callbacks::captured_logs()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
+    test_capture::clear();
 
     let plugin = load_plugin_from_path(
         &path,
         std::ptr::null_mut(),
-        callbacks::default_log_callback_fn(),
+        test_capture::log_callback,
         std::ptr::null_mut(),
-        callbacks::default_lifecycle_callback_fn(),
+        test_capture::lifecycle_callback,
+    )
+    .unwrap();
+
+    let config = serde_json::json!({
+        "dataType": { "type": "generic" },
+        "intervalMs": 500
+    });
+
+    // Restore Trace even if an assertion below panics: the cdylib's statics
+    // are shared process-wide (dlopen refcounting), so a leaked Warn level
+    // would cascade into later tests in this serial suite.
+    struct RestoreLevel<'a>(&'a drasi_host_sdk::loader::LoadedPlugin);
+    impl Drop for RestoreLevel<'_> {
+        fn drop(&mut self) {
+            self.0.set_log_level(FfiLogLevelFilter::Trace);
+        }
+    }
+    let _restore = RestoreLevel(&plugin);
+
+    // Phase 1: Warn level — the mock source's info logs must not cross the FFI.
+    plugin.set_log_level(FfiLogLevelFilter::Warn);
+
+    let source = plugin.source_plugins[0]
+        .create_source("filter-test", &config, false)
+        .await
+        .unwrap();
+    let _ = source.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let _ = source.stop().await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    {
+        let logs = test_capture::logs()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let leaked: Vec<_> = logs
+            .iter()
+            .filter(|l| l.message.contains("filter-test"))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "Expected no plugin logs below Warn to cross the FFI, got: {leaked:?}"
+        );
+    }
+
+    // Phase 2: Trace level — the same source's info logs cross again.
+    plugin.set_log_level(FfiLogLevelFilter::Trace);
+
+    let source2 = plugin.source_plugins[0]
+        .create_source("filter-test-open", &config, false)
+        .await
+        .unwrap();
+    let _ = source2.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let _ = source2.stop().await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let logs = test_capture::logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let visible: Vec<_> = logs
+        .iter()
+        .filter(|l| l.message.contains("filter-test-open"))
+        .collect();
+    assert!(
+        !visible.is_empty(),
+        "Expected plugin logs to cross the FFI again at Trace level"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_logs_without_initialize_reach_global_callback() {
+    //! When a source is NOT initialized (no per-instance callbacks), logs should
+    //! still reach the global callback. This verifies the tracing bridge's
+    //! global fallback path.
+    if !plugin_exists("drasi-source-mock") {
+        eprintln!("SKIP: drasi-source-mock not built as cdylib");
+        panic!("SKIP: drasi-source-mock not built as cdylib");
+    }
+    let path = require_plugin("drasi-source-mock");
+
+    test_capture::clear();
+
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        test_capture::log_callback,
+        std::ptr::null_mut(),
+        test_capture::lifecycle_callback,
     )
     .unwrap();
 
@@ -1270,7 +1424,7 @@ async fn test_logs_without_initialize_reach_global_callback() {
     let _ = source.stop().await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let logs = callbacks::captured_logs()
+    let logs = test_capture::logs()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let our_logs: Vec<_> = logs
@@ -3393,4 +3547,164 @@ async fn test_ffi_checkpoint_persist_and_resume_from() {
 
     source2.stop().await.expect("Should stop source2");
     println!("Phase 2 complete: verified position_handle and supports_replay through FFI");
+}
+
+// ============================================================================
+// Bootstrap provider plugin: push-based FFI contract across a real cdylib
+// ============================================================================
+//
+// The bootstrap_provider_ffi_test suite drives the push contract in-process;
+// these tests load the scriptfile bootstrap plugin as a real cdylib so the
+// contract is exercised across an actual dylib boundary (separate allocator,
+// separate tokio), the failure class behind issue #602.
+
+/// Write a JSONL bootstrap script with `node_count` nodes.
+fn write_bootstrap_script(node_count: usize) -> (tempfile::TempDir, PathBuf) {
+    use std::io::Write;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bootstrap.jsonl");
+    let mut f = std::fs::File::create(&path).expect("create script file");
+    writeln!(
+        f,
+        r#"{{"kind": "Header", "start_time": "2024-01-01T00:00:00Z", "description": "cdylib bootstrap test"}}"#
+    )
+    .expect("write header");
+    for i in 0..node_count {
+        writeln!(
+            f,
+            r#"{{"kind": "Node", "id": "n{i}", "labels": ["Item"], "properties": {{"idx": {i}}}}}"#
+        )
+        .expect("write node");
+    }
+    writeln!(f, r#"{{"kind": "Finish", "description": "done"}}"#).expect("write finish");
+    (dir, path)
+}
+
+/// Load the scriptfile bootstrap plugin and create a provider for `script`.
+async fn load_scriptfile_provider(
+    script: &Path,
+) -> (
+    drasi_host_sdk::loader::LoadedPlugin,
+    Box<dyn drasi_lib::bootstrap::BootstrapProvider>,
+) {
+    let path = require_plugin("drasi-bootstrap-scriptfile");
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Failed to load scriptfile bootstrap plugin");
+
+    assert!(
+        !plugin.bootstrap_plugins.is_empty(),
+        "scriptfile plugin should register a bootstrap descriptor"
+    );
+    let descriptor = &plugin.bootstrap_plugins[0];
+    assert_eq!(descriptor.kind(), "scriptfile");
+
+    let config = serde_json::json!({ "filePaths": [script.to_string_lossy()] });
+    let provider = descriptor
+        .create_bootstrap_provider(&config, &serde_json::json!({}))
+        .await
+        .expect("create_bootstrap_provider across cdylib failed");
+    (plugin, provider)
+}
+
+fn bootstrap_request() -> drasi_lib::bootstrap::BootstrapRequest {
+    drasi_lib::bootstrap::BootstrapRequest {
+        query_id: "cdylib-bootstrap-query".to_string(),
+        node_labels: vec![],
+        relation_labels: vec![],
+        request_id: "cdylib-bootstrap-request".to_string(),
+    }
+}
+
+/// Full bootstrap round-trip across the cdylib boundary: every node in the
+/// script arrives as an event and the provider result reports the count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn test_bootstrap_plugin_streams_across_cdylib() {
+    if !plugin_exists("drasi-bootstrap-scriptfile") {
+        eprintln!("SKIP: drasi-bootstrap-scriptfile not built as cdylib");
+        panic!("SKIP: drasi-bootstrap-scriptfile not built as cdylib");
+    }
+    const N: usize = 2_000;
+    let (_dir, script) = write_bootstrap_script(N);
+    let (_plugin, provider) = load_scriptfile_provider(&script).await;
+
+    let ctx = drasi_lib::bootstrap::BootstrapContext::new_minimal(
+        "itest-server".to_string(),
+        "scriptfile-src".to_string(),
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let drain = tokio::spawn(async move {
+        let mut n = 0usize;
+        while rx.recv().await.is_some() {
+            n += 1;
+        }
+        n
+    });
+
+    let result = provider
+        .bootstrap(bootstrap_request(), &ctx, tx, None)
+        .await
+        .expect("bootstrap across cdylib failed");
+
+    assert_eq!(result.event_count, N, "provider must report all events");
+    assert_eq!(
+        drain.await.unwrap(),
+        N,
+        "all events must cross the boundary"
+    );
+}
+
+/// Backpressure across the cdylib boundary: with a stalled consumer the
+/// bootstrap must stay open (bounded in-flight) instead of running to
+/// completion into unbounded buffers; releasing the consumer drains all
+/// events losslessly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn test_bootstrap_plugin_backpressure_across_cdylib() {
+    if !plugin_exists("drasi-bootstrap-scriptfile") {
+        eprintln!("SKIP: drasi-bootstrap-scriptfile not built as cdylib");
+        panic!("SKIP: drasi-bootstrap-scriptfile not built as cdylib");
+    }
+    // Must exceed provider channel (100) + consumer bridge (256) + the
+    // query-side channel below (100), so a completed bootstrap would prove
+    // unbounded buffering somewhere in the chain.
+    const N: usize = 5_000;
+    let (_dir, script) = write_bootstrap_script(N);
+    let (_plugin, provider) = load_scriptfile_provider(&script).await;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let boot = tokio::spawn(async move {
+        let ctx = drasi_lib::bootstrap::BootstrapContext::new_minimal(
+            "itest-server".to_string(),
+            "scriptfile-src".to_string(),
+        );
+        provider
+            .bootstrap(bootstrap_request(), &ctx, tx, None)
+            .await
+    });
+
+    // Consumer stalled: the bootstrap must still be in flight after a pause.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert!(
+        !boot.is_finished(),
+        "bootstrap must stall under backpressure across the cdylib boundary"
+    );
+
+    // Release: drain everything and confirm nothing was lost.
+    let mut drained = 0usize;
+    while rx.recv().await.is_some() {
+        drained += 1;
+    }
+    let result = boot
+        .await
+        .unwrap()
+        .expect("bootstrap across cdylib failed after release");
+    assert_eq!(result.event_count, N);
+    assert_eq!(drained, N, "all events must arrive after the stall");
 }

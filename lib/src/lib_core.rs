@@ -569,9 +569,16 @@ impl DrasiLib {
     /// Shut down the server permanently, releasing all resources.
     ///
     /// Unlike [`stop()`](Self::stop), which allows the server to be restarted,
-    /// `shutdown()` performs a full teardown: it stops all components and aborts
-    /// the internal graph update loop. After `shutdown()`, the instance cannot
+    /// `shutdown()` performs a full teardown: it stops all components, aborts
+    /// the internal graph update loop, and releases the persistent index-backend
+    /// handles held by queries. After `shutdown()`, the instance cannot
     /// be restarted — create a new `DrasiLib` instance instead.
+    ///
+    /// Releasing the index handles is non-destructive: on-disk data is left intact,
+    /// but persistent backends that hold an exclusive OS resource (notably RocksDB,
+    /// which takes a process-exclusive lock on its data directory) free it here rather
+    /// than only when the whole `DrasiLib` value is dropped. This lets a new `DrasiLib`
+    /// reopen the same path — and recover the prior state — within the same process.
     ///
     /// This method is idempotent — calling it on an already-stopped server will
     /// still clean up the graph update loop.
@@ -611,6 +618,13 @@ impl DrasiLib {
             handle.abort();
             let _ = handle.await;
         }
+
+        // Release persistent index-backend handles retained by queries. Components are
+        // stopped by this point, so the transient handles held by per-query tasks are
+        // already dropped; this drops the remaining long-lived handles so persistent
+        // backends (e.g. RocksDB) release their exclusive lock. On-disk data is left
+        // intact for a future reopen.
+        self.query_manager.release_all_persistent_handles().await;
 
         info!("drasi-lib shut down permanently");
         Ok(())
