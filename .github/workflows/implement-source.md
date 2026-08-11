@@ -9,6 +9,7 @@ engine:
   id: copilot
   model: gpt-5.2-codex 
 permissions:
+  copilot-requests: write
   contents: read
   issues: read
   pull-requests: read
