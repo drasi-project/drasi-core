@@ -31,6 +31,34 @@
 //!     .build()?;
 //! ```
 
+/// The transactional RocksDB database type used for all query indexes.
+///
+/// Pessimistic `TransactionDB` rather than `OptimisticTransactionDB`, for two
+/// reasons. First, every optimistic DB eagerly allocates its lock-bucket table
+/// at open (`occ_lock_buckets = 1 << 20` bucketed mutexes per DB), a fixed
+/// per-query cost paid before any data; pessimistic row locks are sized by the
+/// locks actually held, near zero for our single-writer sessions. Second,
+/// optimistic commit-time validation reads retained write-buffer history, so
+/// history must stay large; pessimistic mode never validates against history,
+/// which is what makes the small explicit `WRITE_BUFFER_HISTORY_BYTES` bound
+/// safe.
+pub type IndexDb = rocksdb::TransactionDB;
+
+/// Flushed-memtable history retained per column family, in bytes.
+///
+/// Set explicitly on every column family and on the DB-level options: leaving
+/// `max_write_buffer_size_to_maintain` at zero is not neutral, RocksDB
+/// sanitizes it back to a large default (128 MiB per CF observed), and the
+/// retained memtables count against process memory after every flush. A 1 MiB
+/// bound is safe only because pessimistic transactions never validate against
+/// history; do not carry it back to an optimistic DB.
+pub(crate) const WRITE_BUFFER_HISTORY_BYTES: usize = 1024 * 1024;
+
+/// Apply the explicit flushed-memtable history bound to a set of options.
+pub(crate) fn bound_write_buffer_history(opts: &mut rocksdb::Options) {
+    opts.set_max_write_buffer_size_to_maintain(WRITE_BUFFER_HISTORY_BYTES as i64);
+}
+
 pub mod checkpoint;
 #[cfg(feature = "plugin-descriptor")]
 mod descriptor;
@@ -39,6 +67,7 @@ pub mod future_queue;
 pub mod live_results;
 pub mod outbox;
 mod plugin;
+mod point_lookup;
 pub mod result_index;
 mod session_state;
 mod storage_models;

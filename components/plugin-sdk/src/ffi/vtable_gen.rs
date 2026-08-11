@@ -102,6 +102,31 @@ extern "C" fn ffi_drop_payload_bytes(ptr: *mut u8, len: usize) {
     }
 }
 
+/// Leak an error message as `(ptr, len, drop_fn)` for `FfiBootstrapResult`,
+/// so provider failure text crosses the boundary instead of only a code.
+fn leak_error_text(msg: String) -> (*const u8, usize, Option<extern "C" fn(*mut u8, usize)>) {
+    if msg.is_empty() {
+        return (std::ptr::null(), 0, None);
+    }
+    let bytes = msg.into_bytes().into_boxed_slice();
+    let len = bytes.len();
+    let ptr = Box::into_raw(bytes) as *const u8;
+    (
+        ptr,
+        len,
+        Some(ffi_drop_error_bytes as extern "C" fn(*mut u8, usize)),
+    )
+}
+
+/// Frees an error buffer produced by [`leak_error_text`].
+extern "C" fn ffi_drop_error_bytes(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() && len > 0 {
+        unsafe {
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+        }
+    }
+}
+
 /// Decode a host-sent `*mut FfiQueryResult` into a plugin-owned `QueryResult`.
 ///
 /// Delegates to the canonical [`super::payload::consume_query_result`], which
@@ -2094,13 +2119,246 @@ pub fn build_reaction_vtable_from_boxed(
 // ============================================================================
 
 /// Build a BootstrapProviderVtable from a `Box<dyn BootstrapProvider>`.
-/// Used by the HOST to wrap a bootstrap provider into a vtable for passing to a source plugin.
+/// Used by bootstrap plugins to export a provider, and by the host to wrap a
+/// provider for passing into a source plugin.
+///
+/// `bootstrap_fn` starts the provider and returns an `FfiBootstrapStream`
+/// immediately. Events flow through a bounded channel into the consumer's
+/// bounded bridge, so consumer backpressure reaches the provider; the
+/// completion result is delivered through the result receiver exactly once.
 pub fn build_bootstrap_provider_vtable(
     provider: Box<dyn BootstrapProvider>,
     executor: AsyncExecutorFn,
 ) -> BootstrapProviderVtable {
+    /// The provider is shared with in-flight bootstrap threads so that
+    /// dropping the vtable while a bootstrap is running cannot free the
+    /// provider out from under it.
     struct BootstrapProviderWrapper {
-        inner: Box<dyn BootstrapProvider>,
+        inner: Arc<dyn BootstrapProvider>,
+    }
+
+    use super::bootstrap_stream::BOOTSTRAP_PROVIDER_CAPACITY;
+
+    type ProviderOutcome = Result<drasi_lib::bootstrap::BootstrapResult, String>;
+
+    struct StreamState {
+        rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<BootstrapEvent>>>,
+    }
+
+    struct ResultState {
+        rx: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<ProviderOutcome>>>,
+    }
+
+    /// Serialize a `BootstrapEvent` into a heap-allocated `FfiBootstrapEvent`.
+    /// Crosses the boundary as MessagePack bytes, never as a reinterpreted
+    /// `repr(Rust)` pointer (issue #602).
+    fn event_to_ffi(record: BootstrapEvent) -> *mut FfiBootstrapEvent {
+        let payload = BootstrapEventPayload::from_event(&record);
+        let timestamp_us = payload.timestamp_us;
+        let sequence = payload.sequence;
+        let (payload_ptr, payload_len) = serialize_ffi_payload(&payload);
+        Box::into_raw(Box::new(FfiBootstrapEvent {
+            payload_ptr,
+            payload_len,
+            payload_drop_fn: Some(ffi_drop_payload_bytes),
+            timestamp_us,
+            sequence,
+        }))
+    }
+
+    extern "C" fn stream_start_push(
+        state: *mut c_void,
+        callback: FfiBootstrapPushCallbackFn,
+        callback_ctx: *mut c_void,
+    ) {
+        ffi_guard((), || {
+            let stream = unsafe { &*(state as *const StreamState) };
+            let rx = stream.rx.lock().ok().and_then(|mut guard| guard.take());
+            let ctx_raw = callback_ctx as usize;
+
+            // The forwarder runs on a dedicated thread: the push callback
+            // blocks when the consumer's bounded bridge is full (that is the
+            // backpressure path), and blocking must never happen on an async
+            // worker.
+            let spawned = std::thread::Builder::new()
+                .name("drasi-bootstrap-forwarder".to_string())
+                .spawn(move || {
+                    // Guarantee exactly one null sentinel on every exit path so
+                    // the consumer can reclaim its callback context (same pattern
+                    // as BootstrapSentinelOnDrop on the subscribe path).
+                    struct SentinelOnDrop {
+                        ctx_raw: usize,
+                        callback: FfiBootstrapPushCallbackFn,
+                    }
+                    impl Drop for SentinelOnDrop {
+                        fn drop(&mut self) {
+                            let cb = self.callback;
+                            let ctx = self.ctx_raw as *mut c_void;
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                cb(ctx, std::ptr::null_mut());
+                            }));
+                        }
+                    }
+                    let _sentinel_guard = SentinelOnDrop { ctx_raw, callback };
+                    let Some(mut rx) = rx else { return };
+                    while let Some(record) = rx.blocking_recv() {
+                        let ffi_event = event_to_ffi(record);
+                        let accepted =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                callback(ctx_raw as *mut c_void, ffi_event)
+                            }))
+                            .unwrap_or(false);
+                        if !accepted {
+                            break;
+                        }
+                    }
+                });
+            if let Err(e) = spawned {
+                // Spawn failure drops the never-invoked closure, which drops
+                // only its CAPTURES (releasing the event receiver). Body
+                // locals such as SentinelOnDrop are constructed only when the
+                // thread runs the body, so no sentinel fires from that drop:
+                // this inline delivery is the sole firing. The consumer-side
+                // reclaim is once-guarded regardless.
+                log::error!("Failed to spawn bootstrap forwarder thread: {e}");
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    callback(ctx_raw as *mut c_void, std::ptr::null_mut());
+                }));
+            }
+        });
+    }
+
+    extern "C" fn stream_drop(state: *mut c_void) {
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut StreamState)) };
+            }
+        });
+    }
+
+    extern "C" fn result_start(
+        state: *mut c_void,
+        callback: FfiBootstrapResultCallbackFn,
+        ctx: *mut c_void,
+    ) {
+        ffi_guard((), || {
+            let result_state = unsafe { &*(state as *const ResultState) };
+            let rx = result_state
+                .rx
+                .lock()
+                .ok()
+                .and_then(|mut guard| guard.take());
+            let ctx_raw = ctx as usize;
+
+            let spawned =
+                std::thread::Builder::new()
+                    .name("drasi-bootstrap-result".to_string())
+                    .spawn(move || {
+                        // Guarantee exactly one callback on every exit path; a null
+                        // result tells the consumer the provider produced nothing.
+                        struct CallOnce {
+                            ctx_raw: usize,
+                            callback: FfiBootstrapResultCallbackFn,
+                            done: bool,
+                        }
+                        impl CallOnce {
+                            fn fire(&mut self, result: *mut FfiBootstrapResult) {
+                                if !self.done {
+                                    self.done = true;
+                                    let cb = self.callback;
+                                    let ctx = self.ctx_raw as *mut c_void;
+                                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                        || {
+                                            cb(ctx, result);
+                                        },
+                                    ));
+                                }
+                            }
+                        }
+                        impl Drop for CallOnce {
+                            fn drop(&mut self) {
+                                self.fire(std::ptr::null_mut());
+                            }
+                        }
+                        let mut call = CallOnce {
+                            ctx_raw,
+                            callback,
+                            done: false,
+                        };
+
+                        let Some(rx) = rx else { return };
+                        let result_ptr = match rx.blocking_recv() {
+                            Ok(Ok(result)) => {
+                                let (
+                                    source_position_ptr,
+                                    source_position_len,
+                                    source_position_drop_fn,
+                                ) = if let Some(ref pos) = result.source_position {
+                                    let pos_vec = pos.to_vec();
+                                    let len = pos_vec.len();
+                                    let leaked = Box::into_raw(pos_vec.into_boxed_slice());
+                                    (
+                                        leaked as *const u8,
+                                        len,
+                                        Some(
+                                            ffi_drop_position_bytes
+                                                as extern "C" fn(*mut u8, usize),
+                                        ),
+                                    )
+                                } else {
+                                    (std::ptr::null(), 0, None)
+                                };
+                                Box::into_raw(Box::new(FfiBootstrapResult {
+                                    event_count: result.event_count as i64,
+                                    source_position_ptr,
+                                    source_position_len,
+                                    source_position_drop_fn,
+                                    error_ptr: std::ptr::null(),
+                                    error_len: 0,
+                                    error_drop_fn: None,
+                                }))
+                            }
+                            Ok(Err(e)) => {
+                                log::error!("Bootstrap provider failed: {e}");
+                                // Carry the error text across the boundary so the
+                                // consumer surfaces the message, not just a code.
+                                let (error_ptr, error_len, error_drop_fn) = leak_error_text(e);
+                                Box::into_raw(Box::new(FfiBootstrapResult {
+                                    event_count: -1,
+                                    source_position_ptr: std::ptr::null(),
+                                    source_position_len: 0,
+                                    source_position_drop_fn: None,
+                                    error_ptr,
+                                    error_len,
+                                    error_drop_fn,
+                                }))
+                            }
+                            // Provider thread exited without sending a result.
+                            Err(_) => std::ptr::null_mut(),
+                        };
+                        call.fire(result_ptr);
+                    });
+            if let Err(e) = spawned {
+                // Spawn failure drops the never-invoked closure, which drops
+                // only its CAPTURES (releasing the oneshot receiver). CallOnce
+                // is a body local, constructed only when the thread runs, so
+                // nothing fires from that drop: this inline delivery is the
+                // sole firing. The consumer-side reclaim is once-guarded
+                // regardless.
+                log::error!("Failed to spawn bootstrap result thread: {e}");
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    callback(ctx_raw as *mut c_void, std::ptr::null_mut());
+                }));
+            }
+        });
+    }
+
+    extern "C" fn result_drop(state: *mut c_void) {
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut ResultState)) };
+            }
+        });
     }
 
     extern "C" fn bootstrap_fn(
@@ -2113,134 +2371,88 @@ pub fn build_bootstrap_provider_vtable(
         request_id: FfiStr,
         server_id: FfiStr,
         source_id: FfiStr,
-        sender: *mut FfiBootstrapSender,
-    ) -> *mut FfiBootstrapResult {
-        use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
+    ) -> *mut FfiBootstrapStream {
+        ffi_guard(std::ptr::null_mut(), || {
+            use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
 
-        let query_id_str = unsafe { query_id.to_string() };
-        let node_label_strs: Vec<String> = (0..node_labels_count)
-            .map(|i| unsafe { (*node_labels.add(i)).to_string() })
-            .collect();
-        let rel_label_strs: Vec<String> = (0..relation_labels_count)
-            .map(|i| unsafe { (*relation_labels.add(i)).to_string() })
-            .collect();
-        let request_id_str = unsafe { request_id.to_string() };
-        let server_id_str = unsafe { server_id.to_string() };
-        let source_id_str = unsafe { source_id.to_string() };
-
-        let request = BootstrapRequest {
-            query_id: query_id_str,
-            node_labels: node_label_strs,
-            relation_labels: rel_label_strs,
-            request_id: request_id_str,
-        };
-        let context = BootstrapContext::new_minimal(server_id_str, source_id_str.clone());
-
-        let ffi_sender = unsafe { &*sender };
-        let send_fn = ffi_sender.send_fn;
-        let sender_state = ffi_sender.state;
-
-        // Use std::sync::mpsc so we can recv without async context
-        let (std_tx, std_rx) = std::sync::mpsc::channel::<BootstrapEvent>();
-        let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
-
-        // Channel to carry the BootstrapResult back from the provider thread
-        let (result_tx, result_rx) =
-            std::sync::mpsc::channel::<Result<drasi_lib::bootstrap::BootstrapResult, String>>();
-
-        // Run the actual bootstrap provider in a background thread with its own tokio runtime
-        let provider_ptr = SendPtr(state as *const BootstrapProviderWrapper);
-        let _bootstrap_handle = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build bootstrap runtime");
-            let inner = unsafe { provider_ptr.as_ref() };
-            rt.block_on(async {
-                let forward_handle = tokio::spawn(async move {
-                    while let Some(record) = tokio_rx.recv().await {
-                        if std_tx.send(record).is_err() {
-                            break;
-                        }
-                    }
-                });
-                let bootstrap_result = inner
-                    .inner
-                    .bootstrap(request, &context, tokio_tx, None)
-                    .await;
-                let _ = forward_handle.await;
-                let _ = result_tx.send(bootstrap_result.map_err(|e| format!("{e:#}")));
-            })
-        });
-
-        // Forward records from std::sync::mpsc to FFI sender
-        let mut count: usize = 0;
-        while let Ok(record) = std_rx.recv() {
-            // Serialize the event payload for cross-cdylib transfer (issue #602):
-            // never hand the host a reinterpreted `repr(Rust)` pointer.
-            let payload = BootstrapEventPayload::from_event(&record);
-            let timestamp_us = payload.timestamp_us;
-            let sequence = payload.sequence;
-            let (payload_ptr, payload_len) = serialize_ffi_payload(&payload);
-            let event = Box::new(FfiBootstrapEvent {
-                payload_ptr,
-                payload_len,
-                payload_drop_fn: Some(ffi_drop_payload_bytes),
-                timestamp_us,
-                sequence,
-            });
-            let event_ptr = Box::into_raw(event);
-            let result = (send_fn)(sender_state, event_ptr);
-            if result != 0 {
-                break;
-            }
-            count += 1;
-        }
-
-        // Collect the BootstrapResult from the provider thread.
-        // If the provider failed, return a null pointer so the host can
-        // detect the error instead of treating it as a successful bootstrap.
-        let provider_result = match result_rx.recv() {
-            Ok(Ok(result)) => Some(result),
-            Ok(Err(e)) => {
-                log::error!("Bootstrap provider failed for source '{source_id_str}': {e}");
-                return std::ptr::null_mut();
-            }
-            Err(_) => {
-                log::error!(
-                    "Bootstrap provider thread exited without sending result for source '{source_id_str}'"
-                );
-                return std::ptr::null_mut();
-            }
-        };
-
-        // Build the FFI result with the source_position handover boundary
-        let (source_position_ptr, source_position_len, source_position_drop_fn) =
-            if let Some(ref br) = provider_result {
-                if let Some(ref pos) = br.source_position {
-                    let pos_vec = pos.to_vec();
-                    let len = pos_vec.len();
-                    let leaked = Box::into_raw(pos_vec.into_boxed_slice());
-                    (
-                        leaked as *const u8,
-                        len,
-                        Some(ffi_drop_position_bytes as extern "C" fn(*mut u8, usize)),
-                    )
-                } else {
-                    (std::ptr::null(), 0, None)
-                }
+            // Defensive: a null array with a non-zero count would be UB to
+            // walk. The host always passes valid arrays; treat null as empty.
+            let node_labels: Vec<String> = if node_labels.is_null() {
+                Vec::new()
             } else {
-                (std::ptr::null(), 0, None)
+                (0..node_labels_count)
+                    .map(|i| unsafe { (*node_labels.add(i)).to_string() })
+                    .collect()
+            };
+            let relation_labels: Vec<String> = if relation_labels.is_null() {
+                Vec::new()
+            } else {
+                (0..relation_labels_count)
+                    .map(|i| unsafe { (*relation_labels.add(i)).to_string() })
+                    .collect()
+            };
+            let request = BootstrapRequest {
+                query_id: unsafe { query_id.to_string() },
+                node_labels,
+                relation_labels,
+                request_id: unsafe { request_id.to_string() },
+            };
+            let server_id_str = unsafe { server_id.to_string() };
+            let source_id_str = unsafe { source_id.to_string() };
+
+            let provider = {
+                let wrapper = unsafe { &*(state as *const BootstrapProviderWrapper) };
+                wrapper.inner.clone()
             };
 
-        let ffi_result = Box::new(FfiBootstrapResult {
-            event_count: count as i64,
-            source_position_ptr,
-            source_position_len,
-            source_position_drop_fn,
-        });
+            let (event_tx, event_rx) =
+                tokio::sync::mpsc::channel::<BootstrapEvent>(BOOTSTRAP_PROVIDER_CAPACITY);
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel::<ProviderOutcome>();
 
-        Box::into_raw(ffi_result)
+            // Run the provider on its own thread + runtime. It produces into
+            // the bounded event channel and reports completion via the oneshot.
+            let spawned = std::thread::Builder::new()
+                .name("drasi-bootstrap-provider".to_string())
+                .spawn(move || {
+                    let rt = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            let _ = result_tx
+                                .send(Err(format!("failed to build bootstrap runtime: {e}")));
+                            return;
+                        }
+                    };
+                    let context = BootstrapContext::new_minimal(server_id_str, source_id_str);
+                    let outcome =
+                        rt.block_on(provider.bootstrap(request, &context, event_tx, None));
+                    let _ = result_tx.send(outcome.map_err(|e| format!("{e:#}")));
+                });
+            if let Err(e) = spawned {
+                // Nothing has crossed the boundary yet; a null stream tells the
+                // caller the bootstrap could not be started.
+                log::error!("Failed to spawn bootstrap provider thread: {e}");
+                return std::ptr::null_mut();
+            }
+
+            let events = Box::into_raw(Box::new(FfiBootstrapReceiver {
+                state: Box::into_raw(Box::new(StreamState {
+                    rx: std::sync::Mutex::new(Some(event_rx)),
+                })) as *mut c_void,
+                start_push_fn: stream_start_push,
+                drop_fn: stream_drop,
+            }));
+            let result = Box::into_raw(Box::new(FfiBootstrapResultReceiver {
+                state: Box::into_raw(Box::new(ResultState {
+                    rx: std::sync::Mutex::new(Some(result_rx)),
+                })) as *mut c_void,
+                start_fn: result_start,
+                drop_fn: result_drop,
+            }));
+            Box::into_raw(Box::new(FfiBootstrapStream { events, result }))
+        })
     }
 
     extern "C" fn ffi_drop_position_bytes(ptr: *mut u8, len: usize) {
@@ -2261,7 +2473,9 @@ pub fn build_bootstrap_provider_vtable(
         });
     }
 
-    let wrapper = Box::new(BootstrapProviderWrapper { inner: provider });
+    let wrapper = Box::new(BootstrapProviderWrapper {
+        inner: Arc::from(provider),
+    });
     BootstrapProviderVtable {
         state: Box::into_raw(wrapper) as *mut c_void,
         executor,
@@ -3129,6 +3343,9 @@ fn wrap_subscription_response(
                                     source_position_ptr,
                                     source_position_len,
                                     source_position_drop_fn,
+                                    error_ptr: std::ptr::null(),
+                                    error_len: 0,
+                                    error_drop_fn: None,
                                 }));
                                 // Defuse sentinel — deliver real result instead.
                                 std::mem::forget(_sentinel);
@@ -3139,11 +3356,16 @@ fn wrap_subscription_response(
                             }
                             Ok(Err(e)) => {
                                 log::error!("Bootstrap result error: {e}");
+                                let (error_ptr, error_len, error_drop_fn) =
+                                    leak_error_text(format!("{e:#}"));
                                 let ffi_result = Box::into_raw(Box::new(FfiBootstrapResult {
                                     event_count: -1,
                                     source_position_ptr: std::ptr::null(),
                                     source_position_len: 0,
                                     source_position_drop_fn: None,
+                                    error_ptr,
+                                    error_len,
+                                    error_drop_fn,
                                 }));
                                 std::mem::forget(_sentinel);
                                 let _ =

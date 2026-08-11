@@ -66,6 +66,8 @@ use crate::evaluation::EvaluationError;
 pub enum IndexError {
     IOError,
     NotSupported,
+    /// A temporal read was attempted on an index whose archive is not enabled.
+    ArchiveNotEnabled,
     CorruptedData,
     ConnectionFailed(Box<dyn std::error::Error + Send + Sync>),
     UnknownStore(String),
@@ -77,6 +79,7 @@ impl PartialEq for IndexError {
         match (self, other) {
             (IndexError::IOError, IndexError::IOError) => true,
             (IndexError::NotSupported, IndexError::NotSupported) => true,
+            (IndexError::ArchiveNotEnabled, IndexError::ArchiveNotEnabled) => true,
             (IndexError::CorruptedData, IndexError::CorruptedData) => true,
             (IndexError::ConnectionFailed(a), IndexError::ConnectionFailed(b)) => {
                 a.to_string() == b.to_string()
@@ -95,7 +98,13 @@ impl PartialEq for IndexError {
 
 impl Display for IndexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        format!("{self:?}").fmt(f)
+        match self {
+            IndexError::ArchiveNotEnabled => write!(
+                f,
+                "archive index not enabled for this query; set enable_archive to use past()"
+            ),
+            _ => format!("{self:?}").fmt(f),
+        }
     }
 }
 

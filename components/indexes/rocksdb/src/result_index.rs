@@ -17,6 +17,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::IndexDb;
 use async_trait::async_trait;
 use drasi_core::{
     evaluation::functions::aggregation::ValueAccumulator,
@@ -31,9 +32,7 @@ use prost::{
     bytes::{Bytes, BytesMut},
     Message,
 };
-use rocksdb::{
-    Direction, IteratorMode, MergeOperands, OptimisticTransactionDB, Options, SliceTransform,
-};
+use rocksdb::{Direction, IteratorMode, MergeOperands, Options, SliceTransform};
 use tokio::task;
 
 use crate::storage_models::{StoredValueAccumulator, StoredValueAccumulatorContainer};
@@ -45,21 +44,26 @@ use crate::RocksDbSessionState;
 ///     - values [set_id] -> ValueAccumulator
 ///     - sorted-sets [set_id + value] -> count {8 byte prefix (set_id)}
 pub struct RocksDbResultIndex {
-    db: Arc<OptimisticTransactionDB>,
+    db: Arc<IndexDb>,
     session_state: Arc<RocksDbSessionState>,
 }
 
 const VALUES_CF: &str = "values";
 const SETS_CF: &str = "sorted-sets";
 const METADATA_CF: &str = "metadata";
-const VALUES_BLOCK_CACHE_SIZE: u64 = 32;
+/// Block cache capacity for `values` (aggregation accumulators).
+const VALUES_BLOCK_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Block cache capacity for `metadata`, which holds a single result-sequence
+/// record and needs no more than one block.
+const METADATA_BLOCK_CACHE_BYTES: usize = 1024 * 1024;
 
 impl RocksDbResultIndex {
     /// Create a new RocksDbResultIndex from a shared database handle.
     ///
     /// The database must already have the required column families created.
     /// Use `open_unified_db()` to open a database with all required CFs.
-    pub fn new(db: Arc<OptimisticTransactionDB>, session_state: Arc<RocksDbSessionState>) -> Self {
+    pub fn new(db: Arc<IndexDb>, session_state: Arc<RocksDbSessionState>) -> Self {
         RocksDbResultIndex { db, session_state }
     }
 }
@@ -366,6 +370,7 @@ impl ResultSequenceCounter for RocksDbResultIndex {
 
 pub(crate) fn get_lss_cf_options() -> Options {
     let mut lss_opts = Options::default();
+    crate::bound_write_buffer_history(&mut lss_opts);
     lss_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
     lss_opts.set_merge_operator_associative("increment", increment_merge);
     lss_opts.set_compaction_filter("remove0", compact);
@@ -373,15 +378,16 @@ pub(crate) fn get_lss_cf_options() -> Options {
 }
 
 pub(crate) fn get_value_cf_options() -> Options {
-    let mut values_opts = Options::default();
-    values_opts.optimize_for_point_lookup(VALUES_BLOCK_CACHE_SIZE);
+    let mut values_opts = crate::point_lookup::point_lookup_cf_options(VALUES_BLOCK_CACHE_BYTES);
+    crate::bound_write_buffer_history(&mut values_opts);
     values_opts
 }
 
 pub(crate) fn get_metadata_cf_options() -> Options {
-    let mut values_opts = Options::default();
-    values_opts.optimize_for_point_lookup(1);
-    values_opts
+    let mut metadata_opts =
+        crate::point_lookup::point_lookup_cf_options(METADATA_BLOCK_CACHE_BYTES);
+    crate::bound_write_buffer_history(&mut metadata_opts);
+    metadata_opts
 }
 
 /// Collect all column family descriptors needed by the result index.
