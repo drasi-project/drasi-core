@@ -123,6 +123,12 @@ impl SubscriptionSettingsBuilder {
                 .as_ref()
                 .and_then(|join_configs| join_configs.iter().find(|j| j.id == *relation_label))
             {
+                if !matching_indices.is_empty() {
+                    bail!(
+                        "Join relation '{relation_label}' cannot be assigned to a source because it is synthetic."
+                    );
+                }
+
                 for key in &join_config.keys {
                     if !query_labels.node_labels.contains(&key.label) {
                         bail!(
@@ -133,10 +139,6 @@ impl SubscriptionSettingsBuilder {
                     }
                 }
 
-                // Synthetic join relations must never be requested from physical sources.
-                for settings in settings_vec.iter_mut() {
-                    settings.relations.remove(relation_label);
-                }
                 continue;
             }
 
@@ -399,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn test_configured_join_relation_not_added_to_source() {
+    fn test_configured_join_relation_error() {
         let sources = vec![SourceSubscriptionConfig {
             source_id: "source1".to_string(),
             nodes: vec![],
@@ -427,11 +429,13 @@ mod tests {
             relation_labels: vec!["CUSTOMER".to_string()],
         };
 
-        let settings =
+        let error =
             SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels)
-                .unwrap();
+                .unwrap_err();
 
-        assert!(!settings[0].relations.contains("CUSTOMER"));
+        assert!(error
+            .to_string()
+            .contains("cannot be assigned to a source because it is synthetic"));
     }
 
     #[test]
