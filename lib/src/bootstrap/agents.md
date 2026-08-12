@@ -15,6 +15,7 @@ mediated by the host.
 | `BootstrapRequest` | Deconstructed into individual FFI args (query_id, node_labels, etc.) | Multiple `FfiStr` + `*const FfiStr` arrays |
 | `BootstrapContext` | Deconstructed into individual FFI args (server_id, source_id) | Multiple `FfiStr` args |
 | `BootstrapEvent` | Serialized to MessagePack bytes (`BootstrapEventPayload`) and transferred as a `payload_ptr` + `payload_len` buffer freed via `payload_drop_fn`; never a reinterpreted `repr(Rust)` pointer (issue #602) | `FfiBootstrapEvent` + `payload.rs::consume_bootstrap_event` |
+| `BootstrapResult` | Delivered exactly once through a push-based result receiver (null result = provider ended without one; negative `event_count` = failure, with optional error text) | `FfiBootstrapResult` via `FfiBootstrapResultReceiver` |
 
 ### Cross-plugin bootstrap flow
 
@@ -22,9 +23,16 @@ mediated by the host.
 Source Plugin B calls set_bootstrap_provider(provider)
   → Host wraps host-side BootstrapProvider into BootstrapProviderVtable
   → Plugin B stores vtable, calls vtable.bootstrap_fn() when subscribing
-  → Host receives call, dispatches to Bootstrap Plugin A
-  → Plugin A sends BootstrapEvents via FfiBootstrapSender
-  → Host forwards events back to Plugin B via channel
+  → bootstrap_fn starts the provider on its own thread and returns an
+    FfiBootstrapStream immediately (FfiBootstrapReceiver for events +
+    FfiBootstrapResultReceiver for completion)
+  → Plugin B consumes both via BootstrapStreamConsumer / wrap_result_receiver
+    (plugin-sdk ffi/bootstrap_stream.rs); every link is bounded, so consumer
+    backpressure stalls the provider (issue #686), and cancellation is
+    achieved by dropping the receiver
+  → When the provider is Bootstrap Plugin A, the host-side provider is
+    BootstrapProviderProxy, which consumes Plugin A's FfiBootstrapStream
+    the same way
 ```
 
 ### What to update when changing `BootstrapProvider`
@@ -40,10 +48,12 @@ Source Plugin B calls set_bootstrap_provider(provider)
 
 4. **Host-side proxy** — `components/host-sdk/src/proxies/bootstrap_provider.rs`
    - `BootstrapProviderProxy` — host-side wrapper for plugin-provided bootstrap providers
-   - `build_ffi_bootstrap_sender()` — creates `FfiBootstrapSender` that bridges
-     `std::sync::mpsc` → `tokio::sync::mpsc`
 
-5. **Version bump** — `components/plugin-sdk/src/ffi/metadata.rs` → `FFI_SDK_VERSION`
+5. **Shared stream consumer** — `components/plugin-sdk/src/ffi/bootstrap_stream.rs`
+   - `BootstrapStreamConsumer` / `wrap_result_receiver` — consume the
+     `FfiBootstrapStream` returned by `bootstrap_fn` (shared by both proxies)
+
+6. **Version bump** — `components/plugin-sdk/src/ffi/metadata.rs` → `FFI_SDK_VERSION`
 
 ### What to update when changing `BootstrapRequest` or `BootstrapContext`
 

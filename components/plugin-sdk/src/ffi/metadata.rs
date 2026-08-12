@@ -37,7 +37,14 @@ use super::types::FfiStr;
 /// - `0.12.0`: `FfiPluginRegistration` gained a trailing `set_log_level`
 ///   field. The host reports its effective log level and the plugin drops
 ///   more verbose records before formatting or crossing the FFI (#685).
-pub const FFI_SDK_VERSION: &str = "0.12.0";
+/// - `0.13.0`: `BootstrapProviderVtable::bootstrap_fn` returns an
+///   `FfiBootstrapStream` (push-based event and result receivers) immediately
+///   instead of streaming through an `FfiBootstrapSender` in a blocking
+///   run-to-completion call (fixes #686 unbounded buffering and pinned
+///   async workers). `FfiBootstrapResult` also carries optional provider
+///   error text (`error_ptr`/`error_len`/`error_drop_fn`) so failures
+///   surface with their message instead of only a negative code.
+pub const FFI_SDK_VERSION: &str = "0.13.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
