@@ -84,6 +84,7 @@ members = [
   "components/reactions/storedproc-postgres",
   "components/reactions/snapshot-test",
   "components/reactions/copilot-agent-task",
+  "components/reactions/workgraph-router",
 
   # Identity Provider Plugins
   "components/identity/azure",
