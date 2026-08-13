@@ -237,15 +237,62 @@ fn rejects_missing_required_fields() {
 }
 
 #[test]
+fn parses_pascal_case_dogfood_contract_fields() {
+    let row = json!({
+        "InvalidationNodeId": "INV_pascal",
+        "DeliveryId": "delivery-pascal",
+        "ProjectItemNodeId": "PVTI_pascal",
+        "ProjectNodeId": "PVT_pascal",
+        "StatusFieldNodeId": "PVTSSF_status",
+        "StateSourceUrl": "http://127.0.0.1:9001/sources/github-project-state/events",
+        "InvalidatedAt": "2026-08-13T18:00:00Z"
+    });
+    let parsed = parse_invalidation_input(&row).expect("parse");
+    assert_eq!(parsed.invalidation_node_id, "INV_pascal");
+    assert_eq!(parsed.delivery_id, "delivery-pascal");
+    assert_eq!(parsed.project_item_node_id, "PVTI_pascal");
+    assert_eq!(parsed.project_node_id.as_deref(), Some("PVT_pascal"));
+    assert_eq!(
+        parsed.status_field_node_id.as_deref(),
+        Some("PVTSSF_status")
+    );
+    assert_eq!(
+        parsed.state_source_url.as_deref(),
+        Some("http://127.0.0.1:9001/sources/github-project-state/events")
+    );
+    assert!(parsed.webhook_updated_at.is_some());
+}
+
+#[test]
+fn invalidated_at_maps_to_webhook_updated_at() {
+    let row = json!({
+        "InvalidationNodeId": "INV_ts",
+        "DeliveryId": "delivery-ts",
+        "ProjectItemNodeId": "PVTI_ts",
+        "InvalidatedAt": "2026-08-13T18:15:00Z"
+    });
+    let parsed = parse_invalidation_input(&row).expect("parse");
+    assert_eq!(parsed.delivery_id, "delivery-ts");
+    assert_eq!(parsed.project_item_node_id, "PVTI_ts");
+    let parsed_timestamp = parsed
+        .webhook_updated_at
+        .expect("invalidatedAt should populate webhook timestamp");
+    assert_eq!(
+        parsed_timestamp.to_rfc3339(),
+        "2026-08-13T18:15:00+00:00".to_string()
+    );
+}
+
+#[test]
 fn deterministic_node_id_is_stable() {
     let node_id = ProjectItemStatusNode::deterministic_node_id("PVTI_abcd");
-    assert_eq!(node_id, "ProjectItemStatus:PVTI_abcd");
+    assert_eq!(node_id, "project-item-status:PVTI_abcd");
 }
 
 #[test]
 fn update_payload_matches_http_source_contract() {
     let node = ProjectItemStatusNode {
-        id: "ProjectItemStatus:PVTI_abcd".to_string(),
+        id: "project-item-status:PVTI_abcd".to_string(),
         project_item_node_id: "PVTI_abcd".to_string(),
         project_node_id: "PVT_proj".to_string(),
         status_field_node_id: "PVTSSF_status".to_string(),
@@ -1196,10 +1243,132 @@ async fn allowlist_rejection_skips_processing() {
     assert_eq!(graphql_requests.len(), 0);
 }
 
+#[tokio::test]
+async fn status_field_node_id_mismatch_is_failed_without_destination_publish() {
+    let graphql_server = MockServer::start().await;
+    let destination_server = MockServer::start().await;
+    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(graphql_success_response(
+                "PVTI_status_mismatch",
+                "PVT_project1",
+                "2026-08-13T20:15:00Z",
+                "In Progress",
+                "opt-ip",
+            )),
+        )
+        .mount(&graphql_server)
+        .await;
+
+    let (processor, state_store) = build_processor(
+        &graphql_server,
+        destination_server.uri(),
+        durable_store,
+        vec![],
+    )
+    .await;
+
+    let row = json!({
+        "InvalidationNodeId": "INV_status_mismatch",
+        "DeliveryId": "delivery-status-mismatch",
+        "ProjectItemNodeId": "PVTI_status_mismatch",
+        "ProjectNodeId": "PVT_project1",
+        "StatusFieldNodeId": "PVTSSF_wrong",
+        "InvalidatedAt": "2026-08-13T20:14:00Z"
+    });
+    let err = processor
+        .process_add_row(&row)
+        .await
+        .expect_err("status field mismatch must fail");
+    assert!(err.to_string().contains("StatusFieldNodeId"));
+
+    let key = DeliveryKey::new("delivery-status-mismatch", "PVTI_status_mismatch");
+    let reservation = state_store
+        .get_reservation(&key)
+        .await
+        .expect("read reservation")
+        .expect("reservation");
+    assert_eq!(
+        reservation.status_field_node_id.as_deref(),
+        Some("PVTSSF_wrong")
+    );
+
+    let publication = state_store
+        .get_publication(&key)
+        .await
+        .expect("store read")
+        .expect("publication");
+    assert_eq!(publication.state, PublicationState::Failed);
+
+    let destination_requests = destination_server
+        .received_requests()
+        .await
+        .expect("destination requests");
+    assert_eq!(destination_requests.len(), 0);
+}
+
+#[tokio::test]
+async fn state_source_url_mismatch_is_rejected_without_redirect_or_fetch() {
+    let graphql_server = MockServer::start().await;
+    let destination_server = MockServer::start().await;
+    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+
+    let (processor, state_store) = build_processor(
+        &graphql_server,
+        destination_server.uri(),
+        durable_store,
+        vec![],
+    )
+    .await;
+
+    let row = json!({
+        "InvalidationNodeId": "INV_url_mismatch",
+        "DeliveryId": "delivery-url-mismatch",
+        "ProjectItemNodeId": "PVTI_url_mismatch",
+        "ProjectNodeId": "PVT_project1",
+        "StateSourceUrl": "http://example.invalid/sources/github-project-state/events",
+        "InvalidatedAt": "2026-08-13T20:20:00Z"
+    });
+
+    let outcome = processor
+        .process_add_row(&row)
+        .await
+        .expect("mismatched state source url should be rejected");
+    assert_eq!(outcome, AddRowOutcome::Rejected);
+
+    let publication = state_store
+        .get_publication(&DeliveryKey::new(
+            "delivery-url-mismatch",
+            "PVTI_url_mismatch",
+        ))
+        .await
+        .expect("read publication")
+        .expect("publication");
+    assert_eq!(publication.state, PublicationState::Rejected);
+
+    let destination_requests = destination_server
+        .received_requests()
+        .await
+        .expect("destination requests");
+    assert_eq!(destination_requests.len(), 0);
+
+    let graphql_requests = graphql_server
+        .received_requests()
+        .await
+        .expect("graphql requests");
+    assert_eq!(
+        graphql_requests.len(),
+        0,
+        "must reject before GraphQL fetch"
+    );
+}
+
 #[test]
 fn http_source_change_uses_node_contract() {
     let node = ProjectItemStatusNode {
-        id: "ProjectItemStatus:PVTI_x".to_string(),
+        id: "project-item-status:PVTI_x".to_string(),
         project_item_node_id: "PVTI_x".to_string(),
         project_node_id: "PVT_p".to_string(),
         status_field_node_id: "PVTSSF_s".to_string(),

@@ -15,6 +15,7 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use log::warn;
+use reqwest::Url;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -99,12 +100,28 @@ impl RefreshProcessor {
             }
         }
 
+        if let Some(state_source_url) = &input.state_source_url {
+            if !urls_match(state_source_url, &self.config.destination_event_url) {
+                return self
+                        .mark_rejected(
+                            &input,
+                            format!(
+                                "input StateSourceUrl '{state_source_url}' does not match configured destinationEventUrl '{}'",
+                                self.config.destination_event_url
+                            ),
+                        )
+                        .await;
+            }
+        }
+
         let key = DeliveryKey::new(&input.delivery_id, &input.project_item_node_id);
         let reservation = DeliveryReservation {
             delivery_id: input.delivery_id.clone(),
             project_item_node_id: input.project_item_node_id.clone(),
             invalidation_node_id: input.invalidation_node_id.clone(),
             project_node_id: input.project_node_id.clone(),
+            status_field_node_id: input.status_field_node_id.clone(),
+            state_source_url: input.state_source_url.clone(),
             webhook_action: input.webhook_action.clone(),
             webhook_updated_at: input.webhook_updated_at,
             reserved_at: Utc::now(),
@@ -177,6 +194,20 @@ impl RefreshProcessor {
                     .mark_failed(&key, publication, PublicationState::Failed, message.clone())
                     .await
                     .context("recording project mismatch")?;
+                anyhow::bail!(message);
+            }
+        }
+
+        if let Some(status_field_node_id) = &input.status_field_node_id {
+            if status_field_node_id != &fetched.status_field_node_id {
+                let message = format!(
+                    "input StatusFieldNodeId '{status_field_node_id}' does not match fetched status field '{}'",
+                    fetched.status_field_node_id
+                );
+                self.state_store
+                    .mark_failed(&key, publication, PublicationState::Failed, message.clone())
+                    .await
+                    .context("recording status field mismatch")?;
                 anyhow::bail!(message);
             }
         }
@@ -337,12 +368,18 @@ pub fn parse_invalidation_input(row_data: &Value) -> anyhow::Result<Invalidation
 
     let invalidation_node_id = required_string(
         object,
-        &["invalidationNodeId", "invalidation_node_id", "id"],
+        &[
+            "InvalidationNodeId",
+            "invalidationNodeId",
+            "invalidation_node_id",
+            "id",
+        ],
         "invalidation node id",
     )?;
     let delivery_id = required_string(
         object,
         &[
+            "DeliveryId",
             "deliveryId",
             "xGitHubDelivery",
             "xGithubDelivery",
@@ -352,14 +389,24 @@ pub fn parse_invalidation_input(row_data: &Value) -> anyhow::Result<Invalidation
     )?;
     let project_item_node_id = required_string(
         object,
-        &["projectItemNodeId", "project_item_node_id"],
+        &[
+            "ProjectItemNodeId",
+            "projectItemNodeId",
+            "project_item_node_id",
+        ],
         "project item node id",
     )?;
-    let project_node_id = optional_string(object, &["projectNodeId", "project_node_id"]);
+    let project_node_id = optional_string(
+        object,
+        &["ProjectNodeId", "projectNodeId", "project_node_id"],
+    );
+    let status_field_node_id = optional_string(object, &["StatusFieldNodeId", "statusFieldNodeId"]);
+    let state_source_url = optional_string(object, &["StateSourceUrl", "stateSourceUrl"]);
     let webhook_action = optional_string(object, &["webhookAction", "action"]);
     let webhook_updated_at = optional_timestamp(
         object,
         &[
+            "InvalidatedAt",
             "webhookUpdatedAt",
             "webhookUpdateTime",
             "updatedAt",
@@ -372,9 +419,39 @@ pub fn parse_invalidation_input(row_data: &Value) -> anyhow::Result<Invalidation
         delivery_id,
         project_item_node_id,
         project_node_id,
+        status_field_node_id,
+        state_source_url,
         webhook_action,
         webhook_updated_at,
     })
+}
+
+fn urls_match(lhs: &str, rhs: &str) -> bool {
+    let fallback_match = normalize_raw_url(lhs).eq_ignore_ascii_case(&normalize_raw_url(rhs));
+
+    match (Url::parse(lhs), Url::parse(rhs)) {
+        (Ok(lhs), Ok(rhs)) => {
+            lhs.scheme() == rhs.scheme()
+                && lhs.host_str() == rhs.host_str()
+                && lhs.port_or_known_default() == rhs.port_or_known_default()
+                && normalize_path(lhs.path()) == normalize_path(rhs.path())
+                && lhs.query() == rhs.query()
+        }
+        _ => fallback_match,
+    }
+}
+
+fn normalize_raw_url(value: &str) -> String {
+    value.trim().trim_end_matches('/').to_string()
+}
+
+fn normalize_path(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/"
+    } else {
+        trimmed
+    }
 }
 
 fn required_string(

@@ -67,14 +67,35 @@ reactions:
 
 ## Input Contract (query row)
 
-The query row (`ResultDiff::Add.data`) must include:
+The query row (`ResultDiff::Add.data`) should prefer the dogfood PascalCase
+fields below. Backward-compatible aliases continue to parse.
 
-- `invalidationNodeId`
-- `deliveryId` (e.g., `X-GitHub-Delivery`)
-- `projectItemNodeId` (`PVTI_*`)
-- `projectNodeId` (`PVT_*`, optional but recommended)
-- `webhookAction` (optional)
-- `webhookUpdatedAt` or `webhookUpdateTime` (optional RFC3339 timestamp)
+| Field | Preferred | Backward-compatible aliases | Required |
+|---|---|---|---|
+| Invalidation node ID | `InvalidationNodeId` | `invalidationNodeId`, `invalidation_node_id`, `id` | Yes |
+| Delivery ID | `DeliveryId` | `deliveryId`, `xGitHubDelivery`, `xGithubDelivery`, `githubDeliveryId` | Yes |
+| Project item node ID | `ProjectItemNodeId` | `projectItemNodeId`, `project_item_node_id` | Yes |
+| Project node ID | `ProjectNodeId` | `projectNodeId`, `project_node_id` | No |
+| Status field node ID | `StatusFieldNodeId` | `statusFieldNodeId` | No |
+| State source URL | `StateSourceUrl` | `stateSourceUrl` | No |
+| Webhook action | `webhookAction` | `action` | No |
+| Invalidation/webhook timestamp | `InvalidatedAt` | `webhookUpdatedAt`, `webhookUpdateTime`, `updatedAt`, `webhook_updated_at` | No |
+
+### Optional Input Validation
+
+- `StatusFieldNodeId` (when present) must match the authoritative GraphQL
+  `status_field_node_id`. A mismatch is persisted as a `failed` publication and
+  no destination publish occurs.
+- `StateSourceUrl` (when present) must match configured `destinationEventUrl`.
+  The input URL is **never** used as a destination override.
+  - Matching uses semantic URL checks when both values parse as URLs:
+    `scheme`, `host`, `port`, `path` (with trailing slash normalization), and
+    query string.
+  - URL fragments are ignored for this comparison.
+  - If parsing fails for either side, fallback comparison uses exact trimmed URL
+    text with trailing slash normalization (case-insensitive).
+  - A mismatch is rejected before GraphQL hydration and before destination
+    publish.
 
 ## Output Contract (destination HTTP source event)
 
@@ -85,7 +106,7 @@ The reaction posts a standard `HttpSourceChange` **update** payload:
   "operation": "update",
   "element": {
     "type": "node",
-    "id": "ProjectItemStatus:PVTI_xxx",
+    "id": "project-item-status:PVTI_xxx",
     "labels": ["ProjectItemStatus"],
     "properties": {
       "projectItemNodeId": "PVTI_xxx",
@@ -103,7 +124,7 @@ The reaction posts a standard `HttpSourceChange` **update** payload:
 
 Deterministic node ID format:
 
-`ProjectItemStatus:{projectItemNodeId}`
+`project-item-status:{projectItemNodeId}`
 
 ## Durable State
 
@@ -133,7 +154,7 @@ Publication states:
 Idempotency is achieved by:
 
 - durable reservation key dedupe
-- deterministic destination node ID (`ProjectItemStatus:{projectItemNodeId}`)
+- deterministic destination node ID (`project-item-status:{projectItemNodeId}`)
 - deterministic source timestamp from the authoritative GitHub `updatedAt`
 - an `Idempotency-Key` header derived from the delivery and project item IDs
 - stale/version guard on `updatedAt`

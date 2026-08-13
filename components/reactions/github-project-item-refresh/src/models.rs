@@ -24,6 +24,8 @@ pub struct InvalidationInput {
     pub delivery_id: String,
     pub project_item_node_id: String,
     pub project_node_id: Option<String>,
+    pub status_field_node_id: Option<String>,
+    pub state_source_url: Option<String>,
     pub webhook_action: Option<String>,
     pub webhook_updated_at: Option<DateTime<Utc>>,
 }
@@ -34,6 +36,8 @@ pub struct DeliveryReservation {
     pub project_item_node_id: String,
     pub invalidation_node_id: String,
     pub project_node_id: Option<String>,
+    pub status_field_node_id: Option<String>,
+    pub state_source_url: Option<String>,
     pub webhook_action: Option<String>,
     pub webhook_updated_at: Option<DateTime<Utc>>,
     pub reserved_at: DateTime<Utc>,
@@ -134,7 +138,7 @@ pub struct ProjectItemStatusNode {
 
 impl ProjectItemStatusNode {
     pub fn deterministic_node_id(project_item_node_id: &str) -> String {
-        format!("ProjectItemStatus:{project_item_node_id}")
+        format!("project-item-status:{project_item_node_id}")
     }
 
     pub fn from_fetched(fetched: &FetchedProjectItemState) -> Self {

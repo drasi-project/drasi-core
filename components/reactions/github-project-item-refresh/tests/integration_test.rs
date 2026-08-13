@@ -161,12 +161,14 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
     let query = Query::cypher("invalidation-query")
         .query(
             "MATCH (n:ProjectItemInvalidation)
-             RETURN n.invalidationNodeId AS invalidationNodeId,
-                    n.deliveryId AS deliveryId,
-                    n.projectItemNodeId AS projectItemNodeId,
-                    n.projectNodeId AS projectNodeId,
+             RETURN n.InvalidationNodeId AS InvalidationNodeId,
+                    n.DeliveryId AS DeliveryId,
+                    n.ProjectItemNodeId AS ProjectItemNodeId,
+                    n.ProjectNodeId AS ProjectNodeId,
+                    n.StatusFieldNodeId AS StatusFieldNodeId,
+                    n.StateSourceUrl AS StateSourceUrl,
                     n.webhookAction AS webhookAction,
-                    n.webhookUpdatedAt AS webhookUpdatedAt",
+                    n.InvalidatedAt AS InvalidatedAt",
         )
         .from_source("invalidation-source")
         .auto_start(true)
@@ -201,12 +203,14 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
             "inv-1",
             vec!["ProjectItemInvalidation"],
             PropertyMapBuilder::new()
-                .with_string("invalidationNodeId", "INV_e2e_1")
-                .with_string("deliveryId", "delivery-e2e-1")
-                .with_string("projectItemNodeId", "PVTI_e2e_item")
-                .with_string("projectNodeId", "PVT_allowlisted_project")
+                .with_string("InvalidationNodeId", "INV_e2e_1")
+                .with_string("DeliveryId", "delivery-e2e-1")
+                .with_string("ProjectItemNodeId", "PVTI_e2e_item")
+                .with_string("ProjectNodeId", "PVT_allowlisted_project")
+                .with_string("StatusFieldNodeId", "PVTSSF_status")
+                .with_string("StateSourceUrl", destination_server.uri())
                 .with_string("webhookAction", "edited")
-                .with_string("webhookUpdatedAt", "2026-08-13T19:59:00Z")
+                .with_string("InvalidatedAt", "2026-08-13T19:59:00Z")
                 .build(),
         )
         .await
@@ -219,12 +223,14 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
             "inv-1",
             vec!["ProjectItemInvalidation"],
             PropertyMapBuilder::new()
-                .with_string("invalidationNodeId", "INV_e2e_1")
-                .with_string("deliveryId", "delivery-e2e-1")
-                .with_string("projectItemNodeId", "PVTI_e2e_item")
-                .with_string("projectNodeId", "PVT_allowlisted_project")
+                .with_string("InvalidationNodeId", "INV_e2e_1")
+                .with_string("DeliveryId", "delivery-e2e-1")
+                .with_string("ProjectItemNodeId", "PVTI_e2e_item")
+                .with_string("ProjectNodeId", "PVT_allowlisted_project")
+                .with_string("StatusFieldNodeId", "PVTSSF_status")
+                .with_string("StateSourceUrl", destination_server.uri())
                 .with_string("webhookAction", "edited")
-                .with_string("webhookUpdatedAt", "2026-08-13T20:00:01Z")
+                .with_string("InvalidatedAt", "2026-08-13T20:00:01Z")
                 .build(),
         )
         .await
@@ -260,7 +266,7 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
         serde_json::from_slice(&destination_requests[0].body).expect("destination body json");
     assert_eq!(body["operation"], "update");
     assert_eq!(
-        body["element"]["id"], "ProjectItemStatus:PVTI_e2e_item",
+        body["element"]["id"], "project-item-status:PVTI_e2e_item",
         "deterministic ProjectItemStatus node id"
     );
     assert_eq!(
