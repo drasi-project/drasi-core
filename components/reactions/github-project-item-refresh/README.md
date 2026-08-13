@@ -33,11 +33,11 @@ stateStore:
   path: "${STATE_STORE_PATH:-./data/github-project-refresh.redb}"
 
 reactions:
-  - id: gh-project-item-refresh
+  - id: refresh-github-project-items
     kind: github-project-item-refresh
     queries:
-      - project-item-invalidations
-    autoStart: true
+      - refresh-github-project-item
+    autoStart: false
     githubToken: "${GITHUB_TOKEN}"
     graphqlUrl: https://api.github.com/graphql
     graphqlHeaders:

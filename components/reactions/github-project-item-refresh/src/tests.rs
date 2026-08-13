@@ -663,10 +663,10 @@ fn generated_descriptor_schema_has_exact_flat_config_contract() {
 async fn exact_flat_server_yaml_maps_to_descriptor_config() {
     let yaml = r#"
 kind: github-project-item-refresh
-id: gh-project-item-refresh
-autoStart: true
+id: refresh-github-project-items
+autoStart: false
 queries:
-  - project-item-invalidations
+  - refresh-github-project-item
 githubToken: "${GITHUB_TOKEN_TEST:-test-token}"
 graphqlUrl: https://api.github.com/graphql
 graphqlHeaders:
@@ -694,9 +694,9 @@ recoveryPolicy: strict
     let auto_start = entry.remove("autoStart").expect("server autoStart");
     let queries = entry.remove("queries").expect("server queries");
     assert_eq!(kind, json!("github-project-item-refresh"));
-    assert_eq!(id, json!("gh-project-item-refresh"));
-    assert_eq!(auto_start, json!(true));
-    assert_eq!(queries, json!(["project-item-invalidations"]));
+    assert_eq!(id, json!("refresh-github-project-items"));
+    assert_eq!(auto_start, json!(false));
+    assert_eq!(queries, json!(["refresh-github-project-item"]));
     assert!(
         !entry.contains_key("config"),
         "server plugin config must remain flat"
@@ -707,16 +707,16 @@ recoveryPolicy: strict
         .expect("flat fields conform to generated descriptor DTO");
     let reaction = GitHubProjectItemRefreshDescriptor
         .create_reaction(
-            "gh-project-item-refresh",
-            vec!["project-item-invalidations".to_string()],
+            "refresh-github-project-items",
+            vec!["refresh-github-project-item".to_string()],
             &plugin_config,
-            true,
+            false,
         )
         .await
         .expect("descriptor constructs reaction from flat server fields");
     assert_eq!(reaction.type_name(), "github-project-item-refresh");
-    assert_eq!(reaction.query_ids(), vec!["project-item-invalidations"]);
-    assert!(reaction.auto_start());
+    assert_eq!(reaction.query_ids(), vec!["refresh-github-project-item"]);
+    assert!(!reaction.auto_start());
 }
 
 #[tokio::test]
