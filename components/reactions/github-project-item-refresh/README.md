@@ -28,25 +28,26 @@ This reaction is intended for webhook-invalidated pipelines (WorkGraph Phase 2):
 ## Configuration
 
 ```yaml
+stateStore:
+  kind: redb
+  path: "${STATE_STORE_PATH:-./data/github-project-refresh.redb}"
+
 reactions:
   - id: gh-project-item-refresh
     kind: github-project-item-refresh
     queries:
       - project-item-invalidations
     autoStart: true
-    githubToken:
-      env: GITHUB_TOKEN
+    githubToken: "${GITHUB_TOKEN}"
     graphqlUrl: https://api.github.com/graphql
     graphqlHeaders:
-      X-GitHub-Api-Version:
-        value: "2022-11-28"
+      X-GitHub-Api-Version: "2022-11-28"
     allowlistedProjectIds:
       - PVT_kwDOABC123
     statusFieldName: Status
     expectedStatusFieldNodeId: PVTSSF_lADOCX0YF84BgNE3zhaadbw
     destinationEventUrl: http://127.0.0.1:9001/sources/github-project-state/events
-    destinationBearerSecret:
-      env: PROJECT_STATUS_SOURCE_BEARER
+    destinationBearerSecret: "${PROJECT_STATUS_SOURCE_BEARER}"
     requestTimeoutMs: 10000
     deliveryRecordTtlSecs: 604800
     priorityQueueCapacity: 10000
@@ -55,6 +56,21 @@ reactions:
 
 Dynamic reaction configuration fields are flat beside the base server fields
 `id`, `kind`, `queries`, and `autoStart`; do not nest them under `config`.
+The top-level durable `stateStore` is required because the reaction refuses to
+start with an in-memory state store.
+
+`ConfigValue` fields accept a direct static value, a POSIX environment
+reference (`"${VAR}"` or `"${VAR:-default}"`), or a structured reference:
+
+```yaml
+githubToken:
+  kind: EnvironmentVariable
+  name: GITHUB_TOKEN
+# Or, with a configured secret store:
+destinationBearerSecret:
+  kind: Secret
+  name: project-status-source-bearer
+```
 
 ### Config Fields
 

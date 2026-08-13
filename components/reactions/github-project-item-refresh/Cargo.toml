@@ -49,6 +49,7 @@ async-trait = "0.1"
 drasi-core.workspace = true
 drasi-source-application.workspace = true
 env_logger = "0.11"
+serde_yaml = "0.9"
 tokio = { version = "1.0", features = ["full", "test-util"] }
 tokio-test = "0.4"
 wiremock = "0.6"

@@ -31,7 +31,7 @@ use drasi_lib::state_store::{StateStoreProvider, StateStoreResult};
 use drasi_plugin_sdk::prelude::ReactionPluginDescriptor;
 
 use crate::config::GitHubProjectItemRefreshConfig;
-use crate::descriptor::GitHubProjectItemRefreshDescriptor;
+use crate::descriptor::{GitHubProjectItemRefreshConfigDto, GitHubProjectItemRefreshDescriptor};
 use crate::destination::{DestinationPublishError, DestinationSourceClient};
 use crate::graphql::{rate_limit_retry_after, GitHubGraphqlClient};
 use crate::models::{
@@ -657,6 +657,66 @@ fn generated_descriptor_schema_has_exact_flat_config_contract() {
             "generated schema must require {field}"
         );
     }
+}
+
+#[tokio::test]
+async fn exact_flat_server_yaml_maps_to_descriptor_config() {
+    let yaml = r#"
+kind: github-project-item-refresh
+id: gh-project-item-refresh
+autoStart: true
+queries:
+  - project-item-invalidations
+githubToken: "${GITHUB_TOKEN_TEST:-test-token}"
+graphqlUrl: https://api.github.com/graphql
+graphqlHeaders:
+  X-GitHub-Api-Version: "2022-11-28"
+allowlistedProjectIds:
+  - PVT_test_project
+statusFieldName: Status
+expectedStatusFieldNodeId: PVTSSF_lADOCX0YF84BgNE3zhaadbw
+destinationEventUrl: http://127.0.0.1:9001/sources/github-project-state/events
+destinationBearerSecret: "${PROJECT_STATUS_SOURCE_BEARER_TEST:-test-bearer}"
+requestTimeoutMs: 10000
+deliveryRecordTtlSecs: 604800
+priorityQueueCapacity: 10000
+recoveryPolicy: strict
+"#;
+    let yaml_value: serde_yaml::Value = serde_yaml::from_str(yaml).expect("valid server YAML");
+    let mut entry = serde_json::to_value(yaml_value)
+        .expect("YAML converts to JSON")
+        .as_object()
+        .cloned()
+        .expect("reaction entry object");
+
+    let kind = entry.remove("kind").expect("server kind");
+    let id = entry.remove("id").expect("server id");
+    let auto_start = entry.remove("autoStart").expect("server autoStart");
+    let queries = entry.remove("queries").expect("server queries");
+    assert_eq!(kind, json!("github-project-item-refresh"));
+    assert_eq!(id, json!("gh-project-item-refresh"));
+    assert_eq!(auto_start, json!(true));
+    assert_eq!(queries, json!(["project-item-invalidations"]));
+    assert!(
+        !entry.contains_key("config"),
+        "server plugin config must remain flat"
+    );
+
+    let plugin_config = serde_json::Value::Object(entry);
+    serde_json::from_value::<GitHubProjectItemRefreshConfigDto>(plugin_config.clone())
+        .expect("flat fields conform to generated descriptor DTO");
+    let reaction = GitHubProjectItemRefreshDescriptor
+        .create_reaction(
+            "gh-project-item-refresh",
+            vec!["project-item-invalidations".to_string()],
+            &plugin_config,
+            true,
+        )
+        .await
+        .expect("descriptor constructs reaction from flat server fields");
+    assert_eq!(reaction.type_name(), "github-project-item-refresh");
+    assert_eq!(reaction.query_ids(), vec!["project-item-invalidations"]);
+    assert!(reaction.auto_start());
 }
 
 #[tokio::test]
