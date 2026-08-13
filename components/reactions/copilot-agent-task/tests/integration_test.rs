@@ -288,19 +288,13 @@ async fn success_launches_task_and_posts_one_comment() {
     let prompt = requests[0]["prompt"].as_str().expect("prompt is a string");
     assert!(prompt.contains(&event_id));
     for field in [
-        "eventId",
         "projectItemNodeId",
-        "projectOwner",
-        "projectNumber",
-        "subjectType",
         "subjectNodeId",
-        "repository",
         "subjectNumber",
-        "actorType",
-        "actorId",
         "routeId",
         "responsibilityId",
         "executionId",
+        "expectedEventId",
         "contentVersion",
         "profileRef",
     ] {
@@ -309,6 +303,34 @@ async fn success_launches_task_and_posts_one_comment() {
             "prompt target missing {field}"
         );
     }
+    let target_json = prompt
+        .split("```json\n")
+        .nth(1)
+        .and_then(|block| block.split("\n```").next())
+        .expect("prompt contains a fenced target");
+    let target: serde_json::Value =
+        serde_json::from_str(target_json).expect("target is valid JSON");
+    let target_fields: std::collections::BTreeSet<&str> = target
+        .as_object()
+        .expect("target is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        target_fields,
+        std::collections::BTreeSet::from([
+            "projectItemNodeId",
+            "subjectNodeId",
+            "subjectNumber",
+            "routeId",
+            "responsibilityId",
+            "executionId",
+            "expectedEventId",
+            "contentVersion",
+            "profileRef",
+        ])
+    );
+    assert!(prompt.contains("`workgraph/report_completion` exactly once"));
     let comments = mock_github::add_comment_bodies(&server).await;
     assert_eq!(comments.len(), 1);
     let comment = &comments[0];

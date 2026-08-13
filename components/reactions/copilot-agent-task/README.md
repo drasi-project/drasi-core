@@ -226,13 +226,18 @@ response body clearly names an unsupported-model condition (see
 
 ## The prompt and `WorkGraphEvent/v1`
 
-The `prompt` sent to the Agent Task supplies exactly one immutable target with these fields:
-`eventId`, `projectItemNodeId`, `projectOwner`, `projectNumber`, `subjectType`,
-`subjectNodeId`, `repository`, `number`, `actorType`, `actorId`, `routeId`,
-`responsibilityId`, `executionId`, `contentVersion`, and `profileRef`. It also embeds the
-literal `WorkGraphEvent/v1` JSON Schema (`schema/workgraph-event-v1.schema.json`) and the
-exact `WorkGraphEvent/v1` marker plus fenced-JSON issue-comment format. The completion
-event uses `contentVersion` and must be posted before any transition to `AwaitingRouting`.
+The `prompt` sent to the Agent Task supplies exactly the nine fields accepted by the
+issue-validator's scoped `workgraph/report_completion` tool: `projectItemNodeId`,
+`subjectNodeId`, `subjectNumber`, `routeId`, `responsibilityId`, `executionId`,
+`expectedEventId`, `contentVersion`, and `profileRef`. The prompt tells the custom agent to
+call that reporter exactly once with no additional arguments; the agent must not substitute
+generic comment or Project mutation tools.
+
+The prompt also embeds the literal `WorkGraphEvent/v1` JSON Schema
+(`schema/workgraph-event-v1.schema.json`) and the exact `WorkGraphEvent/v1` marker plus
+fenced-JSON issue-comment format. The scoped reporter owns the completion comment and the
+Project status mutation: it must confirm the canonical event exists before setting
+`AwaitingRouting`.
 
 ## The `workgraph.execution/v1` comment
 
@@ -329,7 +334,8 @@ Integration coverage (`tests/integration_test.rs`) includes: validation/fail-clo
 the full success path, exactly-once model fallback, no-fallback on an unrelated `422`,
 duplicate delivery, a crash/recovery boundary (pre-seeded `Starting` record + reconciliation),
 ambiguous reconciliation (never guesses), GraphQL errors treated as failures (both for the
-Project-status preflight query and for `addComment`), and secret redaction/wiring.
+Project-status preflight query and for `addComment`), exact nine-field reporter prompts, numeric
+token-owner verification, and secret redaction/wiring.
 
 ## Dynamic plugin build
 
@@ -356,6 +362,11 @@ The plugin ID is `copilot-agent-task-reaction`. The macOS cdylib is
   [Launch row schema](#launch-row-schema).
 - **`profileRef` is `"<agentProfile>@<blobSha>"`.** The repository path is derived as
   `.github/agents/<agentProfile>.agent.md`.
+- **The issue-validator's reporter identity is configured separately.** Its
+  `COPILOT_MCP_WORKGRAPH_TOKEN` must not reuse the launcher's `GITHUB_AGENT_TOKEN`; the
+  profile also requires immutable `COPILOT_MCP_WORKGRAPH_LAUNCHER_USER_ID` and
+  `COPILOT_MCP_WORKGRAPH_REPORTER_USER_ID` Agents variables. Login variables are diagnostic
+  only. This reaction verifies only its own launcher token via `expectedGithubUserId`.
 - **Attempts are always `attempt=1`** in this version — the state key includes an `attempt`
   number for forward compatibility, but there is no multi-attempt retry loop yet. A
   permanently failed attempt requires a new row (e.g. a new `routeId`) to relaunch.

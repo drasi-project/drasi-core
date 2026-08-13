@@ -18,15 +18,11 @@
 //!
 //! # Contract
 //!
-//! The prompt sent to the Copilot coding-agent task instructs it that, upon
-//! completing its assigned responsibility, it **must** emit exactly one
-//! `WorkGraphEvent/v1` object whose `eventType` equals the row's
-//! `requiredEventType` (always `CompletedIssueValidation` in the launch
-//! query this reaction subscribes to) — carrying the reaction-generated
-//! `eventId` (`expectedEventId`) and `executionId` — and that this event **must** be
-//! emitted **before** any `AwaitingRouting` event for the same issue, so a
-//! downstream router never observes routing-readiness before validation
-//! completion is recorded.
+//! The prompt sent to the Copilot coding-agent task supplies the exact
+//! nine-field input accepted by the scoped `workgraph/report_completion`
+//! tool. The custom agent validates the issue, then calls that reporter once.
+//! The reporter owns the canonical `WorkGraphEvent/v1` comment and must
+//! persist it before moving the Project item to `AwaitingRouting`.
 //!
 //! The reaction itself posts a *different*, immediate envelope —
 //! `workgraph.execution/v1` — as a single issue comment right after the task
@@ -87,9 +83,8 @@ pub fn workgraph_execution_v1_schema() -> Value {
 
 /// Build the exact prompt sent as the Agent Task's `prompt` field.
 ///
-/// Embeds the exact frozen target, the literal `WorkGraphEvent/v1` schema,
-/// and the ordering constraint between the required completion event and any
-/// `AwaitingRouting` event.
+/// Embeds the exact nine-field reporter input, the literal
+/// `WorkGraphEvent/v1` schema, and the event-before-status ordering contract.
 pub fn build_prompt(row: &LaunchRow, execution_id: &str, expected_event_id: &str) -> String {
     let schema = work_graph_event_v1_schema();
     let schema_json = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| "{}".to_string());
@@ -99,31 +94,35 @@ pub fn build_prompt(row: &LaunchRow, execution_id: &str, expected_event_id: &str
     format!(
         r#"You are operating as the "{agent_profile}" custom agent.
 
-## Single target
+## Trusted task input
 
-You have exactly one target. Do not discover, infer, or act on any other target.
-Use every field below exactly as supplied:
+Validate exactly this one target. Copy every value verbatim. Do not discover,
+infer, or act on another target.
 
 ```json
 {target_json}
 ```
 
-Reconciliation correlation: `WorkGraph-Execution: {execution_id}`
+After applying the validation rule defined by the custom agent profile, call
+`workgraph/report_completion` exactly once with exactly the nine fields above.
+Do not add a result, timestamp, comment body, repository, Project, field,
+status, actor, event type, REST operation, GraphQL document, or any other
+argument. If the reporter is unavailable or fails, surface that error without
+attempting another mutation.
 
-## Required completion event
+## Reporter completion contract
 
-When you finish this responsibility, you MUST emit exactly one `WorkGraphEvent/v1`
-issue comment in exactly this format:
+The reporter must persist exactly one `{required_event_type}` issue comment
+with no text before or after this exact framing:
 
 WorkGraphEvent/v1
 ```json
 {{the JSON object required by the schema below}}
 ```
 
-The object MUST have `eventType` set to `{required_event_type}`, `eventId` set
-to the target's `eventId`, `executionId` set to the target's `executionId`,
-and `contentVersion` set to the target's `contentVersion`. Copy the target's
-correlation and identity fields exactly. The event's JSON Schema is:
+The reporter-owned object must set `eventId` to `expectedEventId`,
+`executionId` to `executionId`, and `contentVersion` to `contentVersion` from
+the trusted task input. Its JSON Schema is:
 
 ```json
 {schema_json}
@@ -131,10 +130,10 @@ correlation and identity fields exactly. The event's JSON Schema is:
 
 ## Ordering requirement
 
-Post the `{required_event_type}` issue comment above and confirm that GitHub
-accepted it. Only then update this Project item's `Status` to
-`AwaitingRouting`. Never update the status first: downstream routing must not
-observe routing readiness before the validation result is recorded.
+The scoped reporter, not the agent directly, owns both mutations. It must
+confirm the `{required_event_type}` comment exists before it changes this
+Project item's Status to `AwaitingRouting`. Never substitute a generic comment
+or Project mutation tool.
 
 ## Task
 
@@ -142,30 +141,22 @@ Carry out the target responsibility using the custom agent profile pinned by
 the target's `profileRef`. Do not open a pull request as part of this task.
 "#,
         agent_profile = row.agent_profile,
-        execution_id = execution_id,
         required_event_type = row.required_event_type,
         schema_json = schema_json,
         target_json = target_json,
     )
 }
 
-/// Frozen WorkGraph target supplied to the coding agent. No other issue,
-/// project, actor, or correlation fields are included in the target.
+/// Exact input accepted by the issue-validator's scoped completion reporter.
 pub fn target_payload(row: &LaunchRow, execution_id: &str, expected_event_id: &str) -> Value {
     json!({
-        "eventId": expected_event_id,
         "projectItemNodeId": row.project_item_node_id,
-        "projectOwner": row.project_owner,
-        "projectNumber": row.project_number,
-        "subjectType": row.subject_type,
         "subjectNodeId": row.issue_node_id,
-        "repository": row.repository,
         "subjectNumber": row.issue_number,
-        "actorType": row.actor_type,
-        "actorId": row.actor_id,
         "routeId": row.route_id,
         "responsibilityId": row.responsibility_id,
         "executionId": execution_id,
+        "expectedEventId": expected_event_id,
         "contentVersion": row.issue_content_version,
         "profileRef": row.profile_ref,
     })
@@ -278,11 +269,8 @@ mod tests {
             "CompletedIssueValidation",
             "AwaitingRouting",
             "issue-validator@0123456789abcdef0123456789abcdef01234567",
-            "\"projectOwner\": \"drasi-project\"",
-            "\"projectNumber\": 3",
-            "\"subjectType\": \"Issue\"",
-            "\"actorType\": \"Agent\"",
-            "WorkGraph-Execution: execution:exec-123",
+            "\"subjectNumber\": 42",
+            "`workgraph/report_completion` exactly once",
         ] {
             assert!(prompt.contains(needle), "prompt missing '{needle}'");
         }
@@ -302,19 +290,13 @@ mod tests {
             .map(String::as_str)
             .collect();
         let expected = std::collections::BTreeSet::from([
-            "eventId",
             "projectItemNodeId",
-            "projectOwner",
-            "projectNumber",
-            "subjectType",
             "subjectNodeId",
-            "repository",
             "subjectNumber",
-            "actorType",
-            "actorId",
             "routeId",
             "responsibilityId",
             "executionId",
+            "expectedEventId",
             "contentVersion",
             "profileRef",
         ]);
@@ -322,21 +304,17 @@ mod tests {
     }
 
     #[test]
-    fn prompt_requires_completion_event_before_awaiting_routing() {
+    fn prompt_delegates_event_before_status_to_scoped_reporter() {
         let row = sample_row();
         let prompt = build_prompt(
             &row,
             "execution:exec-123",
             "event:execution:exec-123:CompletedIssueValidation",
         );
-        let completion_pos = prompt
-            .find("Post the `CompletedIssueValidation` issue comment")
-            .unwrap();
-        let status_pos = prompt
-            .find("Only then update this Project item's `Status`")
-            .unwrap();
+        let completion_pos = prompt.find("comment exists before it changes").unwrap();
+        let status_pos = prompt.find("Status to `AwaitingRouting`").unwrap();
         assert!(completion_pos < status_pos);
-        assert!(prompt[status_pos..].contains("`AwaitingRouting`"));
+        assert!(prompt.contains("Never substitute a generic comment"));
     }
 
     #[test]
