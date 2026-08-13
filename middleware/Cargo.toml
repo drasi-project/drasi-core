@@ -22,14 +22,15 @@ decoder = []
 map = []
 parse_json = []
 promote = []
+regex_extract = ["dep:regex"]
 relabel = []
 unwind = []
 
 # Convenience feature to enable all middleware
-all = ["jq", "decoder", "map", "parse_json", "promote", "relabel", "unwind"]
+all = ["jq", "decoder", "map", "parse_json", "promote", "regex_extract", "relabel", "unwind"]
 
 [package.metadata.docs.rs]
-features = ["bundled-jq", "decoder", "map", "parse_json", "promote", "relabel", "unwind"]
+features = ["bundled-jq", "decoder", "map", "parse_json", "promote", "regex_extract", "relabel", "unwind"]
 
 [dependencies]
 # Core dependencies (always needed)
@@ -48,6 +49,7 @@ urlencoding = "2.1.2"    # Used by decoder
 
 # Optional: only compiled when jq feature is enabled; use bundled-jq to compile from source
 jq-rs = { version = "0.4.1", optional = true }
+regex = { version = "1", optional = true }
 
 [dev-dependencies]
 ordered-float = "3.7.0"  # Used by parse_json tests

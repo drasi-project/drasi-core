@@ -447,6 +447,22 @@ mod process {
     }
 
     #[tokio::test]
+    async fn test_passthrough_on_missing_property_without_error_policy() {
+        let factory = ParseJsonFactory::default();
+        let config = create_mw_config(json!({
+            "target_property": "non_existent",
+            "on_missing": "passthrough"
+        }));
+        let middleware = factory.create(&config).unwrap();
+        let index = InMemoryElementIndex::new();
+        let input_change = create_node_insert_change(json!({ "id": 1 }));
+        let original_change_clone = input_change.clone();
+
+        let output_changes = middleware.process(input_change, &index).await.unwrap();
+        assert_eq!(output_changes, vec![original_change_clone]);
+    }
+
+    #[tokio::test]
     async fn test_skip_on_invalid_type() {
         let factory = ParseJsonFactory::default();
         let config = create_mw_config(json!({

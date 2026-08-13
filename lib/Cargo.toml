@@ -37,6 +37,7 @@ middleware-decoder = ["drasi-middleware/decoder"]
 middleware-map = ["drasi-middleware/map"]
 middleware-parse-json = ["drasi-middleware/parse_json"]
 middleware-promote = ["drasi-middleware/promote"]
+middleware-regex-extract = ["drasi-middleware/regex_extract"]
 middleware-relabel = ["drasi-middleware/relabel"]
 middleware-unwind = ["drasi-middleware/unwind"]
 
@@ -53,6 +54,7 @@ features = [
     "middleware-map",
     "middleware-parse-json",
     "middleware-promote",
+    "middleware-regex-extract",
     "middleware-relabel",
     "middleware-unwind",
 ]

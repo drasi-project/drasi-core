@@ -14,7 +14,7 @@ All middleware types are **optional** and disabled by default. Enable only the m
 
 ```toml
 [dependencies]
-drasi-middleware = { version = "0.3", features = ["jq", "decoder", "map"] }
+drasi-middleware = { version = "0.5", features = ["jq", "decoder", "regex_extract"] }
 ```
 
 ### Available Middleware Features
@@ -25,6 +25,7 @@ drasi-middleware = { version = "0.3", features = ["jq", "decoder", "map"] }
 - **`map`** - JSONPath-based property mapping
 - **`parse_json`** - Parse JSON strings into structured objects
 - **`promote`** - Promote nested properties to top level
+- **`regex_extract`** - Extract a bounded regex capture from a string property
 - **`relabel`** - Transform element labels
 - **`unwind`** - Unwind arrays into multiple elements
 - **`all`** - Enable all middleware (convenience feature, includes `bundled-jq`)
@@ -72,6 +73,79 @@ drasi-middleware = { version = "0.3", features = ["bundled-jq"] }
 ```
 
 **Note:** If you don't need JQ middleware, you can use other middleware without installing jq or these build tools.
+
+## Source-wide non-destructive pipelines
+
+A query has one middleware pipeline for each source ID. Middleware in that pipeline
+therefore needs to pass unrelated elements through. This example recognizes only
+comments with a versioned header and fenced JSON payload while issues, relations,
+and ordinary comments continue unchanged:
+
+```yaml
+middleware:
+  - name: extract_event_payload
+    kind: regex_extract
+    config:
+      target_property: body
+      pattern: '(?s)^Event/v1\s*\n```json\s*(?<payload>.*?)\s*```'
+      capture_group: payload
+      output_property: event_payload
+      max_capture_size: 65536
+      on_missing: passthrough
+      on_no_match: passthrough
+      on_error: fail
+      on_collision: fail
+  - name: parse_event_payload
+    kind: parse_json
+    config:
+      target_property: event_payload
+      output_property: event
+      on_missing: passthrough
+      on_error: fail
+  - name: derive_event_graph
+    kind: jq
+    config:
+      preserve_input: true
+      include_source_metadata: true
+      reconcile: true
+      mappings:
+        Comment:
+          insert: &event_mappings
+            - op: Insert
+              elementType: Node
+              label: '"Event"'
+              id: .id
+              query: 'if .event then .event else empty end'
+          update: *event_mappings
+```
+
+`preserve_input` tees the input change after the derived changes, keeping the
+source element available to queries and to later reconciliation. With
+`include_source_metadata`, jq receives a reserved `$source` object containing
+`operation`, `sourceId`, `elementId`, `labels`, `effectiveTime`, `elementType`,
+and `inNode`/`outNode` references for relations. It is opt-in so legacy jq
+queries that copy their entire input do not acquire a new property.
+
+`reconcile` compares deterministic node and relation references produced by the
+current mapping with references produced from the source element already in the
+`ElementIndex`. It emits deletes for stale derived references on source updates
+and deletes. It requires `preserve_input: true`, deterministic `id` expressions,
+and IDs owned exclusively by that source mapping. Insert and update mappings may
+differ: candidate references are deleted only when the reference is present in
+the index. Reconciliation treats mapping errors as failures even when
+`haltOnError` is false; an execution error must not look like an intentionally
+empty jq result and delete valid derived elements. If an update or delete has no
+indexed prior source element, cleanup cannot be reconstructed and a warning is
+logged.
+
+Delete changes do not carry properties or relation endpoints. Legacy delete
+mapping input therefore remains property-free. With `include_source_metadata`,
+relation type and endpoints are recovered from the prior indexed source
+element; if it is unavailable, `$source.elementType` is `"unknown"` and the
+endpoints are omitted.
+
+Legacy jq configuration remains valid: a top-level map of labels to operations
+still has `preserve_input`, structured metadata, and reconciliation disabled.
 
 ## Middleware Development Guide
 

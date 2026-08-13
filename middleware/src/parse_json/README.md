@@ -10,7 +10,7 @@ The `parse_json` middleware processes `SourceChange` events (specifically `Inser
 2.  **Validate Type:** It checks if the value of the `target_property` is a string (`ElementValue::String`). If not, it either skips the element or fails, based on the `on_error` setting.
 3.  **Parse JSON:** It attempts to parse the string value as a JSON document using `serde_json`.
 4.  **Convert Value:** If parsing is successful, it converts the resulting `serde_json::Value` into the corresponding `ElementValue` variant (e.g., `ElementValue::Object`, `ElementValue::List`, `ElementValue::Integer`, etc.).
-5.  **Handle Errors:** If parsing or conversion fails (e.g., invalid JSON syntax, unsupported JSON structure), it either skips the element (keeping the original string value) or fails the processing entirely, based on the `on_error` setting.
+5.  **Handle Errors:** If parsing or conversion fails (e.g., invalid JSON syntax, unsupported JSON structure), it either skips the element (keeping the original string value) or fails the processing entirely, based on the `on_error` setting. A missing target can independently pass through via `on_missing: "passthrough"`.
 6.  **Store Result:** If parsing and conversion are successful, the resulting `ElementValue` is stored:
     *   In the property specified by `output_property`, if provided.
     *   Otherwise, it overwrites the original `target_property`.
@@ -26,6 +26,7 @@ The middleware is configured using a JSON object with the following fields:
 | `target_property`   | String                        | Yes      |              | The name of the element property containing the JSON string to be parsed.                                                                 |
 | `output_property`   | String                        | No       | `null`       | Optional. The name of the property where the parsed `ElementValue` should be stored. If omitted or `null`, `target_property` will be overwritten. |
 | `on_error`          | String (`"skip"` or `"fail"`) | No       | `"fail"`     | Defines behavior when an error occurs (missing target, wrong type, parsing/conversion failure): `"skip"` logs a warning and passes the change through unchanged; `"fail"` stops processing and returns an error. |
+| `on_missing`        | String (`"error"` or `"passthrough"`) | No | `"error"` | `"error"` preserves the historical behavior and applies `on_error`; `"passthrough"` quietly preserves changes without the target property. |
 | `max_json_size`     | Integer (bytes)               | No       | `1_048_576`  | Maximum size (in bytes) of the JSON string that will be parsed. Use to guard against unexpectedly large payloads.                                                               |
 | `max_nesting_depth` | Integer                       | No       | `20`         | Maximum allowed nesting depth for objects/arrays within the JSON document. Prevents excessively nested or malicious payloads.                                                   |
 
@@ -38,6 +39,7 @@ The middleware is configured using a JSON object with the following fields:
   "config": {
     "target_property": "raw_event_json",
     "output_property": "event_details",
+    "on_missing": "passthrough",
     "on_error": "skip"
   }
 }

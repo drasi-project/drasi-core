@@ -47,6 +47,17 @@ pub enum ParseJsonErrorType {
     ConversionError,
 }
 
+/// Behavior when the configured target property is absent.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MissingPropertyHandling {
+    /// Preserve the existing behavior by routing missing properties through `on_error`.
+    #[default]
+    Error,
+    /// Pass the source change through unchanged without logging an error.
+    Passthrough,
+}
+
 /// Configuration for the ParseJson middleware.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +70,9 @@ pub struct ParseJsonConfig {
     /// How to handle errors during parsing or if the target property is missing/invalid.
     #[serde(default)]
     pub on_error: ErrorHandling,
+    /// How to handle elements that do not contain `target_property`.
+    #[serde(default)]
+    pub on_missing: MissingPropertyHandling,
     /// Maximum size in bytes for the JSON string (default: 1MB)
     #[serde(default = "default_max_json_size")]
     pub max_json_size: usize,
@@ -200,6 +214,9 @@ impl ParseJson {
                 );
             }
             None => {
+                if self.config.on_missing == MissingPropertyHandling::Passthrough {
+                    return Ok(());
+                }
                 return self.handle_error(
                     ParseJsonErrorType::MissingProperty,
                     format!(

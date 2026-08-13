@@ -286,6 +286,11 @@ impl DrasiLib {
             drasi_middleware::promote::PromoteMiddlewareFactory::new(),
         ));
 
+        #[cfg(feature = "middleware-regex-extract")]
+        middleware_registry.register(Arc::new(
+            drasi_middleware::regex_extract::RegexExtractFactory::new(),
+        ));
+
         let middleware_registry = Arc::new(middleware_registry);
 
         let query_manager = Arc::new(QueryManager::new(
@@ -1021,6 +1026,11 @@ mod tests {
             registry.get("promote").is_some(),
             "Promote factory should be registered"
         );
+        #[cfg(feature = "middleware-regex-extract")]
+        assert!(
+            registry.get("regex_extract").is_some(),
+            "RegexExtract factory should be registered"
+        );
     }
 
     #[tokio::test]
@@ -1075,6 +1085,7 @@ mod tests {
             feature = "middleware-decoder",
             feature = "middleware-parse-json",
             feature = "middleware-promote",
+            feature = "middleware-regex-extract",
             feature = "middleware-relabel",
             feature = "middleware-unwind"
         )))]
@@ -1107,6 +1118,7 @@ mod tests {
             feature = "middleware-decoder",
             feature = "middleware-parse-json",
             feature = "middleware-promote",
+            feature = "middleware-regex-extract",
             feature = "middleware-relabel",
             feature = "middleware-unwind"
         )))]

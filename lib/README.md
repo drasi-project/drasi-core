@@ -679,6 +679,7 @@ drasi-lib = { version = "0.4", features = ["middleware-promote", "middleware-dec
 | `middleware-relabel` | Transform | Rename element labels |
 | `middleware-decoder` | Transform | Decode base64, hex, URL-encoded, or JSON-escaped strings |
 | `middleware-parse-json` | Transform | Parse JSON strings into structured objects |
+| `middleware-regex-extract` | Transform | Extract bounded regex captures from string properties |
 | `middleware-unwind` | Transform | Expand arrays into separate graph elements |
 | `middleware-all` | Convenience | Enable all middleware |
 
@@ -1073,6 +1074,7 @@ match core.get_source_status("unknown").await {
 | `middleware-map` | JSONPath property mapping |
 | `middleware-parse-json` | Parse JSON strings into objects |
 | `middleware-promote` | Promote nested properties to top level |
+| `middleware-regex-extract` | Extract bounded regex captures from string properties |
 | `middleware-relabel` | Rename element labels |
 | `middleware-unwind` | Expand arrays into elements |
 | `middleware-all` | Enable all middleware |

@@ -29,8 +29,19 @@ pub mod parse_json;
 #[cfg(feature = "promote")]
 pub mod promote;
 
+#[cfg(feature = "regex_extract")]
+pub mod regex_extract;
+
 #[cfg(feature = "relabel")]
 pub mod relabel;
 
 #[cfg(feature = "unwind")]
 pub mod unwind;
+
+#[cfg(all(
+    test,
+    feature = "jq",
+    feature = "parse_json",
+    feature = "regex_extract"
+))]
+mod pipeline_tests;
