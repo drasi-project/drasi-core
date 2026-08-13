@@ -96,6 +96,11 @@ impl GitHubProjectItemRefreshBuilder {
         self
     }
 
+    pub fn with_status_field_name(mut self, status_field_name: impl Into<String>) -> Self {
+        self.config.status_field_name = status_field_name.into();
+        self
+    }
+
     pub fn with_destination_event_url(mut self, url: impl Into<String>) -> Self {
         self.config.destination_event_url = url.into();
         self

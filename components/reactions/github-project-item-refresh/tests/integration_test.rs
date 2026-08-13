@@ -131,6 +131,7 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
 
     Mock::given(method("POST"))
         .and(body_string_contains("PVTI_e2e_item"))
+        .and(body_string_contains("\"statusFieldName\""))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(graphql_success_response(
                 "PVTI_e2e_item",
@@ -251,6 +252,9 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
         .await
         .expect("graphql requests");
     assert_eq!(graphql_requests.len(), 1, "update/delete must not refetch");
+    let graphql_body: serde_json::Value =
+        serde_json::from_slice(&graphql_requests[0].body).expect("graphql request json");
+    assert_eq!(graphql_body["variables"]["statusFieldName"], "Status");
 
     let body: serde_json::Value =
         serde_json::from_slice(&destination_requests[0].body).expect("destination body json");

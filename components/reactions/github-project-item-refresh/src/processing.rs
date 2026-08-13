@@ -31,6 +31,7 @@ use crate::state_store::RefreshStateStore;
 
 const MAX_FETCH_ATTEMPTS: u32 = 3;
 const INITIAL_BACKOFF_MS: u64 = 100;
+const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddRowOutcome {
@@ -304,8 +305,17 @@ impl RefreshProcessor {
                 Ok(fetched) => return Ok(fetched),
                 Err(err) => {
                     if attempt < MAX_FETCH_ATTEMPTS && err.is_retryable() {
-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                        backoff_ms = backoff_ms.saturating_mul(2);
+                        let wait = match &err {
+                            GraphqlFetchError::RateLimited { retry_after, .. } => {
+                                (*retry_after).min(MAX_RATE_LIMIT_WAIT)
+                            }
+                            _ => {
+                                let delay = Duration::from_millis(backoff_ms);
+                                backoff_ms = backoff_ms.saturating_mul(2);
+                                delay
+                            }
+                        };
+                        tokio::time::sleep(wait).await;
                         continue;
                     }
                     return Err(map_graphql_error(err));

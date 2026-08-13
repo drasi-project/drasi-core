@@ -165,11 +165,29 @@ async fn build_processor(
     durable_store: Arc<dyn StateStoreProvider>,
     allowlist: Vec<String>,
 ) -> (RefreshProcessor, RefreshStateStore) {
+    build_processor_with_status_field_name(
+        graphql_server,
+        destination_url,
+        durable_store,
+        allowlist,
+        "Status",
+    )
+    .await
+}
+
+async fn build_processor_with_status_field_name(
+    graphql_server: &MockServer,
+    destination_url: String,
+    durable_store: Arc<dyn StateStoreProvider>,
+    allowlist: Vec<String>,
+    status_field_name: &str,
+) -> (RefreshProcessor, RefreshStateStore) {
     let config = GitHubProjectItemRefreshConfig {
         github_token: "ghp_test_secret".to_string(),
         graphql_url: graphql_server.uri(),
         graphql_headers: HashMap::new(),
         allowlisted_project_ids: allowlist,
+        status_field_name: status_field_name.to_string(),
         destination_event_url: destination_url.clone(),
         destination_bearer_secret: Some("dest-secret-token".to_string()),
         request_timeout_ms: 1_000,
@@ -190,6 +208,7 @@ async fn build_processor(
             config.graphql_url.clone(),
             config.github_token,
             config.graphql_headers,
+            config.status_field_name,
         ),
         DestinationSourceClient::new(client, destination_url, config.destination_bearer_secret),
     );
@@ -259,6 +278,7 @@ fn config_debug_redacts_secrets() {
             "graphql-header-secret".to_string(),
         )]),
         allowlisted_project_ids: vec![],
+        status_field_name: "Status".to_string(),
         destination_event_url: "https://dest.example/changes".to_string(),
         destination_bearer_secret: Some("very-secret".to_string()),
         request_timeout_ms: 1000,
@@ -271,6 +291,26 @@ fn config_debug_redacts_secrets() {
     assert!(!rendered.contains("graphql-header-secret"));
     assert!(rendered.contains("X-Api-Key"));
     assert!(rendered.contains("[REDACTED]"));
+}
+
+#[test]
+fn config_validation_rejects_empty_status_field_name() {
+    let config = GitHubProjectItemRefreshConfig {
+        github_token: "ghp_test_secret".to_string(),
+        graphql_url: "https://api.github.com/graphql".to_string(),
+        graphql_headers: HashMap::new(),
+        allowlisted_project_ids: vec![],
+        status_field_name: "   ".to_string(),
+        destination_event_url: "https://dest.example/changes".to_string(),
+        destination_bearer_secret: None,
+        request_timeout_ms: 1000,
+        delivery_record_ttl_secs: 3600,
+    };
+
+    let err = config
+        .validate(&["query".to_string()], Some(10))
+        .expect_err("empty statusFieldName should fail validation");
+    assert!(err.to_string().contains("statusFieldName"));
 }
 
 #[tokio::test]
@@ -349,6 +389,12 @@ async fn process_success_publishes_and_persists_state() {
 
     let graphql_requests = graphql_server.received_requests().await.expect("requests");
     assert_eq!(graphql_requests.len(), 1);
+    let graphql_body: serde_json::Value =
+        serde_json::from_slice(&graphql_requests[0].body).expect("graphql request body");
+    assert_eq!(
+        graphql_body["variables"]["statusFieldName"],
+        json!("Status")
+    );
     assert_eq!(
         graphql_requests[0]
             .headers
@@ -491,7 +537,9 @@ async fn missing_status_is_explicit_failure() {
         .process_add_row(&row)
         .await
         .expect_err("must fail");
-    assert!(err.to_string().contains("missing a required Status"));
+    assert!(err
+        .to_string()
+        .contains("missing a required 'Status' value"));
 
     let key = DeliveryKey::new("delivery-missing-status", "PVTI_missing_status");
     let publication = state_store
@@ -844,6 +892,256 @@ async fn retries_safe_reads_and_recovery_from_ambiguous_publication() {
         graphql_requests.len() >= 2,
         "expected safe read retries; got {}",
         graphql_requests.len()
+    );
+}
+
+#[tokio::test]
+async fn rate_limit_403_retries_and_prefers_retry_after_over_reset() {
+    let graphql_server = MockServer::start().await;
+    let destination_server = MockServer::start().await;
+    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+
+    let reset_epoch = (Utc::now() + Duration::seconds(3)).timestamp().to_string();
+    Mock::given(method("POST"))
+        .and(body_string_contains("PVTI_rate_limited"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .append_header("retry-after", "1")
+                .append_header("x-ratelimit-remaining", "0")
+                .append_header("x-ratelimit-reset", reset_epoch),
+        )
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&graphql_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("PVTI_rate_limited"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(graphql_success_response(
+                "PVTI_rate_limited",
+                "PVT_project1",
+                "2026-08-13T19:15:00Z",
+                "In Progress",
+                "opt-ip",
+            )),
+        )
+        .mount(&graphql_server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "message": "All 1 events processed successfully"
+        })))
+        .mount(&destination_server)
+        .await;
+
+    let (processor, _) = build_processor(
+        &graphql_server,
+        destination_server.uri(),
+        durable_store,
+        vec![],
+    )
+    .await;
+
+    let started = std::time::Instant::now();
+    let outcome = processor
+        .process_add_row(&test_row(
+            "delivery-rate-limit",
+            "PVTI_rate_limited",
+            "PVT_project1",
+        ))
+        .await
+        .expect("rate-limited fetch should retry");
+    assert_eq!(outcome, AddRowOutcome::Published);
+
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= std::time::Duration::from_millis(900),
+        "retry-after=1s should be honored (elapsed={elapsed:?})"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "retry-after should take precedence over x-ratelimit-reset (elapsed={elapsed:?})"
+    );
+
+    let graphql_requests = graphql_server.received_requests().await.expect("requests");
+    assert_eq!(graphql_requests.len(), 2, "expected exactly one retry");
+}
+
+#[tokio::test]
+async fn rate_limit_403_retries_with_retry_after_http_date() {
+    let graphql_server = MockServer::start().await;
+    let destination_server = MockServer::start().await;
+    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+
+    let retry_after_http_date =
+        httpdate::fmt_http_date(std::time::SystemTime::now() + std::time::Duration::from_secs(1));
+    Mock::given(method("POST"))
+        .and(body_string_contains("PVTI_rate_limited_http_date"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .append_header("retry-after", retry_after_http_date)
+                .append_header("x-ratelimit-remaining", "0"),
+        )
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&graphql_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("PVTI_rate_limited_http_date"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(graphql_success_response(
+                "PVTI_rate_limited_http_date",
+                "PVT_project1",
+                "2026-08-13T19:16:00Z",
+                "In Progress",
+                "opt-ip",
+            )),
+        )
+        .mount(&graphql_server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "message": "All 1 events processed successfully"
+        })))
+        .mount(&destination_server)
+        .await;
+
+    let (processor, _) = build_processor(
+        &graphql_server,
+        destination_server.uri(),
+        durable_store,
+        vec![],
+    )
+    .await;
+
+    let outcome = processor
+        .process_add_row(&test_row(
+            "delivery-rate-limit-http-date",
+            "PVTI_rate_limited_http_date",
+            "PVT_project1",
+        ))
+        .await
+        .expect("http-date retry-after should be honored");
+    assert_eq!(outcome, AddRowOutcome::Published);
+
+    let graphql_requests = graphql_server.received_requests().await.expect("requests");
+    assert_eq!(graphql_requests.len(), 2, "expected exactly one retry");
+}
+
+#[tokio::test]
+async fn non_rate_limit_403_does_not_retry() {
+    let graphql_server = MockServer::start().await;
+    let destination_server = MockServer::start().await;
+    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+
+    Mock::given(method("POST"))
+        .and(body_string_contains("PVTI_forbidden"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .append_header("x-ratelimit-reset", "9999999999")
+                .append_header("x-ratelimit-remaining", "42")
+                .set_body_string("forbidden"),
+        )
+        .mount(&graphql_server)
+        .await;
+
+    let (processor, state_store) = build_processor(
+        &graphql_server,
+        destination_server.uri(),
+        durable_store,
+        vec![],
+    )
+    .await;
+
+    let err = processor
+        .process_add_row(&test_row("delivery-403", "PVTI_forbidden", "PVT_project1"))
+        .await
+        .expect_err("non-rate-limit 403 should be permanent");
+    assert!(err.to_string().contains("HTTP 403"));
+
+    let graphql_requests = graphql_server.received_requests().await.expect("requests");
+    assert_eq!(
+        graphql_requests.len(),
+        1,
+        "403 without rate-limit headers must not retry"
+    );
+
+    let destination_requests = destination_server
+        .received_requests()
+        .await
+        .expect("destination requests");
+    assert_eq!(destination_requests.len(), 0);
+
+    let publication = state_store
+        .get_publication(&DeliveryKey::new("delivery-403", "PVTI_forbidden"))
+        .await
+        .expect("store read")
+        .expect("publication");
+    assert_eq!(publication.state, PublicationState::Failed);
+}
+
+#[tokio::test]
+async fn configurable_status_field_name_is_sent_as_graphql_variable() {
+    let graphql_server = MockServer::start().await;
+    let destination_server = MockServer::start().await;
+    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+
+    Mock::given(method("POST"))
+        .and(body_string_contains("PVTI_custom_status"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(graphql_success_response(
+                "PVTI_custom_status",
+                "PVT_project1",
+                "2026-08-13T19:20:00Z",
+                "In Progress",
+                "opt-ip",
+            )),
+        )
+        .mount(&graphql_server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "message": "All 1 events processed successfully"
+        })))
+        .mount(&destination_server)
+        .await;
+
+    let (processor, _) = build_processor_with_status_field_name(
+        &graphql_server,
+        destination_server.uri(),
+        durable_store,
+        vec![],
+        "Workflow Status",
+    )
+    .await;
+
+    let outcome = processor
+        .process_add_row(&test_row(
+            "delivery-custom-status",
+            "PVTI_custom_status",
+            "PVT_project1",
+        ))
+        .await
+        .expect("custom status field should still hydrate and publish");
+    assert_eq!(outcome, AddRowOutcome::Published);
+
+    let graphql_requests = graphql_server.received_requests().await.expect("requests");
+    assert_eq!(graphql_requests.len(), 1);
+    let graphql_body: serde_json::Value =
+        serde_json::from_slice(&graphql_requests[0].body).expect("graphql request body");
+    assert_eq!(
+        graphql_body["variables"]["statusFieldName"],
+        json!("Workflow Status")
+    );
+    assert!(
+        graphql_body["query"]
+            .as_str()
+            .expect("query string")
+            .contains("$statusFieldName"),
+        "query must use statusFieldName variable"
     );
 }
 

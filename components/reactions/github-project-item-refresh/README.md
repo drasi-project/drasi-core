@@ -41,6 +41,7 @@ reactions:
           value: "2022-11-28"
       allowlistedProjectIds:
         - PVT_kwDOABC123
+      statusFieldName: Status
       destinationEventUrl: http://127.0.0.1:9001/sources/github-project-state/events
       destinationBearerSecret:
         env: PROJECT_STATUS_SOURCE_BEARER
@@ -57,6 +58,7 @@ reactions:
 | `graphqlUrl` | No | GitHub GraphQL endpoint (default `https://api.github.com/graphql`) |
 | `graphqlHeaders` | No | Extra GraphQL request headers |
 | `allowlistedProjectIds` | No | Allowed project node IDs (`PVT_*`); empty means allow all |
+| `statusFieldName` | No | Project field name read via `fieldValueByName` (default `Status`) |
 | `destinationEventUrl` | Yes | Standard-mode HTTP source event endpoint |
 | `destinationBearerSecret` | No | Optional bearer secret for destination source |
 | `requestTimeoutMs` | No | Shared request timeout for GraphQL and destination HTTP calls |

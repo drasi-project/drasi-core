@@ -26,6 +26,10 @@ fn default_request_timeout_ms() -> u64 {
     10_000
 }
 
+fn default_status_field_name() -> String {
+    "Status".to_string()
+}
+
 fn default_delivery_record_ttl_secs() -> u64 {
     7 * 24 * 60 * 60
 }
@@ -45,6 +49,9 @@ pub struct GitHubProjectItemRefreshConfig {
     /// Optional allowlist of project node IDs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowlisted_project_ids: Vec<String>,
+    /// Name of the single-select project field representing status.
+    #[serde(default = "default_status_field_name")]
+    pub status_field_name: String,
     /// Standard-mode HTTP source event endpoint.
     pub destination_event_url: String,
     /// Optional bearer token used for destination HTTP source.
@@ -65,6 +72,7 @@ impl Default for GitHubProjectItemRefreshConfig {
             graphql_url: default_graphql_url(),
             graphql_headers: HashMap::new(),
             allowlisted_project_ids: Vec::new(),
+            status_field_name: default_status_field_name(),
             destination_event_url: String::new(),
             destination_bearer_secret: None,
             request_timeout_ms: default_request_timeout_ms(),
@@ -86,6 +94,7 @@ impl std::fmt::Debug for GitHubProjectItemRefreshConfig {
             .field("graphql_url", &self.graphql_url)
             .field("graphql_headers", &redacted_headers)
             .field("allowlisted_project_ids", &self.allowlisted_project_ids)
+            .field("status_field_name", &self.status_field_name)
             .field("destination_event_url", &self.destination_event_url)
             .field(
                 "destination_bearer_secret",
@@ -116,6 +125,9 @@ impl GitHubProjectItemRefreshConfig {
         }
         validate_url(&self.graphql_url).context("graphqlUrl")?;
         validate_url(&self.destination_event_url).context("destinationEventUrl")?;
+        if self.status_field_name.trim().is_empty() {
+            anyhow::bail!("`statusFieldName` must not be empty");
+        }
 
         if self.request_timeout_ms == 0 {
             anyhow::bail!("`requestTimeoutMs` must be greater than 0");

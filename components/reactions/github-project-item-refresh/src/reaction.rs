@@ -163,6 +163,7 @@ impl Reaction for GitHubProjectItemRefreshReaction {
                 self.config.graphql_url.clone(),
                 self.config.github_token.clone(),
                 self.config.graphql_headers.clone(),
+                self.config.status_field_name.clone(),
             ),
             DestinationSourceClient::new(
                 http_client.clone(),

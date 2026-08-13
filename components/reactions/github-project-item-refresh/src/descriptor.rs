@@ -36,6 +36,9 @@ pub struct GitHubProjectItemRefreshConfigDto {
     pub graphql_headers: HashMap<String, ConfigValue<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowlisted_project_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<ConfigValueString>)]
+    pub status_field_name: Option<ConfigValue<String>>,
     #[schema(value_type = ConfigValueString)]
     pub destination_event_url: ConfigValue<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,6 +88,7 @@ impl From<&GitHubProjectItemRefreshConfig> for GitHubProjectItemRefreshConfigDto
             graphql_url: Some(ConfigValue::Static(config.graphql_url.clone())),
             graphql_headers,
             allowlisted_project_ids: config.allowlisted_project_ids.clone(),
+            status_field_name: Some(ConfigValue::Static(config.status_field_name.clone())),
             destination_event_url: ConfigValue::Static(config.destination_event_url.clone()),
             destination_bearer_secret: config
                 .destination_bearer_secret
@@ -157,6 +161,9 @@ impl ReactionPluginDescriptor for GitHubProjectItemRefreshDescriptor {
         })
         .field("graphqlHeaders", |f| f.group("GitHub").order(3))
         .field("allowlistedProjectIds", |f| f.group("GitHub").order(4))
+        .field("statusFieldName", |f| {
+            f.group("GitHub").order(5).placeholder("Status")
+        })
         .field("destinationEventUrl", |f| f.group("Destination").order(10))
         .field("destinationBearerSecret", |f| {
             f.group("Destination").order(11).widget("password")
@@ -204,6 +211,10 @@ impl ReactionPluginDescriptor for GitHubProjectItemRefreshDescriptor {
         }
         if !dto.allowlisted_project_ids.is_empty() {
             builder = builder.with_allowlisted_project_ids(dto.allowlisted_project_ids.clone());
+        }
+        if let Some(status_field_name) = &dto.status_field_name {
+            builder =
+                builder.with_status_field_name(mapper.resolve_string(status_field_name).await?);
         }
         if let Some(secret) = &dto.destination_bearer_secret {
             builder = builder.with_destination_bearer_secret(mapper.resolve_string(secret).await?);

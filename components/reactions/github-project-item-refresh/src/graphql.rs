@@ -14,15 +14,19 @@
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use reqwest::{header::HeaderMap, Client};
+use reqwest::{header::HeaderMap, Client, StatusCode};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::models::FetchedProjectItemState;
 
+const RATE_LIMIT_FALLBACK_BACKOFF: Duration = Duration::from_millis(100);
+const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(120);
+
 const PROJECT_ITEM_STATUS_QUERY: &str = r#"
-query ProjectItemStatus($projectItemNodeId: ID!) {
+query ProjectItemStatus($projectItemNodeId: ID!, $statusFieldName: String!) {
   node(id: $projectItemNodeId) {
     __typename
     ... on ProjectV2Item {
@@ -43,7 +47,7 @@ query ProjectItemStatus($projectItemNodeId: ID!) {
           id
         }
       }
-      fieldValueByName(name: "Status") {
+      fieldValueByName(name: $statusFieldName) {
         __typename
         ... on ProjectV2ItemFieldSingleSelectValue {
           name
@@ -66,6 +70,8 @@ pub enum GraphqlFetchError {
     Transport(String),
     #[error("github graphql responded with HTTP {status}: {body}")]
     HttpStatus { status: u16, body: String },
+    #[error("github graphql rate-limited with HTTP {status}, retrying in {retry_after:?}")]
+    RateLimited { status: u16, retry_after: Duration },
     #[error("github graphql returned errors: {0}")]
     GraphqlErrors(String),
     #[error("project item '{project_item_node_id}' was not found")]
@@ -75,8 +81,13 @@ pub enum GraphqlFetchError {
         project_item_node_id: String,
         actual: String,
     },
-    #[error("project item '{project_item_node_id}' is missing a required Status value")]
-    MissingStatus { project_item_node_id: String },
+    #[error(
+        "project item '{project_item_node_id}' is missing a required '{status_field_name}' value"
+    )]
+    MissingStatus {
+        project_item_node_id: String,
+        status_field_name: String,
+    },
     #[error("project item '{project_item_node_id}' is missing required field '{field_name}'")]
     MissingField {
         project_item_node_id: String,
@@ -88,6 +99,7 @@ impl GraphqlFetchError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Transport(_) => true,
+            Self::RateLimited { .. } => true,
             Self::HttpStatus { status, .. } => *status >= 500 || *status == 429,
             _ => false,
         }
@@ -100,6 +112,7 @@ pub struct GitHubGraphqlClient {
     url: String,
     token: String,
     extra_headers: HashMap<String, String>,
+    status_field_name: String,
 }
 
 impl GitHubGraphqlClient {
@@ -108,12 +121,14 @@ impl GitHubGraphqlClient {
         url: impl Into<String>,
         token: impl Into<String>,
         extra_headers: HashMap<String, String>,
+        status_field_name: impl Into<String>,
     ) -> Self {
         Self {
             client,
             url: url.into(),
             token: token.into(),
             extra_headers,
+            status_field_name: status_field_name.into(),
         }
     }
 
@@ -127,6 +142,7 @@ impl GitHubGraphqlClient {
             "query": PROJECT_ITEM_STATUS_QUERY,
             "variables": {
                 "projectItemNodeId": project_item_node_id,
+                "statusFieldName": &self.status_field_name,
             }
         });
 
@@ -162,12 +178,19 @@ impl GitHubGraphqlClient {
             .map_err(|e| GraphqlFetchError::Transport(e.to_string()))?;
 
         let status = response.status();
+        let response_headers = response.headers().clone();
         let raw_text = response
             .text()
             .await
             .map_err(|e| GraphqlFetchError::Transport(e.to_string()))?;
 
         if !status.is_success() {
+            if let Some(retry_after) = rate_limit_retry_after(status, &response_headers) {
+                return Err(GraphqlFetchError::RateLimited {
+                    status: status.as_u16(),
+                    retry_after,
+                });
+            }
             return Err(GraphqlFetchError::HttpStatus {
                 status: status.as_u16(),
                 body: truncate_for_error(&raw_text),
@@ -228,36 +251,22 @@ impl GitHubGraphqlClient {
             .as_ref()
             .map(|content| content.typename.clone());
 
-        let status_value =
-            node.field_value_by_name
-                .ok_or_else(|| GraphqlFetchError::MissingStatus {
-                    project_item_node_id: project_item_node_id.to_string(),
-                })?;
+        let missing_status = || GraphqlFetchError::MissingStatus {
+            project_item_node_id: project_item_node_id.to_string(),
+            status_field_name: self.status_field_name.clone(),
+        };
+        let status_value = node.field_value_by_name.ok_or_else(&missing_status)?;
 
         if status_value.typename != "ProjectV2ItemFieldSingleSelectValue" {
-            return Err(GraphqlFetchError::MissingStatus {
-                project_item_node_id: project_item_node_id.to_string(),
-            });
+            return Err(missing_status());
         }
 
-        let status_option_id =
-            status_value
-                .option_id
-                .ok_or_else(|| GraphqlFetchError::MissingStatus {
-                    project_item_node_id: project_item_node_id.to_string(),
-                })?;
-        let status_name = status_value
-            .name
-            .ok_or_else(|| GraphqlFetchError::MissingStatus {
-                project_item_node_id: project_item_node_id.to_string(),
-            })?;
-        let status_field_node_id =
-            status_value
-                .field
-                .and_then(|field| field.id)
-                .ok_or_else(|| GraphqlFetchError::MissingStatus {
-                    project_item_node_id: project_item_node_id.to_string(),
-                })?;
+        let status_option_id = status_value.option_id.ok_or_else(&missing_status)?;
+        let status_name = status_value.name.ok_or_else(&missing_status)?;
+        let status_field_node_id = status_value
+            .field
+            .and_then(|field| field.id)
+            .ok_or_else(missing_status)?;
 
         Ok(FetchedProjectItemState {
             project_item_node_id: item_id,
@@ -272,6 +281,62 @@ impl GitHubGraphqlClient {
             triggering_delivery_id: triggering_delivery_id.to_string(),
         })
     }
+}
+
+fn rate_limit_retry_after(status: StatusCode, headers: &HeaderMap) -> Option<Duration> {
+    match status {
+        StatusCode::FORBIDDEN if is_rate_limited_403(headers) => {
+            Some(parse_rate_limit_delay(headers).unwrap_or(RATE_LIMIT_FALLBACK_BACKOFF))
+        }
+        StatusCode::TOO_MANY_REQUESTS => parse_rate_limit_delay(headers),
+        _ => None,
+    }
+}
+
+fn is_rate_limited_403(headers: &HeaderMap) -> bool {
+    headers.contains_key(reqwest::header::RETRY_AFTER)
+        || headers
+            .get("x-ratelimit-remaining")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            == Some("0")
+}
+
+fn parse_rate_limit_delay(headers: &HeaderMap) -> Option<Duration> {
+    parse_retry_after_delay(headers).or_else(|| parse_rate_limit_reset_delay(headers))
+}
+
+fn parse_retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
+    let retry_after = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(seconds) = retry_after.parse::<u64>() {
+        return Some(Duration::from_secs(seconds).min(MAX_RATE_LIMIT_WAIT));
+    }
+
+    let at = httpdate::parse_http_date(retry_after).ok()?;
+    let delay = at
+        .duration_since(SystemTime::now())
+        .unwrap_or_else(|_| Duration::from_secs(0));
+    Some(delay.min(MAX_RATE_LIMIT_WAIT))
+}
+
+fn parse_rate_limit_reset_delay(headers: &HeaderMap) -> Option<Duration> {
+    let reset_epoch = headers
+        .get("x-ratelimit-reset")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    let now_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())?;
+    let delay_secs = reset_epoch.saturating_sub(now_epoch);
+    Some(Duration::from_secs(delay_secs).min(MAX_RATE_LIMIT_WAIT))
 }
 
 fn truncate_for_error(raw: &str) -> String {
