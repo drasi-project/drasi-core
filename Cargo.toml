@@ -76,6 +76,7 @@ members = [
   "components/reactions/log",
   "components/reactions/azure-storage",
   "components/reactions/eventgrid",
+  "components/reactions/github-project-item-refresh",
   "components/reactions/loki",
   "components/reactions/file",
   "components/reactions/storedproc-mssql",
@@ -182,6 +183,7 @@ drasi-source-cloudflare-radar = { version = "0.1.6", path = "components/sources/
 drasi-bootstrap-application = { version = "0.2.11", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.3.2", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.4.2", path = "components/reactions/grpc" }
+drasi-reaction-github-project-item-refresh = { version = "0.1.0", path = "components/reactions/github-project-item-refresh" }
 drasi-reaction-file = { version = "0.1.3", path = "components/reactions/file" }
 drasi-reaction-eventgrid = { version = "0.1.0", path = "components/reactions/eventgrid" }
 drasi-reaction-copilot-agent-task = { version = "0.1.0", path = "components/reactions/copilot-agent-task" }
