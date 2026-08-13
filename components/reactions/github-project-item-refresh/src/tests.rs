@@ -609,6 +609,56 @@ async fn descriptor_fails_when_expected_status_field_node_id_env_is_unset_withou
         .contains("GH_STATUS_FIELD_NODE_ID_TEST_MISSING"));
 }
 
+#[test]
+fn generated_descriptor_schema_has_exact_flat_config_contract() {
+    let descriptor = GitHubProjectItemRefreshDescriptor;
+    let schemas: serde_json::Value =
+        serde_json::from_str(&descriptor.config_schema_json()).expect("valid schema JSON");
+    let root = schemas
+        .get(descriptor.config_schema_name())
+        .expect("generated root config schema");
+    let properties = root["properties"]
+        .as_object()
+        .expect("config schema properties");
+    let expected_fields = [
+        "githubToken",
+        "graphqlUrl",
+        "graphqlHeaders",
+        "allowlistedProjectIds",
+        "statusFieldName",
+        "expectedStatusFieldNodeId",
+        "destinationEventUrl",
+        "destinationBearerSecret",
+        "requestTimeoutMs",
+        "deliveryRecordTtlSecs",
+        "priorityQueueCapacity",
+        "recoveryPolicy",
+    ];
+    assert_eq!(properties.len(), expected_fields.len());
+    for field in expected_fields {
+        assert!(
+            properties.contains_key(field),
+            "generated schema missing flat field {field}"
+        );
+    }
+    assert!(
+        !properties.contains_key("config"),
+        "plugin schema must not contain a nested config object"
+    );
+
+    let required = root["required"].as_array().expect("required config fields");
+    for field in [
+        "githubToken",
+        "expectedStatusFieldNodeId",
+        "destinationEventUrl",
+    ] {
+        assert!(
+            required.iter().any(|value| value.as_str() == Some(field)),
+            "generated schema must require {field}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn process_success_publishes_and_persists_state() {
     let graphql_server = MockServer::start().await;
