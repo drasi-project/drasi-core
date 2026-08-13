@@ -273,7 +273,7 @@ async fn success_launches_task_and_posts_one_comment() {
         "subjectType",
         "subjectNodeId",
         "repository",
-        "number",
+        "subjectNumber",
         "actorType",
         "actorId",
         "routeId",
