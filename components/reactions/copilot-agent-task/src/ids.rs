@@ -31,11 +31,9 @@ const EXECUTION_ID_NAMESPACE: Uuid = Uuid::from_bytes([
 /// Compute the stable `executionId` for one launch attempt.
 ///
 /// `executionId` is this reaction's own private correlation ID for the
-/// attempt (distinct from the upstream-supplied `expectedEventId`, which
-/// identifies the WorkGraph event the *launched* agent must eventually
-/// produce). It is embedded in the agent prompt and in the workgraph
-/// execution comment so that the reconciliation seam can find a task that
-/// was created but whose HTTP response was lost (see `crate::github`).
+/// attempt. It is embedded in the agent prompt and in the workgraph execution
+/// comment so that the reconciliation seam can find a task that was created
+/// but whose HTTP response was lost (see `crate::github`).
 pub fn execution_id(
     reaction_id: &str,
     route_id: &str,
@@ -43,7 +41,15 @@ pub fn execution_id(
     attempt: u32,
 ) -> String {
     let name = format!("{reaction_id}|{route_id}|{responsibility_id}|{attempt}");
-    Uuid::new_v5(&EXECUTION_ID_NAMESPACE, name.as_bytes()).to_string()
+    format!(
+        "execution:{}",
+        Uuid::new_v5(&EXECUTION_ID_NAMESPACE, name.as_bytes())
+    )
+}
+
+/// Compute the canonical expected completion event ID for an execution.
+pub fn expected_event_id(execution_id: &str, required_event_type: &str) -> String {
+    format!("event:{execution_id}:{required_event_type}")
 }
 
 /// The state-store key for a reservation/execution record.
@@ -60,6 +66,7 @@ mod tests {
         let a = execution_id("r1", "route-1", "resp-1", 1);
         let b = execution_id("r1", "route-1", "resp-1", 1);
         assert_eq!(a, b);
+        assert!(a.starts_with("execution:"));
     }
 
     #[test]
@@ -82,6 +89,14 @@ mod tests {
         assert_eq!(
             reservation_key("route-1", "resp-1", 1),
             "execution:route-1:resp-1:1"
+        );
+    }
+
+    #[test]
+    fn expected_event_id_uses_canonical_correlations() {
+        assert_eq!(
+            expected_event_id("execution:abc", "CompletedIssueValidation"),
+            "event:execution:abc:CompletedIssueValidation"
         );
     }
 }

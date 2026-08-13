@@ -75,6 +75,9 @@ pub struct ExecutionRecord {
 
     pub repository: String,
     pub issue_number: u64,
+    pub issue_node_id: String,
+    pub agent_profile: String,
+    pub profile_ref: String,
 
     pub status: ExecutionStatus,
 
@@ -185,6 +188,9 @@ impl ExecutionRecord {
         required_event_type: &str,
         repository: &str,
         issue_number: u64,
+        issue_node_id: &str,
+        agent_profile: &str,
+        profile_ref: &str,
         requested_model: &str,
         fallback_model: Option<&str>,
     ) -> Self {
@@ -198,6 +204,9 @@ impl ExecutionRecord {
             required_event_type: required_event_type.to_string(),
             repository: repository.to_string(),
             issue_number,
+            issue_node_id: issue_node_id.to_string(),
+            agent_profile: agent_profile.to_string(),
+            profile_ref: profile_ref.to_string(),
             status: ExecutionStatus::Reserved,
             requested_model: requested_model.to_string(),
             fallback_model: fallback_model.map(|s| s.to_string()),
@@ -311,6 +320,9 @@ pub async fn reserve_or_resume(
     required_event_type: &str,
     repository: &str,
     issue_number: u64,
+    issue_node_id: &str,
+    agent_profile: &str,
+    profile_ref: &str,
     requested_model: &str,
     fallback_model: Option<&str>,
 ) -> Result<ReservationOutcome> {
@@ -341,6 +353,9 @@ pub async fn reserve_or_resume(
         required_event_type,
         repository,
         issue_number,
+        issue_node_id,
+        agent_profile,
+        profile_ref,
         requested_model,
         fallback_model,
     );
@@ -363,6 +378,9 @@ mod tests {
             "CompletedIssueValidation",
             "owner/repo",
             42,
+            "I_issue",
+            "issue-validator",
+            "issue-validator@0123456789abcdef0123456789abcdef01234567",
             "gpt-5",
             Some("gpt-4"),
         )
@@ -394,6 +412,9 @@ mod tests {
             "CompletedIssueValidation",
             "owner/repo",
             1,
+            "I_issue",
+            "issue-validator",
+            "issue-validator@0123456789abcdef0123456789abcdef01234567",
             "gpt-5",
             None,
         )
@@ -429,6 +450,9 @@ mod tests {
             "CompletedIssueValidation",
             "owner/repo",
             42,
+            "I_issue",
+            "issue-validator",
+            "issue-validator@0123456789abcdef0123456789abcdef01234567",
             "gpt-5",
             Some("gpt-4"),
         )
@@ -479,6 +503,9 @@ mod tests {
             "CompletedIssueValidation",
             "owner/repo",
             42,
+            "I_issue",
+            "issue-validator",
+            "issue-validator@0123456789abcdef0123456789abcdef01234567",
             "gpt-5",
             Some("gpt-4"),
         )
@@ -511,6 +538,9 @@ mod tests {
                 "CompletedIssueValidation",
                 "owner/repo",
                 42,
+                "I_issue",
+                "issue-validator",
+                "issue-validator@0123456789abcdef0123456789abcdef01234567",
                 "gpt-5",
                 Some("gpt-4"),
             )
@@ -541,6 +571,9 @@ mod tests {
             "CompletedIssueValidation",
             "owner/repo",
             42,
+            "I_issue",
+            "issue-validator",
+            "issue-validator@0123456789abcdef0123456789abcdef01234567",
             "gpt-5",
             Some("gpt-4"),
         )
@@ -566,6 +599,9 @@ mod tests {
             "CompletedIssueValidation",
             "owner/repo",
             42,
+            "I_issue",
+            "issue-validator",
+            "issue-validator@0123456789abcdef0123456789abcdef01234567",
             "gpt-5",
             Some("gpt-4"),
         )

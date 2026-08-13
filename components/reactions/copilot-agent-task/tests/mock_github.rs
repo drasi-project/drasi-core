@@ -14,6 +14,8 @@
 
 //! Shared wiremock helpers standing in for the GitHub REST + GraphQL API.
 
+use std::time::Duration;
+
 use serde_json::{json, Value};
 use wiremock::matchers::{body_string_contains, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -156,6 +158,43 @@ pub async fn mount_create_task_unsupported_model(
         .await;
 }
 
+/// Return unsupported-model for the requested model, then delay the fallback
+/// response long enough for a short-timeout client to enter Ambiguous.
+pub async fn mount_fallback_transport_timeout(
+    server: &MockServer,
+    owner: &str,
+    repo: &str,
+    requested_model: &str,
+    fallback_model: &str,
+) {
+    let endpoint = format!("/agents/repos/{owner}/{repo}/tasks");
+    Mock::given(method("POST"))
+        .and(path(endpoint.clone()))
+        .and(body_string_contains(format!(
+            "\"model\":\"{requested_model}\""
+        )))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "message": format!("The model '{requested_model}' is not supported for this operation."),
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(endpoint))
+        .and(body_string_contains(format!(
+            "\"model\":\"{fallback_model}\""
+        )))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_delay(Duration::from_millis(250))
+                .set_body_json(json!({
+                    "id": "task-late",
+                    "html_url": "https://github.com/tasks/late",
+                })),
+        )
+        .mount(server)
+        .await;
+}
+
 /// Mount a create-task responder that always returns a permanent (non-model)
 /// 422 validation error.
 pub async fn mount_create_task_permanent_422(
@@ -220,4 +259,24 @@ pub async fn count_add_comment_requests(server: &MockServer) -> usize {
             r.url.path() == "/graphql" && String::from_utf8_lossy(&r.body).contains("addComment")
         })
         .count()
+}
+
+/// Return the pure-JSON issue comment bodies carried by `addComment`.
+pub async fn add_comment_bodies(server: &MockServer) -> Vec<Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|request| {
+            if request.url.path() != "/graphql"
+                || !String::from_utf8_lossy(&request.body).contains("addComment")
+            {
+                return None;
+            }
+            let request_json: Value = serde_json::from_slice(&request.body).ok()?;
+            let body = request_json["variables"]["body"].as_str()?;
+            serde_json::from_str(body).ok()
+        })
+        .collect()
 }

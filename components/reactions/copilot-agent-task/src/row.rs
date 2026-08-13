@@ -48,7 +48,6 @@ pub struct LaunchRow {
     pub project_owner: String,
     pub project_number: u64,
     pub subject_type: String,
-    pub subject_node_id: String,
     pub actor_type: String,
     pub actor_id: String,
     pub route_id: String,
@@ -62,7 +61,6 @@ pub struct LaunchRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_model: Option<String>,
     pub required_event_type: String,
-    pub expected_event_id: String,
     pub base_ref: String,
     /// See struct docs — an adaptation beyond the literal field list needed to
     /// make the "Project status expected by input" preflight check concrete.
@@ -200,7 +198,6 @@ pub fn validate_row(
     if row.project_number == 0
         || row.project_owner.trim().is_empty()
         || row.subject_type.trim().is_empty()
-        || row.subject_node_id.trim().is_empty()
         || row.actor_type.trim().is_empty()
         || row.actor_id.trim().is_empty()
     {
@@ -208,9 +205,14 @@ pub fn validate_row(
             "project/subject/actor target fields must be non-empty".to_string(),
         ));
     }
-    if row.subject_node_id != row.issue_node_id {
+    if row.subject_type != "Issue" {
         return Err(ValidationError::Malformed(
-            "subjectNodeId must equal issueNodeId for an issue launch".to_string(),
+            "subjectType must be 'Issue'".to_string(),
+        ));
+    }
+    if row.actor_type != "Agent" || row.actor_id != row.agent_profile {
+        return Err(ValidationError::Malformed(
+            "actorType must be 'Agent' and actorId must equal agentProfile".to_string(),
         ));
     }
     if row.required_event_type != "CompletedIssueValidation" {
@@ -236,7 +238,6 @@ mod tests {
             project_owner: "drasi-project".to_string(),
             project_number: 3,
             subject_type: "Issue".to_string(),
-            subject_node_id: "I_kwDOtest".to_string(),
             actor_type: "Agent".to_string(),
             actor_id: "issue-validator".to_string(),
             route_id: "route-1".to_string(),
@@ -247,7 +248,6 @@ mod tests {
             requested_model: "gpt-5".to_string(),
             fallback_model: Some("gpt-4".to_string()),
             required_event_type: "CompletedIssueValidation".to_string(),
-            expected_event_id: "evt-1".to_string(),
             base_ref: "main".to_string(),
             expected_project_status: "In Progress".to_string(),
         }

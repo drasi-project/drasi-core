@@ -4,7 +4,10 @@
   "additionalProperties": false,
   "description": "The single, pure-JSON issue comment the reaction posts immediately after a task is confirmed created (HTTP 201). Mirrors WorkGraphExecutionCommentV1 in src/prompt.rs — keep in sync.",
   "properties": {
-    "baseRef": {
+    "actualModel": {
+      "type": "string"
+    },
+    "agentProfile": {
       "type": "string"
     },
     "executionId": {
@@ -13,24 +16,17 @@
     "expectedEventId": {
       "type": "string"
     },
-    "fallbackUsed": {
-      "type": "boolean"
+    "messageType": {
+      "const": "execution"
     },
-    "issueNumber": {
-      "type": "integer"
-    },
-    "model": {
+    "profileRef": {
       "type": "string"
     },
-    "repository": {
-      "type": "string"
-    },
-    "requestedAt": {
-      "format": "date-time",
+    "requestedModel": {
       "type": "string"
     },
     "requiredEventType": {
-      "type": "string"
+      "const": "CompletedIssueValidation"
     },
     "responsibilityId": {
       "type": "string"
@@ -38,8 +34,15 @@
     "routeId": {
       "type": "string"
     },
-    "schema": {
+    "schemaVersion": {
       "const": "workgraph.execution/v1"
+    },
+    "startedAt": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "state": {
+      "const": "started"
     },
     "taskId": {
       "type": "string"
@@ -49,20 +52,21 @@
     }
   },
   "required": [
-    "schema",
+    "schemaVersion",
+    "messageType",
+    "routeId",
+    "responsibilityId",
     "executionId",
     "expectedEventId",
     "requiredEventType",
-    "routeId",
-    "responsibilityId",
-    "repository",
-    "issueNumber",
     "taskId",
     "taskUrl",
-    "model",
-    "fallbackUsed",
-    "requestedAt",
-    "baseRef"
+    "agentProfile",
+    "profileRef",
+    "requestedModel",
+    "actualModel",
+    "state",
+    "startedAt"
   ],
   "title": "workgraph.execution/v1",
   "type": "object"

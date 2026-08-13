@@ -42,7 +42,7 @@ use crate::github::{
     CreateTaskOutcome, CreateTaskRequest, GitHubClient, GitHubConfig, PreflightError,
     ReconciliationOutcome,
 };
-use crate::ids::execution_id;
+use crate::ids::{execution_id, expected_event_id};
 use crate::prompt::{build_prompt, WorkGraphExecutionCommentV1};
 use crate::row::{validate_row, LaunchRow};
 use crate::state::{reserve_or_resume, save, ExecutionRecord, ExecutionStatus, ReservationOutcome};
@@ -380,6 +380,7 @@ async fn process_add_row(
     };
 
     let exec_id = execution_id(store_id, &row.route_id, &row.responsibility_id, ATTEMPT);
+    let event_id = expected_event_id(&exec_id, &row.required_event_type);
 
     let reservation = reserve_or_resume(
         store,
@@ -388,10 +389,13 @@ async fn process_add_row(
         &row.responsibility_id,
         ATTEMPT,
         &exec_id,
-        &row.expected_event_id,
+        &event_id,
         &row.required_event_type,
         &row.repository,
         row.issue_number,
+        &row.issue_node_id,
+        &row.agent_profile,
+        &row.profile_ref,
         &row.requested_model,
         row.fallback_model.as_deref(),
     )
@@ -488,9 +492,10 @@ async fn reconcile_and_resume(
     row: &LaunchRow,
     mut record: ExecutionRecord,
 ) -> Result<(), String> {
-    let (owner, repo) = row
-        .owner_and_repo()
-        .map_err(|e| format!("cannot reconcile: {e:#}"))?;
+    let (owner, repo) = record
+        .repository
+        .split_once('/')
+        .ok_or_else(|| "cannot reconcile: durable repository is not 'owner/repo'".to_string())?;
 
     info!(
         "[{reaction_name}] Reconciling ambiguous/interrupted launch for route={} responsibility={} (executionId={})",
@@ -525,8 +530,7 @@ async fn reconcile_and_resume(
             save(store, store_id, &record)
                 .await
                 .map_err(|e| format!("failed to persist adopted task: {e:#}"))?;
-            post_comment_and_finish(reaction_name, config, client, store, store_id, row, record)
-                .await
+            post_comment_and_finish(reaction_name, config, client, store, store_id, record).await
         }
         ReconciliationOutcome::Ambiguous(matches) => {
             warn!(
@@ -566,7 +570,7 @@ async fn resume_comment_only(
         "[{reaction_name}] Resuming comment-only step for route={} responsibility={} (task already created: {:?})",
         row.route_id, row.responsibility_id, record.task_id
     );
-    post_comment_and_finish(reaction_name, config, client, store, store_id, row, record).await
+    post_comment_and_finish(reaction_name, config, client, store, store_id, record).await
 }
 
 /// Call `create_task` (with the single permitted fallback-model retry),
@@ -585,7 +589,7 @@ async fn launch_and_comment(
         .owner_and_repo()
         .map_err(|e| format!("cannot launch: {e:#}"))?;
 
-    let prompt = build_prompt(row, &record.execution_id);
+    let prompt = build_prompt(row, &record.execution_id, &record.expected_event_id);
     info!(
         "[{reaction_name}] Launching task for {}#{} (route={}, responsibility={}, executionId={})",
         row.repository, row.issue_number, row.route_id, row.responsibility_id, record.execution_id
@@ -594,6 +598,13 @@ async fn launch_and_comment(
     let request_time = crate::github::now();
     let mut model_used = row.requested_model.clone();
     let mut used_fallback = false;
+    record.model_used = Some(model_used.clone());
+    record.used_fallback = false;
+    record.request_time = Some(request_time);
+    record.touch();
+    save(store, store_id, &record)
+        .await
+        .map_err(|e| format!("failed to persist requested model before create_task: {e:#}"))?;
 
     let request = CreateTaskRequest {
         custom_agent: row.agent_profile.clone(),
@@ -616,6 +627,12 @@ async fn launch_and_comment(
             );
             model_used = fallback.to_string();
             used_fallback = true;
+            record.model_used = Some(model_used.clone());
+            record.used_fallback = true;
+            record.touch();
+            save(store, store_id, &record).await.map_err(|e| {
+                format!("failed to persist fallback model before create_task: {e:#}")
+            })?;
             let fallback_request = CreateTaskRequest {
                 custom_agent: row.agent_profile.clone(),
                 model: model_used.clone(),
@@ -642,14 +659,12 @@ async fn launch_and_comment(
             record.used_fallback = used_fallback;
             record.task_id = Some(id);
             record.task_url = Some(url);
-            record.request_time = Some(request_time);
             record.last_error = None;
             record.touch();
             save(store, store_id, &record)
                 .await
                 .map_err(|e| format!("failed to persist Started state: {e:#}"))?;
-            post_comment_and_finish(reaction_name, config, client, store, store_id, row, record)
-                .await
+            post_comment_and_finish(reaction_name, config, client, store, store_id, record).await
         }
         CreateTaskOutcome::UnsupportedModel(reason) => {
             record.status = ExecutionStatus::Failed;
@@ -678,13 +693,6 @@ async fn launch_and_comment(
                 row.route_id, row.responsibility_id
             );
             record.status = ExecutionStatus::Ambiguous;
-            // Persist which model this (unconfirmed) attempt used so that if
-            // reconciliation later adopts a matching task, the workgraph
-            // execution comment reports the model that was actually
-            // requested for the call whose outcome went unknown — not the
-            // default `requestedModel` reconciliation would otherwise assume.
-            record.model_used = Some(model_used);
-            record.used_fallback = used_fallback;
             record.last_error = Some("create_task transport error; outcome unknown".to_string());
             record.touch();
             let _ = save(store, store_id, &record).await;
@@ -703,7 +711,6 @@ async fn post_comment_and_finish(
     client: &GitHubClient,
     store: &dyn StateStoreProvider,
     store_id: &str,
-    row: &LaunchRow,
     mut record: ExecutionRecord,
 ) -> Result<(), String> {
     if record.comment_posted {
@@ -726,12 +733,12 @@ async fn post_comment_and_finish(
     };
 
     let envelope = WorkGraphExecutionCommentV1::new(
-        row,
+        &record,
         &record.execution_id,
+        &record.expected_event_id,
         &task_id,
         &task_url,
         &model_used,
-        record.used_fallback,
         &request_time,
     );
     let body = envelope.to_comment_body();
@@ -739,11 +746,14 @@ async fn post_comment_and_finish(
     let mut attempt = 0u32;
     loop {
         attempt += 1;
-        match client.post_issue_comment(&row.issue_node_id, &body).await {
+        match client
+            .post_issue_comment(&record.issue_node_id, &body)
+            .await
+        {
             Ok(()) => {
                 info!(
                     "[{reaction_name}] Posted workgraph.execution/v1 comment on issue {} (executionId={})",
-                    row.issue_node_id, record.execution_id
+                    record.issue_node_id, record.execution_id
                 );
                 record.comment_posted = true;
                 record.last_error = None;

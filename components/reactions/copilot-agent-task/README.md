@@ -79,9 +79,8 @@ Each row returned by the launch query must contain the following fields (camelCa
 | `projectOwner` | string | GitHub organization or user that owns the Project |
 | `projectNumber` | integer | GitHub Project number |
 | `subjectType` | string | WorkGraph target subject type (`Issue` for this reaction) |
-| `subjectNodeId` | string | Subject node ID; must equal `issueNodeId` for issue launches |
 | `actorType` | string | WorkGraph actor type |
-| `actorId` | string | WorkGraph actor identifier |
+| `actorId` | string | WorkGraph actor identifier; must equal `agentProfile` |
 | `routeId` | string | WorkGraph routing-decision identifier |
 | `responsibilityId` | string | WorkGraph responsibility identifier |
 | `issueContentVersion` | string | Normalized `lastEditedAt ?? createdAt` RFC 3339 instant |
@@ -90,9 +89,13 @@ Each row returned by the launch query must contain the following fields (camelCa
 | `requestedModel` | string | Must be in `allowedModels` |
 | `fallbackModel` | string (optional) | Must be in `allowedModels` if present |
 | `requiredEventType` | string | Must be `CompletedIssueValidation` |
-| `expectedEventId` | string | Correlation ID the launched agent must echo back in that event |
 | `baseRef` | string | Git ref the task runs against and the profile file is read from |
 | `expectedProjectStatus` | string | See [preflight checks](#preflight-checks) — an adaptation, see below |
+
+The reaction derives `subjectNodeId` from `issueNodeId`, generates stable
+`executionId = "execution:<uuid-v5>"`, and generates
+`expectedEventId = "event:<executionId>:<requiredEventType>"`. These values are not
+query-row inputs.
 
 > **Adaptation note:** `expectedProjectStatus` is not in the reaction's original field list
 > but is required to make "relevant Project status expected by input" concrete — see
@@ -114,6 +117,39 @@ Each row returned by the launch query must contain the following fields (camelCa
 | `commentApi.retryBackoffMs` | u64 | `500` | Backoff between comment retry attempts |
 | `strictRecovery` | bool | `true` | Must be `true` — see [Reservation, idempotency, and recovery](#reservation-idempotency-and-recovery) |
 | `priorityQueueCapacity` | u64 | framework default | Optional reaction input queue capacity |
+
+The Drasi Server reaction object is flat (there is no `config:` or `properties:`
+wrapper); only `commentApi` is nested:
+
+```yaml
+reactions:
+  - kind: copilot-agent-task
+    id: copilot-launcher
+    autoStart: true
+    queries:
+      - launch-issue-validation
+    token: ${GITHUB_AGENT_TOKEN}
+    githubApiBaseUrl: https://api.github.com
+    githubGraphqlUrl: https://api.github.com/graphql
+    agentTasksApiVersion: "2026-03-10"
+    allowedRepositories:
+      - my-org/my-repo
+    allowedProfiles:
+      - issue-validator
+    allowedModels:
+      - gpt-5.6-sol
+      - gpt-5.4
+    requestTimeoutMs: 30000
+    commentApi:
+      maxAttempts: 3
+      retryBackoffMs: 500
+    strictRecovery: true
+    priorityQueueCapacity: 10000
+```
+
+Generated dynamic-plugin schema name:
+`reaction.copilot_agent_task.CopilotAgentTaskReactionConfig`, config version
+`1.0.0`. Unknown fields are rejected.
 
 In declarative (dynamic-plugin) config, `token` is a `ConfigValue<String>` and is expected to
 be supplied as a `${ENV_VAR}` reference or a `{"kind":"Secret","name":"..."}` reference —
@@ -182,17 +218,18 @@ The `prompt` sent to the Agent Task supplies exactly one immutable target with t
 `eventId`, `projectItemNodeId`, `projectOwner`, `projectNumber`, `subjectType`,
 `subjectNodeId`, `repository`, `number`, `actorType`, `actorId`, `routeId`,
 `responsibilityId`, `executionId`, `contentVersion`, and `profileRef`. It also embeds the
-literal `WorkGraphEvent/v1` JSON Schema (`schema/workgraph-event-v1.schema.json`). The
-completion event uses `contentVersion` and must be emitted before any `AwaitingRouting`
-event for the issue.
+literal `WorkGraphEvent/v1` JSON Schema (`schema/workgraph-event-v1.schema.json`) and the
+exact `WorkGraphEvent/v1` marker plus fenced-JSON issue-comment format. The completion
+event uses `contentVersion` and must be posted before any transition to `AwaitingRouting`.
 
 ## The `workgraph.execution/v1` comment
 
 Immediately after a task is confirmed created, the reaction posts **one** GitHub issue
 comment via the `addComment` GraphQL mutation, whose body is **pure JSON** (no markdown
-fencing) matching `schema/workgraph-execution-v1.schema.json` — carrying `executionId`,
-`expectedEventId`, `requiredEventType`, the task ID/URL, the model used, and whether the
-fallback model was used.
+fencing) matching `schema/workgraph-execution-v1.schema.json`. Its exact fields are
+`schemaVersion`, `messageType`, `routeId`, `responsibilityId`, `executionId`,
+`expectedEventId`, `requiredEventType`, `taskId`, `taskUrl`, `agentProfile`,
+`profileRef`, `requestedModel`, `actualModel`, `state`, and `startedAt`.
 
 An HTTP `200` response from GraphQL that carries a non-empty top-level `errors` array is
 always treated as a **failure**, even though the GraphQL spec allows `data` and `errors` to
@@ -279,6 +316,16 @@ duplicate delivery, a crash/recovery boundary (pre-seeded `Starting` record + re
 ambiguous reconciliation (never guesses), GraphQL errors treated as failures (both for the
 Project-status preflight query and for `addComment`), and secret redaction/wiring.
 
+## Dynamic plugin build
+
+```sh
+cargo build -p drasi-reaction-copilot-agent-task --release --features dynamic-plugin
+```
+
+The plugin ID is `copilot-agent-task-reaction`. The macOS cdylib is
+`libdrasi_reaction_copilot_agent_task.dylib`; Linux produces
+`libdrasi_reaction_copilot_agent_task.so`.
+
 ## Known limitations / integration caveats
 
 - **The GitHub "Agent Tasks" API is a preview/evolving surface.** This reaction implements
@@ -301,3 +348,7 @@ Project-status preflight query and for `addComment`), and secret redaction/wirin
   prompt/body. If GitHub's real Agent Tasks API does not surface the prompt on the listing
   endpoint, this seam needs a metadata-based match instead — the ambiguous/no-match/adopt
   state machine in `src/state.rs` and `src/reaction.rs` is unaffected by that change.
+- **Standalone publication still depends on TODO #574.** The workspace build and cdylib are
+  ready, but publishing this reaction independently requires replacing workspace
+  `drasi-lib` and `drasi-plugin-sdk` dependencies with versions compatible with the target
+  dynamic loader.

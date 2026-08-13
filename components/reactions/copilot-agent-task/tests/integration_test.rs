@@ -33,7 +33,7 @@ use drasi_lib::channels::ComponentStatus;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::{DrasiLib, Query, Reaction};
 use drasi_reaction_copilot_agent_task::config::CommentApiConfig;
-use drasi_reaction_copilot_agent_task::ids::execution_id;
+use drasi_reaction_copilot_agent_task::ids::{execution_id, expected_event_id};
 use drasi_reaction_copilot_agent_task::state::{load, save, ExecutionRecord, ExecutionStatus};
 use drasi_reaction_copilot_agent_task::CopilotAgentTaskReaction;
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
@@ -67,17 +67,23 @@ fn launch_query_str() -> &'static str {
      r.repository AS repository, r.issueNumber AS issueNumber, r.issueUrl AS issueUrl, \
      r.issueNodeId AS issueNodeId, r.projectItemNodeId AS projectItemNodeId, \
      r.projectOwner AS projectOwner, r.projectNumber AS projectNumber, \
-     r.subjectType AS subjectType, r.subjectNodeId AS subjectNodeId, \
+     r.subjectType AS subjectType, \
      r.actorType AS actorType, r.actorId AS actorId, \
      r.routeId AS routeId, r.responsibilityId AS responsibilityId, \
      r.issueContentVersion AS issueContentVersion, r.agentProfile AS agentProfile, \
      r.profileRef AS profileRef, r.requestedModel AS requestedModel, \
      r.fallbackModel AS fallbackModel, r.requiredEventType AS requiredEventType, \
-     r.expectedEventId AS expectedEventId, r.baseRef AS baseRef, \
-     r.expectedProjectStatus AS expectedProjectStatus"
+     r.baseRef AS baseRef, r.expectedProjectStatus AS expectedProjectStatus"
 }
 
 fn build_reaction(server_uri: &str) -> CopilotAgentTaskReaction {
+    build_reaction_with_timeout(server_uri, 30_000)
+}
+
+fn build_reaction_with_timeout(
+    server_uri: &str,
+    request_timeout_ms: u64,
+) -> CopilotAgentTaskReaction {
     CopilotAgentTaskReaction::builder(REACTION)
         .with_query(QUERY)
         .with_github_api_base_url(server_uri.to_string())
@@ -86,6 +92,7 @@ fn build_reaction(server_uri: &str) -> CopilotAgentTaskReaction {
         .with_allowed_repositories(vec![REPOSITORY.to_string()])
         .with_allowed_profiles(vec!["issue-validator".to_string()])
         .with_allowed_models(vec!["gpt-5".to_string(), "gpt-4".to_string()])
+        .with_request_timeout_ms(request_timeout_ms)
         .with_comment_api(CommentApiConfig {
             max_attempts: 2,
             retry_backoff_ms: 10,
@@ -121,7 +128,6 @@ async fn insert_row(
         .with_string("projectOwner", OWNER)
         .with_integer("projectNumber", 3)
         .with_string("subjectType", "Issue")
-        .with_string("subjectNodeId", format!("I_{node_id}"))
         .with_string("actorType", "Agent")
         .with_string("actorId", "issue-validator")
         .with_string("routeId", route_id)
@@ -131,7 +137,6 @@ async fn insert_row(
         .with_string("profileRef", format!("issue-validator@{PROFILE_SHA}"))
         .with_string("requestedModel", requested_model)
         .with_string("requiredEventType", "CompletedIssueValidation")
-        .with_string("expectedEventId", format!("evt-{node_id}"))
         .with_string("baseRef", "main")
         .with_string("expectedProjectStatus", expected_project_status);
     if let Some(fb) = fallback_model {
@@ -238,11 +243,13 @@ async fn success_launches_task_and_posts_one_comment() {
     .await;
 
     let exec_id = execution_id(REACTION, "route-1", "resp-1", 1);
+    let event_id = expected_event_id(&exec_id, "CompletedIssueValidation");
     let record = load(store.as_ref(), REACTION, "route-1", "resp-1", 1)
         .await
         .expect("load ok")
         .expect("record exists");
     assert_eq!(record.execution_id, exec_id);
+    assert_eq!(record.expected_event_id, event_id);
     assert_eq!(record.status, ExecutionStatus::Started);
     assert!(record.comment_posted);
     assert_eq!(record.task_id.as_deref(), Some("task-1"));
@@ -255,6 +262,7 @@ async fn success_launches_task_and_posts_one_comment() {
     assert_eq!(requests[0]["base_ref"], "main");
     assert_eq!(requests[0]["create_pull_request"], false);
     let prompt = requests[0]["prompt"].as_str().expect("prompt is a string");
+    assert!(prompt.contains(&event_id));
     for field in [
         "eventId",
         "projectItemNodeId",
@@ -277,6 +285,42 @@ async fn success_launches_task_and_posts_one_comment() {
             "prompt target missing {field}"
         );
     }
+    let comments = mock_github::add_comment_bodies(&server).await;
+    assert_eq!(comments.len(), 1);
+    let comment = &comments[0];
+    let actual_fields: std::collections::BTreeSet<&str> = comment
+        .as_object()
+        .expect("execution comment is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        actual_fields,
+        std::collections::BTreeSet::from([
+            "schemaVersion",
+            "messageType",
+            "routeId",
+            "responsibilityId",
+            "executionId",
+            "expectedEventId",
+            "requiredEventType",
+            "taskId",
+            "taskUrl",
+            "agentProfile",
+            "profileRef",
+            "requestedModel",
+            "actualModel",
+            "state",
+            "startedAt",
+        ])
+    );
+    assert_eq!(comment["schemaVersion"], "workgraph.execution/v1");
+    assert_eq!(comment["messageType"], "execution");
+    assert_eq!(comment["executionId"], exec_id);
+    assert_eq!(comment["expectedEventId"], event_id);
+    assert_eq!(comment["requestedModel"], "gpt-5");
+    assert_eq!(comment["actualModel"], "gpt-5");
+    assert_eq!(comment["state"], "started");
 
     core.stop().await.expect("stop core");
 }
@@ -426,6 +470,11 @@ async fn fallback_used_exactly_once_on_unsupported_model() {
         5000,
     )
     .await;
+    wait_until(
+        || async { mock_github::count_add_comment_requests(&server).await == 1 },
+        5000,
+    )
+    .await;
 
     let record = load(store.as_ref(), REACTION, "route-3", "resp-3", 1)
         .await
@@ -435,6 +484,80 @@ async fn fallback_used_exactly_once_on_unsupported_model() {
     assert!(record.used_fallback);
     assert_eq!(record.model_used.as_deref(), Some("gpt-4"));
     assert_eq!(record.task_id.as_deref(), Some("task-fb"));
+    let comments = mock_github::add_comment_bodies(&server).await;
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0]["requestedModel"], "gpt-5");
+    assert_eq!(comments[0]["actualModel"], "gpt-4");
+
+    core.stop().await.expect("stop core");
+}
+
+#[tokio::test]
+#[ignore]
+async fn fallback_model_is_durable_before_ambiguous_transport_outcome() {
+    let server = MockServer::start().await;
+    mount_happy_path_preflight(&server, 30, "issue-30").await;
+    mock_github::mount_fallback_transport_timeout(&server, OWNER, REPO, "gpt-5", "gpt-4").await;
+
+    let (source, handle) = make_source();
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    let reaction = build_reaction_with_timeout(&server.uri(), 25);
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("fallback-timeout-core")
+            .with_source(source)
+            .with_query(
+                Query::cypher(QUERY)
+                    .query(launch_query_str())
+                    .from_source(SOURCE)
+                    .with_outbox_capacity(100)
+                    .auto_start(true)
+                    .build(),
+            )
+            .with_reaction(reaction)
+            .with_state_store_provider(store.clone())
+            .build()
+            .await
+            .expect("build core"),
+    );
+    core.start().await.expect("start core");
+    tokio::time::sleep(WARMUP).await;
+
+    insert_row(
+        &handle,
+        "issue-30",
+        "route-30",
+        "resp-30",
+        30,
+        "gpt-5",
+        Some("gpt-4"),
+        REPOSITORY,
+        CONTENT_VERSION,
+        "In Progress",
+    )
+    .await;
+
+    wait_until(
+        || async {
+            load(store.as_ref(), REACTION, "route-30", "resp-30", 1)
+                .await
+                .unwrap()
+                .is_some_and(|record| record.status == ExecutionStatus::Ambiguous)
+        },
+        5000,
+    )
+    .await;
+    let record = load(store.as_ref(), REACTION, "route-30", "resp-30", 1)
+        .await
+        .expect("load state")
+        .expect("execution exists");
+    assert_eq!(record.model_used.as_deref(), Some("gpt-4"));
+    assert!(record.used_fallback);
+    assert!(record.request_time.is_some());
+    assert_eq!(
+        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
+        2
+    );
 
     core.stop().await.expect("stop core");
 }
@@ -641,6 +764,9 @@ async fn completed_duplicate_survives_all_allowlist_narrowing() {
         "CompletedIssueValidation",
         REPOSITORY,
         55,
+        "I_issue-narrowed",
+        "issue-validator",
+        &format!("issue-validator@{PROFILE_SHA}"),
         "gpt-5",
         None,
     );
@@ -767,6 +893,9 @@ async fn crash_recovery_adopts_exactly_one_existing_task() {
         "CompletedIssueValidation",
         REPOSITORY,
         6,
+        "I_issue-6",
+        "issue-validator",
+        &format!("issue-validator@{PROFILE_SHA}"),
         "gpt-5",
         None,
     );
@@ -859,6 +988,9 @@ async fn ambiguous_reconciliation_with_no_match_never_retries() {
         "CompletedIssueValidation",
         REPOSITORY,
         7,
+        "I_issue-7",
+        "issue-validator",
+        &format!("issue-validator@{PROFILE_SHA}"),
         "gpt-5",
         None,
     );
