@@ -41,7 +41,7 @@ reactions:
           value: "2022-11-28"
       allowlistedProjectIds:
         - PVT_kwDOABC123
-      destinationEventUrl: http://localhost:8080/changes
+      destinationEventUrl: http://127.0.0.1:9001/sources/github-project-state/events
       destinationBearerSecret:
         env: PROJECT_STATUS_SOURCE_BEARER
       requestTimeoutMs: 10000
@@ -190,7 +190,8 @@ make -C components/reactions/github-project-item-refresh lint
 
 ## Dogfood Integration Notes
 
-- Point `destinationEventUrl` to the standard-mode HTTP source endpoint used by
-  the ProjectItemStatus stream.
+- Point `destinationEventUrl` to the `github-project-state` standard-mode HTTP
+  source endpoint. The Phase 2 dogfood loopback contract is
+  `http://127.0.0.1:9001/sources/github-project-state/events`.
 - Configure `allowlistedProjectIds` for each dogfood project board.
 - Keep `recoveryPolicy: strict` to avoid silent drops on ambiguous publication.
