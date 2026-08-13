@@ -295,6 +295,35 @@ pub struct FfiGetResult {
     pub error_msg: *mut c_char,
 }
 
+// ============================================================================
+// State store compare-and-swap result (POD, no cross-dylib allocations)
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FfiCompareAndSwapResult {
+    /// 0 = swapped, 1 = mismatch, 2 = unsupported, 3 = error.
+    pub code: u8,
+}
+
+impl FfiCompareAndSwapResult {
+    pub fn swapped() -> Self {
+        Self { code: 0 }
+    }
+
+    pub fn mismatch() -> Self {
+        Self { code: 1 }
+    }
+
+    pub fn unsupported() -> Self {
+        Self { code: 2 }
+    }
+
+    pub fn error() -> Self {
+        Self { code: 3 }
+    }
+}
+
 impl FfiGetResult {
     pub fn not_found() -> Self {
         Self {
@@ -628,3 +657,16 @@ impl FfiWalReadResult {
 }
 
 unsafe impl Send for FfiWalReadResult {}
+
+#[cfg(test)]
+mod tests {
+    use super::FfiCompareAndSwapResult;
+
+    #[test]
+    fn compare_and_swap_result_codes_are_stable() {
+        assert_eq!(FfiCompareAndSwapResult::swapped().code, 0);
+        assert_eq!(FfiCompareAndSwapResult::mismatch().code, 1);
+        assert_eq!(FfiCompareAndSwapResult::unsupported().code, 2);
+        assert_eq!(FfiCompareAndSwapResult::error().code, 3);
+    }
+}

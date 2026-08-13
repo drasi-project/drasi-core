@@ -2,7 +2,7 @@
 
 `drasi-reaction-workgraph-router` is a deterministic Phase 2 WorkGraph router reaction.
 
-It consumes **ADDED** rows from the single query `route-awaiting-workgraph-items`, revalidates row provenance + allowlists, reserves routing by `(executionId, requiredEventType)` with durable create-if-absent fencing, applies rules v1, writes trusted JSON comments, creates next routing responsibility, updates Project status, and checkpoints only after durable side effects.
+It consumes **ADDED** rows from the single query `route-awaiting-workgraph-items`, revalidates row provenance + allowlists, reserves routing by `(executionId, requiredEventType)` with durable atomic CAS fencing, applies rules v1, writes trusted JSON comments, creates next routing responsibility, updates Project status, and checkpoints only after durable side effects.
 
 ## Prerequisites
 
@@ -22,6 +22,7 @@ Top-level config (`camelCase`):
 - `githubGraphqlUrl`, `githubRestUrl`, `githubTokenEnv`
 - `projectStatusFieldName` (defaults to `Status`)
 - `timeoutSecs`
+- `reservationLeaseSecs` (defaults to `120`; must be `>= timeoutSecs`)
 - `strictRecovery`
 
 `policyType` currently supports only `rules_v1` (extensible contract already exists for future `linear` / `llm` modes).
@@ -75,13 +76,13 @@ Reconciliation on retry requires trusted, unedited comments; forged public comme
 ## Durability and recovery
 
 - Durable reservation key: `(executionId, requiredEventType)` only
-- Reservation creation uses state-store `create_if_absent` (atomic where supported) and records owner fencing metadata
-- Incomplete reservations owned by another runner are fenced until a persisted failed state is available for safe resume
+- Reservation ownership transitions (create, renew, takeover, complete) use exact-byte state-store CAS with a monotonically increasing fencing epoch
+- Reservations carry a bounded lease (`reservationLeaseSecs`) and can be reclaimed only after lease expiry (or persisted failed state) via CAS takeover that increments epoch
 - Stored state includes reservation, decision, selected transition, side-effect progress, ambiguous/failed flags, and errors
 - `is_durable() = true`
 - `needs_snapshot_on_fresh_start() = false`
 - `default_recovery_policy() = Strict`
-- Retry/resume always re-checks GitHub issue/project state; status updates are allowed only from source status (`AwaitingRouting`) or when destination status is already applied
+- Retry/resume always re-checks GitHub issue/project state immediately before each side effect. Status mutation executes only from source status (`AwaitingRouting`); if destination is already observed, the router reconciles and marks completion without mutating.
 
 ## Running checks
 
@@ -107,6 +108,7 @@ Covered scenarios:
 - stale content rejection
 - wrong status rejection
 - retry preflight protection for closed issues and competing status changes
+- lease expiry recovery and CAS-fenced ownership takeover
 - GraphQL HTTP 200 + `errors` failure behavior
 - partial side-effect recovery via reconciliation
 - update/delete ignored

@@ -16,7 +16,8 @@
 
 use async_trait::async_trait;
 use drasi_lib::{
-    StateStoreCreateIfAbsentResult, StateStoreError, StateStoreProvider, StateStoreResult,
+    StateStoreCompareAndSwapResult, StateStoreCreateIfAbsentResult, StateStoreError,
+    StateStoreProvider, StateStoreResult,
 };
 use log::{debug, info};
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
@@ -267,16 +268,18 @@ impl StateStoreProvider for RedbStateStoreProvider {
         .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
 
-    async fn create_if_absent(
+    async fn compare_and_swap(
         &self,
         store_id: &str,
         key: &str,
-        value: Vec<u8>,
-    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
+        expected: Option<&[u8]>,
+        new_value: Vec<u8>,
+    ) -> StateStoreResult<StateStoreCompareAndSwapResult> {
         let table_name = self.get_or_create_table_name(store_id).await;
         let db = self.db.clone();
         let key = key.to_string();
         let store_id = store_id.to_string();
+        let expected = expected.map(|bytes| bytes.to_vec());
 
         tokio::task::spawn_blocking(move || {
             let write_txn = db.begin_write().map_err(|e| {
@@ -303,32 +306,67 @@ impl StateStoreProvider for RedbStateStoreProvider {
                     })?
                     .map(|existing| existing.value().to_vec());
 
-                if let Some(existing) = existing_value {
-                    Ok(StateStoreCreateIfAbsentResult::Existing(existing))
+                let matches = match (existing_value.as_deref(), expected.as_deref()) {
+                    (None, None) => true,
+                    (Some(current), Some(expected)) => current == expected,
+                    _ => false,
+                };
+
+                if matches {
+                    table
+                        .insert(key.as_str(), new_value.as_slice())
+                        .map_err(|e| {
+                            StateStoreError::StorageError(format!(
+                                "Failed to insert key '{key}' into store '{store_id}': {e}"
+                            ))
+                        })?;
+                    Ok(StateStoreCompareAndSwapResult::Swapped)
                 } else {
-                    table.insert(key.as_str(), value.as_slice()).map_err(|e| {
-                        StateStoreError::StorageError(format!(
-                            "Failed to insert key '{key}' into store '{store_id}': {e}"
-                        ))
-                    })?;
-                    Ok(StateStoreCreateIfAbsentResult::Created)
+                    Ok(StateStoreCompareAndSwapResult::Mismatch)
                 }
             };
 
             match result {
-                Ok(outcome) => {
+                Ok(StateStoreCompareAndSwapResult::Swapped) => {
                     write_txn.commit().map_err(|e| {
                         StateStoreError::StorageError(format!(
                             "Failed to commit transaction for store '{store_id}': {e}"
                         ))
                     })?;
-                    Ok(outcome)
+                    Ok(StateStoreCompareAndSwapResult::Swapped)
+                }
+                Ok(StateStoreCompareAndSwapResult::Mismatch) => {
+                    // Drop without commit to abort transaction.
+                    Ok(StateStoreCompareAndSwapResult::Mismatch)
                 }
                 Err(e) => Err(e),
             }
         })
         .await
         .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
+    }
+
+    async fn create_if_absent(
+        &self,
+        store_id: &str,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
+        loop {
+            match self
+                .compare_and_swap(store_id, key, None, value.clone())
+                .await?
+            {
+                StateStoreCompareAndSwapResult::Swapped => {
+                    return Ok(StateStoreCreateIfAbsentResult::Created)
+                }
+                StateStoreCompareAndSwapResult::Mismatch => {
+                    if let Some(existing) = self.get(store_id, key).await? {
+                        return Ok(StateStoreCreateIfAbsentResult::Existing(existing));
+                    }
+                }
+            }
+        }
     }
 
     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
@@ -826,6 +864,39 @@ mod tests {
 
         let value = provider.get("store1", "key1").await.unwrap();
         assert_eq!(value, Some(b"value1".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_redb_state_store_compare_and_swap() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        let created = provider
+            .compare_and_swap("store1", "key1", None, b"value1".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(created, StateStoreCompareAndSwapResult::Swapped);
+
+        let mismatch = provider
+            .compare_and_swap("store1", "key1", None, b"value2".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(mismatch, StateStoreCompareAndSwapResult::Mismatch);
+
+        let swapped = provider
+            .compare_and_swap(
+                "store1",
+                "key1",
+                Some(b"value1".as_slice()),
+                b"value3".to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(swapped, StateStoreCompareAndSwapResult::Swapped);
+
+        let value = provider.get("store1", "key1").await.unwrap();
+        assert_eq!(value, Some(b"value3".to_vec()));
     }
 
     #[tokio::test]

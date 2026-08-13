@@ -174,6 +174,11 @@ impl WorkgraphRouterReactionBuilder {
         self
     }
 
+    pub fn with_reservation_lease_secs(mut self, value: u64) -> Self {
+        self.config.reservation_lease_secs = value;
+        self
+    }
+
     pub fn with_strict_recovery(mut self, value: bool) -> Self {
         self.config.strict_recovery = value;
         self

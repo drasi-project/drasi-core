@@ -44,7 +44,11 @@ use super::types::FfiStr;
 ///   async workers). `FfiBootstrapResult` also carries optional provider
 ///   error text (`error_ptr`/`error_len`/`error_drop_fn`) so failures
 ///   surface with their message instead of only a negative code.
-pub const FFI_SDK_VERSION: &str = "0.13.0";
+/// - `0.14.0`: `StateStoreVtable` appends `compare_and_swap_fn` for atomic
+///   state transitions needed by cross-replica fencing. The CAS result is a
+///   POD status code (`FfiCompareAndSwapResult`) to avoid cross-dylib
+///   ownership transfer for newly introduced operations.
+pub const FFI_SDK_VERSION: &str = "0.14.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");

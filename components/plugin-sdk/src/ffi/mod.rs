@@ -54,9 +54,9 @@ pub use metadata::{
 };
 pub use payload::{BootstrapEventPayload, SourceEventPayload};
 pub use types::{
-    catch_panic_ffi, now_us, AsyncExecutorFn, FfiChangeOp, FfiComponentStatus, FfiCreateResult,
-    FfiDispatchMode, FfiGetResult, FfiOwnedStr, FfiResult, FfiStr, FfiStringArray, SendMutPtr,
-    SendPtr,
+    catch_panic_ffi, now_us, AsyncExecutorFn, FfiChangeOp, FfiCompareAndSwapResult,
+    FfiComponentStatus, FfiCreateResult, FfiDispatchMode, FfiGetResult, FfiOwnedStr, FfiResult,
+    FfiStr, FfiStringArray, SendMutPtr, SendPtr,
 };
 pub use vtable_gen::{
     build_bootstrap_plugin_vtable, build_bootstrap_provider_vtable,

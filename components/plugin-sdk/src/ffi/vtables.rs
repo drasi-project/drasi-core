@@ -21,8 +21,8 @@
 use std::ffi::c_void;
 
 use super::types::{
-    AsyncExecutorFn, FfiChangeOp, FfiComponentStatus, FfiCreateResult, FfiDispatchMode,
-    FfiGetResult, FfiOwnedStr, FfiResult, FfiStr, FfiStringArray,
+    AsyncExecutorFn, FfiChangeOp, FfiCompareAndSwapResult, FfiComponentStatus, FfiCreateResult,
+    FfiDispatchMode, FfiGetResult, FfiOwnedStr, FfiResult, FfiStr, FfiStringArray,
 };
 
 // ============================================================================
@@ -675,6 +675,15 @@ pub struct StateStoreVtable {
         value: *const u8,
         value_len: usize,
     ) -> FfiGetResult,
+    pub compare_and_swap_fn: extern "C" fn(
+        state: *mut c_void,
+        store_id: FfiStr,
+        key: FfiStr,
+        expected: *const u8,
+        expected_len: usize,
+        new_value: *const u8,
+        new_value_len: usize,
+    ) -> FfiCompareAndSwapResult,
 }
 
 unsafe impl Send for StateStoreVtable {}

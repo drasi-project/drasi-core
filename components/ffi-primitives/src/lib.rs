@@ -26,6 +26,7 @@
 //! - [`FfiStr`] / [`FfiOwnedStr`] / [`FfiStringArray`] — String types for FFI
 //! - [`FfiResult`] — Result type for FFI operations
 //! - [`FfiGetResult`] — Result type for key-value store get operations
+//! - [`FfiCompareAndSwapResult`] — POD result type for atomic CAS operations
 //! - [`AsyncExecutorFn`] — Type-erased async executor for cdylib runtimes
 //! - [`SendPtr`] / [`SendMutPtr`] — Send-safe raw pointer wrappers
 //!

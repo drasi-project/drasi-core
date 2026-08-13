@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use drasi_lib::state_store::{StateStoreCreateIfAbsentResult, StateStoreProvider};
+use drasi_lib::state_store::{StateStoreCompareAndSwapResult, StateStoreProvider};
 use serde::{Deserialize, Serialize};
 
 use crate::candidate::RoutingCandidate;
@@ -32,6 +32,10 @@ pub struct ReservationRecord {
     pub required_event_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_instance_id: Option<String>,
+    #[serde(default = "default_fencing_epoch")]
+    pub fencing_epoch: u64,
+    #[serde(default)]
+    pub lease_expires_at_unix_secs: i64,
     pub policy_id: String,
     pub policy_type: String,
     pub policy_version: String,
@@ -39,6 +43,10 @@ pub struct ReservationRecord {
     pub decision_id: Option<String>,
     pub created_at: String,
     pub completed: bool,
+}
+
+fn default_fencing_epoch() -> u64 {
+    1
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +83,8 @@ pub struct RoutingStateRecord {
     #[serde(default)]
     pub failed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_fencing_epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     pub updated_at: String,
 }
@@ -93,6 +103,7 @@ impl RoutingStateRecord {
             progress: SideEffectProgress::default(),
             ambiguous: false,
             failed: false,
+            failure_fencing_epoch: None,
             last_error: None,
             updated_at: Utc::now().to_rfc3339(),
         }
@@ -101,13 +112,25 @@ impl RoutingStateRecord {
     pub fn mark_error(&mut self, error: impl Into<String>, ambiguous: bool) {
         self.failed = true;
         self.ambiguous = ambiguous;
+        self.failure_fencing_epoch = None;
         self.last_error = Some(error.into());
         self.updated_at = Utc::now().to_rfc3339();
+    }
+
+    pub fn mark_error_with_epoch(
+        &mut self,
+        error: impl Into<String>,
+        ambiguous: bool,
+        fencing_epoch: u64,
+    ) {
+        self.mark_error(error, ambiguous);
+        self.failure_fencing_epoch = Some(fencing_epoch);
     }
 
     pub fn clear_error(&mut self) {
         self.failed = false;
         self.ambiguous = false;
+        self.failure_fencing_epoch = None;
         self.last_error = None;
         self.updated_at = Utc::now().to_rfc3339();
     }
@@ -126,11 +149,29 @@ pub fn routing_state_store_key(reservation_key: &str) -> String {
     format!("{ROUTING_STATE_PREFIX}{reservation_key}")
 }
 
+#[derive(Debug, Clone)]
+pub struct PersistedReservationRecord {
+    pub record: ReservationRecord,
+    pub bytes: Vec<u8>,
+}
+
 pub async fn load_reservation(
     store: Arc<dyn StateStoreProvider>,
     store_id: &str,
     reservation_key: &str,
 ) -> anyhow::Result<Option<ReservationRecord>> {
+    Ok(
+        load_reservation_with_bytes(store, store_id, reservation_key)
+            .await?
+            .map(|persisted| persisted.record),
+    )
+}
+
+pub async fn load_reservation_with_bytes(
+    store: Arc<dyn StateStoreProvider>,
+    store_id: &str,
+    reservation_key: &str,
+) -> anyhow::Result<Option<PersistedReservationRecord>> {
     let key = reservation_store_key(reservation_key);
     let Some(bytes) = store
         .get(store_id, &key)
@@ -139,9 +180,9 @@ pub async fn load_reservation(
     else {
         return Ok(None);
     };
-    serde_json::from_slice::<ReservationRecord>(&bytes)
-        .map(Some)
-        .map_err(|e| anyhow::anyhow!("failed to deserialize reservation record: {e}"))
+    let record = serde_json::from_slice::<ReservationRecord>(&bytes)
+        .map_err(|e| anyhow::anyhow!("failed to deserialize reservation record: {e}"))?;
+    Ok(Some(PersistedReservationRecord { record, bytes }))
 }
 
 pub async fn save_reservation(
@@ -165,18 +206,37 @@ pub async fn create_reservation_if_absent(
     record: &ReservationRecord,
 ) -> anyhow::Result<Option<ReservationRecord>> {
     let key = reservation_store_key(&record.reservation_key);
-    let bytes = serde_json::to_vec(record)
-        .map_err(|e| anyhow::anyhow!("failed to serialize reservation record: {e}"))?;
-    let outcome = store
-        .create_if_absent(store_id, &key, bytes)
+    let bytes = serialize_reservation(record)?;
+    let swapped = store
+        .compare_and_swap(store_id, &key, None, bytes)
         .await
-        .map_err(|e| anyhow::anyhow!("state-store create-if-absent reservation failed: {e}"))?;
-    match outcome {
-        StateStoreCreateIfAbsentResult::Created => Ok(None),
-        StateStoreCreateIfAbsentResult::Existing(existing_bytes) => {
-            deserialize_reservation(existing_bytes).map(Some)
+        .map_err(|e| anyhow::anyhow!("state-store CAS reservation-create failed: {e}"))?;
+    match swapped {
+        StateStoreCompareAndSwapResult::Swapped => Ok(None),
+        StateStoreCompareAndSwapResult::Mismatch => {
+            let Some(existing) = load_reservation(store, store_id, &record.reservation_key).await?
+            else {
+                anyhow::bail!("state-store CAS reservation-create mismatched but value vanished");
+            };
+            Ok(Some(existing))
         }
     }
+}
+
+pub async fn compare_and_swap_reservation(
+    store: Arc<dyn StateStoreProvider>,
+    store_id: &str,
+    reservation_key: &str,
+    expected: Option<&[u8]>,
+    new_record: &ReservationRecord,
+) -> anyhow::Result<bool> {
+    let key = reservation_store_key(reservation_key);
+    let bytes = serialize_reservation(new_record)?;
+    let outcome = store
+        .compare_and_swap(store_id, &key, expected, bytes)
+        .await
+        .map_err(|e| anyhow::anyhow!("state-store CAS reservation failed: {e}"))?;
+    Ok(matches!(outcome, StateStoreCompareAndSwapResult::Swapped))
 }
 
 pub async fn load_routing_state(
@@ -212,7 +272,12 @@ pub async fn save_routing_state(
     Ok(())
 }
 
-fn deserialize_reservation(bytes: Vec<u8>) -> anyhow::Result<ReservationRecord> {
-    serde_json::from_slice::<ReservationRecord>(&bytes)
+pub fn serialize_reservation(record: &ReservationRecord) -> anyhow::Result<Vec<u8>> {
+    serde_json::to_vec(record)
+        .map_err(|e| anyhow::anyhow!("failed to serialize reservation record: {e}"))
+}
+
+pub fn deserialize_reservation(bytes: &[u8]) -> anyhow::Result<ReservationRecord> {
+    serde_json::from_slice::<ReservationRecord>(bytes)
         .map_err(|e| anyhow::anyhow!("failed to deserialize reservation record: {e}"))
 }

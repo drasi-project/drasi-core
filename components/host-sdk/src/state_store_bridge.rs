@@ -22,7 +22,9 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use drasi_lib::{StateStoreCreateIfAbsentResult, StateStoreProvider};
-use drasi_plugin_sdk::ffi::{FfiGetResult, FfiResult, FfiStr, FfiStringArray, StateStoreVtable};
+use drasi_plugin_sdk::ffi::{
+    FfiCompareAndSwapResult, FfiGetResult, FfiResult, FfiStr, FfiStringArray, StateStoreVtable,
+};
 
 /// Wraps an FFI body in `catch_unwind` and returns `default` on panic.
 ///
@@ -65,6 +67,7 @@ impl StateStoreVtableBuilder {
             key_count_fn: ss_key_count,
             sync_fn: ss_sync,
             drop_fn: ss_drop,
+            compare_and_swap_fn: ss_compare_and_swap,
         }
     }
 }
@@ -141,6 +144,49 @@ extern "C" fn ss_create_if_absent(
             }
         },
     )
+}
+
+extern "C" fn ss_compare_and_swap(
+    state: *mut c_void,
+    store_id: FfiStr,
+    key: FfiStr,
+    expected: *const u8,
+    expected_len: usize,
+    new_value: *const u8,
+    new_value_len: usize,
+) -> FfiCompareAndSwapResult {
+    ffi_guard(FfiCompareAndSwapResult::error(), || {
+        let provider = provider_ref(state);
+        let store_id = unsafe { store_id.to_string() };
+        let key = unsafe { key.to_string() };
+        let expected = if expected.is_null() {
+            None
+        } else {
+            Some(unsafe { std::slice::from_raw_parts(expected, expected_len) })
+        };
+        let new_value = if new_value.is_null() {
+            if new_value_len == 0 {
+                Vec::new()
+            } else {
+                return FfiCompareAndSwapResult::error();
+            }
+        } else {
+            unsafe { std::slice::from_raw_parts(new_value, new_value_len) }.to_vec()
+        };
+        match block_on(provider.compare_and_swap(&store_id, &key, expected, new_value)) {
+            Some(Ok(drasi_lib::StateStoreCompareAndSwapResult::Swapped)) => {
+                FfiCompareAndSwapResult::swapped()
+            }
+            Some(Ok(drasi_lib::StateStoreCompareAndSwapResult::Mismatch)) => {
+                FfiCompareAndSwapResult::mismatch()
+            }
+            Some(Err(drasi_lib::StateStoreError::Unsupported(_))) => {
+                FfiCompareAndSwapResult::unsupported()
+            }
+            Some(Err(_)) => FfiCompareAndSwapResult::error(),
+            None => FfiCompareAndSwapResult::error(),
+        }
+    })
 }
 
 extern "C" fn ss_delete(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiResult {

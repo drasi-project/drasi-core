@@ -38,6 +38,10 @@ fn default_timeout_secs() -> u64 {
     30
 }
 
+fn default_reservation_lease_secs() -> u64 {
+    120
+}
+
 fn default_strict_recovery() -> bool {
     true
 }
@@ -76,6 +80,8 @@ pub struct WorkgraphRouterReactionConfig {
     pub project_status_field_name: String,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    #[serde(default = "default_reservation_lease_secs")]
+    pub reservation_lease_secs: u64,
     #[serde(default = "default_strict_recovery")]
     pub strict_recovery: bool,
 }
@@ -107,6 +113,7 @@ impl std::fmt::Debug for WorkgraphRouterReactionConfig {
             .field("github_token_env", &self.github_token_env)
             .field("project_status_field_name", &self.project_status_field_name)
             .field("timeout_secs", &self.timeout_secs)
+            .field("reservation_lease_secs", &self.reservation_lease_secs)
             .field("strict_recovery", &self.strict_recovery)
             .finish()
     }
@@ -146,6 +153,7 @@ impl Default for WorkgraphRouterReactionConfig {
             github_token_env: default_github_token_env(),
             project_status_field_name: default_project_status_field_name(),
             timeout_secs: default_timeout_secs(),
+            reservation_lease_secs: default_reservation_lease_secs(),
             strict_recovery: default_strict_recovery(),
         }
     }
@@ -181,6 +189,15 @@ impl WorkgraphRouterReactionConfig {
         }
         if self.timeout_secs == 0 {
             anyhow::bail!("timeoutSecs must be greater than 0");
+        }
+        if self.reservation_lease_secs == 0 {
+            anyhow::bail!("reservationLeaseSecs must be greater than 0");
+        }
+        if self.reservation_lease_secs < self.timeout_secs {
+            anyhow::bail!("reservationLeaseSecs must be greater than or equal to timeoutSecs");
+        }
+        if self.reservation_lease_secs > i64::MAX as u64 {
+            anyhow::bail!("reservationLeaseSecs must be less than or equal to i64::MAX");
         }
         if matches!(priority_queue_capacity, Some(0)) {
             anyhow::bail!("priorityQueueCapacity must be greater than 0");

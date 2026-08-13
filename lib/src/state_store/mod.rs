@@ -97,6 +97,10 @@ pub enum StateStoreError {
     /// Use this for errors that don't fit the other categories.
     #[error("State store error: {0}")]
     Other(String),
+
+    /// The requested operation is not supported by this state store backend.
+    #[error("Unsupported state store operation: {0}")]
+    Unsupported(String),
 }
 
 /// Result type for state store operations
@@ -109,6 +113,15 @@ pub enum StateStoreCreateIfAbsentResult {
     Created,
     /// The key already existed; contains the current persisted value.
     Existing(Vec<u8>),
+}
+
+/// Result for [`StateStoreProvider::compare_and_swap`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateStoreCompareAndSwapResult {
+    /// The expected bytes matched and the new bytes were durably written.
+    Swapped,
+    /// The expected bytes did not match the persisted bytes.
+    Mismatch,
 }
 
 /// Trait defining the interface for state store providers.
@@ -182,11 +195,40 @@ pub trait StateStoreProvider: Send + Sync {
     /// * `Err(e)` - An error occurred
     async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()>;
 
+    /// Atomically replace a value when the current persisted bytes match `expected`.
+    ///
+    /// This operation is the required primitive for safe cross-replica fencing.
+    /// Implementations must guarantee that compare and write are atomic and durable
+    /// with respect to concurrent callers.
+    ///
+    /// # Arguments
+    /// * `store_id` - The partition identifier (typically the plugin ID)
+    /// * `key` - The key to compare and update
+    /// * `expected` - Expected persisted bytes. `None` means the key must be absent.
+    /// * `new_value` - Bytes to persist when expectation matches
+    ///
+    /// # Returns
+    /// * `Ok(StateStoreCompareAndSwapResult::Swapped)` when update was applied
+    /// * `Ok(StateStoreCompareAndSwapResult::Mismatch)` when expectation did not match
+    /// * `Err(StateStoreError::Unsupported(_))` when backend cannot provide atomic CAS
+    /// * `Err(e)` for other storage failures
+    async fn compare_and_swap(
+        &self,
+        store_id: &str,
+        key: &str,
+        expected: Option<&[u8]>,
+        new_value: Vec<u8>,
+    ) -> StateStoreResult<StateStoreCompareAndSwapResult> {
+        let _ = (store_id, key, expected, new_value);
+        Err(StateStoreError::Unsupported(
+            "compare_and_swap is not supported by this provider".to_string(),
+        ))
+    }
+
     /// Create a key only if it does not already exist.
     ///
-    /// Implementations should provide an atomic, durable create-if-absent
-    /// operation where possible. The default implementation is a non-atomic
-    /// fallback (`get` + `set`) provided for compatibility.
+    /// This helper delegates to [`StateStoreProvider::compare_and_swap`] with
+    /// `expected=None`, preserving atomicity and durability guarantees.
     ///
     /// # Returns
     /// * `Ok(StateStoreCreateIfAbsentResult::Created)` when the key was created
@@ -198,11 +240,19 @@ pub trait StateStoreProvider: Send + Sync {
         key: &str,
         value: Vec<u8>,
     ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
-        match self.get(store_id, key).await? {
-            Some(existing) => Ok(StateStoreCreateIfAbsentResult::Existing(existing)),
-            None => {
-                self.set(store_id, key, value).await?;
-                Ok(StateStoreCreateIfAbsentResult::Created)
+        loop {
+            match self
+                .compare_and_swap(store_id, key, None, value.clone())
+                .await?
+            {
+                StateStoreCompareAndSwapResult::Swapped => {
+                    return Ok(StateStoreCreateIfAbsentResult::Created)
+                }
+                StateStoreCompareAndSwapResult::Mismatch => {
+                    if let Some(existing) = self.get(store_id, key).await? {
+                        return Ok(StateStoreCreateIfAbsentResult::Existing(existing));
+                    }
+                }
             }
         }
     }
@@ -400,19 +450,31 @@ impl StateStoreProvider for MemoryStateStoreProvider {
         Ok(())
     }
 
-    async fn create_if_absent(
+    async fn compare_and_swap(
         &self,
         store_id: &str,
         key: &str,
-        value: Vec<u8>,
-    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
+        expected: Option<&[u8]>,
+        new_value: Vec<u8>,
+    ) -> StateStoreResult<StateStoreCompareAndSwapResult> {
         let mut stores = self.stores.write().await;
-        let store = stores.entry(store_id.to_string()).or_default();
-        if let Some(existing) = store.get(key) {
-            return Ok(StateStoreCreateIfAbsentResult::Existing(existing.clone()));
+
+        let current = stores.get(store_id).and_then(|store| store.get(key));
+        let matches = match (current, expected) {
+            (None, None) => true,
+            (Some(current), Some(expected)) => current.as_slice() == expected,
+            _ => false,
+        };
+
+        if !matches {
+            return Ok(StateStoreCompareAndSwapResult::Mismatch);
         }
-        store.insert(key.to_string(), value);
-        Ok(StateStoreCreateIfAbsentResult::Created)
+
+        stores
+            .entry(store_id.to_string())
+            .or_default()
+            .insert(key.to_string(), new_value);
+        Ok(StateStoreCompareAndSwapResult::Swapped)
     }
 
     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
@@ -802,5 +864,36 @@ mod tests {
 
         let value = provider.get("store1", "key1").await.unwrap();
         assert_eq!(value, Some(b"value1".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_compare_and_swap() {
+        let provider = MemoryStateStoreProvider::new();
+
+        let created = provider
+            .compare_and_swap("store1", "key1", None, b"value1".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(created, StateStoreCompareAndSwapResult::Swapped);
+
+        let mismatch = provider
+            .compare_and_swap("store1", "key1", None, b"value2".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(mismatch, StateStoreCompareAndSwapResult::Mismatch);
+
+        let swapped = provider
+            .compare_and_swap(
+                "store1",
+                "key1",
+                Some(b"value1".as_slice()),
+                b"value3".to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(swapped, StateStoreCompareAndSwapResult::Swapped);
+
+        let value = provider.get("store1", "key1").await.unwrap();
+        assert_eq!(value, Some(b"value3".to_vec()));
     }
 }

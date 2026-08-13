@@ -497,6 +497,19 @@ fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
     Some((v.major as u32, v.minor as u32, v.patch as u32))
 }
 
+fn sdk_major_minor(version: &str) -> String {
+    let parts: Vec<&str> = version.split('.').collect();
+    format!(
+        "{}.{}",
+        parts.first().unwrap_or(&"0"),
+        parts.get(1).unwrap_or(&"0")
+    )
+}
+
+fn sdk_major_minor_compatible(plugin_sdk_version: &str, host_sdk_version: &str) -> bool {
+    sdk_major_minor(plugin_sdk_version) == sdk_major_minor(host_sdk_version)
+}
+
 /// Validate plugin metadata against the host SDK version.
 ///
 /// Checks that the plugin's SDK version is compatible with the host.
@@ -533,21 +546,10 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option
     let host_sdk_version = drasi_plugin_sdk::ffi::metadata::FFI_SDK_VERSION;
 
     // Check major.minor compatibility
-    let plugin_parts: Vec<&str> = plugin_sdk_version.split('.').collect();
-    let host_parts: Vec<&str> = host_sdk_version.split('.').collect();
+    let plugin_major_minor = sdk_major_minor(&plugin_sdk_version);
+    let host_major_minor = sdk_major_minor(host_sdk_version);
 
-    let plugin_major_minor = format!(
-        "{}.{}",
-        plugin_parts.first().unwrap_or(&"0"),
-        plugin_parts.get(1).unwrap_or(&"0")
-    );
-    let host_major_minor = format!(
-        "{}.{}",
-        host_parts.first().unwrap_or(&"0"),
-        host_parts.get(1).unwrap_or(&"0")
-    );
-
-    if plugin_major_minor != host_major_minor {
+    if !sdk_major_minor_compatible(&plugin_sdk_version, host_sdk_version) {
         anyhow::bail!(
             "Plugin '{}' SDK version mismatch: plugin={}, host={}. \
              Major.minor versions must match ({} != {}).",
@@ -1183,5 +1185,13 @@ mod tests {
         // Above the threshold
         assert!(parse_semver("0.6.1").unwrap() > MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS);
         assert!(parse_semver("1.0.0").unwrap() > MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS);
+    }
+
+    #[test]
+    fn test_sdk_major_minor_compatibility() {
+        assert!(sdk_major_minor_compatible("0.14.0", "0.14.1"));
+        assert!(sdk_major_minor_compatible("1.2.3", "1.2.0"));
+        assert!(!sdk_major_minor_compatible("0.13.9", "0.14.0"));
+        assert!(!sdk_major_minor_compatible("1.1.0", "2.1.0"));
     }
 }

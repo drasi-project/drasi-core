@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use super::types::FfiStr;
 use super::vtables::StateStoreVtable;
-use drasi_lib::{StateStoreCreateIfAbsentResult, StateStoreProvider, StateStoreResult};
+use drasi_lib::{StateStoreCompareAndSwapResult, StateStoreProvider, StateStoreResult};
 
 /// Plugin-side proxy: wraps a host-provided `StateStoreVtable` into a local
 /// `StateStoreProvider` implementation.
@@ -64,27 +64,39 @@ impl StateStoreProvider for FfiStateStoreProxy {
         }
     }
 
-    async fn create_if_absent(
+    async fn compare_and_swap(
         &self,
         store_id: &str,
         key: &str,
-        value: Vec<u8>,
-    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
+        expected: Option<&[u8]>,
+        new_value: Vec<u8>,
+    ) -> StateStoreResult<StateStoreCompareAndSwapResult> {
         unsafe {
             let vtable = &*self.vtable;
-            (vtable.create_if_absent_fn)(
+            let (expected_ptr, expected_len) = if let Some(expected) = expected {
+                (expected.as_ptr(), expected.len())
+            } else {
+                (std::ptr::null(), 0)
+            };
+            let result = (vtable.compare_and_swap_fn)(
                 vtable.state,
                 FfiStr::from_str(store_id),
                 FfiStr::from_str(key),
-                value.as_ptr(),
-                value.len(),
-            )
-            .into_result()
-            .map(|value| match value {
-                Some(existing) => StateStoreCreateIfAbsentResult::Existing(existing),
-                None => StateStoreCreateIfAbsentResult::Created,
-            })
-            .map_err(drasi_lib::StateStoreError::Other)
+                expected_ptr,
+                expected_len,
+                new_value.as_ptr(),
+                new_value.len(),
+            );
+            match result.code {
+                0 => Ok(StateStoreCompareAndSwapResult::Swapped),
+                1 => Ok(StateStoreCompareAndSwapResult::Mismatch),
+                2 => Err(drasi_lib::StateStoreError::Unsupported(
+                    "state store compare_and_swap is unsupported by host provider".to_string(),
+                )),
+                _ => Err(drasi_lib::StateStoreError::Other(
+                    "state store compare_and_swap failed".to_string(),
+                )),
+            }
         }
     }
 
