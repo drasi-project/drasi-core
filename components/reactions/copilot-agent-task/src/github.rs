@@ -118,6 +118,31 @@ impl GitHubClient {
         ]
     }
 
+    pub async fn authenticated_user_id(&self) -> Result<String, ApiError> {
+        let url = format!("{}/user", self.config.api_base_url);
+        let mut request = self.http.get(&url);
+        for (name, value) in self.rest_headers() {
+            request = request.header(name, value);
+        }
+        let response = request.send().await.map_err(ApiError::from_transport)?;
+        let status = response.status();
+        let body_text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(ApiError::from_status(status, &body_text));
+        }
+        let body: Value = serde_json::from_str(&body_text).map_err(|error| {
+            ApiError::Permanent(format!("user response was not valid JSON: {error}"))
+        })?;
+        body["id"]
+            .as_u64()
+            .map(|id| id.to_string())
+            .or_else(|| body["id"].as_str().map(ToString::to_string))
+            .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+            .ok_or_else(|| {
+                ApiError::Permanent("user response did not contain a numeric id".to_string())
+            })
+    }
+
     // ---------------------------------------------------------------
     // Preflight: issue state
     // ---------------------------------------------------------------

@@ -159,9 +159,12 @@ impl Reaction for CopilotAgentTaskReaction {
 
         // Durable state store is required: reservation records must survive
         // restarts for idempotency to hold.
-        if self.base.state_store().await.is_none() {
-            let msg =
-                "Copilot Agent Task reaction requires a durable state store (none configured)";
+        let state_store = self.base.state_store().await;
+        if state_store
+            .as_deref()
+            .is_none_or(|store| !store.is_durable())
+        {
+            let msg = "Copilot Agent Task reaction requires a durable state store";
             error!("[{}] {msg}", self.base.id);
             self.base
                 .set_status(ComponentStatus::Error, Some(msg.to_string()))
@@ -182,6 +185,27 @@ impl Reaction for CopilotAgentTaskReaction {
                 return Err(e);
             }
         };
+        if let Some(expected_user_id) = &self.config.expected_github_user_id {
+            let actual_user_id = match client.authenticated_user_id().await {
+                Ok(user_id) => user_id,
+                Err(error) => {
+                    let message = format!("failed to verify GitHub token identity: {error}");
+                    self.base
+                        .set_status(ComponentStatus::Error, Some(message.clone()))
+                        .await;
+                    anyhow::bail!(message);
+                }
+            };
+            if actual_user_id != *expected_user_id {
+                let message = format!(
+                    "GitHub token user ID mismatch: expected {expected_user_id}, authenticated as {actual_user_id}"
+                );
+                self.base
+                    .set_status(ComponentStatus::Error, Some(message.clone()))
+                    .await;
+                anyhow::bail!(message);
+            }
+        }
 
         self.base
             .set_status(

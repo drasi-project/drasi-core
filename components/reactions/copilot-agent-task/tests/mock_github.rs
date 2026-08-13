@@ -20,6 +20,17 @@ use serde_json::{json, Value};
 use wiremock::matchers::{body_string_contains, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+pub async fn mount_authenticated_user(server: &MockServer, user_id: u64) {
+    Mock::given(method("GET"))
+        .and(path("/user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": user_id,
+            "login": "launcher"
+        })))
+        .mount(server)
+        .await;
+}
+
 /// Mount a successful `GET /repos/{owner}/{repo}/issues/{n}` responder.
 /// `node_id` is the GraphQL node ID GitHub would report for this issue —
 /// callers must pass the same value used as the launch row's `issueNodeId`

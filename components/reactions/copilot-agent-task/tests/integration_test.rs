@@ -81,6 +81,27 @@ fn build_reaction(server_uri: &str) -> CopilotAgentTaskReaction {
     build_reaction_with_timeout(server_uri, 30_000)
 }
 
+fn build_reaction_with_expected_user_id(
+    server_uri: &str,
+    expected_user_id: &str,
+) -> CopilotAgentTaskReaction {
+    CopilotAgentTaskReaction::builder(REACTION)
+        .with_query(QUERY)
+        .with_github_api_base_url(server_uri.to_string())
+        .with_github_graphql_url(format!("{server_uri}/graphql"))
+        .with_token("ghp_test_token_do_not_log")
+        .with_expected_github_user_id(expected_user_id)
+        .with_allowed_repositories(vec![REPOSITORY.to_string()])
+        .with_allowed_profiles(vec!["issue-validator".to_string()])
+        .with_allowed_models(vec!["gpt-5".to_string(), "gpt-4".to_string()])
+        .with_comment_api(CommentApiConfig {
+            max_attempts: 2,
+            retry_backoff_ms: 10,
+        })
+        .build()
+        .expect("reaction builds")
+}
+
 fn build_reaction_with_timeout(
     server_uri: &str,
     request_timeout_ms: u64,
@@ -182,6 +203,7 @@ async fn mount_happy_path_preflight(server: &MockServer, issue_number: u64, node
 #[ignore] // Run with: cargo test -- --ignored
 async fn success_launches_task_and_posts_one_comment() {
     let server = MockServer::start().await;
+    mock_github::mount_authenticated_user(&server, 4_021_243).await;
     mount_happy_path_preflight(&server, 1, "issue-1").await;
     mock_github::mount_create_task_success(
         &server,
@@ -195,7 +217,7 @@ async fn success_launches_task_and_posts_one_comment() {
 
     let (source, handle) = make_source();
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    let reaction = build_reaction(&server.uri());
+    let reaction = build_reaction_with_expected_user_id(&server.uri(), "4021243");
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -325,6 +347,50 @@ async fn success_launches_task_and_posts_one_comment() {
     assert_eq!(comment["state"], "started");
 
     core.stop().await.expect("stop core");
+}
+
+#[tokio::test]
+#[ignore]
+async fn startup_rejects_untrusted_numeric_github_identity() {
+    let server = MockServer::start().await;
+    mock_github::mount_authenticated_user(&server, 99).await;
+    let (source, _handle) = make_source();
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    let reaction = CopilotAgentTaskReaction::builder(REACTION)
+        .with_query(QUERY)
+        .with_github_api_base_url(server.uri())
+        .with_github_graphql_url(format!("{}/graphql", server.uri()))
+        .with_token("ghp_test_token_do_not_log")
+        .with_expected_github_user_id("4021243")
+        .with_allowed_repositories(vec![REPOSITORY.to_string()])
+        .with_allowed_profiles(vec!["issue-validator".to_string()])
+        .with_allowed_models(vec!["gpt-5".to_string()])
+        .build()
+        .expect("reaction builds");
+    let core = DrasiLib::builder()
+        .with_id("identity-mismatch-core")
+        .with_source(source)
+        .with_query(
+            Query::cypher(QUERY)
+                .query(launch_query_str())
+                .from_source(SOURCE)
+                .with_outbox_capacity(100)
+                .auto_start(true)
+                .build(),
+        )
+        .with_reaction(reaction)
+        .with_state_store_provider(store)
+        .build()
+        .await
+        .expect("build core");
+
+    let error = core.start().await.expect_err("identity mismatch must fail");
+    assert!(format!("{error:#}").contains("expected 4021243, authenticated as 99"));
+    assert_eq!(
+        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
+        0
+    );
+    assert_eq!(mock_github::count_add_comment_requests(&server).await, 0);
 }
 
 // ---------------------------------------------------------------------

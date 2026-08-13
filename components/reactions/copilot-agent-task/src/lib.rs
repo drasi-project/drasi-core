@@ -105,6 +105,11 @@ impl CopilotAgentTaskReactionBuilder {
         self
     }
 
+    pub fn with_expected_github_user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.config.expected_github_user_id = Some(user_id.into());
+        self
+    }
+
     pub fn with_allowed_repositories(mut self, repos: Vec<String>) -> Self {
         self.config.allowed_repositories = repos;
         self

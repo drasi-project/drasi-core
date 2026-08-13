@@ -98,6 +98,12 @@ pub struct CopilotAgentTaskReactionConfig {
     /// [`crate::descriptor::CopilotAgentTaskReactionConfigDto`].
     pub token: String,
 
+    /// Optional numeric GitHub user ID expected for `token`. When configured,
+    /// startup calls `GET /user` and fails closed if the authenticated
+    /// identity differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_github_user_id: Option<String>,
+
     /// Allowlist of `"owner/repo"` strings. A launch row for any other
     /// repository is rejected (fail-closed). Must be non-empty.
     pub allowed_repositories: Vec<String>,
@@ -141,6 +147,7 @@ impl Default for CopilotAgentTaskReactionConfig {
             github_graphql_url: default_github_graphql_url(),
             agent_tasks_api_version: default_agent_tasks_api_version(),
             token: String::new(),
+            expected_github_user_id: None,
             allowed_repositories: Vec::new(),
             allowed_profiles: Vec::new(),
             allowed_models: Vec::new(),
@@ -158,6 +165,7 @@ impl std::fmt::Debug for CopilotAgentTaskReactionConfig {
             .field("github_graphql_url", &self.github_graphql_url)
             .field("agent_tasks_api_version", &self.agent_tasks_api_version)
             .field("token", &"[REDACTED]")
+            .field("expected_github_user_id", &self.expected_github_user_id)
             .field("allowed_repositories", &self.allowed_repositories)
             .field("allowed_profiles", &self.allowed_profiles)
             .field("allowed_models", &self.allowed_models)
@@ -181,6 +189,13 @@ impl CopilotAgentTaskReactionConfig {
         }
         if self.token.trim().is_empty() {
             bail!("`token` must not be empty (a fine-grained PAT or GitHub App user token is required)");
+        }
+        if self
+            .expected_github_user_id
+            .as_deref()
+            .is_some_and(|id| id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            bail!("`expectedGithubUserId` must contain only decimal digits");
         }
         if self.allowed_repositories.is_empty() {
             bail!("`allowedRepositories` must not be empty (fail-closed: nothing is allowed by default)");
@@ -230,6 +245,23 @@ mod tests {
     #[test]
     fn valid_config_passes() {
         assert!(valid_config().validate(&["query-1".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn accepts_numeric_expected_github_user_id() {
+        let mut config = valid_config();
+        config.expected_github_user_id = Some("4021243".to_string());
+        assert!(config.validate(&["query-1".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn rejects_non_numeric_expected_github_user_id() {
+        let mut config = valid_config();
+        config.expected_github_user_id = Some("trusted-user".to_string());
+        let error = config
+            .validate(&["query-1".to_string()])
+            .expect_err("non-numeric ID must fail");
+        assert!(error.to_string().contains("expectedGithubUserId"));
     }
 
     #[test]

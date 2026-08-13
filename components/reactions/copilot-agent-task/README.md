@@ -110,6 +110,7 @@ query-row inputs.
 | `githubGraphqlUrl` | string | `https://api.github.com/graphql` | GraphQL endpoint |
 | `agentTasksApiVersion` | string | `2026-03-10` | Sent as `X-GitHub-Api-Version` |
 | `token` | string (secret) | — | **Required.** Fine-grained PAT or GitHub App user token; see [Security](#security) |
+| `expectedGithubUserId` | string | — | Optional numeric user ID; startup fails if `GET /user` reports a different token owner |
 | `allowedRepositories` | string[] | — | **Required, non-empty** (fail-closed) |
 | `allowedProfiles` | string[] | — | **Required, non-empty** |
 | `allowedModels` | string[] | — | **Required, non-empty** |
@@ -120,9 +121,16 @@ query-row inputs.
 | `priorityQueueCapacity` | u64 | framework default | Optional reaction input queue capacity |
 
 The Drasi Server reaction object is flat (there is no `config:` or `properties:`
-wrapper); only `commentApi` is nested:
+wrapper); only `commentApi` is nested. Durable state-store wiring is server-wide:
 
 ```yaml
+stateStore:
+  kind: redb
+  path: ./data/workgraph-state.redb
+
+plugins:
+  - ref: reaction/copilot-agent-task
+
 reactions:
   - kind: copilot-agent-task
     id: copilot-launcher
@@ -130,6 +138,7 @@ reactions:
     queries:
       - launch-issue-validation
     token: ${GITHUB_AGENT_TOKEN}
+    expectedGithubUserId: ${TRUSTED_LAUNCHER_USER_ID}
     githubApiBaseUrl: https://api.github.com
     githubGraphqlUrl: https://api.github.com/graphql
     agentTasksApiVersion: "2026-03-10"
@@ -150,7 +159,7 @@ reactions:
 
 Generated dynamic-plugin schema name:
 `reaction.copilot_agent_task.CopilotAgentTaskReactionConfig`, config version
-`1.0.0`. Unknown fields are rejected.
+`1.1.0`. Unknown fields are rejected.
 
 In declarative (dynamic-plugin) config, `token` is a `ConfigValue<String>` and is expected to
 be supplied as a `${ENV_VAR}` reference or a `{"kind":"Secret","name":"..."}` reference —
@@ -296,6 +305,9 @@ prompt/body contains the attempt's `executionId`:
   included in `Reaction::properties()` — this is a framework contract (config persistence
   must be lossless so the reaction restarts correctly), not a log/display surface.
 - Prompt text is never logged, since it may contain sensitive repository or issue context.
+- Set `expectedGithubUserId` to the immutable numeric GitHub user ID trusted by the
+  launch query (`TRUSTED_LAUNCHER_USER_ID`). Startup probes `GET /user` and fails closed if
+  the token belongs to another identity. Logins remain display-only metadata.
 - All input (`repository`, `agentProfile`, `requestedModel`, `fallbackModel`) is validated
   against explicit allowlists; empty allowlists allow nothing (fail-closed).
 

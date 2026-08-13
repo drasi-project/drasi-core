@@ -59,6 +59,10 @@ pub struct CopilotAgentTaskReactionConfigDto {
     #[schema(value_type = ConfigValueString)]
     pub token: ConfigValue<String>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<ConfigValueString>)]
+    pub expected_github_user_id: Option<ConfigValue<String>>,
+
     pub allowed_repositories: Vec<String>,
     pub allowed_profiles: Vec<String>,
     pub allowed_models: Vec<String>,
@@ -86,6 +90,7 @@ impl From<&CopilotAgentTaskReactionConfig> for CopilotAgentTaskReactionConfigDto
             github_graphql_url: Some(ConfigValue::Static(c.github_graphql_url.clone())),
             agent_tasks_api_version: Some(ConfigValue::Static(c.agent_tasks_api_version.clone())),
             token: ConfigValue::Static(c.token.clone()),
+            expected_github_user_id: c.expected_github_user_id.clone().map(ConfigValue::Static),
             allowed_repositories: c.allowed_repositories.clone(),
             allowed_profiles: c.allowed_profiles.clone(),
             allowed_models: c.allowed_models.clone(),
@@ -122,7 +127,13 @@ async fn map_comment_api(
 }
 
 #[derive(OpenApi)]
-#[openapi(components(schemas(CopilotAgentTaskReactionConfigDto, CommentApiConfigDto,)))]
+#[openapi(components(schemas(
+    CopilotAgentTaskReactionConfigDto,
+    CommentApiConfigDto,
+    ConfigValueStringSchema,
+    ConfigValueU64Schema,
+    ConfigValueBoolSchema,
+)))]
 struct CopilotAgentTaskReactionSchemas;
 
 /// Descriptor for the Copilot Agent Task reaction plugin.
@@ -135,7 +146,7 @@ impl ReactionPluginDescriptor for CopilotAgentTaskReactionDescriptor {
     }
 
     fn config_version(&self) -> &str {
-        "1.0.0"
+        "1.1.0"
     }
 
     fn config_schema_name(&self) -> &str {
@@ -182,6 +193,7 @@ impl ReactionPluginDescriptor for CopilotAgentTaskReactionDescriptor {
         })
         .field("agentTasksApiVersion", |f| f.group("GitHub").order(3))
         .field("token", |f| f.group("GitHub").order(4).widget("password"))
+        .field("expectedGithubUserId", |f| f.group("GitHub").order(5))
         .field("allowedRepositories", |f| f.group("Allowlists").order(10))
         .field("allowedProfiles", |f| f.group("Allowlists").order(11))
         .field("allowedModels", |f| f.group("Allowlists").order(12))
@@ -219,6 +231,9 @@ impl ReactionPluginDescriptor for CopilotAgentTaskReactionDescriptor {
         }
         if let Some(ref v) = dto.agent_tasks_api_version {
             builder = builder.with_agent_tasks_api_version(mapper.resolve_string(v).await?);
+        }
+        if let Some(ref v) = dto.expected_github_user_id {
+            builder = builder.with_expected_github_user_id(mapper.resolve_string(v).await?);
         }
         builder = builder.with_allowed_repositories(dto.allowed_repositories.clone());
         builder = builder.with_allowed_profiles(dto.allowed_profiles.clone());
@@ -263,6 +278,24 @@ mod tests {
             .expect("create_reaction succeeds");
         assert_eq!(reaction.type_name(), "copilot-agent-task");
         std::env::remove_var("COPILOT_AGENT_TASK_TEST_TOKEN");
+    }
+
+    #[test]
+    fn generated_schema_exposes_numeric_token_owner_guard() {
+        let schema = CopilotAgentTaskReactionDescriptor.config_schema_json();
+        let schemas: serde_json::Value =
+            serde_json::from_str(&schema).expect("generated schema is JSON");
+        assert!(
+            schemas["reaction.copilot_agent_task.CopilotAgentTaskReactionConfig"]["properties"]
+                ["expectedGithubUserId"]
+                .is_object()
+        );
+        for referenced_schema in ["ConfigValueString", "ConfigValueU64", "ConfigValueBool"] {
+            assert!(
+                schemas[referenced_schema].is_object(),
+                "schema reference {referenced_schema} must resolve"
+            );
+        }
     }
 
     #[tokio::test]
