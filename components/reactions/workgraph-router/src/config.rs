@@ -71,6 +71,14 @@ pub struct WorkgraphRouterReactionConfig {
     pub trusted_agent_authors: Vec<String>,
     pub trusted_router_authors: Vec<String>,
     #[serde(default)]
+    pub trusted_routing_user_ids: Vec<u64>,
+    #[serde(default)]
+    pub trusted_launcher_user_ids: Vec<u64>,
+    #[serde(default)]
+    pub trusted_agent_user_ids: Vec<u64>,
+    #[serde(default)]
+    pub trusted_router_user_ids: Vec<u64>,
+    #[serde(default)]
     pub trusted_router_author_node_ids: Vec<String>,
     #[serde(default)]
     pub trusted_router_author_database_ids: Vec<u64>,
@@ -82,6 +90,7 @@ pub struct WorkgraphRouterReactionConfig {
     pub github_token_env: String,
     #[serde(default = "default_project_status_field_name")]
     pub project_status_field_name: String,
+    pub expected_project_status_field_node_id: String,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     #[serde(default = "default_reservation_lease_secs")]
@@ -112,6 +121,10 @@ impl std::fmt::Debug for WorkgraphRouterReactionConfig {
             .field("trusted_launcher_authors", &self.trusted_launcher_authors)
             .field("trusted_agent_authors", &self.trusted_agent_authors)
             .field("trusted_router_authors", &self.trusted_router_authors)
+            .field("trusted_routing_user_ids", &self.trusted_routing_user_ids)
+            .field("trusted_launcher_user_ids", &self.trusted_launcher_user_ids)
+            .field("trusted_agent_user_ids", &self.trusted_agent_user_ids)
+            .field("trusted_router_user_ids", &self.trusted_router_user_ids)
             .field(
                 "trusted_router_author_node_ids",
                 &self.trusted_router_author_node_ids,
@@ -124,6 +137,10 @@ impl std::fmt::Debug for WorkgraphRouterReactionConfig {
             .field("github_rest_url", &self.github_rest_url)
             .field("github_token_env", &self.github_token_env)
             .field("project_status_field_name", &self.project_status_field_name)
+            .field(
+                "expected_project_status_field_node_id",
+                &self.expected_project_status_field_node_id,
+            )
             .field("timeout_secs", &self.timeout_secs)
             .field("reservation_lease_secs", &self.reservation_lease_secs)
             .field("strict_recovery", &self.strict_recovery)
@@ -160,12 +177,17 @@ impl Default for WorkgraphRouterReactionConfig {
             trusted_launcher_authors: Vec::new(),
             trusted_agent_authors: Vec::new(),
             trusted_router_authors: Vec::new(),
+            trusted_routing_user_ids: Vec::new(),
+            trusted_launcher_user_ids: Vec::new(),
+            trusted_agent_user_ids: Vec::new(),
+            trusted_router_user_ids: Vec::new(),
             trusted_router_author_node_ids: Vec::new(),
             trusted_router_author_database_ids: Vec::new(),
             github_graphql_url: default_github_graphql_url(),
             github_rest_url: default_github_rest_url(),
             github_token_env: default_github_token_env(),
             project_status_field_name: default_project_status_field_name(),
+            expected_project_status_field_node_id: String::new(),
             timeout_secs: default_timeout_secs(),
             reservation_lease_secs: default_reservation_lease_secs(),
             strict_recovery: default_strict_recovery(),
@@ -237,12 +259,31 @@ impl WorkgraphRouterReactionConfig {
         if self.project_status_field_name.trim().is_empty() {
             anyhow::bail!("projectStatusFieldName is required");
         }
-        if self.strict_recovery
-            && self.trusted_router_author_node_ids.is_empty()
-            && self.trusted_router_author_database_ids.is_empty()
+        if !self
+            .expected_project_status_field_node_id
+            .starts_with("PVTSSF_")
+        {
+            anyhow::bail!("expectedProjectStatusFieldNodeId must start with 'PVTSSF_'");
+        }
+        if self.trusted_routing_user_ids.is_empty()
+            || self.trusted_launcher_user_ids.is_empty()
+            || self.trusted_agent_user_ids.is_empty()
+            || self.trusted_router_user_ids.is_empty()
         {
             anyhow::bail!(
-                "strictRecovery requires trustedRouterAuthorNodeIds or trustedRouterAuthorDatabaseIds for immutable reconciliation trust"
+                "trustedRoutingUserIds, trustedLauncherUserIds, trustedAgentUserIds, and trustedRouterUserIds must each contain at least one immutable GitHub user ID"
+            );
+        }
+        if self
+            .trusted_observed_user_ids()
+            .iter()
+            .any(|user_id| *user_id == 0)
+        {
+            anyhow::bail!("trusted GitHub user IDs must be positive");
+        }
+        if self.strict_recovery && self.trusted_router_identity_ids().is_empty() {
+            anyhow::bail!(
+                "strictRecovery requires trustedRouterUserIds for immutable reconciliation trust"
             );
         }
         Ok(())
@@ -263,6 +304,20 @@ impl WorkgraphRouterReactionConfig {
             .cloned()
             .collect()
     }
+
+    pub fn trusted_observed_user_ids(&self) -> HashSet<u64> {
+        self.trusted_routing_user_ids
+            .iter()
+            .chain(self.trusted_launcher_user_ids.iter())
+            .chain(self.trusted_agent_user_ids.iter())
+            .chain(self.trusted_router_user_ids.iter())
+            .copied()
+            .collect()
+    }
+
+    pub fn trusted_router_identity_ids(&self) -> HashSet<u64> {
+        self.trusted_router_user_ids.iter().copied().collect()
+    }
 }
 
 #[cfg(test)]
@@ -276,7 +331,12 @@ mod tests {
             allowed_repos: vec!["drasi-project/drasi-core".to_string()],
             timeout_secs: 10,
             reservation_lease_secs: 30,
+            trusted_routing_user_ids: vec![1001],
+            trusted_launcher_user_ids: vec![1001],
+            trusted_agent_user_ids: vec![1001],
+            trusted_router_user_ids: vec![1001],
             trusted_router_author_node_ids: vec!["MDQ6VXNlcjE=".to_string()],
+            expected_project_status_field_node_id: "PVTSSF_status".to_string(),
             ..WorkgraphRouterReactionConfig::default()
         }
     }
@@ -307,12 +367,12 @@ mod tests {
         let mut cfg = valid_config();
         cfg.trusted_router_author_node_ids.clear();
         cfg.trusted_router_author_database_ids.clear();
+        cfg.trusted_router_user_ids.clear();
         let err = cfg
             .validate(&[ROUTE_QUERY_ID.to_string()], None)
             .expect_err("strict recovery without immutable IDs must fail");
         assert!(
-            err.to_string()
-                .contains("strictRecovery requires trustedRouterAuthorNodeIds"),
+            err.to_string().contains("trustedRouterUserIds"),
             "unexpected error: {err:#}"
         );
     }

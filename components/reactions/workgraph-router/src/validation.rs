@@ -25,13 +25,54 @@ pub fn validate_candidate(
     ensure_not_empty("requiredEventType", &candidate.required_event_type)?;
     ensure_not_empty("eventId", &candidate.event_id)?;
     ensure_not_empty("eventType", &candidate.event_type)?;
+    ensure_not_empty("reasonCode", &candidate.reason_code)?;
+    ensure_not_empty("eventNodeId", &candidate.event_node_id)?;
     ensure_not_empty("subjectRepo", &candidate.subject_repo)?;
+    ensure_not_empty("subjectNodeId", &candidate.subject_node_id)?;
     ensure_not_empty("projectId", &candidate.project_id)?;
     ensure_not_empty("projectItemId", &candidate.project_item_id)?;
     ensure_not_empty("routeId", &candidate.route_id)?;
     ensure_not_empty("responsibilityId", &candidate.responsibility_id)?;
     ensure_not_empty("contentVersion", &candidate.content_version)?;
     ensure_not_empty("contentProfile", &candidate.content_profile)?;
+    ensure_not_empty("policyId", &candidate.policy_id)?;
+    ensure_not_empty("policyType", &candidate.policy_type)?;
+    ensure_not_empty("policyVersion", &candidate.policy_version)?;
+    ensure_not_empty("routingAuthor", &candidate.routing_author)?;
+    ensure_not_empty("launcherAuthor", &candidate.launcher_author)?;
+    ensure_not_empty("agentAuthor", &candidate.agent_author)?;
+    ensure_not_empty("routerAuthor", &candidate.router_author)?;
+    ensure_not_empty("commentAuthor", &candidate.comment_author)?;
+
+    if candidate.comment_id == 0 || candidate.subject_issue_number == 0 {
+        anyhow::bail!("commentId and subjectIssueNumber must be positive");
+    }
+    if !candidate.event_node_id.starts_with("workgraph-event:") {
+        anyhow::bail!("eventNodeId must start with 'workgraph-event:'");
+    }
+    if candidate.policy_id != config.policy_id
+        || candidate.policy_type != config.policy_type
+        || candidate.policy_version != config.policy_version
+    {
+        anyhow::bail!(
+            "candidate policy {}:{}@{} does not match configured policy {}:{}@{}",
+            candidate.policy_id,
+            candidate.policy_type,
+            candidate.policy_version,
+            config.policy_id,
+            config.policy_type,
+            config.policy_version
+        );
+    }
+    match candidate.outcome_key() {
+        "passed" if candidate.reason_code == "required-marker-present" => {}
+        "failed" if candidate.reason_code == "required-marker-missing" => {}
+        _ => anyhow::bail!(
+            "outcome '{}' and reasonCode '{}' are inconsistent",
+            candidate.outcome,
+            candidate.reason_code
+        ),
+    }
 
     require_allowlisted(
         "requiredEventType",
@@ -130,43 +171,61 @@ pub fn validate_candidate(
         anyhow::bail!("source comment provenance is edited; unedited comment is required");
     }
 
-    let trusted_observed_authors = config.trusted_observed_authors();
-    if trusted_observed_authors.is_empty() {
-        anyhow::bail!("trusted author allowlists are empty");
+    require_trusted_id(
+        "routingAuthorId",
+        candidate.routing_author_id,
+        &config.trusted_routing_user_ids,
+    )?;
+    require_trusted_id(
+        "launcherAuthorId",
+        candidate.launcher_author_id,
+        &config.trusted_launcher_user_ids,
+    )?;
+    require_trusted_id(
+        "agentAuthorId",
+        candidate.agent_author_id,
+        &config.trusted_agent_user_ids,
+    )?;
+    require_trusted_id(
+        "commentAuthorId",
+        candidate.agent_author_id,
+        &config.trusted_agent_user_ids,
+    )?;
+    require_trusted_id(
+        "routerAuthorId",
+        candidate.router_author_id,
+        &config.trusted_router_user_ids,
+    )?;
+
+    if candidate.comment_author != candidate.agent_author {
+        anyhow::bail!("commentAuthor does not match agentAuthor");
     }
 
-    require_trusted(
-        "routingAuthor",
-        &candidate.routing_author,
-        &config.trusted_routing_authors,
-    )?;
-    require_trusted(
-        "launcherAuthor",
-        &candidate.launcher_author,
-        &config.trusted_launcher_authors,
-    )?;
-    require_trusted(
-        "agentAuthor",
-        &candidate.agent_author,
-        &config.trusted_agent_authors,
-    )?;
-    require_trusted(
-        "routerAuthor",
-        &candidate.router_author,
-        &config.trusted_router_authors,
-    )?;
-    require_trusted(
-        "commentAuthor",
-        &candidate.comment_author,
-        &config.trusted_routing_authors,
-    )?;
-
-    if !candidate
+    let expected_observed_authors = [
+        candidate.routing_author.as_str(),
+        candidate.launcher_author.as_str(),
+        candidate.agent_author.as_str(),
+    ];
+    if candidate
         .observed_authors
         .iter()
-        .all(|author| trusted_observed_authors.contains(author))
+        .map(String::as_str)
+        .ne(expected_observed_authors)
     {
-        anyhow::bail!("observedAuthors contains untrusted author(s)");
+        anyhow::bail!("observedAuthors does not match routing, launcher, and agent provenance");
+    }
+    let expected_observed_author_ids = [
+        candidate.routing_author_id,
+        candidate.launcher_author_id,
+        candidate.agent_author_id,
+    ];
+    if candidate
+        .observed_author_ids
+        .iter()
+        .copied()
+        .ne(expected_observed_author_ids)
+    {
+        anyhow::bail!("observedAuthorIds does not match routing, launcher, and agent provenance");
     }
 
     Ok(())
@@ -186,8 +245,8 @@ fn require_allowlisted(name: &str, value: &str, allowlist: &[String]) -> anyhow:
     anyhow::bail!("{name} '{value}' is not in allowlist");
 }
 
-fn require_trusted(name: &str, value: &str, allowlist: &[String]) -> anyhow::Result<()> {
-    if allowlist.iter().any(|allowed| allowed == value) {
+fn require_trusted_id(name: &str, value: u64, allowlist: &[u64]) -> anyhow::Result<()> {
+    if value > 0 && allowlist.contains(&value) {
         return Ok(());
     }
     anyhow::bail!("{name} '{value}' is not trusted");

@@ -45,7 +45,7 @@ pub struct PolicyOutcome {
     pub next_responsibility_owner: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker_request: Option<String>,
-    pub reason: String,
+    pub reason_code: String,
 }
 
 pub trait RoutingPolicyEngine: Send + Sync {
@@ -74,8 +74,7 @@ impl RoutingPolicyEngine for RulesV1PolicyEngine {
                 next_responsibility_type: "issue-risk-profiling".to_string(),
                 next_responsibility_owner: candidate.responsibility_actor.clone(),
                 marker_request: None,
-                reason: "Completed issue validation passed; route to issue risk profiling."
-                    .to_string(),
+                reason_code: "issue-validation-passed".to_string(),
             }),
             "failed" => Ok(PolicyOutcome {
                 from_status: "AwaitingRouting".to_string(),
@@ -85,8 +84,7 @@ impl RoutingPolicyEngine for RulesV1PolicyEngine {
                 marker_request: Some(
                     "Please provide additional details requested by issue validation.".to_string(),
                 ),
-                reason: "Completed issue validation failed; request submitter correction."
-                    .to_string(),
+                reason_code: "issue-validation-failed".to_string(),
             }),
             other => anyhow::bail!("unsupported outcome '{other}' for rules_v1"),
         }

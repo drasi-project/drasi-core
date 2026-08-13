@@ -137,8 +137,11 @@ fn sample_candidate() -> RoutingCandidate {
         event_id: "event-1".to_string(),
         event_type: "CompletedIssueValidation".to_string(),
         outcome: "passed".to_string(),
+        reason_code: "required-marker-present".to_string(),
+        event_node_id: "workgraph-event:IC_event".to_string(),
         subject_repo: "drasi-project/drasi-core".to_string(),
         subject_issue_number: 42,
+        subject_node_id: "I_issue".to_string(),
         project_id: "PVT_project".to_string(),
         project_item_id: "PVTI_item".to_string(),
         project_status: "AwaitingRouting".to_string(),
@@ -147,31 +150,39 @@ fn sample_candidate() -> RoutingCandidate {
         route_expected_event_type: "CompletedIssueValidation".to_string(),
         route_expected_subject_repo: "drasi-project/drasi-core".to_string(),
         route_expected_subject_issue_number: 42,
-        route_content_version: "sha256:abc".to_string(),
+        route_content_version: "2026-01-01T00:00:00Z".to_string(),
         route_content_profile: "phase2".to_string(),
         responsibility_id: "resp-1".to_string(),
         responsibility_type: "issue-validation".to_string(),
         responsibility_actor: "bot-user".to_string(),
         submitter_actor: "submitter-user".to_string(),
         launcher_author: "launcher-user".to_string(),
+        launcher_author_id: 1001,
         agent_author: "agent-user".to_string(),
+        agent_author_id: 1001,
         router_author: "router-user".to_string(),
+        router_author_id: 1001,
         routing_author: "router-user".to_string(),
+        routing_author_id: 1001,
         observed_authors: vec![
+            "router-user".to_string(),
             "launcher-user".to_string(),
             "agent-user".to_string(),
-            "router-user".to_string(),
         ],
+        observed_author_ids: vec![1001, 1001, 1001],
         comment_id: 1000,
-        comment_author: "router-user".to_string(),
+        comment_author: "agent-user".to_string(),
         comment_body: "{\"source\":\"validated\"}".to_string(),
         comment_edited: false,
         comment_created_at: Some("2026-01-01T00:00:00Z".to_string()),
         comment_updated_at: Some("2026-01-01T00:00:00Z".to_string()),
         comment_provenance_event_id: "event-1".to_string(),
         comment_provenance_event_type: "CompletedIssueValidation".to_string(),
-        content_version: "sha256:abc".to_string(),
+        content_version: "2026-01-01T00:00:00Z".to_string(),
         content_profile: "phase2".to_string(),
+        policy_id: "policy-1".to_string(),
+        policy_type: "rules_v1".to_string(),
+        policy_version: "1.0.0".to_string(),
     }
 }
 
@@ -184,6 +195,23 @@ fn status_snapshot_response(status: &str) -> Value {
         "PVT_project",
         "PVTI_item",
     )
+}
+
+fn issue_snapshot_response() -> Value {
+    json!({
+        "data": {
+            "issue": {
+                "id": "I_issue",
+                "number": 42,
+                "state": "OPEN",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "lastEditedAt": null,
+                "repository": {
+                    "nameWithOwner": "drasi-project/drasi-core"
+                }
+            }
+        }
+    })
 }
 
 fn status_snapshot_response_for_item(
@@ -284,7 +312,12 @@ fn base_reaction_with_timeouts(
         .with_trusted_launcher_authors(vec!["launcher-user".to_string()])
         .with_trusted_agent_authors(vec!["agent-user".to_string()])
         .with_trusted_router_authors(vec!["router-user".to_string()])
+        .with_trusted_routing_user_ids(vec![1001])
+        .with_trusted_launcher_user_ids(vec![1001])
+        .with_trusted_agent_user_ids(vec![1001])
+        .with_trusted_router_user_ids(vec![1001])
         .with_trusted_router_author_node_ids(vec!["MDQ6VXNlcjE=".to_string()])
+        .with_expected_project_status_field_node_id("PVTSSF_status")
         .with_github_rest_url(server.uri())
         .with_github_graphql_url(format!("{}/graphql", server.uri()))
         .with_github_token_env("WG_ROUTER_TEST_TOKEN")
@@ -479,6 +512,7 @@ fn comment_type_from_request(req: &wiremock::Request) -> Option<String> {
     let inner: Value = serde_json::from_str(body).ok()?;
     inner
         .get("type")
+        .or_else(|| inner.get("schemaVersion"))
         .and_then(Value::as_str)
         .map(ToString::to_string)
 }
@@ -510,6 +544,8 @@ async fn mount_common_success_mocks(server: &MockServer, preflight_status: &str)
         .await;
 
     let preflight = status_snapshot_response(preflight_status);
+    mount_issue_snapshot_mock(server).await;
+
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
@@ -534,6 +570,15 @@ async fn mount_common_success_mocks(server: &MockServer, preflight_status: &str)
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z"
         })))
+        .mount(server)
+        .await;
+}
+
+async fn mount_issue_snapshot_mock(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("WorkgraphRouterIssueSnapshot"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(issue_snapshot_response()))
         .mount(server)
         .await;
 }
@@ -579,6 +624,7 @@ async fn failed_validation_routes_to_issue_correction() {
 
     let mut candidate = sample_candidate();
     candidate.outcome = "failed".to_string();
+    candidate.reason_code = "required-marker-missing".to_string();
     enqueue_add(&reaction, &candidate, 1).await;
     wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
     reaction.stop().await.expect("reaction stop");
@@ -929,6 +975,7 @@ async fn retry_with_closed_issue_fails_preflight_and_emits_no_side_effects() {
 async fn retry_with_competing_status_fails_preflight_and_does_not_overwrite() {
     std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-competing-status");
     let server = MockServer::start().await;
+    mount_issue_snapshot_mock(&server).await;
     Mock::given(method("GET"))
         .and(path("/repos/drasi-project/drasi-core/issues/42"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
@@ -975,6 +1022,7 @@ async fn retry_with_competing_status_fails_preflight_and_does_not_overwrite() {
 async fn status_change_between_comment_writes_aborts_second_comment_and_mutation() {
     std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-preflight-race-status");
     let server = MockServer::start().await;
+    mount_issue_snapshot_mock(&server).await;
 
     Mock::given(method("GET"))
         .and(path("/repos/drasi-project/drasi-core/issues/42"))
@@ -1052,6 +1100,7 @@ async fn status_change_between_comment_writes_aborts_second_comment_and_mutation
 async fn issue_closes_before_status_mutation_aborts_without_overwrite() {
     std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-preflight-race-issue");
     let server = MockServer::start().await;
+    mount_issue_snapshot_mock(&server).await;
 
     let issue_calls = Arc::new(AtomicUsize::new(0));
     let issue_counter = Arc::clone(&issue_calls);
@@ -1129,6 +1178,7 @@ async fn issue_closes_before_status_mutation_aborts_without_overwrite() {
 async fn status_race_between_preflight_and_mutation_rejects_update() {
     std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-status-race-pre-mutation");
     let server = MockServer::start().await;
+    mount_issue_snapshot_mock(&server).await;
 
     Mock::given(method("GET"))
         .and(path("/repos/drasi-project/drasi-core/issues/42"))
@@ -1201,6 +1251,7 @@ async fn status_race_between_preflight_and_mutation_rejects_update() {
 async fn already_at_destination_snapshot_skips_mutation() {
     std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-status-already-destination");
     let server = MockServer::start().await;
+    mount_issue_snapshot_mock(&server).await;
 
     Mock::given(method("GET"))
         .and(path("/repos/drasi-project/drasi-core/issues/42"))
@@ -1273,6 +1324,7 @@ async fn already_at_destination_snapshot_skips_mutation() {
 async fn mismatched_project_item_issue_rejects_before_side_effects() {
     std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-mismatch-item-issue");
     let server = MockServer::start().await;
+    mount_issue_snapshot_mock(&server).await;
 
     Mock::given(method("GET"))
         .and(path("/repos/drasi-project/drasi-core/issues/42"))
@@ -1321,6 +1373,7 @@ async fn mismatched_project_item_issue_rejects_before_side_effects() {
 async fn mismatched_project_item_repo_rejects_before_side_effects() {
     std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-mismatch-item-repo");
     let server = MockServer::start().await;
+    mount_issue_snapshot_mock(&server).await;
 
     Mock::given(method("GET"))
         .and(path("/repos/drasi-project/drasi-core/issues/42"))
@@ -1369,6 +1422,7 @@ async fn mismatched_project_item_repo_rejects_before_side_effects() {
 async fn stale_owner_with_delayed_preflight_cannot_emit_duplicate_side_effects() {
     std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-delayed-lease-fence");
     let server = MockServer::start().await;
+    mount_issue_snapshot_mock(&server).await;
 
     Mock::given(method("GET"))
         .and(path("/repos/drasi-project/drasi-core/issues/42"))
@@ -1491,6 +1545,7 @@ async fn interrupted_old_policy_reservation_resumes_with_persisted_decision_cont
     let candidate = sample_candidate();
     let mut failed_outcome_candidate = candidate.clone();
     failed_outcome_candidate.outcome = "failed".to_string();
+    failed_outcome_candidate.reason_code = "required-marker-missing".to_string();
     let old_decision = RoutingDecision::from_policy(
         &policy_identity_config("1.0.0"),
         &failed_outcome_candidate,
@@ -1531,7 +1586,9 @@ async fn interrupted_old_policy_reservation_resumes_with_persisted_decision_cont
     let retry = base_reaction(&server, "2.0.0");
     initialize_reaction(&retry, Arc::clone(&store)).await;
     retry.start().await.expect("retry start");
-    enqueue_add(&retry, &candidate, 2).await;
+    let mut current_policy_candidate = candidate.clone();
+    current_policy_candidate.policy_version = "2.0.0".to_string();
+    enqueue_add(&retry, &current_policy_candidate, 2).await;
     wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
     wait_for_count(&server, is_project_status_mutation, 1).await;
     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1545,7 +1602,9 @@ async fn interrupted_old_policy_reservation_resumes_with_persisted_decision_cont
             let outer: Value = serde_json::from_slice(&req.body).ok()?;
             let body = outer.get("body")?.as_str()?;
             let inner: Value = serde_json::from_str(body).ok()?;
-            if inner.get("type").and_then(Value::as_str) == Some("workgraph.routing-decision/v1") {
+            if inner.get("schemaVersion").and_then(Value::as_str)
+                == Some("workgraph.routing-decision/v1")
+            {
                 Some(inner)
             } else {
                 None
@@ -1555,14 +1614,12 @@ async fn interrupted_old_policy_reservation_resumes_with_persisted_decision_cont
     assert_eq!(decision_payloads.len(), 1);
     let payload = &decision_payloads[0];
     assert_eq!(
-        payload.pointer("/policy/version").and_then(Value::as_str),
+        payload.get("policyVersion").and_then(Value::as_str),
         Some("1.0.0"),
         "retry must resume with persisted policy contract, not current config policy version"
     );
     assert_eq!(
-        payload
-            .pointer("/transition/toStatus")
-            .and_then(Value::as_str),
+        payload.get("toStatus").and_then(Value::as_str),
         Some("NeedsMoreInformation"),
         "retry must use persisted decision transition"
     );
@@ -1626,6 +1683,7 @@ async fn stale_content_and_wrong_status_are_rejected() {
 async fn graphql_200_errors_are_treated_as_failures() {
     std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-graphql");
     let server = MockServer::start().await;
+    mount_issue_snapshot_mock(&server).await;
 
     Mock::given(method("GET"))
         .and(path("/repos/drasi-project/drasi-core/issues/42"))
@@ -1663,6 +1721,7 @@ async fn graphql_200_errors_are_treated_as_failures() {
 async fn partial_side_effect_recovery_reconciles_trusted_comments() {
     std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-recovery");
     let first = MockServer::start().await;
+    mount_issue_snapshot_mock(&first).await;
     Mock::given(method("GET"))
         .and(path("/repos/drasi-project/drasi-core/issues/42"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
@@ -1730,6 +1789,7 @@ async fn partial_side_effect_recovery_reconciles_trusted_comments() {
         .expect("responsibility body");
 
     let second = MockServer::start().await;
+    mount_issue_snapshot_mock(&second).await;
     Mock::given(method("GET"))
         .and(path("/repos/drasi-project/drasi-core/issues/42"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))

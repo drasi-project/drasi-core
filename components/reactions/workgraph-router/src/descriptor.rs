@@ -68,6 +68,18 @@ pub struct WorkgraphRouterReactionConfigDto {
     #[schema(value_type = Vec<ConfigValueString>)]
     pub trusted_router_authors: Vec<ConfigValue<String>>,
     #[serde(default)]
+    #[schema(value_type = Vec<ConfigValueU64>)]
+    pub trusted_routing_user_ids: Vec<ConfigValue<u64>>,
+    #[serde(default)]
+    #[schema(value_type = Vec<ConfigValueU64>)]
+    pub trusted_launcher_user_ids: Vec<ConfigValue<u64>>,
+    #[serde(default)]
+    #[schema(value_type = Vec<ConfigValueU64>)]
+    pub trusted_agent_user_ids: Vec<ConfigValue<u64>>,
+    #[serde(default)]
+    #[schema(value_type = Vec<ConfigValueU64>)]
+    pub trusted_router_user_ids: Vec<ConfigValue<u64>>,
+    #[serde(default)]
     #[schema(value_type = Vec<ConfigValueString>)]
     pub trusted_router_author_node_ids: Vec<ConfigValue<String>>,
     #[serde(default)]
@@ -85,6 +97,8 @@ pub struct WorkgraphRouterReactionConfigDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueString>)]
     pub project_status_field_name: Option<ConfigValue<String>>,
+    #[schema(value_type = ConfigValueString)]
+    pub expected_project_status_field_node_id: ConfigValue<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueU64>)]
     pub timeout_secs: Option<ConfigValue<u64>>,
@@ -173,6 +187,30 @@ impl From<&WorkgraphRouterReactionConfig> for WorkgraphRouterReactionConfigDto {
                 .cloned()
                 .map(ConfigValue::Static)
                 .collect(),
+            trusted_routing_user_ids: config
+                .trusted_routing_user_ids
+                .iter()
+                .copied()
+                .map(ConfigValue::Static)
+                .collect(),
+            trusted_launcher_user_ids: config
+                .trusted_launcher_user_ids
+                .iter()
+                .copied()
+                .map(ConfigValue::Static)
+                .collect(),
+            trusted_agent_user_ids: config
+                .trusted_agent_user_ids
+                .iter()
+                .copied()
+                .map(ConfigValue::Static)
+                .collect(),
+            trusted_router_user_ids: config
+                .trusted_router_user_ids
+                .iter()
+                .copied()
+                .map(ConfigValue::Static)
+                .collect(),
             trusted_router_author_node_ids: config
                 .trusted_router_author_node_ids
                 .iter()
@@ -191,6 +229,9 @@ impl From<&WorkgraphRouterReactionConfig> for WorkgraphRouterReactionConfigDto {
             project_status_field_name: Some(ConfigValue::Static(
                 config.project_status_field_name.clone(),
             )),
+            expected_project_status_field_node_id: ConfigValue::Static(
+                config.expected_project_status_field_node_id.clone(),
+            ),
             timeout_secs: Some(ConfigValue::Static(config.timeout_secs)),
             reservation_lease_secs: Some(ConfigValue::Static(config.reservation_lease_secs)),
             strict_recovery: Some(ConfigValue::Static(config.strict_recovery)),
@@ -299,7 +340,12 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
             .with_github_token_env(match dto.github_token_env.as_ref() {
                 Some(value) => mapper.resolve_string(value).await?,
                 None => default_config.github_token_env.clone(),
-            });
+            })
+            .with_expected_project_status_field_node_id(
+                mapper
+                    .resolve_string(&dto.expected_project_status_field_node_id)
+                    .await?,
+            );
 
         if let Some(allowed_event_types) = dto.allowed_event_types.as_ref() {
             builder = builder
@@ -321,6 +367,30 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
             }
             builder = builder.with_trusted_router_author_database_ids(ids);
         }
+
+        let mut ids = Vec::with_capacity(dto.trusted_routing_user_ids.len());
+        for id in &dto.trusted_routing_user_ids {
+            ids.push(mapper.resolve_typed::<u64>(id).await?);
+        }
+        builder = builder.with_trusted_routing_user_ids(ids);
+
+        let mut ids = Vec::with_capacity(dto.trusted_launcher_user_ids.len());
+        for id in &dto.trusted_launcher_user_ids {
+            ids.push(mapper.resolve_typed::<u64>(id).await?);
+        }
+        builder = builder.with_trusted_launcher_user_ids(ids);
+
+        let mut ids = Vec::with_capacity(dto.trusted_agent_user_ids.len());
+        for id in &dto.trusted_agent_user_ids {
+            ids.push(mapper.resolve_typed::<u64>(id).await?);
+        }
+        builder = builder.with_trusted_agent_user_ids(ids);
+
+        let mut ids = Vec::with_capacity(dto.trusted_router_user_ids.len());
+        for id in &dto.trusted_router_user_ids {
+            ids.push(mapper.resolve_typed::<u64>(id).await?);
+        }
+        builder = builder.with_trusted_router_user_ids(ids);
 
         if let Some(project_status_field_name) = dto.project_status_field_name.as_ref() {
             builder = builder.with_project_status_field_name(
@@ -414,6 +484,7 @@ mod tests {
             "githubGraphqlUrl": "https://api.github.com/graphql",
             "githubRestUrl": "https://api.github.com",
             "githubTokenEnv": "GITHUB_TOKEN",
+            "expectedProjectStatusFieldNodeId": "PVTSSF_status",
             "reservationLeaseSecs": 300
         });
 
@@ -439,7 +510,8 @@ mod tests {
             "trustedAgentAuthors": [],
             "trustedRouterAuthors": [],
             "trustedRouterAuthorNodeIds": [],
-            "trustedRouterAuthorDatabaseIds": []
+            "trustedRouterAuthorDatabaseIds": [],
+            "expectedProjectStatusFieldNodeId": "PVTSSF_status"
         });
 
         let dto: WorkgraphRouterReactionConfigDto =
@@ -470,6 +542,7 @@ mod tests {
             "githubGraphqlUrl": "https://api.github.com/graphql",
             "githubRestUrl": "https://api.github.com",
             "githubTokenEnv": "GITHUB_TOKEN",
+            "expectedProjectStatusFieldNodeId": "PVTSSF_status",
             "reservationLeaseSecs": 300,
             "totallyUnknownField": true
         });
@@ -494,6 +567,11 @@ mod tests {
             "trustedLauncherAuthors": ["launcher-user"],
             "trustedAgentAuthors": ["agent-user"],
             "trustedRouterAuthors": ["router-user"],
+            "trustedRoutingUserIds": [1001],
+            "trustedLauncherUserIds": [1001],
+            "trustedAgentUserIds": [1001],
+            "trustedRouterUserIds": [1001],
+            "expectedProjectStatusFieldNodeId": "PVTSSF_status",
             "strictRecovery": false
         })
     }

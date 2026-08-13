@@ -149,6 +149,26 @@ impl WorkgraphRouterReactionBuilder {
         self
     }
 
+    pub fn with_trusted_routing_user_ids(mut self, values: Vec<u64>) -> Self {
+        self.config.trusted_routing_user_ids = values;
+        self
+    }
+
+    pub fn with_trusted_launcher_user_ids(mut self, values: Vec<u64>) -> Self {
+        self.config.trusted_launcher_user_ids = values;
+        self
+    }
+
+    pub fn with_trusted_agent_user_ids(mut self, values: Vec<u64>) -> Self {
+        self.config.trusted_agent_user_ids = values;
+        self
+    }
+
+    pub fn with_trusted_router_user_ids(mut self, values: Vec<u64>) -> Self {
+        self.config.trusted_router_user_ids = values;
+        self
+    }
+
     pub fn with_trusted_router_author_node_ids(mut self, values: Vec<String>) -> Self {
         self.config.trusted_router_author_node_ids = values;
         self
@@ -176,6 +196,11 @@ impl WorkgraphRouterReactionBuilder {
 
     pub fn with_project_status_field_name(mut self, value: impl Into<String>) -> Self {
         self.config.project_status_field_name = value.into();
+        self
+    }
+
+    pub fn with_expected_project_status_field_node_id(mut self, value: impl Into<String>) -> Self {
+        self.config.expected_project_status_field_node_id = value.into();
         self
     }
 

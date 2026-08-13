@@ -90,6 +90,23 @@ mutation WorkgraphRouterUpdateProjectV2Status(
 }
 "#;
 
+const ISSUE_SNAPSHOT_QUERY: &str = r#"
+query WorkgraphRouterIssueSnapshot($issueId: ID!) {
+  issue: node(id: $issueId) {
+    ... on Issue {
+      id
+      number
+      state
+      createdAt
+      lastEditedAt
+      repository {
+        nameWithOwner
+      }
+    }
+  }
+}
+"#;
+
 #[derive(Debug, Clone)]
 pub struct GithubClient {
     http: reqwest::Client,
@@ -97,6 +114,7 @@ pub struct GithubClient {
     pub graphql_url: String,
     pub token_env: String,
     pub project_status_field_name: String,
+    pub expected_project_status_field_node_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,7 +160,69 @@ impl GithubClient {
             graphql_url: config.github_graphql_url.clone(),
             token_env: config.github_token_env.clone(),
             project_status_field_name: config.project_status_field_name.clone(),
+            expected_project_status_field_node_id: config
+                .expected_project_status_field_node_id
+                .clone(),
         })
+    }
+
+    pub async fn validate_issue_snapshot(
+        &self,
+        issue_node_id: &str,
+        expected_repo: &str,
+        expected_issue_number: u64,
+        expected_content_version: &str,
+    ) -> anyhow::Result<()> {
+        let data = self
+            .graphql(
+                ISSUE_SNAPSHOT_QUERY,
+                serde_json::json!({"issueId": issue_node_id}),
+            )
+            .await
+            .context("failed to resolve issue snapshot")?;
+        let actual_id = data
+            .pointer("/issue/id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("GraphQL issue snapshot missing issue.id"))?;
+        let actual_repo = data
+            .pointer("/issue/repository/nameWithOwner")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("GraphQL issue snapshot missing repository"))?;
+        let actual_number = data
+            .pointer("/issue/number")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("GraphQL issue snapshot missing number"))?;
+        let state = data
+            .pointer("/issue/state")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("GraphQL issue snapshot missing state"))?;
+        if actual_id != issue_node_id
+            || actual_repo != expected_repo
+            || actual_number != expected_issue_number
+        {
+            anyhow::bail!("GraphQL issue snapshot does not match the routing subject");
+        }
+        if !state.eq_ignore_ascii_case("open") {
+            anyhow::bail!("subject issue {expected_repo}/{expected_issue_number} is not open");
+        }
+
+        let actual_content_version = data
+            .pointer("/issue/lastEditedAt")
+            .and_then(Value::as_str)
+            .or_else(|| data.pointer("/issue/createdAt").and_then(Value::as_str))
+            .ok_or_else(|| {
+                anyhow::anyhow!("GraphQL issue snapshot missing lastEditedAt and createdAt")
+            })?;
+        let actual = chrono::DateTime::parse_from_rfc3339(actual_content_version)
+            .context("GraphQL issue content version is not RFC3339")?;
+        let expected = chrono::DateTime::parse_from_rfc3339(expected_content_version)
+            .context("routing contentVersion is not RFC3339")?;
+        if actual != expected {
+            anyhow::bail!(
+                "issue content version '{actual_content_version}' does not match routed version '{expected_content_version}'"
+            );
+        }
+        Ok(())
     }
 
     pub async fn issue_is_open(&self, repo: &str, issue_number: u64) -> anyhow::Result<bool> {
@@ -187,6 +267,9 @@ impl GithubClient {
         snapshot
             .validate_content_correlation(expected_repo, expected_issue_number)
             .context("project item content correlation validation failed")?;
+        snapshot
+            .validate_status_field_id(&self.expected_project_status_field_node_id)
+            .context("project status field identity validation failed")?;
         Ok(snapshot.current_status)
     }
 
@@ -206,6 +289,9 @@ impl GithubClient {
         snapshot
             .validate_content_correlation(expected_repo, expected_issue_number)
             .context("project item content correlation validation failed")?;
+        snapshot
+            .validate_status_field_id(&self.expected_project_status_field_node_id)
+            .context("project status field identity validation failed")?;
 
         if snapshot.current_status == target_status {
             return Ok(UpdateStatusOutcome::AlreadyAtDestination);
@@ -495,6 +581,17 @@ struct ProjectStatusSnapshot {
 }
 
 impl ProjectStatusSnapshot {
+    fn validate_status_field_id(&self, expected: &str) -> anyhow::Result<()> {
+        if self.status_field_id != expected {
+            anyhow::bail!(
+                "project status field '{}' does not match expected '{}'",
+                self.status_field_id,
+                expected
+            );
+        }
+        Ok(())
+    }
+
     fn validate_content_correlation(
         &self,
         expected_repo: &str,

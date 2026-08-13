@@ -22,8 +22,11 @@ pub struct RoutingCandidate {
     pub event_id: String,
     pub event_type: String,
     pub outcome: String,
+    pub reason_code: String,
+    pub event_node_id: String,
     pub subject_repo: String,
     pub subject_issue_number: u64,
+    pub subject_node_id: String,
     pub project_id: String,
     pub project_item_id: String,
     pub project_status: String,
@@ -39,11 +42,17 @@ pub struct RoutingCandidate {
     pub responsibility_actor: String,
     pub submitter_actor: String,
     pub launcher_author: String,
+    pub launcher_author_id: u64,
     pub agent_author: String,
+    pub agent_author_id: u64,
     pub router_author: String,
+    pub router_author_id: u64,
     pub routing_author: String,
+    pub routing_author_id: u64,
     #[serde(default)]
     pub observed_authors: Vec<String>,
+    #[serde(default)]
+    pub observed_author_ids: Vec<u64>,
     pub comment_id: u64,
     pub comment_author: String,
     pub comment_body: String,
@@ -56,6 +65,9 @@ pub struct RoutingCandidate {
     pub comment_provenance_event_type: String,
     pub content_version: String,
     pub content_profile: String,
+    pub policy_id: String,
+    pub policy_type: String,
+    pub policy_version: String,
 }
 
 impl RoutingCandidate {

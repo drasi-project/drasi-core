@@ -771,10 +771,7 @@ async fn finalize_terminal_rejection(
         let reservation = load_reservation_with_bytes(store.clone(), &base.id, reservation_key)
             .await?
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "terminal rejection reservation '{}' is missing",
-                    reservation_key
-                )
+                anyhow::anyhow!("terminal rejection reservation '{reservation_key}' is missing")
             })?
             .record;
         let expected_decision_id = format!("terminal-rejection:{row_fingerprint}");
@@ -782,8 +779,7 @@ async fn finalize_terminal_rejection(
             || reservation.decision_id.as_deref() != Some(expected_decision_id.as_str())
         {
             anyhow::bail!(
-                "terminal rejection reservation '{}' is not durably tombstoned",
-                reservation_key
+                "terminal rejection reservation '{reservation_key}' is not durably tombstoned"
             );
         }
 
@@ -1624,7 +1620,7 @@ async fn run_github_preflight(
     if !github
         .issue_is_open(&candidate.subject_repo, candidate.subject_issue_number)
         .await
-        .context("GitHub issue preflight failed")?
+        .context("GitHub issue state preflight failed")?
     {
         anyhow::bail!(
             "subject issue {}/{} is not open",
@@ -1632,6 +1628,15 @@ async fn run_github_preflight(
             candidate.subject_issue_number
         );
     }
+    github
+        .validate_issue_snapshot(
+            &candidate.subject_node_id,
+            &candidate.subject_repo,
+            candidate.subject_issue_number,
+            &candidate.content_version,
+        )
+        .await
+        .context("GitHub issue preflight failed")?;
     let current_status = github
         .current_project_status(
             &candidate.project_id,
@@ -1987,7 +1992,12 @@ mod tests {
             trusted_launcher_authors: vec!["launcher-user".to_string()],
             trusted_agent_authors: vec!["agent-user".to_string()],
             trusted_router_authors: vec!["router-user".to_string()],
+            trusted_routing_user_ids: vec![1001],
+            trusted_launcher_user_ids: vec![1001],
+            trusted_agent_user_ids: vec![1001],
+            trusted_router_user_ids: vec![1001],
             trusted_router_author_node_ids: vec!["MDQ6VXNlcjE=".to_string()],
+            expected_project_status_field_node_id: "PVTSSF_status".to_string(),
             timeout_secs: 5,
             reservation_lease_secs: 15,
             ..WorkgraphRouterReactionConfig::default()
@@ -2001,8 +2011,11 @@ mod tests {
             event_id: "event-1".to_string(),
             event_type: "CompletedIssueValidation".to_string(),
             outcome: "passed".to_string(),
+            reason_code: "required-marker-present".to_string(),
+            event_node_id: "workgraph-event:IC_event".to_string(),
             subject_repo: "drasi-project/drasi-core".to_string(),
             subject_issue_number: 42,
+            subject_node_id: "I_issue".to_string(),
             project_id: "PVT_project".to_string(),
             project_item_id: "PVTI_item".to_string(),
             project_status: "AwaitingRouting".to_string(),
@@ -2018,16 +2031,21 @@ mod tests {
             responsibility_actor: "bot-user".to_string(),
             submitter_actor: "submitter-user".to_string(),
             launcher_author: "launcher-user".to_string(),
+            launcher_author_id: 1001,
             agent_author: "agent-user".to_string(),
+            agent_author_id: 1001,
             router_author: "router-user".to_string(),
+            router_author_id: 1001,
             routing_author: "router-user".to_string(),
+            routing_author_id: 1001,
             observed_authors: vec![
+                "router-user".to_string(),
                 "launcher-user".to_string(),
                 "agent-user".to_string(),
-                "router-user".to_string(),
             ],
+            observed_author_ids: vec![1001, 1001, 1001],
             comment_id: 1,
-            comment_author: "router-user".to_string(),
+            comment_author: "agent-user".to_string(),
             comment_body: "{\"ok\":true}".to_string(),
             comment_edited: false,
             comment_created_at: Some("2026-01-01T00:00:00Z".to_string()),
@@ -2036,6 +2054,9 @@ mod tests {
             comment_provenance_event_type: "CompletedIssueValidation".to_string(),
             content_version: "sha256:abc".to_string(),
             content_profile: "phase2".to_string(),
+            policy_id: "policy-1".to_string(),
+            policy_type: "rules_v1".to_string(),
+            policy_version: "1.0.0".to_string(),
         }
     }
 
@@ -2386,7 +2407,7 @@ mod tests {
     async fn validation_drift_cannot_terminalize_existing_routing_state() {
         let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
         let mut runtime_config = sample_config();
-        runtime_config.trusted_agent_authors = vec!["replacement-agent".to_string()];
+        runtime_config.trusted_agent_user_ids = vec![9999];
         let reaction = make_reaction("router-validation-drift", &runtime_config);
         initialize_reaction_for_test(&reaction, store.clone()).await;
 
