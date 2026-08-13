@@ -19,10 +19,11 @@ Top-level config (`camelCase`):
 - `allowedStatusTransitions` (`[{ from, to }]`)
 - `allowedResponsibilityTypes`, `allowedActors`
 - `trustedRoutingAuthors`, `trustedLauncherAuthors`, `trustedAgentAuthors`, `trustedRouterAuthors`
+- `trustedRouterAuthorNodeIds`, `trustedRouterAuthorDatabaseIds` (immutable GitHub actor IDs used for strict reconciliation trust)
 - `githubGraphqlUrl`, `githubRestUrl`, `githubTokenEnv`
 - `projectStatusFieldName` (defaults to `Status`)
 - `timeoutSecs`
-- `reservationLeaseSecs` (defaults to `120`; must be `>= timeoutSecs`)
+- `reservationLeaseSecs` (defaults to `120`; must be `>= 3 * timeoutSecs`)
 - `strictRecovery`
 
 `policyType` currently supports only `rules_v1` (extensible contract already exists for future `linear` / `llm` modes).
@@ -71,18 +72,20 @@ For `CompletedIssueValidation`:
    - `type: "workgraph.routing-responsibility/v1"`
 3. GraphQL `updateProjectV2ItemFieldValue` project status mutation
 
-Reconciliation on retry requires trusted, unedited comments; forged public comments do not satisfy reconciliation.
+Reconciliation on retry requires trusted, unedited comments. In strict recovery mode, comment trust requires immutable actor ID matches (`trustedRouterAuthorNodeIds` / `trustedRouterAuthorDatabaseIds`) in addition to trusted login allowlists. Forged public comments and reclaimed usernames do not satisfy reconciliation.
 
 ## Durability and recovery
 
 - Durable reservation key: `(executionId, requiredEventType)` only
-- Reservation ownership transitions (create, renew, takeover, complete) use exact-byte state-store CAS with a monotonically increasing fencing epoch
+- Initial reservation create and ownership transitions (create, renew, takeover, complete) are atomic exact-byte state-store CAS operations with a monotonically increasing fencing epoch
 - Reservations carry a bounded lease (`reservationLeaseSecs`) and can be reclaimed only after lease expiry (or persisted failed state) via CAS takeover that increments epoch
-- Stored state includes reservation, decision, selected transition, side-effect progress, ambiguous/failed flags, and errors
+- Stored state includes reservation, decision, selected transition, side-effect progress, owner + fencing epoch, ambiguous/failed flags, and errors
 - `is_durable() = true`
 - `needs_snapshot_on_fresh_start() = false`
 - `default_recovery_policy() = Strict`
-- Retry/resume always re-checks GitHub issue/project state immediately before each side effect. Status mutation executes only from source status (`AwaitingRouting`); if destination is already observed, the router reconciles and marks completion without mutating.
+- Retry/resume always re-checks GitHub issue/project state immediately before each side effect and re-renews reservation ownership after preflight and immediately before each external write.
+- Project status mutation is guarded by expected source status + content correlation (project item must match expected repository + issue). If already at destination, mutation is skipped and completion is reconciled.
+- Ambiguous external write failures are treated as ambiguous in strict recovery and reconciled deterministically via `decisionId` payloads plus trusted immutable actor IDs before retry/takeover can complete.
 
 ## Running checks
 
@@ -108,7 +111,10 @@ Covered scenarios:
 - stale content rejection
 - wrong status rejection
 - retry preflight protection for closed issues and competing status changes
+- source/destination race between preflight and mutation
+- strict content correlation (project item issue/repo mismatch rejection)
 - lease expiry recovery and CAS-fenced ownership takeover
+- stale-owner delayed-preflight duplicate suppression
 - GraphQL HTTP 200 + `errors` failure behavior
 - partial side-effect recovery via reconciliation
 - update/delete ignored

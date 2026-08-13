@@ -32,7 +32,8 @@ use drasi_reaction_workgraph_router::config::{
 use drasi_reaction_workgraph_router::decision::RoutingDecision;
 use drasi_reaction_workgraph_router::rules::{RoutingPolicyEngine, RulesV1PolicyEngine};
 use drasi_reaction_workgraph_router::state::{
-    save_reservation, save_routing_state, ReservationRecord, RoutingStateRecord, SideEffectProgress,
+    load_reservation, save_reservation, save_routing_state, ReservationRecord, RoutingStateRecord,
+    SideEffectProgress,
 };
 use drasi_reaction_workgraph_router::WorkgraphRouterReaction;
 use serde_json::{json, Value};
@@ -175,10 +176,28 @@ fn sample_candidate() -> RoutingCandidate {
 }
 
 fn status_snapshot_response(status: &str) -> Value {
+    status_snapshot_response_for_item(
+        status,
+        "Issue",
+        "drasi-project/drasi-core",
+        Some(42),
+        "PVT_project",
+        "PVTI_item",
+    )
+}
+
+fn status_snapshot_response_for_item(
+    status: &str,
+    content_type: &str,
+    repo_name_with_owner: &str,
+    issue_number: Option<u64>,
+    project_id: &str,
+    item_id: &str,
+) -> Value {
     json!({
         "data": {
             "project": {
-                "id": "PVT_project",
+                "id": project_id,
                 "fields": {
                     "nodes": [
                         {
@@ -195,8 +214,19 @@ fn status_snapshot_response(status: &str) -> Value {
                 }
             },
             "item": {
-                "id": "PVTI_item",
-                "project": {"id": "PVT_project"},
+                "id": item_id,
+                "project": {"id": project_id},
+                "content": {
+                    "__typename": content_type,
+                    "number": issue_number,
+                    "repository": {
+                        "nameWithOwner": repo_name_with_owner,
+                        "owner": {
+                            "login": repo_name_with_owner.split('/').next().unwrap_or("drasi-project")
+                        },
+                        "name": repo_name_with_owner.split('/').nth(1).unwrap_or("drasi-core")
+                    }
+                },
                 "fieldValueByName": {
                     "name": status,
                     "optionId": "PVTSSO_current"
@@ -217,6 +247,15 @@ fn status_update_response() -> Value {
 }
 
 fn base_reaction(server: &MockServer, policy_version: &str) -> WorkgraphRouterReaction {
+    base_reaction_with_timeouts(server, policy_version, 5, 15)
+}
+
+fn base_reaction_with_timeouts(
+    server: &MockServer,
+    policy_version: &str,
+    timeout_secs: u64,
+    reservation_lease_secs: u64,
+) -> WorkgraphRouterReaction {
     WorkgraphRouterReaction::builder(TEST_REACTION_ID)
         .with_query(ROUTE_QUERY_ID)
         .with_policy_id("policy-1")
@@ -245,10 +284,12 @@ fn base_reaction(server: &MockServer, policy_version: &str) -> WorkgraphRouterRe
         .with_trusted_launcher_authors(vec!["launcher-user".to_string()])
         .with_trusted_agent_authors(vec!["agent-user".to_string()])
         .with_trusted_router_authors(vec!["router-user".to_string()])
+        .with_trusted_router_author_node_ids(vec!["MDQ6VXNlcjE=".to_string()])
         .with_github_rest_url(server.uri())
         .with_github_graphql_url(format!("{}/graphql", server.uri()))
         .with_github_token_env("WG_ROUTER_TEST_TOKEN")
-        .with_timeout_secs(5)
+        .with_timeout_secs(timeout_secs)
+        .with_reservation_lease_secs(reservation_lease_secs)
         .with_strict_recovery(true)
         .build()
         .expect("reaction should build")
@@ -457,7 +498,7 @@ async fn mount_common_success_mocks(server: &MockServer, preflight_status: &str)
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": 11,
             "body": "ok",
-            "user": {"login": "router-user"},
+            "user": {"login": "router-user", "node_id": "MDQ6VXNlcjE=", "id": 1001},
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z"
         })))
@@ -779,7 +820,7 @@ async fn status_change_between_comment_writes_aborts_second_comment_and_mutation
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": 200,
             "body": "ok",
-            "user": {"login":"router-user"},
+            "user": {"login":"router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
             "created_at":"2026-01-01T00:00:00Z",
             "updated_at":"2026-01-01T00:00:00Z"
         })))
@@ -853,7 +894,7 @@ async fn issue_closes_before_status_mutation_aborts_without_overwrite() {
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": 201,
             "body": "ok",
-            "user": {"login":"router-user"},
+            "user": {"login":"router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
             "created_at":"2026-01-01T00:00:00Z",
             "updated_at":"2026-01-01T00:00:00Z"
         })))
@@ -885,6 +926,362 @@ async fn issue_closes_before_status_mutation_aborts_without_overwrite() {
     assert_eq!(
         status_updates, 0,
         "closed issue before mutation must block project status overwrite"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn status_race_between_preflight_and_mutation_rejects_update() {
+    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-status-race-pre-mutation");
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
+
+    let snapshot_calls = Arc::new(AtomicUsize::new(0));
+    let snapshot_counter = Arc::clone(&snapshot_calls);
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
+        .respond_with(move |_req: &wiremock::Request| {
+            let call = snapshot_counter.fetch_add(1, Ordering::SeqCst);
+            let status = if call < 4 {
+                "AwaitingRouting"
+            } else {
+                "InProgress"
+            };
+            ResponseTemplate::new(200).set_body_json(status_snapshot_response(status))
+        })
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(status_update_response()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": 202,
+            "body": "ok",
+            "user": {"login":"router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
+            "created_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-01T00:00:00Z"
+        })))
+        .mount(&server)
+        .await;
+
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+    let reaction = base_reaction(&server, "1.0.0");
+    initialize_reaction(&reaction, Arc::clone(&store)).await;
+    reaction.start().await.expect("reaction start");
+    enqueue_add(&reaction, &sample_candidate(), 1).await;
+    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    reaction.stop().await.expect("reaction stop");
+
+    let requests = server.received_requests().await.expect("requests");
+    let status_updates = requests
+        .iter()
+        .filter(|req| is_project_status_mutation(req))
+        .count();
+    assert_eq!(
+        status_updates, 0,
+        "status race between preflight and mutation must abort without mutation"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn already_at_destination_snapshot_skips_mutation() {
+    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-status-already-destination");
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
+
+    let snapshot_calls = Arc::new(AtomicUsize::new(0));
+    let snapshot_counter = Arc::clone(&snapshot_calls);
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
+        .respond_with(move |_req: &wiremock::Request| {
+            let call = snapshot_counter.fetch_add(1, Ordering::SeqCst);
+            let status = if call < 4 {
+                "AwaitingRouting"
+            } else {
+                "AwaitingIssueRiskProfiling"
+            };
+            ResponseTemplate::new(200).set_body_json(status_snapshot_response(status))
+        })
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(status_update_response()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": 203,
+            "body": "ok",
+            "user": {"login":"router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
+            "created_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-01T00:00:00Z"
+        })))
+        .mount(&server)
+        .await;
+
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+    let reaction = base_reaction(&server, "1.0.0");
+    initialize_reaction(&reaction, Arc::clone(&store)).await;
+    reaction.start().await.expect("reaction start");
+    enqueue_add(&reaction, &sample_candidate(), 1).await;
+    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    reaction.stop().await.expect("reaction stop");
+
+    let requests = server.received_requests().await.expect("requests");
+    let status_updates = requests
+        .iter()
+        .filter(|req| is_project_status_mutation(req))
+        .count();
+    assert_eq!(
+        status_updates, 0,
+        "already-at-destination snapshot must not send mutation"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn mismatched_project_item_issue_rejects_before_side_effects() {
+    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-mismatch-item-issue");
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(status_snapshot_response_for_item(
+                "AwaitingRouting",
+                "Issue",
+                "drasi-project/drasi-core",
+                Some(99),
+                "PVT_project",
+                "PVTI_item",
+            )),
+        )
+        .mount(&server)
+        .await;
+
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+    let reaction = base_reaction(&server, "1.0.0");
+    initialize_reaction(&reaction, Arc::clone(&store)).await;
+    reaction.start().await.expect("reaction start");
+    enqueue_add(&reaction, &sample_candidate(), 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    reaction.stop().await.expect("reaction stop");
+
+    let requests = server.received_requests().await.expect("requests");
+    let comment_posts = requests
+        .iter()
+        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
+        .count();
+    let status_updates = requests
+        .iter()
+        .filter(|req| is_project_status_mutation(req))
+        .count();
+    assert_eq!(comment_posts, 0);
+    assert_eq!(status_updates, 0);
+}
+
+#[tokio::test]
+#[ignore]
+async fn mismatched_project_item_repo_rejects_before_side_effects() {
+    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-mismatch-item-repo");
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(status_snapshot_response_for_item(
+                "AwaitingRouting",
+                "Issue",
+                "drasi-project/other-repo",
+                Some(42),
+                "PVT_project",
+                "PVTI_item",
+            )),
+        )
+        .mount(&server)
+        .await;
+
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+    let reaction = base_reaction(&server, "1.0.0");
+    initialize_reaction(&reaction, Arc::clone(&store)).await;
+    reaction.start().await.expect("reaction start");
+    enqueue_add(&reaction, &sample_candidate(), 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    reaction.stop().await.expect("reaction stop");
+
+    let requests = server.received_requests().await.expect("requests");
+    let comment_posts = requests
+        .iter()
+        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
+        .count();
+    let status_updates = requests
+        .iter()
+        .filter(|req| is_project_status_mutation(req))
+        .count();
+    assert_eq!(comment_posts, 0);
+    assert_eq!(status_updates, 0);
+}
+
+#[tokio::test]
+#[ignore]
+async fn stale_owner_with_delayed_preflight_cannot_emit_duplicate_side_effects() {
+    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-delayed-lease-fence");
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
+
+    let snapshot_calls = Arc::new(AtomicUsize::new(0));
+    let snapshot_counter = Arc::clone(&snapshot_calls);
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
+        .respond_with(move |_req: &wiremock::Request| {
+            let call = snapshot_counter.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                std::thread::sleep(Duration::from_millis(800));
+            }
+            ResponseTemplate::new(200).set_body_json(status_snapshot_response("AwaitingRouting"))
+        })
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(status_update_response()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": 204,
+            "body": "ok",
+            "user": {"login":"router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
+            "created_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-01T00:00:00Z"
+        })))
+        .mount(&server)
+        .await;
+
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+    let reaction_a = base_reaction_with_timeouts(&server, "1.0.0", 1, 3);
+    let reaction_b = base_reaction_with_timeouts(&server, "1.0.0", 1, 3);
+    initialize_reaction(&reaction_a, Arc::clone(&store)).await;
+    initialize_reaction(&reaction_b, Arc::clone(&store)).await;
+    reaction_a.start().await.expect("reaction a start");
+    reaction_b.start().await.expect("reaction b start");
+
+    let candidate = sample_candidate();
+    enqueue_add(&reaction_a, &candidate, 1).await;
+
+    for _ in 0..40 {
+        if load_reservation(
+            Arc::clone(&store),
+            TEST_REACTION_ID,
+            &candidate.reservation_key(),
+        )
+        .await
+        .expect("load reservation")
+        .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    if let Some(mut reservation) = load_reservation(
+        Arc::clone(&store),
+        TEST_REACTION_ID,
+        &candidate.reservation_key(),
+    )
+    .await
+    .expect("load reservation after enqueue")
+    {
+        reservation.lease_expires_at_unix_secs = Utc::now().timestamp() - 1;
+        save_reservation(Arc::clone(&store), TEST_REACTION_ID, &reservation)
+            .await
+            .expect("force lease expiry");
+    }
+
+    enqueue_add(&reaction_b, &candidate, 1).await;
+    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
+    wait_for_count(&server, is_project_status_mutation, 1).await;
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    reaction_a.stop().await.expect("reaction a stop");
+    reaction_b.stop().await.expect("reaction b stop");
+
+    let requests = server.received_requests().await.expect("requests");
+    let comment_posts = requests
+        .iter()
+        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
+        .count();
+    let status_updates = requests
+        .iter()
+        .filter(|req| is_project_status_mutation(req))
+        .count();
+    assert_eq!(
+        comment_posts, 2,
+        "stale owner must not emit duplicate decision/responsibility comments"
+    );
+    assert_eq!(
+        status_updates, 1,
+        "stale owner must not duplicate status mutation"
     );
 }
 
@@ -1093,7 +1490,7 @@ async fn partial_side_effect_recovery_reconciles_trusted_comments() {
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": 101,
             "body": "ok",
-            "user": {"login":"router-user"},
+            "user": {"login":"router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
             "created_at":"2026-01-01T00:00:00Z",
             "updated_at":"2026-01-01T00:00:00Z"
         })))
@@ -1147,14 +1544,14 @@ async fn partial_side_effect_recovery_reconciles_trusted_comments() {
             {
                 "id": 1,
                 "body": decision_comment,
-                "user": {"login": "router-user"},
+                "user": {"login": "router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
                 "created_at":"2026-01-01T00:00:00Z",
                 "updated_at":"2026-01-01T00:00:00Z"
             },
             {
                 "id": 2,
                 "body": responsibility_comment,
-                "user": {"login": "router-user"},
+                "user": {"login": "router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
                 "created_at":"2026-01-01T00:00:00Z",
                 "updated_at":"2026-01-01T00:00:00Z"
             }

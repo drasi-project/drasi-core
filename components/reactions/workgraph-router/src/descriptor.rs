@@ -66,6 +66,12 @@ pub struct WorkgraphRouterReactionConfigDto {
     #[serde(default)]
     #[schema(value_type = Vec<ConfigValueString>)]
     pub trusted_router_authors: Vec<ConfigValue<String>>,
+    #[serde(default)]
+    #[schema(value_type = Vec<ConfigValueString>)]
+    pub trusted_router_author_node_ids: Vec<ConfigValue<String>>,
+    #[serde(default)]
+    #[schema(value_type = Vec<ConfigValueU64>)]
+    pub trusted_router_author_database_ids: Vec<ConfigValue<u64>>,
     #[schema(value_type = ConfigValueString)]
     pub github_graphql_url: ConfigValue<String>,
     #[schema(value_type = ConfigValueString)]
@@ -78,6 +84,9 @@ pub struct WorkgraphRouterReactionConfigDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueU64>)]
     pub timeout_secs: Option<ConfigValue<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<ConfigValueU64>)]
+    pub reservation_lease_secs: Option<ConfigValue<u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueBool>)]
     pub strict_recovery: Option<ConfigValue<bool>>,
@@ -154,6 +163,18 @@ impl From<&WorkgraphRouterReactionConfig> for WorkgraphRouterReactionConfigDto {
                 .cloned()
                 .map(ConfigValue::Static)
                 .collect(),
+            trusted_router_author_node_ids: config
+                .trusted_router_author_node_ids
+                .iter()
+                .cloned()
+                .map(ConfigValue::Static)
+                .collect(),
+            trusted_router_author_database_ids: config
+                .trusted_router_author_database_ids
+                .iter()
+                .copied()
+                .map(ConfigValue::Static)
+                .collect(),
             github_graphql_url: ConfigValue::Static(config.github_graphql_url.clone()),
             github_rest_url: ConfigValue::Static(config.github_rest_url.clone()),
             github_token_env: ConfigValue::Static(config.github_token_env.clone()),
@@ -161,6 +182,7 @@ impl From<&WorkgraphRouterReactionConfig> for WorkgraphRouterReactionConfigDto {
                 config.project_status_field_name.clone(),
             )),
             timeout_secs: Some(ConfigValue::Static(config.timeout_secs)),
+            reservation_lease_secs: Some(ConfigValue::Static(config.reservation_lease_secs)),
             strict_recovery: Some(ConfigValue::Static(config.strict_recovery)),
             priority_queue_capacity: None,
         }
@@ -256,9 +278,22 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
                     .resolve_string_vec(&dto.trusted_router_authors)
                     .await?,
             )
+            .with_trusted_router_author_node_ids(
+                mapper
+                    .resolve_string_vec(&dto.trusted_router_author_node_ids)
+                    .await?,
+            )
             .with_github_graphql_url(mapper.resolve_string(&dto.github_graphql_url).await?)
             .with_github_rest_url(mapper.resolve_string(&dto.github_rest_url).await?)
             .with_github_token_env(mapper.resolve_string(&dto.github_token_env).await?);
+
+        if !dto.trusted_router_author_database_ids.is_empty() {
+            let mut ids = Vec::with_capacity(dto.trusted_router_author_database_ids.len());
+            for id in &dto.trusted_router_author_database_ids {
+                ids.push(mapper.resolve_typed::<u64>(id).await?);
+            }
+            builder = builder.with_trusted_router_author_database_ids(ids);
+        }
 
         if let Some(project_status_field_name) = dto.project_status_field_name.as_ref() {
             builder = builder.with_project_status_field_name(
@@ -268,6 +303,11 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
 
         if let Some(timeout_secs) = dto.timeout_secs.as_ref() {
             builder = builder.with_timeout_secs(mapper.resolve_typed::<u64>(timeout_secs).await?);
+        }
+        if let Some(reservation_lease_secs) = dto.reservation_lease_secs.as_ref() {
+            builder = builder.with_reservation_lease_secs(
+                mapper.resolve_typed::<u64>(reservation_lease_secs).await?,
+            );
         }
         if let Some(strict_recovery) = dto.strict_recovery.as_ref() {
             builder =
@@ -299,6 +339,7 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn dto_roundtrip_preserves_policy_fields() {
@@ -306,10 +347,83 @@ mod tests {
             policy_id: "policy".to_string(),
             policy_type: "rules_v1".to_string(),
             policy_version: "1.0.1".to_string(),
+            reservation_lease_secs: 300,
+            trusted_router_author_node_ids: vec!["MDQ6VXNlcjE=".to_string()],
             ..WorkgraphRouterReactionConfig::default()
         };
         let dto = WorkgraphRouterReactionConfigDto::from(&cfg);
         assert_eq!(dto.policy_id, ConfigValue::Static("policy".to_string()));
         assert_eq!(dto.policy_version, ConfigValue::Static("1.0.1".to_string()));
+        assert_eq!(
+            dto.reservation_lease_secs,
+            Some(ConfigValue::Static(300)),
+            "reservationLeaseSecs must roundtrip through DTO"
+        );
+        assert_eq!(
+            dto.trusted_router_author_node_ids,
+            vec![ConfigValue::Static("MDQ6VXNlcjE=".to_string())]
+        );
+    }
+
+    #[test]
+    fn dto_deserialization_with_reservation_lease_secs() {
+        let json = json!({
+            "policyId": "policy",
+            "policyType": "rules_v1",
+            "policyVersion": "1.0.0",
+            "allowedProjects": [],
+            "allowedRepos": [],
+            "allowedEventTypes": [],
+            "allowedStatusTransitions": [],
+            "allowedResponsibilityTypes": [],
+            "allowedActors": [],
+            "trustedRoutingAuthors": [],
+            "trustedLauncherAuthors": [],
+            "trustedAgentAuthors": [],
+            "trustedRouterAuthors": [],
+            "trustedRouterAuthorNodeIds": [],
+            "trustedRouterAuthorDatabaseIds": [],
+            "githubGraphqlUrl": "https://api.github.com/graphql",
+            "githubRestUrl": "https://api.github.com",
+            "githubTokenEnv": "GITHUB_TOKEN",
+            "reservationLeaseSecs": 300
+        });
+
+        let dto: WorkgraphRouterReactionConfigDto =
+            serde_json::from_value(json).expect("DTO should parse");
+        assert_eq!(dto.reservation_lease_secs, Some(ConfigValue::Static(300)));
+    }
+
+    #[test]
+    fn dto_deserialization_rejects_unknown_field() {
+        let json = json!({
+            "policyId": "policy",
+            "policyType": "rules_v1",
+            "policyVersion": "1.0.0",
+            "allowedProjects": [],
+            "allowedRepos": [],
+            "allowedEventTypes": [],
+            "allowedStatusTransitions": [],
+            "allowedResponsibilityTypes": [],
+            "allowedActors": [],
+            "trustedRoutingAuthors": [],
+            "trustedLauncherAuthors": [],
+            "trustedAgentAuthors": [],
+            "trustedRouterAuthors": [],
+            "trustedRouterAuthorNodeIds": [],
+            "trustedRouterAuthorDatabaseIds": [],
+            "githubGraphqlUrl": "https://api.github.com/graphql",
+            "githubRestUrl": "https://api.github.com",
+            "githubTokenEnv": "GITHUB_TOKEN",
+            "reservationLeaseSecs": 300,
+            "totallyUnknownField": true
+        });
+
+        let err = serde_json::from_value::<WorkgraphRouterReactionConfigDto>(json)
+            .expect_err("unknown fields must be rejected");
+        assert!(
+            err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
     }
 }

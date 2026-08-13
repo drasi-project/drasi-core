@@ -70,6 +70,10 @@ pub struct WorkgraphRouterReactionConfig {
     pub trusted_launcher_authors: Vec<String>,
     pub trusted_agent_authors: Vec<String>,
     pub trusted_router_authors: Vec<String>,
+    #[serde(default)]
+    pub trusted_router_author_node_ids: Vec<String>,
+    #[serde(default)]
+    pub trusted_router_author_database_ids: Vec<u64>,
     #[serde(default = "default_github_graphql_url")]
     pub github_graphql_url: String,
     #[serde(default = "default_github_rest_url")]
@@ -108,6 +112,14 @@ impl std::fmt::Debug for WorkgraphRouterReactionConfig {
             .field("trusted_launcher_authors", &self.trusted_launcher_authors)
             .field("trusted_agent_authors", &self.trusted_agent_authors)
             .field("trusted_router_authors", &self.trusted_router_authors)
+            .field(
+                "trusted_router_author_node_ids",
+                &self.trusted_router_author_node_ids,
+            )
+            .field(
+                "trusted_router_author_database_ids",
+                &self.trusted_router_author_database_ids,
+            )
             .field("github_graphql_url", &self.github_graphql_url)
             .field("github_rest_url", &self.github_rest_url)
             .field("github_token_env", &self.github_token_env)
@@ -148,6 +160,8 @@ impl Default for WorkgraphRouterReactionConfig {
             trusted_launcher_authors: Vec::new(),
             trusted_agent_authors: Vec::new(),
             trusted_router_authors: Vec::new(),
+            trusted_router_author_node_ids: Vec::new(),
+            trusted_router_author_database_ids: Vec::new(),
             github_graphql_url: default_github_graphql_url(),
             github_rest_url: default_github_rest_url(),
             github_token_env: default_github_token_env(),
@@ -193,8 +207,11 @@ impl WorkgraphRouterReactionConfig {
         if self.reservation_lease_secs == 0 {
             anyhow::bail!("reservationLeaseSecs must be greater than 0");
         }
-        if self.reservation_lease_secs < self.timeout_secs {
-            anyhow::bail!("reservationLeaseSecs must be greater than or equal to timeoutSecs");
+        let minimum_safe_lease_secs = self.timeout_secs.saturating_mul(3);
+        if self.reservation_lease_secs < minimum_safe_lease_secs {
+            anyhow::bail!(
+                "reservationLeaseSecs must be at least 3x timeoutSecs (>= {minimum_safe_lease_secs})"
+            );
         }
         if self.reservation_lease_secs > i64::MAX as u64 {
             anyhow::bail!("reservationLeaseSecs must be less than or equal to i64::MAX");
@@ -217,6 +234,14 @@ impl WorkgraphRouterReactionConfig {
         if self.project_status_field_name.trim().is_empty() {
             anyhow::bail!("projectStatusFieldName is required");
         }
+        if self.strict_recovery
+            && self.trusted_router_author_node_ids.is_empty()
+            && self.trusted_router_author_database_ids.is_empty()
+        {
+            anyhow::bail!(
+                "strictRecovery requires trustedRouterAuthorNodeIds or trustedRouterAuthorDatabaseIds for immutable reconciliation trust"
+            );
+        }
         Ok(())
     }
 
@@ -234,5 +259,58 @@ impl WorkgraphRouterReactionConfig {
             .chain(self.trusted_router_authors.iter())
             .cloned()
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_config() -> WorkgraphRouterReactionConfig {
+        WorkgraphRouterReactionConfig {
+            policy_id: "policy-1".to_string(),
+            allowed_projects: vec!["PVT_project".to_string()],
+            allowed_repos: vec!["drasi-project/drasi-core".to_string()],
+            timeout_secs: 10,
+            reservation_lease_secs: 30,
+            trusted_router_author_node_ids: vec!["MDQ6VXNlcjE=".to_string()],
+            ..WorkgraphRouterReactionConfig::default()
+        }
+    }
+
+    #[test]
+    fn lease_duration_must_be_at_least_three_times_timeout() {
+        let mut cfg = valid_config();
+        cfg.reservation_lease_secs = 29;
+        let err = cfg
+            .validate(&[ROUTE_QUERY_ID.to_string()], None)
+            .expect_err("lease < 3x timeout must fail");
+        assert!(
+            err.to_string()
+                .contains("reservationLeaseSecs must be at least 3x timeoutSecs"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn lease_duration_three_times_timeout_is_valid() {
+        let cfg = valid_config();
+        cfg.validate(&[ROUTE_QUERY_ID.to_string()], None)
+            .expect("lease at 3x timeout should validate");
+    }
+
+    #[test]
+    fn strict_recovery_requires_immutable_router_ids() {
+        let mut cfg = valid_config();
+        cfg.trusted_router_author_node_ids.clear();
+        cfg.trusted_router_author_database_ids.clear();
+        let err = cfg
+            .validate(&[ROUTE_QUERY_ID.to_string()], None)
+            .expect_err("strict recovery without immutable IDs must fail");
+        assert!(
+            err.to_string()
+                .contains("strictRecovery requires trustedRouterAuthorNodeIds"),
+            "unexpected error: {err:#}"
+        );
     }
 }

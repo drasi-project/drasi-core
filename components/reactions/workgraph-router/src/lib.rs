@@ -149,6 +149,16 @@ impl WorkgraphRouterReactionBuilder {
         self
     }
 
+    pub fn with_trusted_router_author_node_ids(mut self, values: Vec<String>) -> Self {
+        self.config.trusted_router_author_node_ids = values;
+        self
+    }
+
+    pub fn with_trusted_router_author_database_ids(mut self, values: Vec<u64>) -> Self {
+        self.config.trusted_router_author_database_ids = values;
+        self
+    }
+
     pub fn with_github_graphql_url(mut self, value: impl Into<String>) -> Self {
         self.config.github_graphql_url = value.into();
         self

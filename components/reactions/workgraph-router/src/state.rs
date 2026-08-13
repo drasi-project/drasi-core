@@ -69,6 +69,10 @@ pub struct RoutingStateRecord {
     pub reservation_key: String,
     pub execution_id: String,
     pub required_event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_instance_id: Option<String>,
+    #[serde(default)]
+    pub fencing_epoch: u64,
     pub policy_id: String,
     pub policy_type: String,
     pub policy_version: String,
@@ -95,6 +99,8 @@ impl RoutingStateRecord {
             reservation_key: reservation.reservation_key.clone(),
             execution_id: candidate.execution_id.clone(),
             required_event_type: candidate.required_event_type.clone(),
+            owner_instance_id: reservation.owner_instance_id.clone(),
+            fencing_epoch: reservation.fencing_epoch,
             policy_id: reservation.policy_id.clone(),
             policy_type: reservation.policy_type.clone(),
             policy_version: reservation.policy_version.clone(),
@@ -152,6 +158,12 @@ pub fn routing_state_store_key(reservation_key: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct PersistedReservationRecord {
     pub record: ReservationRecord,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistedRoutingStateRecord {
+    pub record: RoutingStateRecord,
     pub bytes: Vec<u8>,
 }
 
@@ -244,6 +256,18 @@ pub async fn load_routing_state(
     store_id: &str,
     reservation_key: &str,
 ) -> anyhow::Result<Option<RoutingStateRecord>> {
+    Ok(
+        load_routing_state_with_bytes(store, store_id, reservation_key)
+            .await?
+            .map(|persisted| persisted.record),
+    )
+}
+
+pub async fn load_routing_state_with_bytes(
+    store: Arc<dyn StateStoreProvider>,
+    store_id: &str,
+    reservation_key: &str,
+) -> anyhow::Result<Option<PersistedRoutingStateRecord>> {
     let key = routing_state_store_key(reservation_key);
     let Some(bytes) = store
         .get(store_id, &key)
@@ -252,9 +276,9 @@ pub async fn load_routing_state(
     else {
         return Ok(None);
     };
-    serde_json::from_slice::<RoutingStateRecord>(&bytes)
-        .map(Some)
-        .map_err(|e| anyhow::anyhow!("failed to deserialize routing-state record: {e}"))
+    let record = serde_json::from_slice::<RoutingStateRecord>(&bytes)
+        .map_err(|e| anyhow::anyhow!("failed to deserialize routing-state record: {e}"))?;
+    Ok(Some(PersistedRoutingStateRecord { record, bytes }))
 }
 
 pub async fn save_routing_state(
@@ -270,6 +294,23 @@ pub async fn save_routing_state(
         .await
         .map_err(|e| anyhow::anyhow!("state-store set routing-state failed: {e}"))?;
     Ok(())
+}
+
+pub async fn compare_and_swap_routing_state(
+    store: Arc<dyn StateStoreProvider>,
+    store_id: &str,
+    reservation_key: &str,
+    expected: Option<&[u8]>,
+    new_record: &RoutingStateRecord,
+) -> anyhow::Result<bool> {
+    let key = routing_state_store_key(reservation_key);
+    let bytes = serde_json::to_vec(new_record)
+        .map_err(|e| anyhow::anyhow!("failed to serialize routing-state record: {e}"))?;
+    let outcome = store
+        .compare_and_swap(store_id, &key, expected, bytes)
+        .await
+        .map_err(|e| anyhow::anyhow!("state-store CAS routing-state failed: {e}"))?;
+    Ok(matches!(outcome, StateStoreCompareAndSwapResult::Swapped))
 }
 
 pub fn serialize_reservation(record: &ReservationRecord) -> anyhow::Result<Vec<u8>> {

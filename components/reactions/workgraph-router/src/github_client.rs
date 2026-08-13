@@ -46,6 +46,19 @@ query WorkgraphRouterProjectStatusSnapshot($projectId: ID!, $projectItemId: ID!,
       project {
         id
       }
+      content {
+        __typename
+        ... on Issue {
+          number
+          repository {
+            nameWithOwner
+            owner {
+              login
+            }
+            name
+          }
+        }
+      }
       fieldValueByName(name: $statusFieldName) {
         ... on ProjectV2ItemFieldSingleSelectValue {
           name
@@ -93,6 +106,10 @@ pub struct IssueComment {
     pub body: String,
     pub author_login: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_database_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
@@ -105,6 +122,12 @@ impl IssueComment {
             _ => true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateStatusOutcome {
+    Applied,
+    AlreadyAtDestination,
 }
 
 impl GithubClient {
@@ -154,11 +177,16 @@ impl GithubClient {
         &self,
         project_id: &str,
         project_item_id: &str,
+        expected_repo: &str,
+        expected_issue_number: u64,
     ) -> anyhow::Result<String> {
         let snapshot = self
             .project_status_snapshot(project_id, project_item_id)
             .await
             .context("failed to resolve project status snapshot")?;
+        snapshot
+            .validate_content_correlation(expected_repo, expected_issue_number)
+            .context("project item content correlation validation failed")?;
         Ok(snapshot.current_status)
     }
 
@@ -166,22 +194,42 @@ impl GithubClient {
         &self,
         project_id: &str,
         project_item_id: &str,
-        status_name: &str,
-    ) -> anyhow::Result<()> {
+        expected_source_status: &str,
+        target_status: &str,
+        expected_repo: &str,
+        expected_issue_number: u64,
+    ) -> anyhow::Result<UpdateStatusOutcome> {
         let snapshot = self
             .project_status_snapshot(project_id, project_item_id)
             .await
             .context("failed to resolve project status update metadata")?;
+        snapshot
+            .validate_content_correlation(expected_repo, expected_issue_number)
+            .context("project item content correlation validation failed")?;
+
+        if snapshot.current_status == target_status {
+            return Ok(UpdateStatusOutcome::AlreadyAtDestination);
+        }
+        if snapshot.current_status != expected_source_status {
+            anyhow::bail!(
+                "project item {} status is '{}' (expected '{}' or '{}')",
+                project_item_id,
+                snapshot.current_status,
+                expected_source_status,
+                target_status
+            );
+        }
+
         let status_option_id = snapshot
             .status_option_ids
-            .get(status_name)
+            .get(target_status)
             .cloned()
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "project '{}' status field '{}' has no option named '{}'",
                     project_id,
                     self.project_status_field_name,
-                    status_name
+                    target_status
                 )
             })?;
 
@@ -198,7 +246,7 @@ impl GithubClient {
             .await
             .with_context(|| {
                 format!(
-                    "failed to update project status for projectItemId='{project_item_id}' to '{status_name}'"
+                    "failed to update project status for projectItemId='{project_item_id}' to '{target_status}'"
                 )
             })?;
         let updated_item_id = data
@@ -212,7 +260,7 @@ impl GithubClient {
                 "GraphQL update returned mismatched project item id '{updated_item_id}' (expected '{project_item_id}')"
             );
         }
-        Ok(())
+        Ok(UpdateStatusOutcome::Applied)
     }
 
     pub async fn create_issue_comment(
@@ -376,6 +424,16 @@ impl GithubClient {
             .ok_or_else(|| anyhow::anyhow!("GraphQL status snapshot missing current status value"))?
             .to_string();
 
+        let content_type = data
+            .pointer("/item/content/__typename")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let content_issue_number = data.pointer("/item/content/number").and_then(Value::as_u64);
+        let content_repo = data
+            .pointer("/item/content/repository/nameWithOwner")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+
         let status_field_nodes = data
             .pointer("/project/fields/nodes")
             .and_then(Value::as_array)
@@ -418,6 +476,9 @@ impl GithubClient {
 
         Ok(ProjectStatusSnapshot {
             current_status,
+            content_type,
+            content_issue_number,
+            content_repo,
             status_field_id,
             status_option_ids,
         })
@@ -426,8 +487,47 @@ impl GithubClient {
 
 struct ProjectStatusSnapshot {
     current_status: String,
+    content_type: Option<String>,
+    content_issue_number: Option<u64>,
+    content_repo: Option<String>,
     status_field_id: String,
     status_option_ids: HashMap<String, String>,
+}
+
+impl ProjectStatusSnapshot {
+    fn validate_content_correlation(
+        &self,
+        expected_repo: &str,
+        expected_issue_number: u64,
+    ) -> anyhow::Result<()> {
+        let content_type = self
+            .content_type
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("project item content type is missing"))?;
+        if content_type != "Issue" {
+            anyhow::bail!("project item content type '{content_type}' is not Issue");
+        }
+
+        let issue_number = self
+            .content_issue_number
+            .ok_or_else(|| anyhow::anyhow!("project item issue number is missing"))?;
+        if issue_number != expected_issue_number {
+            anyhow::bail!(
+                "project item issue number '{issue_number}' does not match expected '{expected_issue_number}'"
+            );
+        }
+
+        let repo = self
+            .content_repo
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("project item repository is missing"))?;
+        if repo != expected_repo {
+            anyhow::bail!(
+                "project item repository '{repo}' does not match expected '{expected_repo}'"
+            );
+        }
+        Ok(())
+    }
 }
 
 fn parse_comment(value: Value) -> anyhow::Result<IssueComment> {
@@ -445,6 +545,11 @@ fn parse_comment(value: Value) -> anyhow::Result<IssueComment> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("comment payload missing user.login"))?
         .to_string();
+    let author_node_id = value
+        .pointer("/user/node_id")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let author_database_id = value.pointer("/user/id").and_then(Value::as_u64);
     let created_at = value
         .get("created_at")
         .and_then(Value::as_str)
@@ -458,6 +563,8 @@ fn parse_comment(value: Value) -> anyhow::Result<IssueComment> {
         id,
         body,
         author_login,
+        author_node_id,
+        author_database_id,
         created_at,
         updated_at,
     })
