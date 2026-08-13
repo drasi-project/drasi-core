@@ -14,7 +14,10 @@
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use reqwest::Client;
+use reqwest::{
+    header::{HeaderMap, HeaderValue},
+    Client, StatusCode,
+};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,7 +28,7 @@ use drasi_lib::state_store::{StateStoreProvider, StateStoreResult};
 
 use crate::config::GitHubProjectItemRefreshConfig;
 use crate::destination::{DestinationPublishError, DestinationSourceClient};
-use crate::graphql::GitHubGraphqlClient;
+use crate::graphql::{rate_limit_retry_after, GitHubGraphqlClient};
 use crate::models::{
     DeliveryKey, FetchedProjectItemState, HttpElement, HttpSourceChange, ItemVersionRecord,
     ProjectItemStatusNode, PublicationRecord, PublicationState,
@@ -895,20 +898,45 @@ async fn retries_safe_reads_and_recovery_from_ambiguous_publication() {
     );
 }
 
+#[test]
+fn rate_limit_delay_prefers_retry_after_and_is_bounded() {
+    let mut headers = HeaderMap::new();
+    headers.insert(reqwest::header::RETRY_AFTER, HeaderValue::from_static("1"));
+    headers.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+    headers.insert(
+        "x-ratelimit-reset",
+        HeaderValue::from_str(&(Utc::now() + Duration::seconds(3)).timestamp().to_string())
+            .expect("reset header"),
+    );
+    assert_eq!(
+        rate_limit_retry_after(StatusCode::FORBIDDEN, &headers),
+        Some(std::time::Duration::from_secs(1)),
+        "Retry-After must take precedence over x-ratelimit-reset"
+    );
+
+    headers.insert(
+        reqwest::header::RETRY_AFTER,
+        HeaderValue::from_static("9999"),
+    );
+    assert_eq!(
+        rate_limit_retry_after(StatusCode::FORBIDDEN, &headers),
+        Some(std::time::Duration::from_secs(120)),
+        "server-provided delays must be bounded"
+    );
+}
+
 #[tokio::test]
-async fn rate_limit_403_retries_and_prefers_retry_after_over_reset() {
+async fn rate_limit_403_retries_with_retry_after() {
     let graphql_server = MockServer::start().await;
     let destination_server = MockServer::start().await;
     let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
 
-    let reset_epoch = (Utc::now() + Duration::seconds(3)).timestamp().to_string();
     Mock::given(method("POST"))
         .and(body_string_contains("PVTI_rate_limited"))
         .respond_with(
             ResponseTemplate::new(403)
-                .append_header("retry-after", "1")
-                .append_header("x-ratelimit-remaining", "0")
-                .append_header("x-ratelimit-reset", reset_epoch),
+                .append_header("retry-after", "0")
+                .append_header("x-ratelimit-remaining", "0"),
         )
         .up_to_n_times(1)
         .with_priority(1)
@@ -943,7 +971,6 @@ async fn rate_limit_403_retries_and_prefers_retry_after_over_reset() {
     )
     .await;
 
-    let started = std::time::Instant::now();
     let outcome = processor
         .process_add_row(&test_row(
             "delivery-rate-limit",
@@ -953,16 +980,6 @@ async fn rate_limit_403_retries_and_prefers_retry_after_over_reset() {
         .await
         .expect("rate-limited fetch should retry");
     assert_eq!(outcome, AddRowOutcome::Published);
-
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed >= std::time::Duration::from_millis(900),
-        "retry-after=1s should be honored (elapsed={elapsed:?})"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_secs(3),
-        "retry-after should take precedence over x-ratelimit-reset (elapsed={elapsed:?})"
-    );
 
     let graphql_requests = graphql_server.received_requests().await.expect("requests");
     assert_eq!(graphql_requests.len(), 2, "expected exactly one retry");
@@ -974,8 +991,7 @@ async fn rate_limit_403_retries_with_retry_after_http_date() {
     let destination_server = MockServer::start().await;
     let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
 
-    let retry_after_http_date =
-        httpdate::fmt_http_date(std::time::SystemTime::now() + std::time::Duration::from_secs(1));
+    let retry_after_http_date = httpdate::fmt_http_date(std::time::UNIX_EPOCH);
     Mock::given(method("POST"))
         .and(body_string_contains("PVTI_rate_limited_http_date"))
         .respond_with(

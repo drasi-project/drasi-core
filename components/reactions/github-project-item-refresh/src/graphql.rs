@@ -283,7 +283,7 @@ impl GitHubGraphqlClient {
     }
 }
 
-fn rate_limit_retry_after(status: StatusCode, headers: &HeaderMap) -> Option<Duration> {
+pub(crate) fn rate_limit_retry_after(status: StatusCode, headers: &HeaderMap) -> Option<Duration> {
     match status {
         StatusCode::FORBIDDEN if is_rate_limited_403(headers) => {
             Some(parse_rate_limit_delay(headers).unwrap_or(RATE_LIMIT_FALLBACK_BACKOFF))
