@@ -17,10 +17,9 @@ use chrono::{DateTime, Utc};
 use log::warn;
 use reqwest::Url;
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
-use tokio::sync::Mutex;
 
 use crate::config::{
     validate_project_item_node_id, validate_project_node_id, GitHubProjectItemRefreshConfig,
@@ -62,8 +61,8 @@ impl PruneThrottle {
         }
     }
 
-    async fn try_acquire(&self) -> Option<PrunePermit> {
-        let mut state = self.state.lock().await;
+    fn try_acquire(&self) -> Option<PrunePermit> {
+        let mut state = lock_prune_state(&self.state);
         if state.in_progress {
             return None;
         }
@@ -85,16 +84,26 @@ struct PrunePermit {
 }
 
 impl PrunePermit {
-    async fn mark_success(self) {
-        let mut state = self.state.lock().await;
+    fn mark_success(self) {
+        let mut state = lock_prune_state(&self.state);
         state.last_successful_prune = Some(Instant::now());
-        state.in_progress = false;
     }
 
-    async fn mark_failure(self) {
-        let mut state = self.state.lock().await;
-        state.in_progress = false;
+    fn mark_failure(self) {}
+}
+
+impl Drop for PrunePermit {
+    fn drop(&mut self) {
+        lock_prune_state(&self.state).in_progress = false;
     }
+}
+
+fn lock_prune_state(
+    state: &Mutex<PruneThrottleState>,
+) -> std::sync::MutexGuard<'_, PruneThrottleState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,7 +400,7 @@ impl RefreshProcessor {
     }
 
     async fn maybe_prune_terminal_records(&self) {
-        let Some(permit) = self.prune_throttle.try_acquire().await else {
+        let Some(permit) = self.prune_throttle.try_acquire() else {
             return;
         };
 
@@ -400,10 +409,10 @@ impl RefreshProcessor {
             .prune_terminal_records_older_than(self.config.delivery_record_ttl_secs, Utc::now())
             .await
         {
-            Ok(_) => permit.mark_success().await,
+            Ok(_) => permit.mark_success(),
             Err(err) => {
                 warn!("failed to prune terminal delivery records: {err:#}");
-                permit.mark_failure().await;
+                permit.mark_failure();
             }
         }
     }

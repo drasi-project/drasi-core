@@ -21,7 +21,7 @@ use reqwest::{
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration as StdDuration;
 use tokio::sync::Barrier;
 use wiremock::matchers::{body_string_contains, method};
@@ -46,7 +46,7 @@ const EXPECTED_STATUS_FIELD_NODE_ID: &str = "PVTSSF_lADOCX0YF84BgNE3zhaadbw";
 struct DurableMemoryStateStore {
     inner: drasi_lib::MemoryStateStoreProvider,
     list_keys_calls: AtomicUsize,
-    list_keys_delay: Option<StdDuration>,
+    list_keys_delay: StdMutex<Option<StdDuration>>,
 }
 
 impl DurableMemoryStateStore {
@@ -58,12 +58,19 @@ impl DurableMemoryStateStore {
         Self {
             inner: drasi_lib::MemoryStateStoreProvider::new(),
             list_keys_calls: AtomicUsize::new(0),
-            list_keys_delay,
+            list_keys_delay: StdMutex::new(list_keys_delay),
         }
     }
 
     fn list_keys_calls(&self) -> usize {
         self.list_keys_calls.load(Ordering::SeqCst)
+    }
+
+    fn set_list_keys_delay(&self, delay: Option<StdDuration>) {
+        *self
+            .list_keys_delay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = delay;
     }
 }
 
@@ -107,7 +114,11 @@ impl StateStoreProvider for DurableMemoryStateStore {
 
     async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
         self.list_keys_calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(delay) = self.list_keys_delay {
+        let delay = *self
+            .list_keys_delay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
         self.inner.list_keys(store_id).await
@@ -907,6 +918,83 @@ async fn concurrent_adds_across_clones_share_prune_throttle() {
         durable_store.list_keys_calls(),
         1,
         "concurrent cloned processors should dedupe prune scans"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_prune_is_immediately_retryable() {
+    let graphql_server = MockServer::start().await;
+    let destination_server = MockServer::start().await;
+    let durable_store = Arc::new(DurableMemoryStateStore::new_with_list_keys_delay(Some(
+        StdDuration::from_secs(5),
+    )));
+
+    Mock::given(method("POST"))
+        .and(body_string_contains("PVTI_prune_after_cancel"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(graphql_success_response(
+                "PVTI_prune_after_cancel",
+                "PVT_project1",
+                "2026-08-13T19:12:00Z",
+                "In Progress",
+                "opt-ip",
+            )),
+        )
+        .mount(&graphql_server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "message": "All 1 events processed successfully"
+        })))
+        .mount(&destination_server)
+        .await;
+
+    let (processor, _) = build_processor(
+        &graphql_server,
+        destination_server.uri(),
+        durable_store.clone(),
+        vec![],
+    )
+    .await;
+    let cancelled_processor = processor.clone();
+    let cancelled = tokio::spawn(async move {
+        cancelled_processor
+            .process_add_row(&test_row(
+                "delivery-prune-cancelled",
+                "PVTI_prune_cancelled",
+                "PVT_project1",
+            ))
+            .await
+    });
+
+    for _ in 0..100 {
+        if durable_store.list_keys_calls() == 1 {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(5)).await;
+    }
+    assert_eq!(durable_store.list_keys_calls(), 1, "prune should start");
+    durable_store.set_list_keys_delay(None);
+    cancelled.abort();
+    assert!(cancelled
+        .await
+        .expect_err("task should be cancelled")
+        .is_cancelled());
+
+    let outcome = processor
+        .process_add_row(&test_row(
+            "delivery-prune-after-cancel",
+            "PVTI_prune_after_cancel",
+            "PVT_project1",
+        ))
+        .await
+        .expect("next ADD should retry pruning and continue");
+    assert_eq!(outcome, AddRowOutcome::Published);
+    assert_eq!(
+        durable_store.list_keys_calls(),
+        2,
+        "cancelled prune must not leave the shared throttle stuck"
     );
 }
 
