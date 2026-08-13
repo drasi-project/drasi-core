@@ -165,7 +165,13 @@ impl RefreshProcessor {
             .await
             .context("writing reservation publication state")?;
 
-        if let Some(status_field_node_id) = &reservation.status_field_node_id {
+        for status_field_node_id in [
+            input.status_field_node_id.as_ref(),
+            reservation.status_field_node_id.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             if status_field_node_id != &self.config.expected_status_field_node_id {
                 let message = format!(
                     "input StatusFieldNodeId '{status_field_node_id}' does not match configured expectedStatusFieldNodeId '{}'",

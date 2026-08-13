@@ -32,8 +32,8 @@ use crate::descriptor::GitHubProjectItemRefreshDescriptor;
 use crate::destination::{DestinationPublishError, DestinationSourceClient};
 use crate::graphql::{rate_limit_retry_after, GitHubGraphqlClient};
 use crate::models::{
-    DeliveryKey, FetchedProjectItemState, HttpElement, HttpSourceChange, ItemVersionRecord,
-    ProjectItemStatusNode, PublicationRecord, PublicationState,
+    DeliveryKey, DeliveryReservation, FetchedProjectItemState, HttpElement, HttpSourceChange,
+    ItemVersionRecord, ProjectItemStatusNode, PublicationRecord, PublicationState,
 };
 use crate::processing::{parse_invalidation_input, AddRowOutcome, RefreshProcessor};
 use crate::state_store::RefreshStateStore;
@@ -1535,6 +1535,68 @@ async fn row_status_field_node_id_mismatch_blocks_all_network_and_remains_canoni
         0,
         "row mismatch must fail before GraphQL"
     );
+}
+
+#[tokio::test]
+async fn retry_cannot_override_reserved_status_field_with_mismatching_current_row() {
+    let graphql_server = MockServer::start().await;
+    let destination_server = MockServer::start().await;
+    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+    let (processor, state_store) = build_processor(
+        &graphql_server,
+        destination_server.uri(),
+        durable_store,
+        vec![],
+    )
+    .await;
+    let key = DeliveryKey::new("delivery-retry-mismatch", "PVTI_retry_mismatch");
+    state_store
+        .set_reservation(
+            &key,
+            &DeliveryReservation {
+                delivery_id: "delivery-retry-mismatch".to_string(),
+                project_item_node_id: "PVTI_retry_mismatch".to_string(),
+                invalidation_node_id: "INV_retry_mismatch".to_string(),
+                project_node_id: Some("PVT_project1".to_string()),
+                status_field_node_id: Some(EXPECTED_STATUS_FIELD_NODE_ID.to_string()),
+                state_source_url: None,
+                webhook_action: Some("edited".to_string()),
+                webhook_updated_at: None,
+                reserved_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("persist reservation");
+
+    let conflicting_retry = json!({
+        "invalidationNodeId": "INV_retry_mismatch",
+        "deliveryId": "delivery-retry-mismatch",
+        "projectItemNodeId": "PVTI_retry_mismatch",
+        "projectNodeId": "PVT_project1",
+        "statusFieldNodeId": "PVTSSF_wrong",
+        "invalidatedAt": "2026-08-13T20:15:00Z"
+    });
+    let error = processor
+        .process_add_row(&conflicting_retry)
+        .await
+        .expect_err("current row mismatch must fail despite a valid reservation");
+    assert!(error.to_string().contains("expectedStatusFieldNodeId"));
+    assert!(graphql_server
+        .received_requests()
+        .await
+        .expect("GraphQL requests")
+        .is_empty());
+    assert!(destination_server
+        .received_requests()
+        .await
+        .expect("destination requests")
+        .is_empty());
+    let publication = state_store
+        .get_publication(&key)
+        .await
+        .expect("store read")
+        .expect("publication");
+    assert_eq!(publication.state, PublicationState::Failed);
 }
 
 #[tokio::test]
