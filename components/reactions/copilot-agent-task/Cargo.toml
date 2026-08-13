@@ -1,0 +1,66 @@
+# Copyright 2026 The Drasi Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[package]
+name = "drasi-reaction-copilot-agent-task"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "Copilot Agent Task reaction plugin for Drasi (launches GitHub Copilot coding-agent tasks from WorkGraph routing decisions)"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "reaction", "github", "copilot"]
+categories = ["network-programming"]
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+# TODO(#574): For standalone reaction-plugin packaging, depend on published
+# crates.io versions instead of workspace-inherited drasi crates. This remains
+# intentionally uncompliant for now so the in-repo reaction can build against
+# local drasi-core/drasi-lib changes while it lives in this workspace.
+drasi-lib.workspace = true
+anyhow = "1.0"
+async-trait = "0.1"
+log = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v5"] }
+sha2 = "0.10"
+thiserror = "2.0"
+hex = "0.4"
+# TODO(#574): Pin the same crates.io drasi-plugin-sdk version as the target
+# dynamic plugin loader before treating this crate as standalone.
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+
+[dev-dependencies]
+# TODO(#574): Revisit these test-only workspace dependencies when the reaction
+# is made buildable outside the drasi-core workspace.
+drasi-core.workspace = true
+drasi-source-application.workspace = true
+wiremock = "0.6"
+tokio = { version = "1.0", features = ["full", "test-util"] }
+env_logger = "0.11"
+
+[features]
+# default = []
+dynamic-plugin = []

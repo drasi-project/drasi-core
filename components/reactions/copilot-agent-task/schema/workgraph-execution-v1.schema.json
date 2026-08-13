@@ -1,0 +1,69 @@
+{
+  "$id": "https://drasi.io/schemas/workgraph/workgraph.execution-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The single, pure-JSON issue comment the reaction posts immediately after a task is confirmed created (HTTP 201). Mirrors WorkGraphExecutionCommentV1 in src/prompt.rs — keep in sync.",
+  "properties": {
+    "baseRef": {
+      "type": "string"
+    },
+    "executionId": {
+      "type": "string"
+    },
+    "expectedEventId": {
+      "type": "string"
+    },
+    "fallbackUsed": {
+      "type": "boolean"
+    },
+    "issueNumber": {
+      "type": "integer"
+    },
+    "model": {
+      "type": "string"
+    },
+    "repository": {
+      "type": "string"
+    },
+    "requestedAt": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "requiredEventType": {
+      "type": "string"
+    },
+    "responsibilityId": {
+      "type": "string"
+    },
+    "routeId": {
+      "type": "string"
+    },
+    "schema": {
+      "const": "workgraph.execution/v1"
+    },
+    "taskId": {
+      "type": "string"
+    },
+    "taskUrl": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "executionId",
+    "expectedEventId",
+    "requiredEventType",
+    "routeId",
+    "responsibilityId",
+    "repository",
+    "issueNumber",
+    "taskId",
+    "taskUrl",
+    "model",
+    "fallbackUsed",
+    "requestedAt",
+    "baseRef"
+  ],
+  "title": "workgraph.execution/v1",
+  "type": "object"
+}

@@ -1,0 +1,49 @@
+{
+  "$id": "https://drasi.io/schemas/workgraph/WorkGraphEvent-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "eventId": {
+      "type": "string"
+    },
+    "eventType": {
+      "type": "string"
+    },
+    "executionId": {
+      "type": "string"
+    },
+    "issueContentVersion": {
+      "type": "string"
+    },
+    "responsibilityId": {
+      "type": "string"
+    },
+    "result": {
+      "enum": [
+        "success",
+        "failure"
+      ]
+    },
+    "routeId": {
+      "type": "string"
+    },
+    "schema": {
+      "const": "WorkGraphEvent/v1"
+    },
+    "summary": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema",
+    "eventType",
+    "eventId",
+    "routeId",
+    "responsibilityId",
+    "executionId",
+    "issueContentVersion",
+    "result"
+  ],
+  "title": "WorkGraphEvent/v1",
+  "type": "object"
+}
