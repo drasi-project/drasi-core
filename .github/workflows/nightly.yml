@@ -63,28 +63,23 @@ jobs:
   publish-plugins:
     name: Publish nightly plugins
     needs: release-dry-run
-    # Elevated scopes needed by the called publish-plugins.yml (OCI push + cosign
-    # keyless). A called workflow's token can't exceed the calling job's grants.
+    # Elevated package scope needed by the called publish-plugins.yml for OCI push.
+    # A called workflow's token can't exceed the calling job's grants.
     permissions:
       contents: read
       packages: write
-      id-token: write
     # Single chain: publish only after the release dry-run passes. always()
     # so a *skipped* release-dry-run (skip_release_dry_run) still lets publishing
     # proceed, while a *failed* release-dry-run blocks the rest of the nightly.
-    # [skip-plugins] / skip_publish_plugins reuse an already-published nightly tag.
+    # skip_publish_plugins reuses an already-published nightly tag.
     if: >-
       ${{ always()
         && needs.release-dry-run.result != 'failure'
         && needs.release-dry-run.result != 'cancelled'
-        && inputs.skip_publish_plugins != true
-        && !contains(github.event.head_commit.message || '', '[skip-plugins]') }}
+        && inputs.skip_publish_plugins != true }}
     uses: ./.github/workflows/publish-plugins.yml
     with:
       tag: ${{ inputs.plugin_tag || 'drasi-nightly-test' }}
-      # TEMPORARY (testing): build from the branch to validate the xtask zigbuild
-      # fix before it lands on main. Revert to `main` once the fix is merged.
-      ref: drasi-e2e-nightly
       # Nightly -test channel: skip cosign signing to avoid orphaned signatures
       # on each tag overwrite.
       sign: false
