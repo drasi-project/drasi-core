@@ -327,7 +327,8 @@ async fn seed_failed_reservation_state(
         .evaluate(candidate)
         .expect("rules evaluation");
     let decision =
-        RoutingDecision::from_policy(&policy_identity_config(policy_version), candidate, outcome);
+        RoutingDecision::from_policy(&policy_identity_config(policy_version), candidate, outcome)
+            .expect("decision");
 
     let mut state = RoutingStateRecord::new(candidate, &reservation);
     state.decision = Some(decision.clone());
@@ -1302,7 +1303,8 @@ async fn interrupted_old_policy_reservation_resumes_with_persisted_decision_cont
         RulesV1PolicyEngine
             .evaluate(&failed_outcome_candidate)
             .expect("rules evaluation"),
-    );
+    )
+    .expect("old decision");
 
     let reservation = ReservationRecord {
         reservation_key: candidate.reservation_key(),
@@ -1524,7 +1526,8 @@ async fn partial_side_effect_recovery_reconciles_trusted_comments() {
         },
         &candidate,
         outcome,
-    );
+    )
+    .expect("decision");
     let decision_comment = decision
         .decision_comment(&candidate)
         .expect("decision body");

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -64,6 +64,66 @@ struct OwnedRoutingState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct QueryResultProcessingOutcome {
     has_unresolved_nonterminal: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SequenceCheckpointBarrier {
+    unresolved_sequences: BTreeSet<u64>,
+    completed_sequences: BTreeSet<u64>,
+}
+
+impl SequenceCheckpointBarrier {
+    fn new() -> Self {
+        Self {
+            unresolved_sequences: BTreeSet::new(),
+            completed_sequences: BTreeSet::new(),
+        }
+    }
+
+    fn mark_completed(&mut self, sequence: u64) {
+        self.unresolved_sequences.remove(&sequence);
+        self.completed_sequences.insert(sequence);
+    }
+
+    fn mark_unresolved(&mut self, sequence: u64) {
+        self.unresolved_sequences.insert(sequence);
+        self.completed_sequences.remove(&sequence);
+    }
+
+    fn has_unresolved_before(&self, sequence: u64) -> bool {
+        self.unresolved_sequences
+            .iter()
+            .next()
+            .is_some_and(|blocked| *blocked < sequence)
+    }
+
+    async fn advance_ready(
+        &mut self,
+        base: &ReactionBase,
+        checkpoint_state: &mut CheckpointState,
+        query_id: &str,
+    ) -> anyhow::Result<()> {
+        while let Some(next_sequence) = self.completed_sequences.iter().next().copied() {
+            if self
+                .unresolved_sequences
+                .iter()
+                .next()
+                .is_some_and(|blocked| *blocked < next_sequence)
+            {
+                break;
+            }
+            self.completed_sequences.remove(&next_sequence);
+            checkpoint_state
+                .advance(base, query_id, next_sequence)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to advance checkpoint for query '{query_id}' to {next_sequence}"
+                    )
+                })?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +275,8 @@ async fn run_processing_loop(
     checkpoint_state: &mut CheckpointState,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
+    let mut checkpoint_barrier = SequenceCheckpointBarrier::new();
+
     loop {
         let event = tokio::select! {
             biased;
@@ -227,6 +289,24 @@ async fn run_processing_loop(
                 "[{}] received result for unexpected query '{}'; expected '{}'",
                 reaction_name, event.query_id, ROUTE_QUERY_ID
             );
+            continue;
+        }
+        if checkpoint_barrier.has_unresolved_before(event.sequence) {
+            info!(
+                "[{}] deferring query '{}' sequence {} because earlier unresolved sequence exists",
+                reaction_name, event.query_id, event.sequence
+            );
+            let requeued = base.priority_queue.enqueue(event.clone()).await;
+            if !requeued {
+                let message = format!(
+                    "failed to requeue deferred query result {}:{}",
+                    event.query_id, event.sequence
+                );
+                error!("[{reaction_name}] {message}");
+                base.set_status(ComponentStatus::Error, Some(message)).await;
+                return;
+            }
+            tokio::time::sleep(unresolved_retry_delay(&config)).await;
             continue;
         }
 
@@ -254,11 +334,24 @@ async fn run_processing_loop(
                 if config.strict_recovery {
                     return;
                 }
+                checkpoint_barrier.mark_unresolved(event.sequence);
+                let requeued = base.priority_queue.enqueue(event.clone()).await;
+                if !requeued {
+                    let message = format!(
+                        "failed to requeue failed query result {}:{}",
+                        event.query_id, event.sequence
+                    );
+                    error!("[{reaction_name}] {message}");
+                    base.set_status(ComponentStatus::Error, Some(message)).await;
+                    return;
+                }
+                tokio::time::sleep(unresolved_retry_delay(&config)).await;
                 continue;
             }
         };
 
         if processing.has_unresolved_nonterminal {
+            checkpoint_barrier.mark_unresolved(event.sequence);
             info!(
                 "[{}] query '{}' sequence {} has unresolved fenced candidates; requeuing before checkpoint advance",
                 reaction_name, event.query_id, event.sequence
@@ -277,12 +370,13 @@ async fn run_processing_loop(
             continue;
         }
 
-        if let Err(error) = checkpoint_state
-            .advance(&base, &event.query_id, event.sequence)
+        checkpoint_barrier.mark_completed(event.sequence);
+        if let Err(error) = checkpoint_barrier
+            .advance_ready(&base, checkpoint_state, &event.query_id)
             .await
         {
             error!(
-                "[{}] checkpoint update failed for sequence {}: {error:#}",
+                "[{}] checkpoint update failed while evaluating sequence {}: {error:#}",
                 reaction_name, event.sequence
             );
             base.set_status(
@@ -447,7 +541,8 @@ async fn process_candidate(
                 outcome.to_status
             );
         }
-        let decision = RoutingDecision::from_policy(config, candidate, outcome);
+        let decision = RoutingDecision::from_policy(config, candidate, outcome)
+            .context("policy output failed allowlist validation")?;
         state.selected_transition =
             Some((decision.from_status.clone(), decision.to_status.clone()));
         state.decision = Some(decision.clone());
@@ -465,10 +560,14 @@ async fn process_candidate(
         decision
     };
 
-    let mut progress =
+    let mut progress = {
+        decision
+            .validate_allowlists(config)
+            .context("decision allowlist validation failed before side effects")?;
         reconcile_progress(github, candidate, &decision, config, state.progress.clone())
-            .await
-            .context("failed to reconcile existing side effects")?;
+    }
+    .await
+    .context("failed to reconcile existing side effects")?;
     state.mark_progress(progress.clone());
 
     if !progress.decision_comment_written {
@@ -1451,6 +1550,40 @@ mod tests {
             .expect("reaction build")
     }
 
+    async fn seed_completed_candidate_state(
+        store: Arc<dyn StateStoreProvider>,
+        store_id: &str,
+        config: &WorkgraphRouterReactionConfig,
+        candidate: &RoutingCandidate,
+    ) {
+        let reservation = ReservationRecord {
+            reservation_key: candidate.reservation_key(),
+            execution_id: candidate.execution_id.clone(),
+            required_event_type: candidate.required_event_type.clone(),
+            owner_instance_id: Some("completed-owner".to_string()),
+            fencing_epoch: 1,
+            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
+            policy_id: config.policy_id.clone(),
+            policy_type: config.policy_type.clone(),
+            policy_version: config.policy_version.clone(),
+            decision_id: Some("done".to_string()),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            completed: true,
+        };
+        crate::state::save_reservation(store.clone(), store_id, &reservation)
+            .await
+            .expect("seed completed reservation");
+        let mut state = RoutingStateRecord::new(candidate, &reservation);
+        state.mark_progress(SideEffectProgress {
+            decision_comment_written: true,
+            responsibility_written: true,
+            project_status_updated: true,
+        });
+        save_routing_state(store, store_id, &state)
+            .await
+            .expect("seed completed state");
+    }
+
     async fn initialize_reaction_for_test(
         reaction: &WorkgraphRouterReaction,
         store: Arc<dyn StateStoreProvider>,
@@ -1727,6 +1860,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persisted_decision_must_still_pass_output_allowlists() {
+        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+        let mut runtime_config = sample_config();
+        runtime_config.allowed_responsibility_types = vec!["issue-validation".to_string()];
+        runtime_config.allowed_actors = vec!["bot-user".to_string(), "submitter-user".to_string()];
+        let reaction = make_reaction("router-persisted-allowlist", &runtime_config);
+        initialize_reaction_for_test(&reaction, store.clone()).await;
+
+        let candidate = sample_candidate();
+        let mut reservation = ReservationRecord {
+            reservation_key: candidate.reservation_key(),
+            execution_id: candidate.execution_id.clone(),
+            required_event_type: candidate.required_event_type.clone(),
+            owner_instance_id: Some(reaction.runner_instance_id.clone()),
+            fencing_epoch: 1,
+            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
+            policy_id: runtime_config.policy_id.clone(),
+            policy_type: runtime_config.policy_type.clone(),
+            policy_version: runtime_config.policy_version.clone(),
+            decision_id: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            completed: false,
+        };
+        let decision = RoutingDecision::from_policy(
+            &sample_config(),
+            &candidate,
+            RulesV1PolicyEngine
+                .evaluate(&candidate)
+                .expect("rules evaluation"),
+        )
+        .expect("decision");
+        reservation.decision_id = Some(decision.decision_id.clone());
+        crate::state::save_reservation(store.clone(), "router-persisted-allowlist", &reservation)
+            .await
+            .expect("seed reservation");
+
+        let mut state = RoutingStateRecord::new(&candidate, &reservation);
+        state.decision = Some(decision);
+        state.selected_transition = Some((
+            "AwaitingRouting".to_string(),
+            "AwaitingIssueRiskProfiling".to_string(),
+        ));
+        save_routing_state(store, "router-persisted-allowlist", &state)
+            .await
+            .expect("seed state");
+
+        let github = GithubClient::from_config(&runtime_config).expect("github client");
+        let err = process_candidate(
+            "router-persisted-allowlist",
+            &reaction.base,
+            &runtime_config,
+            &github,
+            &reaction.runner_instance_id,
+            &candidate,
+        )
+        .await
+        .expect_err("persisted decision should be blocked by output allowlist validation");
+        assert!(
+            err.to_string()
+                .contains("decision allowlist validation failed before side effects"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn unresolved_result_does_not_advance_checkpoint_past_later_sequence() {
         let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
         let config = sample_config();
@@ -1826,6 +2024,213 @@ mod tests {
         assert!(
             sequence < 2,
             "checkpoint advanced past unresolved sequence: got {sequence}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nonstrict_failed_sequence_blocks_checkpoint_advance() {
+        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+        let mut config = sample_config();
+        config.strict_recovery = false;
+        let reaction = make_reaction("router-nonstrict-failure-gap", &config);
+        initialize_reaction_for_test(&reaction, store.clone()).await;
+
+        let mut failed_candidate = sample_candidate();
+        failed_candidate.execution_id = "exec-failure-gap".to_string();
+        failed_candidate.comment_edited = true;
+
+        let mut completed_candidate = sample_candidate();
+        completed_candidate.execution_id = "exec-nonstrict-complete".to_string();
+        seed_completed_candidate_state(
+            store.clone(),
+            "router-nonstrict-failure-gap",
+            &config,
+            &completed_candidate,
+        )
+        .await;
+
+        reaction.start().await.expect("reaction start");
+        reaction
+            .enqueue_query_result(QueryResult::new(
+                ROUTE_QUERY_ID.to_string(),
+                1,
+                chrono::Utc::now(),
+                vec![ResultDiff::Add {
+                    data: serde_json::to_value(&failed_candidate).expect("failed row json"),
+                    row_signature: 1,
+                }],
+                HashMap::new(),
+            ))
+            .await
+            .expect("enqueue failed row");
+        reaction
+            .enqueue_query_result(QueryResult::new(
+                ROUTE_QUERY_ID.to_string(),
+                2,
+                chrono::Utc::now() + chrono::Duration::milliseconds(1),
+                vec![ResultDiff::Add {
+                    data: serde_json::to_value(&completed_candidate).expect("completed row json"),
+                    row_signature: 2,
+                }],
+                HashMap::new(),
+            ))
+            .await
+            .expect("enqueue completed row");
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        reaction.stop().await.expect("reaction stop");
+
+        let checkpoint = reaction
+            .base
+            .read_checkpoint(ROUTE_QUERY_ID)
+            .await
+            .expect("read checkpoint");
+        let sequence = checkpoint.map(|cp| cp.sequence).unwrap_or(0);
+        assert!(
+            sequence < 2,
+            "nonstrict checkpoint advanced past failed sequence: got {sequence}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nonstrict_unresolved_sequence_is_recoverable_before_checkpoint_advances() {
+        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+        let mut config = sample_config();
+        config.strict_recovery = false;
+        let reaction = make_reaction("router-nonstrict-recoverable", &config);
+        initialize_reaction_for_test(&reaction, store.clone()).await;
+
+        let mut fenced_candidate = sample_candidate();
+        fenced_candidate.execution_id = "exec-nonstrict-fenced".to_string();
+        let fenced_reservation = ReservationRecord {
+            reservation_key: fenced_candidate.reservation_key(),
+            execution_id: fenced_candidate.execution_id.clone(),
+            required_event_type: fenced_candidate.required_event_type.clone(),
+            owner_instance_id: Some("other-owner".to_string()),
+            fencing_epoch: 1,
+            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
+            policy_id: config.policy_id.clone(),
+            policy_type: config.policy_type.clone(),
+            policy_version: config.policy_version.clone(),
+            decision_id: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            completed: false,
+        };
+        crate::state::save_reservation(
+            store.clone(),
+            "router-nonstrict-recoverable",
+            &fenced_reservation,
+        )
+        .await
+        .expect("seed fenced reservation");
+
+        let mut completed_candidate = sample_candidate();
+        completed_candidate.execution_id = "exec-nonstrict-complete-2".to_string();
+        seed_completed_candidate_state(
+            store.clone(),
+            "router-nonstrict-recoverable",
+            &config,
+            &completed_candidate,
+        )
+        .await;
+
+        reaction.start().await.expect("reaction start");
+        reaction
+            .enqueue_query_result(QueryResult::new(
+                ROUTE_QUERY_ID.to_string(),
+                1,
+                chrono::Utc::now(),
+                vec![ResultDiff::Add {
+                    data: serde_json::to_value(&fenced_candidate).expect("fenced row json"),
+                    row_signature: 1,
+                }],
+                HashMap::new(),
+            ))
+            .await
+            .expect("enqueue fenced row");
+        reaction
+            .enqueue_query_result(QueryResult::new(
+                ROUTE_QUERY_ID.to_string(),
+                2,
+                chrono::Utc::now() + chrono::Duration::milliseconds(1),
+                vec![ResultDiff::Add {
+                    data: serde_json::to_value(&completed_candidate).expect("completed row json"),
+                    row_signature: 2,
+                }],
+                HashMap::new(),
+            ))
+            .await
+            .expect("enqueue completed row");
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        reaction.stop().await.expect("reaction stop");
+
+        let first_checkpoint = reaction
+            .base
+            .read_checkpoint(ROUTE_QUERY_ID)
+            .await
+            .expect("read first checkpoint")
+            .map(|cp| cp.sequence)
+            .unwrap_or(0);
+        assert!(
+            first_checkpoint < 2,
+            "checkpoint advanced past unresolved sequence before recovery: got {first_checkpoint}"
+        );
+
+        seed_completed_candidate_state(
+            store.clone(),
+            "router-nonstrict-recoverable",
+            &config,
+            &fenced_candidate,
+        )
+        .await;
+
+        let resumed_reaction = make_reaction("router-nonstrict-recoverable", &config);
+        initialize_reaction_for_test(&resumed_reaction, store).await;
+        resumed_reaction
+            .start()
+            .await
+            .expect("resumed reaction start");
+        resumed_reaction
+            .enqueue_query_result(QueryResult::new(
+                ROUTE_QUERY_ID.to_string(),
+                1,
+                chrono::Utc::now(),
+                vec![ResultDiff::Add {
+                    data: serde_json::to_value(&fenced_candidate).expect("fenced row json"),
+                    row_signature: 1,
+                }],
+                HashMap::new(),
+            ))
+            .await
+            .expect("enqueue recovered fenced row");
+        resumed_reaction
+            .enqueue_query_result(QueryResult::new(
+                ROUTE_QUERY_ID.to_string(),
+                2,
+                chrono::Utc::now() + chrono::Duration::milliseconds(1),
+                vec![ResultDiff::Add {
+                    data: serde_json::to_value(&completed_candidate).expect("completed row json"),
+                    row_signature: 2,
+                }],
+                HashMap::new(),
+            ))
+            .await
+            .expect("enqueue completed row");
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        resumed_reaction
+            .stop()
+            .await
+            .expect("resumed reaction stop");
+
+        let recovered_checkpoint = resumed_reaction
+            .base
+            .read_checkpoint(ROUTE_QUERY_ID)
+            .await
+            .expect("read recovered checkpoint")
+            .map(|cp| cp.sequence)
+            .unwrap_or(0);
+        assert!(
+            recovered_checkpoint >= 2,
+            "checkpoint did not advance after unresolved sequence became recoverable: got {recovered_checkpoint}"
         );
     }
 

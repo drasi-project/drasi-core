@@ -238,7 +238,7 @@ mod tests {
         let policy = RulesV1PolicyEngine
             .evaluate(candidate)
             .expect("rules evaluation");
-        RoutingDecision::from_policy(config, candidate, policy)
+        RoutingDecision::from_policy(config, candidate, policy).expect("decision")
     }
 
     fn decision_comment(

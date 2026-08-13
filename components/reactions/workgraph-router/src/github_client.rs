@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use anyhow::Context;
-use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
+use reqwest::header::{ACCEPT, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -153,7 +153,7 @@ impl GithubClient {
             .get(url)
             .header(USER_AGENT, "drasi-workgraph-router")
             .header(ACCEPT, "application/vnd.github+json")
-            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .bearer_auth(&token)
             .send()
             .await
             .context("GitHub issue preflight request failed")?;
@@ -279,7 +279,7 @@ impl GithubClient {
             .post(url)
             .header(USER_AGENT, "drasi-workgraph-router")
             .header(ACCEPT, "application/vnd.github+json")
-            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .bearer_auth(&token)
             .json(&serde_json::json!({ "body": body }))
             .send()
             .await
@@ -318,7 +318,7 @@ impl GithubClient {
                 .get(url)
                 .header(USER_AGENT, "drasi-workgraph-router")
                 .header(ACCEPT, "application/vnd.github+json")
-                .header(AUTHORIZATION, format!("Bearer {token}"))
+                .bearer_auth(&token)
                 .send()
                 .await
                 .context("GitHub list comments request failed")?;
@@ -357,7 +357,7 @@ impl GithubClient {
             .post(&self.graphql_url)
             .header(USER_AGENT, "drasi-workgraph-router")
             .header(ACCEPT, "application/vnd.github+json")
-            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .bearer_auth(&token)
             .json(&serde_json::json!({
                 "query": query,
                 "variables": variables

@@ -96,6 +96,24 @@ fn sample_config() -> WorkgraphRouterReactionConfig {
     }
 }
 
+fn github_client_for_test(
+    server: &wiremock::MockServer,
+    token_env: &str,
+    token_value: &str,
+) -> GithubClient {
+    std::env::set_var(token_env, token_value);
+    let config = WorkgraphRouterReactionConfig {
+        policy_id: "policy".to_string(),
+        policy_type: "rules_v1".to_string(),
+        policy_version: "1.0.0".to_string(),
+        github_rest_url: server.uri(),
+        github_graphql_url: format!("{}/graphql", server.uri()),
+        github_token_env: token_env.to_string(),
+        ..sample_config()
+    };
+    GithubClient::from_config(&config).expect("client")
+}
+
 #[test]
 fn rules_v1_pass_routes_to_risk_profiling() {
     let candidate = sample_candidate();
@@ -154,7 +172,7 @@ fn decision_comment_is_pure_json() {
     let policy = RulesV1PolicyEngine
         .evaluate(&candidate)
         .expect("rules evaluation");
-    let decision = RoutingDecision::from_policy(&config, &candidate, policy);
+    let decision = RoutingDecision::from_policy(&config, &candidate, policy).expect("decision");
     let comment = decision
         .decision_comment(&candidate)
         .expect("decision comment");
@@ -162,6 +180,167 @@ fn decision_comment_is_pure_json() {
     assert_eq!(
         payload.get("type").and_then(|v| v.as_str()),
         Some("workgraph.routing-decision/v1")
+    );
+}
+
+#[tokio::test]
+async fn github_issue_preflight_sends_bearer_authorization() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let token = "token-issue-open";
+    let expected_auth = format!("{} {}", "Bearer", token);
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42"))
+        .and(header("authorization", expected_auth.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "state":"open"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = github_client_for_test(&server, "WG_ROUTER_TEST_TOKEN_ISSUE_OPEN", token);
+    let is_open = client
+        .issue_is_open("drasi-project/drasi-core", 42)
+        .await
+        .expect("issue preflight");
+    assert!(is_open);
+}
+
+#[tokio::test]
+async fn github_create_comment_sends_bearer_authorization() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let token = "token-comment-create";
+    let expected_auth = format!("{} {}", "Bearer", token);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
+        .and(header("authorization", expected_auth.as_str()))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "id": 1,
+            "body": "ok",
+            "user": {"login":"router-user"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = github_client_for_test(&server, "WG_ROUTER_TEST_TOKEN_CREATE_COMMENT", token);
+    let comment = client
+        .create_issue_comment("drasi-project/drasi-core", 42, "{\"ok\":true}")
+        .await
+        .expect("create comment");
+    assert_eq!(comment.id, 1);
+}
+
+#[tokio::test]
+async fn github_list_comments_sends_bearer_authorization() {
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let token = "token-list-comments";
+    let expected_auth = format!("{} {}", "Bearer", token);
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
+        .and(query_param("per_page", "100"))
+        .and(query_param("page", "1"))
+        .and(header("authorization", expected_auth.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = github_client_for_test(&server, "WG_ROUTER_TEST_TOKEN_LIST_COMMENTS", token);
+    let comments = client
+        .list_issue_comments("drasi-project/drasi-core", 42)
+        .await
+        .expect("list comments");
+    assert!(comments.is_empty());
+}
+
+#[tokio::test]
+async fn github_graphql_sends_bearer_authorization() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let token = "token-graphql";
+    let expected_auth = format!("{} {}", "Bearer", token);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("authorization", expected_auth.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"viewer": {"login": "octocat"}}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = github_client_for_test(&server, "WG_ROUTER_TEST_TOKEN_GRAPHQL", token);
+    let data = client
+        .graphql("query Q { viewer { login } }", serde_json::json!({}))
+        .await
+        .expect("graphql");
+    assert_eq!(
+        data.pointer("/viewer/login").and_then(|v| v.as_str()),
+        Some("octocat")
+    );
+}
+
+#[test]
+fn policy_output_rejected_when_next_responsibility_type_not_allowlisted() {
+    let mut config = sample_config();
+    config.allowed_responsibility_types = vec!["issue-validation".to_string()];
+    let candidate = sample_candidate();
+    let policy = RulesV1PolicyEngine
+        .evaluate(&candidate)
+        .expect("rules evaluation");
+    let err = RoutingDecision::from_policy(&config, &candidate, policy)
+        .expect_err("decision should reject policy output type");
+    assert!(
+        err.to_string()
+            .contains("nextResponsibilityType 'issue-risk-profiling'"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn policy_output_rejected_when_issue_correction_not_allowlisted() {
+    let mut config = sample_config();
+    config.allowed_responsibility_types = vec!["issue-validation".to_string()];
+    let mut candidate = sample_candidate();
+    candidate.outcome = "failed".to_string();
+    let policy = RulesV1PolicyEngine
+        .evaluate(&candidate)
+        .expect("rules evaluation");
+    let err = RoutingDecision::from_policy(&config, &candidate, policy)
+        .expect_err("decision should reject issue-correction output type");
+    assert!(
+        err.to_string()
+            .contains("nextResponsibilityType 'issue-correction'"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn policy_output_rejected_when_owner_not_allowlisted() {
+    let mut config = sample_config();
+    config.allowed_actors = vec!["submitter-user".to_string()];
+    let candidate = sample_candidate();
+    let policy = RulesV1PolicyEngine
+        .evaluate(&candidate)
+        .expect("rules evaluation");
+    let err = RoutingDecision::from_policy(&config, &candidate, policy)
+        .expect_err("decision should reject policy output owner");
+    assert!(
+        err.to_string()
+            .contains("nextResponsibilityOwner 'bot-user'"),
+        "unexpected error: {err:#}"
     );
 }
 
@@ -201,5 +380,30 @@ async fn github_errors_do_not_leak_token_value() {
     assert!(
         !rendered.contains(token_value),
         "error output leaked token value"
+    );
+}
+
+#[tokio::test]
+async fn github_transport_errors_do_not_leak_token_value() {
+    let token_value = "transport-secret-token";
+    std::env::set_var("WG_ROUTER_TEST_TOKEN_TRANSPORT_REDACTION", token_value);
+    let config = WorkgraphRouterReactionConfig {
+        policy_id: "policy".to_string(),
+        policy_type: "rules_v1".to_string(),
+        policy_version: "1.0.0".to_string(),
+        github_rest_url: "http://127.0.0.1:1".to_string(),
+        github_graphql_url: "http://127.0.0.1:1/graphql".to_string(),
+        github_token_env: "WG_ROUTER_TEST_TOKEN_TRANSPORT_REDACTION".to_string(),
+        ..sample_config()
+    };
+    let client = GithubClient::from_config(&config).expect("client");
+    let error = client
+        .issue_is_open("drasi-project/drasi-core", 42)
+        .await
+        .expect_err("transport should fail");
+    let rendered = format!("{error:#}");
+    assert!(
+        !rendered.contains(token_value),
+        "transport error output leaked token value"
     );
 }

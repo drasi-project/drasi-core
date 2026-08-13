@@ -106,13 +106,41 @@ pub struct DecisionTransition {
 }
 
 impl RoutingDecision {
+    pub fn validate_allowlists(
+        &self,
+        config: &WorkgraphRouterReactionConfig,
+    ) -> anyhow::Result<()> {
+        if !config
+            .allowed_responsibility_types
+            .iter()
+            .any(|allowed| allowed == &self.next_responsibility_type)
+        {
+            anyhow::bail!(
+                "policy output nextResponsibilityType '{}' is not in allowedResponsibilityTypes",
+                self.next_responsibility_type
+            );
+        }
+        if !config.allowed_actors.is_empty()
+            && !config
+                .allowed_actors
+                .iter()
+                .any(|allowed| allowed == &self.next_responsibility_owner)
+        {
+            anyhow::bail!(
+                "policy output nextResponsibilityOwner '{}' is not in allowedActors",
+                self.next_responsibility_owner
+            );
+        }
+        Ok(())
+    }
+
     pub fn from_policy(
         config: &WorkgraphRouterReactionConfig,
         candidate: &RoutingCandidate,
         policy: PolicyOutcome,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let decision_id = deterministic_decision_id(config, candidate, &policy).to_string();
-        Self {
+        let decision = Self {
             decision_id,
             policy_id: config.policy_id.clone(),
             policy_type: config.policy_type.clone(),
@@ -123,7 +151,9 @@ impl RoutingDecision {
             next_responsibility_owner: policy.next_responsibility_owner,
             marker_request: policy.marker_request,
             reason: policy.reason,
-        }
+        };
+        decision.validate_allowlists(config)?;
+        Ok(decision)
     }
 
     pub fn decision_comment(&self, candidate: &RoutingCandidate) -> anyhow::Result<String> {

@@ -20,7 +20,9 @@ Top-level config (`camelCase`):
 - `allowedResponsibilityTypes`, `allowedActors`
 - `trustedRoutingAuthors`, `trustedLauncherAuthors`, `trustedAgentAuthors`, `trustedRouterAuthors`
 - `trustedRouterAuthorNodeIds`, `trustedRouterAuthorDatabaseIds` (immutable GitHub actor IDs used for strict reconciliation trust)
-- `githubGraphqlUrl`, `githubRestUrl`, `githubTokenEnv`
+- `githubGraphqlUrl` (defaults to `https://api.github.com/graphql`)
+- `githubRestUrl` (defaults to `https://api.github.com`)
+- `githubTokenEnv` (defaults to `GITHUB_TOKEN`)
 - `projectStatusFieldName` (defaults to `Status`)
 - `timeoutSecs`
 - `reservationLeaseSecs` (defaults to `120`; must be `>= 3 * timeoutSecs`)
