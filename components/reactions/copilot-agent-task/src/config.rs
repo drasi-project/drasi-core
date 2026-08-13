@@ -44,11 +44,6 @@ pub fn default_request_timeout_ms() -> u64 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CommentApiConfig {
-    /// When `false`, the reaction still launches tasks but skips posting the
-    /// workgraph execution comment (e.g. for environments where issue
-    /// comments are managed by a different automation). Default `true`.
-    #[serde(default = "CommentApiConfig::default_enabled")]
-    pub enabled: bool,
     /// Number of GraphQL comment-post attempts within a single processing
     /// pass before treating the failure as transient and stopping (the next
     /// restart resumes at the comment step — the task is never recreated).
@@ -60,9 +55,6 @@ pub struct CommentApiConfig {
 }
 
 impl CommentApiConfig {
-    fn default_enabled() -> bool {
-        true
-    }
     fn default_max_attempts() -> u32 {
         3
     }
@@ -74,7 +66,6 @@ impl CommentApiConfig {
 impl Default for CommentApiConfig {
     fn default() -> Self {
         Self {
-            enabled: Self::default_enabled(),
             max_attempts: Self::default_max_attempts(),
             retry_backoff_ms: Self::default_retry_backoff_ms(),
         }

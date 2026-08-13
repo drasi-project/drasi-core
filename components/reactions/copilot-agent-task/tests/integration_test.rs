@@ -85,7 +85,6 @@ fn build_reaction(server_uri: &str) -> CopilotAgentTaskReaction {
         .with_allowed_profiles(vec!["issue-validator".to_string()])
         .with_allowed_models(vec!["gpt-5".to_string(), "gpt-4".to_string()])
         .with_comment_api(CommentApiConfig {
-            enabled: true,
             max_attempts: 2,
             retry_backoff_ms: 10,
         })
@@ -609,16 +608,19 @@ async fn duplicate_delivery_launches_only_once() {
 // ---------------------------------------------------------------------
 #[tokio::test]
 #[ignore]
-async fn crash_recovery_reconciles_starting_record_with_no_existing_task() {
+async fn crash_recovery_adopts_exactly_one_existing_task() {
     let server = MockServer::start().await;
     mount_happy_path_preflight(&server, 6, "issue-6").await;
-    mock_github::mount_list_tasks(&server, OWNER, REPO, vec![]).await; // no existing task found
-    mock_github::mount_create_task_success(
+    let exec_id = execution_id(REACTION, "route-6", "resp-6", 1);
+    mock_github::mount_list_tasks(
         &server,
         OWNER,
         REPO,
-        "task-recovered",
-        "https://github.com/tasks/rec",
+        vec![json!({
+            "id": "task-recovered",
+            "html_url": "https://github.com/tasks/rec",
+            "prompt": format!("...{exec_id}...")
+        })],
     )
     .await;
     mock_github::mount_add_comment_success(&server).await;
@@ -630,7 +632,6 @@ async fn crash_recovery_reconciles_starting_record_with_no_existing_task() {
     // durable reservation was marked Starting but before task creation was
     // confirmed, and before the checkpoint advanced (so this row will be
     // redelivered on "restart").
-    let exec_id = execution_id(REACTION, "route-6", "resp-6", 1);
     let mut record = ExecutionRecord::new_reserved(
         "route-6",
         "resp-6",
@@ -686,7 +687,7 @@ async fn crash_recovery_reconciles_starting_record_with_no_existing_task() {
     .await;
 
     wait_until(
-        || async { mock_github::count_create_task_requests(&server, OWNER, REPO).await == 1 },
+        || async { mock_github::count_add_comment_requests(&server).await == 1 },
         5000,
     )
     .await;
@@ -697,18 +698,23 @@ async fn crash_recovery_reconciles_starting_record_with_no_existing_task() {
         .unwrap();
     assert_eq!(record.status, ExecutionStatus::Started);
     assert_eq!(record.task_id.as_deref(), Some("task-recovered"));
+    assert_eq!(
+        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
+        0,
+        "recovery must adopt the correlated task without creating another"
+    );
 
     core.stop().await.expect("stop core");
 }
 
 // ---------------------------------------------------------------------
-// 7. Ambiguous reconciliation: more than one candidate task is found —
-//    the reaction never guesses, stays Ambiguous, and stops for
-//    intervention rather than launching a duplicate.
+// 7. Ambiguous reconciliation: no correlated task is visible in the recent
+//    listing. Absence is not proof that creation failed, so the reaction
+//    stays Ambiguous and never launches a duplicate.
 // ---------------------------------------------------------------------
 #[tokio::test]
 #[ignore]
-async fn ambiguous_reconciliation_never_guesses() {
+async fn ambiguous_reconciliation_with_no_match_never_retries() {
     let server = MockServer::start().await;
     mount_happy_path_preflight(&server, 7, "issue-7").await;
 
@@ -716,16 +722,7 @@ async fn ambiguous_reconciliation_never_guesses() {
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     let exec_id = execution_id(REACTION, "route-7", "resp-7", 1);
-    mock_github::mount_list_tasks(
-        &server,
-        OWNER,
-        REPO,
-        vec![
-            json!({"id": "task-a", "html_url": "https://x/a", "prompt": format!("...{exec_id}...")}),
-            json!({"id": "task-b", "html_url": "https://x/b", "prompt": format!("...{exec_id}...")}),
-        ],
-    )
-    .await;
+    mock_github::mount_list_tasks(&server, OWNER, REPO, vec![]).await;
 
     let mut record = ExecutionRecord::new_reserved(
         "route-7",
@@ -814,7 +811,7 @@ async fn ambiguous_reconciliation_never_guesses() {
             .last_error
             .as_deref()
             .unwrap_or_default()
-            .contains("candidate tasks matched executionId"),
+            .contains("0 candidate tasks matched executionId"),
         "expected reconciliation's ambiguous-match error, got {:?}",
         record.last_error
     );

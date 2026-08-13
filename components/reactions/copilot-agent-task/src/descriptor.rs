@@ -29,9 +29,6 @@ use crate::CopilotAgentTaskReactionBuilder;
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CommentApiConfigDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<ConfigValueBool>)]
-    pub enabled: Option<ConfigValue<bool>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueU64>)]
     pub max_attempts: Option<ConfigValue<u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,7 +91,6 @@ impl From<&CopilotAgentTaskReactionConfig> for CopilotAgentTaskReactionConfigDto
             allowed_models: c.allowed_models.clone(),
             request_timeout_ms: Some(ConfigValue::Static(c.request_timeout_ms)),
             comment_api: Some(CommentApiConfigDto {
-                enabled: Some(ConfigValue::Static(c.comment_api.enabled)),
                 max_attempts: Some(ConfigValue::Static(c.comment_api.max_attempts as u64)),
                 retry_backoff_ms: Some(ConfigValue::Static(c.comment_api.retry_backoff_ms)),
             }),
@@ -107,10 +103,6 @@ impl From<&CopilotAgentTaskReactionConfig> for CopilotAgentTaskReactionConfigDto
 fn map_comment_api(dto: &CommentApiConfigDto) -> CommentApiConfig {
     let default = CommentApiConfig::default();
     CommentApiConfig {
-        enabled: match &dto.enabled {
-            Some(ConfigValue::Static(v)) => *v,
-            _ => default.enabled,
-        },
         max_attempts: match &dto.max_attempts {
             Some(ConfigValue::Static(v)) => *v as u32,
             _ => default.max_attempts,
@@ -230,6 +222,9 @@ impl ReactionPluginDescriptor for CopilotAgentTaskReactionDescriptor {
         if let Some(ref c) = dto.comment_api {
             builder = builder.with_comment_api(map_comment_api(c));
         }
+        if let Some(ref v) = dto.strict_recovery {
+            builder = builder.with_strict_recovery(mapper.resolve_typed(v).await?);
+        }
         if let Some(ref cap) = dto.priority_queue_capacity {
             let resolved: u64 = mapper.resolve_typed(cap).await?;
             builder = builder.with_priority_queue_capacity(resolved as usize);
@@ -270,6 +265,21 @@ mod tests {
             "allowedRepositories": [],
             "allowedProfiles": [],
             "allowedModels": [],
+        });
+        let result = CopilotAgentTaskReactionDescriptor
+            .create_reaction("id", vec!["q1".to_string()], &cfg, true)
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn create_reaction_rejects_non_strict_recovery() {
+        let cfg = serde_json::json!({
+            "token": "ghp_test",
+            "allowedRepositories": ["drasi-project/drasi-core"],
+            "allowedProfiles": ["issue-validator"],
+            "allowedModels": ["gpt-5"],
+            "strictRecovery": false,
         });
         let result = CopilotAgentTaskReactionDescriptor
             .create_reaction("id", vec!["q1".to_string()], &cfg, true)

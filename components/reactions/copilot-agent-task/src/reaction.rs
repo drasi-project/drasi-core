@@ -44,7 +44,6 @@ use crate::github::{
 };
 use crate::ids::execution_id;
 use crate::prompt::{build_prompt, WorkGraphExecutionCommentV1};
-use crate::redact::preview;
 use crate::row::{validate_row, LaunchRow};
 use crate::state::{reserve_or_resume, save, ExecutionRecord, ExecutionStatus, ReservationOutcome};
 use crate::CopilotAgentTaskReactionBuilder;
@@ -529,39 +528,6 @@ async fn reconcile_and_resume(
         .map_err(|e| format!("reconciliation lookup failed: {e}"))?;
 
     match outcome {
-        ReconciliationOutcome::NoMatch => {
-            // No task exists under this executionId: safe to (re-)attempt a
-            // fresh launch from preflight onward.
-            info!(
-                "[{reaction_name}] Reconciliation found no existing task for executionId={} — retrying launch",
-                record.execution_id
-            );
-            record.status = ExecutionStatus::Reserved;
-            record.touch();
-            save(store, store_id, &record)
-                .await
-                .map_err(|e| format!("failed to persist reservation reset: {e:#}"))?;
-
-            match crate::github::run_preflight(client, row).await {
-                Ok(()) => {}
-                Err(PreflightError::Permanent(reason)) => {
-                    record.status = ExecutionStatus::Failed;
-                    record.last_error = Some(reason);
-                    record.touch();
-                    let _ = save(store, store_id, &record).await;
-                    return Ok(());
-                }
-                Err(PreflightError::Transient(reason)) => {
-                    return Err(format!("preflight transient failure: {reason}"));
-                }
-            }
-            record.status = ExecutionStatus::Starting;
-            record.touch();
-            save(store, store_id, &record)
-                .await
-                .map_err(|e| format!("failed to persist Starting state: {e:#}"))?;
-            launch_and_comment(reaction_name, config, client, store, store_id, row, record).await
-        }
         ReconciliationOutcome::ExactMatch(task) => {
             info!(
                 "[{reaction_name}] Reconciliation adopted existing task {} for executionId={}",
@@ -646,8 +612,8 @@ async fn launch_and_comment(
 
     let prompt = build_prompt(row, &record.execution_id);
     info!(
-        "[{reaction_name}] Launching task for {}#{} (route={}, responsibility={}, executionId={}) — prompt preview: {}",
-        row.repository, row.issue_number, row.route_id, row.responsibility_id, record.execution_id, preview(&prompt)
+        "[{reaction_name}] Launching task for {}#{} (route={}, responsibility={}, executionId={})",
+        row.repository, row.issue_number, row.route_id, row.responsibility_id, record.execution_id
     );
 
     let request_time = crate::github::now();
@@ -752,8 +718,8 @@ async fn launch_and_comment(
     }
 }
 
-/// Post the single `workgraph.execution/v1` comment (if enabled and not
-/// already posted) and mark the record fully done. This is the last step
+/// Post the single `workgraph.execution/v1` comment (if not already posted)
+/// and mark the record fully done. This is the last step
 /// before the checkpoint is allowed to advance — "checkpoint only after
 /// durable task/execution state and comment recorded".
 async fn post_comment_and_finish(
@@ -765,15 +731,6 @@ async fn post_comment_and_finish(
     row: &LaunchRow,
     mut record: ExecutionRecord,
 ) -> Result<(), String> {
-    if !config.comment_api.enabled {
-        record.comment_posted = true; // nothing to do; treat as satisfied.
-        record.touch();
-        save(store, store_id, &record)
-            .await
-            .map_err(|e| format!("failed to persist final state: {e:#}"))?;
-        return Ok(());
-    }
-
     if record.comment_posted {
         return Ok(());
     }

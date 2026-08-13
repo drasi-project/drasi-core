@@ -130,6 +130,11 @@ impl CopilotAgentTaskReactionBuilder {
         self
     }
 
+    pub fn with_strict_recovery(mut self, strict_recovery: bool) -> Self {
+        self.config.strict_recovery = strict_recovery;
+        self
+    }
+
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
         self

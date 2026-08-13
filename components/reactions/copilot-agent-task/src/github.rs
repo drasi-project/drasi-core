@@ -354,9 +354,8 @@ impl GitHubClient {
     }
 
     /// Search recent tasks for exactly one whose prompt/body contains
-    /// `execution_id`. Never guesses: zero or more-than-one matches are
-    /// reported distinctly so the caller can decide (and never blindly
-    /// retries creation on an ambiguous outcome).
+    /// `execution_id`. Never guesses: any result other than exactly one match
+    /// remains ambiguous and must not trigger another create request.
     pub async fn reconcile(
         &self,
         owner: &str,
@@ -369,7 +368,6 @@ impl GitHubClient {
             .filter(|t| t.searchable.contains(execution_id))
             .collect();
         Ok(match matches.len() {
-            0 => ReconciliationOutcome::NoMatch,
             1 => ReconciliationOutcome::ExactMatch(matches.remove(0)),
             _ => ReconciliationOutcome::Ambiguous(matches),
         })
@@ -489,7 +487,6 @@ pub struct TaskSummary {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReconciliationOutcome {
-    NoMatch,
     ExactMatch(TaskSummary),
     Ambiguous(Vec<TaskSummary>),
 }

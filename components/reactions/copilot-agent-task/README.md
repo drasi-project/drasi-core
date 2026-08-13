@@ -103,7 +103,6 @@ Each row returned by the launch query must contain the following fields (camelCa
 | `allowedProfiles` | string[] | — | **Required, non-empty** |
 | `allowedModels` | string[] | — | **Required, non-empty** |
 | `requestTimeoutMs` | u64 | `30000` | Per-HTTP-request timeout |
-| `commentApi.enabled` | bool | `true` | Set `false` to skip posting the workgraph comment |
 | `commentApi.maxAttempts` | u32 | `3` | In-process retry attempts for the comment step within one run |
 | `commentApi.retryBackoffMs` | u64 | `500` | Backoff between comment retry attempts |
 | `strictRecovery` | bool | `true` | Must be `true` — see [Reservation, idempotency, and recovery](#reservation-idempotency-and-recovery) |
@@ -155,8 +154,8 @@ Reserved -> Starting -> Started (comment_posted=false) -> Started (comment_poste
   [reconciliation](#ambiguous-creation-and-reconciliation) before doing anything else — it
   never blindly retries task creation.
 - The reaction's checkpoint (the query-outbox position) is advanced **only after** the task
-  is confirmed created *and* the `workgraph.execution/v1` comment is recorded as posted (or
-  `commentApi.enabled = false`). A transient failure at any step returns an error that stops
+  is confirmed created *and* the `workgraph.execution/v1` comment is recorded as posted.
+  A transient failure at any step returns an error that stops
   the reaction (`ReactionRecoveryPolicy::Strict`) so the batch replays from the outbox on
   restart, without ever recreating an already-confirmed task.
 - `strictRecovery` must be `true`: an ambiguous or failed launch always requires
@@ -202,7 +201,8 @@ created. The reaction marks the record `Ambiguous` and, on the next processing p
 (`GET /agents/repos/{owner}/{repo}/tasks`) and searches for **exactly one** whose
 prompt/body contains the attempt's `executionId`:
 
-- **Zero matches** → safe to (re-)launch from preflight onward.
+- **Zero matches** → stays `Ambiguous`; absence from a recent-task listing is not proof that
+  creation did not succeed.
 - **Exactly one match** → adopt it (mark `Started` with its task ID/URL) and proceed to the
   comment step.
 - **More than one match** → stays `Ambiguous` and the reaction stops; it never guesses.
@@ -216,8 +216,7 @@ prompt/body contains the attempt's `executionId`:
   (`CopilotAgentTaskReactionConfig` and `GitHubClient` both redact it explicitly). It **is**
   included in `Reaction::properties()` — this is a framework contract (config persistence
   must be lossless so the reaction restarts correctly), not a log/display surface.
-- Prompt text is only ever logged as a short, length-bounded preview (`redact::preview`),
-  never in full, since it may embed repository/issue content.
+- Prompt text is never logged, since it may contain sensitive repository or issue context.
 - All input (`repository`, `agentProfile`, `requestedModel`, `fallbackModel`) is validated
   against explicit allowlists; empty allowlists allow nothing (fail-closed).
 
