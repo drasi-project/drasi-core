@@ -113,12 +113,12 @@ fn test_row(
     project_node_id: &str,
 ) -> serde_json::Value {
     json!({
-        "invalidationNodeId": "INV_test",
+        "invalidationNodeId": format!("project-item-invalidation:{delivery_id}"),
         "deliveryId": delivery_id,
         "projectItemNodeId": project_item_node_id,
         "projectNodeId": project_node_id,
         "webhookAction": "edited",
-        "webhookUpdatedAt": "2026-08-13T18:00:00Z"
+        "invalidatedAt": "2026-08-13T18:00:00Z"
     })
 }
 

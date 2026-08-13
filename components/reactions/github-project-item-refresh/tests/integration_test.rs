@@ -163,14 +163,14 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
     let query = Query::cypher("invalidation-query")
         .query(
             "MATCH (n:ProjectItemInvalidation)
-             RETURN n.InvalidationNodeId AS InvalidationNodeId,
-                    n.DeliveryId AS DeliveryId,
-                    n.ProjectItemNodeId AS ProjectItemNodeId,
-                    n.ProjectNodeId AS ProjectNodeId,
-                    n.StatusFieldNodeId AS StatusFieldNodeId,
-                    n.StateSourceUrl AS StateSourceUrl,
+             RETURN n.InvalidationNodeId AS invalidationNodeId,
+                    n.DeliveryId AS deliveryId,
+                    n.ProjectItemNodeId AS projectItemNodeId,
+                    n.ProjectNodeId AS projectNodeId,
+                    n.StatusFieldNodeId AS statusFieldNodeId,
+                    n.StateSourceUrl AS stateSourceUrl,
                     n.webhookAction AS webhookAction,
-                    n.InvalidatedAt AS InvalidatedAt",
+                    n.InvalidatedAt AS invalidatedAt",
         )
         .from_source("invalidation-source")
         .auto_start(true)
@@ -203,10 +203,13 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
     // INSERT -> should trigger fetch + publish
     handle
         .send_node_insert(
-            "inv-1",
+            "project-item-invalidation:delivery-e2e-1",
             vec!["ProjectItemInvalidation"],
             PropertyMapBuilder::new()
-                .with_string("InvalidationNodeId", "INV_e2e_1")
+                .with_string(
+                    "InvalidationNodeId",
+                    "project-item-invalidation:delivery-e2e-1",
+                )
                 .with_string("DeliveryId", "delivery-e2e-1")
                 .with_string("ProjectItemNodeId", "PVTI_e2e_item")
                 .with_string("ProjectNodeId", "PVT_allowlisted_project")
@@ -223,10 +226,13 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
     // UPDATE -> should be ignored by the reaction.
     handle
         .send_node_update(
-            "inv-1",
+            "project-item-invalidation:delivery-e2e-1",
             vec!["ProjectItemInvalidation"],
             PropertyMapBuilder::new()
-                .with_string("InvalidationNodeId", "INV_e2e_1")
+                .with_string(
+                    "InvalidationNodeId",
+                    "project-item-invalidation:delivery-e2e-1",
+                )
                 .with_string("DeliveryId", "delivery-e2e-1")
                 .with_string("ProjectItemNodeId", "PVTI_e2e_item")
                 .with_string("ProjectNodeId", "PVT_allowlisted_project")
@@ -241,7 +247,10 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
 
     // DELETE -> should be ignored by the reaction.
     handle
-        .send_delete("inv-1", vec!["ProjectItemInvalidation"])
+        .send_delete(
+            "project-item-invalidation:delivery-e2e-1",
+            vec!["ProjectItemInvalidation"],
+        )
         .await
         .expect("send delete");
 

@@ -33,24 +33,28 @@ reactions:
     kind: github-project-item-refresh
     queries:
       - project-item-invalidations
-    config:
-      githubToken:
-        env: GITHUB_TOKEN
-      graphqlUrl: https://api.github.com/graphql
-      graphqlHeaders:
-        X-GitHub-Api-Version:
-          value: "2022-11-28"
-      allowlistedProjectIds:
-        - PVT_kwDOABC123
-      statusFieldName: Status
-      expectedStatusFieldNodeId: PVTSSF_lADOCX0YF84BgNE3zhaadbw
-      destinationEventUrl: http://127.0.0.1:9001/sources/github-project-state/events
-      destinationBearerSecret:
-        env: PROJECT_STATUS_SOURCE_BEARER
-      requestTimeoutMs: 10000
-      deliveryRecordTtlSecs: 604800
-      recoveryPolicy: strict
+    autoStart: true
+    githubToken:
+      env: GITHUB_TOKEN
+    graphqlUrl: https://api.github.com/graphql
+    graphqlHeaders:
+      X-GitHub-Api-Version:
+        value: "2022-11-28"
+    allowlistedProjectIds:
+      - PVT_kwDOABC123
+    statusFieldName: Status
+    expectedStatusFieldNodeId: PVTSSF_lADOCX0YF84BgNE3zhaadbw
+    destinationEventUrl: http://127.0.0.1:9001/sources/github-project-state/events
+    destinationBearerSecret:
+      env: PROJECT_STATUS_SOURCE_BEARER
+    requestTimeoutMs: 10000
+    deliveryRecordTtlSecs: 604800
+    priorityQueueCapacity: 10000
+    recoveryPolicy: strict
 ```
+
+Dynamic reaction configuration fields are flat beside the base server fields
+`id`, `kind`, `queries`, and `autoStart`; do not nest them under `config`.
 
 ### Config Fields
 
@@ -66,6 +70,7 @@ reactions:
 | `destinationBearerSecret` | No | Optional bearer secret for destination source |
 | `requestTimeoutMs` | No | Shared request timeout for GraphQL and destination HTTP calls |
 | `deliveryRecordTtlSecs` | No | TTL for terminal per-delivery records (default 7 days) |
+| `priorityQueueCapacity` | No | Inbound reaction queue capacity |
 | `recoveryPolicy` | No | `strict` (default) or `auto_skip_gap` |
 
 ## Input Contract (query row)
@@ -75,6 +80,10 @@ below. PascalCase dogfood fields and existing aliases remain supported.
 Preferred contract field names are:
 `invalidationNodeId`, `deliveryId`, `projectItemNodeId`, `projectNodeId`,
 `statusFieldNodeId`, `invalidatedAt`, `stateSourceUrl`.
+
+The canonical invalidation element/property identity is
+`project-item-invalidation:{deliveryId}` and is accepted verbatim as
+`invalidationNodeId`.
 
 | Field | Preferred | Backward-compatible aliases | Required |
 |---|---|---|---|
@@ -107,8 +116,7 @@ Preferred contract field names are:
     `scheme`, `host`, `port`, `path` (with trailing slash normalization), and
     query string.
   - URL fragments are ignored for this comparison.
-  - If parsing fails for either side, fallback comparison uses exact trimmed URL
-    text with trailing slash normalization (case-insensitive).
+  - If parsing fails for either side, validation fails closed.
   - A mismatch is rejected before GraphQL hydration and before destination
     publish.
 
