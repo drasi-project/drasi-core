@@ -132,12 +132,21 @@ Idempotency is achieved by:
 
 - durable reservation key dedupe
 - deterministic destination node ID (`ProjectItemStatus:{projectItemNodeId}`)
+- deterministic source timestamp from the authoritative GitHub `updatedAt`
+- an `Idempotency-Key` header derived from the delivery and project item IDs
 - stale/version guard on `updatedAt`
+
+Safe GraphQL reads retry automatically. Destination writes are attempted once per
+processing attempt because a transport failure may occur after ingestion.
+In-flight (`fetched`) and ambiguous writes retain the exact fetched state;
+strict recovery replays that same deterministic update and requires a valid
+HTTP Source acknowledgement before recording publication or advancing the
+checkpoint.
 
 ## Security Notes
 
-- GitHub token and destination bearer secret are never logged.
-- Config `Debug` output redacts secrets.
+- GitHub token, GraphQL header values, and destination bearer secret are never logged.
+- Config `Debug` output exposes GraphQL header names but redacts all values.
 - GraphQL and destination failures are logged without credential material.
 
 ## Testing

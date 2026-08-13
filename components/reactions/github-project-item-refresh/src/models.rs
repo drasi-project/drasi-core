@@ -15,6 +15,7 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::io;
 
 /// Parsed invalidation payload from a query `ADD` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,7 +183,7 @@ pub enum HttpElement {
 }
 
 impl HttpSourceChange {
-    pub fn update_project_item_status(node: &ProjectItemStatusNode) -> Self {
+    pub fn update_project_item_status(node: &ProjectItemStatusNode) -> Result<Self, io::Error> {
         let mut properties = Map::new();
         properties.insert(
             "projectItemNodeId".to_string(),
@@ -217,13 +218,24 @@ impl HttpSourceChange {
             Value::String(node.triggering_delivery_id.clone()),
         );
 
-        Self::Update {
+        let timestamp = node
+            .updated_at
+            .timestamp_nanos_opt()
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "updatedAt cannot be represented as a non-negative nanosecond timestamp",
+                )
+            })?;
+
+        Ok(Self::Update {
             element: HttpElement::Node {
                 id: node.id.clone(),
                 labels: vec!["ProjectItemStatus".to_string()],
                 properties,
             },
-            timestamp: None,
-        }
+            timestamp: Some(timestamp),
+        })
     }
 }

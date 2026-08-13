@@ -24,11 +24,11 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use drasi_lib::state_store::{StateStoreProvider, StateStoreResult};
 
 use crate::config::GitHubProjectItemRefreshConfig;
-use crate::destination::DestinationSourceClient;
+use crate::destination::{DestinationPublishError, DestinationSourceClient};
 use crate::graphql::GitHubGraphqlClient;
 use crate::models::{
-    DeliveryKey, HttpElement, HttpSourceChange, ItemVersionRecord, ProjectItemStatusNode,
-    PublicationState,
+    DeliveryKey, FetchedProjectItemState, HttpElement, HttpSourceChange, ItemVersionRecord,
+    ProjectItemStatusNode, PublicationRecord, PublicationState,
 };
 use crate::processing::{parse_invalidation_input, AddRowOutcome, RefreshProcessor};
 use crate::state_store::RefreshStateStore;
@@ -177,6 +177,7 @@ async fn build_processor(
     };
 
     let client = Client::builder()
+        .user_agent(crate::reaction::HTTP_USER_AGENT)
         .timeout(std::time::Duration::from_millis(config.request_timeout_ms))
         .build()
         .expect("client");
@@ -233,7 +234,7 @@ fn update_payload_matches_http_source_contract() {
         triggering_delivery_id: "delivery-1".to_string(),
     };
 
-    let payload = HttpSourceChange::update_project_item_status(&node);
+    let payload = HttpSourceChange::update_project_item_status(&node).expect("valid timestamp");
     let serialized = serde_json::to_value(payload).expect("serialize");
     assert_eq!(serialized["operation"], "update");
     assert_eq!(serialized["element"]["type"], "node");
@@ -253,7 +254,10 @@ fn config_debug_redacts_secrets() {
     let config = GitHubProjectItemRefreshConfig {
         github_token: "ghp_super_secret".to_string(),
         graphql_url: "https://api.github.com/graphql".to_string(),
-        graphql_headers: HashMap::new(),
+        graphql_headers: HashMap::from([(
+            "X-Api-Key".to_string(),
+            "graphql-header-secret".to_string(),
+        )]),
         allowlisted_project_ids: vec![],
         destination_event_url: "https://dest.example/changes".to_string(),
         destination_bearer_secret: Some("very-secret".to_string()),
@@ -264,6 +268,8 @@ fn config_debug_redacts_secrets() {
     let rendered = format!("{config:?}");
     assert!(!rendered.contains("ghp_super_secret"));
     assert!(!rendered.contains("very-secret"));
+    assert!(!rendered.contains("graphql-header-secret"));
+    assert!(rendered.contains("X-Api-Key"));
     assert!(rendered.contains("[REDACTED]"));
 }
 
@@ -287,7 +293,10 @@ async fn process_success_publishes_and_persists_state() {
         .await;
 
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "message": "All 1 events processed successfully"
+        })))
         .mount(&destination_server)
         .await;
 
@@ -314,6 +323,21 @@ async fn process_success_publishes_and_persists_state() {
         requests[0].headers.get("authorization").is_some(),
         "destination bearer secret should be sent when configured"
     );
+    assert_eq!(
+        requests[0]
+            .headers
+            .get("idempotency-key")
+            .and_then(|value| value.to_str().ok()),
+        Some("delivery-1:PVTI_item1")
+    );
+    let destination_payload: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("destination payload");
+    let expected_timestamp = chrono::DateTime::parse_from_rfc3339("2026-08-13T18:10:00Z")
+        .expect("timestamp")
+        .timestamp_nanos_opt()
+        .and_then(|value| u64::try_from(value).ok())
+        .expect("nanosecond timestamp");
+    assert_eq!(destination_payload["timestamp"], json!(expected_timestamp));
 
     let key = DeliveryKey::new("delivery-1", "PVTI_item1");
     let publication = state_store
@@ -325,6 +349,13 @@ async fn process_success_publishes_and_persists_state() {
 
     let graphql_requests = graphql_server.received_requests().await.expect("requests");
     assert_eq!(graphql_requests.len(), 1);
+    assert_eq!(
+        graphql_requests[0]
+            .headers
+            .get("user-agent")
+            .and_then(|value| value.to_str().ok()),
+        Some(crate::reaction::HTTP_USER_AGENT)
+    );
     let authorization = graphql_requests[0]
         .headers
         .get("authorization")
@@ -355,7 +386,10 @@ async fn duplicate_delivery_is_deduplicated() {
         .mount(&graphql_server)
         .await;
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "message": "All 1 events processed successfully"
+        })))
         .mount(&destination_server)
         .await;
 
@@ -574,6 +608,15 @@ async fn destination_failure_and_ambiguity_are_persisted() {
         .expect("store read")
         .expect("publication");
     assert_eq!(publication.state, PublicationState::Failed);
+    let rejected_requests = destination_server
+        .received_requests()
+        .await
+        .expect("destination requests");
+    assert_eq!(
+        rejected_requests.len(),
+        1,
+        "destination writes must not retry automatically"
+    );
 
     let (ambiguous_processor, ambiguous_store) = build_processor(
         &graphql_server,
@@ -610,6 +653,120 @@ async fn destination_failure_and_ambiguity_are_persisted() {
 }
 
 #[tokio::test]
+async fn destination_requires_a_valid_positive_acknowledgement() {
+    let destination_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not an HTTP source response"))
+        .mount(&destination_server)
+        .await;
+
+    let client = DestinationSourceClient::new(
+        Client::new(),
+        destination_server.uri(),
+        Option::<String>::None,
+    );
+    let node = ProjectItemStatusNode {
+        id: ProjectItemStatusNode::deterministic_node_id("PVTI_ack"),
+        project_item_node_id: "PVTI_ack".to_string(),
+        project_node_id: "PVT_project1".to_string(),
+        status_field_node_id: "PVTSSF_status".to_string(),
+        status_option_id: "opt-ip".to_string(),
+        status_name: "In Progress".to_string(),
+        updated_at: Utc::now(),
+        refreshed_at: Utc::now(),
+        triggering_delivery_id: "delivery-ack".to_string(),
+    };
+
+    let error = client
+        .publish_project_item_status(&node)
+        .await
+        .expect_err("invalid acknowledgement must fail");
+    assert!(matches!(
+        error,
+        DestinationPublishError::InvalidAcknowledgement { .. }
+    ));
+    assert!(error.is_ambiguous());
+}
+
+#[tokio::test]
+async fn recovery_from_fetched_state_replays_the_persisted_payload() {
+    let graphql_server = MockServer::start().await;
+    let destination_server = MockServer::start().await;
+    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+    let (processor, state_store) = build_processor(
+        &graphql_server,
+        destination_server.uri(),
+        durable_store,
+        vec![],
+    )
+    .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "message": "All 1 events processed successfully"
+        })))
+        .mount(&destination_server)
+        .await;
+
+    let key = DeliveryKey::new("delivery-fetched", "PVTI_fetched");
+    let fetched_state = FetchedProjectItemState {
+        project_item_node_id: "PVTI_fetched".to_string(),
+        project_node_id: "PVT_project1".to_string(),
+        content_node_id: Some("I_123".to_string()),
+        content_type: Some("Issue".to_string()),
+        status_field_node_id: "PVTSSF_status".to_string(),
+        status_option_id: "opt-persisted".to_string(),
+        status_name: "Persisted".to_string(),
+        updated_at: chrono::DateTime::parse_from_rfc3339("2026-08-13T19:05:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc),
+        refreshed_at: Utc::now(),
+        triggering_delivery_id: "delivery-fetched".to_string(),
+    };
+    state_store
+        .set_publication(
+            &key,
+            &PublicationRecord {
+                state: PublicationState::Fetched,
+                attempts: 1,
+                last_error: None,
+                fetched_state: Some(fetched_state),
+                completed_at: None,
+            },
+        )
+        .await
+        .expect("persist fetched state");
+
+    let outcome = processor
+        .process_add_row(&test_row(
+            "delivery-fetched",
+            "PVTI_fetched",
+            "PVT_project1",
+        ))
+        .await
+        .expect("fetched recovery succeeds");
+    assert_eq!(outcome, AddRowOutcome::Published);
+    assert!(
+        graphql_server
+            .received_requests()
+            .await
+            .expect("GraphQL requests")
+            .is_empty(),
+        "recovery must not replace the persisted payload with a refetch"
+    );
+    let destination_requests = destination_server
+        .received_requests()
+        .await
+        .expect("destination requests");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&destination_requests[0].body).expect("destination payload");
+    assert_eq!(
+        payload["element"]["properties"]["statusOptionId"],
+        json!("opt-persisted")
+    );
+}
+
+#[tokio::test]
 async fn retries_safe_reads_and_recovery_from_ambiguous_publication() {
     let graphql_server = MockServer::start().await;
     let destination_server = MockServer::start().await;
@@ -636,7 +793,10 @@ async fn retries_safe_reads_and_recovery_from_ambiguous_publication() {
         .mount(&graphql_server)
         .await;
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "message": "All 1 events processed successfully"
+        })))
         .mount(&destination_server)
         .await;
 
@@ -681,8 +841,8 @@ async fn retries_safe_reads_and_recovery_from_ambiguous_publication() {
 
     let graphql_requests = graphql_server.received_requests().await.expect("requests");
     assert!(
-        graphql_requests.len() >= 3,
-        "expected retries plus recovery fetch; got {}",
+        graphql_requests.len() >= 2,
+        "expected safe read retries; got {}",
         graphql_requests.len()
     );
 }
@@ -735,7 +895,7 @@ fn http_source_change_uses_node_contract() {
         refreshed_at: Utc::now(),
         triggering_delivery_id: "delivery".to_string(),
     };
-    let payload = HttpSourceChange::update_project_item_status(&node);
+    let payload = HttpSourceChange::update_project_item_status(&node).expect("valid timestamp");
     let HttpSourceChange::Update { element, .. } = payload;
     let HttpElement::Node { labels, .. } = element;
     assert_eq!(labels, vec!["ProjectItemStatus".to_string()]);

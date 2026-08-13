@@ -33,6 +33,11 @@ use crate::processing::RefreshProcessor;
 use crate::state_store::RefreshStateStore;
 use crate::GitHubProjectItemRefreshBuilder;
 
+pub(crate) const HTTP_USER_AGENT: &str = concat!(
+    "drasi-github-project-item-refresh/",
+    env!("CARGO_PKG_VERSION")
+);
+
 pub struct GitHubProjectItemRefreshReaction {
     pub(crate) base: ReactionBase,
     pub(crate) config: GitHubProjectItemRefreshConfig,
@@ -78,6 +83,7 @@ impl GitHubProjectItemRefreshReaction {
 
     fn build_http_client(&self) -> anyhow::Result<Client> {
         Client::builder()
+            .user_agent(HTTP_USER_AGENT)
             .timeout(Duration::from_millis(self.config.request_timeout_ms))
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(8)

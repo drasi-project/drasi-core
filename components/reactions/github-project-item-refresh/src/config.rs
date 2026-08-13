@@ -75,10 +75,16 @@ impl Default for GitHubProjectItemRefreshConfig {
 
 impl std::fmt::Debug for GitHubProjectItemRefreshConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted_headers = self
+            .graphql_headers
+            .keys()
+            .map(|name| (name.as_str(), "[REDACTED]"))
+            .collect::<HashMap<_, _>>();
+
         f.debug_struct("GitHubProjectItemRefreshConfig")
             .field("github_token", &redacted_opt(!self.github_token.is_empty()))
             .field("graphql_url", &self.graphql_url)
-            .field("graphql_headers", &self.graphql_headers)
+            .field("graphql_headers", &redacted_headers)
             .field("allowlisted_project_ids", &self.allowlisted_project_ids)
             .field("destination_event_url", &self.destination_event_url)
             .field(

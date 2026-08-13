@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use reqwest::Client;
+use serde::Deserialize;
 
 use crate::models::{HttpSourceChange, ProjectItemStatusNode};
 
@@ -22,19 +23,28 @@ pub enum DestinationPublishError {
     Transport(String),
     #[error("destination source rejected payload with HTTP {status}: {body}")]
     HttpStatus { status: u16, body: String },
+    #[error("destination source returned an invalid acknowledgement: {body}")]
+    InvalidAcknowledgement { body: String },
+    #[error("destination source rejected the event: {message}")]
+    RejectedAcknowledgement { message: String },
+    #[error("destination payload is invalid: {0}")]
+    InvalidPayload(String),
 }
 
 impl DestinationPublishError {
-    pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::Transport(_) => true,
-            Self::HttpStatus { status, .. } => *status >= 500 || *status == 429,
-        }
-    }
-
     pub fn is_ambiguous(&self) -> bool {
-        matches!(self, Self::Transport(_))
+        matches!(
+            self,
+            Self::Transport(_) | Self::InvalidAcknowledgement { .. }
+        )
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct EventResponse {
+    success: bool,
+    message: String,
+    error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -61,8 +71,17 @@ impl DestinationSourceClient {
         &self,
         node: &ProjectItemStatusNode,
     ) -> Result<(), DestinationPublishError> {
-        let change = HttpSourceChange::update_project_item_status(node);
-        let mut request = self.client.post(&self.destination_event_url).json(&change);
+        let change = HttpSourceChange::update_project_item_status(node)
+            .map_err(|e| DestinationPublishError::InvalidPayload(e.to_string()))?;
+        let idempotency_key = format!(
+            "{}:{}",
+            node.triggering_delivery_id, node.project_item_node_id
+        );
+        let mut request = self
+            .client
+            .post(&self.destination_event_url)
+            .header("Idempotency-Key", idempotency_key)
+            .json(&change);
 
         if let Some(secret) = &self.bearer_secret {
             request = request.bearer_auth(secret);
@@ -84,6 +103,19 @@ impl DestinationSourceClient {
                 status: status.as_u16(),
                 body: truncate_for_error(&body),
             });
+        }
+
+        let acknowledgement: EventResponse = serde_json::from_str(&body).map_err(|_| {
+            DestinationPublishError::InvalidAcknowledgement {
+                body: truncate_for_error(&body),
+            }
+        })?;
+        if !acknowledgement.success {
+            let message = acknowledgement
+                .error
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(acknowledgement.message);
+            return Err(DestinationPublishError::RejectedAcknowledgement { message });
         }
 
         Ok(())

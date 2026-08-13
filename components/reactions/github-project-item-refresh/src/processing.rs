@@ -30,7 +30,6 @@ use crate::models::{
 use crate::state_store::RefreshStateStore;
 
 const MAX_FETCH_ATTEMPTS: u32 = 3;
-const MAX_PUBLISH_ATTEMPTS: u32 = 3;
 const INITIAL_BACKOFF_MS: u64 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +129,12 @@ impl RefreshProcessor {
             return Ok(AddRowOutcome::Duplicate);
         }
 
+        let recoverable_fetched_state = match publication.state {
+            PublicationState::Fetched | PublicationState::Ambiguous => {
+                publication.fetched_state.clone()
+            }
+            _ => None,
+        };
         publication.attempts = publication.attempts.saturating_add(1);
         publication.state = PublicationState::Reserved;
         publication.last_error = None;
@@ -138,15 +143,18 @@ impl RefreshProcessor {
             .await
             .context("writing reservation publication state")?;
 
-        let fetched = match self.fetch_with_retry(&input).await {
-            Ok(fetched) => fetched,
-            Err(err) => {
-                self.state_store
-                    .mark_failed(&key, publication, PublicationState::Failed, err.to_string())
-                    .await
-                    .context("recording fetch failure")?;
-                return Err(err);
-            }
+        let fetched = match recoverable_fetched_state {
+            Some(fetched) => fetched,
+            None => match self.fetch_with_retry(&input).await {
+                Ok(fetched) => fetched,
+                Err(err) => {
+                    self.state_store
+                        .mark_failed(&key, publication, PublicationState::Failed, err.to_string())
+                        .await
+                        .context("recording fetch failure")?;
+                    return Err(err);
+                }
+            },
         };
 
         if !self.config.is_project_allowed(&fetched.project_node_id) {
@@ -206,7 +214,11 @@ impl RefreshProcessor {
             .context("recording fetched publication state")?;
 
         let node = ProjectItemStatusNode::from_fetched(&fetched);
-        if let Err(err) = self.publish_with_retry(&node).await {
+        if let Err(err) = self
+            .destination_client
+            .publish_project_item_status(&node)
+            .await
+        {
             let failed_state = if err.is_ambiguous() {
                 PublicationState::Ambiguous
             } else {
@@ -301,31 +313,6 @@ impl RefreshProcessor {
             }
         }
         unreachable!("fetch retry loop should always return");
-    }
-
-    async fn publish_with_retry(
-        &self,
-        node: &ProjectItemStatusNode,
-    ) -> Result<(), DestinationPublishError> {
-        let mut backoff_ms = INITIAL_BACKOFF_MS;
-        for attempt in 1..=MAX_PUBLISH_ATTEMPTS {
-            match self
-                .destination_client
-                .publish_project_item_status(node)
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(err) => {
-                    if attempt < MAX_PUBLISH_ATTEMPTS && err.is_retryable() {
-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                        backoff_ms = backoff_ms.saturating_mul(2);
-                        continue;
-                    }
-                    return Err(err);
-                }
-            }
-        }
-        unreachable!("publish retry loop should always return");
     }
 }
 

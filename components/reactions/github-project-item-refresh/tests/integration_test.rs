@@ -141,7 +141,10 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
         .await;
 
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "message": "All 1 events processed successfully"
+        })))
         .mount(&destination_server)
         .await;
 
