@@ -26,6 +26,9 @@ use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::state_store::{StateStoreCompareAndSwapResult, StateStoreProvider};
 use drasi_lib::Reaction;
 use log::{error, info, warn};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use uuid::Uuid;
 
 use crate::candidate::RoutingCandidate;
 use crate::config::{WorkgraphRouterReactionConfig, ROUTE_QUERY_ID};
@@ -51,6 +54,29 @@ struct ReservationFencedError {
     message: String,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct PermanentCandidateError {
+    reason_code: &'static str,
+    message: String,
+    owned_reservation: Option<OwnedReservation>,
+}
+
+impl PermanentCandidateError {
+    fn new(reason_code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            reason_code,
+            message: message.into(),
+            owned_reservation: None,
+        }
+    }
+
+    fn with_reservation(mut self, reservation: &OwnedReservation) -> Self {
+        self.owned_reservation = Some(reservation.clone());
+        self
+    }
+}
+
 #[derive(Debug, Clone)]
 struct OwnedReservation {
     record: ReservationRecord,
@@ -65,6 +91,31 @@ struct OwnedRoutingState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct QueryResultProcessingOutcome {
     has_unresolved_nonterminal: bool,
+}
+
+const TERMINAL_REJECTION_SCHEMA: &str = "workgraph.router-rejection/v1";
+const TERMINAL_REJECTION_PREFIX: &str = "workgraph-router/rejections/";
+const TERMINAL_REJECTION_NAMESPACE: Uuid = Uuid::from_bytes([
+    0x59, 0xc5, 0xd2, 0x5b, 0x7f, 0x94, 0x4d, 0x6d, 0x9b, 0x48, 0x42, 0x91, 0xf0, 0x6b, 0xa7, 0x35,
+]);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalRejectionRecord {
+    schema_version: String,
+    query_id: String,
+    sequence: u64,
+    row_signature: u64,
+    row_fingerprint: String,
+    reason_code: String,
+    message: String,
+    policy_id: String,
+    policy_type: String,
+    policy_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reservation_key: Option<String>,
+    finalized: bool,
+    rejected_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -405,9 +456,67 @@ async fn process_query_result(
     let mut has_unresolved_nonterminal = false;
     for diff in &result.results {
         match diff {
-            ResultDiff::Add { data, .. } => {
-                let candidate: RoutingCandidate = serde_json::from_value(data.clone())
-                    .context("failed to deserialize added row into RoutingCandidate")?;
+            ResultDiff::Add {
+                data,
+                row_signature,
+            } => {
+                if let Some(rejection) =
+                    load_terminal_rejection(base, result, *row_signature, data).await?
+                {
+                    if rejection.finalized {
+                        info!(
+                            "[{reaction_name}] finalized terminal rejection already recorded for query '{}' sequence {} row {}; skipping replay",
+                            result.query_id, result.sequence, row_signature
+                        );
+                        continue;
+                    }
+
+                    let candidate: RoutingCandidate = serde_json::from_value(data.clone())
+                        .context(
+                            "pending terminal rejection no longer contains a valid candidate",
+                        )?;
+                    if let Err(error) = complete_pending_terminal_rejection(
+                        base,
+                        config,
+                        runner_instance_id,
+                        &candidate,
+                        &rejection,
+                    )
+                    .await
+                    {
+                        if error.downcast_ref::<ReservationFencedError>().is_some() {
+                            has_unresolved_nonterminal = true;
+                            info!(
+                                "[{reaction_name}] terminal rejection tombstone for query '{}' sequence {} row {} remains fenced (will retry): {}",
+                                result.query_id, result.sequence, row_signature, error
+                            );
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                    finalize_terminal_rejection(base, result, *row_signature, data).await?;
+                    continue;
+                }
+                let candidate: RoutingCandidate = match serde_json::from_value(data.clone()) {
+                    Ok(candidate) => candidate,
+                    Err(error) => {
+                        persist_terminal_rejection(
+                            reaction_name,
+                            base,
+                            config,
+                            result,
+                            *row_signature,
+                            data,
+                            "invalid-row-shape",
+                            &format!(
+                                "failed to deserialize added row into RoutingCandidate: {error}"
+                            ),
+                            None,
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
                 if let Err(error) = process_candidate(
                     reaction_name,
                     base,
@@ -418,6 +527,51 @@ async fn process_query_result(
                 )
                 .await
                 {
+                    if let Some(permanent) = error.downcast_ref::<PermanentCandidateError>() {
+                        let reservation_key = permanent
+                            .owned_reservation
+                            .as_ref()
+                            .map(|owned| owned.record.reservation_key.as_str());
+                        let rejection = persist_terminal_rejection(
+                            reaction_name,
+                            base,
+                            config,
+                            result,
+                            *row_signature,
+                            data,
+                            permanent.reason_code,
+                            &permanent.message,
+                            reservation_key,
+                        )
+                        .await?;
+                        if !rejection.finalized {
+                            let mut owned_reservation = permanent
+                                .owned_reservation
+                                .clone()
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "pending terminal rejection is missing reservation ownership"
+                                    )
+                                })?;
+                            let store = base.state_store().await.ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "durable state store is required for workgraph-router"
+                                )
+                            })?;
+                            complete_reservation(
+                                store,
+                                &base.id,
+                                config,
+                                runner_instance_id,
+                                &mut owned_reservation,
+                                &format!("terminal-rejection:{}", rejection.row_fingerprint),
+                            )
+                            .await
+                            .context("failed to complete terminally rejected reservation")?;
+                            finalize_terminal_rejection(base, result, *row_signature, data).await?;
+                        }
+                        continue;
+                    }
                     if error.downcast_ref::<ReservationFencedError>().is_some() {
                         has_unresolved_nonterminal = true;
                         info!(
@@ -447,6 +601,303 @@ async fn process_query_result(
     })
 }
 
+fn terminal_rejection_store_key(
+    query_id: &str,
+    sequence: u64,
+    row_signature: u64,
+    row_fingerprint: &str,
+) -> String {
+    format!("{TERMINAL_REJECTION_PREFIX}{query_id}/{sequence}/{row_signature}/{row_fingerprint}")
+}
+
+fn terminal_rejection_fingerprint(data: &Value) -> anyhow::Result<String> {
+    let bytes = serde_json::to_vec(data).context("failed to serialize rejected row fingerprint")?;
+    Ok(Uuid::new_v5(&TERMINAL_REJECTION_NAMESPACE, &bytes).to_string())
+}
+
+async fn load_terminal_rejection(
+    base: &ReactionBase,
+    result: &QueryResult,
+    row_signature: u64,
+    data: &Value,
+) -> anyhow::Result<Option<TerminalRejectionRecord>> {
+    let store = base
+        .state_store()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("durable state store is required for workgraph-router"))?;
+    let row_fingerprint = terminal_rejection_fingerprint(data)?;
+    let key = terminal_rejection_store_key(
+        &result.query_id,
+        result.sequence,
+        row_signature,
+        &row_fingerprint,
+    );
+    let Some(existing) = store
+        .get(&base.id, &key)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to read terminal rejection: {error}"))?
+    else {
+        return Ok(None);
+    };
+    let existing: TerminalRejectionRecord = serde_json::from_slice(&existing)
+        .context("failed to deserialize existing terminal rejection record")?;
+    validate_terminal_rejection_identity(&existing, result, row_signature, &row_fingerprint, &key)?;
+    Ok(Some(existing))
+}
+
+fn validate_terminal_rejection_identity(
+    record: &TerminalRejectionRecord,
+    result: &QueryResult,
+    row_signature: u64,
+    row_fingerprint: &str,
+    key: &str,
+) -> anyhow::Result<()> {
+    if record.schema_version != TERMINAL_REJECTION_SCHEMA
+        || record.query_id != result.query_id
+        || record.sequence != result.sequence
+        || record.row_signature != row_signature
+        || record.row_fingerprint != row_fingerprint
+    {
+        anyhow::bail!("terminal rejection key collision or conflicting replay for '{key}'");
+    }
+    Ok(())
+}
+
+async fn complete_pending_terminal_rejection(
+    base: &ReactionBase,
+    config: &WorkgraphRouterReactionConfig,
+    runner_instance_id: &str,
+    candidate: &RoutingCandidate,
+    rejection: &TerminalRejectionRecord,
+) -> anyhow::Result<()> {
+    let expected_reservation_key = rejection.reservation_key.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("pending terminal rejection is missing its reservation key")
+    })?;
+    if candidate.reservation_key() != expected_reservation_key {
+        anyhow::bail!(
+            "pending terminal rejection reservation '{}' does not match candidate '{}'",
+            expected_reservation_key,
+            candidate.reservation_key()
+        );
+    }
+
+    let store = base
+        .state_store()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("durable state store is required for workgraph-router"))?;
+    let (reservation, mut owned_reservation, _, _) = reserve_or_resume(
+        store.clone(),
+        &base.id,
+        config,
+        candidate,
+        runner_instance_id,
+    )
+    .await?;
+    if reservation.reservation_key != expected_reservation_key {
+        anyhow::bail!(
+            "loaded reservation '{}' does not match pending terminal rejection '{}'",
+            reservation.reservation_key,
+            expected_reservation_key
+        );
+    }
+    if reservation.completed {
+        return Ok(());
+    }
+
+    let mut owned_reservation = owned_reservation
+        .take()
+        .ok_or_else(|| ReservationFencedError {
+            message: format!(
+                "terminal rejection reservation '{}' is fenced by owner '{}' epoch {}",
+                reservation.reservation_key,
+                reservation
+                    .owner_instance_id
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                reservation.fencing_epoch
+            ),
+        })?;
+    complete_reservation(
+        store,
+        &base.id,
+        config,
+        runner_instance_id,
+        &mut owned_reservation,
+        &format!("terminal-rejection:{}", rejection.row_fingerprint),
+    )
+    .await
+}
+
+async fn finalize_terminal_rejection(
+    base: &ReactionBase,
+    result: &QueryResult,
+    row_signature: u64,
+    data: &Value,
+) -> anyhow::Result<()> {
+    let store = base
+        .state_store()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("durable state store is required for workgraph-router"))?;
+    let row_fingerprint = terminal_rejection_fingerprint(data)?;
+    let key = terminal_rejection_store_key(
+        &result.query_id,
+        result.sequence,
+        row_signature,
+        &row_fingerprint,
+    );
+
+    loop {
+        let existing_bytes = store
+            .get(&base.id, &key)
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to load terminal rejection: {error}"))?
+            .ok_or_else(|| anyhow::anyhow!("terminal rejection '{key}' is missing"))?;
+        let mut record: TerminalRejectionRecord = serde_json::from_slice(&existing_bytes)
+            .context("failed to deserialize terminal rejection before finalization")?;
+        validate_terminal_rejection_identity(
+            &record,
+            result,
+            row_signature,
+            &row_fingerprint,
+            &key,
+        )?;
+        if record.finalized {
+            return Ok(());
+        }
+
+        let reservation_key = record.reservation_key.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("pending terminal rejection is missing its reservation key")
+        })?;
+        let reservation = load_reservation_with_bytes(store.clone(), &base.id, reservation_key)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "terminal rejection reservation '{}' is missing",
+                    reservation_key
+                )
+            })?
+            .record;
+        let expected_decision_id = format!("terminal-rejection:{row_fingerprint}");
+        if !reservation.completed
+            || reservation.decision_id.as_deref() != Some(expected_decision_id.as_str())
+        {
+            anyhow::bail!(
+                "terminal rejection reservation '{}' is not durably tombstoned",
+                reservation_key
+            );
+        }
+
+        record.finalized = true;
+        let finalized_bytes = serde_json::to_vec(&record)
+            .context("failed to serialize finalized terminal rejection")?;
+        match store
+            .compare_and_swap(
+                &base.id,
+                &key,
+                Some(existing_bytes.as_slice()),
+                finalized_bytes,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to finalize terminal rejection: {error}"))?
+        {
+            StateStoreCompareAndSwapResult::Swapped => return Ok(()),
+            StateStoreCompareAndSwapResult::Mismatch => continue,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_terminal_rejection(
+    reaction_name: &str,
+    base: &ReactionBase,
+    config: &WorkgraphRouterReactionConfig,
+    result: &QueryResult,
+    row_signature: u64,
+    data: &Value,
+    reason_code: &str,
+    message: &str,
+    reservation_key: Option<&str>,
+) -> anyhow::Result<TerminalRejectionRecord> {
+    let store = base
+        .state_store()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("durable state store is required for workgraph-router"))?;
+    let row_fingerprint = terminal_rejection_fingerprint(data)?;
+    let key = terminal_rejection_store_key(
+        &result.query_id,
+        result.sequence,
+        row_signature,
+        &row_fingerprint,
+    );
+    let record = TerminalRejectionRecord {
+        schema_version: TERMINAL_REJECTION_SCHEMA.to_string(),
+        query_id: result.query_id.clone(),
+        sequence: result.sequence,
+        row_signature,
+        row_fingerprint: row_fingerprint.clone(),
+        reason_code: reason_code.to_string(),
+        message: message.chars().take(2_000).collect(),
+        policy_id: config.policy_id.clone(),
+        policy_type: config.policy_type.clone(),
+        policy_version: config.policy_version.clone(),
+        reservation_key: reservation_key.map(ToString::to_string),
+        finalized: reservation_key.is_none(),
+        rejected_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let bytes =
+        serde_json::to_vec(&record).context("failed to serialize terminal rejection record")?;
+
+    match store
+        .compare_and_swap(&base.id, &key, None, bytes)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to persist terminal rejection: {error}"))?
+    {
+        StateStoreCompareAndSwapResult::Swapped => {
+            warn!(
+                "[{reaction_name}] terminally rejected query '{}' sequence {} row {} ({reason_code}): {}",
+                result.query_id,
+                result.sequence,
+                row_signature,
+                record.message
+            );
+            Ok(record)
+        }
+        StateStoreCompareAndSwapResult::Mismatch => {
+            let existing = store
+                .get(&base.id, &key)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to reload terminal rejection after CAS mismatch: {error}"
+                    )
+                })?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "terminal rejection CAS mismatched but record '{key}' disappeared"
+                    )
+                })?;
+            let existing: TerminalRejectionRecord = serde_json::from_slice(&existing)
+                .context("failed to deserialize existing terminal rejection record")?;
+            validate_terminal_rejection_identity(
+                &existing,
+                result,
+                row_signature,
+                &row_fingerprint,
+                &key,
+            )?;
+            if existing.reservation_key.as_deref() != reservation_key {
+                anyhow::bail!(
+                    "terminal rejection reservation identity changed for query '{}' sequence {} row {}",
+                    result.query_id,
+                    result.sequence,
+                    row_signature
+                );
+            }
+            Ok(existing)
+        }
+    }
+}
+
 async fn process_candidate(
     reaction_name: &str,
     base: &ReactionBase,
@@ -455,13 +906,10 @@ async fn process_candidate(
     runner_instance_id: &str,
     candidate: &RoutingCandidate,
 ) -> anyhow::Result<()> {
-    validate_candidate(candidate, config).context("row validation failed")?;
-
     let store = base
         .state_store()
         .await
         .ok_or_else(|| anyhow::anyhow!("durable state store is required for workgraph-router"))?;
-
     let (reservation, mut owned_reservation, mut state, mut owned_state) = reserve_or_resume(
         store.clone(),
         &base.id,
@@ -471,7 +919,7 @@ async fn process_candidate(
     )
     .await?;
 
-    if reservation.completed && state.progress.is_complete() {
+    if reservation.completed {
         info!(
             "[{}] reservation '{}' already completed; skipping",
             reaction_name, reservation.reservation_key
@@ -481,10 +929,6 @@ async fn process_candidate(
 
     let mut owned_reservation = if let Some(owned) = owned_reservation.take() {
         owned
-    } else if reservation.completed {
-        // Reservation was completed but persisted state wasn't fully marked complete yet.
-        // Stale runners must not mutate this reservation.
-        return Ok(());
     } else {
         return Err(ReservationFencedError {
             message: format!(
@@ -499,6 +943,25 @@ async fn process_candidate(
         }
         .into());
     };
+
+    if let Err(error) = validate_candidate(candidate, config) {
+        let has_routing_history = state.decision.is_some()
+            || state.selected_transition.is_some()
+            || state.progress != SideEffectProgress::default()
+            || state.ambiguous
+            || state.failed;
+        if has_routing_history {
+            return Err(error).context(
+                "row validation failed for an execution with existing routing history; refusing terminal rejection",
+            );
+        }
+        return Err(PermanentCandidateError::new(
+            "candidate-validation-failed",
+            format!("row validation failed: {error:#}"),
+        )
+        .with_reservation(&owned_reservation)
+        .into());
+    }
 
     let reservation_policy_mismatch = reservation.policy_id != config.policy_id
         || reservation.policy_type != config.policy_type
@@ -536,11 +999,21 @@ async fn process_candidate(
                 )
             }
         };
-        let outcome = engine
-            .evaluate(candidate)
-            .context("rules evaluation rejected candidate")?;
-        let decision = RoutingDecision::from_policy(config, candidate, outcome)
-            .context("policy output failed allowlist validation")?;
+        let outcome = engine.evaluate(candidate).map_err(|error| {
+            PermanentCandidateError::new(
+                "policy-evaluation-failed",
+                format!("rules evaluation rejected candidate: {error:#}"),
+            )
+            .with_reservation(&owned_reservation)
+        })?;
+        let decision =
+            RoutingDecision::from_policy(config, candidate, outcome).map_err(|error| {
+                PermanentCandidateError::new(
+                    "policy-output-rejected",
+                    format!("policy output failed allowlist validation: {error:#}"),
+                )
+                .with_reservation(&owned_reservation)
+            })?;
         state.selected_transition =
             Some((decision.from_status.clone(), decision.to_status.clone()));
         state.decision = Some(decision.clone());
@@ -548,16 +1021,31 @@ async fn process_candidate(
     };
 
     if !config.allows_transition(&decision.from_status, &decision.to_status) {
-        anyhow::bail!(
+        let message = format!(
             "selected transition {} -> {} is not allowlisted",
-            decision.from_status,
-            decision.to_status
+            decision.from_status, decision.to_status
         );
+        if decision_is_new {
+            return Err(
+                PermanentCandidateError::new("transition-not-allowlisted", message)
+                    .with_reservation(&owned_reservation)
+                    .into(),
+            );
+        }
+        anyhow::bail!(message);
     }
 
-    decision
-        .validate_allowlists(config)
-        .context("decision allowlist validation failed before side effects")?;
+    if let Err(error) = decision.validate_allowlists(config) {
+        if decision_is_new {
+            return Err(PermanentCandidateError::new(
+                "policy-output-rejected",
+                format!("decision allowlist validation failed before side effects: {error:#}"),
+            )
+            .with_reservation(&owned_reservation)
+            .into());
+        }
+        return Err(error).context("decision allowlist validation failed before side effects");
+    }
 
     if decision_is_new {
         persist_state_with_ownership(
@@ -1802,7 +2290,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multi_row_fenced_candidate_does_not_skip_later_rows() {
+    async fn multi_row_fenced_candidate_does_not_prevent_terminal_rejection() {
         let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
         let config = sample_config();
         let reaction = make_reaction("router-multi-row", &config);
@@ -1850,7 +2338,7 @@ mod tests {
         );
 
         let github = GithubClient::from_config(&config).expect("github client");
-        let err = process_query_result(
+        let outcome = process_query_result(
             "router-multi-row",
             &reaction.base,
             &config,
@@ -1859,12 +2347,109 @@ mod tests {
             &result,
         )
         .await
-        .expect_err("second row validation error should still surface");
-        let rendered = format!("{err:#}");
+        .expect("terminal rejection should not fail the query result");
         assert!(
-            rendered.contains("row validation failed")
-                && rendered.contains("source comment provenance is edited"),
-            "unexpected error: {rendered}"
+            outcome.has_unresolved_nonterminal,
+            "the fenced candidate must remain unresolved"
+        );
+        let rejected_data =
+            serde_json::to_value(&invalid_candidate).expect("invalid candidate json");
+        let fingerprint =
+            terminal_rejection_fingerprint(&rejected_data).expect("rejection fingerprint");
+        let rejection_key =
+            terminal_rejection_store_key(ROUTE_QUERY_ID, result.sequence, 2, &fingerprint);
+        let rejection = store
+            .get("router-multi-row", &rejection_key)
+            .await
+            .expect("read terminal rejection")
+            .expect("invalid candidate must be durably rejected");
+        let rejection: TerminalRejectionRecord =
+            serde_json::from_slice(&rejection).expect("valid rejection record");
+        assert_eq!(rejection.reason_code, "candidate-validation-failed");
+        assert!(rejection.finalized);
+        assert_eq!(
+            rejection.reservation_key.as_deref(),
+            Some("exec-invalid:CompletedIssueValidation")
+        );
+        let reservation = crate::state::load_reservation(
+            store,
+            "router-multi-row",
+            "exec-invalid:CompletedIssueValidation",
+        )
+        .await
+        .expect("load invalid-candidate reservation")
+        .expect("invalid candidate must retain a reservation tombstone");
+        assert!(reservation.completed);
+    }
+
+    #[tokio::test]
+    async fn validation_drift_cannot_terminalize_existing_routing_state() {
+        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+        let mut runtime_config = sample_config();
+        runtime_config.trusted_agent_authors = vec!["replacement-agent".to_string()];
+        let reaction = make_reaction("router-validation-drift", &runtime_config);
+        initialize_reaction_for_test(&reaction, store.clone()).await;
+
+        let candidate = sample_candidate();
+        let reservation = ReservationRecord {
+            reservation_key: candidate.reservation_key(),
+            execution_id: candidate.execution_id.clone(),
+            required_event_type: candidate.required_event_type.clone(),
+            owner_instance_id: Some(reaction.runner_instance_id.clone()),
+            fencing_epoch: 1,
+            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
+            policy_id: runtime_config.policy_id.clone(),
+            policy_type: runtime_config.policy_type.clone(),
+            policy_version: runtime_config.policy_version.clone(),
+            decision_id: Some("persisted-decision".to_string()),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            completed: false,
+        };
+        crate::state::save_reservation(store.clone(), "router-validation-drift", &reservation)
+            .await
+            .expect("seed reservation");
+        let mut state = RoutingStateRecord::new(&candidate, &reservation);
+        state.progress.decision_comment_written = true;
+        save_routing_state(store.clone(), "router-validation-drift", &state)
+            .await
+            .expect("seed partial routing state");
+
+        let result = QueryResult::new(
+            ROUTE_QUERY_ID.to_string(),
+            1,
+            chrono::Utc::now(),
+            vec![ResultDiff::Add {
+                data: serde_json::to_value(&candidate).expect("candidate json"),
+                row_signature: 1,
+            }],
+            HashMap::new(),
+        );
+        let github = GithubClient::from_config(&runtime_config).expect("github client");
+        let error = process_query_result(
+            "router-validation-drift",
+            &reaction.base,
+            &runtime_config,
+            &github,
+            &reaction.runner_instance_id,
+            &result,
+        )
+        .await
+        .expect_err("validation drift over partial state must remain nonterminal");
+
+        assert!(
+            format!("{error:#}").contains("refusing terminal rejection"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            store
+                .list_keys("router-validation-drift")
+                .await
+                .expect("list state")
+                .iter()
+                .filter(|key| key.starts_with(TERMINAL_REJECTION_PREFIX))
+                .count(),
+            0,
+            "partial routing state must never gain a terminal rejection marker"
         );
     }
 
@@ -2126,7 +2711,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonstrict_failed_sequence_blocks_checkpoint_advance() {
+    async fn terminally_rejected_sequence_does_not_block_later_checkpoint() {
         let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
         let mut config = sample_config();
         config.strict_recovery = false;
@@ -2183,9 +2768,9 @@ mod tests {
             .await
             .expect("read checkpoint");
         let sequence = checkpoint.map(|cp| cp.sequence).unwrap_or(0);
-        assert!(
-            sequence < 2,
-            "nonstrict checkpoint advanced past failed sequence: got {sequence}"
+        assert_eq!(
+            sequence, 2,
+            "terminal rejection must not poison checkpoint advancement"
         );
     }
 

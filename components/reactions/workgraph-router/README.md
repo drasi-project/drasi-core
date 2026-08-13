@@ -86,6 +86,10 @@ Reconciliation on retry requires trusted, unedited comments. In strict recovery 
 - `needs_snapshot_on_fresh_start() = false`
 - `default_recovery_policy() = Strict`
 - `checkpoint_ownership() = Reaction` (runtime does not advance replay/live checkpoints on enqueue; router advances checkpoints only after side effects complete)
+- Malformed rows, failed candidate validation, rejected policy output, and new non-allowlisted transitions are terminally rejected before side effects. Each rejection is durably CAS-written under `(queryId, sequence, rowSignature, rowFingerprint)`, allowing later rows and the checkpoint to advance.
+- Structurally valid candidates claim the normal execution reservation before terminal classification, preventing mixed-version replicas from racing a finalized rejection against an accepted route.
+- Post-reservation rejections remain pending until their reservation is durably tombstoned; only finalized records are skipped on replay. State-store failures, fencing, GitHub failures, and ambiguous writes remain nonterminal and retain strict halt/replay behavior.
+- Validation drift over an existing reservation or routing state is never terminally skipped, preserving recovery of any partially completed side effects.
 - Retry/resume always re-checks GitHub issue/project state immediately before each side effect and re-renews reservation ownership after preflight and immediately before each external write.
 - Project status mutation is guarded by expected source status + content correlation (project item must match expected repository + issue). If already at destination, mutation is skipped and completion is reconciled.
 - Ambiguous external write failures are treated as ambiguous in strict recovery and reconciled deterministically via `decisionId` payloads plus trusted immutable actor IDs before retry/takeover can complete.

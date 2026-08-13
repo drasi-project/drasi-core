@@ -384,6 +384,37 @@ async fn enqueue_add(
         .expect("enqueue add");
 }
 
+async fn enqueue_terminal_rejections_then_valid(reaction: &WorkgraphRouterReaction, sequence: u64) {
+    let mut invalid_candidate = sample_candidate();
+    invalid_candidate.execution_id = "exec-invalid".to_string();
+    invalid_candidate.outcome = "unknown".to_string();
+
+    let result = QueryResult::new(
+        ROUTE_QUERY_ID.to_string(),
+        sequence,
+        Utc::now(),
+        vec![
+            ResultDiff::Add {
+                data: json!({"unexpected": "shape"}),
+                row_signature: 0,
+            },
+            ResultDiff::Add {
+                data: serde_json::to_value(&invalid_candidate).expect("invalid candidate json"),
+                row_signature: 0,
+            },
+            ResultDiff::Add {
+                data: serde_json::to_value(sample_candidate()).expect("valid candidate json"),
+                row_signature: 103,
+            },
+        ],
+        HashMap::new(),
+    );
+    reaction
+        .enqueue_query_result(result)
+        .await
+        .expect("enqueue mixed terminal and valid rows");
+}
+
 async fn enqueue_update(reaction: &WorkgraphRouterReaction, sequence: u64) {
     let result = QueryResult::new(
         ROUTE_QUERY_ID.to_string(),
@@ -599,6 +630,169 @@ async fn duplicate_rows_do_not_duplicate_comments() {
     assert_eq!(
         comments, 2,
         "duplicate execution should not create extra comments"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn terminal_rejections_do_not_poison_later_rows_or_replay() {
+    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-terminal-rejection");
+    let server = MockServer::start().await;
+    mount_common_success_mocks(&server, "AwaitingRouting").await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+
+    let first = base_reaction(&server, "1.0.0");
+    initialize_reaction(&first, Arc::clone(&store)).await;
+    first.start().await.expect("first reaction start");
+    enqueue_terminal_rejections_then_valid(&first, 1).await;
+    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
+    wait_for_count(&server, is_project_status_mutation, 1).await;
+    first.stop().await.expect("first reaction stop");
+
+    let keys = store
+        .list_keys(TEST_REACTION_ID)
+        .await
+        .expect("list first-run state");
+    assert_eq!(
+        keys.iter()
+            .filter(|key| key.starts_with("workgraph-router/rejections/"))
+            .count(),
+        2,
+        "malformed and invalid rows must each have one durable rejection"
+    );
+    let mut rejected_reservation = load_reservation(
+        Arc::clone(&store),
+        TEST_REACTION_ID,
+        "exec-invalid:CompletedIssueValidation",
+    )
+    .await
+    .expect("load rejected reservation")
+    .expect("post-reservation rejection must retain a reservation tombstone");
+    assert!(
+        rejected_reservation.completed
+            && rejected_reservation
+                .decision_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("terminal-rejection:")),
+        "post-reservation rejection must durably complete its reservation"
+    );
+
+    let mut pending_rejection_key = None;
+    for key in keys
+        .iter()
+        .filter(|key| key.starts_with("workgraph-router/rejections/"))
+    {
+        let bytes = store
+            .get(TEST_REACTION_ID, key)
+            .await
+            .expect("read rejection record")
+            .expect("rejection record exists");
+        let mut record: Value =
+            serde_json::from_slice(&bytes).expect("valid rejection record json");
+        if record.get("reservationKey").is_some() {
+            record["finalized"] = json!(false);
+            store
+                .set(
+                    TEST_REACTION_ID,
+                    key,
+                    serde_json::to_vec(&record).expect("serialize pending rejection"),
+                )
+                .await
+                .expect("restore pending rejection");
+            pending_rejection_key = Some(key.clone());
+            break;
+        }
+    }
+    let pending_rejection_key =
+        pending_rejection_key.expect("post-reservation rejection record exists");
+    rejected_reservation.completed = false;
+    rejected_reservation.decision_id = None;
+    rejected_reservation.owner_instance_id = Some("crashed-runner".to_string());
+    rejected_reservation.lease_expires_at_unix_secs = Utc::now().timestamp() - 1;
+    save_reservation(Arc::clone(&store), TEST_REACTION_ID, &rejected_reservation)
+        .await
+        .expect("restore pre-tombstone reservation");
+
+    assert!(
+        store
+            .delete(TEST_REACTION_ID, &format!("checkpoint:{ROUTE_QUERY_ID}"))
+            .await
+            .expect("delete first-run checkpoint"),
+        "first run must advance the checkpoint"
+    );
+
+    let replay = base_reaction(&server, "1.0.0");
+    initialize_reaction(&replay, Arc::clone(&store)).await;
+    replay.start().await.expect("replay reaction start");
+    enqueue_terminal_rejections_then_valid(&replay, 1).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    replay.stop().await.expect("replay reaction stop");
+
+    assert!(
+        store
+            .contains_key(TEST_REACTION_ID, &format!("checkpoint:{ROUTE_QUERY_ID}"))
+            .await
+            .expect("read replay checkpoint"),
+        "replay must advance the checkpoint past terminal rows"
+    );
+    let finalized_rejection: Value = serde_json::from_slice(
+        &store
+            .get(TEST_REACTION_ID, &pending_rejection_key)
+            .await
+            .expect("read replayed rejection")
+            .expect("replayed rejection exists"),
+    )
+    .expect("valid replayed rejection json");
+    assert_eq!(
+        finalized_rejection
+            .get("finalized")
+            .and_then(Value::as_bool),
+        Some(true),
+        "replay must finalize a rejection only after restoring its tombstone"
+    );
+    let replayed_reservation = load_reservation(
+        Arc::clone(&store),
+        TEST_REACTION_ID,
+        "exec-invalid:CompletedIssueValidation",
+    )
+    .await
+    .expect("load replayed reservation")
+    .expect("replayed reservation exists");
+    assert!(
+        replayed_reservation.completed,
+        "replay must complete a pending terminal reservation"
+    );
+    let replay_keys = store
+        .list_keys(TEST_REACTION_ID)
+        .await
+        .expect("list replay state");
+    assert_eq!(
+        replay_keys
+            .iter()
+            .filter(|key| key.starts_with("workgraph-router/rejections/"))
+            .count(),
+        2,
+        "replay must reuse terminal rejection records"
+    );
+
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|req| {
+                req.method.as_str() == "POST" && req.url.path().ends_with("/comments")
+            })
+            .count(),
+        2,
+        "the later valid row must write each comment exactly once"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|req| is_project_status_mutation(req))
+            .count(),
+        1,
+        "the later valid row must update status exactly once"
     );
 }
 
