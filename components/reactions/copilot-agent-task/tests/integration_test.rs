@@ -624,6 +624,109 @@ async fn duplicate_delivery_launches_only_once() {
     core.stop().await.expect("stop core");
 }
 
+#[tokio::test]
+#[ignore]
+async fn completed_duplicate_survives_all_allowlist_narrowing() {
+    let server = MockServer::start().await;
+    let (source, handle) = make_source();
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let exec_id = execution_id(REACTION, "route-narrowed", "resp-narrowed", 1);
+    let mut completed = ExecutionRecord::new_reserved(
+        "route-narrowed",
+        "resp-narrowed",
+        1,
+        &exec_id,
+        "evt-narrowed",
+        "CompletedIssueValidation",
+        REPOSITORY,
+        55,
+        "gpt-5",
+        None,
+    );
+    completed.status = ExecutionStatus::Started;
+    completed.model_used = Some("gpt-5".to_string());
+    completed.task_id = Some("task-preserved".to_string());
+    completed.task_url = Some("https://github.com/tasks/preserved".to_string());
+    completed.request_time = Some(chrono::Utc::now());
+    completed.comment_posted = true;
+    save(store.as_ref(), REACTION, &completed)
+        .await
+        .expect("seed completed execution");
+
+    let reaction = CopilotAgentTaskReaction::builder(REACTION)
+        .with_query(QUERY)
+        .with_github_api_base_url(server.uri())
+        .with_github_graphql_url(format!("{}/graphql", server.uri()))
+        .with_token("ghp_test_token_do_not_log")
+        .with_allowed_repositories(vec!["other-org/other-repo".to_string()])
+        .with_allowed_profiles(vec!["other-profile".to_string()])
+        .with_allowed_models(vec!["other-model".to_string()])
+        .build()
+        .expect("narrowed reaction builds");
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("narrowed-duplicate-core")
+            .with_source(source)
+            .with_query(
+                Query::cypher(QUERY)
+                    .query(launch_query_str())
+                    .from_source(SOURCE)
+                    .with_outbox_capacity(100)
+                    .auto_start(true)
+                    .build(),
+            )
+            .with_reaction(reaction)
+            .with_state_store_provider(store.clone())
+            .build()
+            .await
+            .expect("build core"),
+    );
+    core.start().await.expect("start core");
+    tokio::time::sleep(WARMUP).await;
+
+    insert_row(
+        &handle,
+        "issue-narrowed",
+        "route-narrowed",
+        "resp-narrowed",
+        55,
+        "gpt-5",
+        None,
+        REPOSITORY,
+        CONTENT_VERSION,
+        "In Progress",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let preserved = load(
+        store.as_ref(),
+        REACTION,
+        "route-narrowed",
+        "resp-narrowed",
+        1,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(preserved.status, ExecutionStatus::Started);
+    assert!(preserved.comment_posted);
+    assert_eq!(preserved.task_id.as_deref(), Some("task-preserved"));
+    assert_eq!(
+        preserved.task_url.as_deref(),
+        Some("https://github.com/tasks/preserved")
+    );
+    assert_eq!(
+        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
+        0
+    );
+    assert_eq!(mock_github::count_add_comment_requests(&server).await, 0);
+
+    core.stop().await.expect("stop core");
+}
+
 // ---------------------------------------------------------------------
 // 6. Crash/recovery boundary: a record left in `Starting` (simulating a
 //    crash between reservation and confirmed task creation) is reconciled

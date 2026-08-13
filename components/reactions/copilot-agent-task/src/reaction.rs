@@ -379,20 +379,6 @@ async fn process_add_row(
         }
     };
 
-    if let Err(e) = validate_row(
-        &row,
-        &config.allowed_repositories,
-        &config.allowed_profiles,
-        &config.allowed_models,
-    ) {
-        warn!(
-            "[{reaction_name}] Rejecting row for {} issue #{} (route={}, responsibility={}): {e}",
-            row.repository, row.issue_number, row.route_id, row.responsibility_id
-        );
-        record_permanent_failure(store, store_id, &row, e.to_string()).await;
-        return Ok(());
-    }
-
     let exec_id = execution_id(store_id, &row.route_id, &row.responsibility_id, ATTEMPT);
 
     let reservation = reserve_or_resume(
@@ -438,6 +424,29 @@ async fn process_add_row(
         }
     };
 
+    // Current configuration is relevant only to a new or merely Reserved
+    // attempt. An authoritative prior state must be resumed or skipped before
+    // mutable allowlists are consulted, otherwise config narrowing could
+    // corrupt a completed execution on duplicate delivery.
+    if let Err(e) = validate_row(
+        &row,
+        &config.allowed_repositories,
+        &config.allowed_profiles,
+        &config.allowed_models,
+    ) {
+        warn!(
+            "[{reaction_name}] Rejecting new/reserved row for {} issue #{} (route={}, responsibility={}): {e}",
+            row.repository, row.issue_number, row.route_id, row.responsibility_id
+        );
+        record.status = ExecutionStatus::Failed;
+        record.last_error = Some(e.to_string());
+        record.touch();
+        save(store, store_id, &record)
+            .await
+            .map_err(|error| format!("failed to persist validation failure: {error:#}"))?;
+        return Ok(());
+    }
+
     // ---- Preflight ----
     match crate::github::run_preflight(client, &row).await {
         Ok(()) => {}
@@ -465,40 +474,6 @@ async fn process_add_row(
         .map_err(|e| format!("failed to persist Starting state: {e:#}"))?;
 
     launch_and_comment(reaction_name, config, client, store, store_id, &row, record).await
-}
-
-/// Record a permanent (fail-closed) validation rejection, best-effort. If we
-/// cannot even parse `route_id`/`responsibility_id` this silently no-ops —
-/// there is no reservation key to record against, and the row was already
-/// logged by the caller.
-async fn record_permanent_failure(
-    store: &dyn StateStoreProvider,
-    store_id: &str,
-    row: &LaunchRow,
-    reason: String,
-) {
-    let exec_id = execution_id(store_id, &row.route_id, &row.responsibility_id, ATTEMPT);
-    let mut record = ExecutionRecord::new_reserved(
-        &row.route_id,
-        &row.responsibility_id,
-        ATTEMPT,
-        &exec_id,
-        &row.expected_event_id,
-        &row.required_event_type,
-        &row.repository,
-        row.issue_number,
-        &row.requested_model,
-        row.fallback_model.as_deref(),
-    );
-    record.status = ExecutionStatus::Failed;
-    record.last_error = Some(reason);
-    record.touch();
-    if let Err(e) = save(store, store_id, &record).await {
-        warn!(
-            "failed to persist permanent-failure record for route={} responsibility={}: {e:#}",
-            row.route_id, row.responsibility_id
-        );
-    }
 }
 
 /// Resume a launch attempt that crashed (or was ambiguous) between
