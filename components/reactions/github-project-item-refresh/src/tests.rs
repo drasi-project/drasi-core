@@ -20,7 +20,10 @@ use reqwest::{
 };
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
+use tokio::sync::Barrier;
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -42,13 +45,25 @@ const EXPECTED_STATUS_FIELD_NODE_ID: &str = "PVTSSF_lADOCX0YF84BgNE3zhaadbw";
 
 struct DurableMemoryStateStore {
     inner: drasi_lib::MemoryStateStoreProvider,
+    list_keys_calls: AtomicUsize,
+    list_keys_delay: Option<StdDuration>,
 }
 
 impl DurableMemoryStateStore {
     fn new() -> Self {
+        Self::new_with_list_keys_delay(None)
+    }
+
+    fn new_with_list_keys_delay(list_keys_delay: Option<StdDuration>) -> Self {
         Self {
             inner: drasi_lib::MemoryStateStoreProvider::new(),
+            list_keys_calls: AtomicUsize::new(0),
+            list_keys_delay,
         }
+    }
+
+    fn list_keys_calls(&self) -> usize {
+        self.list_keys_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -91,6 +106,10 @@ impl StateStoreProvider for DurableMemoryStateStore {
     }
 
     async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
+        self.list_keys_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(delay) = self.list_keys_delay {
+            tokio::time::sleep(delay).await;
+        }
         self.inner.list_keys(store_id).await
     }
 
@@ -731,6 +750,164 @@ async fn duplicate_delivery_is_deduplicated() {
         .await
         .expect("requests");
     assert_eq!(destination_requests.len(), 1);
+}
+
+#[tokio::test]
+async fn successful_adds_within_interval_trigger_one_prune_scan() {
+    let graphql_server = MockServer::start().await;
+    let destination_server = MockServer::start().await;
+    let durable_store = Arc::new(DurableMemoryStateStore::new());
+
+    for (item, updated_at) in [
+        ("PVTI_prune_interval_1", "2026-08-13T19:00:00Z"),
+        ("PVTI_prune_interval_2", "2026-08-13T19:01:00Z"),
+        ("PVTI_prune_interval_3", "2026-08-13T19:02:00Z"),
+    ] {
+        Mock::given(method("POST"))
+            .and(body_string_contains(item))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_success_response(
+                    item,
+                    "PVT_project1",
+                    updated_at,
+                    "In Progress",
+                    "opt-ip",
+                )),
+            )
+            .mount(&graphql_server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "message": "All 1 events processed successfully"
+        })))
+        .mount(&destination_server)
+        .await;
+
+    let (processor, _) = build_processor(
+        &graphql_server,
+        destination_server.uri(),
+        durable_store.clone(),
+        vec![],
+    )
+    .await;
+
+    for (delivery_id, item_id) in [
+        ("delivery-prune-interval-1", "PVTI_prune_interval_1"),
+        ("delivery-prune-interval-2", "PVTI_prune_interval_2"),
+        ("delivery-prune-interval-3", "PVTI_prune_interval_3"),
+    ] {
+        let outcome = processor
+            .process_add_row(&test_row(delivery_id, item_id, "PVT_project1"))
+            .await
+            .expect("invalidation should be published");
+        assert_eq!(outcome, AddRowOutcome::Published);
+    }
+
+    assert_eq!(
+        durable_store.list_keys_calls(),
+        1,
+        "multiple successful ADDs within interval should run one prune scan"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_adds_across_clones_share_prune_throttle() {
+    let graphql_server = MockServer::start().await;
+    let destination_server = MockServer::start().await;
+    let durable_store = Arc::new(DurableMemoryStateStore::new_with_list_keys_delay(Some(
+        StdDuration::from_millis(150),
+    )));
+
+    Mock::given(method("POST"))
+        .and(body_string_contains("PVTI_prune_clone_1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(graphql_success_response(
+                "PVTI_prune_clone_1",
+                "PVT_project1",
+                "2026-08-13T19:10:00Z",
+                "In Progress",
+                "opt-ip",
+            )),
+        )
+        .mount(&graphql_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("PVTI_prune_clone_2"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(graphql_success_response(
+                "PVTI_prune_clone_2",
+                "PVT_project1",
+                "2026-08-13T19:11:00Z",
+                "In Progress",
+                "opt-ip",
+            )),
+        )
+        .mount(&graphql_server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "message": "All 1 events processed successfully"
+        })))
+        .mount(&destination_server)
+        .await;
+
+    let (processor, _) = build_processor(
+        &graphql_server,
+        destination_server.uri(),
+        durable_store.clone(),
+        vec![],
+    )
+    .await;
+    let processor_one = processor.clone();
+    let processor_two = processor;
+    let start_barrier = Arc::new(Barrier::new(3));
+
+    let row_one = test_row(
+        "delivery-prune-clone-1",
+        "PVTI_prune_clone_1",
+        "PVT_project1",
+    );
+    let row_two = test_row(
+        "delivery-prune-clone-2",
+        "PVTI_prune_clone_2",
+        "PVT_project1",
+    );
+
+    let barrier_one = Arc::clone(&start_barrier);
+    let task_one = tokio::spawn(async move {
+        barrier_one.wait().await;
+        processor_one.process_add_row(&row_one).await
+    });
+    let barrier_two = Arc::clone(&start_barrier);
+    let task_two = tokio::spawn(async move {
+        barrier_two.wait().await;
+        processor_two.process_add_row(&row_two).await
+    });
+
+    start_barrier.wait().await;
+    assert_eq!(
+        task_one
+            .await
+            .expect("task one join")
+            .expect("task one result"),
+        AddRowOutcome::Published
+    );
+    assert_eq!(
+        task_two
+            .await
+            .expect("task two join")
+            .expect("task two result"),
+        AddRowOutcome::Published
+    );
+
+    assert_eq!(
+        durable_store.list_keys_calls(),
+        1,
+        "concurrent cloned processors should dedupe prune scans"
+    );
 }
 
 #[tokio::test]

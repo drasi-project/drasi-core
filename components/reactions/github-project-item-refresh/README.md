@@ -189,6 +189,12 @@ strict recovery replays that same deterministic update and requires a valid
 HTTP Source acknowledgement before recording publication or advancing the
 checkpoint.
 
+Terminal publication/reservation pruning is internal and bounded: the reaction
+attempts one prune pass on the first processed ADD after startup/restart, then
+at most once every 5 minutes. If a prune pass fails, the failure is logged and
+the next ADD remains eligible to retry pruning immediately (no public config
+field controls this interval).
+
 ## Security Notes
 
 - GitHub token, GraphQL header values, and destination bearer secret are never logged.

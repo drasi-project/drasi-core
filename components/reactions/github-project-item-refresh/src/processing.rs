@@ -17,7 +17,10 @@ use chrono::{DateTime, Utc};
 use log::warn;
 use reqwest::Url;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
+use tokio::sync::Mutex;
 
 use crate::config::{
     validate_project_item_node_id, validate_project_node_id, GitHubProjectItemRefreshConfig,
@@ -33,6 +36,66 @@ use crate::state_store::RefreshStateStore;
 const MAX_FETCH_ATTEMPTS: u32 = 3;
 const INITIAL_BACKOFF_MS: u64 = 100;
 const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(120);
+const PRUNE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Clone)]
+struct PruneThrottle {
+    state: Arc<Mutex<PruneThrottleState>>,
+    interval: Duration,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PruneThrottleState {
+    last_successful_prune: Option<Instant>,
+    in_progress: bool,
+}
+
+impl PruneThrottle {
+    fn new() -> Self {
+        Self::with_interval(PRUNE_INTERVAL)
+    }
+
+    fn with_interval(interval: Duration) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(PruneThrottleState::default())),
+            interval,
+        }
+    }
+
+    async fn try_acquire(&self) -> Option<PrunePermit> {
+        let mut state = self.state.lock().await;
+        if state.in_progress {
+            return None;
+        }
+        if let Some(last_successful_prune) = state.last_successful_prune {
+            if last_successful_prune.elapsed() < self.interval {
+                return None;
+            }
+        }
+
+        state.in_progress = true;
+        Some(PrunePermit {
+            state: Arc::clone(&self.state),
+        })
+    }
+}
+
+struct PrunePermit {
+    state: Arc<Mutex<PruneThrottleState>>,
+}
+
+impl PrunePermit {
+    async fn mark_success(self) {
+        let mut state = self.state.lock().await;
+        state.last_successful_prune = Some(Instant::now());
+        state.in_progress = false;
+    }
+
+    async fn mark_failure(self) {
+        let mut state = self.state.lock().await;
+        state.in_progress = false;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddRowOutcome {
@@ -48,6 +111,7 @@ pub struct RefreshProcessor {
     state_store: RefreshStateStore,
     graphql_client: GitHubGraphqlClient,
     destination_client: DestinationSourceClient,
+    prune_throttle: PruneThrottle,
 }
 
 impl RefreshProcessor {
@@ -62,6 +126,7 @@ impl RefreshProcessor {
             state_store,
             graphql_client,
             destination_client,
+            prune_throttle: PruneThrottle::new(),
         }
     }
 
@@ -74,13 +139,7 @@ impl RefreshProcessor {
         &self,
         input: InvalidationInput,
     ) -> anyhow::Result<AddRowOutcome> {
-        if let Err(err) = self
-            .state_store
-            .prune_terminal_records_older_than(self.config.delivery_record_ttl_secs, Utc::now())
-            .await
-        {
-            warn!("failed to prune terminal delivery records: {err:#}");
-        }
+        self.maybe_prune_terminal_records().await;
 
         validate_project_item_node_id(&input.project_item_node_id)
             .context("validating project item node id")?;
@@ -329,6 +388,24 @@ impl RefreshProcessor {
             .context("recording published state")?;
 
         Ok(AddRowOutcome::Published)
+    }
+
+    async fn maybe_prune_terminal_records(&self) {
+        let Some(permit) = self.prune_throttle.try_acquire().await else {
+            return;
+        };
+
+        match self
+            .state_store
+            .prune_terminal_records_older_than(self.config.delivery_record_ttl_secs, Utc::now())
+            .await
+        {
+            Ok(_) => permit.mark_success().await,
+            Err(err) => {
+                warn!("failed to prune terminal delivery records: {err:#}");
+                permit.mark_failure().await;
+            }
+        }
     }
 
     async fn mark_rejected(
