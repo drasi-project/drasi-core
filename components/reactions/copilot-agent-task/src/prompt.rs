@@ -49,7 +49,7 @@ pub fn work_graph_event_v1_schema() -> Value {
         "$id": "https://drasi.io/schemas/workgraph/WorkGraphEvent-v1.json",
         "title": "WorkGraphEvent/v1",
         "type": "object",
-        "required": ["schema", "eventType", "eventId", "routeId", "responsibilityId", "executionId", "issueContentVersion", "result"],
+        "required": ["schema", "eventType", "eventId", "routeId", "responsibilityId", "executionId", "contentVersion", "result"],
         "properties": {
             "schema": { "const": "WorkGraphEvent/v1" },
             "eventType": { "type": "string" },
@@ -57,7 +57,7 @@ pub fn work_graph_event_v1_schema() -> Value {
             "routeId": { "type": "string" },
             "responsibilityId": { "type": "string" },
             "executionId": { "type": "string" },
-            "issueContentVersion": { "type": "string" },
+            "contentVersion": { "type": "string", "format": "date-time" },
             "result": { "enum": ["success", "failure"] },
             "summary": { "type": "string" }
         },
@@ -102,32 +102,33 @@ pub fn workgraph_execution_v1_schema() -> Value {
 
 /// Build the exact prompt sent as the Agent Task's `prompt` field.
 ///
-/// Embeds every correlation ID the launched agent must echo back
-/// (`executionId`, `expectedEventId`, `routeId`, `responsibilityId`), the
-/// literal `WorkGraphEvent/v1` schema, and the ordering constraint between
-/// the required completion event and any `AwaitingRouting` event.
+/// Embeds the exact frozen target, the literal `WorkGraphEvent/v1` schema,
+/// and the ordering constraint between the required completion event and any
+/// `AwaitingRouting` event.
 pub fn build_prompt(row: &LaunchRow, execution_id: &str) -> String {
     let schema = work_graph_event_v1_schema();
     let schema_json = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| "{}".to_string());
+    let target = target_payload(row, execution_id);
+    let target_json = serde_json::to_string_pretty(&target).unwrap_or_else(|_| "{}".to_string());
 
     format!(
-        r#"You are operating as the "{agent_profile}" agent profile against {repository} issue #{issue_number} ({issue_url}).
+        r#"You are operating as the "{agent_profile}" custom agent.
 
-## Correlation identifiers (do not change these; echo them back exactly)
+## Single target
 
-- executionId: {execution_id}
-- expectedEventId: {expected_event_id}
-- routeId: {route_id}
-- responsibilityId: {responsibility_id}
-- issueContentVersion: {issue_content_version}
-- baseRef: {base_ref}
+You have exactly one target. Do not discover, infer, or act on any other target.
+Use every field below exactly as supplied:
+
+```json
+{target_json}
+```
 
 ## Required completion event
 
 When you finish this responsibility, you MUST emit exactly one `WorkGraphEvent/v1`
 object with `eventType` set to `{required_event_type}`, `eventId` set to the
-`expectedEventId` above, and `executionId` set to the `executionId` above. The
-event's JSON Schema is:
+target's `eventId`, `executionId` set to the target's `executionId`, and
+`contentVersion` set to the target's `contentVersion`. The event's JSON Schema is:
 
 ```json
 {schema_json}
@@ -138,34 +139,40 @@ event's JSON Schema is:
 The `{required_event_type}` event above MUST be emitted before any
 `AwaitingRouting` event is produced for this issue. Downstream routing must
 never observe a workflow that appears ready to route before this validation
-result has been recorded. Do not emit `AwaitingRouting` yourself; this
-ordering requirement exists solely to constrain the relative order in which
-events referencing this issue are allowed to appear.
+result has been recorded. Do not emit `AwaitingRouting` yourself.
 
 ## Task
 
-Carry out the "{agent_profile}" responsibility for this issue as configured by
-the profile pinned at `{profile_path}` (blob `{profile_blob_sha}`) on ref
-`{base_ref}`. Do not open a pull request as part of this task.
+Carry out the target responsibility using the custom agent profile pinned by
+the target's `profileRef`. Do not open a pull request as part of this task.
 "#,
         agent_profile = row.agent_profile,
-        repository = row.repository,
-        issue_number = row.issue_number,
-        issue_url = row.issue_url,
-        execution_id = execution_id,
-        expected_event_id = row.expected_event_id,
-        route_id = row.route_id,
-        responsibility_id = row.responsibility_id,
-        issue_content_version = row.issue_content_version,
-        base_ref = row.base_ref,
         required_event_type = row.required_event_type,
         schema_json = schema_json,
-        profile_path = row
-            .profile_path_and_sha()
-            .map(|(p, _)| p)
-            .unwrap_or(&row.profile_ref),
-        profile_blob_sha = row.profile_path_and_sha().map(|(_, s)| s).unwrap_or(""),
+        target_json = target_json,
     )
+}
+
+/// Frozen WorkGraph target supplied to the coding agent. No other issue,
+/// project, actor, or correlation fields are included in the target.
+pub fn target_payload(row: &LaunchRow, execution_id: &str) -> Value {
+    json!({
+        "eventId": row.expected_event_id,
+        "projectItemNodeId": row.project_item_node_id,
+        "projectOwner": row.project_owner,
+        "projectNumber": row.project_number,
+        "subjectType": row.subject_type,
+        "subjectNodeId": row.subject_node_id,
+        "repository": row.repository,
+        "number": row.issue_number,
+        "actorType": row.actor_type,
+        "actorId": row.actor_id,
+        "routeId": row.route_id,
+        "responsibilityId": row.responsibility_id,
+        "executionId": execution_id,
+        "contentVersion": row.issue_content_version,
+        "profileRef": row.profile_ref,
+    })
 }
 
 /// The `workgraph.execution/v1` envelope posted as a single, pure-JSON issue
@@ -241,11 +248,17 @@ mod tests {
             issue_url: "https://github.com/drasi-project/drasi-core/issues/42".to_string(),
             issue_node_id: "I_kwDOtest".to_string(),
             project_item_node_id: "PVTI_test".to_string(),
+            project_owner: "drasi-project".to_string(),
+            project_number: 3,
+            subject_type: "Issue".to_string(),
+            subject_node_id: "I_kwDOtest".to_string(),
+            actor_type: "Agent".to_string(),
+            actor_id: "issue-validator".to_string(),
             route_id: "route-1".to_string(),
             responsibility_id: "resp-1".to_string(),
-            issue_content_version: "deadbeef".to_string(),
+            issue_content_version: "2026-08-13T19:00:00Z".to_string(),
             agent_profile: "issue-validator".to_string(),
-            profile_ref: "profiles/issue-validator.yml@abc123sha".to_string(),
+            profile_ref: "issue-validator@0123456789abcdef0123456789abcdef01234567".to_string(),
             requested_model: "gpt-5".to_string(),
             fallback_model: Some("gpt-4".to_string()),
             required_event_type: "CompletedIssueValidation".to_string(),
@@ -264,15 +277,46 @@ mod tests {
             "evt-1",
             "route-1",
             "resp-1",
-            "deadbeef",
-            "main",
+            "2026-08-13T19:00:00Z",
             "CompletedIssueValidation",
             "AwaitingRouting",
-            "profiles/issue-validator.yml",
-            "abc123sha",
+            "issue-validator@0123456789abcdef0123456789abcdef01234567",
+            "\"projectOwner\": \"drasi-project\"",
+            "\"projectNumber\": 3",
+            "\"subjectType\": \"Issue\"",
+            "\"actorType\": \"Agent\"",
         ] {
             assert!(prompt.contains(needle), "prompt missing '{needle}'");
         }
+    }
+
+    #[test]
+    fn target_payload_has_exact_frozen_fields() {
+        let target = target_payload(&sample_row(), "exec-123");
+        let actual: std::collections::BTreeSet<&str> = target
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected = std::collections::BTreeSet::from([
+            "eventId",
+            "projectItemNodeId",
+            "projectOwner",
+            "projectNumber",
+            "subjectType",
+            "subjectNodeId",
+            "repository",
+            "number",
+            "actorType",
+            "actorId",
+            "routeId",
+            "responsibilityId",
+            "executionId",
+            "contentVersion",
+            "profileRef",
+        ]);
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -296,7 +340,7 @@ mod tests {
             "routeId",
             "responsibilityId",
             "executionId",
-            "issueContentVersion",
+            "contentVersion",
             "result",
         ] {
             assert!(names.contains(&field), "schema missing required '{field}'");

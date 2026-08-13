@@ -33,7 +33,6 @@ use drasi_lib::channels::ComponentStatus;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::{DrasiLib, Query, Reaction};
 use drasi_reaction_copilot_agent_task::config::CommentApiConfig;
-use drasi_reaction_copilot_agent_task::github::content_version_of;
 use drasi_reaction_copilot_agent_task::ids::execution_id;
 use drasi_reaction_copilot_agent_task::state::{load, save, ExecutionRecord, ExecutionStatus};
 use drasi_reaction_copilot_agent_task::CopilotAgentTaskReaction;
@@ -48,8 +47,8 @@ const REACTION: &str = "copilot-launcher";
 const OWNER: &str = "drasi-project";
 const REPO: &str = "drasi-core";
 const REPOSITORY: &str = "drasi-project/drasi-core";
-const ISSUE_BODY: &str = "please validate this issue";
-const PROFILE_SHA: &str = "abc123sha";
+const CONTENT_VERSION: &str = "2026-08-13T19:00:00Z";
+const PROFILE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const WARMUP: Duration = Duration::from_millis(150);
 
 fn make_source() -> (
@@ -67,6 +66,9 @@ fn launch_query_str() -> &'static str {
     "MATCH (r:LaunchRequest) RETURN \
      r.repository AS repository, r.issueNumber AS issueNumber, r.issueUrl AS issueUrl, \
      r.issueNodeId AS issueNodeId, r.projectItemNodeId AS projectItemNodeId, \
+     r.projectOwner AS projectOwner, r.projectNumber AS projectNumber, \
+     r.subjectType AS subjectType, r.subjectNodeId AS subjectNodeId, \
+     r.actorType AS actorType, r.actorId AS actorId, \
      r.routeId AS routeId, r.responsibilityId AS responsibilityId, \
      r.issueContentVersion AS issueContentVersion, r.agentProfile AS agentProfile, \
      r.profileRef AS profileRef, r.requestedModel AS requestedModel, \
@@ -92,10 +94,8 @@ fn build_reaction(server_uri: &str) -> CopilotAgentTaskReaction {
         .expect("reaction builds")
 }
 
-/// Insert one launch row into the source. `issue_content_version` should be
-/// computed with [`content_version_of`] over the mocked issue body so
-/// preflight passes by default; pass a wrong value to exercise the mismatch
-/// path.
+/// Insert one launch row into the source. `issue_content_version` must be the
+/// normalized `lastEditedAt ?? createdAt` RFC 3339 instant.
 #[allow(clippy::too_many_arguments)]
 async fn insert_row(
     handle: &drasi_source_application::ApplicationSourceHandle,
@@ -118,14 +118,17 @@ async fn insert_row(
         )
         .with_string("issueNodeId", format!("I_{node_id}"))
         .with_string("projectItemNodeId", format!("PVTI_{node_id}"))
+        .with_string("projectOwner", OWNER)
+        .with_integer("projectNumber", 3)
+        .with_string("subjectType", "Issue")
+        .with_string("subjectNodeId", format!("I_{node_id}"))
+        .with_string("actorType", "Agent")
+        .with_string("actorId", "issue-validator")
         .with_string("routeId", route_id)
         .with_string("responsibilityId", responsibility_id)
         .with_string("issueContentVersion", issue_content_version)
         .with_string("agentProfile", "issue-validator")
-        .with_string(
-            "profileRef",
-            format!("profiles/issue-validator.yml@{PROFILE_SHA}"),
-        )
+        .with_string("profileRef", format!("issue-validator@{PROFILE_SHA}"))
         .with_string("requestedModel", requested_model)
         .with_string("requiredEventType", "CompletedIssueValidation")
         .with_string("expectedEventId", format!("evt-{node_id}"))
@@ -160,16 +163,7 @@ where
 
 async fn mount_happy_path_preflight(server: &MockServer, issue_number: u64, node_id: &str) {
     let issue_node_id = format!("I_{node_id}");
-    mock_github::mount_issue(
-        server,
-        OWNER,
-        REPO,
-        issue_number,
-        "open",
-        ISSUE_BODY,
-        &issue_node_id,
-    )
-    .await;
+    mock_github::mount_issue(server, OWNER, REPO, issue_number, "open", &issue_node_id).await;
     mock_github::mount_contents(server, OWNER, REPO, PROFILE_SHA).await;
     mock_github::mount_project_status(server, "In Progress", &issue_node_id).await;
 }
@@ -217,7 +211,7 @@ async fn success_launches_task_and_posts_one_comment() {
     core.start().await.expect("start core");
     tokio::time::sleep(WARMUP).await;
 
-    let version = content_version_of(Some(ISSUE_BODY));
+    let version = CONTENT_VERSION.to_string();
     insert_row(
         &handle,
         "issue-1",
@@ -254,6 +248,35 @@ async fn success_launches_task_and_posts_one_comment() {
     assert_eq!(record.task_id.as_deref(), Some("task-1"));
     assert_eq!(record.model_used.as_deref(), Some("gpt-5"));
     assert!(!record.used_fallback);
+    let requests = mock_github::create_task_request_bodies(&server, OWNER, REPO).await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["custom_agent"], "issue-validator");
+    assert_eq!(requests[0]["model"], "gpt-5");
+    assert_eq!(requests[0]["base_ref"], "main");
+    assert_eq!(requests[0]["create_pull_request"], false);
+    let prompt = requests[0]["prompt"].as_str().expect("prompt is a string");
+    for field in [
+        "eventId",
+        "projectItemNodeId",
+        "projectOwner",
+        "projectNumber",
+        "subjectType",
+        "subjectNodeId",
+        "repository",
+        "number",
+        "actorType",
+        "actorId",
+        "routeId",
+        "responsibilityId",
+        "executionId",
+        "contentVersion",
+        "profileRef",
+    ] {
+        assert!(
+            prompt.contains(&format!("\"{field}\"")),
+            "prompt target missing {field}"
+        );
+    }
 
     core.stop().await.expect("stop core");
 }
@@ -383,7 +406,7 @@ async fn fallback_used_exactly_once_on_unsupported_model() {
     core.start().await.expect("start core");
     tokio::time::sleep(WARMUP).await;
 
-    let version = content_version_of(Some(ISSUE_BODY));
+    let version = CONTENT_VERSION.to_string();
     insert_row(
         &handle,
         "issue-3",
@@ -457,7 +480,7 @@ async fn no_fallback_on_unrelated_422() {
     core.start().await.expect("start core");
     tokio::time::sleep(WARMUP).await;
 
-    let version = content_version_of(Some(ISSUE_BODY));
+    let version = CONTENT_VERSION.to_string();
     insert_row(
         &handle,
         "issue-4",
@@ -545,7 +568,7 @@ async fn duplicate_delivery_launches_only_once() {
     core.start().await.expect("start core");
     tokio::time::sleep(WARMUP).await;
 
-    let version = content_version_of(Some(ISSUE_BODY));
+    let version = CONTENT_VERSION.to_string();
     insert_row(
         &handle,
         "issue-5a",
@@ -671,7 +694,7 @@ async fn crash_recovery_adopts_exactly_one_existing_task() {
     core.start().await.expect("start core");
     tokio::time::sleep(WARMUP).await;
 
-    let version = content_version_of(Some(ISSUE_BODY));
+    let version = CONTENT_VERSION.to_string();
     insert_row(
         &handle,
         "issue-6",
@@ -763,7 +786,7 @@ async fn ambiguous_reconciliation_with_no_match_never_retries() {
     core.start().await.expect("start core");
     tokio::time::sleep(WARMUP).await;
 
-    let version = content_version_of(Some(ISSUE_BODY));
+    let version = CONTENT_VERSION.to_string();
     insert_row(
         &handle,
         "issue-7",
@@ -842,7 +865,7 @@ async fn ambiguous_reconciliation_with_no_match_never_retries() {
 #[ignore]
 async fn graphql_errors_on_project_status_are_treated_as_failure() {
     let server = MockServer::start().await;
-    mock_github::mount_issue(&server, OWNER, REPO, 8, "open", ISSUE_BODY, "I_issue-8").await;
+    mock_github::mount_issue(&server, OWNER, REPO, 8, "open", "I_issue-8").await;
     mock_github::mount_contents(&server, OWNER, REPO, PROFILE_SHA).await;
     mock_github::mount_project_status_graphql_error(&server, "Something went wrong").await;
 
@@ -871,7 +894,7 @@ async fn graphql_errors_on_project_status_are_treated_as_failure() {
     core.start().await.expect("start core");
     tokio::time::sleep(WARMUP).await;
 
-    let version = content_version_of(Some(ISSUE_BODY));
+    let version = CONTENT_VERSION.to_string();
     insert_row(
         &handle,
         "issue-8",
@@ -949,7 +972,7 @@ async fn graphql_errors_on_add_comment_are_treated_as_failure() {
     core.start().await.expect("start core");
     tokio::time::sleep(WARMUP).await;
 
-    let version = content_version_of(Some(ISSUE_BODY));
+    let version = CONTENT_VERSION.to_string();
     insert_row(
         &handle,
         "issue-9",
@@ -1077,7 +1100,7 @@ async fn token_is_sent_to_github_but_never_exposed_via_debug() {
     core.start().await.expect("start core");
     tokio::time::sleep(WARMUP).await;
 
-    let version = content_version_of(Some(ISSUE_BODY));
+    let version = CONTENT_VERSION.to_string();
     insert_row(
         &handle,
         "issue-10",

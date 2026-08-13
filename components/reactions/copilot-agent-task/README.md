@@ -75,14 +75,20 @@ Each row returned by the launch query must contain the following fields (camelCa
 | `issueUrl` | string | |
 | `issueNodeId` | string | GitHub GraphQL node ID of the issue (comment target) |
 | `projectItemNodeId` | string | GitHub Projects (v2) item node ID |
+| `projectOwner` | string | GitHub organization or user that owns the Project |
+| `projectNumber` | integer | GitHub Project number |
+| `subjectType` | string | WorkGraph target subject type (`Issue` for this reaction) |
+| `subjectNodeId` | string | Subject node ID; must equal `issueNodeId` for issue launches |
+| `actorType` | string | WorkGraph actor type |
+| `actorId` | string | WorkGraph actor identifier |
 | `routeId` | string | WorkGraph routing-decision identifier |
 | `responsibilityId` | string | WorkGraph responsibility identifier |
-| `issueContentVersion` | string | See [preflight checks](#preflight-checks) |
+| `issueContentVersion` | string | Normalized `lastEditedAt ?? createdAt` RFC 3339 instant |
 | `agentProfile` | string | Must be in `allowedProfiles`; sent as `custom_agent` |
-| `profileRef` | string | `"<path>@<blobSha>"` — see [preflight checks](#preflight-checks) |
+| `profileRef` | string | `"<agentProfile>@<blobSha>"` — see [preflight checks](#preflight-checks) |
 | `requestedModel` | string | Must be in `allowedModels` |
 | `fallbackModel` | string (optional) | Must be in `allowedModels` if present |
-| `requiredEventType` | string | The event type the launched agent must emit (e.g. `CompletedIssueValidation`) |
+| `requiredEventType` | string | Must be `CompletedIssueValidation` |
 | `expectedEventId` | string | Correlation ID the launched agent must echo back in that event |
 | `baseRef` | string | Git ref the task runs against and the profile file is read from |
 | `expectedProjectStatus` | string | See [preflight checks](#preflight-checks) — an adaptation, see below |
@@ -121,19 +127,18 @@ state live, rejecting (permanently, fail-closed) if any of the following do not 
 2. **`issueNodeId` matches the resolved issue** — the REST response's `node_id` must equal
    the row's `issueNodeId`, so a row cannot point its correlation IDs (and therefore the
    comment target) at an issue node ID unrelated to the `repository`/`issueNumber` it claims.
-3. **Issue content unchanged** — GitHub has no native "content version" concept, so the
-   reaction computes a SHA-256 hex digest of the issue body and requires it to equal the
-   row's `issueContentVersion`. The upstream router/query producing launch rows must use the
-   same hashing convention (`content_version_of` in `src/github.rs`) when it captures
-   `issueContentVersion`.
+3. **Issue content unchanged** — the Project-item GraphQL lookup reads the linked Issue's
+   `lastEditedAt` and `createdAt`. The reaction selects `lastEditedAt ?? createdAt`, normalizes
+   the chosen instant to UTC RFC 3339 (`Z`), and requires it to equal `issueContentVersion`.
 4. **Project status unchanged** — a GraphQL query reads the Projects (v2) item's `Status`
    single-select field value and requires it to equal `expectedProjectStatus`.
 5. **Project item is linked to this issue** — the same GraphQL query also reads the item's
    `content { ... on Issue { id } } ` and requires it to equal the row's `issueNodeId`, so
    `projectItemNodeId` cannot name an unrelated project item that merely happens to have a
    matching `Status` value.
-6. **Agent profile pinned** — `GET /repos/{owner}/{repo}/contents/{path}?ref={baseRef}` and
-   requires the returned blob `sha` to equal the SHA encoded in `profileRef`.
+6. **Agent profile pinned** — `profileRef` must be `<agentProfile>@<blobSha>`. The reaction
+   derives `.github/agents/<agentProfile>.agent.md`, fetches it at `baseRef`, and requires the
+   returned blob `sha` to equal the SHA encoded in `profileRef`.
 
 ## Reservation, idempotency, and recovery
 
@@ -172,14 +177,13 @@ response body clearly names an unsupported-model condition (see
 
 ## The prompt and `WorkGraphEvent/v1`
 
-The `prompt` sent to the Agent Task embeds every correlation ID the launched agent must echo
-back (`executionId`, `expectedEventId`, `routeId`, `responsibilityId`), the profile path/blob
-SHA, and the literal `WorkGraphEvent/v1` JSON Schema
-(`schema/workgraph-event-v1.schema.json`). It instructs the agent that, on completion, it
-**must** emit exactly one such event with `eventType` equal to the row's `requiredEventType`
-and, critically, that this event **must be emitted before any `AwaitingRouting` event** for
-the same issue — so a downstream router never observes routing-readiness before the
-validation result is recorded.
+The `prompt` sent to the Agent Task supplies exactly one immutable target with these fields:
+`eventId`, `projectItemNodeId`, `projectOwner`, `projectNumber`, `subjectType`,
+`subjectNodeId`, `repository`, `number`, `actorType`, `actorId`, `routeId`,
+`responsibilityId`, `executionId`, `contentVersion`, and `profileRef`. It also embeds the
+literal `WorkGraphEvent/v1` JSON Schema (`schema/workgraph-event-v1.schema.json`). The
+completion event uses `contentVersion` and must be emitted before any `AwaitingRouting`
+event for the issue.
 
 ## The `workgraph.execution/v1` comment
 
@@ -249,13 +253,13 @@ Project-status preflight query and for `addComment`), and secret redaction/wirin
   best-effort adaptations for the parts not pinned down publicly — see the module docs in
   `src/github.rs` for specifics (task-listing endpoint shape, "clearly unsupported model"
   detection heuristic, and the transport-error-only definition of "ambiguous").
-- **`issueContentVersion` is a hash convention, not a GitHub-native field.** The reaction and
-  the upstream router must agree on `content_version_of` (SHA-256 of the issue body).
+- **`issueContentVersion` is the canonical issue edit instant.** Producers must supply the
+  normalized UTC RFC 3339 value of `lastEditedAt ?? createdAt`.
 - **`expectedProjectStatus` is an added field** beyond the reaction's literal requirements
   list, needed to make the "Project status expected by input" preflight check concrete — see
   [Launch row schema](#launch-row-schema).
-- **`profileRef` is `"<path>@<blobSha>"`**, a compact encoding chosen so a single query column
-  can carry a pinned-file-content reference; it is not a GitHub API convention.
+- **`profileRef` is `"<agentProfile>@<blobSha>"`.** The repository path is derived as
+  `.github/agents/<agentProfile>.agent.md`.
 - **Attempts are always `attempt=1`** in this version — the state key includes an `attempt`
   number for forward compatibility, but there is no multi-attempt retry loop yet. A
   permanently failed attempt requires a new row (e.g. a new `routeId`) to relaunch.

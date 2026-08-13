@@ -50,7 +50,6 @@ use chrono::{DateTime, Utc};
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::redact::redact_authorization;
 
@@ -154,7 +153,6 @@ impl GitHubClient {
             .map_err(|e| ApiError::Permanent(format!("issue response was not valid JSON: {e}")))?;
         Ok(IssueInfo {
             state: body["state"].as_str().unwrap_or_default().to_string(),
-            body: body["body"].as_str().map(|s| s.to_string()),
             node_id: body["node_id"].as_str().map(|s| s.to_string()),
         })
     }
@@ -163,16 +161,13 @@ impl GitHubClient {
     // Preflight: Project (v2) item status
     // ---------------------------------------------------------------
 
-    /// Returns `(status, linked_issue_node_id)`: the `Status` single-select
-    /// value plus the node ID of the issue the project item is linked to
-    /// (via `content { ... on Issue { id } }`), so callers can verify the
-    /// item actually belongs to the issue named in the launch row rather
-    /// than trusting `projectItemNodeId` at face value.
+    /// Returns the Project status, linked issue node ID, and authoritative
+    /// issue content version (`lastEditedAt ?? createdAt`).
     pub async fn project_item_status(
         &self,
         project_item_node_id: &str,
         field_name: &str,
-    ) -> Result<(Option<String>, Option<String>), ApiError> {
+    ) -> Result<(Option<String>, Option<String>, Option<String>), ApiError> {
         let query = r#"
             query($id: ID!, $field: String!) {
               node(id: $id) {
@@ -181,7 +176,7 @@ impl GitHubClient {
                     ... on ProjectV2ItemFieldSingleSelectValue { name }
                   }
                   content {
-                    ... on Issue { id }
+                    ... on Issue { id lastEditedAt createdAt }
                   }
                 }
               }
@@ -195,7 +190,27 @@ impl GitHubClient {
         let linked_issue_id = data["node"]["content"]["id"]
             .as_str()
             .map(|s| s.to_string());
-        Ok((status, linked_issue_id))
+        let content_version = Self::content_version_from_timestamps(
+            data["node"]["content"]["lastEditedAt"].as_str(),
+            data["node"]["content"]["createdAt"].as_str(),
+        )?;
+        Ok((status, linked_issue_id, content_version))
+    }
+
+    fn content_version_from_timestamps(
+        last_edited_at: Option<&str>,
+        created_at: Option<&str>,
+    ) -> Result<Option<String>, ApiError> {
+        match last_edited_at.or(created_at) {
+            Some(value) => Ok(Some(
+                crate::row::LaunchRow::normalize_rfc3339_instant(value).map_err(|e| {
+                    ApiError::Permanent(format!(
+                        "issue content timestamp was not valid RFC 3339: {e:#}"
+                    ))
+                })?,
+            )),
+            None => Ok(None),
+        }
     }
 
     // ---------------------------------------------------------------
@@ -433,20 +448,9 @@ impl GitHubClient {
     }
 }
 
-/// Compute the content-version token for an issue body: a SHA-256 hex digest
-/// (empty string hashed for a `null` body). See [`crate::row::LaunchRow`]
-/// docs for why this stands in for GitHub's lack of a native "content
-/// version" concept.
-pub fn content_version_of(body: Option<&str>) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(body.unwrap_or("").as_bytes());
-    hex::encode(hasher.finalize())
-}
-
 #[derive(Debug, Clone)]
 pub struct IssueInfo {
     pub state: String,
-    pub body: Option<String>,
     pub node_id: Option<String>,
 }
 
@@ -688,15 +692,7 @@ pub async fn run_preflight(
             row.issue_node_id, row.repository, row.issue_number, issue.node_id
         )));
     }
-    let live_version = content_version_of(issue.body.as_deref());
-    if live_version != row.issue_content_version {
-        return Err(PreflightError::Permanent(format!(
-            "issue content version changed: expected {}, found {live_version}",
-            row.issue_content_version
-        )));
-    }
-
-    let (status, linked_issue_id) = client
+    let (status, linked_issue_id, live_content_version) = client
         .project_item_status(&row.project_item_node_id, "Status")
         .await?;
     if status.as_deref() != Some(row.expected_project_status.as_str()) {
@@ -714,17 +710,23 @@ pub async fn run_preflight(
             row.project_item_node_id, row.issue_node_id, linked_issue_id
         )));
     }
+    if live_content_version.as_deref() != Some(row.issue_content_version.as_str()) {
+        return Err(PreflightError::Permanent(format!(
+            "issue content version changed: expected {}, found {:?}",
+            row.issue_content_version, live_content_version
+        )));
+    }
 
     let (path, expected_sha) = row
         .profile_path_and_sha()
         .map_err(|e| PreflightError::Permanent(e.to_string()))?;
     let live_sha = client
-        .blob_sha_at_path(owner, repo, path, &row.base_ref)
+        .blob_sha_at_path(owner, repo, &path, &row.base_ref)
         .await?;
     if live_sha.as_deref() != Some(expected_sha) {
         return Err(PreflightError::Permanent(format!(
-            "profile '{path}' at {} does not match pinned blob SHA {expected_sha} (found {:?})",
-            row.base_ref, live_sha
+            "profile '{}' at {} does not match pinned blob SHA {expected_sha} (found {:?})",
+            path, row.base_ref, live_sha
         )));
     }
 
@@ -740,22 +742,6 @@ pub fn now() -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn content_version_is_stable_hash() {
-        let a = content_version_of(Some("hello"));
-        let b = content_version_of(Some("hello"));
-        let c = content_version_of(Some("world"));
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn content_version_handles_missing_body() {
-        let a = content_version_of(None);
-        let b = content_version_of(Some(""));
-        assert_eq!(a, b);
-    }
 
     #[test]
     fn detects_unsupported_model_message_field() {
@@ -805,5 +791,23 @@ mod tests {
             ApiError::from_status(reqwest::StatusCode::TOO_MANY_REQUESTS, "slow down"),
             ApiError::Transient(_)
         ));
+    }
+
+    #[test]
+    fn content_version_prefers_last_edited_at_and_normalizes_to_utc() {
+        let version = GitHubClient::content_version_from_timestamps(
+            Some("2026-08-13T12:00:00-07:00"),
+            Some("2026-08-01T00:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(version.as_deref(), Some("2026-08-13T19:00:00Z"));
+    }
+
+    #[test]
+    fn content_version_falls_back_to_created_at() {
+        let version =
+            GitHubClient::content_version_from_timestamps(None, Some("2026-08-01T00:00:00Z"))
+                .unwrap();
+        assert_eq!(version.as_deref(), Some("2026-08-01T00:00:00Z"));
     }
 }

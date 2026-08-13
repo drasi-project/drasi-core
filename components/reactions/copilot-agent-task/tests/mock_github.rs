@@ -28,14 +28,12 @@ pub async fn mount_issue(
     repo: &str,
     number: u64,
     state: &str,
-    body: &str,
     node_id: &str,
 ) {
     Mock::given(method("GET"))
         .and(path(format!("/repos/{owner}/{repo}/issues/{number}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "state": state,
-            "body": body,
             "node_id": node_id,
         })))
         .mount(server)
@@ -62,7 +60,11 @@ pub async fn mount_project_status(server: &MockServer, status: &str, linked_issu
             "data": {
                 "node": {
                     "fieldValueByName": { "name": status },
-                    "content": { "id": linked_issue_node_id }
+                    "content": {
+                        "id": linked_issue_node_id,
+                        "lastEditedAt": "2026-08-13T19:00:00Z",
+                        "createdAt": "2026-08-01T00:00:00Z"
+                    }
                 }
             }
         })))
@@ -189,6 +191,22 @@ pub async fn count_create_task_requests(server: &MockServer, owner: &str, repo: 
         .iter()
         .filter(|r| r.method.as_str() == "POST" && r.url.path() == expected_path)
         .count()
+}
+
+pub async fn create_task_request_bodies(
+    server: &MockServer,
+    owner: &str,
+    repo: &str,
+) -> Vec<Value> {
+    let expected_path = format!("/agents/repos/{owner}/{repo}/tasks");
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.method.as_str() == "POST" && r.url.path() == expected_path)
+        .map(|r| serde_json::from_slice(&r.body).expect("create-task request must be JSON"))
+        .collect()
 }
 
 /// Count how many `addComment` GraphQL mutations were sent.

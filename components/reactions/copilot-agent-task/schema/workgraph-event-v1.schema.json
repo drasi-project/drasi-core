@@ -3,6 +3,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "contentVersion": {
+      "format": "date-time",
+      "type": "string"
+    },
     "eventId": {
       "type": "string"
     },
@@ -10,9 +14,6 @@
       "type": "string"
     },
     "executionId": {
-      "type": "string"
-    },
-    "issueContentVersion": {
       "type": "string"
     },
     "responsibilityId": {
@@ -41,7 +42,7 @@
     "routeId",
     "responsibilityId",
     "executionId",
-    "issueContentVersion",
+    "contentVersion",
     "result"
   ],
   "title": "WorkGraphEvent/v1",

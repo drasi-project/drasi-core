@@ -24,18 +24,13 @@ use serde::{Deserialize, Serialize};
 
 /// One row of the launch query's result set.
 ///
-/// # Field notes / adaptations
+/// # Field notes
 ///
-/// * `profile_ref` is a `"<path>@<blobSha>"` encoded string: the repository
-///   path of the agent-profile file, and the git blob SHA it is expected to
-///   resolve to at `base_ref`. This is the smallest self-contained way to
-///   carry a "pinned file content" reference in a single query column.
-/// * `issue_content_version` is compared, during preflight, against a SHA-256
-///   digest of the issue body fetched live from GitHub (see
-///   [`crate::github::content_version_of`]). GitHub issues have no native
-///   "content version" concept, so the reaction and the upstream router are
-///   expected to agree on this hash convention as the optimistic-concurrency
-///   token for "has the issue changed since the routing decision was made".
+/// * `profile_ref` is `"<agentProfile>@<blobSha>"`. The file path is derived
+///   from GitHub's custom-agent convention:
+///   `.github/agents/<agentProfile>.agent.md`.
+/// * `issue_content_version` is the normalized RFC 3339 instant from the
+///   issue's GraphQL `lastEditedAt ?? createdAt`.
 /// * `expected_project_status` is the Project (v2) single-select `Status`
 ///   field value the row was observed with when the launch query emitted it.
 ///   Preflight re-reads the live status and requires an exact match, so a
@@ -50,12 +45,18 @@ pub struct LaunchRow {
     pub issue_url: String,
     pub issue_node_id: String,
     pub project_item_node_id: String,
+    pub project_owner: String,
+    pub project_number: u64,
+    pub subject_type: String,
+    pub subject_node_id: String,
+    pub actor_type: String,
+    pub actor_id: String,
     pub route_id: String,
     pub responsibility_id: String,
-    /// Opaque version token for the issue body (see struct docs).
+    /// Normalized `lastEditedAt ?? createdAt` RFC 3339 instant.
     pub issue_content_version: String,
     pub agent_profile: String,
-    /// `"<path>@<blobSha>"`.
+    /// `"<agentProfile>@<blobSha>"`.
     pub profile_ref: String,
     pub requested_model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,21 +75,49 @@ impl LaunchRow {
         serde_json::from_value(data.clone()).context("launch row does not match expected schema")
     }
 
-    /// Split `profile_ref` into `(path, expected_blob_sha)`.
-    pub fn profile_path_and_sha(&self) -> Result<(&str, &str)> {
-        let (path, sha) = self.profile_ref.rsplit_once('@').with_context(|| {
+    /// Split `profile_ref` into `(agent_profile, expected_blob_sha)`.
+    pub fn profile_name_and_sha(&self) -> Result<(&str, &str)> {
+        let (profile, sha) = self.profile_ref.rsplit_once('@').with_context(|| {
             format!(
-                "profileRef '{}' is not '<path>@<blobSha>'",
+                "profileRef '{}' is not '<agentProfile>@<blobSha>'",
                 self.profile_ref
             )
         })?;
-        if path.is_empty() || sha.is_empty() {
+        if profile.is_empty() || sha.is_empty() {
             bail!(
-                "profileRef '{}' has an empty path or blob SHA",
+                "profileRef '{}' has an empty agent profile or blob SHA",
                 self.profile_ref
             );
         }
-        Ok((path, sha))
+        if profile != self.agent_profile {
+            bail!(
+                "profileRef agent profile '{}' does not match agentProfile '{}'",
+                profile,
+                self.agent_profile
+            );
+        }
+        if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            bail!("profileRef blob SHA must be exactly 40 hexadecimal characters");
+        }
+        Ok((profile, sha))
+    }
+
+    pub fn profile_path_and_sha(&self) -> Result<(String, &str)> {
+        let (profile, sha) = self.profile_name_and_sha()?;
+        if profile.contains('/') || profile.contains("..") {
+            bail!("agentProfile '{profile}' is not safe for a custom-agent path");
+        }
+        Ok((format!(".github/agents/{profile}.agent.md"), sha))
+    }
+
+    /// Normalize an RFC 3339 timestamp to a UTC instant using `Z` and only the
+    /// fractional precision needed to represent the instant.
+    pub fn normalize_rfc3339_instant(value: &str) -> Result<String> {
+        let parsed = chrono::DateTime::parse_from_rfc3339(value)
+            .with_context(|| format!("'{value}' is not an RFC 3339 instant"))?;
+        Ok(parsed
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
     }
 
     /// Split `repository` into `(owner, repo)`.
@@ -159,6 +188,36 @@ pub fn validate_row(
     if let Err(e) = row.profile_path_and_sha() {
         return Err(ValidationError::Malformed(e.to_string()));
     }
+    match LaunchRow::normalize_rfc3339_instant(&row.issue_content_version) {
+        Ok(normalized) if normalized == row.issue_content_version => {}
+        Ok(normalized) => {
+            return Err(ValidationError::Malformed(format!(
+                "issueContentVersion must be normalized RFC 3339; expected '{normalized}'"
+            )))
+        }
+        Err(e) => return Err(ValidationError::Malformed(e.to_string())),
+    }
+    if row.project_number == 0
+        || row.project_owner.trim().is_empty()
+        || row.subject_type.trim().is_empty()
+        || row.subject_node_id.trim().is_empty()
+        || row.actor_type.trim().is_empty()
+        || row.actor_id.trim().is_empty()
+    {
+        return Err(ValidationError::Malformed(
+            "project/subject/actor target fields must be non-empty".to_string(),
+        ));
+    }
+    if row.subject_node_id != row.issue_node_id {
+        return Err(ValidationError::Malformed(
+            "subjectNodeId must equal issueNodeId for an issue launch".to_string(),
+        ));
+    }
+    if row.required_event_type != "CompletedIssueValidation" {
+        return Err(ValidationError::Malformed(
+            "requiredEventType must be 'CompletedIssueValidation'".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -174,11 +233,17 @@ mod tests {
             issue_url: "https://github.com/drasi-project/drasi-core/issues/42".to_string(),
             issue_node_id: "I_kwDOtest".to_string(),
             project_item_node_id: "PVTI_test".to_string(),
+            project_owner: "drasi-project".to_string(),
+            project_number: 3,
+            subject_type: "Issue".to_string(),
+            subject_node_id: "I_kwDOtest".to_string(),
+            actor_type: "Agent".to_string(),
+            actor_id: "issue-validator".to_string(),
             route_id: "route-1".to_string(),
             responsibility_id: "resp-1".to_string(),
-            issue_content_version: "deadbeef".to_string(),
+            issue_content_version: "2026-08-13T19:00:00Z".to_string(),
             agent_profile: "issue-validator".to_string(),
-            profile_ref: "profiles/issue-validator.yml@abc123sha".to_string(),
+            profile_ref: "issue-validator@0123456789abcdef0123456789abcdef01234567".to_string(),
             requested_model: "gpt-5".to_string(),
             fallback_model: Some("gpt-4".to_string()),
             required_event_type: "CompletedIssueValidation".to_string(),
@@ -203,11 +268,11 @@ mod tests {
     }
 
     #[test]
-    fn profile_ref_splits_on_last_at() {
+    fn profile_ref_derives_custom_agent_path() {
         let row = sample_row();
         let (path, sha) = row.profile_path_and_sha().unwrap();
-        assert_eq!(path, "profiles/issue-validator.yml");
-        assert_eq!(sha, "abc123sha");
+        assert_eq!(path, ".github/agents/issue-validator.agent.md");
+        assert_eq!(sha, "0123456789abcdef0123456789abcdef01234567");
     }
 
     #[test]
@@ -215,6 +280,21 @@ mod tests {
         let mut row = sample_row();
         row.profile_ref = "no-at-sign".to_string();
         assert!(row.profile_path_and_sha().is_err());
+    }
+
+    #[test]
+    fn profile_ref_must_match_agent_profile() {
+        let mut row = sample_row();
+        row.profile_ref = "other@0123456789abcdef0123456789abcdef01234567".to_string();
+        assert!(row.profile_path_and_sha().is_err());
+    }
+
+    #[test]
+    fn normalizes_content_version_to_utc() {
+        assert_eq!(
+            LaunchRow::normalize_rfc3339_instant("2026-08-13T12:00:00-07:00").unwrap(),
+            "2026-08-13T19:00:00Z"
+        );
     }
 
     #[test]
