@@ -52,6 +52,8 @@ pub struct GitHubProjectItemRefreshConfig {
     /// Name of the single-select project field representing status.
     #[serde(default = "default_status_field_name")]
     pub status_field_name: String,
+    /// Expected single-select status field node ID (`PVTSSF_*`) for defense-in-depth validation.
+    pub expected_status_field_node_id: String,
     /// Standard-mode HTTP source event endpoint.
     pub destination_event_url: String,
     /// Optional bearer token used for destination HTTP source.
@@ -73,6 +75,7 @@ impl Default for GitHubProjectItemRefreshConfig {
             graphql_headers: HashMap::new(),
             allowlisted_project_ids: Vec::new(),
             status_field_name: default_status_field_name(),
+            expected_status_field_node_id: String::new(),
             destination_event_url: String::new(),
             destination_bearer_secret: None,
             request_timeout_ms: default_request_timeout_ms(),
@@ -95,6 +98,10 @@ impl std::fmt::Debug for GitHubProjectItemRefreshConfig {
             .field("graphql_headers", &redacted_headers)
             .field("allowlisted_project_ids", &self.allowlisted_project_ids)
             .field("status_field_name", &self.status_field_name)
+            .field(
+                "expected_status_field_node_id",
+                &self.expected_status_field_node_id,
+            )
             .field("destination_event_url", &self.destination_event_url)
             .field(
                 "destination_bearer_secret",
@@ -128,6 +135,8 @@ impl GitHubProjectItemRefreshConfig {
         if self.status_field_name.trim().is_empty() {
             anyhow::bail!("`statusFieldName` must not be empty");
         }
+        validate_status_field_node_id(&self.expected_status_field_node_id)
+            .context("expectedStatusFieldNodeId")?;
 
         if self.request_timeout_ms == 0 {
             anyhow::bail!("`requestTimeoutMs` must be greater than 0");
@@ -191,6 +200,19 @@ pub(crate) fn validate_project_item_node_id(project_item_node_id: &str) -> anyho
     }
     if project_item_node_id.contains(char::is_whitespace) {
         anyhow::bail!("project item node id must not contain whitespace");
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_status_field_node_id(status_field_node_id: &str) -> anyhow::Result<()> {
+    if status_field_node_id.trim().is_empty() {
+        anyhow::bail!("status field node id must not be empty");
+    }
+    if !status_field_node_id.starts_with("PVTSSF_") {
+        anyhow::bail!("status field node id must start with 'PVTSSF_'");
+    }
+    if status_field_node_id.contains(char::is_whitespace) {
+        anyhow::bail!("status field node id must not contain whitespace");
     }
     Ok(())
 }

@@ -25,8 +25,10 @@ use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use drasi_lib::state_store::{StateStoreProvider, StateStoreResult};
+use drasi_plugin_sdk::prelude::ReactionPluginDescriptor;
 
 use crate::config::GitHubProjectItemRefreshConfig;
+use crate::descriptor::GitHubProjectItemRefreshDescriptor;
 use crate::destination::{DestinationPublishError, DestinationSourceClient};
 use crate::graphql::{rate_limit_retry_after, GitHubGraphqlClient};
 use crate::models::{
@@ -35,6 +37,8 @@ use crate::models::{
 };
 use crate::processing::{parse_invalidation_input, AddRowOutcome, RefreshProcessor};
 use crate::state_store::RefreshStateStore;
+
+const EXPECTED_STATUS_FIELD_NODE_ID: &str = "PVTSSF_lADOCX0YF84BgNE3zhaadbw";
 
 struct DurableMemoryStateStore {
     inner: drasi_lib::MemoryStateStoreProvider,
@@ -125,6 +129,24 @@ fn graphql_success_response(
     status_name: &str,
     status_option_id: &str,
 ) -> serde_json::Value {
+    graphql_success_response_with_field_id(
+        project_item_node_id,
+        project_node_id,
+        updated_at,
+        status_name,
+        status_option_id,
+        EXPECTED_STATUS_FIELD_NODE_ID,
+    )
+}
+
+fn graphql_success_response_with_field_id(
+    project_item_node_id: &str,
+    project_node_id: &str,
+    updated_at: &str,
+    status_name: &str,
+    status_option_id: &str,
+    status_field_node_id: &str,
+) -> serde_json::Value {
     json!({
         "data": {
             "node": {
@@ -137,7 +159,7 @@ fn graphql_success_response(
                     "__typename": "ProjectV2ItemFieldSingleSelectValue",
                     "name": status_name,
                     "optionId": status_option_id,
-                    "field": { "id": "PVTSSF_status" }
+                    "field": { "id": status_field_node_id }
                 }
             }
         }
@@ -185,12 +207,32 @@ async fn build_processor_with_status_field_name(
     allowlist: Vec<String>,
     status_field_name: &str,
 ) -> (RefreshProcessor, RefreshStateStore) {
+    build_processor_with_status_field_name_and_expected_status_field_node_id(
+        graphql_server,
+        destination_url,
+        durable_store,
+        allowlist,
+        status_field_name,
+        EXPECTED_STATUS_FIELD_NODE_ID,
+    )
+    .await
+}
+
+async fn build_processor_with_status_field_name_and_expected_status_field_node_id(
+    graphql_server: &MockServer,
+    destination_url: String,
+    durable_store: Arc<dyn StateStoreProvider>,
+    allowlist: Vec<String>,
+    status_field_name: &str,
+    expected_status_field_node_id: &str,
+) -> (RefreshProcessor, RefreshStateStore) {
     let config = GitHubProjectItemRefreshConfig {
         github_token: "ghp_test_secret".to_string(),
         graphql_url: graphql_server.uri(),
         graphql_headers: HashMap::new(),
         allowlisted_project_ids: allowlist,
         status_field_name: status_field_name.to_string(),
+        expected_status_field_node_id: expected_status_field_node_id.to_string(),
         destination_event_url: destination_url.clone(),
         destination_bearer_secret: Some("dest-secret-token".to_string()),
         request_timeout_ms: 1_000,
@@ -243,7 +285,7 @@ fn parses_pascal_case_dogfood_contract_fields() {
         "DeliveryId": "delivery-pascal",
         "ProjectItemNodeId": "PVTI_pascal",
         "ProjectNodeId": "PVT_pascal",
-        "StatusFieldNodeId": "PVTSSF_status",
+        "StatusFieldNodeId": EXPECTED_STATUS_FIELD_NODE_ID,
         "StateSourceUrl": "http://127.0.0.1:9001/sources/github-project-state/events",
         "InvalidatedAt": "2026-08-13T18:00:00Z"
     });
@@ -254,7 +296,7 @@ fn parses_pascal_case_dogfood_contract_fields() {
     assert_eq!(parsed.project_node_id.as_deref(), Some("PVT_pascal"));
     assert_eq!(
         parsed.status_field_node_id.as_deref(),
-        Some("PVTSSF_status")
+        Some(EXPECTED_STATUS_FIELD_NODE_ID)
     );
     assert_eq!(
         parsed.state_source_url.as_deref(),
@@ -284,6 +326,24 @@ fn invalidated_at_maps_to_webhook_updated_at() {
 }
 
 #[test]
+fn lower_camel_invalidated_at_maps_to_webhook_updated_at() {
+    let row = json!({
+        "invalidationNodeId": "INV_ts_lc",
+        "deliveryId": "delivery-ts-lc",
+        "projectItemNodeId": "PVTI_ts_lc",
+        "invalidatedAt": "2026-08-13T18:16:00Z"
+    });
+    let parsed = parse_invalidation_input(&row).expect("parse");
+    let parsed_timestamp = parsed
+        .webhook_updated_at
+        .expect("lower-camel invalidatedAt should populate webhook timestamp");
+    assert_eq!(
+        parsed_timestamp.to_rfc3339(),
+        "2026-08-13T18:16:00+00:00".to_string()
+    );
+}
+
+#[test]
 fn deterministic_node_id_is_stable() {
     let node_id = ProjectItemStatusNode::deterministic_node_id("PVTI_abcd");
     assert_eq!(node_id, "project-item-status:PVTI_abcd");
@@ -295,7 +355,7 @@ fn update_payload_matches_http_source_contract() {
         id: "project-item-status:PVTI_abcd".to_string(),
         project_item_node_id: "PVTI_abcd".to_string(),
         project_node_id: "PVT_proj".to_string(),
-        status_field_node_id: "PVTSSF_status".to_string(),
+        status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
         status_option_id: "opt-in-progress".to_string(),
         status_name: "In Progress".to_string(),
         updated_at: Utc::now(),
@@ -329,6 +389,7 @@ fn config_debug_redacts_secrets() {
         )]),
         allowlisted_project_ids: vec![],
         status_field_name: "Status".to_string(),
+        expected_status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
         destination_event_url: "https://dest.example/changes".to_string(),
         destination_bearer_secret: Some("very-secret".to_string()),
         request_timeout_ms: 1000,
@@ -351,6 +412,7 @@ fn config_validation_rejects_empty_status_field_name() {
         graphql_headers: HashMap::new(),
         allowlisted_project_ids: vec![],
         status_field_name: "   ".to_string(),
+        expected_status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
         destination_event_url: "https://dest.example/changes".to_string(),
         destination_bearer_secret: None,
         request_timeout_ms: 1000,
@@ -361,6 +423,160 @@ fn config_validation_rejects_empty_status_field_name() {
         .validate(&["query".to_string()], Some(10))
         .expect_err("empty statusFieldName should fail validation");
     assert!(err.to_string().contains("statusFieldName"));
+}
+
+#[test]
+fn config_deserialization_rejects_missing_expected_status_field_node_id() {
+    let json = json!({
+        "githubToken": "ghp_test_secret",
+        "graphqlUrl": "https://api.github.com/graphql",
+        "statusFieldName": "Status",
+        "destinationEventUrl": "https://dest.example/changes",
+        "requestTimeoutMs": 1000,
+        "deliveryRecordTtlSecs": 3600
+    });
+
+    let err = serde_json::from_value::<GitHubProjectItemRefreshConfig>(json)
+        .expect_err("missing expectedStatusFieldNodeId should fail deserialization");
+    assert!(err.to_string().contains("expectedStatusFieldNodeId"));
+}
+
+#[test]
+fn config_validation_rejects_empty_expected_status_field_node_id() {
+    let config = GitHubProjectItemRefreshConfig {
+        github_token: "ghp_test_secret".to_string(),
+        graphql_url: "https://api.github.com/graphql".to_string(),
+        graphql_headers: HashMap::new(),
+        allowlisted_project_ids: vec![],
+        status_field_name: "Status".to_string(),
+        expected_status_field_node_id: "   ".to_string(),
+        destination_event_url: "https://dest.example/changes".to_string(),
+        destination_bearer_secret: None,
+        request_timeout_ms: 1000,
+        delivery_record_ttl_secs: 3600,
+    };
+
+    let err = config
+        .validate(&["query".to_string()], Some(10))
+        .expect_err("empty expectedStatusFieldNodeId should fail validation");
+    assert!(err.to_string().contains("expectedStatusFieldNodeId"));
+}
+
+#[test]
+fn config_validation_rejects_invalid_expected_status_field_node_id() {
+    let config = GitHubProjectItemRefreshConfig {
+        github_token: "ghp_test_secret".to_string(),
+        graphql_url: "https://api.github.com/graphql".to_string(),
+        graphql_headers: HashMap::new(),
+        allowlisted_project_ids: vec![],
+        status_field_name: "Status".to_string(),
+        expected_status_field_node_id: "PVT_invalid".to_string(),
+        destination_event_url: "https://dest.example/changes".to_string(),
+        destination_bearer_secret: None,
+        request_timeout_ms: 1000,
+        delivery_record_ttl_secs: 3600,
+    };
+
+    let err = config
+        .validate(&["query".to_string()], Some(10))
+        .expect_err("invalid expectedStatusFieldNodeId should fail validation");
+    assert!(err.to_string().contains("expectedStatusFieldNodeId"));
+}
+
+#[test]
+fn config_validation_rejects_whitespace_expected_status_field_node_id() {
+    let config = GitHubProjectItemRefreshConfig {
+        github_token: "ghp_test_secret".to_string(),
+        graphql_url: "https://api.github.com/graphql".to_string(),
+        graphql_headers: HashMap::new(),
+        allowlisted_project_ids: vec![],
+        status_field_name: "Status".to_string(),
+        expected_status_field_node_id: format!("{EXPECTED_STATUS_FIELD_NODE_ID} bad"),
+        destination_event_url: "https://dest.example/changes".to_string(),
+        destination_bearer_secret: None,
+        request_timeout_ms: 1000,
+        delivery_record_ttl_secs: 3600,
+    };
+
+    let err = config
+        .validate(&["query".to_string()], Some(10))
+        .expect_err("whitespace in expectedStatusFieldNodeId should fail validation");
+    assert!(err.to_string().contains("expectedStatusFieldNodeId"));
+}
+
+#[test]
+fn config_validation_accepts_valid_expected_status_field_node_id() {
+    let config = GitHubProjectItemRefreshConfig {
+        github_token: "ghp_test_secret".to_string(),
+        graphql_url: "https://api.github.com/graphql".to_string(),
+        graphql_headers: HashMap::new(),
+        allowlisted_project_ids: vec![],
+        status_field_name: "Status".to_string(),
+        expected_status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
+        destination_event_url: "https://dest.example/changes".to_string(),
+        destination_bearer_secret: None,
+        request_timeout_ms: 1000,
+        delivery_record_ttl_secs: 3600,
+    };
+
+    config
+        .validate(&["query".to_string()], Some(10))
+        .expect("valid expectedStatusFieldNodeId should pass validation");
+}
+
+#[tokio::test]
+async fn descriptor_resolves_env_expected_status_field_node_id_and_roundtrips() {
+    let descriptor = GitHubProjectItemRefreshDescriptor;
+    let expected_status_field_expr =
+        "${GH_STATUS_FIELD_NODE_ID_TEST:-PVTSSF_lADOCX0YF84BgNE3zhaadbw}";
+    let config_json = json!({
+        "githubToken": "ghp_test_secret",
+        "graphqlUrl": "https://api.github.com/graphql",
+        "statusFieldName": "Status",
+        "expectedStatusFieldNodeId": expected_status_field_expr,
+        "destinationEventUrl": "http://127.0.0.1:9001/sources/github-project-state/events"
+    });
+
+    let reaction = descriptor
+        .create_reaction(
+            "descriptor-roundtrip",
+            vec!["q".to_string()],
+            &config_json,
+            true,
+        )
+        .await
+        .expect("descriptor should resolve config values");
+    let properties = reaction.properties();
+    assert_eq!(
+        properties.get("expectedStatusFieldNodeId"),
+        Some(&json!(expected_status_field_expr))
+    );
+}
+
+#[tokio::test]
+async fn descriptor_fails_when_expected_status_field_node_id_env_is_unset_without_default() {
+    let descriptor = GitHubProjectItemRefreshDescriptor;
+    let config_json = json!({
+        "githubToken": "ghp_test_secret",
+        "graphqlUrl": "https://api.github.com/graphql",
+        "statusFieldName": "Status",
+        "expectedStatusFieldNodeId": "${GH_STATUS_FIELD_NODE_ID_TEST_MISSING}",
+        "destinationEventUrl": "http://127.0.0.1:9001/sources/github-project-state/events"
+    });
+
+    let err = descriptor
+        .create_reaction(
+            "descriptor-env-missing",
+            vec!["q".to_string()],
+            &config_json,
+            true,
+        )
+        .await
+        .err()
+        .expect("missing env var should fail descriptor resolution");
+    assert!(err
+        .to_string()
+        .contains("GH_STATUS_FIELD_NODE_ID_TEST_MISSING"));
 }
 
 #[tokio::test]
@@ -633,7 +849,7 @@ async fn stale_ordering_is_rejected_without_republish() {
             &ItemVersionRecord {
                 project_item_node_id: "PVTI_stale_item".to_string(),
                 project_node_id: "PVT_project1".to_string(),
-                status_field_node_id: "PVTSSF_status".to_string(),
+                status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
                 status_option_id: "opt-done".to_string(),
                 status_name: "Done".to_string(),
                 updated_at: Utc::now() + Duration::minutes(5),
@@ -767,7 +983,7 @@ async fn destination_requires_a_valid_positive_acknowledgement() {
         id: ProjectItemStatusNode::deterministic_node_id("PVTI_ack"),
         project_item_node_id: "PVTI_ack".to_string(),
         project_node_id: "PVT_project1".to_string(),
-        status_field_node_id: "PVTSSF_status".to_string(),
+        status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
         status_option_id: "opt-ip".to_string(),
         status_name: "In Progress".to_string(),
         updated_at: Utc::now(),
@@ -812,7 +1028,7 @@ async fn recovery_from_fetched_state_replays_the_persisted_payload() {
         project_node_id: "PVT_project1".to_string(),
         content_node_id: Some("I_123".to_string()),
         content_type: Some("Issue".to_string()),
-        status_field_node_id: "PVTSSF_status".to_string(),
+        status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
         status_option_id: "opt-persisted".to_string(),
         status_name: "Persisted".to_string(),
         updated_at: chrono::DateTime::parse_from_rfc3339("2026-08-13T19:05:00Z")
@@ -1244,23 +1460,10 @@ async fn allowlist_rejection_skips_processing() {
 }
 
 #[tokio::test]
-async fn status_field_node_id_mismatch_is_failed_without_destination_publish() {
+async fn row_status_field_node_id_mismatch_blocks_all_network_and_remains_canonical_on_retry() {
     let graphql_server = MockServer::start().await;
     let destination_server = MockServer::start().await;
     let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-
-    Mock::given(method("POST"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(graphql_success_response(
-                "PVTI_status_mismatch",
-                "PVT_project1",
-                "2026-08-13T20:15:00Z",
-                "In Progress",
-                "opt-ip",
-            )),
-        )
-        .mount(&graphql_server)
-        .await;
 
     let (processor, state_store) = build_processor(
         &graphql_server,
@@ -1282,7 +1485,7 @@ async fn status_field_node_id_mismatch_is_failed_without_destination_publish() {
         .process_add_row(&row)
         .await
         .expect_err("status field mismatch must fail");
-    assert!(err.to_string().contains("StatusFieldNodeId"));
+    assert!(err.to_string().contains("expectedStatusFieldNodeId"));
 
     let key = DeliveryKey::new("delivery-status-mismatch", "PVTI_status_mismatch");
     let reservation = state_store
@@ -1306,7 +1509,9 @@ async fn status_field_node_id_mismatch_is_failed_without_destination_publish() {
         .process_add_row(&replay_without_constraint)
         .await
         .expect_err("persisted status field constraint must remain authoritative");
-    assert!(replay_error.to_string().contains("StatusFieldNodeId"));
+    assert!(replay_error
+        .to_string()
+        .contains("expectedStatusFieldNodeId"));
 
     let publication = state_store
         .get_publication(&key)
@@ -1320,6 +1525,146 @@ async fn status_field_node_id_mismatch_is_failed_without_destination_publish() {
         .await
         .expect("destination requests");
     assert_eq!(destination_requests.len(), 0);
+
+    let graphql_requests = graphql_server
+        .received_requests()
+        .await
+        .expect("graphql requests");
+    assert_eq!(
+        graphql_requests.len(),
+        0,
+        "row mismatch must fail before GraphQL"
+    );
+}
+
+#[tokio::test]
+async fn graphql_field_id_mismatch_blocks_destination_even_when_row_omits_status_field() {
+    let graphql_server = MockServer::start().await;
+    let destination_server = MockServer::start().await;
+    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            graphql_success_response_with_field_id(
+                "PVTI_graphql_mismatch",
+                "PVT_project1",
+                "2026-08-13T20:15:00Z",
+                "In Progress",
+                "opt-ip",
+                "PVTSSF_different",
+            ),
+        ))
+        .mount(&graphql_server)
+        .await;
+
+    let (processor, state_store) = build_processor(
+        &graphql_server,
+        destination_server.uri(),
+        durable_store,
+        vec![],
+    )
+    .await;
+
+    let row = json!({
+        "invalidationNodeId": "INV_graphql_mismatch",
+        "deliveryId": "delivery-graphql-mismatch",
+        "projectItemNodeId": "PVTI_graphql_mismatch",
+        "projectNodeId": "PVT_project1",
+        "invalidatedAt": "2026-08-13T20:14:00Z"
+    });
+
+    let err = processor
+        .process_add_row(&row)
+        .await
+        .expect_err("authoritative GraphQL field mismatch must fail");
+    assert!(err.to_string().contains("expectedStatusFieldNodeId"));
+
+    let publication = state_store
+        .get_publication(&DeliveryKey::new(
+            "delivery-graphql-mismatch",
+            "PVTI_graphql_mismatch",
+        ))
+        .await
+        .expect("store read")
+        .expect("publication");
+    assert_eq!(publication.state, PublicationState::Failed);
+
+    let graphql_requests = graphql_server
+        .received_requests()
+        .await
+        .expect("graphql requests");
+    assert_eq!(graphql_requests.len(), 1);
+
+    let destination_requests = destination_server
+        .received_requests()
+        .await
+        .expect("destination requests");
+    assert_eq!(destination_requests.len(), 0);
+}
+
+#[tokio::test]
+async fn success_with_canonical_status_field_node_id() {
+    let graphql_server = MockServer::start().await;
+    let destination_server = MockServer::start().await;
+    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(graphql_success_response(
+                "PVTI_status_ok",
+                "PVT_project1",
+                "2026-08-13T20:16:00Z",
+                "In Progress",
+                "opt-ip",
+            )),
+        )
+        .mount(&graphql_server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "message": "All 1 events processed successfully"
+        })))
+        .mount(&destination_server)
+        .await;
+
+    let (processor, state_store) = build_processor(
+        &graphql_server,
+        destination_server.uri(),
+        durable_store,
+        vec![],
+    )
+    .await;
+
+    let row = json!({
+        "invalidationNodeId": "INV_status_ok",
+        "deliveryId": "delivery-status-ok",
+        "projectItemNodeId": "PVTI_status_ok",
+        "projectNodeId": "PVT_project1",
+        "statusFieldNodeId": EXPECTED_STATUS_FIELD_NODE_ID,
+        "invalidatedAt": "2026-08-13T20:15:30Z"
+    });
+    let outcome = processor
+        .process_add_row(&row)
+        .await
+        .expect("matching canonical status field id should publish");
+    assert_eq!(outcome, AddRowOutcome::Published);
+
+    let publication = state_store
+        .get_publication(&DeliveryKey::new("delivery-status-ok", "PVTI_status_ok"))
+        .await
+        .expect("store read")
+        .expect("publication");
+    assert_eq!(publication.state, PublicationState::Published);
+
+    assert_eq!(
+        destination_server
+            .received_requests()
+            .await
+            .expect("destination requests")
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]

@@ -101,6 +101,14 @@ impl GitHubProjectItemRefreshBuilder {
         self
     }
 
+    pub fn with_expected_status_field_node_id(
+        mut self,
+        expected_status_field_node_id: impl Into<String>,
+    ) -> Self {
+        self.config.expected_status_field_node_id = expected_status_field_node_id.into();
+        self
+    }
+
     pub fn with_destination_event_url(mut self, url: impl Into<String>) -> Self {
         self.config.destination_event_url = url.into();
         self

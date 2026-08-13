@@ -24,6 +24,8 @@ use std::time::Duration;
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+const EXPECTED_STATUS_FIELD_NODE_ID: &str = "PVTSSF_lADOCX0YF84BgNE3zhaadbw";
+
 struct DurableMemoryStateStore {
     inner: drasi_lib::MemoryStateStoreProvider,
 }
@@ -96,7 +98,7 @@ fn graphql_success_response(
                     "__typename": "ProjectV2ItemFieldSingleSelectValue",
                     "name": "In Progress",
                     "optionId": "opt-in-progress",
-                    "field": { "id": "PVTSSF_status" }
+                    "field": { "id": EXPECTED_STATUS_FIELD_NODE_ID }
                 }
             }
         }
@@ -181,6 +183,7 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
         .with_destination_event_url(destination_server.uri())
         .with_destination_bearer_secret("dest-secret")
         .with_allowlisted_project_ids(vec!["PVT_allowlisted_project".to_string()])
+        .with_expected_status_field_node_id(EXPECTED_STATUS_FIELD_NODE_ID)
         .build()
         .expect("build reaction");
 
@@ -207,10 +210,10 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
                 .with_string("DeliveryId", "delivery-e2e-1")
                 .with_string("ProjectItemNodeId", "PVTI_e2e_item")
                 .with_string("ProjectNodeId", "PVT_allowlisted_project")
-                .with_string("StatusFieldNodeId", "PVTSSF_status")
+                .with_string("StatusFieldNodeId", EXPECTED_STATUS_FIELD_NODE_ID)
                 .with_string("StateSourceUrl", destination_server.uri())
                 .with_string("webhookAction", "edited")
-                .with_string("InvalidatedAt", "2026-08-13T19:59:00Z")
+                .with_string("invalidatedAt", "2026-08-13T19:59:00Z")
                 .build(),
         )
         .await
@@ -227,10 +230,10 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
                 .with_string("DeliveryId", "delivery-e2e-1")
                 .with_string("ProjectItemNodeId", "PVTI_e2e_item")
                 .with_string("ProjectNodeId", "PVT_allowlisted_project")
-                .with_string("StatusFieldNodeId", "PVTSSF_status")
+                .with_string("StatusFieldNodeId", EXPECTED_STATUS_FIELD_NODE_ID)
                 .with_string("StateSourceUrl", destination_server.uri())
                 .with_string("webhookAction", "edited")
-                .with_string("InvalidatedAt", "2026-08-13T20:00:01Z")
+                .with_string("invalidatedAt", "2026-08-13T20:00:01Z")
                 .build(),
         )
         .await

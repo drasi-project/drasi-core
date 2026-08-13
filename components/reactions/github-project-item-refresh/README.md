@@ -18,6 +18,7 @@ This reaction is intended for webhook-invalidated pipelines (WorkGraph Phase 2):
 - Processes **only `ResultDiff::Add`** rows.
 - Ignores `Update`, `Delete`, aggregation, and noop diffs.
 - Validates node IDs and project allowlist rules.
+- Enforces a configured authoritative Status field node ID (`expectedStatusFieldNodeId`) before and after GraphQL hydration.
 - Durably reserves each `(deliveryId, projectItemNodeId)` key.
 - Detects stale/out-of-order refreshes using durable per-item version state.
 - Publishes only after successful GraphQL hydration and destination ACK.
@@ -42,6 +43,7 @@ reactions:
       allowlistedProjectIds:
         - PVT_kwDOABC123
       statusFieldName: Status
+      expectedStatusFieldNodeId: PVTSSF_lADOCX0YF84BgNE3zhaadbw
       destinationEventUrl: http://127.0.0.1:9001/sources/github-project-state/events
       destinationBearerSecret:
         env: PROJECT_STATUS_SOURCE_BEARER
@@ -59,6 +61,7 @@ reactions:
 | `graphqlHeaders` | No | Extra GraphQL request headers |
 | `allowlistedProjectIds` | No | Allowed project node IDs (`PVT_*`); empty means allow all |
 | `statusFieldName` | No | Project field name read via `fieldValueByName` (default `Status`) |
+| `expectedStatusFieldNodeId` | Yes | Expected authoritative GitHub ProjectV2 single-select status field node ID (`PVTSSF_*`); enforced as a security constraint |
 | `destinationEventUrl` | Yes | Standard-mode HTTP source event endpoint |
 | `destinationBearerSecret` | No | Optional bearer secret for destination source |
 | `requestTimeoutMs` | No | Shared request timeout for GraphQL and destination HTTP calls |
@@ -67,25 +70,37 @@ reactions:
 
 ## Input Contract (query row)
 
-The query row (`ResultDiff::Add.data`) should prefer the dogfood PascalCase
-fields below. Backward-compatible aliases continue to parse.
+The query row (`ResultDiff::Add.data`) should prefer the lower-camel fields
+below. PascalCase dogfood fields and existing aliases remain supported.
+Preferred contract field names are:
+`invalidationNodeId`, `deliveryId`, `projectItemNodeId`, `projectNodeId`,
+`statusFieldNodeId`, `invalidatedAt`, `stateSourceUrl`.
 
 | Field | Preferred | Backward-compatible aliases | Required |
 |---|---|---|---|
-| Invalidation node ID | `InvalidationNodeId` | `invalidationNodeId`, `invalidation_node_id`, `id` | Yes |
-| Delivery ID | `DeliveryId` | `deliveryId`, `xGitHubDelivery`, `xGithubDelivery`, `githubDeliveryId` | Yes |
-| Project item node ID | `ProjectItemNodeId` | `projectItemNodeId`, `project_item_node_id` | Yes |
-| Project node ID | `ProjectNodeId` | `projectNodeId`, `project_node_id` | No |
-| Status field node ID | `StatusFieldNodeId` | `statusFieldNodeId` | No |
-| State source URL | `StateSourceUrl` | `stateSourceUrl` | No |
+| Invalidation node ID | `invalidationNodeId` | `InvalidationNodeId`, `invalidation_node_id`, `id` | Yes |
+| Delivery ID | `deliveryId` | `DeliveryId`, `xGitHubDelivery`, `xGithubDelivery`, `githubDeliveryId` | Yes |
+| Project item node ID | `projectItemNodeId` | `ProjectItemNodeId`, `project_item_node_id` | Yes |
+| Project node ID | `projectNodeId` | `ProjectNodeId`, `project_node_id` | No |
+| Status field node ID | `statusFieldNodeId` | `StatusFieldNodeId` | No |
+| Invalidation/webhook timestamp | `invalidatedAt` | `InvalidatedAt`, `webhookUpdatedAt`, `webhookUpdateTime`, `updatedAt`, `webhook_updated_at` | No |
+| State source URL | `stateSourceUrl` | `StateSourceUrl` | No |
 | Webhook action | `webhookAction` | `action` | No |
-| Invalidation/webhook timestamp | `InvalidatedAt` | `webhookUpdatedAt`, `webhookUpdateTime`, `updatedAt`, `webhook_updated_at` | No |
 
 ### Optional Input Validation
 
-- `StatusFieldNodeId` (when present) must match the authoritative GraphQL
-  `status_field_node_id`. A mismatch is persisted as a `failed` publication and
-  no destination publish occurs.
+- The upstream query should filter invalidations to the configured changed
+  Status field before invoking this reaction.
+- `statusFieldNodeId` / `StatusFieldNodeId` (when present) must match
+  configured `expectedStatusFieldNodeId`. A mismatch is persisted as a `failed`
+  publication and is rejected before GraphQL/destination access.
+- The authoritative GraphQL `status_field_node_id` must always match configured
+  `expectedStatusFieldNodeId` (even if the row omits `statusFieldNodeId`). A
+  mismatch is persisted as a `failed` publication and no destination publish
+  occurs.
+- For durable reservation consistency, any persisted row `StatusFieldNodeId`
+  remains canonical on retries and is also validated against fetched GraphQL
+  state.
 - `StateSourceUrl` (when present) must match configured `destinationEventUrl`.
   The input URL is **never** used as a destination override.
   - Matching uses semantic URL checks when both values parse as URLs:
@@ -216,5 +231,7 @@ make -C components/reactions/github-project-item-refresh lint
 - Point `destinationEventUrl` to the `github-project-state` standard-mode HTTP
   source endpoint. The Phase 2 dogfood loopback contract is
   `http://127.0.0.1:9001/sources/github-project-state/events`.
+- Set `expectedStatusFieldNodeId` to the authoritative dogfood Status field:
+  `PVTSSF_lADOCX0YF84BgNE3zhaadbw`.
 - Configure `allowlistedProjectIds` for each dogfood project board.
 - Keep `recoveryPolicy: strict` to avoid silent drops on ambiguous publication.

@@ -40,6 +40,8 @@ pub struct GitHubProjectItemRefreshConfigDto {
     #[schema(value_type = Option<ConfigValueString>)]
     pub status_field_name: Option<ConfigValue<String>>,
     #[schema(value_type = ConfigValueString)]
+    pub expected_status_field_node_id: ConfigValue<String>,
+    #[schema(value_type = ConfigValueString)]
     pub destination_event_url: ConfigValue<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueString>)]
@@ -89,6 +91,9 @@ impl From<&GitHubProjectItemRefreshConfig> for GitHubProjectItemRefreshConfigDto
             graphql_headers,
             allowlisted_project_ids: config.allowlisted_project_ids.clone(),
             status_field_name: Some(ConfigValue::Static(config.status_field_name.clone())),
+            expected_status_field_node_id: ConfigValue::Static(
+                config.expected_status_field_node_id.clone(),
+            ),
             destination_event_url: ConfigValue::Static(config.destination_event_url.clone()),
             destination_bearer_secret: config
                 .destination_bearer_secret
@@ -164,6 +169,9 @@ impl ReactionPluginDescriptor for GitHubProjectItemRefreshDescriptor {
         .field("statusFieldName", |f| {
             f.group("GitHub").order(5).placeholder("Status")
         })
+        .field("expectedStatusFieldNodeId", |f| {
+            f.group("GitHub").order(6).placeholder("PVTSSF_...")
+        })
         .field("destinationEventUrl", |f| f.group("Destination").order(10))
         .field("destinationBearerSecret", |f| {
             f.group("Destination").order(11).widget("password")
@@ -195,6 +203,11 @@ impl ReactionPluginDescriptor for GitHubProjectItemRefreshDescriptor {
             .with_queries(query_ids)
             .with_auto_start(auto_start)
             .with_github_token(mapper.resolve_string(&dto.github_token).await?)
+            .with_expected_status_field_node_id(
+                mapper
+                    .resolve_string(&dto.expected_status_field_node_id)
+                    .await?,
+            )
             .with_destination_event_url(mapper.resolve_string(&dto.destination_event_url).await?);
 
         if let Some(graphql_url) = &dto.graphql_url {

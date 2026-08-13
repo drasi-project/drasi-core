@@ -165,6 +165,20 @@ impl RefreshProcessor {
             .await
             .context("writing reservation publication state")?;
 
+        if let Some(status_field_node_id) = &reservation.status_field_node_id {
+            if status_field_node_id != &self.config.expected_status_field_node_id {
+                let message = format!(
+                    "input StatusFieldNodeId '{status_field_node_id}' does not match configured expectedStatusFieldNodeId '{}'",
+                    self.config.expected_status_field_node_id
+                );
+                self.state_store
+                    .mark_failed(&key, publication, PublicationState::Failed, message.clone())
+                    .await
+                    .context("recording configured status field mismatch")?;
+                anyhow::bail!(message);
+            }
+        }
+
         let fetched = match recoverable_fetched_state {
             Some(fetched) => fetched,
             None => match self.fetch_with_retry(&input).await {
@@ -186,6 +200,18 @@ impl RefreshProcessor {
                     format!("project '{}' is not allowlisted", fetched.project_node_id),
                 )
                 .await;
+        }
+
+        if fetched.status_field_node_id != self.config.expected_status_field_node_id {
+            let message = format!(
+                "fetched status field node id '{}' does not match configured expectedStatusFieldNodeId '{}'",
+                fetched.status_field_node_id, self.config.expected_status_field_node_id
+            );
+            self.state_store
+                .mark_failed(&key, publication, PublicationState::Failed, message.clone())
+                .await
+                .context("recording fetched configured status field mismatch")?;
+            anyhow::bail!(message);
         }
 
         if let Some(project_node_id) = &reservation.project_node_id {
@@ -411,6 +437,7 @@ pub fn parse_invalidation_input(row_data: &Value) -> anyhow::Result<Invalidation
         object,
         &[
             "InvalidatedAt",
+            "invalidatedAt",
             "webhookUpdatedAt",
             "webhookUpdateTime",
             "updatedAt",
