@@ -47,6 +47,23 @@ use crate::queries::Query;
 use crate::reactions::bootstrap_context::BootstrapContext;
 use crate::recovery::ReactionRecoveryPolicy;
 
+/// Controls who advances reaction checkpoints after query results are enqueued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagerCheckpointOwnership {
+    /// Default behavior: the runtime advances bootstrap/live in-memory checkpoint
+    /// tracking immediately after `enqueue_query_result()` succeeds.
+    ///
+    /// Use this when enqueue implies durable delivery for your reaction.
+    Manager,
+    /// Opt-out behavior: the runtime does NOT advance replay/live checkpoints on
+    /// enqueue. The reaction must advance durable checkpoints itself only after
+    /// side effects are durably acknowledged.
+    ///
+    /// Use this for reactions with async post-enqueue processing where enqueue
+    /// does not mean delivery completed.
+    Reaction,
+}
+
 /// Trait for providing access to queries without requiring full DrasiLib dependency.
 ///
 /// This trait provides a way for reactions to access query instances for subscription
@@ -288,6 +305,15 @@ pub trait Reaction: Send + Sync {
     async fn bootstrap(&self, _ctx: BootstrapContext) -> Result<()> {
         Ok(())
     }
+
+    /// Declares whether enqueue-time checkpoint advancement is owned by the
+    /// runtime or by the reaction.
+    ///
+    /// Default: [`ManagerCheckpointOwnership::Manager`], preserving existing
+    /// runtime-managed behavior.
+    fn checkpoint_ownership(&self) -> ManagerCheckpointOwnership {
+        ManagerCheckpointOwnership::Manager
+    }
 }
 
 /// Blanket implementation of Reaction for `Box<dyn Reaction>`
@@ -360,5 +386,9 @@ impl Reaction for Box<dyn Reaction + 'static> {
 
     async fn bootstrap(&self, ctx: BootstrapContext) -> Result<()> {
         (**self).bootstrap(ctx).await
+    }
+
+    fn checkpoint_ownership(&self) -> ManagerCheckpointOwnership {
+        (**self).checkpoint_ownership()
     }
 }

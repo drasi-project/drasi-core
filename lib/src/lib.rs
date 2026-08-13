@@ -194,7 +194,7 @@ pub use sources::Source;
 pub use sources::SourceError;
 
 /// Reaction traits for implementing reaction plugins
-pub use reactions::Reaction;
+pub use reactions::{ManagerCheckpointOwnership, Reaction};
 
 /// Bootstrap provider trait for implementing bootstrap plugins
 pub use bootstrap::BootstrapProvider;

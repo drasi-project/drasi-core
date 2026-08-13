@@ -837,6 +837,11 @@ Query emits results ──► Outbox (ring buffer) ──► Forwarder ──►
 
 1. Each query retains the last N results in an **outbox** (configurable via `with_outbox_capacity`).
 2. Reactions persist a **checkpoint** (sequence number + config hash) after each delivered result.
+   - Default: runtime-managed enqueue checkpointing (`ManagerCheckpointOwnership::Manager`).
+   - Opt-out: reactions with post-side-effect ack can return
+     `ManagerCheckpointOwnership::Reaction`; the runtime will not advance replay/live
+     checkpoints at enqueue time, and the reaction must advance checkpoints after
+     durable processing.
 3. On restart, the runtime replays missed results from the outbox starting after the checkpoint.
 4. If the checkpoint falls behind the outbox (gap), the **recovery policy** decides what happens.
 

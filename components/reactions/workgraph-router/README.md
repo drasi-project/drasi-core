@@ -85,6 +85,7 @@ Reconciliation on retry requires trusted, unedited comments. In strict recovery 
 - `is_durable() = true`
 - `needs_snapshot_on_fresh_start() = false`
 - `default_recovery_policy() = Strict`
+- `checkpoint_ownership() = Reaction` (runtime does not advance replay/live checkpoints on enqueue; router advances checkpoints only after side effects complete)
 - Retry/resume always re-checks GitHub issue/project state immediately before each side effect and re-renews reservation ownership after preflight and immediately before each external write.
 - Project status mutation is guarded by expected source status + content correlation (project item must match expected repository + issue). If already at destination, mutation is skipped and completion is reconciled.
 - Ambiguous external write failures are treated as ambiguous in strict recovery and reconciled deterministically via `decisionId` payloads plus trusted immutable actor IDs before retry/takeover can complete.

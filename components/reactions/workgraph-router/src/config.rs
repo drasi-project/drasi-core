@@ -225,6 +225,9 @@ impl WorkgraphRouterReactionConfig {
         if self.allowed_event_types.is_empty() {
             anyhow::bail!("allowedEventTypes must contain at least one entry");
         }
+        if self.allowed_responsibility_types.is_empty() {
+            anyhow::bail!("allowedResponsibilityTypes must contain at least one entry");
+        }
         if self.github_graphql_url.trim().is_empty() || self.github_rest_url.trim().is_empty() {
             anyhow::bail!("githubGraphqlUrl and githubRestUrl are required");
         }
@@ -310,6 +313,20 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("strictRecovery requires trustedRouterAuthorNodeIds"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn allowed_responsibility_types_must_not_be_empty() {
+        let mut cfg = valid_config();
+        cfg.allowed_responsibility_types.clear();
+        let err = cfg
+            .validate(&[ROUTE_QUERY_ID.to_string()], None)
+            .expect_err("empty allowedResponsibilityTypes must fail");
+        assert!(
+            err.to_string()
+                .contains("allowedResponsibilityTypes must contain at least one entry"),
             "unexpected error: {err:#}"
         );
     }

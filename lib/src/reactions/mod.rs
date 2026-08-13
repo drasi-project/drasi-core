@@ -24,7 +24,7 @@ pub(crate) mod tests;
 
 // Re-export the Reaction trait. QueryProvider is internal to ReactionManager.
 pub(crate) use traits::QueryProvider;
-pub use traits::Reaction;
+pub use traits::{ManagerCheckpointOwnership, Reaction};
 
 pub use bootstrap_context::BootstrapBackend;
 pub use bootstrap_context::BootstrapContext;

@@ -21,6 +21,7 @@ use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::reactions::common::CheckpointState;
+use drasi_lib::reactions::ManagerCheckpointOwnership;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::state_store::{StateStoreCompareAndSwapResult, StateStoreProvider};
 use drasi_lib::Reaction;
@@ -264,6 +265,10 @@ impl Reaction for WorkgraphRouterReaction {
     fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
         ReactionRecoveryPolicy::Strict
     }
+
+    fn checkpoint_ownership(&self) -> ManagerCheckpointOwnership {
+        ManagerCheckpointOwnership::Reaction
+    }
 }
 
 async fn run_processing_loop(
@@ -499,7 +504,7 @@ async fn process_candidate(
         || reservation.policy_type != config.policy_type
         || reservation.policy_version != config.policy_version;
 
-    let decision = if let Some(decision) = state.decision.clone() {
+    let (decision, decision_is_new) = if let Some(decision) = state.decision.clone() {
         if reservation_policy_mismatch {
             info!(
                 "[{}] resuming reservation '{}' with persisted decision '{}' bound to policy {}@{}",
@@ -510,7 +515,7 @@ async fn process_candidate(
                 decision.policy_version
             );
         }
-        decision
+        (decision, false)
     } else {
         if reservation_policy_mismatch {
             anyhow::bail!(
@@ -534,18 +539,27 @@ async fn process_candidate(
         let outcome = engine
             .evaluate(candidate)
             .context("rules evaluation rejected candidate")?;
-        if !config.allows_transition(&outcome.from_status, &outcome.to_status) {
-            anyhow::bail!(
-                "selected transition {} -> {} is not allowlisted",
-                outcome.from_status,
-                outcome.to_status
-            );
-        }
         let decision = RoutingDecision::from_policy(config, candidate, outcome)
             .context("policy output failed allowlist validation")?;
         state.selected_transition =
             Some((decision.from_status.clone(), decision.to_status.clone()));
         state.decision = Some(decision.clone());
+        (decision, true)
+    };
+
+    if !config.allows_transition(&decision.from_status, &decision.to_status) {
+        anyhow::bail!(
+            "selected transition {} -> {} is not allowlisted",
+            decision.from_status,
+            decision.to_status
+        );
+    }
+
+    decision
+        .validate_allowlists(config)
+        .context("decision allowlist validation failed before side effects")?;
+
+    if decision_is_new {
         persist_state_with_ownership(
             store.clone(),
             &base.id,
@@ -557,17 +571,12 @@ async fn process_candidate(
             "failed to persist routing decision state",
         )
         .await?;
-        decision
-    };
-
-    let mut progress = {
-        decision
-            .validate_allowlists(config)
-            .context("decision allowlist validation failed before side effects")?;
-        reconcile_progress(github, candidate, &decision, config, state.progress.clone())
     }
-    .await
-    .context("failed to reconcile existing side effects")?;
+
+    let mut progress =
+        reconcile_progress(github, candidate, &decision, config, state.progress.clone())
+            .await
+            .context("failed to reconcile existing side effects")?;
     state.mark_progress(progress.clone());
 
     if !progress.decision_comment_written {
@@ -1922,6 +1931,95 @@ mod tests {
                 .contains("decision allowlist validation failed before side effects"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_old_policy_decision_with_disallowed_transition_fails_without_checkpoint() {
+        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+        let mut runtime_config = sample_config();
+        runtime_config.policy_version = "2.0.0".to_string();
+        runtime_config.allowed_status_transitions = vec![crate::config::StatusTransition {
+            from: "AwaitingRouting".to_string(),
+            to: "NeedsMoreInformation".to_string(),
+        }];
+
+        let reaction = make_reaction("router-persisted-transition", &runtime_config);
+        initialize_reaction_for_test(&reaction, store.clone()).await;
+
+        let candidate = sample_candidate();
+        let mut reservation = ReservationRecord {
+            reservation_key: candidate.reservation_key(),
+            execution_id: candidate.execution_id.clone(),
+            required_event_type: candidate.required_event_type.clone(),
+            owner_instance_id: Some(reaction.runner_instance_id.clone()),
+            fencing_epoch: 1,
+            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
+            policy_id: runtime_config.policy_id.clone(),
+            policy_type: runtime_config.policy_type.clone(),
+            policy_version: "1.0.0".to_string(),
+            decision_id: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            completed: false,
+        };
+
+        let persisted_decision = RoutingDecision::from_policy(
+            &sample_config(),
+            &candidate,
+            RulesV1PolicyEngine
+                .evaluate(&candidate)
+                .expect("rules evaluation"),
+        )
+        .expect("persisted decision");
+        reservation.decision_id = Some(persisted_decision.decision_id.clone());
+        crate::state::save_reservation(store.clone(), "router-persisted-transition", &reservation)
+            .await
+            .expect("seed reservation");
+
+        let mut state = RoutingStateRecord::new(&candidate, &reservation);
+        state.decision = Some(persisted_decision);
+        state.selected_transition = Some((
+            "AwaitingRouting".to_string(),
+            "AwaitingIssueRiskProfiling".to_string(),
+        ));
+        save_routing_state(store, "router-persisted-transition", &state)
+            .await
+            .expect("seed routing state");
+
+        reaction.start().await.expect("reaction start");
+        reaction
+            .enqueue_query_result(QueryResult::new(
+                ROUTE_QUERY_ID.to_string(),
+                1,
+                chrono::Utc::now(),
+                vec![ResultDiff::Add {
+                    data: serde_json::to_value(&candidate).expect("candidate row"),
+                    row_signature: 1,
+                }],
+                HashMap::new(),
+            ))
+            .await
+            .expect("enqueue candidate");
+
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert_eq!(
+            reaction.status().await,
+            ComponentStatus::Error,
+            "reaction should fail-safe when persisted transition is no longer allowlisted"
+        );
+
+        let checkpoint = reaction
+            .base
+            .read_checkpoint(ROUTE_QUERY_ID)
+            .await
+            .expect("read checkpoint")
+            .map(|cp| cp.sequence)
+            .unwrap_or(0);
+        assert_eq!(
+            checkpoint, 0,
+            "checkpoint must not advance when persisted decision transition is rejected"
+        );
+
+        reaction.stop().await.expect("reaction stop");
     }
 
     #[tokio::test]

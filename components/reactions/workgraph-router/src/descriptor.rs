@@ -43,11 +43,12 @@ pub struct WorkgraphRouterReactionConfigDto {
     #[serde(default)]
     #[schema(value_type = Vec<ConfigValueString>)]
     pub allowed_repos: Vec<ConfigValue<String>>,
-    #[serde(default)]
-    #[schema(value_type = Vec<ConfigValueString>)]
-    pub allowed_event_types: Vec<ConfigValue<String>>,
-    #[serde(default)]
-    pub allowed_status_transitions: Vec<StatusTransitionDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Vec<ConfigValueString>>)]
+    pub allowed_event_types: Option<Vec<ConfigValue<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Vec<StatusTransitionDto>>)]
+    pub allowed_status_transitions: Option<Vec<StatusTransitionDto>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<Vec<ConfigValueString>>)]
     pub allowed_responsibility_types: Option<Vec<ConfigValue<String>>>,
@@ -116,20 +117,24 @@ impl From<&WorkgraphRouterReactionConfig> for WorkgraphRouterReactionConfigDto {
                 .cloned()
                 .map(ConfigValue::Static)
                 .collect(),
-            allowed_event_types: config
-                .allowed_event_types
-                .iter()
-                .cloned()
-                .map(ConfigValue::Static)
-                .collect(),
-            allowed_status_transitions: config
-                .allowed_status_transitions
-                .iter()
-                .map(|s| StatusTransitionDto {
-                    from: s.from.clone(),
-                    to: s.to.clone(),
-                })
-                .collect(),
+            allowed_event_types: Some(
+                config
+                    .allowed_event_types
+                    .iter()
+                    .cloned()
+                    .map(ConfigValue::Static)
+                    .collect(),
+            ),
+            allowed_status_transitions: Some(
+                config
+                    .allowed_status_transitions
+                    .iter()
+                    .map(|s| StatusTransitionDto {
+                        from: s.from.clone(),
+                        to: s.to.clone(),
+                    })
+                    .collect(),
+            ),
             allowed_responsibility_types: Some(
                 config
                     .allowed_responsibility_types
@@ -257,7 +262,6 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
             .with_policy_version(mapper.resolve_string(&dto.policy_version).await?)
             .with_allowed_projects(mapper.resolve_string_vec(&dto.allowed_projects).await?)
             .with_allowed_repos(mapper.resolve_string_vec(&dto.allowed_repos).await?)
-            .with_allowed_event_types(mapper.resolve_string_vec(&dto.allowed_event_types).await?)
             .with_allowed_actors(mapper.resolve_string_vec(&dto.allowed_actors).await?)
             .with_trusted_routing_authors(
                 mapper
@@ -296,6 +300,11 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
                 Some(value) => mapper.resolve_string(value).await?,
                 None => default_config.github_token_env.clone(),
             });
+
+        if let Some(allowed_event_types) = dto.allowed_event_types.as_ref() {
+            builder = builder
+                .with_allowed_event_types(mapper.resolve_string_vec(allowed_event_types).await?);
+        }
 
         if let Some(allowed_responsibility_types) = dto.allowed_responsibility_types.as_ref() {
             builder = builder.with_allowed_responsibility_types(
@@ -336,9 +345,9 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
                 mapper.resolve_typed::<u64>(priority_queue_capacity).await? as usize,
             );
         }
-        if !dto.allowed_status_transitions.is_empty() {
+        if let Some(allowed_status_transitions) = dto.allowed_status_transitions.as_ref() {
             builder = builder.with_allowed_status_transitions(
-                dto.allowed_status_transitions
+                allowed_status_transitions
                     .iter()
                     .map(|item| StatusTransition {
                         from: item.from.clone(),
@@ -357,6 +366,7 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ROUTE_QUERY_ID;
     use serde_json::json;
 
     #[test]
@@ -469,6 +479,123 @@ mod tests {
         assert!(
             err.to_string().contains("unknown field"),
             "unexpected error: {err}"
+        );
+    }
+
+    fn minimal_descriptor_json() -> serde_json::Value {
+        json!({
+            "policyId": "policy",
+            "policyType": "rules_v1",
+            "policyVersion": "1.0.0",
+            "allowedProjects": ["PVT_project"],
+            "allowedRepos": ["drasi-project/drasi-core"],
+            "allowedActors": ["bot-user"],
+            "trustedRoutingAuthors": ["router-user"],
+            "trustedLauncherAuthors": ["launcher-user"],
+            "trustedAgentAuthors": ["agent-user"],
+            "trustedRouterAuthors": ["router-user"],
+            "strictRecovery": false
+        })
+    }
+
+    #[test]
+    fn dto_distinguishes_omitted_and_explicit_empty_security_allowlists() {
+        let omitted: WorkgraphRouterReactionConfigDto =
+            serde_json::from_value(minimal_descriptor_json()).expect("parse omitted fields");
+        assert!(omitted.allowed_event_types.is_none());
+        assert!(omitted.allowed_status_transitions.is_none());
+        assert!(omitted.allowed_responsibility_types.is_none());
+
+        let mut explicit = minimal_descriptor_json();
+        explicit["allowedEventTypes"] = json!([]);
+        explicit["allowedStatusTransitions"] = json!([]);
+        explicit["allowedResponsibilityTypes"] = json!([]);
+        let explicit: WorkgraphRouterReactionConfigDto =
+            serde_json::from_value(explicit).expect("parse explicit empty fields");
+        assert_eq!(explicit.allowed_event_types, Some(vec![]));
+        assert_eq!(explicit.allowed_status_transitions, Some(vec![]));
+        assert_eq!(explicit.allowed_responsibility_types, Some(vec![]));
+    }
+
+    #[tokio::test]
+    async fn descriptor_omitted_security_allowlists_use_builder_defaults() {
+        let descriptor = WorkgraphRouterReactionDescriptor;
+        let created = descriptor
+            .create_reaction(
+                "router-omitted-defaults",
+                vec![ROUTE_QUERY_ID.to_string()],
+                &minimal_descriptor_json(),
+                true,
+            )
+            .await;
+        assert!(
+            created.is_ok(),
+            "omitted allowlists should retain defaults and validate"
+        );
+    }
+
+    #[tokio::test]
+    async fn descriptor_rejects_explicit_empty_security_allowlists() {
+        let descriptor = WorkgraphRouterReactionDescriptor;
+
+        let mut empty_event_types = minimal_descriptor_json();
+        empty_event_types["allowedEventTypes"] = json!([]);
+        let err = match descriptor
+            .create_reaction(
+                "router-empty-events",
+                vec![ROUTE_QUERY_ID.to_string()],
+                &empty_event_types,
+                true,
+            )
+            .await
+        {
+            Ok(_) => panic!("explicit empty allowedEventTypes must fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("allowedEventTypes must contain at least one entry"),
+            "unexpected error: {err:#}"
+        );
+
+        let mut empty_transitions = minimal_descriptor_json();
+        empty_transitions["allowedStatusTransitions"] = json!([]);
+        let err = match descriptor
+            .create_reaction(
+                "router-empty-transitions",
+                vec![ROUTE_QUERY_ID.to_string()],
+                &empty_transitions,
+                true,
+            )
+            .await
+        {
+            Ok(_) => panic!("explicit empty allowedStatusTransitions must fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("allowedStatusTransitions must contain at least one transition"),
+            "unexpected error: {err:#}"
+        );
+
+        let mut empty_responsibilities = minimal_descriptor_json();
+        empty_responsibilities["allowedResponsibilityTypes"] = json!([]);
+        let err = match descriptor
+            .create_reaction(
+                "router-empty-responsibilities",
+                vec![ROUTE_QUERY_ID.to_string()],
+                &empty_responsibilities,
+                true,
+            )
+            .await
+        {
+            Ok(_) => panic!("explicit empty allowedResponsibilityTypes must fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("allowedResponsibilityTypes must contain at least one entry"),
+            "unexpected error: {err:#}"
         );
     }
 }

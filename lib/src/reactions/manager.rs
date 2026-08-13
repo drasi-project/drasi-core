@@ -33,9 +33,9 @@ use crate::queries::Query;
 use crate::reactions::bootstrap_context::BootstrapContext;
 use crate::reactions::checkpoint::ReactionCheckpoint;
 use crate::reactions::snapshot_fetcher::InProcessSnapshotFetcher;
-use crate::reactions::{QueryProvider, Reaction};
+use crate::reactions::{ManagerCheckpointOwnership, QueryProvider, Reaction};
 use crate::recovery::ReactionRecoveryPolicy;
-use crate::state_store::StateStoreProvider;
+use crate::state_store::{StateStoreCompareAndSwapResult, StateStoreError, StateStoreProvider};
 
 /// Key for per-reaction per-query metrics: `(reaction_id, query_id)`.
 type MetricsKey = (String, String);
@@ -90,6 +90,136 @@ pub struct ReactionManager {
 }
 
 impl ReactionManager {
+    fn manager_owns_enqueue_checkpoint(reaction: &Arc<dyn Reaction>) -> bool {
+        matches!(
+            reaction.checkpoint_ownership(),
+            ManagerCheckpointOwnership::Manager
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn advance_live_checkpoint_after_enqueue(
+        reaction: &Arc<dyn Reaction>,
+        reaction_id: &str,
+        query_id: &str,
+        seq: u64,
+        checkpoints: &Arc<RwLock<HashMap<String, ReactionCheckpoint>>>,
+        query: &Arc<dyn Query>,
+        metrics: &Arc<ReactionMetrics>,
+    ) {
+        if !Self::manager_owns_enqueue_checkpoint(reaction) {
+            log::debug!(
+                "[{reaction_id}] Query '{query_id}' seq={seq} enqueued; \
+                 reaction-owned checkpoints enabled, manager not advancing live checkpoint"
+            );
+            return;
+        }
+
+        // Advance in-memory checkpoint so forwarder tracks position
+        // (skip stale events on reconnect).
+        // NOTE: We do NOT persist to durable storage here.
+        // The reaction should persist its checkpoint after successfully
+        // processing the event.
+        let config_hash = {
+            let cps = checkpoints.read().await;
+            cps.get(query_id).map(|cp| cp.config_hash).unwrap_or(0)
+        };
+        let cp = ReactionCheckpoint {
+            sequence: seq,
+            config_hash,
+        };
+        checkpoints.write().await.insert(query_id.to_string(), cp);
+
+        // Update reaction metrics: checkpoint position
+        let query_latest = query
+            .output_metrics()
+            .map(|m| m.load_outbox_latest_seq())
+            .unwrap_or(seq);
+        metrics.record_checkpoint(seq, query_latest);
+    }
+
+    async fn persist_manager_checkpoint(
+        store: &dyn StateStoreProvider,
+        reaction_id: &str,
+        query_id: &str,
+        checkpoint: &ReactionCheckpoint,
+        manager_owns_checkpoint: bool,
+    ) -> Result<ReactionCheckpoint> {
+        let key = format!("checkpoint:{query_id}");
+        let new_bytes = bincode::serialize(checkpoint)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize checkpoint: {e}"))?;
+        let mut cas_unsupported = false;
+
+        for _ in 0..8 {
+            let existing_bytes = store.get(reaction_id, &key).await?;
+            if !manager_owns_checkpoint {
+                if let Some(bytes) = existing_bytes.as_ref() {
+                    let existing: ReactionCheckpoint =
+                        bincode::deserialize(bytes).map_err(|e| {
+                            anyhow::anyhow!(
+                            "Failed to deserialize existing checkpoint for query '{query_id}': {e}"
+                        )
+                        })?;
+                    if existing.sequence > checkpoint.sequence
+                        && existing.config_hash == checkpoint.config_hash
+                    {
+                        log::info!(
+                            "[{reaction_id}] Skipping checkpoint write for query '{query_id}' at seq={} \
+                             because reaction-owned checkpoint already advanced to seq={}",
+                            checkpoint.sequence,
+                            existing.sequence
+                        );
+                        return Ok(existing);
+                    }
+                }
+            }
+
+            let expected = existing_bytes.as_deref();
+            match store
+                .compare_and_swap(reaction_id, &key, expected, new_bytes.clone())
+                .await
+            {
+                Err(StateStoreError::Unsupported(_)) => {
+                    cas_unsupported = true;
+                    break;
+                }
+                Err(e) => return Err(e.into()),
+                Ok(StateStoreCompareAndSwapResult::Swapped) => return Ok(checkpoint.clone()),
+                Ok(StateStoreCompareAndSwapResult::Mismatch) => continue,
+            }
+        }
+
+        if cas_unsupported {
+            log::debug!(
+                "[{reaction_id}] State store compare_and_swap unsupported; falling back to legacy checkpoint set for query '{query_id}'"
+            );
+            if !manager_owns_checkpoint {
+                if let Some(existing) =
+                    crate::reactions::checkpoint::read_checkpoint(store, reaction_id, query_id)
+                        .await?
+                {
+                    if existing.sequence > checkpoint.sequence
+                        && existing.config_hash == checkpoint.config_hash
+                    {
+                        return Ok(existing);
+                    }
+                }
+            }
+            crate::reactions::checkpoint::write_checkpoint(
+                store,
+                reaction_id,
+                query_id,
+                checkpoint,
+            )
+            .await?;
+            return Ok(checkpoint.clone());
+        }
+
+        Err(anyhow::anyhow!(
+            "Failed to persist checkpoint for query '{query_id}' after repeated CAS retries"
+        ))
+    }
+
     /// Create a new ReactionManager
     ///
     /// # Parameters
@@ -338,6 +468,7 @@ impl ReactionManager {
 
         let state_store = self.state_store.read().await.clone();
         let policy = reaction.default_recovery_policy();
+        let manager_owns_checkpoint = Self::manager_owns_enqueue_checkpoint(&reaction);
 
         // Shared checkpoint map — populated during bootstrap, read by forwarders after gate opens.
         let shared_checkpoints: Arc<RwLock<HashMap<String, ReactionCheckpoint>>> =
@@ -467,20 +598,24 @@ impl ReactionManager {
         // 5. Persist checkpoints AFTER bootstrap succeeds — a crash before this
         //    point will re-trigger bootstrap on next start (safe).
         if let Some(store) = state_store.as_ref() {
-            for (query_id, cp) in &initial_checkpoints {
-                if let Err(e) = crate::reactions::checkpoint::write_checkpoint(
+            for (query_id, cp) in initial_checkpoints.iter_mut() {
+                match Self::persist_manager_checkpoint(
                     store.as_ref(),
                     reaction_id,
                     query_id,
                     cp,
+                    manager_owns_checkpoint,
                 )
                 .await
                 {
-                    log::warn!(
-                        "[{reaction_id}] Failed to persist checkpoint for query '{query_id}' \
-                         at seq={}: {e}",
-                        cp.sequence
-                    );
+                    Ok(effective_cp) => *cp = effective_cp,
+                    Err(e) => {
+                        log::warn!(
+                            "[{reaction_id}] Failed to persist checkpoint for query '{query_id}' \
+                             at seq={}: {e}",
+                            cp.sequence
+                        );
+                    }
                 }
             }
         }
@@ -526,15 +661,18 @@ impl ReactionManager {
             // startup cycle (e.g., from source replay) and record the checkpoint.
             // Without this replay, results produced before the reaction subscribes
             // to the broadcast channel would be silently skipped.
+            let manager_owns_checkpoint = Self::manager_owns_enqueue_checkpoint(reaction);
             metrics.record_fetch_outbox();
             let seq = match query.fetch_outbox(0).await {
                 Ok(resp) => {
+                    let mut replayed_any = false;
                     if resp.results.is_empty() {
                         info!(
                             "[{reaction_id}] Fresh start for query '{query_id}' — fetch_outbox(0) returned latest_seq={}",
                             resp.latest_sequence
                         );
                     } else {
+                        replayed_any = true;
                         info!(
                             "[{reaction_id}] Fresh start for query '{query_id}' — replaying {} outbox entries (latest_seq={})",
                             resp.results.len(),
@@ -563,7 +701,15 @@ impl ReactionManager {
                             );
                         }
                     }
-                    resp.latest_sequence
+                    if manager_owns_checkpoint || !replayed_any {
+                        resp.latest_sequence
+                    } else {
+                        info!(
+                            "[{reaction_id}] Fresh start for query '{query_id}' replayed entries via enqueue \
+                             with reaction-owned checkpoints; seeding checkpoint at seq=0 until reaction acks processing"
+                        );
+                        0
+                    }
                 }
                 Err(FetchError::OutboxGap(gap)) => {
                     info!(
@@ -587,11 +733,12 @@ impl ReactionManager {
             };
 
             if let Some(store) = state_store.as_ref() {
-                crate::reactions::checkpoint::write_checkpoint(
+                Self::persist_manager_checkpoint(
                     store.as_ref(),
                     reaction_id,
                     query_id,
                     &cp,
+                    manager_owns_checkpoint,
                 )
                 .await?;
             }
@@ -617,6 +764,7 @@ impl ReactionManager {
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
         metrics: &Arc<ReactionMetrics>,
     ) -> Result<ReactionCheckpoint> {
+        let manager_owns_checkpoint = Self::manager_owns_enqueue_checkpoint(reaction);
         metrics.record_fetch_outbox();
         match query.fetch_outbox(checkpoint.sequence).await {
             Ok(outbox_resp) => {
@@ -639,8 +787,17 @@ impl ReactionManager {
                     }
                 }
 
-                // Update checkpoint to the latest SUCCESSFULLY replayed sequence.
-                let new_seq = last_ok_seq;
+                // Runtime-managed checkpoint ownership keeps the historical behavior:
+                // advance to the latest successfully enqueued replay row.
+                //
+                // Reaction-managed ownership intentionally does NOT advance replay
+                // checkpoints at enqueue time. The reaction must ack processing by
+                // writing checkpoints after durable side effects complete.
+                let new_seq = if manager_owns_checkpoint {
+                    last_ok_seq
+                } else {
+                    checkpoint.sequence
+                };
 
                 let cp = ReactionCheckpoint {
                     sequence: new_seq,
@@ -649,11 +806,12 @@ impl ReactionManager {
 
                 if new_seq != checkpoint.sequence {
                     if let Some(store) = state_store.as_ref() {
-                        crate::reactions::checkpoint::write_checkpoint(
+                        Self::persist_manager_checkpoint(
                             store.as_ref(),
                             reaction_id,
                             query_id,
                             &cp,
+                            manager_owns_checkpoint,
                         )
                         .await?;
                     }
@@ -696,7 +854,7 @@ impl ReactionManager {
         &self,
         reaction_id: &str,
         query_id: &str,
-        _reaction: &Arc<dyn Reaction>,
+        reaction: &Arc<dyn Reaction>,
         query: &Arc<dyn Query>,
         policy: ReactionRecoveryPolicy,
         state_store: &Option<Arc<dyn StateStoreProvider>>,
@@ -704,6 +862,7 @@ impl ReactionManager {
         metrics: &Arc<ReactionMetrics>,
     ) -> Result<ReactionCheckpoint> {
         let config_hash = crate::queries::compute_config_hash(query.get_config());
+        let manager_owns_checkpoint = Self::manager_owns_enqueue_checkpoint(reaction);
 
         match policy {
             ReactionRecoveryPolicy::Strict => Err(anyhow::anyhow!(
@@ -758,11 +917,12 @@ impl ReactionManager {
                 };
 
                 if let Some(store) = state_store.as_ref() {
-                    crate::reactions::checkpoint::write_checkpoint(
+                    Self::persist_manager_checkpoint(
                         store.as_ref(),
                         reaction_id,
                         query_id,
                         &cp,
+                        manager_owns_checkpoint,
                     )
                     .await?;
                 }
@@ -1222,26 +1382,16 @@ impl ReactionManager {
                                         "[{reaction_id_owned}] Failed to enqueue result from query '{query_id_clone}': {e}"
                                     );
                                 } else {
-                                    // Advance in-memory checkpoint so forwarder tracks
-                                    // position (skip stale events on reconnect).
-                                    // NOTE: We do NOT persist to durable storage here.
-                                    // The reaction should persist its checkpoint after
-                                    // successfully processing the event. This prevents
-                                    // permanent skipping if the process crashes between
-                                    // enqueue and handler processing.
-                                    let config_hash = {
-                                        let cps = checkpoints.read().await;
-                                        cps.get(&query_id_clone).map(|cp| cp.config_hash).unwrap_or(0)
-                                    };
-                                    let cp = ReactionCheckpoint { sequence: seq, config_hash };
-                                    checkpoints.write().await.insert(query_id_clone.clone(), cp);
-
-                                    // Update reaction metrics: checkpoint position
-                                    let query_latest = query_clone
-                                        .output_metrics()
-                                        .map(|m| m.load_outbox_latest_seq())
-                                        .unwrap_or(seq);
-                                    forwarder_metrics.record_checkpoint(seq, query_latest);
+                                    Self::advance_live_checkpoint_after_enqueue(
+                                        &reaction,
+                                        &reaction_id_owned,
+                                        &query_id_clone,
+                                        seq,
+                                        &checkpoints,
+                                        &query_clone,
+                                        &forwarder_metrics,
+                                    )
+                                    .await;
                                 }
                             }
                             Err(e) => {
@@ -1349,6 +1499,7 @@ impl ReactionManager {
     /// - `AutoSkipGap`: jump to current sequence, update checkpoint
     async fn handle_broadcast_gap(ctx: &BroadcastGapContext<'_>) -> Result<()> {
         let config_hash = crate::queries::compute_config_hash(ctx.query.get_config());
+        let manager_owns_checkpoint = Self::manager_owns_enqueue_checkpoint(ctx.reaction);
 
         match ctx.policy {
             ReactionRecoveryPolicy::Strict => Err(anyhow::anyhow!(
@@ -1390,12 +1541,14 @@ impl ReactionManager {
                 ctx.reaction.bootstrap(bootstrap_ctx).await?;
 
                 // Bootstrap succeeded — now safe to persist checkpoint.
+                let mut effective_cp = cp.clone();
                 if let Some(store) = ctx.state_store.as_ref() {
-                    crate::reactions::checkpoint::write_checkpoint(
+                    effective_cp = Self::persist_manager_checkpoint(
                         store.as_ref(),
                         ctx.reaction_id,
                         ctx.query_id,
                         &cp,
+                        manager_owns_checkpoint,
                     )
                     .await?;
                 }
@@ -1403,7 +1556,7 @@ impl ReactionManager {
                 ctx.checkpoints
                     .write()
                     .await
-                    .insert(ctx.query_id.to_string(), cp);
+                    .insert(ctx.query_id.to_string(), effective_cp);
 
                 Ok(())
             }
@@ -1441,12 +1594,14 @@ impl ReactionManager {
                     config_hash,
                 };
 
+                let mut effective_cp = cp.clone();
                 if let Some(store) = ctx.state_store.as_ref() {
-                    crate::reactions::checkpoint::write_checkpoint(
+                    effective_cp = Self::persist_manager_checkpoint(
                         store.as_ref(),
                         ctx.reaction_id,
                         ctx.query_id,
                         &cp,
+                        manager_owns_checkpoint,
                     )
                     .await?;
                 }
@@ -1454,7 +1609,7 @@ impl ReactionManager {
                 ctx.checkpoints
                     .write()
                     .await
-                    .insert(ctx.query_id.to_string(), cp);
+                    .insert(ctx.query_id.to_string(), effective_cp);
 
                 Ok(())
             }
@@ -1596,6 +1751,92 @@ mod tests {
         }
     }
 
+    /// Query with deterministic outbox entries that respects `after_sequence`.
+    struct SequenceOutboxQuery {
+        config: QueryConfig,
+        latest_sequence: u64,
+        entries: Vec<Arc<QueryResult>>,
+    }
+
+    impl SequenceOutboxQuery {
+        fn new(entries: Vec<Arc<QueryResult>>, latest_sequence: u64) -> Self {
+            let config = QueryConfig {
+                id: "q1".to_string(),
+                query: "MATCH (n) RETURN n".to_string(),
+                query_language: crate::config::schema::QueryLanguage::Cypher,
+                middleware: vec![],
+                sources: vec![],
+                auto_start: true,
+                joins: None,
+                enable_bootstrap: true,
+                bootstrap_buffer_size: 10000,
+                priority_queue_capacity: None,
+                dispatch_buffer_capacity: None,
+                dispatch_mode: None,
+                storage_backend: None,
+                recovery_policy: None,
+                bootstrap_timeout_secs: 300,
+                outbox_capacity: 1000,
+            };
+            Self {
+                config,
+                latest_sequence,
+                entries,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::queries::Query for SequenceOutboxQuery {
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            ComponentStatus::Running
+        }
+
+        fn get_config(&self) -> &QueryConfig {
+            &self.config
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn subscribe(&self, _reaction_id: String) -> Result<QuerySubscriptionResponse> {
+            Err(anyhow::anyhow!(
+                "SequenceOutboxQuery does not support subscribe"
+            ))
+        }
+
+        async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError> {
+            Ok(SnapshotResponse::new(
+                im::HashMap::new(),
+                self.latest_sequence,
+                crate::queries::compute_config_hash(&self.config),
+            ))
+        }
+
+        async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError> {
+            let results = self
+                .entries
+                .iter()
+                .filter(|entry| entry.sequence > after_sequence)
+                .cloned()
+                .collect();
+            Ok(OutboxResponse {
+                results,
+                latest_sequence: self.latest_sequence,
+                config_hash: crate::queries::compute_config_hash(&self.config),
+            })
+        }
+    }
+
     // ========================================================================
     // Configurable mock reaction for testing startup validation and bootstrap
     // ========================================================================
@@ -1606,6 +1847,7 @@ mod tests {
         durable: bool,
         snapshot_on_fresh: bool,
         policy: ReactionRecoveryPolicy,
+        checkpoint_ownership: ManagerCheckpointOwnership,
         status_handle: ComponentStatusHandle,
         enqueued: Arc<Mutex<Vec<QueryResult>>>,
         bootstrap_count: Arc<AtomicUsize>,
@@ -1619,6 +1861,7 @@ mod tests {
                 durable: false,
                 snapshot_on_fresh: false,
                 policy: ReactionRecoveryPolicy::Strict,
+                checkpoint_ownership: ManagerCheckpointOwnership::Manager,
                 status_handle: ComponentStatusHandle::new(id),
                 enqueued: Arc::new(Mutex::new(Vec::new())),
                 bootstrap_count: Arc::new(AtomicUsize::new(0)),
@@ -1637,6 +1880,11 @@ mod tests {
 
         fn with_policy(mut self, p: ReactionRecoveryPolicy) -> Self {
             self.policy = p;
+            self
+        }
+
+        fn with_checkpoint_ownership(mut self, mode: ManagerCheckpointOwnership) -> Self {
+            self.checkpoint_ownership = mode;
             self
         }
     }
@@ -1684,6 +1932,9 @@ mod tests {
         }
         fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
             self.policy
+        }
+        fn checkpoint_ownership(&self) -> ManagerCheckpointOwnership {
+            self.checkpoint_ownership
         }
         async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
             self.enqueued.lock().await.push(result);
@@ -1739,6 +1990,17 @@ mod tests {
             .build()
             .await
             .unwrap()
+    }
+
+    fn build_test_manager() -> ReactionManager {
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("mgr-test");
+        let update_tx = graph.update_sender();
+        ReactionManager::new(
+            "mgr-test",
+            Arc::new(crate::managers::ComponentLogRegistry::new()),
+            Arc::new(tokio::sync::RwLock::new(graph)),
+            update_tx,
+        )
     }
 
     /// Helper: create a SourceChange::Insert for a Test node.
@@ -2048,6 +2310,259 @@ mod tests {
             cp.sequence > 0,
             "Checkpoint sequence should have advanced from 0, got {}",
             cp.sequence
+        );
+    }
+
+    #[tokio::test]
+    async fn reaction_owned_replay_checkpoint_stays_at_prior_seq_until_ack() {
+        let manager = build_test_manager();
+        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let state_store: Option<Arc<dyn crate::state_store::StateStoreProvider>> =
+            Some(store.clone() as Arc<dyn crate::state_store::StateStoreProvider>);
+
+        let reaction: Arc<MockReaction> = Arc::new(
+            MockReaction::new("r_replay_owned", vec!["q1".into()])
+                .with_checkpoint_ownership(ManagerCheckpointOwnership::Reaction),
+        );
+        let reaction_trait: Arc<dyn Reaction> = reaction.clone();
+
+        let result_11 = Arc::new(QueryResult::new(
+            "q1".to_string(),
+            11,
+            chrono::Utc::now(),
+            vec![crate::channels::ResultDiff::Noop],
+            HashMap::new(),
+        ));
+        let result_12 = Arc::new(QueryResult::new(
+            "q1".to_string(),
+            12,
+            chrono::Utc::now() + chrono::Duration::milliseconds(1),
+            vec![crate::channels::ResultDiff::Noop],
+            HashMap::new(),
+        ));
+        let query: Arc<dyn crate::queries::Query> =
+            Arc::new(SequenceOutboxQuery::new(vec![result_11, result_12], 12));
+
+        let checkpoint = ReactionCheckpoint {
+            sequence: 10,
+            config_hash: crate::queries::compute_config_hash(query.get_config()),
+        };
+        crate::reactions::checkpoint::write_checkpoint(
+            store.as_ref(),
+            "r_replay_owned",
+            "q1",
+            &checkpoint,
+        )
+        .await
+        .unwrap();
+
+        let mut bootstrap_queries = Vec::new();
+        let metrics = Arc::new(ReactionMetrics::new());
+
+        let first_cp = manager
+            .handle_outbox_catchup(
+                "r_replay_owned",
+                "q1",
+                &checkpoint,
+                &reaction_trait,
+                &query,
+                ReactionRecoveryPolicy::Strict,
+                &state_store,
+                &mut bootstrap_queries,
+                &metrics,
+            )
+            .await
+            .expect("first catchup succeeds");
+        assert_eq!(
+            first_cp.sequence, 10,
+            "reaction-owned replay must not advance checkpoint at enqueue time"
+        );
+        let persisted_after_first =
+            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r_replay_owned", "q1")
+                .await
+                .unwrap()
+                .expect("checkpoint after first replay");
+        assert_eq!(
+            persisted_after_first.sequence, 10,
+            "persisted checkpoint must stay at 10 until reaction ack"
+        );
+        let first_enqueued = reaction.enqueued.lock().await;
+        assert_eq!(
+            first_enqueued
+                .iter()
+                .map(|r| r.sequence)
+                .collect::<Vec<_>>(),
+            vec![11, 12]
+        );
+        drop(first_enqueued);
+
+        // Simulate restart before processing acks: checkpoint is still 10, so replay
+        // must enqueue 11/12 again (cannot skip failed replay work).
+        reaction.enqueued.lock().await.clear();
+        let persisted_before_restart =
+            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r_replay_owned", "q1")
+                .await
+                .unwrap()
+                .expect("checkpoint before restart");
+        manager
+            .handle_outbox_catchup(
+                "r_replay_owned",
+                "q1",
+                &persisted_before_restart,
+                &reaction_trait,
+                &query,
+                ReactionRecoveryPolicy::Strict,
+                &state_store,
+                &mut bootstrap_queries,
+                &metrics,
+            )
+            .await
+            .expect("replay after restart succeeds");
+        let second_enqueued = reaction.enqueued.lock().await;
+        assert_eq!(
+            second_enqueued
+                .iter()
+                .map(|r| r.sequence)
+                .collect::<Vec<_>>(),
+            vec![11, 12],
+            "restart must replay unacked rows 11/12 again"
+        );
+        drop(second_enqueued);
+
+        // Simulate reaction-owned post-processing ack by persisting checkpoint 12.
+        crate::reactions::checkpoint::write_checkpoint(
+            store.as_ref(),
+            "r_replay_owned",
+            "q1",
+            &ReactionCheckpoint {
+                sequence: 12,
+                config_hash: checkpoint.config_hash,
+            },
+        )
+        .await
+        .unwrap();
+
+        reaction.enqueued.lock().await.clear();
+        let acked_cp =
+            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r_replay_owned", "q1")
+                .await
+                .unwrap()
+                .expect("acked checkpoint");
+        manager
+            .handle_outbox_catchup(
+                "r_replay_owned",
+                "q1",
+                &acked_cp,
+                &reaction_trait,
+                &query,
+                ReactionRecoveryPolicy::Strict,
+                &state_store,
+                &mut bootstrap_queries,
+                &metrics,
+            )
+            .await
+            .expect("catchup after ack succeeds");
+        assert!(
+            reaction.enqueued.lock().await.is_empty(),
+            "after acking seq 12, replay should not enqueue 11/12 again"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_enqueue_checkpoint_update_respects_checkpoint_ownership() {
+        let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 10));
+        let metrics = Arc::new(ReactionMetrics::new());
+        let checkpoints = Arc::new(RwLock::new(HashMap::from([(
+            "q1".to_string(),
+            ReactionCheckpoint {
+                sequence: 10,
+                config_hash: 1234,
+            },
+        )])));
+
+        let manager_owned: Arc<dyn Reaction> =
+            Arc::new(MockReaction::new("r_manager", vec!["q1".into()]));
+        ReactionManager::advance_live_checkpoint_after_enqueue(
+            &manager_owned,
+            "r_manager",
+            "q1",
+            11,
+            &checkpoints,
+            &query,
+            &metrics,
+        )
+        .await;
+        assert_eq!(
+            checkpoints.read().await.get("q1").map(|cp| cp.sequence),
+            Some(11),
+            "manager-owned mode should advance live checkpoint after enqueue"
+        );
+
+        checkpoints.write().await.insert(
+            "q1".to_string(),
+            ReactionCheckpoint {
+                sequence: 10,
+                config_hash: 1234,
+            },
+        );
+        let reaction_owned: Arc<dyn Reaction> = Arc::new(
+            MockReaction::new("r_reaction", vec!["q1".into()])
+                .with_checkpoint_ownership(ManagerCheckpointOwnership::Reaction),
+        );
+        ReactionManager::advance_live_checkpoint_after_enqueue(
+            &reaction_owned,
+            "r_reaction",
+            "q1",
+            11,
+            &checkpoints,
+            &query,
+            &metrics,
+        )
+        .await;
+        assert_eq!(
+            checkpoints.read().await.get("q1").map(|cp| cp.sequence),
+            Some(10),
+            "reaction-owned mode must not advance live checkpoint at enqueue time"
+        );
+    }
+
+    #[tokio::test]
+    async fn reaction_owned_checkpoint_persistence_guard_never_rewinds_sequence() {
+        let store: Arc<dyn crate::state_store::StateStoreProvider> =
+            Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        crate::reactions::checkpoint::write_checkpoint(
+            store.as_ref(),
+            "r_guard",
+            "q1",
+            &ReactionCheckpoint {
+                sequence: 12,
+                config_hash: 99,
+            },
+        )
+        .await
+        .unwrap();
+
+        ReactionManager::persist_manager_checkpoint(
+            store.as_ref(),
+            "r_guard",
+            "q1",
+            &ReactionCheckpoint {
+                sequence: 10,
+                config_hash: 99,
+            },
+            false,
+        )
+        .await
+        .expect("guarded write should not fail");
+
+        let persisted =
+            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r_guard", "q1")
+                .await
+                .unwrap()
+                .expect("checkpoint must still exist");
+        assert_eq!(
+            persisted.sequence, 12,
+            "reaction-owned guarded checkpoint write must not rewind sequence"
         );
     }
 
