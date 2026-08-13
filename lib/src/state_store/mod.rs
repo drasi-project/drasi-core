@@ -102,6 +102,15 @@ pub enum StateStoreError {
 /// Result type for state store operations
 pub type StateStoreResult<T> = Result<T, StateStoreError>;
 
+/// Result for [`StateStoreProvider::create_if_absent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateStoreCreateIfAbsentResult {
+    /// The key did not exist and was created with the supplied value.
+    Created,
+    /// The key already existed; contains the current persisted value.
+    Existing(Vec<u8>),
+}
+
 /// Trait defining the interface for state store providers.
 ///
 /// State store providers allow plugins (Sources, BootstrapProviders, and Reactions)
@@ -172,6 +181,31 @@ pub trait StateStoreProvider: Send + Sync {
     /// * `Ok(())` - The value was successfully stored
     /// * `Err(e)` - An error occurred
     async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()>;
+
+    /// Create a key only if it does not already exist.
+    ///
+    /// Implementations should provide an atomic, durable create-if-absent
+    /// operation where possible. The default implementation is a non-atomic
+    /// fallback (`get` + `set`) provided for compatibility.
+    ///
+    /// # Returns
+    /// * `Ok(StateStoreCreateIfAbsentResult::Created)` when the key was created
+    /// * `Ok(StateStoreCreateIfAbsentResult::Existing(value))` when the key already exists
+    /// * `Err(e)` on storage failure
+    async fn create_if_absent(
+        &self,
+        store_id: &str,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
+        match self.get(store_id, key).await? {
+            Some(existing) => Ok(StateStoreCreateIfAbsentResult::Existing(existing)),
+            None => {
+                self.set(store_id, key, value).await?;
+                Ok(StateStoreCreateIfAbsentResult::Created)
+            }
+        }
+    }
 
     /// Delete a single key from a store partition.
     ///
@@ -364,6 +398,21 @@ impl StateStoreProvider for MemoryStateStoreProvider {
             .or_default()
             .insert(key.to_string(), value);
         Ok(())
+    }
+
+    async fn create_if_absent(
+        &self,
+        store_id: &str,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
+        let mut stores = self.stores.write().await;
+        let store = stores.entry(store_id.to_string()).or_default();
+        if let Some(existing) = store.get(key) {
+            return Ok(StateStoreCreateIfAbsentResult::Existing(existing.clone()));
+        }
+        store.insert(key.to_string(), value);
+        Ok(StateStoreCreateIfAbsentResult::Created)
     }
 
     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
@@ -730,5 +779,28 @@ mod tests {
             .await
             .unwrap();
         provider.sync().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_memory_state_store_create_if_absent() {
+        let provider = MemoryStateStoreProvider::new();
+
+        let created = provider
+            .create_if_absent("store1", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(created, StateStoreCreateIfAbsentResult::Created);
+
+        let existing = provider
+            .create_if_absent("store1", "key1", b"value2".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            existing,
+            StateStoreCreateIfAbsentResult::Existing(b"value1".to_vec())
+        );
+
+        let value = provider.get("store1", "key1").await.unwrap();
+        assert_eq!(value, Some(b"value1".to_vec()));
     }
 }

@@ -73,6 +73,9 @@ pub struct WorkgraphRouterReactionConfigDto {
     #[schema(value_type = ConfigValueString)]
     pub github_token_env: ConfigValue<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<ConfigValueString>)]
+    pub project_status_field_name: Option<ConfigValue<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueU64>)]
     pub timeout_secs: Option<ConfigValue<u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,6 +157,9 @@ impl From<&WorkgraphRouterReactionConfig> for WorkgraphRouterReactionConfigDto {
             github_graphql_url: ConfigValue::Static(config.github_graphql_url.clone()),
             github_rest_url: ConfigValue::Static(config.github_rest_url.clone()),
             github_token_env: ConfigValue::Static(config.github_token_env.clone()),
+            project_status_field_name: Some(ConfigValue::Static(
+                config.project_status_field_name.clone(),
+            )),
             timeout_secs: Some(ConfigValue::Static(config.timeout_secs)),
             strict_recovery: Some(ConfigValue::Static(config.strict_recovery)),
             priority_queue_capacity: None,
@@ -253,6 +259,12 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
             .with_github_graphql_url(mapper.resolve_string(&dto.github_graphql_url).await?)
             .with_github_rest_url(mapper.resolve_string(&dto.github_rest_url).await?)
             .with_github_token_env(mapper.resolve_string(&dto.github_token_env).await?);
+
+        if let Some(project_status_field_name) = dto.project_status_field_name.as_ref() {
+            builder = builder.with_project_status_field_name(
+                mapper.resolve_string(project_status_field_name).await?,
+            );
+        }
 
         if let Some(timeout_secs) = dto.timeout_secs.as_ref() {
             builder = builder.with_timeout_secs(mapper.resolve_typed::<u64>(timeout_secs).await?);

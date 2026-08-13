@@ -19,7 +19,9 @@ use std::time::Duration;
 use chrono::Utc;
 use drasi_lib::channels::{QueryResult, ResultDiff};
 use drasi_lib::component_graph::ComponentGraph;
-use drasi_lib::state_store::{StateStoreProvider, StateStoreResult};
+use drasi_lib::state_store::{
+    StateStoreCreateIfAbsentResult, StateStoreProvider, StateStoreResult,
+};
 use drasi_lib::{Reaction, ReactionRuntimeContext};
 use drasi_reaction_workgraph_router::candidate::RoutingCandidate;
 use drasi_reaction_workgraph_router::config::{
@@ -27,10 +29,15 @@ use drasi_reaction_workgraph_router::config::{
 };
 use drasi_reaction_workgraph_router::decision::RoutingDecision;
 use drasi_reaction_workgraph_router::rules::{RoutingPolicyEngine, RulesV1PolicyEngine};
+use drasi_reaction_workgraph_router::state::{
+    save_reservation, save_routing_state, ReservationRecord, RoutingStateRecord, SideEffectProgress,
+};
 use drasi_reaction_workgraph_router::WorkgraphRouterReaction;
 use serde_json::{json, Value};
 use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+const TEST_REACTION_ID: &str = "workgraph-router-test";
 
 struct DurableMemoryStateStore {
     inner: drasi_lib::MemoryStateStoreProvider,
@@ -52,6 +59,15 @@ impl StateStoreProvider for DurableMemoryStateStore {
 
     async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
         self.inner.set(store_id, key, value).await
+    }
+
+    async fn create_if_absent(
+        &self,
+        store_id: &str,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
+        self.inner.create_if_absent(store_id, key, value).await
     }
 
     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
@@ -144,8 +160,50 @@ fn sample_candidate() -> RoutingCandidate {
     }
 }
 
+fn status_snapshot_response(status: &str) -> Value {
+    json!({
+        "data": {
+            "project": {
+                "id": "PVT_project",
+                "fields": {
+                    "nodes": [
+                        {
+                            "id": "PVTSSF_status",
+                            "name": "Status",
+                            "options": [
+                                {"id":"PVTSSO_awaiting_routing","name":"AwaitingRouting"},
+                                {"id":"PVTSSO_awaiting_risk","name":"AwaitingIssueRiskProfiling"},
+                                {"id":"PVTSSO_needs_more_information","name":"NeedsMoreInformation"},
+                                {"id":"PVTSSO_done","name":"Done"}
+                            ]
+                        }
+                    ]
+                }
+            },
+            "item": {
+                "id": "PVTI_item",
+                "project": {"id": "PVT_project"},
+                "fieldValueByName": {
+                    "name": status,
+                    "optionId": "PVTSSO_current"
+                }
+            }
+        }
+    })
+}
+
+fn status_update_response() -> Value {
+    json!({
+        "data": {
+            "updateProjectV2ItemFieldValue": {
+                "projectV2Item": { "id": "PVTI_item" }
+            }
+        }
+    })
+}
+
 fn base_reaction(server: &MockServer, policy_version: &str) -> WorkgraphRouterReaction {
-    WorkgraphRouterReaction::builder("workgraph-router-test")
+    WorkgraphRouterReaction::builder(TEST_REACTION_ID)
         .with_query(ROUTE_QUERY_ID)
         .with_policy_id("policy-1")
         .with_policy_type("rules_v1")
@@ -180,6 +238,56 @@ fn base_reaction(server: &MockServer, policy_version: &str) -> WorkgraphRouterRe
         .with_strict_recovery(true)
         .build()
         .expect("reaction should build")
+}
+
+fn policy_identity_config(policy_version: &str) -> WorkgraphRouterReactionConfig {
+    WorkgraphRouterReactionConfig {
+        policy_id: "policy-1".to_string(),
+        policy_type: "rules_v1".to_string(),
+        policy_version: policy_version.to_string(),
+        ..WorkgraphRouterReactionConfig::default()
+    }
+}
+
+async fn seed_failed_reservation_state(
+    store: Arc<dyn StateStoreProvider>,
+    candidate: &RoutingCandidate,
+    policy_version: &str,
+) {
+    let reservation = ReservationRecord {
+        reservation_key: candidate.reservation_key(),
+        execution_id: candidate.execution_id.clone(),
+        required_event_type: candidate.required_event_type.clone(),
+        owner_instance_id: Some("legacy-runner".to_string()),
+        policy_id: "policy-1".to_string(),
+        policy_type: "rules_v1".to_string(),
+        policy_version: policy_version.to_string(),
+        decision_id: None,
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        completed: false,
+    };
+    let outcome = RulesV1PolicyEngine
+        .evaluate(candidate)
+        .expect("rules evaluation");
+    let decision =
+        RoutingDecision::from_policy(&policy_identity_config(policy_version), candidate, outcome);
+
+    let mut state = RoutingStateRecord::new(candidate, &reservation);
+    state.decision = Some(decision.clone());
+    state.selected_transition = Some((decision.from_status.clone(), decision.to_status.clone()));
+    state.progress = SideEffectProgress {
+        decision_comment_written: true,
+        responsibility_written: true,
+        project_status_updated: false,
+    };
+    state.mark_error("simulated interrupted status update", true);
+
+    save_reservation(store.clone(), TEST_REACTION_ID, &reservation)
+        .await
+        .expect("seed reservation");
+    save_routing_state(store, TEST_REACTION_ID, &state)
+        .await
+        .expect("seed routing state");
 }
 
 async fn initialize_reaction(
@@ -291,7 +399,10 @@ fn is_project_status_mutation(req: &wiremock::Request) -> bool {
         return false;
     }
     std::str::from_utf8(&req.body)
-        .map(|body| body.contains("WorkgraphRouterUpdateStatus"))
+        .map(|body| {
+            body.contains("WorkgraphRouterUpdateProjectV2Status")
+                || body.contains("updateProjectV2ItemFieldValue")
+        })
         .unwrap_or(false)
 }
 
@@ -309,34 +420,18 @@ async fn mount_common_success_mocks(server: &MockServer, preflight_status: &str)
         .mount(server)
         .await;
 
-    let preflight = json!({
-        "data": {
-            "node": {
-                "id": "PVTI_item",
-                "fieldValueByName": {
-                    "name": preflight_status
-                }
-            }
-        }
-    });
+    let preflight = status_snapshot_response(preflight_status);
     Mock::given(method("POST"))
         .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterPreflight"))
+        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
         .respond_with(ResponseTemplate::new(200).set_body_json(preflight))
         .mount(server)
         .await;
 
-    let mutation = json!({
-        "data": {
-            "workgraphRouterUpdateStatus": {
-                "projectItemId": "PVTI_item",
-                "statusName": "ok"
-            }
-        }
-    });
+    let mutation = status_update_response();
     Mock::given(method("POST"))
         .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterUpdateStatus"))
+        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
         .respond_with(ResponseTemplate::new(200).set_body_json(mutation))
         .mount(server)
         .await;
@@ -451,6 +546,51 @@ async fn duplicate_rows_do_not_duplicate_comments() {
 
 #[tokio::test]
 #[ignore]
+async fn concurrent_replicas_share_reservation_and_emit_side_effects_once() {
+    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-concurrent");
+    let server = MockServer::start().await;
+    mount_common_success_mocks(&server, "AwaitingRouting").await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+    let reaction_a = base_reaction(&server, "1.0.0");
+    let reaction_b = base_reaction(&server, "1.0.0");
+    initialize_reaction(&reaction_a, Arc::clone(&store)).await;
+    initialize_reaction(&reaction_b, Arc::clone(&store)).await;
+    reaction_a.start().await.expect("reaction A start");
+    reaction_b.start().await.expect("reaction B start");
+
+    let candidate = sample_candidate();
+    tokio::join!(
+        enqueue_add(&reaction_a, &candidate, 1),
+        enqueue_add(&reaction_b, &candidate, 1)
+    );
+
+    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
+    wait_for_count(&server, is_project_status_mutation, 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    reaction_a.stop().await.expect("reaction A stop");
+    reaction_b.stop().await.expect("reaction B stop");
+
+    let requests = server.received_requests().await.expect("requests");
+    let comment_posts = requests
+        .iter()
+        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
+        .count();
+    let status_updates = requests
+        .iter()
+        .filter(|req| is_project_status_mutation(req))
+        .count();
+    assert_eq!(
+        comment_posts, 2,
+        "concurrent replicas must emit exactly one decision/responsibility comment pair"
+    );
+    assert_eq!(
+        status_updates, 1,
+        "concurrent replicas must emit exactly one project status mutation"
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn newer_policy_version_cannot_reroute_existing_reservation() {
     std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-policy");
     let server = MockServer::start().await;
@@ -480,6 +620,186 @@ async fn newer_policy_version_cannot_reroute_existing_reservation() {
     assert_eq!(
         comments, 2,
         "policy version change must not reroute completion"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn retry_with_closed_issue_fails_preflight_and_emits_no_side_effects() {
+    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-closed-retry");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"closed"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(status_snapshot_response("AwaitingRouting")),
+        )
+        .mount(&server)
+        .await;
+
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+    let candidate = sample_candidate();
+    seed_failed_reservation_state(Arc::clone(&store), &candidate, "1.0.0").await;
+
+    let reaction = base_reaction(&server, "1.0.0");
+    initialize_reaction(&reaction, Arc::clone(&store)).await;
+    reaction.start().await.expect("reaction start");
+    enqueue_add(&reaction, &candidate, 1).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    reaction.stop().await.expect("reaction stop");
+
+    let requests = server.received_requests().await.expect("requests");
+    let comment_posts = requests
+        .iter()
+        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
+        .count();
+    let status_updates = requests
+        .iter()
+        .filter(|req| is_project_status_mutation(req))
+        .count();
+    assert_eq!(
+        comment_posts, 0,
+        "retry preflight failure must not write comments"
+    );
+    assert_eq!(
+        status_updates, 0,
+        "retry preflight failure must not overwrite project status"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn retry_with_competing_status_fails_preflight_and_does_not_overwrite() {
+    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-competing-status");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/drasi-project/drasi-core/issues/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(status_snapshot_response("InProgress")),
+        )
+        .mount(&server)
+        .await;
+
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+    let candidate = sample_candidate();
+    seed_failed_reservation_state(Arc::clone(&store), &candidate, "1.0.0").await;
+
+    let reaction = base_reaction(&server, "1.0.0");
+    initialize_reaction(&reaction, Arc::clone(&store)).await;
+    reaction.start().await.expect("reaction start");
+    enqueue_add(&reaction, &candidate, 1).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    reaction.stop().await.expect("reaction stop");
+
+    let requests = server.received_requests().await.expect("requests");
+    let comment_posts = requests
+        .iter()
+        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
+        .count();
+    let status_updates = requests
+        .iter()
+        .filter(|req| is_project_status_mutation(req))
+        .count();
+    assert_eq!(comment_posts, 0, "competing status must block side effects");
+    assert_eq!(
+        status_updates, 0,
+        "competing status must not be overwritten by retry"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn interrupted_old_policy_reservation_resumes_with_persisted_decision_contract() {
+    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-old-policy-resume");
+    let server = MockServer::start().await;
+    mount_common_success_mocks(&server, "AwaitingRouting").await;
+
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
+    let candidate = sample_candidate();
+    let mut failed_outcome_candidate = candidate.clone();
+    failed_outcome_candidate.outcome = "failed".to_string();
+    let old_decision = RoutingDecision::from_policy(
+        &policy_identity_config("1.0.0"),
+        &failed_outcome_candidate,
+        RulesV1PolicyEngine
+            .evaluate(&failed_outcome_candidate)
+            .expect("rules evaluation"),
+    );
+
+    let reservation = ReservationRecord {
+        reservation_key: candidate.reservation_key(),
+        execution_id: candidate.execution_id.clone(),
+        required_event_type: candidate.required_event_type.clone(),
+        owner_instance_id: Some("legacy-runner".to_string()),
+        policy_id: "policy-1".to_string(),
+        policy_type: "rules_v1".to_string(),
+        policy_version: "1.0.0".to_string(),
+        decision_id: Some(old_decision.decision_id.clone()),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        completed: false,
+    };
+    let mut state = RoutingStateRecord::new(&candidate, &reservation);
+    state.decision = Some(old_decision.clone());
+    state.selected_transition = Some((
+        old_decision.from_status.clone(),
+        old_decision.to_status.clone(),
+    ));
+    state.mark_error("simulated interruption", true);
+    save_reservation(Arc::clone(&store), TEST_REACTION_ID, &reservation)
+        .await
+        .expect("seed reservation");
+    save_routing_state(Arc::clone(&store), TEST_REACTION_ID, &state)
+        .await
+        .expect("seed state");
+
+    let retry = base_reaction(&server, "2.0.0");
+    initialize_reaction(&retry, Arc::clone(&store)).await;
+    retry.start().await.expect("retry start");
+    enqueue_add(&retry, &candidate, 2).await;
+    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
+    wait_for_count(&server, is_project_status_mutation, 1).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    retry.stop().await.expect("retry stop");
+
+    let requests = server.received_requests().await.expect("requests");
+    let decision_payloads: Vec<Value> = requests
+        .iter()
+        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
+        .filter_map(|req| {
+            let outer: Value = serde_json::from_slice(&req.body).ok()?;
+            let body = outer.get("body")?.as_str()?;
+            let inner: Value = serde_json::from_str(body).ok()?;
+            if inner.get("type").and_then(Value::as_str) == Some("workgraph.routing-decision/v1") {
+                Some(inner)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(decision_payloads.len(), 1);
+    let payload = &decision_payloads[0];
+    assert_eq!(
+        payload.pointer("/policy/version").and_then(Value::as_str),
+        Some("1.0.0"),
+        "retry must resume with persisted policy contract, not current config policy version"
+    );
+    assert_eq!(
+        payload
+            .pointer("/transition/toStatus")
+            .and_then(Value::as_str),
+        Some("NeedsMoreInformation"),
+        "retry must use persisted decision transition"
     );
 }
 
@@ -549,7 +869,7 @@ async fn graphql_200_errors_are_treated_as_failures() {
         .await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterPreflight"))
+        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "errors":[{"message":"boom"}],
             "data": null
@@ -590,15 +910,10 @@ async fn partial_side_effect_recovery_reconciles_trusted_comments() {
         .await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterPreflight"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {
-                "node": {
-                    "id":"PVTI_item",
-                    "fieldValueByName": {"name":"AwaitingRouting"}
-                }
-            }
-        })))
+        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(status_snapshot_response("AwaitingRouting")),
+        )
         .mount(&first)
         .await;
     Mock::given(method("POST"))
@@ -614,7 +929,7 @@ async fn partial_side_effect_recovery_reconciles_trusted_comments() {
         .await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterUpdateStatus"))
+        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
         .respond_with(ResponseTemplate::new(500).set_body_string("status update failed"))
         .mount(&first)
         .await;
@@ -676,28 +991,16 @@ async fn partial_side_effect_recovery_reconciles_trusted_comments() {
         .await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterPreflight"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {
-                "node": {
-                    "id": "PVTI_item",
-                    "fieldValueByName": {"name":"AwaitingRouting"}
-                }
-            }
-        })))
+        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(status_snapshot_response("AwaitingRouting")),
+        )
         .mount(&second)
         .await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterUpdateStatus"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {
-                "workgraphRouterUpdateStatus": {
-                    "projectItemId":"PVTI_item",
-                    "statusName":"AwaitingIssueRiskProfiling"
-                }
-            }
-        })))
+        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(status_update_response()))
         .mount(&second)
         .await;
     Mock::given(method("POST"))

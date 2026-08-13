@@ -15,7 +15,9 @@
 //! Redb-based state store provider implementation.
 
 use async_trait::async_trait;
-use drasi_lib::{StateStoreError, StateStoreProvider, StateStoreResult};
+use drasi_lib::{
+    StateStoreCreateIfAbsentResult, StateStoreError, StateStoreProvider, StateStoreResult,
+};
 use log::{debug, info};
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use std::collections::HashMap;
@@ -259,6 +261,70 @@ impl StateStoreProvider for RedbStateStoreProvider {
                     // Transaction will be aborted on drop
                     Err(e)
                 }
+            }
+        })
+        .await
+        .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
+    }
+
+    async fn create_if_absent(
+        &self,
+        store_id: &str,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
+        let table_name = self.get_or_create_table_name(store_id).await;
+        let db = self.db.clone();
+        let key = key.to_string();
+        let store_id = store_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let write_txn = db.begin_write().map_err(|e| {
+                StateStoreError::StorageError(format!(
+                    "Failed to begin write transaction for store '{store_id}': {e}"
+                ))
+            })?;
+
+            let result = {
+                let table_def = Self::make_table_def(table_name);
+
+                let mut table = write_txn.open_table(table_def).map_err(|e| {
+                    StateStoreError::StorageError(format!(
+                        "Failed to open table for store '{store_id}': {e}"
+                    ))
+                })?;
+
+                let existing_value = table
+                    .get(key.as_str())
+                    .map_err(|e| {
+                        StateStoreError::StorageError(format!(
+                            "Failed to read key '{key}' in store '{store_id}': {e}"
+                        ))
+                    })?
+                    .map(|existing| existing.value().to_vec());
+
+                if let Some(existing) = existing_value {
+                    Ok(StateStoreCreateIfAbsentResult::Existing(existing))
+                } else {
+                    table.insert(key.as_str(), value.as_slice()).map_err(|e| {
+                        StateStoreError::StorageError(format!(
+                            "Failed to insert key '{key}' into store '{store_id}': {e}"
+                        ))
+                    })?;
+                    Ok(StateStoreCreateIfAbsentResult::Created)
+                }
+            };
+
+            match result {
+                Ok(outcome) => {
+                    write_txn.commit().map_err(|e| {
+                        StateStoreError::StorageError(format!(
+                            "Failed to commit transaction for store '{store_id}': {e}"
+                        ))
+                    })?;
+                    Ok(outcome)
+                }
+                Err(e) => Err(e),
             }
         })
         .await
@@ -735,6 +801,31 @@ mod tests {
         // Get from non-existent store
         let result = provider.get("nonexistent", "key1").await.unwrap();
         assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn test_redb_state_store_create_if_absent() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+        let provider = RedbStateStoreProvider::new(&db_path).unwrap();
+
+        let created = provider
+            .create_if_absent("store1", "key1", b"value1".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(created, StateStoreCreateIfAbsentResult::Created);
+
+        let existing = provider
+            .create_if_absent("store1", "key1", b"value2".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            existing,
+            StateStoreCreateIfAbsentResult::Existing(b"value1".to_vec())
+        );
+
+        let value = provider.get("store1", "key1").await.unwrap();
+        assert_eq!(value, Some(b"value1".to_vec()));
     }
 
     #[tokio::test]

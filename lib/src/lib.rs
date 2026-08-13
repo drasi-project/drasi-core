@@ -206,7 +206,8 @@ pub use indexes::IndexBackendPlugin;
 
 /// State store provider traits and default implementation
 pub use state_store::{
-    MemoryStateStoreProvider, StateStoreError, StateStoreProvider, StateStoreResult,
+    MemoryStateStoreProvider, StateStoreCreateIfAbsentResult, StateStoreError, StateStoreProvider,
+    StateStoreResult,
 };
 
 /// Secret store provider traits and default implementation

@@ -21,7 +21,7 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use drasi_lib::StateStoreProvider;
+use drasi_lib::{StateStoreCreateIfAbsentResult, StateStoreProvider};
 use drasi_plugin_sdk::ffi::{FfiGetResult, FfiResult, FfiStr, FfiStringArray, StateStoreVtable};
 
 /// Wraps an FFI body in `catch_unwind` and returns `default` on panic.
@@ -53,6 +53,7 @@ impl StateStoreVtableBuilder {
             state,
             get_fn: ss_get,
             set_fn: ss_set,
+            create_if_absent_fn: ss_create_if_absent,
             delete_fn: ss_delete,
             contains_key_fn: ss_contains_key,
             get_many_fn: ss_get_many,
@@ -114,6 +115,32 @@ extern "C" fn ss_set(
             None => FfiResult::err("failed to build runtime".to_string()),
         }
     })
+}
+
+extern "C" fn ss_create_if_absent(
+    state: *mut c_void,
+    store_id: FfiStr,
+    key: FfiStr,
+    value: *const u8,
+    value_len: usize,
+) -> FfiGetResult {
+    ffi_guard(
+        FfiGetResult::err("ss_create_if_absent: panic".to_string()),
+        || {
+            let provider = provider_ref(state);
+            let store_id = unsafe { store_id.to_string() };
+            let key = unsafe { key.to_string() };
+            let value = unsafe { std::slice::from_raw_parts(value, value_len) }.to_vec();
+            match block_on(provider.create_if_absent(&store_id, &key, value)) {
+                Some(Ok(StateStoreCreateIfAbsentResult::Created)) => FfiGetResult::not_found(),
+                Some(Ok(StateStoreCreateIfAbsentResult::Existing(existing))) => {
+                    FfiGetResult::found(existing)
+                }
+                Some(Err(e)) => FfiGetResult::err(e.to_string()),
+                None => FfiGetResult::err("failed to build runtime".to_string()),
+            }
+        },
+    )
 }
 
 extern "C" fn ss_delete(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiResult {

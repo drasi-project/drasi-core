@@ -2,7 +2,7 @@
 
 `drasi-reaction-workgraph-router` is a deterministic Phase 2 WorkGraph router reaction.
 
-It consumes **ADDED** rows from the single query `route-awaiting-workgraph-items`, revalidates row provenance + allowlists, reserves routing by `(executionId, requiredEventType)`, applies rules v1, writes trusted JSON comments, creates next routing responsibility, updates Project status, and checkpoints only after durable side effects.
+It consumes **ADDED** rows from the single query `route-awaiting-workgraph-items`, revalidates row provenance + allowlists, reserves routing by `(executionId, requiredEventType)` with durable create-if-absent fencing, applies rules v1, writes trusted JSON comments, creates next routing responsibility, updates Project status, and checkpoints only after durable side effects.
 
 ## Prerequisites
 
@@ -20,6 +20,7 @@ Top-level config (`camelCase`):
 - `allowedResponsibilityTypes`, `allowedActors`
 - `trustedRoutingAuthors`, `trustedLauncherAuthors`, `trustedAgentAuthors`, `trustedRouterAuthors`
 - `githubGraphqlUrl`, `githubRestUrl`, `githubTokenEnv`
+- `projectStatusFieldName` (defaults to `Status`)
 - `timeoutSecs`
 - `strictRecovery`
 
@@ -67,22 +68,20 @@ For `CompletedIssueValidation`:
    - `type: "workgraph.routing-decision/v1"`
 2. Trusted pure-JSON issue comment:
    - `type: "workgraph.routing-responsibility/v1"`
-3. GraphQL project status update mutation
+3. GraphQL `updateProjectV2ItemFieldValue` project status mutation
 
 Reconciliation on retry requires trusted, unedited comments; forged public comments do not satisfy reconciliation.
 
 ## Durability and recovery
 
 - Durable reservation key: `(executionId, requiredEventType)` only
-- Policy id/version are atomically bound at reservation time within the reaction process
+- Reservation creation uses state-store `create_if_absent` (atomic where supported) and records owner fencing metadata
+- Incomplete reservations owned by another runner are fenced until a persisted failed state is available for safe resume
 - Stored state includes reservation, decision, selected transition, side-effect progress, ambiguous/failed flags, and errors
 - `is_durable() = true`
 - `needs_snapshot_on_fresh_start() = false`
 - `default_recovery_policy() = Strict`
-
-### Note on SDK primitive gap
-
-Drasi state store currently has no cross-process compare-and-swap primitive. Reservation write is implemented with an in-process async mutex + durable state store read/write. This is the smallest reusable extension available without middleware changes.
+- Retry/resume always re-checks GitHub issue/project state; status updates are allowed only from source status (`AwaitingRouting`) or when destination status is already applied
 
 ## Running checks
 
@@ -101,10 +100,13 @@ Covered scenarios:
 
 - pass/fail routing
 - duplicate race suppression
+- concurrent replica fencing with shared durable state
 - policy-version conflict suppression
+- interrupted old-policy resume using persisted decision contract
 - untrusted input rejection
 - stale content rejection
 - wrong status rejection
+- retry preflight protection for closed issues and competing status changes
 - GraphQL HTTP 200 + `errors` failure behavior
 - partial side-effect recovery via reconciliation
 - update/delete ignored
@@ -122,5 +124,5 @@ cargo test -p drasi-reaction-workgraph-router --test integration_test -- --ignor
   - ensure `githubTokenEnv` points to an exported token variable
 - `selected transition ... is not allowlisted`:
   - update `allowedStatusTransitions` to include policy output
-- `project item ... status is 'X' (expected 'AwaitingRouting')`:
-  - row is stale or item was already routed
+- `project item ... status is 'X' (expected 'AwaitingRouting' or '<destination>')`:
+  - row is stale, changed by another workflow, or already routed

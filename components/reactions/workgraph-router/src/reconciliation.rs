@@ -56,7 +56,7 @@ pub async fn reconcile_progress(
 
     if !progress.project_status_updated {
         let project_status = github
-            .current_project_status(&candidate.project_item_id)
+            .current_project_status(&candidate.project_id, &candidate.project_item_id)
             .await?;
         if project_status == decision.to_status {
             progress.project_status_updated = true;

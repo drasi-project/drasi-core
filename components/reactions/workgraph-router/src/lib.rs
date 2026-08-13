@@ -164,6 +164,11 @@ impl WorkgraphRouterReactionBuilder {
         self
     }
 
+    pub fn with_project_status_field_name(mut self, value: impl Into<String>) -> Self {
+        self.config.project_status_field_name = value.into();
+        self
+    }
+
     pub fn with_timeout_secs(mut self, value: u64) -> Self {
         self.config.timeout_secs = value;
         self

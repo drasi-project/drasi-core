@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use drasi_lib::state_store::StateStoreProvider;
+use drasi_lib::state_store::{StateStoreCreateIfAbsentResult, StateStoreProvider};
 use serde::{Deserialize, Serialize};
 
 use crate::candidate::RoutingCandidate;
@@ -30,6 +30,8 @@ pub struct ReservationRecord {
     pub reservation_key: String,
     pub execution_id: String,
     pub required_event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_instance_id: Option<String>,
     pub policy_id: String,
     pub policy_type: String,
     pub policy_version: String,
@@ -157,6 +159,26 @@ pub async fn save_reservation(
     Ok(())
 }
 
+pub async fn create_reservation_if_absent(
+    store: Arc<dyn StateStoreProvider>,
+    store_id: &str,
+    record: &ReservationRecord,
+) -> anyhow::Result<Option<ReservationRecord>> {
+    let key = reservation_store_key(&record.reservation_key);
+    let bytes = serde_json::to_vec(record)
+        .map_err(|e| anyhow::anyhow!("failed to serialize reservation record: {e}"))?;
+    let outcome = store
+        .create_if_absent(store_id, &key, bytes)
+        .await
+        .map_err(|e| anyhow::anyhow!("state-store create-if-absent reservation failed: {e}"))?;
+    match outcome {
+        StateStoreCreateIfAbsentResult::Created => Ok(None),
+        StateStoreCreateIfAbsentResult::Existing(existing_bytes) => {
+            deserialize_reservation(existing_bytes).map(Some)
+        }
+    }
+}
+
 pub async fn load_routing_state(
     store: Arc<dyn StateStoreProvider>,
     store_id: &str,
@@ -188,4 +210,9 @@ pub async fn save_routing_state(
         .await
         .map_err(|e| anyhow::anyhow!("state-store set routing-state failed: {e}"))?;
     Ok(())
+}
+
+fn deserialize_reservation(bytes: Vec<u8>) -> anyhow::Result<ReservationRecord> {
+    serde_json::from_slice::<ReservationRecord>(&bytes)
+        .map_err(|e| anyhow::anyhow!("failed to deserialize reservation record: {e}"))
 }

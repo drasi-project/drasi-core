@@ -667,6 +667,14 @@ pub struct StateStoreVtable {
     pub sync_fn: extern "C" fn(state: *mut c_void) -> FfiResult,
     // Cleanup
     pub drop_fn: extern "C" fn(state: *mut c_void),
+    // Extension operations (appended to preserve prefix ABI layout)
+    pub create_if_absent_fn: extern "C" fn(
+        state: *mut c_void,
+        store_id: FfiStr,
+        key: FfiStr,
+        value: *const u8,
+        value_len: usize,
+    ) -> FfiGetResult,
 }
 
 unsafe impl Send for StateStoreVtable {}

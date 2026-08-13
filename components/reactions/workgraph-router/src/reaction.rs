@@ -25,7 +25,6 @@ use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::Reaction;
 use log::{error, info, warn};
-use tokio::sync::Mutex;
 
 use crate::candidate::RoutingCandidate;
 use crate::config::{WorkgraphRouterReactionConfig, ROUTE_QUERY_ID};
@@ -34,16 +33,22 @@ use crate::github_client::GithubClient;
 use crate::reconciliation::reconcile_progress;
 use crate::rules::{PolicyMode, RoutingPolicyEngine, RulesV1PolicyEngine};
 use crate::state::{
-    load_reservation, load_routing_state, save_reservation, save_routing_state, ReservationRecord,
-    RoutingStateRecord, SideEffectProgress,
+    create_reservation_if_absent, load_reservation, load_routing_state, save_reservation,
+    save_routing_state, ReservationRecord, RoutingStateRecord, SideEffectProgress,
 };
 use crate::validation::validate_candidate;
 use crate::WorkgraphRouterReactionBuilder;
 
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct ReservationFencedError {
+    message: String,
+}
+
 pub struct WorkgraphRouterReaction {
     pub(crate) base: ReactionBase,
     pub(crate) config: WorkgraphRouterReactionConfig,
-    reservation_lock: Arc<Mutex<()>>,
+    runner_instance_id: String,
 }
 
 impl WorkgraphRouterReaction {
@@ -59,6 +64,11 @@ impl WorkgraphRouterReaction {
         auto_start: bool,
         recovery_policy: Option<ReactionRecoveryPolicy>,
     ) -> Self {
+        let runner_instance_id = format!(
+            "{id}:{}:{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
@@ -69,7 +79,7 @@ impl WorkgraphRouterReaction {
         Self {
             base: ReactionBase::new(params),
             config,
-            reservation_lock: Arc::new(Mutex::new(())),
+            runner_instance_id,
         }
     }
 }
@@ -118,7 +128,7 @@ impl Reaction for WorkgraphRouterReaction {
         let reaction_name = self.base.id.clone();
         let base = self.base.clone_shared();
         let config = self.config.clone();
-        let reservation_lock = Arc::clone(&self.reservation_lock);
+        let runner_instance_id = self.runner_instance_id.clone();
 
         let handle = tokio::spawn(async move {
             let mut checkpoint_state = CheckpointState::load(&base).await;
@@ -127,7 +137,7 @@ impl Reaction for WorkgraphRouterReaction {
                 base,
                 config,
                 github,
-                reservation_lock,
+                &runner_instance_id,
                 &mut checkpoint_state,
                 shutdown_rx,
             )
@@ -174,7 +184,7 @@ async fn run_processing_loop(
     base: ReactionBase,
     config: WorkgraphRouterReactionConfig,
     github: GithubClient,
-    reservation_lock: Arc<Mutex<()>>,
+    runner_instance_id: &str,
     checkpoint_state: &mut CheckpointState,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
@@ -198,11 +208,18 @@ async fn run_processing_loop(
             &base,
             &config,
             &github,
-            Arc::clone(&reservation_lock),
+            runner_instance_id,
             &event,
         )
         .await
         {
+            if error.downcast_ref::<ReservationFencedError>().is_some() {
+                info!(
+                    "[{}] reservation fenced for query '{}' sequence {}: {}",
+                    reaction_name, event.query_id, event.sequence, error
+                );
+                continue;
+            }
             error!(
                 "[{}] processing failed for query '{}' sequence {}: {error:#}",
                 reaction_name, event.query_id, event.sequence
@@ -241,7 +258,7 @@ async fn process_query_result(
     base: &ReactionBase,
     config: &WorkgraphRouterReactionConfig,
     github: &GithubClient,
-    reservation_lock: Arc<Mutex<()>>,
+    runner_instance_id: &str,
     result: &QueryResult,
 ) -> anyhow::Result<()> {
     for diff in &result.results {
@@ -254,7 +271,7 @@ async fn process_query_result(
                     base,
                     config,
                     github,
-                    Arc::clone(&reservation_lock),
+                    runner_instance_id,
                     &candidate,
                 )
                 .await?;
@@ -276,7 +293,7 @@ async fn process_candidate(
     base: &ReactionBase,
     config: &WorkgraphRouterReactionConfig,
     github: &GithubClient,
-    reservation_lock: Arc<Mutex<()>>,
+    runner_instance_id: &str,
     candidate: &RoutingCandidate,
 ) -> anyhow::Result<()> {
     validate_candidate(candidate, config).context("row validation failed")?;
@@ -286,8 +303,14 @@ async fn process_candidate(
         .await
         .ok_or_else(|| anyhow::anyhow!("durable state store is required for workgraph-router"))?;
 
-    let (mut reservation, mut state) =
-        reserve_or_resume(store.clone(), &base.id, config, candidate, reservation_lock).await?;
+    let (mut reservation, mut state, owns_reservation) = reserve_or_resume(
+        store.clone(),
+        &base.id,
+        config,
+        candidate,
+        runner_instance_id,
+    )
+    .await?;
 
     if reservation.completed && state.progress.is_complete() {
         info!(
@@ -297,29 +320,60 @@ async fn process_candidate(
         return Ok(());
     }
 
-    if reservation.policy_id != config.policy_id
-        || reservation.policy_version != config.policy_version
-    {
+    if !owns_reservation && !reservation.completed && !state.failed {
+        return Err(ReservationFencedError {
+            message: format!(
+                "reservation '{}' is fenced by owner '{}' and is not complete",
+                reservation.reservation_key,
+                reservation
+                    .owner_instance_id
+                    .as_deref()
+                    .unwrap_or("unknown")
+            ),
+        }
+        .into());
+    }
+    if !owns_reservation && !reservation.completed && state.failed {
         info!(
-            "[{}] reservation '{}' already bound to policy {}@{}; skipping newer policy {}@{}",
+            "[{}] resuming failed reservation '{}' owned by '{}' after persisted failure",
             reaction_name,
             reservation.reservation_key,
-            reservation.policy_id,
-            reservation.policy_version,
-            config.policy_id,
-            config.policy_version
+            reservation
+                .owner_instance_id
+                .as_deref()
+                .unwrap_or("unknown")
         );
-        return Ok(());
+        reservation.owner_instance_id = Some(runner_instance_id.to_string());
+        save_reservation(store.clone(), &base.id, &reservation)
+            .await
+            .context("failed to persist reservation ownership claim during resume")?;
     }
 
-    let requires_fresh_preflight = state.decision.is_none();
-    if requires_fresh_preflight {
-        run_github_preflight(github, candidate).await?;
-    }
+    let reservation_policy_mismatch = reservation.policy_id != config.policy_id
+        || reservation.policy_type != config.policy_type
+        || reservation.policy_version != config.policy_version;
 
     let decision = if let Some(decision) = state.decision.clone() {
+        if reservation_policy_mismatch {
+            info!(
+                "[{}] resuming reservation '{}' with persisted decision '{}' bound to policy {}@{}",
+                reaction_name,
+                reservation.reservation_key,
+                decision.decision_id,
+                decision.policy_id,
+                decision.policy_version
+            );
+        }
         decision
     } else {
+        if reservation_policy_mismatch {
+            anyhow::bail!(
+                "reservation '{}' is bound to policy {}@{} but has no persisted decision to resume",
+                reservation.reservation_key,
+                reservation.policy_id,
+                reservation.policy_version
+            );
+        }
         let mode = PolicyMode::try_from(config.policy_type.as_str())
             .context("unable to resolve policyType for routing evaluation")?;
         let engine: Box<dyn RoutingPolicyEngine> = match mode {
@@ -350,6 +404,14 @@ async fn process_candidate(
             .context("failed to persist routing decision state")?;
         decision
     };
+
+    if let Err(error) = run_github_preflight(github, candidate, &decision).await {
+        state.mark_error(format!("github preflight failed: {error:#}"), false);
+        save_routing_state(store.clone(), &base.id, &state)
+            .await
+            .context("failed to persist preflight failure state")?;
+        return Err(error);
+    }
 
     let mut progress =
         reconcile_progress(github, candidate, &decision, config, state.progress.clone())
@@ -463,22 +525,20 @@ async fn reserve_or_resume(
     store_id: &str,
     config: &WorkgraphRouterReactionConfig,
     candidate: &RoutingCandidate,
-    reservation_lock: Arc<Mutex<()>>,
-) -> anyhow::Result<(ReservationRecord, RoutingStateRecord)> {
-    // Smallest reusable reservation primitive available today:
-    // the StateStoreProvider trait has no CAS/create-if-absent operation yet,
-    // so we serialize read+write within the reaction process. Durable state
-    // still guarantees replay-safe dedupe on restart for a single runner.
-    let _guard = reservation_lock.lock().await;
+    runner_instance_id: &str,
+) -> anyhow::Result<(ReservationRecord, RoutingStateRecord, bool)> {
     let reservation_key = candidate.reservation_key();
-    let existing = load_reservation(store.clone(), store_id, &reservation_key).await?;
-    let reservation = if let Some(existing) = existing {
-        existing
+    let (reservation, owns_reservation) = if let Some(existing) =
+        load_reservation(store.clone(), store_id, &reservation_key).await?
+    {
+        let owns_existing = existing.owner_instance_id.as_deref() == Some(runner_instance_id);
+        (existing, owns_existing)
     } else {
         let created = ReservationRecord {
             reservation_key: reservation_key.clone(),
             execution_id: candidate.execution_id.clone(),
             required_event_type: candidate.required_event_type.clone(),
+            owner_instance_id: Some(runner_instance_id.to_string()),
             policy_id: config.policy_id.clone(),
             policy_type: config.policy_type.clone(),
             policy_version: config.policy_version.clone(),
@@ -486,8 +546,10 @@ async fn reserve_or_resume(
             created_at: chrono::Utc::now().to_rfc3339(),
             completed: false,
         };
-        save_reservation(store.clone(), store_id, &created).await?;
-        created
+        match create_reservation_if_absent(store.clone(), store_id, &created).await? {
+            Some(existing) => (existing, false),
+            None => (created, true),
+        }
     };
 
     let state = if let Some(existing_state) =
@@ -499,12 +561,13 @@ async fn reserve_or_resume(
         save_routing_state(store, store_id, &state).await?;
         state
     };
-    Ok((reservation, state))
+    Ok((reservation, state, owns_reservation))
 }
 
 async fn run_github_preflight(
     github: &GithubClient,
     candidate: &RoutingCandidate,
+    decision: &RoutingDecision,
 ) -> anyhow::Result<()> {
     if !github
         .issue_is_open(&candidate.subject_repo, candidate.subject_issue_number)
@@ -518,14 +581,16 @@ async fn run_github_preflight(
         );
     }
     let current_status = github
-        .current_project_status(&candidate.project_item_id)
+        .current_project_status(&candidate.project_id, &candidate.project_item_id)
         .await
         .context("GitHub project-status preflight failed")?;
-    if current_status != "AwaitingRouting" {
+    if current_status != decision.from_status && current_status != decision.to_status {
         anyhow::bail!(
-            "project item {} status is '{}' (expected 'AwaitingRouting')",
+            "project item {} status is '{}' (expected '{}' or '{}')",
             candidate.project_item_id,
-            current_status
+            current_status,
+            decision.from_status,
+            decision.to_status
         );
     }
     Ok(())

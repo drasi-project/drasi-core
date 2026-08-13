@@ -30,6 +30,10 @@ fn default_github_token_env() -> String {
     "GITHUB_TOKEN".to_string()
 }
 
+fn default_project_status_field_name() -> String {
+    "Status".to_string()
+}
+
 fn default_timeout_secs() -> u64 {
     30
 }
@@ -68,6 +72,8 @@ pub struct WorkgraphRouterReactionConfig {
     pub github_rest_url: String,
     #[serde(default = "default_github_token_env")]
     pub github_token_env: String,
+    #[serde(default = "default_project_status_field_name")]
+    pub project_status_field_name: String,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     #[serde(default = "default_strict_recovery")]
@@ -99,6 +105,7 @@ impl std::fmt::Debug for WorkgraphRouterReactionConfig {
             .field("github_graphql_url", &self.github_graphql_url)
             .field("github_rest_url", &self.github_rest_url)
             .field("github_token_env", &self.github_token_env)
+            .field("project_status_field_name", &self.project_status_field_name)
             .field("timeout_secs", &self.timeout_secs)
             .field("strict_recovery", &self.strict_recovery)
             .finish()
@@ -137,6 +144,7 @@ impl Default for WorkgraphRouterReactionConfig {
             github_graphql_url: default_github_graphql_url(),
             github_rest_url: default_github_rest_url(),
             github_token_env: default_github_token_env(),
+            project_status_field_name: default_project_status_field_name(),
             timeout_secs: default_timeout_secs(),
             strict_recovery: default_strict_recovery(),
         }
@@ -188,6 +196,9 @@ impl WorkgraphRouterReactionConfig {
         }
         if self.github_token_env.trim().is_empty() {
             anyhow::bail!("githubTokenEnv is required");
+        }
+        if self.project_status_field_name.trim().is_empty() {
+            anyhow::bail!("projectStatusFieldName is required");
         }
         Ok(())
     }

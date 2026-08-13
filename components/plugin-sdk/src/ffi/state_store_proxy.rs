@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use super::types::FfiStr;
 use super::vtables::StateStoreVtable;
-use drasi_lib::{StateStoreProvider, StateStoreResult};
+use drasi_lib::{StateStoreCreateIfAbsentResult, StateStoreProvider, StateStoreResult};
 
 /// Plugin-side proxy: wraps a host-provided `StateStoreVtable` into a local
 /// `StateStoreProvider` implementation.
@@ -60,6 +60,30 @@ impl StateStoreProvider for FfiStateStoreProxy {
                 value.len(),
             )
             .into_result()
+            .map_err(drasi_lib::StateStoreError::Other)
+        }
+    }
+
+    async fn create_if_absent(
+        &self,
+        store_id: &str,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
+        unsafe {
+            let vtable = &*self.vtable;
+            (vtable.create_if_absent_fn)(
+                vtable.state,
+                FfiStr::from_str(store_id),
+                FfiStr::from_str(key),
+                value.as_ptr(),
+                value.len(),
+            )
+            .into_result()
+            .map(|value| match value {
+                Some(existing) => StateStoreCreateIfAbsentResult::Existing(existing),
+                None => StateStoreCreateIfAbsentResult::Created,
+            })
             .map_err(drasi_lib::StateStoreError::Other)
         }
     }
