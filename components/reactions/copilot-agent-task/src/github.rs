@@ -161,19 +161,26 @@ impl GitHubClient {
     // Preflight: Project (v2) item status
     // ---------------------------------------------------------------
 
-    /// Returns the Project status, linked issue node ID, and authoritative
-    /// issue content version (`lastEditedAt ?? createdAt`).
+    /// Returns authoritative Project item, Project, and linked Issue state.
     pub async fn project_item_status(
         &self,
         project_item_node_id: &str,
         field_name: &str,
-    ) -> Result<(Option<String>, Option<String>, Option<String>), ApiError> {
+    ) -> Result<ProjectItemInfo, ApiError> {
         let query = r#"
             query($id: ID!, $field: String!) {
               node(id: $id) {
                 ... on ProjectV2Item {
                   fieldValueByName(name: $field) {
                     ... on ProjectV2ItemFieldSingleSelectValue { name }
+                  }
+                  project {
+                    id
+                    number
+                    owner {
+                      ... on Organization { login }
+                      ... on User { login }
+                    }
                   }
                   content {
                     ... on Issue { id lastEditedAt createdAt }
@@ -194,7 +201,18 @@ impl GitHubClient {
             data["node"]["content"]["lastEditedAt"].as_str(),
             data["node"]["content"]["createdAt"].as_str(),
         )?;
-        Ok((status, linked_issue_id, content_version))
+        Ok(ProjectItemInfo {
+            status,
+            linked_issue_id,
+            content_version,
+            project_node_id: data["node"]["project"]["id"]
+                .as_str()
+                .map(ToString::to_string),
+            project_owner: data["node"]["project"]["owner"]["login"]
+                .as_str()
+                .map(ToString::to_string),
+            project_number: data["node"]["project"]["number"].as_u64(),
+        })
     }
 
     fn content_version_from_timestamps(
@@ -454,6 +472,16 @@ pub struct IssueInfo {
     pub node_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProjectItemInfo {
+    pub status: Option<String>,
+    pub linked_issue_id: Option<String>,
+    pub content_version: Option<String>,
+    pub project_node_id: Option<String>,
+    pub project_owner: Option<String>,
+    pub project_number: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CreateTaskRequest {
@@ -692,27 +720,56 @@ pub async fn run_preflight(
             row.issue_node_id, row.repository, row.issue_number, issue.node_id
         )));
     }
-    let (status, linked_issue_id, live_content_version) = client
+    let project_item = client
         .project_item_status(&row.project_item_node_id, "Status")
         .await?;
-    if status.as_deref() != Some(row.expected_project_status.as_str()) {
+    if project_item.status.as_deref() != Some(row.expected_project_status.as_str()) {
         return Err(PreflightError::Permanent(format!(
             "project status changed: expected '{}', found {:?}",
-            row.expected_project_status, status
+            row.expected_project_status, project_item.status
+        )));
+    }
+    if project_item.project_node_id.as_deref() != Some(row.project_node_id.as_str())
+        || project_item.project_owner.as_deref() != Some(row.project_owner.as_str())
+        || project_item.project_number != Some(row.project_number)
+    {
+        return Err(PreflightError::Permanent(format!(
+            "project identity changed: expected node={} owner={} number={}, found node={:?} owner={:?} number={:?}",
+            row.project_node_id,
+            row.project_owner,
+            row.project_number,
+            project_item.project_node_id,
+            project_item.project_owner,
+            project_item.project_number
         )));
     }
     // Cross-check that the project item is actually linked to this issue —
     // otherwise `projectItemNodeId` could name an unrelated project item
     // that merely happens to have a matching `Status` value.
-    if linked_issue_id.as_deref() != Some(row.issue_node_id.as_str()) {
+    if project_item.linked_issue_id.as_deref() != Some(row.issue_node_id.as_str()) {
         return Err(PreflightError::Permanent(format!(
             "projectItemNodeId '{}' is not linked to issue '{}' (linked to {:?})",
-            row.project_item_node_id, row.issue_node_id, linked_issue_id
+            row.project_item_node_id, row.issue_node_id, project_item.linked_issue_id
         )));
     }
-    if live_content_version.as_deref() != Some(row.issue_content_version.as_str()) {
+    let expected_content_version =
+        crate::row::LaunchRow::parse_rfc3339_instant(&row.issue_content_version)
+            .map_err(|e| PreflightError::Permanent(e.to_string()))?;
+    let live_content_version = project_item
+        .content_version
+        .as_deref()
+        .ok_or_else(|| {
+            PreflightError::Permanent(
+                "project item linked issue did not return a content version".to_string(),
+            )
+        })
+        .and_then(|value| {
+            crate::row::LaunchRow::parse_rfc3339_instant(value)
+                .map_err(|e| PreflightError::Permanent(e.to_string()))
+        })?;
+    if live_content_version != expected_content_version {
         return Err(PreflightError::Permanent(format!(
-            "issue content version changed: expected {}, found {:?}",
+            "issue content version changed: expected {}, found {}",
             row.issue_content_version, live_content_version
         )));
     }

@@ -242,6 +242,7 @@ mod tests {
             issue_url: "https://github.com/drasi-project/drasi-core/issues/42".to_string(),
             issue_node_id: "I_kwDOtest".to_string(),
             project_item_node_id: "PVTI_test".to_string(),
+            project_node_id: "PVT_test".to_string(),
             project_owner: "drasi-project".to_string(),
             project_number: 3,
             subject_type: "Issue".to_string(),
@@ -256,7 +257,7 @@ mod tests {
             fallback_model: Some("gpt-4".to_string()),
             required_event_type: "CompletedIssueValidation".to_string(),
             base_ref: "main".to_string(),
-            expected_project_status: "In Progress".to_string(),
+            expected_project_status: "AwaitingValidation".to_string(),
         }
     }
 

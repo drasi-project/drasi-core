@@ -47,7 +47,7 @@ const REACTION: &str = "copilot-launcher";
 const OWNER: &str = "drasi-project";
 const REPO: &str = "drasi-core";
 const REPOSITORY: &str = "drasi-project/drasi-core";
-const CONTENT_VERSION: &str = "2026-08-13T19:00:00Z";
+const CONTENT_VERSION: &str = "2026-08-13T19:00:00.000Z";
 const PROFILE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const WARMUP: Duration = Duration::from_millis(150);
 
@@ -66,6 +66,7 @@ fn launch_query_str() -> &'static str {
     "MATCH (r:LaunchRequest) RETURN \
      r.repository AS repository, r.issueNumber AS issueNumber, r.issueUrl AS issueUrl, \
      r.issueNodeId AS issueNodeId, r.projectItemNodeId AS projectItemNodeId, \
+     r.projectNodeId AS projectNodeId, \
      r.projectOwner AS projectOwner, r.projectNumber AS projectNumber, \
      r.subjectType AS subjectType, \
      r.actorType AS actorType, r.actorId AS actorId, \
@@ -125,6 +126,7 @@ async fn insert_row(
         )
         .with_string("issueNodeId", format!("I_{node_id}"))
         .with_string("projectItemNodeId", format!("PVTI_{node_id}"))
+        .with_string("projectNodeId", "PVT_workgraph")
         .with_string("projectOwner", OWNER)
         .with_integer("projectNumber", 3)
         .with_string("subjectType", "Issue")
@@ -170,7 +172,7 @@ async fn mount_happy_path_preflight(server: &MockServer, issue_number: u64, node
     let issue_node_id = format!("I_{node_id}");
     mock_github::mount_issue(server, OWNER, REPO, issue_number, "open", &issue_node_id).await;
     mock_github::mount_contents(server, OWNER, REPO, PROFILE_SHA).await;
-    mock_github::mount_project_status(server, "In Progress", &issue_node_id).await;
+    mock_github::mount_project_status(server, "AwaitingValidation", &issue_node_id).await;
 }
 
 // ---------------------------------------------------------------------
@@ -227,7 +229,7 @@ async fn success_launches_task_and_posts_one_comment() {
         Some("gpt-4"),
         REPOSITORY,
         &version,
-        "In Progress",
+        "AwaitingValidation",
     )
     .await;
 
@@ -371,7 +373,7 @@ async fn validation_rejects_disallowed_repository_and_never_launches() {
         None,
         "other-org/other-repo",
         "any-version",
-        "In Progress",
+        "AwaitingValidation",
     )
     .await;
 
@@ -461,7 +463,7 @@ async fn fallback_used_exactly_once_on_unsupported_model() {
         Some("gpt-4"),
         REPOSITORY,
         &version,
-        "In Progress",
+        "AwaitingValidation",
     )
     .await;
 
@@ -533,7 +535,7 @@ async fn fallback_model_is_durable_before_ambiguous_transport_outcome() {
         Some("gpt-4"),
         REPOSITORY,
         CONTENT_VERSION,
-        "In Progress",
+        "AwaitingValidation",
     )
     .await;
 
@@ -614,7 +616,7 @@ async fn no_fallback_on_unrelated_422() {
         Some("gpt-4"),
         REPOSITORY,
         &version,
-        "In Progress",
+        "AwaitingValidation",
     )
     .await;
 
@@ -702,7 +704,7 @@ async fn duplicate_delivery_launches_only_once() {
         None,
         REPOSITORY,
         &version,
-        "In Progress",
+        "AwaitingValidation",
     )
     .await;
     wait_until(
@@ -728,7 +730,7 @@ async fn duplicate_delivery_launches_only_once() {
         None,
         REPOSITORY,
         &version,
-        "In Progress",
+        "AwaitingValidation",
     )
     .await;
     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -822,7 +824,7 @@ async fn completed_duplicate_survives_all_allowlist_narrowing() {
         None,
         REPOSITORY,
         CONTENT_VERSION,
-        "In Progress",
+        "AwaitingValidation",
     )
     .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -937,7 +939,7 @@ async fn crash_recovery_adopts_exactly_one_existing_task() {
         None,
         REPOSITORY,
         &version,
-        "In Progress",
+        "AwaitingValidation",
     )
     .await;
 
@@ -1032,7 +1034,7 @@ async fn ambiguous_reconciliation_with_no_match_never_retries() {
         None,
         REPOSITORY,
         &version,
-        "In Progress",
+        "AwaitingValidation",
     )
     .await;
 
@@ -1140,7 +1142,7 @@ async fn graphql_errors_on_project_status_are_treated_as_failure() {
         None,
         REPOSITORY,
         &version,
-        "In Progress",
+        "AwaitingValidation",
     )
     .await;
 
@@ -1218,7 +1220,7 @@ async fn graphql_errors_on_add_comment_are_treated_as_failure() {
         None,
         REPOSITORY,
         &version,
-        "In Progress",
+        "AwaitingValidation",
     )
     .await;
 
@@ -1346,7 +1348,7 @@ async fn token_is_sent_to_github_but_never_exposed_via_debug() {
         None,
         REPOSITORY,
         &version,
-        "In Progress",
+        "AwaitingValidation",
     )
     .await;
 

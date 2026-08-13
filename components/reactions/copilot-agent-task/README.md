@@ -76,6 +76,7 @@ Each row returned by the launch query must contain the following fields (camelCa
 | `issueUrl` | string | |
 | `issueNodeId` | string | GitHub GraphQL node ID of the issue (comment target) |
 | `projectItemNodeId` | string | GitHub Projects (v2) item node ID |
+| `projectNodeId` | string | GitHub Project (v2) node ID |
 | `projectOwner` | string | GitHub organization or user that owns the Project |
 | `projectNumber` | integer | GitHub Project number |
 | `subjectType` | string | WorkGraph target subject type (`Issue` for this reaction) |
@@ -165,10 +166,12 @@ state live, rejecting (permanently, fail-closed) if any of the following do not 
    the row's `issueNodeId`, so a row cannot point its correlation IDs (and therefore the
    comment target) at an issue node ID unrelated to the `repository`/`issueNumber` it claims.
 3. **Issue content unchanged** — the Project-item GraphQL lookup reads the linked Issue's
-   `lastEditedAt` and `createdAt`. The reaction selects `lastEditedAt ?? createdAt`, normalizes
-   the chosen instant to UTC RFC 3339 (`Z`), and requires it to equal `issueContentVersion`.
-4. **Project status unchanged** — a GraphQL query reads the Projects (v2) item's `Status`
-   single-select field value and requires it to equal `expectedProjectStatus`.
+   `lastEditedAt` and `createdAt`. The reaction selects `lastEditedAt ?? createdAt` and
+   requires it to represent the same RFC 3339 instant as `issueContentVersion`.
+4. **Project identity and status unchanged** — a GraphQL query requires the item's parent
+   Project node ID, owner login, and number to equal `projectNodeId`, `projectOwner`, and
+   `projectNumber`, then requires its `Status` single-select value to equal
+   `expectedProjectStatus`, which must be `AwaitingValidation` for this Phase 2 reaction.
 5. **Project item is linked to this issue** — the same GraphQL query also reads the item's
    `content { ... on Issue { id } } ` and requires it to equal the row's `issueNodeId`, so
    `projectItemNodeId` cannot name an unrelated project item that merely happens to have a

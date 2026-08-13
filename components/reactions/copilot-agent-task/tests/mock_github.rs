@@ -62,6 +62,11 @@ pub async fn mount_project_status(server: &MockServer, status: &str, linked_issu
             "data": {
                 "node": {
                     "fieldValueByName": { "name": status },
+                    "project": {
+                        "id": "PVT_workgraph",
+                        "number": 3,
+                        "owner": { "login": "drasi-project" }
+                    },
                     "content": {
                         "id": linked_issue_node_id,
                         "lastEditedAt": "2026-08-13T19:00:00Z",

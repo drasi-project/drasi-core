@@ -45,6 +45,7 @@ pub struct LaunchRow {
     pub issue_url: String,
     pub issue_node_id: String,
     pub project_item_node_id: String,
+    pub project_node_id: String,
     pub project_owner: String,
     pub project_number: u64,
     pub subject_type: String,
@@ -111,11 +112,14 @@ impl LaunchRow {
     /// Normalize an RFC 3339 timestamp to a UTC instant using `Z` and only the
     /// fractional precision needed to represent the instant.
     pub fn normalize_rfc3339_instant(value: &str) -> Result<String> {
-        let parsed = chrono::DateTime::parse_from_rfc3339(value)
-            .with_context(|| format!("'{value}' is not an RFC 3339 instant"))?;
-        Ok(parsed
-            .with_timezone(&chrono::Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+        let parsed = Self::parse_rfc3339_instant(value)?;
+        Ok(parsed.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+    }
+
+    pub fn parse_rfc3339_instant(value: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .with_context(|| format!("'{value}' is not an RFC 3339 instant"))
+            .map(|parsed| parsed.with_timezone(&chrono::Utc))
     }
 
     /// Split `repository` into `(owner, repo)`.
@@ -186,16 +190,11 @@ pub fn validate_row(
     if let Err(e) = row.profile_path_and_sha() {
         return Err(ValidationError::Malformed(e.to_string()));
     }
-    match LaunchRow::normalize_rfc3339_instant(&row.issue_content_version) {
-        Ok(normalized) if normalized == row.issue_content_version => {}
-        Ok(normalized) => {
-            return Err(ValidationError::Malformed(format!(
-                "issueContentVersion must be normalized RFC 3339; expected '{normalized}'"
-            )))
-        }
-        Err(e) => return Err(ValidationError::Malformed(e.to_string())),
+    if let Err(e) = LaunchRow::parse_rfc3339_instant(&row.issue_content_version) {
+        return Err(ValidationError::Malformed(e.to_string()));
     }
     if row.project_number == 0
+        || row.project_node_id.trim().is_empty()
         || row.project_owner.trim().is_empty()
         || row.subject_type.trim().is_empty()
         || row.actor_type.trim().is_empty()
@@ -220,6 +219,11 @@ pub fn validate_row(
             "requiredEventType must be 'CompletedIssueValidation'".to_string(),
         ));
     }
+    if row.expected_project_status != "AwaitingValidation" {
+        return Err(ValidationError::Malformed(
+            "expectedProjectStatus must be 'AwaitingValidation'".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -235,6 +239,7 @@ mod tests {
             issue_url: "https://github.com/drasi-project/drasi-core/issues/42".to_string(),
             issue_node_id: "I_kwDOtest".to_string(),
             project_item_node_id: "PVTI_test".to_string(),
+            project_node_id: "PVT_test".to_string(),
             project_owner: "drasi-project".to_string(),
             project_number: 3,
             subject_type: "Issue".to_string(),
@@ -249,7 +254,7 @@ mod tests {
             fallback_model: Some("gpt-4".to_string()),
             required_event_type: "CompletedIssueValidation".to_string(),
             base_ref: "main".to_string(),
-            expected_project_status: "In Progress".to_string(),
+            expected_project_status: "AwaitingValidation".to_string(),
         }
     }
 
