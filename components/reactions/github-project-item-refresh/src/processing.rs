@@ -127,12 +127,16 @@ impl RefreshProcessor {
             reserved_at: Utc::now(),
         };
 
-        if self.state_store.get_reservation(&key).await?.is_none() {
-            self.state_store
-                .set_reservation(&key, &reservation)
-                .await
-                .context("persisting delivery reservation")?;
-        }
+        let reservation = match self.state_store.get_reservation(&key).await? {
+            Some(existing) => existing,
+            None => {
+                self.state_store
+                    .set_reservation(&key, &reservation)
+                    .await
+                    .context("persisting delivery reservation")?;
+                reservation
+            }
+        };
 
         let mut publication = self
             .state_store
@@ -184,7 +188,7 @@ impl RefreshProcessor {
                 .await;
         }
 
-        if let Some(project_node_id) = &input.project_node_id {
+        if let Some(project_node_id) = &reservation.project_node_id {
             if project_node_id != &fetched.project_node_id {
                 let message = format!(
                     "input project node id '{project_node_id}' does not match fetched project '{}'",
@@ -198,7 +202,7 @@ impl RefreshProcessor {
             }
         }
 
-        if let Some(status_field_node_id) = &input.status_field_node_id {
+        if let Some(status_field_node_id) = &reservation.status_field_node_id {
             if status_field_node_id != &fetched.status_field_node_id {
                 let message = format!(
                     "input StatusFieldNodeId '{status_field_node_id}' does not match fetched status field '{}'",
@@ -427,8 +431,6 @@ pub fn parse_invalidation_input(row_data: &Value) -> anyhow::Result<Invalidation
 }
 
 fn urls_match(lhs: &str, rhs: &str) -> bool {
-    let fallback_match = normalize_raw_url(lhs).eq_ignore_ascii_case(&normalize_raw_url(rhs));
-
     match (Url::parse(lhs), Url::parse(rhs)) {
         (Ok(lhs), Ok(rhs)) => {
             lhs.scheme() == rhs.scheme()
@@ -437,12 +439,8 @@ fn urls_match(lhs: &str, rhs: &str) -> bool {
                 && normalize_path(lhs.path()) == normalize_path(rhs.path())
                 && lhs.query() == rhs.query()
         }
-        _ => fallback_match,
+        _ => false,
     }
-}
-
-fn normalize_raw_url(value: &str) -> String {
-    value.trim().trim_end_matches('/').to_string()
 }
 
 fn normalize_path(path: &str) -> &str {

@@ -1295,6 +1295,19 @@ async fn status_field_node_id_mismatch_is_failed_without_destination_publish() {
         Some("PVTSSF_wrong")
     );
 
+    let replay_without_constraint = json!({
+        "InvalidationNodeId": "INV_status_mismatch",
+        "DeliveryId": "delivery-status-mismatch",
+        "ProjectItemNodeId": "PVTI_status_mismatch",
+        "ProjectNodeId": "PVT_project1",
+        "InvalidatedAt": "2026-08-13T20:14:00Z"
+    });
+    let replay_error = processor
+        .process_add_row(&replay_without_constraint)
+        .await
+        .expect_err("persisted status field constraint must remain authoritative");
+    assert!(replay_error.to_string().contains("StatusFieldNodeId"));
+
     let publication = state_store
         .get_publication(&key)
         .await
@@ -1363,6 +1376,30 @@ async fn state_source_url_mismatch_is_rejected_without_redirect_or_fetch() {
         0,
         "must reject before GraphQL fetch"
     );
+
+    let malformed_matching_url = json!({
+        "InvalidationNodeId": "INV_url_malformed",
+        "DeliveryId": "delivery-url-malformed",
+        "ProjectItemNodeId": "PVTI_url_malformed",
+        "ProjectNodeId": "PVT_project1",
+        "StateSourceUrl": "\u{2003}http://127.0.0.1:9001/sources/github-project-state/events",
+        "InvalidatedAt": "2026-08-13T20:21:00Z"
+    });
+    let outcome = processor
+        .process_add_row(&malformed_matching_url)
+        .await
+        .expect("malformed URL should be rejected without network access");
+    assert_eq!(outcome, AddRowOutcome::Rejected);
+    assert!(graphql_server
+        .received_requests()
+        .await
+        .expect("graphql requests")
+        .is_empty());
+    assert!(destination_server
+        .received_requests()
+        .await
+        .expect("destination requests")
+        .is_empty());
 }
 
 #[test]
