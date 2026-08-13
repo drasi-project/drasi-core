@@ -100,18 +100,25 @@ impl From<&CopilotAgentTaskReactionConfig> for CopilotAgentTaskReactionConfigDto
     }
 }
 
-fn map_comment_api(dto: &CommentApiConfigDto) -> CommentApiConfig {
+async fn map_comment_api(
+    dto: &CommentApiConfigDto,
+    mapper: &DtoMapper,
+) -> anyhow::Result<CommentApiConfig> {
     let default = CommentApiConfig::default();
-    CommentApiConfig {
+    Ok(CommentApiConfig {
         max_attempts: match &dto.max_attempts {
-            Some(ConfigValue::Static(v)) => *v as u32,
-            _ => default.max_attempts,
+            Some(v) => {
+                let resolved: u64 = mapper.resolve_typed(v).await?;
+                u32::try_from(resolved)
+                    .map_err(|_| anyhow::anyhow!("`commentApi.maxAttempts` exceeds u32"))?
+            }
+            None => default.max_attempts,
         },
         retry_backoff_ms: match &dto.retry_backoff_ms {
-            Some(ConfigValue::Static(v)) => *v,
-            _ => default.retry_backoff_ms,
+            Some(v) => mapper.resolve_typed(v).await?,
+            None => default.retry_backoff_ms,
         },
-    }
+    })
 }
 
 #[derive(OpenApi)]
@@ -220,7 +227,7 @@ impl ReactionPluginDescriptor for CopilotAgentTaskReactionDescriptor {
             builder = builder.with_request_timeout_ms(mapper.resolve_typed(v).await?);
         }
         if let Some(ref c) = dto.comment_api {
-            builder = builder.with_comment_api(map_comment_api(c));
+            builder = builder.with_comment_api(map_comment_api(c, &mapper).await?);
         }
         if let Some(ref v) = dto.strict_recovery {
             builder = builder.with_strict_recovery(mapper.resolve_typed(v).await?);

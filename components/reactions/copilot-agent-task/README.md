@@ -106,6 +106,7 @@ Each row returned by the launch query must contain the following fields (camelCa
 | `commentApi.maxAttempts` | u32 | `3` | In-process retry attempts for the comment step within one run |
 | `commentApi.retryBackoffMs` | u64 | `500` | Backoff between comment retry attempts |
 | `strictRecovery` | bool | `true` | Must be `true` — see [Reservation, idempotency, and recovery](#reservation-idempotency-and-recovery) |
+| `priorityQueueCapacity` | u64 | framework default | Optional reaction input queue capacity |
 
 In declarative (dynamic-plugin) config, `token` is a `ConfigValue<String>` and is expected to
 be supplied as a `${ENV_VAR}` reference or a `{"kind":"Secret","name":"..."}` reference —
