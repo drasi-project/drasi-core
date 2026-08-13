@@ -111,8 +111,7 @@ middleware:
       mappings:
         Comment:
           insert: &event_mappings
-            - op: Insert
-              elementType: Node
+            - elementType: Node
               label: '"Event"'
               id: .id
               query: 'if .event then .event else empty end'
