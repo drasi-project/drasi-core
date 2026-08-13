@@ -36,6 +36,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use drasi_lib::state_store::StateStoreProvider;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 /// Lifecycle status of one launch attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +101,76 @@ pub struct ExecutionRecord {
 
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+pub const WORKGRAPH_EXECUTION_STATE_SCHEMA_V1: &str = "workgraph.execution-state/v1";
+
+/// Stable structured-log envelope emitted after an `Ambiguous` or `Failed`
+/// execution record is durably written. It intentionally excludes
+/// `last_error`, prompts, and credentials.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkGraphExecutionStateV1 {
+    pub schema: String,
+    pub reaction_id: String,
+    pub execution_id: String,
+    pub route_id: String,
+    pub responsibility_id: String,
+    pub attempt: u32,
+    pub status: ExecutionStatus,
+    pub repository: String,
+    pub issue_number: u64,
+    pub error_present: bool,
+    pub observed_at: DateTime<Utc>,
+}
+
+impl WorkGraphExecutionStateV1 {
+    pub fn from_record(reaction_id: &str, record: &ExecutionRecord) -> Option<Self> {
+        match record.status {
+            ExecutionStatus::Ambiguous | ExecutionStatus::Failed => Some(Self {
+                schema: WORKGRAPH_EXECUTION_STATE_SCHEMA_V1.to_string(),
+                reaction_id: reaction_id.to_string(),
+                execution_id: record.execution_id.clone(),
+                route_id: record.route_id.clone(),
+                responsibility_id: record.responsibility_id.clone(),
+                attempt: record.attempt,
+                status: record.status,
+                repository: record.repository.clone(),
+                issue_number: record.issue_number,
+                error_present: record.last_error.is_some(),
+                observed_at: record.updated_at,
+            }),
+            _ => None,
+        }
+    }
+}
+
+pub fn workgraph_execution_state_v1_schema() -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://drasi.io/schemas/workgraph/workgraph.execution-state-v1.json",
+        "title": "workgraph.execution-state/v1",
+        "description": "Structured log emitted after a failed or ambiguous Copilot Agent Task execution state is durably persisted.",
+        "type": "object",
+        "required": [
+            "schema", "reactionId", "executionId", "routeId", "responsibilityId", "attempt",
+            "status", "repository", "issueNumber", "errorPresent", "observedAt"
+        ],
+        "properties": {
+            "schema": { "const": WORKGRAPH_EXECUTION_STATE_SCHEMA_V1 },
+            "reactionId": { "type": "string" },
+            "executionId": { "type": "string" },
+            "routeId": { "type": "string" },
+            "responsibilityId": { "type": "string" },
+            "attempt": { "type": "integer", "minimum": 1 },
+            "status": { "enum": ["ambiguous", "failed"] },
+            "repository": { "type": "string" },
+            "issueNumber": { "type": "integer" },
+            "errorPresent": { "type": "boolean" },
+            "observedAt": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+    })
 }
 
 impl ExecutionRecord {
@@ -181,10 +252,19 @@ pub async fn save(
     let key =
         crate::ids::reservation_key(&record.route_id, &record.responsibility_id, record.attempt);
     let bytes = serde_json::to_vec(record).context("failed to serialize ExecutionRecord")?;
+    let observation = WorkGraphExecutionStateV1::from_record(store_id, record)
+        .map(|value| {
+            serde_json::to_string(&value)
+                .context("failed to serialize workgraph execution-state observation")
+        })
+        .transpose()?;
     store
         .set(store_id, &key, bytes)
         .await
         .map_err(|e| anyhow::anyhow!("state store set failed: {e}"))?;
+    if let Some(observation) = observation {
+        log::warn!(target: "workgraph.execution_state", "{observation}");
+    }
     Ok(())
 }
 
@@ -355,6 +435,28 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(outcome, ReservationOutcome::AlreadyDone(_)));
+    }
+
+    #[test]
+    fn failed_observation_is_structured_and_excludes_error_text() {
+        let mut record = sample();
+        record.status = ExecutionStatus::Failed;
+        record.last_error = Some("sensitive upstream response".to_string());
+        let observation = WorkGraphExecutionStateV1::from_record("reaction-1", &record).unwrap();
+        let value = serde_json::to_value(observation).unwrap();
+        assert_eq!(value["schema"], WORKGRAPH_EXECUTION_STATE_SCHEMA_V1);
+        assert_eq!(value["reactionId"], "reaction-1");
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["errorPresent"], true);
+        assert!(value.get("lastError").is_none());
+        assert!(!value.to_string().contains("sensitive upstream response"));
+    }
+
+    #[test]
+    fn successful_states_do_not_emit_failure_observations() {
+        let mut record = sample();
+        record.status = ExecutionStatus::Started;
+        assert!(WorkGraphExecutionStateV1::from_record("reaction-1", &record).is_none());
     }
 
     #[tokio::test]

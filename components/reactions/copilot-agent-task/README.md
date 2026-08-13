@@ -29,10 +29,11 @@ newly added to the query's result set can trigger a launch.
 7. [Model fallback](#model-fallback)
 8. [The prompt and `WorkGraphEvent/v1`](#the-prompt-and-workgrapheventv1)
 9. [The `workgraph.execution/v1` comment](#the-workgraphexecutionv1-comment)
-10. [Ambiguous creation and reconciliation](#ambiguous-creation-and-reconciliation)
-11. [Security](#security)
-12. [Testing](#testing)
-13. [Known limitations / integration caveats](#known-limitations--integration-caveats)
+10. [Failure-state observability](#failure-state-observability)
+11. [Ambiguous creation and reconciliation](#ambiguous-creation-and-reconciliation)
+12. [Security](#security)
+13. [Testing](#testing)
+14. [Known limitations / integration caveats](#known-limitations--integration-caveats)
 
 ---
 
@@ -196,6 +197,39 @@ fallback model was used.
 An HTTP `200` response from GraphQL that carries a non-empty top-level `errors` array is
 always treated as a **failure**, even though the GraphQL spec allows `data` and `errors` to
 coexist — the reaction never treats a partial GraphQL response as success.
+
+## Failure-state observability
+
+The `workgraph.execution/v1` GitHub comment is success-only: it is posted only after GitHub
+confirms that a task started. Failed or ambiguous reservations never write a success-shaped
+issue comment.
+
+After every durable `Failed` or `Ambiguous` execution-record write, the reaction emits one
+single-line JSON log to the `workgraph.execution_state` log target. The body matches
+`schema/workgraph-execution-state-v1.schema.json`:
+
+```json
+{
+  "schema": "workgraph.execution-state/v1",
+  "reactionId": "copilot-launcher",
+  "executionId": "<stable execution ID>",
+  "routeId": "<route ID>",
+  "responsibilityId": "<responsibility ID>",
+  "attempt": 1,
+  "status": "failed",
+  "repository": "owner/repo",
+  "issueNumber": 123,
+  "errorPresent": true,
+  "observedAt": "2026-08-13T19:00:00Z"
+}
+```
+
+`status` is exactly `ambiguous` or `failed`. The envelope deliberately excludes `lastError`,
+token values, prompts, and GitHub response bodies. Dogfood monitors should collect structured
+logs and filter on log target `workgraph.execution_state` or JSON field
+`schema=workgraph.execution-state/v1`. `ComponentStatus::Error` remains the coarse health
+surface for transient/ambiguous pipeline stops, while the durable `ExecutionRecord` remains
+the restart/idempotency source of truth.
 
 ## Ambiguous creation and reconciliation
 

@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use drasi_reaction_copilot_agent_task::prompt::{
     work_graph_event_v1_schema, workgraph_execution_v1_schema,
 };
+use drasi_reaction_copilot_agent_task::state::workgraph_execution_state_v1_schema;
 
 fn schema_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -75,5 +76,13 @@ fn workgraph_execution_v1_schema_file_is_in_sync() {
     assert_in_sync(
         "workgraph-execution-v1.schema.json",
         &workgraph_execution_v1_schema(),
+    );
+}
+
+#[test]
+fn workgraph_execution_state_v1_schema_file_is_in_sync() {
+    assert_in_sync(
+        "workgraph-execution-state-v1.schema.json",
+        &workgraph_execution_state_v1_schema(),
     );
 }

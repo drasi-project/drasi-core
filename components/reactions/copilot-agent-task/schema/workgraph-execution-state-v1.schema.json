@@ -1,0 +1,61 @@
+{
+  "$id": "https://drasi.io/schemas/workgraph/workgraph.execution-state-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Structured log emitted after a failed or ambiguous Copilot Agent Task execution state is durably persisted.",
+  "properties": {
+    "attempt": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "errorPresent": {
+      "type": "boolean"
+    },
+    "executionId": {
+      "type": "string"
+    },
+    "issueNumber": {
+      "type": "integer"
+    },
+    "observedAt": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "reactionId": {
+      "type": "string"
+    },
+    "repository": {
+      "type": "string"
+    },
+    "responsibilityId": {
+      "type": "string"
+    },
+    "routeId": {
+      "type": "string"
+    },
+    "schema": {
+      "const": "workgraph.execution-state/v1"
+    },
+    "status": {
+      "enum": [
+        "ambiguous",
+        "failed"
+      ]
+    }
+  },
+  "required": [
+    "schema",
+    "reactionId",
+    "executionId",
+    "routeId",
+    "responsibilityId",
+    "attempt",
+    "status",
+    "repository",
+    "issueNumber",
+    "errorPresent",
+    "observedAt"
+  ],
+  "title": "workgraph.execution-state/v1",
+  "type": "object"
+}
