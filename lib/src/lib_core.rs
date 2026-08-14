@@ -418,6 +418,9 @@ impl DrasiLib {
         self.source_manager
             .inject_state_store(state_store.clone())
             .await;
+        self.query_manager
+            .inject_state_store(state_store.clone())
+            .await;
         self.reaction_manager.inject_state_store(state_store).await;
 
         // Inject IdentityProvider into SourceManager and ReactionManager (if configured)

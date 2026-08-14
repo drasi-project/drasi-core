@@ -607,6 +607,9 @@ impl DrasiLibBuilder {
         core.source_manager
             .inject_state_store(state_store.clone())
             .await;
+        core.query_manager
+            .inject_state_store(state_store.clone())
+            .await;
         core.reaction_manager.inject_state_store(state_store).await;
 
         // Inject WAL provider into SourceManager (if configured)

@@ -2781,6 +2781,133 @@ async fn test_e2e_cdylib_source_query_reaction() {
     core.stop().await.expect("Should stop DrasiLib");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn test_cdylib_reaction_receives_results_above_legacy_redb_checkpoint() {
+    use drasi_lib::{ReactionCheckpoint, StateStoreProvider};
+
+    if !plugin_exists("drasi-source-mock") || !plugin_exists("drasi-reaction-sse") {
+        eprintln!(
+            "SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)"
+        );
+        return;
+    }
+
+    let mock_plugin = load_plugin_from_path(
+        &require_plugin("drasi-source-mock"),
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("load mock-source cdylib");
+    let sse_plugin = load_plugin_from_path(
+        &require_plugin("drasi-reaction-sse"),
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("load SSE-reaction cdylib");
+
+    let source = mock_plugin.source_plugins[0]
+        .create_source(
+            "restart-source",
+            &serde_json::json!({
+                "dataType": { "type": "counter" },
+                "intervalMs": 100
+            }),
+            true,
+        )
+        .await
+        .expect("create mock source");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve SSE port");
+    let port = listener.local_addr().expect("SSE address").port();
+    drop(listener);
+    let reaction = sse_plugin.reaction_plugins[0]
+        .create_reaction(
+            "restart-reaction",
+            vec!["restart-query".to_string()],
+            &serde_json::json!({
+                "host": "127.0.0.1",
+                "port": port,
+                "sse_path": "/events"
+            }),
+            true,
+        )
+        .await
+        .expect("create SSE reaction");
+
+    let query = drasi_lib::Query::cypher("restart-query")
+        .query("MATCH (n:Counter) RETURN n.value AS Value")
+        .from_source("restart-source")
+        .with_outbox_capacity(100)
+        .build();
+    let checkpoint = ReactionCheckpoint {
+        sequence: 50,
+        config_hash: drasi_lib::queries::compute_config_hash(&query),
+    };
+    let temp_dir = tempfile::tempdir().expect("redb temp directory");
+    let store: std::sync::Arc<dyn StateStoreProvider> = std::sync::Arc::new(
+        drasi_state_store_redb::RedbStateStoreProvider::new(
+            temp_dir.path().join("legacy-state.redb"),
+        )
+        .expect("create redb state store"),
+    );
+    store
+        .set(
+            "restart-reaction",
+            "checkpoint:restart-query",
+            bincode::serialize(&checkpoint).expect("serialize checkpoint"),
+        )
+        .await
+        .expect("seed legacy reaction checkpoint");
+
+    let core = drasi_lib::DrasiLib::builder()
+        .with_id("cdylib-restart-baseline")
+        .with_state_store_provider(store.clone())
+        .with_source(source)
+        .with_query(query)
+        .with_reaction(reaction)
+        .build()
+        .await
+        .expect("build DrasiLib");
+    core.start().await.expect("start DrasiLib");
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let events = collect_sse_events(
+        &format!("http://127.0.0.1:{port}/events"),
+        1,
+        std::time::Duration::from_secs(3),
+    )
+    .await;
+    assert_eq!(
+        events.len(),
+        1,
+        "dynamic reaction did not receive a result above its legacy checkpoint"
+    );
+    let event: serde_json::Value =
+        serde_json::from_str(&events[0]).expect("SSE event should be JSON");
+    assert_eq!(event["queryId"], "restart-query");
+    let sequence_bytes = store
+        .get("__drasi_query_output_sequences", "restart-query")
+        .await
+        .expect("read query sequence")
+        .expect("query sequence should be durable");
+    let sequence = u64::from_le_bytes(
+        sequence_bytes
+            .try_into()
+            .expect("query sequence should contain eight bytes"),
+    );
+    assert!(
+        sequence > 50,
+        "dynamic reaction received a result while query sequence remained at {sequence}"
+    );
+
+    core.shutdown().await.expect("shutdown DrasiLib");
+}
+
 /// E2E test exercising fan-out patterns: multiple queries from one source
 /// and multiple reactions subscribed to one query.
 ///

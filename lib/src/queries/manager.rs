@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 
@@ -54,7 +55,74 @@ use crate::queries::QueryBase;
 use crate::sources::FutureQueueSource;
 use crate::sources::Source;
 use crate::sources::SourceManager;
+use crate::state_store::{StateStoreCompareAndSwapResult, StateStoreError, StateStoreProvider};
 use tracing::Instrument;
+
+const QUERY_OUTPUT_SEQUENCE_STORE_ID: &str = "__drasi_query_output_sequences";
+
+async fn read_durable_output_sequence(
+    store: &dyn StateStoreProvider,
+    query_id: &str,
+) -> Result<Option<u64>> {
+    let Some(bytes) = store.get(QUERY_OUTPUT_SEQUENCE_STORE_ID, query_id).await? else {
+        return Ok(None);
+    };
+    let encoded: [u8; 8] = bytes.try_into().map_err(|bytes: Vec<u8>| {
+        anyhow::anyhow!(
+            "Invalid durable output sequence for query '{query_id}': expected 8 bytes, got {}",
+            bytes.len()
+        )
+    })?;
+    Ok(Some(u64::from_le_bytes(encoded)))
+}
+
+async fn write_durable_output_sequence(
+    store: &dyn StateStoreProvider,
+    query_id: &str,
+    sequence: u64,
+) -> Result<()> {
+    let new_value = sequence.to_le_bytes();
+    for _ in 0..8 {
+        let existing = store.get(QUERY_OUTPUT_SEQUENCE_STORE_ID, query_id).await?;
+        if let Some(bytes) = existing.as_ref() {
+            let encoded: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                anyhow::anyhow!(
+                    "Invalid durable output sequence for query '{query_id}': expected 8 bytes, got {}",
+                    bytes.len()
+                )
+            })?;
+            if u64::from_le_bytes(encoded) >= sequence {
+                return Ok(());
+            }
+        }
+
+        match store
+            .compare_and_swap(
+                QUERY_OUTPUT_SEQUENCE_STORE_ID,
+                query_id,
+                existing.as_deref(),
+                new_value.to_vec(),
+            )
+            .await
+        {
+            Ok(StateStoreCompareAndSwapResult::Swapped) => return Ok(()),
+            Ok(StateStoreCompareAndSwapResult::Mismatch) => continue,
+            Err(StateStoreError::Unsupported(_)) => {
+                // Legacy providers are serialized by the query output-state
+                // lock within one runtime, so a direct durable write retains
+                // the pre-CAS behavior for them.
+                store
+                    .set(QUERY_OUTPUT_SEQUENCE_STORE_ID, query_id, new_value.to_vec())
+                    .await?;
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "Failed to persist durable output sequence for query '{query_id}' after repeated CAS retries"
+    ))
+}
 
 /// Default query configuration
 struct DefaultQueryConfig;
@@ -236,6 +304,21 @@ pub trait Query: Send + Sync {
     /// `fetch_snapshot`.
     async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError>;
 
+    /// Ensure result sequences remain comparable with durable reaction
+    /// checkpoints from an earlier process.
+    ///
+    /// Query implementations without a process-local sequence source may keep
+    /// the default no-op implementation.
+    async fn ensure_output_sequence_at_least(&self, _minimum: u64) -> Result<()> {
+        Ok(())
+    }
+
+    /// Restore any query-owned durable sequence baseline before merging
+    /// reaction checkpoints.
+    async fn restore_output_sequence_baseline(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Get the query's output metrics (outbox health, sequence rate, snapshot tracking).
     ///
     /// Returns `None` for query implementations that don't support metrics.
@@ -280,6 +363,7 @@ async fn dispatch_query_results(
     outbox_writer: &Option<Arc<dyn OutboxWriter>>,
     live_results_writer: &Option<Arc<dyn LiveResultsWriter>>,
     checkpoint_store: &Option<Arc<dyn CheckpointStore>>,
+    output_sequence_store: &Option<Arc<dyn StateStoreProvider>>,
     outbox_capacity: usize,
     profiling: crate::profiling::ProfilingMetadata,
     output_metrics: &Arc<QueryOutputMetrics>,
@@ -375,6 +459,25 @@ async fn dispatch_query_results(
         );
 
         let result = state.advance_sequence_and_push(query_result);
+
+        // Persist the sequence clock before publishing the result. Reaction
+        // checkpoints live in this same durable store, so a new process must
+        // never restart result numbering below an acknowledged checkpoint.
+        // Keep the output-state lock across this write so legacy rebasing and
+        // concurrent result production cannot reorder sequence persistence.
+        if let Some(store) = output_sequence_store {
+            if let Err(e) =
+                write_durable_output_sequence(store.as_ref(), query_id, result.sequence).await
+            {
+                // Continue delivery to preserve availability. If a durable
+                // reaction acknowledges this result, its checkpoint is read as
+                // a fallback floor before the next query start.
+                warn!(
+                    "Query '{query_id}' failed to persist durable output sequence {}: {e}",
+                    result.sequence
+                );
+            }
+        }
 
         // Update query output metrics
         let duration_ns = u64::try_from(tx_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -550,6 +653,13 @@ pub struct DrasiQuery {
     future_queue_source: Arc<RwLock<Option<Arc<FutureQueueSource>>>>,
     // Persisted checkpoint_store across stop/start cycles for checkpoint recovery
     checkpoint_store: Arc<RwLock<Option<Arc<dyn CheckpointStore>>>>,
+    // Shared state store used to make the query-result sequence clock durable,
+    // even when the query's index backend itself is in-memory.
+    output_sequence_store: Option<Arc<dyn StateStoreProvider>>,
+    // True only when this process restored or established a restart baseline.
+    // A sequence written by an early result in a legacy run does not set this:
+    // the manager must still rebase that result above legacy reaction checkpoints.
+    output_sequence_has_restart_baseline: AtomicBool,
     // Persistent outbox writer for reaction replay (from index backend)
     outbox_writer: Arc<RwLock<Option<Arc<dyn OutboxWriter>>>>,
     // Persistent live results writer for snapshot recovery (from index backend)
@@ -572,6 +682,7 @@ impl DrasiQuery {
         index_factory: Arc<crate::indexes::IndexFactory>,
         middleware_registry: Arc<MiddlewareTypeRegistry>,
         default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
+        output_sequence_store: Option<Arc<dyn StateStoreProvider>>,
     ) -> Result<Self> {
         // Create priority queue with configured capacity (fallback to 10000 if not set)
         let priority_capacity = config.priority_queue_capacity.unwrap_or(10000);
@@ -603,6 +714,8 @@ impl DrasiQuery {
             middleware_registry,
             future_queue_source: Arc::new(RwLock::new(None)),
             checkpoint_store: Arc::new(RwLock::new(None)),
+            output_sequence_store,
+            output_sequence_has_restart_baseline: AtomicBool::new(false),
             outbox_writer: Arc::new(RwLock::new(None)),
             live_results_writer: Arc::new(RwLock::new(None)),
             bootstrap_timeout,
@@ -622,6 +735,59 @@ impl DrasiQuery {
 
     pub async fn get_current_results(&self) -> Vec<serde_json::Value> {
         self.output_state.read().await.get_results_as_vec()
+    }
+
+    async fn restore_output_sequence(&self) -> Result<()> {
+        let Some(store) = self.output_sequence_store.as_ref() else {
+            return Ok(());
+        };
+        let Some(sequence) =
+            read_durable_output_sequence(store.as_ref(), &self.base.config.id).await?
+        else {
+            self.output_sequence_has_restart_baseline
+                .store(false, Ordering::Release);
+            return Ok(());
+        };
+
+        let mut state = self.output_state.write().await;
+        let delta = sequence.saturating_sub(state.as_of_sequence());
+        state
+            .rebase_sequence(delta)
+            .map_err(|e| anyhow::anyhow!("Failed to restore query output sequence: {e}"))?;
+        self.output_sequence_has_restart_baseline
+            .store(true, Ordering::Release);
+        Ok(())
+    }
+
+    async fn establish_output_sequence_floor(&self, minimum: u64) -> Result<()> {
+        let Some(store) = self.output_sequence_store.as_ref() else {
+            return Ok(());
+        };
+
+        let mut state = self.output_state.write().await;
+        let has_baseline = self
+            .output_sequence_has_restart_baseline
+            .load(Ordering::Acquire);
+        let delta = if has_baseline {
+            minimum.saturating_sub(state.as_of_sequence())
+        } else {
+            // No sequence key existed when this process started. This is legacy
+            // state: retained results belong to the new process-local epoch and
+            // must all be shifted above the old reaction checkpoint watermark.
+            minimum
+        };
+        let sequence = state
+            .as_of_sequence()
+            .checked_add(delta)
+            .ok_or_else(|| anyhow::anyhow!("Query output sequence overflow"))?;
+
+        write_durable_output_sequence(store.as_ref(), &self.base.config.id, sequence).await?;
+        state
+            .rebase_sequence(delta)
+            .map_err(|e| anyhow::anyhow!("Failed to establish query output sequence: {e}"))?;
+        self.output_sequence_has_restart_baseline
+            .store(true, Ordering::Release);
+        Ok(())
     }
 
     /// Wait until the query has finished bootstrapping (status is no longer `Starting`).
@@ -747,6 +913,7 @@ impl Query for DrasiQuery {
     async fn start(&self) -> Result<()> {
         log_component_start("Query", &self.base.config.id);
 
+        self.restore_output_sequence().await?;
         self.bootstrap_state.write().await.clear();
 
         // Set Starting on the local status handle. The manager has already validated
@@ -1112,6 +1279,19 @@ impl Query for DrasiQuery {
             // Only read checkpoints if the config hash matched — otherwise we
             // cleared them above and a full bootstrap will run.
             if config_matches {
+                if let Some(sequence) = checkpoint_store
+                    .read_result_sequence(&self.base.config.id)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Query '{}' failed to read its persisted result sequence",
+                            self.base.config.id
+                        )
+                    })?
+                {
+                    self.establish_output_sequence_floor(sequence).await?;
+                }
+
                 match checkpoint_store.read_all_checkpoints().await {
                     Ok(checkpoints) => {
                         for settings in &mut subscription_settings {
@@ -2081,6 +2261,7 @@ impl Query for DrasiQuery {
         let position_handles_for_processor = position_handles;
         let outbox_writer_for_processor = self.outbox_writer.read().await.clone();
         let live_results_writer_for_processor = self.live_results_writer.read().await.clone();
+        let output_sequence_store_for_processor = self.output_sequence_store.clone();
         let outbox_capacity_for_processor = self.output_state.read().await.outbox_capacity();
         let output_metrics_for_processor = self.output_metrics.clone();
         let source_ids_for_processor: Vec<String> = self
@@ -2231,6 +2412,7 @@ impl Query for DrasiQuery {
                                                         &outbox_writer_for_processor,
                                                         &live_results_writer_for_processor,
                                                         &checkpoint_store_for_dispatch,
+                                                        &output_sequence_store_for_processor,
                                                         outbox_capacity_for_processor,
                                                         profiling,
                                                         &output_metrics_for_processor,
@@ -2303,6 +2485,7 @@ impl Query for DrasiQuery {
                                                     &outbox_writer_for_processor,
                                                     &live_results_writer_for_processor,
                                                     &checkpoint_store_for_dispatch,
+                                                    &output_sequence_store_for_processor,
                                                     outbox_capacity_for_processor,
                                                     profiling,
                                                     &output_metrics_for_processor,
@@ -2540,6 +2723,14 @@ impl Query for DrasiQuery {
         })
     }
 
+    async fn ensure_output_sequence_at_least(&self, minimum: u64) -> Result<()> {
+        self.establish_output_sequence_floor(minimum).await
+    }
+
+    async fn restore_output_sequence_baseline(&self) -> Result<()> {
+        self.restore_output_sequence().await
+    }
+
     fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
         Some(self.output_metrics.clone())
     }
@@ -2581,6 +2772,8 @@ pub struct QueryManager {
     /// Managers send transitional states (Starting, Stopping, Reconfiguring) here;
     /// the loop applies them to the graph and records events automatically.
     update_tx: ComponentUpdateSender,
+    /// Shared state store used for restart-stable query output sequences.
+    state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Global default recovery policy. Per-query overrides this; if neither is set,
     /// defaults to `Strict`.
     default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
@@ -2608,9 +2801,58 @@ impl QueryManager {
             log_registry,
             graph,
             update_tx,
+            state_store: Arc::new(RwLock::new(None)),
             default_recovery_policy,
             label_cache: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Inject the shared state store before queries are provisioned.
+    pub async fn inject_state_store(&self, state_store: Arc<dyn StateStoreProvider>) {
+        *self.state_store.write().await = Some(state_store);
+    }
+
+    async fn prepare_output_sequence(&self, query_id: &str, query: &Arc<dyn Query>) -> Result<()> {
+        query.restore_output_sequence_baseline().await?;
+
+        let Some(store) = self.state_store.read().await.clone() else {
+            return Ok(());
+        };
+        let config_hash = crate::queries::compute_config_hash(query.get_config());
+        let reaction_ids = {
+            let graph = self.graph.read().await;
+            graph
+                .get_dependents(query_id)
+                .into_iter()
+                .filter(|node| node.kind == ComponentKind::Reaction)
+                .map(|node| node.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let mut sequence_floor = 0;
+        for reaction_id in reaction_ids {
+            if let Some(checkpoint) = crate::reactions::checkpoint::read_checkpoint(
+                store.as_ref(),
+                &reaction_id,
+                query_id,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to read restart checkpoint for reaction '{reaction_id}', query '{query_id}'"
+                )
+            })?
+            {
+                if checkpoint.config_hash == config_hash {
+                    sequence_floor = sequence_floor.max(checkpoint.sequence);
+                }
+            }
+        }
+
+        query
+            .ensure_output_sequence_at_least(sequence_floor)
+            .await
+            .with_context(|| format!("Failed to prepare result sequence for query '{query_id}'"))
     }
 
     /// Register and provision a new query from the given configuration.
@@ -2679,6 +2921,7 @@ impl QueryManager {
             self.index_factory.clone(),
             self.middleware_registry.clone(),
             self.default_recovery_policy,
+            self.state_store.read().await.clone(),
         )?;
 
         // Wire status handle to graph via context (same pattern as Source/Reaction)
@@ -2723,6 +2966,7 @@ impl QueryManager {
                     anyhow::Error::new(crate::managers::ComponentNotFoundError::new("query", &id))
                 })?;
 
+        self.prepare_output_sequence(&id, &query).await?;
         crate::managers::lifecycle_helpers::start_component(&self.graph, &id, "query", &query).await
     }
 
@@ -2862,6 +3106,15 @@ impl QueryManager {
             || async {},
         )
         .await?;
+
+        if let Some(store) = self.state_store.read().await.as_ref() {
+            store
+                .delete(QUERY_OUTPUT_SEQUENCE_STORE_ID, &id)
+                .await
+                .with_context(|| {
+                    format!("Failed to clear durable output sequence for removed query '{id}'")
+                })?;
+        }
 
         // After teardown: clear persistent indexes + checkpoints so a future
         // query with the same ID starts fresh. Only needed for persistent backends.
@@ -3016,6 +3269,8 @@ impl QueryManager {
             "query",
             |q| q.get_config().auto_start,
             |id, query| async move {
+                self.prepare_output_sequence(&id, &query).await?;
+
                 // Validate and apply Starting transition atomically through the graph
                 {
                     let mut graph = self.graph.write().await;
