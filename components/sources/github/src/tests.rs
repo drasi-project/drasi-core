@@ -568,6 +568,53 @@ fn config_dto_deserialization_applies_defaults() {
 }
 
 #[test]
+fn config_dto_accepts_exact_dogfood_shape() {
+    let config = serde_json::json!({
+        "token": { "kind": "Secret", "name": "github-pat" },
+        "repositories": ["drasi-project/drasi-workgraph-demo"],
+        "projects": [{ "owner": "drasi-project", "number": 3 }],
+        "webhook": {
+            "host": "${WEBHOOK_HOST:-127.0.0.1}",
+            "port": "${WEBHOOK_PORT:-9000}",
+            "path": "/github/events",
+            "secret": { "kind": "Secret", "name": "github-webhook-secret" },
+            "bodyLimitBytes": 10485760
+        },
+        "reconcileIntervalSecs": 300,
+        "durability": {
+            "enabled": true,
+            "max_events": 10000,
+            "capacity_policy": "RejectIncoming"
+        },
+        "graphqlUrl": "https://api.github.com/graphql",
+        "skipInitialBootstrap": false
+    });
+
+    let dto: GitHubSourceConfigDto = serde_json::from_value(config).expect("dogfood DTO");
+    assert_eq!(
+        dto.repositories,
+        vec![ConfigValue::Static(
+            "drasi-project/drasi-workgraph-demo".to_string()
+        )]
+    );
+    assert_eq!(
+        dto.projects[0].owner,
+        ConfigValue::Static("drasi-project".to_string())
+    );
+    assert_eq!(dto.projects[0].number, ConfigValue::Static(3));
+    assert_eq!(
+        dto.webhook.body_limit_bytes,
+        ConfigValue::Static(10_485_760)
+    );
+    assert!(dto.durability.enabled);
+    assert_eq!(dto.durability.max_events, 10_000);
+    assert_eq!(
+        dto.durability.capacity_policy,
+        CapacityPolicy::RejectIncoming
+    );
+}
+
+#[test]
 fn config_dto_denies_unknown_fields() {
     let config = serde_json::json!({
         "token": { "kind": "Secret", "name": "pat" },
