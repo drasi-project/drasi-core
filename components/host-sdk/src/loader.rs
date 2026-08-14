@@ -1189,9 +1189,11 @@ mod tests {
 
     #[test]
     fn test_sdk_major_minor_compatibility() {
-        assert!(sdk_major_minor_compatible("0.14.0", "0.14.1"));
+        let current = drasi_plugin_sdk::ffi::metadata::FFI_SDK_VERSION;
+
+        assert!(sdk_major_minor_compatible("0.15.99", current));
         assert!(sdk_major_minor_compatible("1.2.3", "1.2.0"));
-        assert!(!sdk_major_minor_compatible("0.13.9", "0.14.0"));
+        assert!(!sdk_major_minor_compatible("0.14.99", current));
         assert!(!sdk_major_minor_compatible("1.1.0", "2.1.0"));
     }
 }

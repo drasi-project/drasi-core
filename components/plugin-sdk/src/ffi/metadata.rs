@@ -48,7 +48,10 @@ use super::types::FfiStr;
 ///   state transitions needed by cross-replica fencing. The CAS result is a
 ///   POD status code (`FfiCompareAndSwapResult`) to avoid cross-dylib
 ///   ownership transfer for newly introduced operations.
-pub const FFI_SDK_VERSION: &str = "0.14.0";
+/// - `0.15.0`: `StateStoreVtable` appends `is_durable_fn` so dynamic plugins
+///   can distinguish persistent host stores from in-memory providers. The
+///   nullable callback fails closed when the capability is unavailable.
+pub const FFI_SDK_VERSION: &str = "0.15.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");

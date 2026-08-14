@@ -684,6 +684,10 @@ pub struct StateStoreVtable {
         new_value: *const u8,
         new_value_len: usize,
     ) -> FfiCompareAndSwapResult,
+    /// Whether the host provider persists state durably across restarts.
+    ///
+    /// Appended in SDK 0.15.0. A missing callback is treated as non-durable.
+    pub is_durable_fn: Option<extern "C" fn(state: *mut c_void) -> bool>,
 }
 
 unsafe impl Send for StateStoreVtable {}

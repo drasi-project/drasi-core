@@ -49,6 +49,8 @@ build-test-plugins:
 	cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
 	cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
 	cargo build --lib -p drasi-reaction-sse --features drasi-reaction-sse/dynamic-plugin
+	cargo build --lib -p drasi-reaction-github-project-item-refresh --features drasi-reaction-github-project-item-refresh/dynamic-plugin
+	cargo build --lib -p drasi-reaction-copilot-agent-task --features drasi-reaction-copilot-agent-task/dynamic-plugin
 	cargo build --lib -p drasi-reaction-snapshot-test
 	cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
 	cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
@@ -58,12 +60,16 @@ build-test-plugins:
 		for f in target/debug/libdrasi_source_mock.$$ext \
 		         target/debug/libdrasi_reaction_log.$$ext \
 		         target/debug/libdrasi_reaction_sse.$$ext \
+		         target/debug/libdrasi_reaction_github_project_item_refresh.$$ext \
+		         target/debug/libdrasi_reaction_copilot_agent_task.$$ext \
 		         target/debug/libdrasi_reaction_snapshot_test.$$ext \
 		         target/debug/libdrasi_identity_test.$$ext \
 		         target/debug/libdrasi_bootstrap_scriptfile.$$ext \
 		         target/debug/drasi_source_mock.$$ext \
 		         target/debug/drasi_reaction_log.$$ext \
 		         target/debug/drasi_reaction_sse.$$ext \
+		         target/debug/drasi_reaction_github_project_item_refresh.$$ext \
+		         target/debug/drasi_reaction_copilot_agent_task.$$ext \
 		         target/debug/drasi_reaction_snapshot_test.$$ext \
 		         target/debug/drasi_identity_test.$$ext \
 		         target/debug/drasi_bootstrap_scriptfile.$$ext; do \

@@ -34,6 +34,18 @@ pub struct FfiStateStoreProxy {
 unsafe impl Send for FfiStateStoreProxy {}
 unsafe impl Sync for FfiStateStoreProxy {}
 
+impl FfiStateStoreProxy {
+    /// Wrap a host-provided state-store vtable.
+    ///
+    /// # Safety
+    ///
+    /// `vtable` must be non-null, point to a fully initialized vtable, and remain
+    /// valid with its backing state for the lifetime of this proxy.
+    pub unsafe fn from_raw(vtable: *const StateStoreVtable) -> Self {
+        Self { vtable }
+    }
+}
+
 #[async_trait::async_trait]
 impl StateStoreProvider for FfiStateStoreProxy {
     async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
@@ -208,5 +220,18 @@ impl StateStoreProvider for FfiStateStoreProxy {
                 .into_result()
                 .map_err(drasi_lib::StateStoreError::Other)
         }
+    }
+
+    fn is_durable(&self) -> bool {
+        let Some(vtable) = (unsafe { self.vtable.as_ref() }) else {
+            return false;
+        };
+        if vtable.state.is_null() {
+            return false;
+        }
+
+        vtable
+            .is_durable_fn
+            .is_some_and(|is_durable_fn| is_durable_fn(vtable.state))
     }
 }

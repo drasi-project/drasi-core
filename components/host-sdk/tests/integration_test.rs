@@ -2264,6 +2264,125 @@ async fn test_reaction_identity_provider_cross_cdylib_clone_stress() {
 }
 
 // ============================================================================
+// State store durability bridge E2E tests
+// ============================================================================
+
+async fn assert_reaction_state_store_durability(
+    crate_name: &str,
+    reaction_id: &str,
+    query_ids: Vec<String>,
+    config: serde_json::Value,
+) {
+    let path = require_plugin(crate_name);
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap_or_else(|error| panic!("failed to load {crate_name}: {error:#}"));
+    let descriptor = plugin
+        .reaction_plugins
+        .first()
+        .unwrap_or_else(|| panic!("{crate_name} did not register a reaction descriptor"));
+
+    let temp_dir = tempfile::tempdir().expect("temp directory");
+    let durable_store: std::sync::Arc<dyn drasi_lib::StateStoreProvider> = std::sync::Arc::new(
+        drasi_state_store_redb::RedbStateStoreProvider::new(
+            temp_dir.path().join("durable-state.redb"),
+        )
+        .expect("redb state store"),
+    );
+    let durable_reaction = descriptor
+        .create_reaction(reaction_id, query_ids.clone(), &config, false)
+        .await
+        .unwrap_or_else(|error| panic!("failed to create {crate_name}: {error:#}"));
+    let (durable_update_tx, _durable_update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
+    durable_reaction
+        .initialize(drasi_lib::ReactionRuntimeContext::new(
+            "durability-bridge-test",
+            reaction_id,
+            Some(durable_store),
+            durable_update_tx,
+            None,
+        ))
+        .await;
+    durable_reaction
+        .start()
+        .await
+        .unwrap_or_else(|error| panic!("{crate_name} rejected bridged redb: {error:#}"));
+    durable_reaction
+        .stop()
+        .await
+        .unwrap_or_else(|error| panic!("failed to stop {crate_name}: {error:#}"));
+    drop(durable_reaction);
+
+    let non_durable_reaction = descriptor
+        .create_reaction(&format!("{reaction_id}-memory"), query_ids, &config, false)
+        .await
+        .unwrap_or_else(|error| panic!("failed to create {crate_name}: {error:#}"));
+    let non_durable_store: std::sync::Arc<dyn drasi_lib::StateStoreProvider> =
+        std::sync::Arc::new(drasi_lib::MemoryStateStoreProvider::new());
+    let (memory_update_tx, _memory_update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
+    non_durable_reaction
+        .initialize(drasi_lib::ReactionRuntimeContext::new(
+            "durability-bridge-test",
+            format!("{reaction_id}-memory"),
+            Some(non_durable_store),
+            memory_update_tx,
+            None,
+        ))
+        .await;
+    let error = non_durable_reaction
+        .start()
+        .await
+        .expect_err("in-memory state store must be rejected");
+    assert!(
+        error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("requires a durable state store"),
+        "unexpected {crate_name} startup error: {error:#}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn test_github_project_item_refresh_state_store_durability_cross_cdylib() {
+    assert_reaction_state_store_durability(
+        "drasi-reaction-github-project-item-refresh",
+        "github-project-item-refresh-durability",
+        vec!["refresh-github-project-item".to_string()],
+        serde_json::json!({
+            "githubToken": "test-token",
+            "expectedStatusFieldNodeId": "PVTSSF_test",
+            "destinationEventUrl": "http://127.0.0.1:9/events"
+        }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn test_copilot_agent_task_state_store_durability_cross_cdylib() {
+    assert_reaction_state_store_durability(
+        "drasi-reaction-copilot-agent-task",
+        "copilot-agent-task-durability",
+        vec!["launch-copilot-agent-task".to_string()],
+        serde_json::json!({
+            "token": "test-token",
+            "allowedRepositories": ["drasi-project/drasi-core"],
+            "allowedProfiles": ["issue-validator"],
+            "allowedModels": ["gpt-5"]
+        }),
+    )
+    .await;
+}
+
+// ============================================================================
 // Reaction enqueue_query_result E2E Tests
 // ============================================================================
 
