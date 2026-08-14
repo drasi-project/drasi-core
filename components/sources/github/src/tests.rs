@@ -368,6 +368,10 @@ fn mapping_project_item_emits_tracks_relation() {
     assert!(snapshot.elements.contains_key("IN_PROJECT:PVTI_1:PVT_1"));
     assert!(snapshot.elements.contains_key("TRACKS:PVTI_1:I_1"));
     assert!(!snapshot.elements.contains_key("HAS_ITEM:PVT_1:PVTI_1"));
+    let properties = &snapshot.elements["PVTI_1"].properties;
+    assert_eq!(properties["statusFieldId"], json!("status"));
+    assert_eq!(properties["statusOptionId"], json!("opt1"));
+    assert_eq!(properties["statusName"], json!("In Progress"));
 }
 
 #[test]
