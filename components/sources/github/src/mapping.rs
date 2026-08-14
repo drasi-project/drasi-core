@@ -645,12 +645,6 @@ fn upsert_comment_snapshot_elements(
             ),
             ("isMinimized", serde_json::json!(comment.is_minimized)),
             (
-                "performedViaGithubAppId",
-                serde_json::json!(github_app_database_id(
-                    comment.performed_via_github_app.as_ref()
-                )),
-            ),
-            (
                 "repositoryNameWithOwner",
                 serde_json::json!(comment.repository.name_with_owner),
             ),
@@ -688,12 +682,6 @@ fn upsert_review_snapshot_elements(
                 serde_json::json!(actor_type(review.author.as_ref())),
             ),
             ("url", serde_json::json!(review.url)),
-            (
-                "performedViaGithubAppId",
-                serde_json::json!(github_app_database_id(
-                    review.performed_via_github_app.as_ref()
-                )),
-            ),
         ]),
     );
 }
@@ -735,12 +723,6 @@ fn upsert_review_comment_snapshot_elements(
                 serde_json::json!(comment.updated_at != comment.created_at),
             ),
             ("diffHunk", serde_json::json!(comment.diff_hunk)),
-            (
-                "performedViaGithubAppId",
-                serde_json::json!(github_app_database_id(
-                    comment.performed_via_github_app.as_ref()
-                )),
-            ),
             (
                 "repositoryNameWithOwner",
                 serde_json::json!(comment.repository.name_with_owner),
@@ -905,10 +887,6 @@ fn actor_type(actor: Option<&ActorRef>) -> Option<String> {
 fn body_digest(body: &Option<String>) -> String {
     let digest = Sha256::digest(body.as_deref().unwrap_or("").as_bytes());
     format!("sha256:{}", hex::encode(digest))
-}
-
-fn github_app_database_id(app: Option<&crate::graphql::GitHubAppRef>) -> Option<i64> {
-    app.and_then(|v| v.database_id)
 }
 
 fn json_object(entries: &[(&str, serde_json::Value)]) -> serde_json::Value {

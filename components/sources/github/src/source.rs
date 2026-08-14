@@ -40,7 +40,9 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
-use tokio::time::{timeout, Duration};
+use tokio::time::{timeout, Duration, Instant};
+
+const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// GitHub webhook source with authoritative hydrator/reconciler.
 pub struct GitHubSource {
@@ -66,7 +68,16 @@ impl Source for GitHubSource {
     }
 
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        self.base.properties_or_serialize(&self.config)
+        if self.base.raw_config().is_some() {
+            return self.base.properties_or_serialize(&self.config);
+        }
+
+        let mut properties = self.base.properties_or_serialize(&self.config);
+        properties.remove("token");
+        if let Some(serde_json::Value::Object(webhook)) = properties.get_mut("webhook") {
+            webhook.remove("secret");
+        }
+        properties
     }
 
     fn auto_start(&self) -> bool {
@@ -74,7 +85,7 @@ impl Source for GitHubSource {
     }
 
     fn dispatch_mode(&self) -> DispatchMode {
-        DispatchMode::Channel
+        self.base.get_dispatch_mode()
     }
 
     fn supports_replay(&self) -> bool {
@@ -258,14 +269,30 @@ impl Source for GitHubSource {
             let _ = tx.send(true);
         }
 
-        let mut handles = self.task_handles.write().await;
-        while let Some(handle) = handles.pop() {
-            match timeout(Duration::from_secs(10), handle).await {
+        let mut handles = {
+            let mut task_handles = self.task_handles.write().await;
+            std::mem::take(&mut *task_handles)
+        };
+        let shutdown_deadline = Instant::now() + TASK_SHUTDOWN_TIMEOUT;
+        while let Some(mut handle) = handles.pop() {
+            let remaining = shutdown_deadline.saturating_duration_since(Instant::now());
+            match timeout(remaining, &mut handle).await {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
                     warn!("[{}] Source task panicked: {}", self.base.id, err);
                 }
-                Err(_) => warn!("[{}] Timed out waiting for task shutdown", self.base.id),
+                Err(_) => {
+                    warn!(
+                        "[{}] Timed out waiting for task shutdown; aborting it",
+                        self.base.id
+                    );
+                    handle.abort();
+                    if let Err(err) = handle.await {
+                        if !err.is_cancelled() {
+                            warn!("[{}] Aborted source task failed: {}", self.base.id, err);
+                        }
+                    }
+                }
             }
         }
 

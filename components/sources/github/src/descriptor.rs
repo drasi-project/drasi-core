@@ -25,17 +25,22 @@ use utoipa::OpenApi;
 #[schema(as = source::github::GitHubSourceConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GitHubSourceConfigDto {
+    #[schema(value_type = ConfigValueString)]
     pub token: ConfigValueString,
     #[serde(default)]
+    #[schema(value_type = Vec<ConfigValueString>)]
     pub repositories: Vec<ConfigValueString>,
     #[serde(default)]
     pub projects: Vec<ProjectSpecDto>,
     pub webhook: WebhookConfigDto,
     #[serde(default = "default_reconcile_interval")]
+    #[schema(value_type = ConfigValueU64)]
     pub reconcile_interval_secs: ConfigValueU64,
     #[serde(default)]
+    #[schema(value_type = DurabilityConfigSchema)]
     pub durability: drasi_lib::DurabilityConfig,
     #[serde(default = "default_graphql_url")]
+    #[schema(value_type = ConfigValueString)]
     pub graphql_url: ConfigValueString,
     #[serde(default)]
     pub skip_initial_bootstrap: bool,
@@ -51,27 +56,45 @@ fn default_graphql_url() -> ConfigValueString {
 
 /// Project selector DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = source::github::ProjectSpec)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProjectSpecDto {
+    #[schema(value_type = ConfigValueString)]
     pub owner: ConfigValueString,
+    #[schema(value_type = ConfigValueU32)]
     pub number: ConfigValueU32,
 }
 
 /// Webhook listener DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = source::github::WebhookConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WebhookConfigDto {
     #[serde(default = "default_host")]
+    #[schema(value_type = ConfigValueString)]
     pub host: ConfigValueString,
     #[serde(default = "default_port")]
+    #[schema(value_type = ConfigValueU16)]
     pub port: ConfigValueU16,
     #[serde(default = "default_path")]
+    #[schema(value_type = ConfigValueString)]
     pub path: ConfigValueString,
+    #[schema(value_type = ConfigValueString)]
     pub secret: ConfigValueString,
     #[serde(default = "default_body_limit")]
+    #[schema(value_type = ConfigValueUsize)]
     pub body_limit_bytes: ConfigValueUsize,
+}
+
+#[derive(utoipa::ToSchema)]
+struct DurabilityConfigSchema {
+    enabled: bool,
+    max_events: u64,
+    capacity_policy: CapacityPolicySchema,
+}
+
+#[derive(utoipa::ToSchema)]
+enum CapacityPolicySchema {
+    RejectIncoming,
+    OverwriteOldest,
 }
 
 fn default_host() -> ConfigValueString {
@@ -91,7 +114,18 @@ fn default_body_limit() -> ConfigValueUsize {
 }
 
 #[derive(OpenApi)]
-#[openapi(components(schemas(GitHubSourceConfigDto)))]
+#[openapi(components(schemas(
+    GitHubSourceConfigDto,
+    ProjectSpecDto,
+    WebhookConfigDto,
+    ConfigValueStringSchema,
+    ConfigValueU16Schema,
+    ConfigValueU32Schema,
+    ConfigValueU64Schema,
+    ConfigValueUsizeSchema,
+    DurabilityConfigSchema,
+    CapacityPolicySchema,
+)))]
 struct GitHubSourceSchemas;
 
 /// Descriptor for authorized GitHub source.

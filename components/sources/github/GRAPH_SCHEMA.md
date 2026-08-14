@@ -52,7 +52,6 @@ The shared contract vector
   - `body`, `createdAt`, `updatedAt`
   - `authorLogin`, `authorId`, `authorDatabaseId`, `authorType`, `url`
   - `isEdited`, `isMinimized`
-  - `performedViaGithubAppId`
   - `repositoryNameWithOwner`
 
 ### `GitHubPullRequestReview`
@@ -61,7 +60,6 @@ The shared contract vector
   - `state`, `body`
   - `createdAt`, `updatedAt`
   - `authorLogin`, `authorId`, `authorDatabaseId`, `authorType`, `url`
-  - `performedViaGithubAppId`
 
 ### `GitHubPullRequestReviewComment`
 - ID: review comment global ID
@@ -70,8 +68,12 @@ The shared contract vector
   - `createdAt`, `updatedAt`
   - `authorLogin`, `authorId`, `authorDatabaseId`, `authorType`, `url`
   - `isEdited`, `diffHunk`
-  - `performedViaGithubAppId`
   - `repositoryNameWithOwner`
+
+`performedViaGithubAppId` is not part of the comment/review contract. GitHub's
+current GraphQL schema does not expose `performedViaGithubApp` on
+`IssueComment`, `PullRequestReview`, or `PullRequestReviewComment`, and webhook
+payload values are not used as authoritative graph properties.
 
 ### `GitHubProject`
 - ID: project global ID
