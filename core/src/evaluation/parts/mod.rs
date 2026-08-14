@@ -347,7 +347,11 @@ impl QueryPartEvaluator {
                 ..
             } => {
                 if let Some(before) = &before {
-                    if before == &after && !change_context.is_future_reprocess && !default_before {
+                    if before == &after
+                        && !change_context.is_future_reprocess
+                        && !default_before
+                        && !default_after
+                    {
                         return Ok(vec![QueryPartEvaluationContext::Noop]);
                     }
                 };
@@ -576,17 +580,23 @@ impl QueryPartEvaluator {
                         )
                         .await?),
                     _ => {
-                        if before_filtered || !should_revert {
-                            Ok(vec![QueryPartEvaluationContext::Adding {
-                                after: next_after,
-                                row_signature: 0,
-                            }])
-                        } else {
-                            Ok(vec![QueryPartEvaluationContext::Updating {
+                        // A default aggregate is the absence of a materialized group,
+                        // so an identity-valued transition can still add or remove a row.
+                        match (!before_filtered && should_revert, should_apply) {
+                            (true, true) => Ok(vec![QueryPartEvaluationContext::Updating {
                                 before: next_before.unwrap_or_default(),
                                 after: next_after,
                                 row_signature: 0,
-                            }])
+                            }]),
+                            (true, false) => Ok(vec![QueryPartEvaluationContext::Removing {
+                                before: next_before.unwrap_or_default(),
+                                row_signature: 0,
+                            }]),
+                            (false, true) => Ok(vec![QueryPartEvaluationContext::Adding {
+                                after: next_after,
+                                row_signature: 0,
+                            }]),
+                            (false, false) => Ok(vec![QueryPartEvaluationContext::Noop]),
                         }
                     }
                 }
@@ -697,7 +707,8 @@ impl QueryPartEvaluator {
                 before: snapshot,
                 after: after_out,
                 grouping_keys: grouping_keys.clone(),
-                default_before: false,
+                // Crossing into a group has the same default-before semantics as Add.
+                default_before: true,
                 default_after: false,
                 row_signature: 0,
             },
@@ -715,7 +726,8 @@ impl QueryPartEvaluator {
                 },
                 grouping_keys: grouping_keys.clone(),
                 default_before: false,
-                default_after: false,
+                // Crossing out of a group has the same default-after semantics as Remove.
+                default_after: true,
                 row_signature: 0,
             },
         ])
