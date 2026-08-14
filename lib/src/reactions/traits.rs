@@ -281,6 +281,9 @@ pub trait Reaction: Send + Sync {
     ///
     /// If `true`, the host calls `bootstrap()` with a `BootstrapContext` providing
     /// `fetch_snapshot()` the first time the reaction starts with no existing checkpoint.
+    /// Side-effect reactions must return `true` only when `bootstrap()` correlates each
+    /// retained row with durable reaction-owned execution state. Snapshot membership alone
+    /// does not prove that a side effect is unacknowledged.
     ///
     /// Default: `false`.
     fn needs_snapshot_on_fresh_start(&self) -> bool {
@@ -300,6 +303,8 @@ pub trait Reaction: Send + Sync {
     ///
     /// The `BootstrapContext` provides access to the query's `fetch_snapshot()`
     /// and `fetch_outbox()` APIs, as well as checkpoint read/write helpers.
+    /// Implementations must return an error rather than acknowledge retained rows whose
+    /// side-effect provenance cannot be determined.
     ///
     /// Default: no-op.
     async fn bootstrap(&self, _ctx: BootstrapContext) -> Result<()> {

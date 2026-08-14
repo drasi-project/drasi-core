@@ -141,14 +141,26 @@ impl RefreshProcessor {
 
     pub async fn process_add_row(&self, row_data: &Value) -> anyhow::Result<AddRowOutcome> {
         let input = parse_invalidation_input(row_data).context("parsing invalidation row")?;
-        self.process_invalidation(input).await
+        self.process_invalidation(input, true).await
+    }
+
+    pub(crate) async fn reconcile_retained_row(
+        &self,
+        row_data: &Value,
+    ) -> anyhow::Result<AddRowOutcome> {
+        let input =
+            parse_invalidation_input(row_data).context("parsing retained invalidation row")?;
+        self.process_invalidation(input, false).await
     }
 
     async fn process_invalidation(
         &self,
         input: InvalidationInput,
+        prune_terminal_records: bool,
     ) -> anyhow::Result<AddRowOutcome> {
-        self.maybe_prune_terminal_records().await;
+        if prune_terminal_records {
+            self.maybe_prune_terminal_records().await;
+        }
 
         validate_project_item_node_id(&input.project_item_node_id)
             .context("validating project item node id")?;

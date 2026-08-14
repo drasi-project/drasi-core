@@ -213,8 +213,20 @@ Reserved -> Starting -> Started (comment_posted=false) -> Started (comment_poste
   A transient failure at any step returns an error that stops
   the reaction (`ReactionRecoveryPolicy::Strict`) so the batch replays from the outbox on
   restart, without ever recreating an already-confirmed task.
+- On a fresh subscription, the reaction reconciles every retained launch-query row through
+  the same durable `ExecutionRecord` state machine. A row with no reservation is launched;
+  a completed row is skipped; and an in-flight or ambiguous row is reconciled before any
+  retry. The host persists the snapshot checkpoint only after all retained rows succeed.
 - `strictRecovery` must be `true`: an ambiguous or failed launch always requires
   reconciliation or operator intervention, never a silent skip or auto-reset.
+
+For state created by a runtime that incorrectly checkpointed a retained row without delivering
+it, stop the reaction and delete only `checkpoint:<query-id>` from that reaction's state-store
+namespace, preserving every `execution:*` record, then restart it. This forces retained-row
+reconciliation while completed execution records suppress duplicate tasks. Do not clear the
+checkpoint if execution records were deleted or the durable store was replaced unless an
+external audit proves the retained candidates were not performed; without either provenance
+source, safe replay cannot be inferred.
 
 ## Model fallback
 

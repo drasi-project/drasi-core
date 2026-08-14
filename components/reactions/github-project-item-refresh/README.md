@@ -186,7 +186,7 @@ Publication states:
 ## Recovery & Idempotency
 
 - `is_durable() == true`
-- `needs_snapshot_on_fresh_start() == false`
+- `needs_snapshot_on_fresh_start() == true`
 - `default_recovery_policy() == strict`
 - checkpoint advances only after destination ACK and durable publication state
 
@@ -204,6 +204,20 @@ In-flight (`fetched`) and ambiguous writes retain the exact fetched state;
 strict recovery replays that same deterministic update and requires a valid
 HTTP Source acknowledgement before recording publication or advancing the
 checkpoint.
+
+On a fresh subscription, every retained invalidation row is reconciled through
+the same reservation/publication state machine. Terminal `published`, `stale`,
+or `rejected` deliveries are skipped, while an unreserved delivery is processed.
+The host persists the snapshot checkpoint only after the full reconciliation
+succeeds.
+
+To repair legacy state where a retained invalidation was checkpointed but never
+delivered, stop the reaction and delete only `checkpoint:<query-id>` from that
+reaction's state-store namespace. Preserve all `reservation:*`, `publication:*`,
+and `version:*` records, then restart the reaction. Do not use this procedure
+after deleting/replacing the reaction state or after losing terminal delivery
+provenance unless an external audit proves the retained candidates were not
+published; blindly replaying them would not be safe.
 
 Terminal publication/reservation pruning is internal and bounded: the reaction
 attempts one prune pass on the first processed ADD after startup/restart, then

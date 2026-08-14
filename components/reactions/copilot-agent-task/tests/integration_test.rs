@@ -29,7 +29,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use drasi_lib::channels::ComponentStatus;
+use drasi_lib::queries::output_state::{
+    FetchError, OutboxResponse, OutboxStream, SnapshotResponse, SnapshotStream,
+};
+use drasi_lib::reactions::bootstrap_context::{BootstrapBackend, BootstrapContext};
+use drasi_lib::reactions::checkpoint::ReactionCheckpoint;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::{DrasiLib, Query, Reaction};
 use drasi_reaction_copilot_agent_task::config::CommentApiConfig;
@@ -194,6 +200,156 @@ async fn mount_happy_path_preflight(server: &MockServer, issue_number: u64, node
     mock_github::mount_issue(server, OWNER, REPO, issue_number, "open", &issue_node_id).await;
     mock_github::mount_contents(server, OWNER, REPO, PROFILE_SHA).await;
     mock_github::mount_project_status(server, "AwaitingValidation", &issue_node_id).await;
+}
+
+struct StaticSnapshotBackend {
+    row: serde_json::Value,
+}
+
+#[async_trait]
+impl BootstrapBackend for StaticSnapshotBackend {
+    async fn fetch_snapshot(&self) -> Result<SnapshotStream, FetchError> {
+        let mut results = im::HashMap::new();
+        results.insert(1, self.row.clone());
+        Ok(SnapshotStream::from_snapshot(SnapshotResponse::new(
+            results, 7, 11,
+        )))
+    }
+
+    async fn fetch_outbox(&self, _after_sequence: u64) -> Result<OutboxStream, FetchError> {
+        Ok(OutboxStream::from_outbox(OutboxResponse {
+            results: Vec::new(),
+            latest_sequence: 7,
+            config_hash: 11,
+        }))
+    }
+
+    async fn read_checkpoint(&self) -> anyhow::Result<Option<ReactionCheckpoint>> {
+        Ok(None)
+    }
+
+    async fn write_checkpoint(&self, _checkpoint: &ReactionCheckpoint) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+fn retained_launch_row(
+    node_id: &str,
+    route_id: &str,
+    responsibility_id: &str,
+) -> serde_json::Value {
+    json!({
+        "repository": REPOSITORY,
+        "issueNumber": 21,
+        "issueUrl": format!("https://github.com/{REPOSITORY}/issues/21"),
+        "issueNodeId": format!("I_{node_id}"),
+        "projectItemNodeId": format!("PVTI_{node_id}"),
+        "projectNodeId": "PVT_workgraph",
+        "projectOwner": OWNER,
+        "projectNumber": 3,
+        "subjectType": "Issue",
+        "actorType": "Agent",
+        "actorId": "issue-validator",
+        "routeId": route_id,
+        "responsibilityId": responsibility_id,
+        "issueContentVersion": CONTENT_VERSION,
+        "agentProfile": "issue-validator",
+        "profileRef": format!("issue-validator@{PROFILE_SHA}"),
+        "requestedModel": "gpt-5",
+        "fallbackModel": "gpt-4",
+        "requiredEventType": "CompletedIssueValidation",
+        "baseRef": "main",
+        "expectedProjectStatus": "AwaitingValidation"
+    })
+}
+
+#[tokio::test]
+async fn retained_launch_snapshot_executes_missing_work_once() {
+    let server = MockServer::start().await;
+    mount_happy_path_preflight(&server, 21, "issue-21").await;
+    mock_github::mount_create_task_success(
+        &server,
+        OWNER,
+        REPO,
+        "task-21",
+        "https://github.com/tasks/21",
+    )
+    .await;
+    mock_github::mount_add_comment_success(&server).await;
+
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    let reaction = build_reaction(&server.uri());
+    let (update_tx, _update_rx) = tokio::sync::mpsc::channel(8);
+    reaction
+        .initialize(drasi_lib::context::ReactionRuntimeContext::new(
+            "snapshot-core",
+            REACTION,
+            Some(store.clone()),
+            update_tx,
+            None,
+        ))
+        .await;
+    assert!(reaction.needs_snapshot_on_fresh_start());
+
+    let row = retained_launch_row("issue-21", "route-21", "resp-21");
+    for _ in 0..2 {
+        reaction
+            .bootstrap(BootstrapContext::from_backend(
+                QUERY.to_string(),
+                false,
+                Box::new(StaticSnapshotBackend { row: row.clone() }),
+            ))
+            .await
+            .expect("snapshot reconciliation succeeds");
+    }
+
+    assert_eq!(
+        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
+        1
+    );
+    assert_eq!(mock_github::count_add_comment_requests(&server).await, 1);
+    let record = load(store.as_ref(), REACTION, "route-21", "resp-21", 1)
+        .await
+        .expect("load execution")
+        .expect("execution persisted");
+    assert_eq!(record.status, ExecutionStatus::Started);
+    assert!(record.comment_posted);
+}
+
+#[tokio::test]
+async fn retained_launch_snapshot_without_execution_identity_fails_closed() {
+    let server = MockServer::start().await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    let reaction = build_reaction(&server.uri());
+    let (update_tx, _update_rx) = tokio::sync::mpsc::channel(8);
+    reaction
+        .initialize(drasi_lib::context::ReactionRuntimeContext::new(
+            "snapshot-core",
+            REACTION,
+            Some(store),
+            update_tx,
+            None,
+        ))
+        .await;
+
+    let error = reaction
+        .bootstrap(BootstrapContext::from_backend(
+            QUERY.to_string(),
+            false,
+            Box::new(StaticSnapshotBackend {
+                row: json!({"repository": REPOSITORY}),
+            }),
+        ))
+        .await
+        .expect_err("unidentifiable retained row must not be checkpointed");
+
+    assert!(error
+        .to_string()
+        .contains("has no usable execution identity"));
+    assert_eq!(
+        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
+        0
+    );
 }
 
 // ---------------------------------------------------------------------

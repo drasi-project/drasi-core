@@ -17,13 +17,14 @@ use async_trait::async_trait;
 use log::{debug, error, info, warn};
 use reqwest::Client;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::reactions::common::{CheckpointState, FailureAction};
-use drasi_lib::reactions::ManagerCheckpointOwnership;
+use drasi_lib::reactions::{BootstrapContext, ManagerCheckpointOwnership};
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::Reaction;
 
@@ -91,6 +92,29 @@ impl GitHubProjectItemRefreshReaction {
             .build()
             .context("building shared HTTP client")
     }
+
+    fn build_processor(
+        &self,
+        state_store: Arc<dyn drasi_lib::state_store::StateStoreProvider>,
+    ) -> anyhow::Result<RefreshProcessor> {
+        let http_client = self.build_http_client()?;
+        Ok(RefreshProcessor::new(
+            self.config.clone(),
+            RefreshStateStore::new(state_store, self.base.id.clone()),
+            GitHubGraphqlClient::new(
+                http_client.clone(),
+                self.config.graphql_url.clone(),
+                self.config.github_token.clone(),
+                self.config.graphql_headers.clone(),
+                self.config.status_field_name.clone(),
+            ),
+            DestinationSourceClient::new(
+                http_client,
+                self.config.destination_event_url.clone(),
+                self.config.destination_bearer_secret.clone(),
+            ),
+        ))
+    }
 }
 
 #[async_trait]
@@ -155,23 +179,7 @@ impl Reaction for GitHubProjectItemRefreshReaction {
             );
         }
 
-        let http_client = self.build_http_client()?;
-        let processor = RefreshProcessor::new(
-            self.config.clone(),
-            RefreshStateStore::new(state_store.clone(), self.base.id.clone()),
-            GitHubGraphqlClient::new(
-                http_client.clone(),
-                self.config.graphql_url.clone(),
-                self.config.github_token.clone(),
-                self.config.graphql_headers.clone(),
-                self.config.status_field_name.clone(),
-            ),
-            DestinationSourceClient::new(
-                http_client.clone(),
-                self.config.destination_event_url.clone(),
-                self.config.destination_bearer_secret.clone(),
-            ),
-        );
+        let processor = self.build_processor(state_store)?;
 
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
         let base = self.base.clone_shared();
@@ -308,7 +316,7 @@ impl Reaction for GitHubProjectItemRefreshReaction {
     }
 
     fn needs_snapshot_on_fresh_start(&self) -> bool {
-        false
+        true
     }
 
     fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
@@ -317,5 +325,39 @@ impl Reaction for GitHubProjectItemRefreshReaction {
 
     fn checkpoint_ownership(&self) -> ManagerCheckpointOwnership {
         ManagerCheckpointOwnership::Reaction
+    }
+
+    async fn bootstrap(&self, ctx: BootstrapContext) -> anyhow::Result<()> {
+        let state_store = self.base.state_store().await.ok_or_else(|| {
+            anyhow::anyhow!("GitHub project item refresh bootstrap requires a durable state store")
+        })?;
+        if !state_store.is_durable() {
+            anyhow::bail!("GitHub project item refresh bootstrap requires a durable state store");
+        }
+        let processor = self.build_processor(state_store)?;
+        let mut snapshot = ctx
+            .fetch_snapshot()
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to fetch refresh snapshot: {error}"))?;
+        let mut row_count = 0usize;
+
+        while let Some((_row_signature, row)) = snapshot.next_keyed().await {
+            row_count += 1;
+            processor
+                .reconcile_retained_row(&row)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to reconcile retained refresh row for query '{}'",
+                        ctx.query_id
+                    )
+                })?;
+        }
+
+        info!(
+            "[{}] Reconciled {row_count} retained refresh row(s) for query '{}'",
+            self.base.id, ctx.query_id
+        );
+        Ok(())
     }
 }

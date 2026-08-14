@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use log::{error, info, warn};
 
@@ -33,7 +33,7 @@ use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::reactions::common::CheckpointState;
-use drasi_lib::reactions::ManagerCheckpointOwnership;
+use drasi_lib::reactions::{BootstrapContext, ManagerCheckpointOwnership};
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::Reaction;
@@ -257,11 +257,11 @@ impl Reaction for CopilotAgentTaskReaction {
         true
     }
 
-    /// A trigger reaction: launching on the entire historical result set on
-    /// a fresh start would fire duplicate task creation for already-handled
-    /// rows. Only new `Add` rows observed after the reaction starts matter.
+    /// Durable execution reservations make snapshot reconciliation idempotent.
+    /// This lets operators clear only a legacy reaction checkpoint and recover
+    /// retained launch candidates without recreating completed tasks.
     fn needs_snapshot_on_fresh_start(&self) -> bool {
-        false
+        true
     }
 
     /// Always Strict: an ambiguous or failed launch must stop the pipeline
@@ -273,6 +273,52 @@ impl Reaction for CopilotAgentTaskReaction {
 
     fn checkpoint_ownership(&self) -> ManagerCheckpointOwnership {
         ManagerCheckpointOwnership::Reaction
+    }
+
+    async fn bootstrap(&self, ctx: BootstrapContext) -> Result<()> {
+        let store = self.base.state_store().await.ok_or_else(|| {
+            anyhow::anyhow!("Copilot Agent Task bootstrap requires a durable state store")
+        })?;
+        if !store.is_durable() {
+            anyhow::bail!("Copilot Agent Task bootstrap requires a durable state store");
+        }
+        let client = self.github_client()?;
+        let mut snapshot = ctx
+            .fetch_snapshot()
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to fetch launch snapshot: {error}"))?;
+        let mut row_count = 0usize;
+
+        while let Some((_row_signature, row)) = snapshot.next_keyed().await {
+            row_count += 1;
+            LaunchRow::from_json(&row).with_context(|| {
+                format!(
+                    "retained launch row for query '{}' has no usable execution identity",
+                    ctx.query_id
+                )
+            })?;
+            process_add_row(
+                &self.base.id,
+                &self.base,
+                &self.config,
+                &client,
+                store.as_ref(),
+                &row,
+            )
+            .await
+            .map_err(|reason| {
+                anyhow::anyhow!(
+                    "failed to reconcile retained launch row for query '{}': {reason}",
+                    ctx.query_id
+                )
+            })?;
+        }
+
+        info!(
+            "[{}] Reconciled {row_count} retained launch row(s) for query '{}'",
+            self.base.id, ctx.query_id
+        );
+        Ok(())
     }
 }
 

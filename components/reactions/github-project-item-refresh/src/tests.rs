@@ -27,6 +27,11 @@ use tokio::sync::Barrier;
 use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use drasi_lib::queries::output_state::{
+    FetchError, OutboxResponse, OutboxStream, SnapshotResponse, SnapshotStream,
+};
+use drasi_lib::reactions::bootstrap_context::{BootstrapBackend, BootstrapContext};
+use drasi_lib::reactions::checkpoint::ReactionCheckpoint;
 use drasi_lib::state_store::{StateStoreProvider, StateStoreResult};
 use drasi_lib::{reactions::ManagerCheckpointOwnership, Reaction};
 use drasi_plugin_sdk::prelude::ReactionPluginDescriptor;
@@ -56,6 +61,37 @@ fn checkpoint_advances_only_after_reaction_processing() {
         reaction.checkpoint_ownership(),
         ManagerCheckpointOwnership::Reaction
     );
+}
+
+struct StaticSnapshotBackend {
+    row: serde_json::Value,
+}
+
+#[async_trait]
+impl BootstrapBackend for StaticSnapshotBackend {
+    async fn fetch_snapshot(&self) -> Result<SnapshotStream, FetchError> {
+        let mut results = im::HashMap::new();
+        results.insert(1, self.row.clone());
+        Ok(SnapshotStream::from_snapshot(SnapshotResponse::new(
+            results, 9, 13,
+        )))
+    }
+
+    async fn fetch_outbox(&self, _after_sequence: u64) -> Result<OutboxStream, FetchError> {
+        Ok(OutboxStream::from_outbox(OutboxResponse {
+            results: Vec::new(),
+            latest_sequence: 9,
+            config_hash: 13,
+        }))
+    }
+
+    async fn read_checkpoint(&self) -> anyhow::Result<Option<ReactionCheckpoint>> {
+        Ok(None)
+    }
+
+    async fn write_checkpoint(&self, _checkpoint: &ReactionCheckpoint) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 struct DurableMemoryStateStore {
@@ -303,6 +339,95 @@ async fn build_processor_with_status_field_name_and_expected_status_field_node_i
         DestinationSourceClient::new(client, destination_url, config.destination_bearer_secret),
     );
     (processor, store)
+}
+
+#[tokio::test]
+async fn retained_initializer_snapshot_publishes_missing_work_once() {
+    let graphql_server = MockServer::start().await;
+    let destination_server = MockServer::start().await;
+    let durable_store = Arc::new(DurableMemoryStateStore::new());
+
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(graphql_success_response(
+                "PVTI_issue22",
+                "PVT_project1",
+                "2026-08-13T18:10:00Z",
+                "Todo",
+                "opt-todo",
+            )),
+        )
+        .mount(&graphql_server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "message": "All 1 events processed successfully"
+        })))
+        .mount(&destination_server)
+        .await;
+
+    let reaction = crate::reaction::GitHubProjectItemRefreshReaction::new(
+        "refresh-github-project-items",
+        vec!["initialize-project-item".to_string()],
+        GitHubProjectItemRefreshConfig {
+            github_token: "ghp_test_secret".to_string(),
+            graphql_url: graphql_server.uri(),
+            graphql_headers: HashMap::new(),
+            allowlisted_project_ids: vec!["PVT_project1".to_string()],
+            status_field_name: "Status".to_string(),
+            expected_status_field_node_id: EXPECTED_STATUS_FIELD_NODE_ID.to_string(),
+            destination_event_url: destination_server.uri(),
+            destination_bearer_secret: Some("dest-secret-token".to_string()),
+            request_timeout_ms: 1_000,
+            delivery_record_ttl_secs: 60,
+        },
+    );
+    let (update_tx, _update_rx) = tokio::sync::mpsc::channel(8);
+    reaction
+        .initialize(drasi_lib::context::ReactionRuntimeContext::new(
+            "snapshot-core",
+            "refresh-github-project-items",
+            Some(durable_store.clone()),
+            update_tx,
+            None,
+        ))
+        .await;
+    assert!(reaction.needs_snapshot_on_fresh_start());
+
+    let row = test_row("delivery-22", "PVTI_issue22", "PVT_project1");
+    for _ in 0..2 {
+        reaction
+            .bootstrap(BootstrapContext::from_backend(
+                "initialize-project-item".to_string(),
+                false,
+                Box::new(StaticSnapshotBackend { row: row.clone() }),
+            ))
+            .await
+            .expect("snapshot reconciliation succeeds");
+    }
+
+    assert_eq!(
+        destination_server
+            .received_requests()
+            .await
+            .expect("destination requests")
+            .len(),
+        1
+    );
+    assert_eq!(
+        graphql_server
+            .received_requests()
+            .await
+            .expect("GraphQL requests")
+            .len(),
+        1
+    );
+    assert_eq!(
+        durable_store.list_keys_calls(),
+        0,
+        "snapshot reconciliation must not prune the terminal provenance it relies on"
+    );
 }
 
 #[test]
