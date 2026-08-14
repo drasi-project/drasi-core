@@ -198,16 +198,20 @@ pub(crate) async fn process_admission(
             })?;
         return Ok(());
     }
-    let fetched = params
-        .api_client
-        .fetch_root_from_locator(&locator)
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to hydrate locator event={} action={} node_id={:?}",
-                locator.event_type, locator.action, locator.node_id
-            )
-        })?;
+    let fetched = if is_immediate_authoritative_removal(&locator) {
+        None
+    } else {
+        params
+            .api_client
+            .fetch_root_from_locator(&locator)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to hydrate locator event={} action={} node_id={:?}",
+                    locator.event_type, locator.action, locator.node_id
+                )
+            })?
+    };
     if fetched.is_none() && !is_authoritative_delete_action(&locator) {
         if has_later_authoritative_delete(params, sequence, &locator).await? {
             debug!(
@@ -247,36 +251,58 @@ pub(crate) async fn process_admission(
 
     let mut reconcile_index_cache: Option<HashMap<String, SnapshotElement>> = None;
     if is_project_event(&locator) {
-        let identity = resolve_project_identity(
-            params,
-            &locator,
-            fetched.as_ref(),
-            &mut reconcile_index_cache,
-        )
-        .await?;
-        let Some(identity) = identity else {
-            debug!(
+        if is_immediate_authoritative_removal(&locator) {
+            let reconcile_index =
+                load_reconcile_index(params.state_store.as_ref(), &params.source_id).await?;
+            if !is_durable_project_item_removal(&locator, previous.as_ref(), &reconcile_index) {
+                debug!(
+                    "[{}] Skipping delivery {} because archived project item {:?} has no matching durable state",
+                    params.source_id, delivery_id, locator.node_id
+                );
+                params
+                    .wal
+                    .prune_up_to(&params.source_id, sequence)
+                    .await
+                    .context("Failed to prune unknown archived project item delivery from WAL")?;
+                return Ok(());
+            }
+            reconcile_index_cache = Some(reconcile_index);
+        } else {
+            let identity = resolve_project_identity(
+                params,
+                &locator,
+                fetched.as_ref(),
+                &mut reconcile_index_cache,
+            )
+            .await?;
+            let Some(identity) = identity else {
+                debug!(
                 "[{}] Skipping delivery {} because authoritative project identity could not be resolved",
                 params.source_id, delivery_id
             );
-            params
-                .wal
-                .prune_up_to(&params.source_id, sequence)
-                .await
-                .context("Failed to prune skipped project delivery from WAL")?;
-            return Ok(());
-        };
-        if !is_project_configured(&params.projects, &identity.owner, identity.number) {
-            debug!(
-                "[{}] Skipping delivery {} for unconfigured project id={} owner={} number={}",
-                params.source_id, delivery_id, identity.project_id, identity.owner, identity.number
-            );
-            params
-                .wal
-                .prune_up_to(&params.source_id, sequence)
-                .await
-                .context("Failed to prune skipped project delivery from WAL")?;
-            return Ok(());
+                params
+                    .wal
+                    .prune_up_to(&params.source_id, sequence)
+                    .await
+                    .context("Failed to prune skipped project delivery from WAL")?;
+                return Ok(());
+            };
+            if !is_project_configured(&params.projects, &identity.owner, identity.number) {
+                debug!(
+                    "[{}] Skipping delivery {} for unconfigured project id={} owner={} number={}",
+                    params.source_id,
+                    delivery_id,
+                    identity.project_id,
+                    identity.owner,
+                    identity.number
+                );
+                params
+                    .wal
+                    .prune_up_to(&params.source_id, sequence)
+                    .await
+                    .context("Failed to prune skipped project delivery from WAL")?;
+                return Ok(());
+            }
         }
     }
 
@@ -326,21 +352,13 @@ pub(crate) async fn process_admission(
             None => load_reconcile_index(params.state_store.as_ref(), &params.source_id).await?,
         };
 
-        let (changes, deleted_ids) = if previous.is_some() {
-            let changes =
-                map_root_delete_from_snapshot(&params.source_id, previous.as_ref(), effective_from);
-            let deleted_ids = deleted_element_ids(&changes);
-            (changes, deleted_ids)
-        } else if let Some(root_id) = resolve_delete_root_id(&locator, &reconcile_index) {
-            map_delete_from_reconcile_index(
-                &params.source_id,
-                &root_id,
-                &reconcile_index,
-                effective_from,
-            )
-        } else {
-            (Vec::new(), HashSet::new())
-        };
+        let (changes, deleted_ids) = map_delete_from_durable_state(
+            &params.source_id,
+            &locator,
+            previous.as_ref(),
+            &reconcile_index,
+            effective_from,
+        );
 
         debug!(
             "[{}] Locator {:?} resolved to delete with {} change(s)",
@@ -530,16 +548,6 @@ async fn resolve_project_identity(
         .map(str::to_string);
 
     if let Some(project_id) = project_id_hint {
-        if let Some(project) = params.api_client.fetch_project(&project_id).await? {
-            let number = u32::try_from(project.number)
-                .context("Project number does not fit in u32 while resolving project scope")?;
-            return Ok(Some(ProjectIdentity {
-                project_id: project.id,
-                owner: project.owner.login,
-                number,
-            }));
-        }
-
         if reconcile_index_cache.is_none() {
             *reconcile_index_cache =
                 Some(load_reconcile_index(params.state_store.as_ref(), &params.source_id).await?);
@@ -548,6 +556,16 @@ async fn resolve_project_identity(
             if let Some(identity) = project_identity_from_reconcile_index(index, &project_id) {
                 return Ok(Some(identity));
             }
+        }
+
+        if let Some(project) = params.api_client.fetch_project(&project_id).await? {
+            let number = u32::try_from(project.number)
+                .context("Project number does not fit in u32 while resolving project scope")?;
+            return Ok(Some(ProjectIdentity {
+                project_id: project.id,
+                owner: project.owner.login,
+                number,
+            }));
         }
     }
 
@@ -611,6 +629,59 @@ fn project_identity_from_reconcile_index(
     })
 }
 
+fn is_durable_project_item_removal(
+    locator: &WebhookLocator,
+    previous: Option<&RootSnapshot>,
+    reconcile_index: &HashMap<String, SnapshotElement>,
+) -> bool {
+    let Some(item_id) = locator.node_id.as_deref() else {
+        return false;
+    };
+
+    let snapshot_has_item = previous.is_some_and(|snapshot| {
+        snapshot.root_id == item_id
+            && snapshot.elements.get(item_id).is_some_and(|element| {
+                element.element_type == "node"
+                    && element
+                        .labels
+                        .iter()
+                        .any(|label| label == "GitHubProjectItem")
+            })
+    });
+    let index_has_item = reconcile_index.get(item_id).is_some_and(|element| {
+        element.element_type == "node"
+            && element
+                .labels
+                .iter()
+                .any(|label| label == "GitHubProjectItem")
+    });
+    if !snapshot_has_item && !index_has_item {
+        return false;
+    }
+
+    let mut stored_project_ids = HashSet::new();
+    for element in previous
+        .into_iter()
+        .flat_map(|snapshot| snapshot.elements.values())
+        .chain(reconcile_index.values())
+    {
+        if element.element_type == "relation"
+            && element.labels.iter().any(|label| label == "IN_PROJECT")
+            && element.out_node_id.as_deref() == Some(item_id)
+        {
+            if let Some(project_id) = element.in_node_id.as_ref() {
+                stored_project_ids.insert(project_id.as_str());
+            }
+        }
+    }
+
+    match locator.project_id.as_deref() {
+        Some(project_id) if stored_project_ids.is_empty() => !project_id.is_empty(),
+        Some(project_id) => stored_project_ids.contains(project_id),
+        None => !stored_project_ids.is_empty(),
+    }
+}
+
 fn resolve_delete_root_id(
     locator: &WebhookLocator,
     reconcile_index: &HashMap<String, SnapshotElement>,
@@ -642,6 +713,36 @@ fn resolve_delete_root_id(
         }
     }
     None
+}
+
+fn map_delete_from_durable_state(
+    source_id: &str,
+    locator: &WebhookLocator,
+    previous: Option<&RootSnapshot>,
+    reconcile_index: &HashMap<String, SnapshotElement>,
+    effective_from: u64,
+) -> (Vec<SourceChange>, HashSet<String>) {
+    let mut changes = map_root_delete_from_snapshot(source_id, previous, effective_from);
+    let mut deleted_ids = deleted_element_ids(&changes);
+    let root_id = previous
+        .map(|snapshot| snapshot.root_id.clone())
+        .or_else(|| resolve_delete_root_id(locator, reconcile_index));
+
+    if let Some(root_id) = root_id {
+        let (adjacency_changes, adjacency_ids) =
+            map_delete_from_reconcile_index(source_id, &root_id, reconcile_index, effective_from);
+        for change in adjacency_changes {
+            let Some(element_id) = deleted_element_id(&change) else {
+                continue;
+            };
+            if deleted_ids.insert(element_id) {
+                changes.push(change);
+            }
+        }
+        deleted_ids.extend(adjacency_ids);
+    }
+
+    (changes, deleted_ids)
 }
 
 fn map_delete_from_reconcile_index(
@@ -688,6 +789,10 @@ fn map_delete_from_reconcile_index(
         if let Some(rels) = relations_by_in.get(node_id.as_str()) {
             for rel in rels {
                 included_ids.insert(rel.id.clone());
+                // TRACKS links an independently owned project item to its content.
+                if rel.labels.iter().any(|label| label == "TRACKS") {
+                    continue;
+                }
                 if let Some(child_id) = rel.out_node_id.as_ref() {
                     if !visited_nodes.contains(child_id) {
                         queue.push_back(child_id.clone());
@@ -721,15 +826,16 @@ fn map_delete_from_reconcile_index(
 }
 
 fn deleted_element_ids(changes: &[SourceChange]) -> HashSet<String> {
-    changes
-        .iter()
-        .filter_map(|change| match change {
-            SourceChange::Delete { metadata } => {
-                Some(metadata.reference.element_id.as_ref().to_string())
-            }
-            _ => None,
-        })
-        .collect()
+    changes.iter().filter_map(deleted_element_id).collect()
+}
+
+fn deleted_element_id(change: &SourceChange) -> Option<String> {
+    match change {
+        SourceChange::Delete { metadata } => {
+            Some(metadata.reference.element_id.as_ref().to_string())
+        }
+        _ => None,
+    }
 }
 
 fn is_authoritative_delete_action(locator: &WebhookLocator) -> bool {
@@ -744,6 +850,13 @@ fn is_authoritative_delete_action(locator: &WebhookLocator) -> bool {
         "repository" => matches!(action, "deleted" | "archived"),
         _ => false,
     }
+}
+
+fn is_immediate_authoritative_removal(locator: &WebhookLocator) -> bool {
+    matches!(
+        (locator.event_type.as_str(), locator.action.as_str()),
+        ("projects_v2_item" | "project_item", "archived")
+    )
 }
 
 pub fn snapshot_key_for_locator(locator: &WebhookLocator, fetched: Option<&FetchedRoot>) -> String {

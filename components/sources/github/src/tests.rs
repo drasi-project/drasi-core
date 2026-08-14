@@ -1,10 +1,10 @@
 use crate::config::{GitHubSourceConfig, ProjectSpec, WebhookConfig};
-use crate::descriptor::GitHubSourceConfigDto;
+use crate::descriptor::{GitHubSourceConfigDto, GitHubSourceDescriptor};
 use crate::graphql::{
-    Connection, FetchedRoot, GitHubAppRef, GitHubGraphQLClient, IssueCommentData, IssueData,
-    LabelRef, NodeIdRef, OwnerRef, PageInfo, ProjectIdentityRef, ProjectItemContent,
-    ProjectItemData, ProjectItemFieldValue, PullRequestData, PullRequestReviewData,
-    PullRequestReviewRef, ReconcileSnapshot, RepositoryData, RepositoryRef, UserRef,
+    Connection, FetchedRoot, GitHubGraphQLClient, IssueCommentData, IssueData, LabelRef, NodeIdRef,
+    OwnerRef, PageInfo, ProjectIdentityRef, ProjectItemContent, ProjectItemData,
+    ProjectItemFieldValue, PullRequestData, PullRequestReviewData, PullRequestReviewRef,
+    ReconcileSnapshot, RepositoryData, RepositoryRef, UserRef,
 };
 use crate::hydrator::{
     load_root_snapshot, process_admission, save_root_snapshot, snapshot_key_for_locator,
@@ -14,19 +14,20 @@ use crate::mapping::{map_reconcile_snapshot, map_root_diff, node_labels, relatio
 use crate::rate_limit::{classify_retry, exp_backoff};
 use crate::reconciler::{run_reconciler_loop, ReconcilerParams};
 use crate::source::GitHubSourceBuilder;
-use crate::types::{HydratorHealth, RootSnapshot, WebhookLocator};
+use crate::types::{HydratorHealth, RootSnapshot, SnapshotElement, WebhookLocator};
 use crate::webhook::{encode_admission_change, parse_locator, verify_signature};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::routing::post;
 use axum::{Json, Router};
 use drasi_core::models::SourceChange;
+use drasi_lib::channels::DispatchMode;
 use drasi_lib::state_store::{
     MemoryStateStoreProvider, StateStoreError, StateStoreProvider, StateStoreResult,
 };
 use drasi_lib::wal::{CapacityPolicy, WalProvider};
-use drasi_lib::{DrasiLib, DurabilityConfig};
-use drasi_plugin_sdk::ConfigValue;
+use drasi_lib::{DrasiLib, DurabilityConfig, Source};
+use drasi_plugin_sdk::{ConfigValue, SourcePluginDescriptor};
 use drasi_state_store_redb::RedbStateStoreProvider;
 use drasi_wal_redb::RedbWalProvider;
 use hmac::Mac;
@@ -88,7 +89,6 @@ fn sample_issue(title: &str) -> IssueData {
             url: "https://example/comment".to_string(),
             is_minimized: false,
             author: None,
-            performed_via_github_app: None,
             issue: Some(NodeIdRef {
                 id: "I_1".to_string(),
             }),
@@ -375,7 +375,7 @@ fn mapping_project_item_emits_tracks_relation() {
 }
 
 #[test]
-fn mapping_comment_review_shapes_include_author_and_app_fields() {
+fn mapping_comment_review_shapes_include_author_fields() {
     let issue_comment = IssueCommentData {
         id: "IC_meta".to_string(),
         body: Some("comment".to_string()),
@@ -388,9 +388,6 @@ fn mapping_comment_review_shapes_include_author_and_app_fields() {
             login: Some("octocat".to_string()),
             actor_type: Some("User".to_string()),
             database_id: Some(42),
-        }),
-        performed_via_github_app: Some(GitHubAppRef {
-            database_id: Some(9001),
         }),
         issue: Some(NodeIdRef {
             id: "I_1".to_string(),
@@ -413,9 +410,6 @@ fn mapping_comment_review_shapes_include_author_and_app_fields() {
             login: Some("reviewer".to_string()),
             actor_type: Some("Bot".to_string()),
             database_id: Some(77),
-        }),
-        performed_via_github_app: Some(GitHubAppRef {
-            database_id: Some(1234),
         }),
         pull_request: crate::graphql::PullRequestRef {
             id: "PR_1".to_string(),
@@ -441,9 +435,6 @@ fn mapping_comment_review_shapes_include_author_and_app_fields() {
             login: Some("reviewer2".to_string()),
             actor_type: Some("User".to_string()),
             database_id: Some(88),
-        }),
-        performed_via_github_app: Some(GitHubAppRef {
-            database_id: Some(5678),
         }),
         repository: RepositoryRef {
             id: "R_1".to_string(),
@@ -487,20 +478,22 @@ fn mapping_comment_review_shapes_include_author_and_app_fields() {
     assert_eq!(comment_props["authorId"], json!("U_NODE_1"));
     assert_eq!(comment_props["authorDatabaseId"], json!(42));
     assert_eq!(comment_props["authorType"], json!("User"));
-    assert_eq!(comment_props["performedViaGithubAppId"], json!(9001));
+    assert!(comment_props.get("performedViaGithubAppId").is_none());
     assert_eq!(comment_props["isEdited"], json!(true));
 
     let review_props = &review_snapshot.elements["RV_1"].properties;
     assert_eq!(review_props["authorId"], json!("U_NODE_2"));
     assert_eq!(review_props["authorDatabaseId"], json!(77));
     assert_eq!(review_props["authorType"], json!("Bot"));
-    assert_eq!(review_props["performedViaGithubAppId"], json!(1234));
+    assert!(review_props.get("performedViaGithubAppId").is_none());
 
     let review_comment_props = &review_comment_snapshot.elements["RC_1"].properties;
     assert_eq!(review_comment_props["authorId"], json!("U_NODE_3"));
     assert_eq!(review_comment_props["authorDatabaseId"], json!(88));
     assert_eq!(review_comment_props["authorType"], json!("User"));
-    assert_eq!(review_comment_props["performedViaGithubAppId"], json!(5678));
+    assert!(review_comment_props
+        .get("performedViaGithubAppId")
+        .is_none());
     assert_eq!(review_comment_props["isEdited"], json!(true));
 }
 
@@ -625,6 +618,82 @@ fn config_dto_denies_unknown_fields() {
         "repositories": ["acme/repo"]
     });
     assert!(serde_json::from_value::<GitHubSourceConfigDto>(config).is_err());
+}
+
+#[test]
+fn descriptor_schema_has_no_dangling_references() {
+    fn check_refs(value: &serde_json::Value, schemas: &serde_json::Map<String, serde_json::Value>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(reference) = object.get("$ref").and_then(|value| value.as_str()) {
+                    let name = reference
+                        .strip_prefix("#/components/schemas/")
+                        .expect("schema references must target components/schemas");
+                    assert!(
+                        schemas.contains_key(name),
+                        "schema reference {reference} is not registered"
+                    );
+                }
+                for child in object.values() {
+                    check_refs(child, schemas);
+                }
+            }
+            serde_json::Value::Array(array) => {
+                for child in array {
+                    check_refs(child, schemas);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let schemas: serde_json::Value =
+        serde_json::from_str(&GitHubSourceDescriptor.config_schema_json()).expect("schema JSON");
+    let schemas = schemas.as_object().expect("schema map");
+    assert!(schemas.contains_key("source.github.GitHubSourceConfig"));
+    check_refs(&serde_json::Value::Object(schemas.clone()), schemas);
+}
+
+#[tokio::test]
+async fn direct_builder_properties_and_configuration_snapshot_redact_secrets() {
+    let pat = "literal-pat-must-not-leak";
+    let webhook_secret = "literal-webhook-secret-must-not-leak";
+    let mut config = valid_config_with_port(0);
+    config.token = pat.to_string();
+    config.webhook.secret = webhook_secret.to_string();
+    let source = GitHubSourceBuilder::new("github-secret-test")
+        .with_config(config)
+        .with_auto_start(false)
+        .build()
+        .expect("build source");
+
+    let properties_json = serde_json::to_string(&source.properties()).expect("properties JSON");
+    assert!(!properties_json.contains(pat));
+    assert!(!properties_json.contains(webhook_secret));
+    assert!(!source.properties().contains_key("token"));
+    assert!(source.properties()["webhook"].get("secret").is_none());
+
+    let core = DrasiLib::builder()
+        .with_id("github-secret-core")
+        .with_source(source)
+        .build()
+        .await
+        .expect("build core");
+    let snapshot_json =
+        serde_json::to_string(&core.snapshot_configuration().await.expect("snapshot"))
+            .expect("snapshot JSON");
+    assert!(!snapshot_json.contains(pat));
+    assert!(!snapshot_json.contains(webhook_secret));
+}
+
+#[test]
+fn dispatch_mode_reports_builder_configuration() {
+    let source = GitHubSourceBuilder::new("github-broadcast")
+        .with_config(valid_config_with_port(0))
+        .with_dispatch_mode(DispatchMode::Broadcast)
+        .build()
+        .expect("build source");
+    assert_eq!(source.dispatch_mode(), DispatchMode::Broadcast);
 }
 
 #[test]
@@ -812,7 +881,14 @@ async fn graphql_client_sends_bearer_token_header() {
 
 #[tokio::test]
 async fn graphql_fetch_issue_comment_parses_authoritative_shape_fields() {
-    async fn handler(Json(_payload): Json<serde_json::Value>) -> Json<serde_json::Value> {
+    async fn handler(Json(payload): Json<serde_json::Value>) -> Json<serde_json::Value> {
+        let query = payload["query"].as_str().expect("query document");
+        assert!(!query.contains("performedViaGithubApp"));
+        assert!(!query.contains("__typename\n        id\n        login"));
+        for actor_type in ["User", "Bot", "Organization", "Mannequin"] {
+            assert!(query.contains(&format!("... on {actor_type} {{ id databaseId }}")));
+        }
+        assert!(query.contains("... on EnterpriseUserAccount { id }"));
         Json(json!({
             "data": {
                 "node": {
@@ -829,7 +905,6 @@ async fn graphql_fetch_issue_comment_parses_authoritative_shape_fields() {
                         "login": "octocat",
                         "databaseId": 7
                     },
-                    "performedViaGithubApp": { "databaseId": 901 },
                     "issue": { "id": "I_1" },
                     "pullRequest": null,
                     "repository": { "id": "R_1", "nameWithOwner": "acme/repo" }
@@ -857,13 +932,6 @@ async fn graphql_fetch_issue_comment_parses_authoritative_shape_fields() {
 
     assert_eq!(
         comment
-            .performed_via_github_app
-            .as_ref()
-            .and_then(|app| app.database_id),
-        Some(901)
-    );
-    assert_eq!(
-        comment
             .author
             .as_ref()
             .and_then(|author| author.id.as_deref()),
@@ -886,7 +954,7 @@ async fn graphql_fetch_issue_comment_parses_authoritative_shape_fields() {
     server.abort();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn graphql_client_retries_5xx_with_backoff_and_succeeds() {
     #[derive(Clone, Default)]
     struct RetryState {
@@ -941,15 +1009,13 @@ async fn graphql_client_retries_5xx_with_backoff_and_succeeds() {
     let client = GitHubGraphQLClient::new(format!("http://{addr}/graphql"), "pat".to_string())
         .expect("client");
     let fetch_task = tokio::spawn(async move { client.fetch_repository("acme", "repo").await });
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_secs(2)).await;
     let result = fetch_task.await.expect("task join").expect("fetch success");
     assert!(result.is_some());
     assert_eq!(state.calls.load(Ordering::SeqCst), 2);
     server.abort();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn graphql_client_retries_transient_transport_failure() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -997,14 +1063,12 @@ async fn graphql_client_retries_transient_transport_failure() {
     let client = GitHubGraphQLClient::new(format!("http://{addr}/graphql"), "pat".to_string())
         .expect("client");
     let fetch_task = tokio::spawn(async move { client.fetch_repository("acme", "repo").await });
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_secs(2)).await;
     let result = fetch_task.await.expect("task join").expect("fetch success");
     assert!(result.is_some());
     server.await.expect("server task");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn graphql_client_retries_retryable_graphql_error_then_succeeds() {
     #[derive(Clone, Default)]
     struct RetryState {
@@ -1058,8 +1122,6 @@ async fn graphql_client_retries_retryable_graphql_error_then_succeeds() {
     let client = GitHubGraphQLClient::new(format!("http://{addr}/graphql"), "pat".to_string())
         .expect("client");
     let fetch_task = tokio::spawn(async move { client.fetch_repository("acme", "repo").await });
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_secs(2)).await;
     let result = fetch_task.await.expect("task join").expect("fetch success");
     assert!(result.is_some());
     assert_eq!(state.calls.load(Ordering::SeqCst), 2);
@@ -1144,6 +1206,10 @@ async fn fetch_repository_treats_path_not_found_as_absent() {
 #[tokio::test]
 async fn project_owner_lookup_accepts_only_alternate_namespace_not_found() {
     async fn handler(Json(payload): Json<serde_json::Value>) -> Json<serde_json::Value> {
+        let query = payload["query"].as_str().expect("query document");
+        assert!(!query.contains("owner { login }"));
+        assert!(query.contains("... on Organization { login }"));
+        assert!(query.contains("... on User { login }"));
         let owner = payload["variables"]["owner"].as_str().unwrap_or_default();
         let project = |id: &str, owner: &str| {
             json!({
@@ -1304,7 +1370,6 @@ async fn fetch_issue_paginates_comments_across_pages() {
                                 "url": "https://github.com/acme/repo/issues/1#issuecomment-2",
                                 "isMinimized": false,
                                 "author": { "__typename": "User", "id": "U_2", "login": "user2", "databaseId": 2 },
-                                "performedViaGithubApp": { "databaseId": 7002 },
                                 "issue": { "id": "I_1" },
                                 "pullRequest": null,
                                 "repository": { "id": "R_1", "nameWithOwner": "acme/repo" }
@@ -1343,7 +1408,6 @@ async fn fetch_issue_paginates_comments_across_pages() {
                             "url": "https://github.com/acme/repo/issues/1#issuecomment-1",
                             "isMinimized": false,
                             "author": { "__typename": "Bot", "id": "U_1", "login": "user1", "databaseId": 1 },
-                            "performedViaGithubApp": { "databaseId": 7001 },
                             "issue": { "id": "I_1" },
                             "pullRequest": null,
                             "repository": { "id": "R_1", "nameWithOwner": "acme/repo" }
@@ -1377,13 +1441,6 @@ async fn fetch_issue_paginates_comments_across_pages() {
     assert_eq!(issue.comments.nodes.len(), 2);
     assert_eq!(issue.comments.nodes[0].id, "IC_1");
     assert_eq!(issue.comments.nodes[1].id, "IC_2");
-    assert_eq!(
-        issue.comments.nodes[0]
-            .performed_via_github_app
-            .as_ref()
-            .and_then(|app| app.database_id),
-        Some(7001)
-    );
     assert_eq!(
         issue.comments.nodes[0]
             .author
@@ -1432,7 +1489,6 @@ async fn fetch_pull_request_paginates_reviews_and_review_comments() {
                                 "updatedAt": "2026-01-03T00:00:00Z",
                                 "url": "https://github.com/acme/repo/pull/1#review-2",
                                 "author": { "__typename": "User", "id": "U_2", "login": "reviewer2", "databaseId": 2 },
-                                "performedViaGithubApp": { "databaseId": 2002 },
                                 "pullRequest": { "id": "PR_1", "repository": { "id": "R_1", "nameWithOwner": "acme/repo" } },
                                 "comments": {
                                     "pageInfo": { "hasNextPage": false, "endCursor": null },
@@ -1466,7 +1522,6 @@ async fn fetch_pull_request_paginates_reviews_and_review_comments() {
                                 "updatedAt": "2026-01-02T00:00:00Z",
                                 "url": "https://github.com/acme/repo/pull/1#discussion_r2",
                                 "author": { "__typename": "Bot", "id": "U_3", "login": "reviewer3", "databaseId": 3 },
-                                "performedViaGithubApp": { "databaseId": 3003 },
                                 "repository": { "id": "R_1", "nameWithOwner": "acme/repo" },
                                 "pullRequestReview": { "id": "R_1", "pullRequest": { "id": "PR_1", "repository": { "id": "R_1", "nameWithOwner": "acme/repo" } } }
                             }]
@@ -1510,7 +1565,6 @@ async fn fetch_pull_request_paginates_reviews_and_review_comments() {
                       "updatedAt": "2026-01-01T00:00:00Z",
                       "url": "https://github.com/acme/repo/pull/1#review-1",
                       "author": { "__typename": "User", "id": "U_1", "login": "reviewer1", "databaseId": 1 },
-                      "performedViaGithubApp": { "databaseId": 1001 },
                       "pullRequest": { "id": "PR_1", "repository": { "id": "R_1", "nameWithOwner": "acme/repo" } },
                       "comments": {
                         "pageInfo": { "hasNextPage": true, "endCursor": "rc1" },
@@ -1526,7 +1580,6 @@ async fn fetch_pull_request_paginates_reviews_and_review_comments() {
                           "url": "https://github.com/acme/repo/pull/1#discussion_r1",
                           "pullRequestReview": { "id": "R_1", "pullRequest": { "id": "PR_1", "repository": { "id": "R_1", "nameWithOwner": "acme/repo" } } },
                           "author": { "__typename": "User", "id": "U_1", "login": "reviewer1", "databaseId": 1 },
-                          "performedViaGithubApp": { "databaseId": 5001 },
                           "repository": { "id": "R_1", "nameWithOwner": "acme/repo" }
                         }]
                       }
@@ -1565,24 +1618,10 @@ async fn fetch_pull_request_paginates_reviews_and_review_comments() {
     assert_eq!(pr.reviews.nodes[0].comments.nodes[1].id, "RC_2");
     assert_eq!(
         pr.reviews.nodes[0]
-            .performed_via_github_app
-            .as_ref()
-            .and_then(|app| app.database_id),
-        Some(1001)
-    );
-    assert_eq!(
-        pr.reviews.nodes[0]
             .author
             .as_ref()
             .and_then(|author| author.actor_type.as_deref()),
         Some("User")
-    );
-    assert_eq!(
-        pr.reviews.nodes[0].comments.nodes[0]
-            .performed_via_github_app
-            .as_ref()
-            .and_then(|app| app.database_id),
-        Some(5001)
     );
     assert_eq!(state.review_page_calls.load(Ordering::SeqCst), 1);
     assert_eq!(state.review_comment_page_calls.load(Ordering::SeqCst), 1);
@@ -2324,6 +2363,103 @@ async fn start_fails_fast_when_loading_effective_repos_errors() {
 }
 
 #[tokio::test]
+async fn stop_aborts_hung_graphql_task_and_allows_listener_restart() {
+    #[derive(Clone, Default)]
+    struct HungState {
+        request_started: Arc<Notify>,
+    }
+
+    async fn hung_handler(
+        State(state): State<HungState>,
+        Json(_payload): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        state.request_started.notify_one();
+        std::future::pending().await
+    }
+
+    let hung_state = HungState::default();
+    let graphql_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind GraphQL server");
+    let graphql_addr = graphql_listener.local_addr().expect("GraphQL addr");
+    let server_state = hung_state.clone();
+    let graphql_server = tokio::spawn(async move {
+        let _ = axum::serve(
+            graphql_listener,
+            Router::new()
+                .route("/graphql", post(hung_handler))
+                .with_state(server_state),
+        )
+        .await;
+    });
+
+    let webhook_port = find_available_port().await;
+    let mut config = valid_config_with_port(webhook_port);
+    config.graphql_url = format!("http://{graphql_addr}/graphql");
+    let source = GitHubSourceBuilder::new("github-hung-stop")
+        .with_config(config)
+        .build()
+        .expect("build source");
+    let temp = TempDir::new().expect("tempdir");
+    let core = DrasiLib::builder()
+        .with_id("github-hung-stop-core")
+        .with_source(source)
+        .with_state_store_provider(Arc::new(
+            RedbStateStoreProvider::new(temp.path().join("state.redb")).expect("state store"),
+        ))
+        .with_wal_provider(Arc::new(RedbWalProvider::new(temp.path())))
+        .build()
+        .await
+        .expect("build core");
+    core.start().await.expect("start core");
+
+    let body = br#"{"action":"edited","issue":{"node_id":"I_hung"},"repository":{"full_name":"acme/repo"}}"#;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret").expect("hmac");
+    mac.update(body);
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{webhook_port}/webhook"))
+        .header(
+            "X-Hub-Signature-256",
+            format!("sha256={}", hex::encode(mac.finalize().into_bytes())),
+        )
+        .header("X-GitHub-Delivery", "hung-delivery")
+        .header("X-GitHub-Event", "issues")
+        .body(body.as_slice().to_vec())
+        .send()
+        .await
+        .expect("send webhook");
+    assert!(response.status().is_success());
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        hung_state.request_started.notified(),
+    )
+    .await
+    .expect("hung GraphQL request should start");
+
+    tokio::time::timeout(Duration::from_secs(8), core.stop())
+        .await
+        .expect("stop must be bounded")
+        .expect("stop core");
+    drasi_lib::wait_for_status(
+        &core.component_graph(),
+        "github-hung-stop",
+        &[drasi_lib::channels::ComponentStatus::Stopped],
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("stopped status must be observed");
+    core.start()
+        .await
+        .expect("listener must restart on the same port");
+    tokio::time::timeout(Duration::from_secs(8), core.stop())
+        .await
+        .expect("second stop must be bounded")
+        .expect("second stop");
+    graphql_server.abort();
+    let _ = graphql_server.await;
+}
+
+#[tokio::test]
 async fn hydrator_null_node_for_non_delete_action_returns_error() {
     async fn handler(Json(_payload): Json<serde_json::Value>) -> Json<serde_json::Value> {
         Json(json!({ "data": { "node": null } }))
@@ -2396,7 +2532,7 @@ async fn hydrator_null_node_for_non_delete_action_returns_error() {
 }
 
 #[tokio::test]
-async fn hydrator_null_node_for_delete_action_persists_tombstone_and_prunes() {
+async fn snapshot_delete_cleans_incident_tracks_without_duplicate_or_item_delete() {
     async fn handler(Json(_payload): Json<serde_json::Value>) -> Json<serde_json::Value> {
         Json(json!({
             "data": { "node": null },
@@ -2433,6 +2569,10 @@ async fn hydrator_null_node_for_delete_action_persists_tombstone_and_prunes() {
     .expect("register wal");
     let state_store = Arc::new(MemoryStateStoreProvider::new());
     let base = test_source_base("src");
+    let mut receiver = base
+        .create_streaming_receiver()
+        .await
+        .expect("create event receiver");
     let params = HydratorParams {
         source_id: "src".to_string(),
         base,
@@ -2469,6 +2609,32 @@ async fn hydrator_null_node_for_delete_action_persists_tombstone_and_prunes() {
     )
     .await
     .expect("save previous");
+    let mut reconcile_index = previous_snapshot.elements.clone();
+    reconcile_index.insert(
+        "PVTI_1".to_string(),
+        SnapshotElement {
+            element_type: "node".to_string(),
+            id: "PVTI_1".to_string(),
+            labels: vec!["GitHubProjectItem".to_string()],
+            properties: json!({}),
+            in_node_id: None,
+            out_node_id: None,
+        },
+    );
+    reconcile_index.insert(
+        "TRACKS:PVTI_1:I_1".to_string(),
+        SnapshotElement {
+            element_type: "relation".to_string(),
+            id: "TRACKS:PVTI_1:I_1".to_string(),
+            labels: vec!["TRACKS".to_string()],
+            properties: json!({}),
+            in_node_id: Some("I_1".to_string()),
+            out_node_id: Some("PVTI_1".to_string()),
+        },
+    );
+    crate::hydrator::save_reconcile_index(state_store.as_ref(), "src", &reconcile_index)
+        .await
+        .expect("seed reconcile index");
 
     let locator = WebhookLocator {
         event_type: "issues".to_string(),
@@ -2497,6 +2663,28 @@ async fn hydrator_null_node_for_delete_action_persists_tombstone_and_prunes() {
         tombstone.committed_delivery_id.as_deref(),
         Some("delivery-delete")
     );
+    let updated_index = crate::hydrator::load_reconcile_index(state_store.as_ref(), "src")
+        .await
+        .expect("load updated reconcile index");
+    assert!(!updated_index.contains_key("I_1"));
+    assert!(!updated_index.contains_key("TRACKS:PVTI_1:I_1"));
+    assert!(updated_index.contains_key("PVTI_1"));
+
+    let mut delete_counts = HashMap::new();
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(20), receiver.recv()).await
+    {
+        if let drasi_lib::channels::SourceEvent::Change(SourceChange::Delete { metadata }) =
+            &event.event
+        {
+            *delete_counts
+                .entry(metadata.reference.element_id.as_ref().to_string())
+                .or_insert(0usize) += 1;
+        }
+    }
+    assert_eq!(delete_counts.get("I_1"), Some(&1));
+    assert_eq!(delete_counts.get("TRACKS:PVTI_1:I_1"), Some(&1));
+    assert!(!delete_counts.contains_key("PVTI_1"));
+    assert!(delete_counts.values().all(|count| *count == 1));
     server.abort();
 }
 
@@ -2575,8 +2763,30 @@ async fn hydrator_delete_uses_reconcile_index_when_root_snapshot_missing() {
             .issue_comments
             .insert(comment.id.clone(), comment.clone());
     }
-    let (_, reconcile_index) =
+    let (_, mut reconcile_index) =
         map_reconcile_snapshot("src", &reconcile_snapshot, &HashMap::new(), 1_000);
+    reconcile_index.insert(
+        "PVTI_1".to_string(),
+        SnapshotElement {
+            element_type: "node".to_string(),
+            id: "PVTI_1".to_string(),
+            labels: vec!["GitHubProjectItem".to_string()],
+            properties: json!({}),
+            in_node_id: None,
+            out_node_id: None,
+        },
+    );
+    reconcile_index.insert(
+        "TRACKS:PVTI_1:I_1".to_string(),
+        SnapshotElement {
+            element_type: "relation".to_string(),
+            id: "TRACKS:PVTI_1:I_1".to_string(),
+            labels: vec!["TRACKS".to_string()],
+            properties: json!({}),
+            in_node_id: Some("I_1".to_string()),
+            out_node_id: Some("PVTI_1".to_string()),
+        },
+    );
     crate::hydrator::save_reconcile_index(state_store.as_ref(), "src", &reconcile_index)
         .await
         .expect("save reconcile index");
@@ -2613,8 +2823,179 @@ async fn hydrator_delete_uses_reconcile_index_when_root_snapshot_missing() {
     assert!(!updated_index.contains_key("IC_1"));
     assert!(!updated_index.contains_key("COMMENT_ON:IC_1:I_1"));
     assert!(!updated_index.contains_key("IN_REPOSITORY:I_1:R_1"));
+    assert!(!updated_index.contains_key("TRACKS:PVTI_1:I_1"));
+    assert!(updated_index.contains_key("PVTI_1"));
     assert!(updated_index.contains_key("R_1"));
     assert!(wal.oldest_sequence("src").await.expect("oldest").is_none());
+    server.abort();
+}
+
+#[tokio::test]
+async fn archived_project_item_deletes_from_durable_adjacency_without_hydration() {
+    async fn hung_handler(State(calls): State<Arc<AtomicUsize>>) -> Json<serde_json::Value> {
+        calls.fetch_add(1, Ordering::SeqCst);
+        std::future::pending::<Json<serde_json::Value>>().await
+    }
+
+    let graphql_calls = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind hung GraphQL endpoint");
+    let addr = listener.local_addr().expect("local addr");
+    let app = Router::new()
+        .route("/graphql", post(hung_handler))
+        .with_state(graphql_calls.clone());
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let temp = TempDir::new().expect("tempdir");
+    let wal = Arc::new(RedbWalProvider::new(temp.path()));
+    wal.register(
+        "src",
+        DurabilityConfig {
+            enabled: true,
+            max_events: 32,
+            capacity_policy: CapacityPolicy::RejectIncoming,
+        }
+        .to_wal_config(),
+    )
+    .await
+    .expect("register wal");
+    let state_store = Arc::new(MemoryStateStoreProvider::new());
+    let index = HashMap::from([
+        (
+            "PVTI_1".to_string(),
+            SnapshotElement {
+                element_type: "node".to_string(),
+                id: "PVTI_1".to_string(),
+                labels: vec!["GitHubProjectItem".to_string()],
+                properties: json!({}),
+                in_node_id: None,
+                out_node_id: None,
+            },
+        ),
+        (
+            "I_1".to_string(),
+            SnapshotElement {
+                element_type: "node".to_string(),
+                id: "I_1".to_string(),
+                labels: vec!["GitHubIssue".to_string()],
+                properties: json!({}),
+                in_node_id: None,
+                out_node_id: None,
+            },
+        ),
+        (
+            "IN_PROJECT:PVTI_1:PVT_1".to_string(),
+            SnapshotElement {
+                element_type: "relation".to_string(),
+                id: "IN_PROJECT:PVTI_1:PVT_1".to_string(),
+                labels: vec!["IN_PROJECT".to_string()],
+                properties: json!({}),
+                in_node_id: Some("PVT_1".to_string()),
+                out_node_id: Some("PVTI_1".to_string()),
+            },
+        ),
+        (
+            "TRACKS:PVTI_1:I_1".to_string(),
+            SnapshotElement {
+                element_type: "relation".to_string(),
+                id: "TRACKS:PVTI_1:I_1".to_string(),
+                labels: vec!["TRACKS".to_string()],
+                properties: json!({}),
+                in_node_id: Some("I_1".to_string()),
+                out_node_id: Some("PVTI_1".to_string()),
+            },
+        ),
+    ]);
+    assert!(!index.contains_key("PVT_1"));
+    crate::hydrator::save_reconcile_index(state_store.as_ref(), "src", &index)
+        .await
+        .expect("seed index");
+    let locator = parse_locator(
+        "projects_v2_item",
+        br#"{"action":"archived","projects_v2_item":{"node_id":"PVTI_1","project_node_id":"PVT_1"}}"#,
+    )
+    .expect("parse archived project item webhook locator");
+    let (_, item_snapshot) = map_root_diff(
+        "src",
+        &FetchedRoot::ProjectItem(sample_project_item()),
+        None,
+        1_000,
+    )
+    .expect("map standalone project item snapshot");
+    save_root_snapshot(
+        state_store.as_ref(),
+        "src",
+        &snapshot_key_for_locator(&locator, None),
+        &item_snapshot,
+    )
+    .await
+    .expect("save standalone project item snapshot");
+    let base = test_source_base("src");
+    let mut receiver = base
+        .create_streaming_receiver()
+        .await
+        .expect("create event receiver");
+    let params = HydratorParams {
+        source_id: "src".to_string(),
+        base,
+        wal: wal.clone(),
+        state_store: state_store.clone(),
+        api_client: Arc::new(
+            GitHubGraphQLClient::new(format!("http://{addr}/graphql"), "pat".to_string())
+                .expect("client"),
+        ),
+        projects: vec![ProjectSpec {
+            owner: "acme".to_string(),
+            number: 1,
+        }],
+        effective_repos: Arc::new(RwLock::new(HashSet::new())),
+        notify: Arc::new(Notify::new()),
+        health: Arc::new(RwLock::new(HydratorHealth::default())),
+        processing_gate: Arc::new(tokio::sync::Mutex::new(())),
+        shutdown: tokio::sync::watch::channel(false).1,
+    };
+    let admission =
+        encode_admission_change("src", "delivery-project-archived", &locator).expect("encode");
+    let sequence = wal.append("src", &admission).await.expect("append");
+
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        process_admission(&params, sequence, &admission),
+    )
+    .await
+    .expect("archived item deletion must not wait on GraphQL")
+    .expect("archived item is an immediate authoritative removal");
+
+    let updated = crate::hydrator::load_reconcile_index(state_store.as_ref(), "src")
+        .await
+        .expect("load index");
+    assert!(!updated.contains_key("PVTI_1"));
+    assert!(!updated.contains_key("IN_PROJECT:PVTI_1:PVT_1"));
+    assert!(!updated.contains_key("TRACKS:PVTI_1:I_1"));
+    assert!(updated.contains_key("I_1"));
+    assert_eq!(graphql_calls.load(Ordering::SeqCst), 0);
+    assert!(wal.oldest_sequence("src").await.expect("oldest").is_none());
+
+    let mut delete_counts = HashMap::new();
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(20), receiver.recv()).await
+    {
+        if let drasi_lib::channels::SourceEvent::Change(SourceChange::Delete { metadata }) =
+            &event.event
+        {
+            *delete_counts
+                .entry(metadata.reference.element_id.as_ref().to_string())
+                .or_insert(0usize) += 1;
+        }
+    }
+    assert_eq!(delete_counts.get("PVTI_1"), Some(&1));
+    assert_eq!(delete_counts.get("IN_PROJECT:PVTI_1:PVT_1"), Some(&1));
+    assert_eq!(delete_counts.get("TRACKS:PVTI_1:I_1"), Some(&1));
+    assert!(!delete_counts.contains_key("PVT_1"));
+    assert!(!delete_counts.contains_key("I_1"));
+    assert!(delete_counts.values().all(|count| *count == 1));
     server.abort();
 }
 

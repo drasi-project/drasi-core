@@ -23,7 +23,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::time::sleep;
+use tokio::time::{sleep, Duration};
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fetched root object used by hydrator.
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +109,7 @@ impl GitHubGraphQLClient {
 
         let client = reqwest::Client::builder()
             .default_headers(headers.clone())
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .context("Failed to construct reqwest client")?;
 
@@ -247,7 +250,11 @@ fragment ProjectItemFields on ProjectV2Item {
   type
   createdAt
   updatedAt
-  project { id number owner { login } }
+  project {
+    id
+    number
+    owner { ... on Organization { login } ... on User { login } }
+  }
   content {
     __typename
     ... on Issue { id number title state repository { id nameWithOwner } }
@@ -322,7 +329,11 @@ fragment ProjectItemFields on ProjectV2Item {
   type
   createdAt
   updatedAt
-  project { id number owner { login } }
+  project {
+    id
+    number
+    owner { ... on Organization { login } ... on User { login } }
+  }
   content {
     __typename
     ... on Issue { id number title state repository { id nameWithOwner } }
@@ -377,7 +388,11 @@ query($id: ID!) {
       type
       createdAt
       updatedAt
-      project { id number owner { login } }
+      project {
+        id
+        number
+        owner { ... on Organization { login } ... on User { login } }
+      }
       content {
         __typename
         ... on Issue { id number title state repository { id nameWithOwner } }
@@ -497,15 +512,13 @@ fragment IssueCommentFields on IssueComment {
   isMinimized
   author {
     __typename
-    id
     login
-    ... on User { databaseId }
-    ... on Bot { databaseId }
-    ... on Organization { databaseId }
-    ... on Mannequin { databaseId }
-    ... on EnterpriseUserAccount { databaseId }
+    ... on User { id databaseId }
+    ... on Bot { id databaseId }
+    ... on Organization { id databaseId }
+    ... on Mannequin { id databaseId }
+    ... on EnterpriseUserAccount { id }
   }
-  performedViaGithubApp { databaseId }
   issue { id }
   pullRequest { id }
   repository { id nameWithOwner }
@@ -572,15 +585,13 @@ fragment IssueCommentFields on IssueComment {
   isMinimized
   author {
     __typename
-    id
     login
-    ... on User { databaseId }
-    ... on Bot { databaseId }
-    ... on Organization { databaseId }
-    ... on Mannequin { databaseId }
-    ... on EnterpriseUserAccount { databaseId }
+    ... on User { id databaseId }
+    ... on Bot { id databaseId }
+    ... on Organization { id databaseId }
+    ... on Mannequin { id databaseId }
+    ... on EnterpriseUserAccount { id }
   }
-  performedViaGithubApp { databaseId }
   issue { id }
   pullRequest { id }
   repository { id nameWithOwner }
@@ -595,15 +606,13 @@ fragment ReviewFields on PullRequestReview {
   url
   author {
     __typename
-    id
     login
-    ... on User { databaseId }
-    ... on Bot { databaseId }
-    ... on Organization { databaseId }
-    ... on Mannequin { databaseId }
-    ... on EnterpriseUserAccount { databaseId }
+    ... on User { id databaseId }
+    ... on Bot { id databaseId }
+    ... on Organization { id databaseId }
+    ... on Mannequin { id databaseId }
+    ... on EnterpriseUserAccount { id }
   }
-  performedViaGithubApp { databaseId }
   pullRequest { id repository { id nameWithOwner } }
   comments(first: 100) {
     pageInfo { hasNextPage endCursor }
@@ -621,17 +630,15 @@ fragment ReviewCommentFields on PullRequestReviewComment {
   createdAt
   updatedAt
   url
-  performedViaGithubApp { databaseId }
   pullRequestReview { id pullRequest { id repository { id nameWithOwner } } }
   author {
     __typename
-    id
     login
-    ... on User { databaseId }
-    ... on Bot { databaseId }
-    ... on Organization { databaseId }
-    ... on Mannequin { databaseId }
-    ... on EnterpriseUserAccount { databaseId }
+    ... on User { id databaseId }
+    ... on Bot { id databaseId }
+    ... on Organization { id databaseId }
+    ... on Mannequin { id databaseId }
+    ... on EnterpriseUserAccount { id }
   }
   repository { id nameWithOwner }
 }
@@ -668,15 +675,13 @@ query($id: ID!) {
       isMinimized
       author {
         __typename
-        id
         login
-        ... on User { databaseId }
-        ... on Bot { databaseId }
-        ... on Organization { databaseId }
-        ... on Mannequin { databaseId }
-        ... on EnterpriseUserAccount { databaseId }
+        ... on User { id databaseId }
+        ... on Bot { id databaseId }
+        ... on Organization { id databaseId }
+        ... on Mannequin { id databaseId }
+        ... on EnterpriseUserAccount { id }
       }
-      performedViaGithubApp { databaseId }
       issue { id }
       pullRequest { id }
       repository { id nameWithOwner }
@@ -716,15 +721,13 @@ query($id: ID!) {
       url
       author {
         __typename
-        id
         login
-        ... on User { databaseId }
-        ... on Bot { databaseId }
-        ... on Organization { databaseId }
-        ... on Mannequin { databaseId }
-        ... on EnterpriseUserAccount { databaseId }
+        ... on User { id databaseId }
+        ... on Bot { id databaseId }
+        ... on Organization { id databaseId }
+        ... on Mannequin { id databaseId }
+        ... on EnterpriseUserAccount { id }
       }
-      performedViaGithubApp { databaseId }
       pullRequest { id repository { id nameWithOwner } }
       comments(first: 100) {
         pageInfo { hasNextPage endCursor }
@@ -740,15 +743,13 @@ query($id: ID!) {
           url
           author {
             __typename
-            id
             login
-            ... on User { databaseId }
-            ... on Bot { databaseId }
-            ... on Organization { databaseId }
-            ... on Mannequin { databaseId }
-            ... on EnterpriseUserAccount { databaseId }
+            ... on User { id databaseId }
+            ... on Bot { id databaseId }
+            ... on Organization { id databaseId }
+            ... on Mannequin { id databaseId }
+            ... on EnterpriseUserAccount { id }
           }
-          performedViaGithubApp { databaseId }
           repository { id nameWithOwner }
           pullRequestReview { id pullRequest { id repository { id nameWithOwner } } }
         }
@@ -797,15 +798,13 @@ query($id: ID!) {
       url
       author {
         __typename
-        id
         login
-        ... on User { databaseId }
-        ... on Bot { databaseId }
-        ... on Organization { databaseId }
-        ... on Mannequin { databaseId }
-        ... on EnterpriseUserAccount { databaseId }
+        ... on User { id databaseId }
+        ... on Bot { id databaseId }
+        ... on Organization { id databaseId }
+        ... on Mannequin { id databaseId }
+        ... on EnterpriseUserAccount { id }
       }
-      performedViaGithubApp { databaseId }
       repository { id nameWithOwner }
       pullRequestReview { id pullRequest { id repository { id nameWithOwner } } }
     }
@@ -866,15 +865,13 @@ fragment IssueFields on Issue {
       isMinimized
       author {
         __typename
-        id
         login
-        ... on User { databaseId }
-        ... on Bot { databaseId }
-        ... on Organization { databaseId }
-        ... on Mannequin { databaseId }
-        ... on EnterpriseUserAccount { databaseId }
+        ... on User { id databaseId }
+        ... on Bot { id databaseId }
+        ... on Organization { id databaseId }
+        ... on Mannequin { id databaseId }
+        ... on EnterpriseUserAccount { id }
       }
-      performedViaGithubApp { databaseId }
       issue { id }
       pullRequest { id }
       repository { id nameWithOwner }
@@ -946,15 +943,13 @@ fragment PullRequestFields on PullRequest {
       isMinimized
       author {
         __typename
-        id
         login
-        ... on User { databaseId }
-        ... on Bot { databaseId }
-        ... on Organization { databaseId }
-        ... on Mannequin { databaseId }
-        ... on EnterpriseUserAccount { databaseId }
+        ... on User { id databaseId }
+        ... on Bot { id databaseId }
+        ... on Organization { id databaseId }
+        ... on Mannequin { id databaseId }
+        ... on EnterpriseUserAccount { id }
       }
-      performedViaGithubApp { databaseId }
       issue { id }
       pullRequest { id }
       repository { id nameWithOwner }
@@ -971,15 +966,13 @@ fragment PullRequestFields on PullRequest {
       url
       author {
         __typename
-        id
         login
-        ... on User { databaseId }
-        ... on Bot { databaseId }
-        ... on Organization { databaseId }
-        ... on Mannequin { databaseId }
-        ... on EnterpriseUserAccount { databaseId }
+        ... on User { id databaseId }
+        ... on Bot { id databaseId }
+        ... on Organization { id databaseId }
+        ... on Mannequin { id databaseId }
+        ... on EnterpriseUserAccount { id }
       }
-      performedViaGithubApp { databaseId }
       pullRequest { id repository { id nameWithOwner } }
       comments(first: 50) {
         pageInfo { hasNextPage endCursor }
@@ -995,15 +988,13 @@ fragment PullRequestFields on PullRequest {
           url
           author {
             __typename
-            id
             login
-            ... on User { databaseId }
-            ... on Bot { databaseId }
-            ... on Organization { databaseId }
-            ... on Mannequin { databaseId }
-            ... on EnterpriseUserAccount { databaseId }
+            ... on User { id databaseId }
+            ... on Bot { id databaseId }
+            ... on Organization { id databaseId }
+            ... on Mannequin { id databaseId }
+            ... on EnterpriseUserAccount { id }
           }
-          performedViaGithubApp { databaseId }
           repository { id nameWithOwner }
           pullRequestReview { id pullRequest { id repository { id nameWithOwner } } }
         }
@@ -1099,7 +1090,11 @@ fragment ProjectItemFields on ProjectV2Item {
   type
   createdAt
   updatedAt
-  project { id number owner { login } }
+  project {
+    id
+    number
+    owner { ... on Organization { login } ... on User { login } }
+  }
   content {
     __typename
     ... on Issue { id number title state repository { id nameWithOwner } }
@@ -1459,15 +1454,13 @@ query($id: ID!, $cursor: String) {
           isMinimized
           author {
             __typename
-            id
             login
-            ... on User { databaseId }
-            ... on Bot { databaseId }
-            ... on Organization { databaseId }
-            ... on Mannequin { databaseId }
-            ... on EnterpriseUserAccount { databaseId }
+            ... on User { id databaseId }
+            ... on Bot { id databaseId }
+            ... on Organization { id databaseId }
+            ... on Mannequin { id databaseId }
+            ... on EnterpriseUserAccount { id }
           }
-          performedViaGithubApp { databaseId }
           issue { id }
           pullRequest { id }
           repository { id nameWithOwner }
@@ -1596,15 +1589,13 @@ query($id: ID!, $cursor: String) {
           isMinimized
           author {
             __typename
-            id
             login
-            ... on User { databaseId }
-            ... on Bot { databaseId }
-            ... on Organization { databaseId }
-            ... on Mannequin { databaseId }
-            ... on EnterpriseUserAccount { databaseId }
+            ... on User { id databaseId }
+            ... on Bot { id databaseId }
+            ... on Organization { id databaseId }
+            ... on Mannequin { id databaseId }
+            ... on EnterpriseUserAccount { id }
           }
-          performedViaGithubApp { databaseId }
           issue { id }
           pullRequest { id }
           repository { id nameWithOwner }
@@ -1657,15 +1648,13 @@ query($id: ID!, $cursor: String) {
           url
           author {
             __typename
-            id
             login
-            ... on User { databaseId }
-            ... on Bot { databaseId }
-            ... on Organization { databaseId }
-            ... on Mannequin { databaseId }
-            ... on EnterpriseUserAccount { databaseId }
+            ... on User { id databaseId }
+            ... on Bot { id databaseId }
+            ... on Organization { id databaseId }
+            ... on Mannequin { id databaseId }
+            ... on EnterpriseUserAccount { id }
           }
-          performedViaGithubApp { databaseId }
           pullRequest { id repository { id nameWithOwner } }
           comments(first: 100) {
             pageInfo { hasNextPage endCursor }
@@ -1682,15 +1671,13 @@ query($id: ID!, $cursor: String) {
               pullRequestReview { id pullRequest { id repository { id nameWithOwner } } }
               author {
                 __typename
-                id
                 login
-                ... on User { databaseId }
-                ... on Bot { databaseId }
-                ... on Organization { databaseId }
-                ... on Mannequin { databaseId }
-                ... on EnterpriseUserAccount { databaseId }
+                ... on User { id databaseId }
+                ... on Bot { id databaseId }
+                ... on Organization { id databaseId }
+                ... on Mannequin { id databaseId }
+                ... on EnterpriseUserAccount { id }
               }
-              performedViaGithubApp { databaseId }
               repository { id nameWithOwner }
             }
           }
@@ -1746,15 +1733,13 @@ query($id: ID!, $cursor: String) {
           url
           author {
             __typename
-            id
             login
-            ... on User { databaseId }
-            ... on Bot { databaseId }
-            ... on Organization { databaseId }
-            ... on Mannequin { databaseId }
-            ... on EnterpriseUserAccount { databaseId }
+            ... on User { id databaseId }
+            ... on Bot { id databaseId }
+            ... on Organization { id databaseId }
+            ... on Mannequin { id databaseId }
+            ... on EnterpriseUserAccount { id }
           }
-          performedViaGithubApp { databaseId }
           repository { id nameWithOwner }
           pullRequestReview { id pullRequest { id repository { id nameWithOwner } } }
         }
@@ -2155,12 +2140,6 @@ pub struct ActorRef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct GitHubAppRef {
-    #[serde(rename = "databaseId")]
-    pub database_id: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProjectIdentityRef {
     pub id: String,
     pub number: i64,
@@ -2249,8 +2228,6 @@ pub struct IssueCommentData {
     #[serde(rename = "isMinimized")]
     pub is_minimized: bool,
     pub author: Option<ActorRef>,
-    #[serde(rename = "performedViaGithubApp")]
-    pub performed_via_github_app: Option<GitHubAppRef>,
     pub issue: Option<NodeIdRef>,
     #[serde(rename = "pullRequest")]
     pub pull_request: Option<NodeIdRef>,
@@ -2268,8 +2245,6 @@ pub struct PullRequestReviewData {
     pub updated_at: String,
     pub url: String,
     pub author: Option<ActorRef>,
-    #[serde(rename = "performedViaGithubApp")]
-    pub performed_via_github_app: Option<GitHubAppRef>,
     #[serde(rename = "pullRequest")]
     pub pull_request: PullRequestRef,
     pub comments: Connection<PullRequestReviewCommentData>,
@@ -2290,8 +2265,6 @@ pub struct PullRequestReviewCommentData {
     pub updated_at: String,
     pub url: String,
     pub author: Option<ActorRef>,
-    #[serde(rename = "performedViaGithubApp")]
-    pub performed_via_github_app: Option<GitHubAppRef>,
     pub repository: RepositoryRef,
     #[serde(rename = "pullRequestReview")]
     pub pull_request_review: PullRequestReviewRef,
