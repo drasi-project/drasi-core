@@ -66,7 +66,11 @@ export class DashboardDesigner {
     for (const widget of this.dashboard.widgets) {
       this.addWidgetToGrid(widget);
       this.runtimeByWidgetId.set(widget.id, createWidgetRuntime());
-      this.renderWidget(widget.id);
+      try {
+        this.renderWidget(widget.id);
+      } catch (err) {
+        console.error(`Failed to render widget ${widget.id}`, err);
+      }
     }
 
     // Let gridstack finish layout, then resize charts to match actual container dimensions
@@ -344,6 +348,31 @@ export class DashboardDesigner {
         form.appendChild(this._formGroup("Value Field", this._fieldSelect("cfg-valField", fieldOpts, config.valueField)));
         break;
       }
+      case "graph": {
+        const optionalFields = ["", ...fieldOpts];
+        const ends = document.createElement("div");
+        ends.className = "form-row";
+        ends.appendChild(this._formGroup("Source Field", this._fieldSelect("cfg-sourceField", fieldOpts, config.sourceField)));
+        ends.appendChild(this._formGroup("Target Field", this._fieldSelect("cfg-targetField", fieldOpts, config.targetField)));
+        form.appendChild(ends);
+        const labels = document.createElement("div");
+        labels.className = "form-row";
+        labels.appendChild(this._formGroup("Source Label Field", this._fieldSelect("cfg-sourceLabelField", optionalFields, config.sourceLabelField ?? "")));
+        labels.appendChild(this._formGroup("Target Label Field", this._fieldSelect("cfg-targetLabelField", optionalFields, config.targetLabelField ?? "")));
+        form.appendChild(labels);
+        const cats = document.createElement("div");
+        cats.className = "form-row";
+        cats.appendChild(this._formGroup("Source Category Field", this._fieldSelect("cfg-sourceCategoryField", optionalFields, config.sourceCategoryField ?? "")));
+        cats.appendChild(this._formGroup("Target Category Field", this._fieldSelect("cfg-targetCategoryField", optionalFields, config.targetCategoryField ?? "")));
+        form.appendChild(cats);
+        const extras = document.createElement("div");
+        extras.className = "form-row";
+        extras.appendChild(this._formGroup("Edge Label Field", this._fieldSelect("cfg-edgeLabelField", optionalFields, config.edgeLabelField ?? "")));
+        extras.appendChild(this._formGroup("Value Field", this._fieldSelect("cfg-valField", optionalFields, config.valueField ?? "")));
+        form.appendChild(extras);
+        form.appendChild(this._formGroup("Layout", this._selectInput("cfg-layout", ["force", "circular"], config.layout ?? "force")));
+        break;
+      }
     }
   }
 
@@ -360,6 +389,18 @@ export class DashboardDesigner {
       case "kpi": return { ...base, valueField: val("cfg-valField"), label: val("cfg-label") || "KPI", aggregation: val("cfg-aggregation") || "last", filterField: val("cfg-filterField"), filterValue: val("cfg-filterValue") };
       case "text": return { ...base, template: val("cfg-template") };
       case "map": return { ...base, latField: val("cfg-latField"), lngField: val("cfg-lngField"), valueField: val("cfg-valField") };
+      case "graph": return {
+        ...base,
+        sourceField: val("cfg-sourceField") || "source",
+        targetField: val("cfg-targetField") || "target",
+        sourceLabelField: val("cfg-sourceLabelField"),
+        targetLabelField: val("cfg-targetLabelField"),
+        sourceCategoryField: val("cfg-sourceCategoryField"),
+        targetCategoryField: val("cfg-targetCategoryField"),
+        edgeLabelField: val("cfg-edgeLabelField"),
+        valueField: val("cfg-valField"),
+        layout: val("cfg-layout") || "force",
+      };
       default: return base;
     }
   }
@@ -603,23 +644,21 @@ export class DashboardDesigner {
   widgetMarkup(widget) {
     const meta = WIDGET_TYPE_META[widget.type] || {};
     return `
-      <div class="grid-stack-item-content">
-        <div class="widget-header">
-          <div style="display:flex;align-items:center">
-            <div class="widget-type-indicator type-${widget.type}"></div>
-            <span data-role="title">${widget.title}</span>
-          </div>
-          <div class="widget-actions">
-            <button type="button" class="btn-icon" data-action="configure" title="Configure">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            </button>
-            <button type="button" class="btn-icon" data-action="remove" title="Remove">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-            </button>
-          </div>
+      <div class="widget-header">
+        <div style="display:flex;align-items:center">
+          <div class="widget-type-indicator type-${widget.type}"></div>
+          <span data-role="title">${widget.title}</span>
         </div>
-        <div class="widget-body"></div>
+        <div class="widget-actions">
+          <button type="button" class="btn-icon" data-action="configure" title="Configure">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+          <button type="button" class="btn-icon" data-action="remove" title="Remove">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
       </div>
+      <div class="widget-body"></div>
     `;
   }
 

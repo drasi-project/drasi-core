@@ -3,7 +3,7 @@
 `drasi-reaction-dashboard` serves an embeddable web dashboard UI from a Drasi reaction. It provides:
 
 - Drag-and-drop visual dashboard layout (Gridstack.js)
-- Chart/table/KPI/gauge/text/map widgets (ECharts + HTML widgets)
+- Chart/table/KPI/gauge/text/map/graph widgets (ECharts + HTML widgets)
 - Real-time query-result updates over WebSocket
 - Dashboard configuration CRUD via REST API
 - Persistence through DrasiLib `StateStoreProvider`
@@ -94,6 +94,9 @@ let reaction = DashboardReaction::builder("my-dashboard")
 | KPI | `"kpi"` | `queryId`, `valueField`, `aggregation`, `label` |
 | Markdown | `"text"` | `queryId`, `template` (Handlebars + Markdown) |
 | Map | `"map"` | `queryId`, `latField`, `lngField`, `valueField` |
+| Graph | `"graph"` | `queryId`, `sourceField`, `targetField` |
+
+Each graph row is one edge. Nodes are inferred from unique `sourceField` / `targetField` values. Optional fields: `sourceLabelField`, `targetLabelField`, `sourceCategoryField`, `targetCategoryField`, `edgeLabelField`, `valueField` (node/edge size), `layout` (`"force"` or `"circular"`). Isolated nodes (no incident edge) are not shown.
 
 ### Aggregation Modes (KPI & Gauge)
 
