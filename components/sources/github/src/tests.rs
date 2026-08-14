@@ -101,6 +101,35 @@ fn sample_issue(title: &str) -> IssueData {
     }
 }
 
+fn sample_pull_request(body: Option<String>) -> PullRequestData {
+    PullRequestData {
+        id: "PR_1".to_string(),
+        number: 7,
+        title: "Pull request".to_string(),
+        body,
+        state: "OPEN".to_string(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+        closed_at: None,
+        merged_at: None,
+        url: "https://github.com/acme/repo/pull/7".to_string(),
+        is_draft: false,
+        head_ref_name: Some("feature".to_string()),
+        base_ref_name: Some("main".to_string()),
+        author: Some(OwnerRef {
+            login: "octocat".to_string(),
+        }),
+        repository: RepositoryRef {
+            id: "R_1".to_string(),
+            name_with_owner: "acme/repo".to_string(),
+        },
+        assignees: single_connection(Vec::new()),
+        labels: single_connection(Vec::new()),
+        comments: single_connection(Vec::new()),
+        reviews: single_connection(Vec::new()),
+    }
+}
+
 fn sample_project_item() -> ProjectItemData {
     ProjectItemData {
         id: "PVTI_1".to_string(),
@@ -282,7 +311,8 @@ fn signature_validation_rejects_malformed_header() {
 
 #[test]
 fn mapping_issue_produces_expected_nodes_and_relations() {
-    let issue = sample_issue("initial title");
+    let mut issue = sample_issue("initial title");
+    issue.body = Some("Context\nWorkGraph-Validation: pass\n".to_string());
     let root = FetchedRoot::Issue(issue);
     let (changes, snapshot): (Vec<SourceChange>, RootSnapshot) =
         map_root_diff("github-src", &root, None, 1_000).expect("map");
@@ -291,6 +321,42 @@ fn mapping_issue_produces_expected_nodes_and_relations() {
     assert!(snapshot.elements.contains_key("I_1"));
     assert!(snapshot.elements.contains_key("IN_REPOSITORY:I_1:R_1"));
     assert!(snapshot.elements.contains_key("COMMENT_ON:IC_1:I_1"));
+    let properties = &snapshot.elements["I_1"].properties;
+    assert_eq!(
+        properties["body"],
+        json!("Context\nWorkGraph-Validation: pass\n")
+    );
+    assert_eq!(
+        properties["bodyDigest"],
+        json!("sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa")
+    );
+}
+
+#[test]
+fn mapping_pull_request_preserves_body_and_adds_authoritative_digest() {
+    let body = "Context\nWorkGraph-Validation: pass\n";
+    let root = FetchedRoot::PullRequest(sample_pull_request(Some(body.to_string())));
+    let (_, snapshot) = map_root_diff("github-src", &root, None, 1_000).expect("map");
+
+    let properties = &snapshot.elements["PR_1"].properties;
+    assert_eq!(properties["body"], json!(body));
+    assert_eq!(
+        properties["bodyDigest"],
+        json!("sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa")
+    );
+}
+
+#[test]
+fn mapping_body_digest_hashes_missing_body_as_empty_string() {
+    let root = FetchedRoot::PullRequest(sample_pull_request(None));
+    let (_, snapshot) = map_root_diff("github-src", &root, None, 1_000).expect("map");
+
+    let properties = &snapshot.elements["PR_1"].properties;
+    assert_eq!(properties["body"], serde_json::Value::Null);
+    assert_eq!(
+        properties["bodyDigest"],
+        json!("sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    );
 }
 
 #[test]

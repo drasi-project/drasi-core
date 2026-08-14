@@ -19,7 +19,7 @@ Relation IDs are deterministic:
 ### `GitHubIssue`
 - ID: issue global ID
 - Properties:
-  - `number`, `title`, `body`, `state`
+  - `number`, `title`, `body`, `bodyDigest`, `state`
   - `createdAt`, `updatedAt`, `closedAt`
   - `authorLogin`, `url`
   - `repositoryNameWithOwner`
@@ -30,7 +30,7 @@ Relation IDs are deterministic:
 ### `GitHubPullRequest`
 - ID: pull request global ID
 - Properties:
-  - `number`, `title`, `body`, `state`
+  - `number`, `title`, `body`, `bodyDigest`, `state`
   - `createdAt`, `updatedAt`, `closedAt`, `mergedAt`
   - `authorLogin`, `url`
   - `repositoryNameWithOwner`
@@ -38,6 +38,13 @@ Relation IDs are deterministic:
   - `headRefName`, `baseRefName`
   - `assignees` (string list)
   - `labels` (string list)
+
+For `GitHubIssue` and `GitHubPullRequest`, `body` preserves the authoritative
+GitHub value. `bodyDigest` is always `sha256:` followed by the lowercase SHA-256
+hex digest of the exact UTF-8 bytes of `body ?? ""`, without normalization.
+The shared contract vector
+`Context\nWorkGraph-Validation: pass\n` produces
+`sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa`.
 
 ### `GitHubIssueComment`
 - ID: issue comment global ID

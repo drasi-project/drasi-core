@@ -24,6 +24,7 @@ use anyhow::Result;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -325,6 +326,7 @@ fn build_issue_snapshot(issue: &IssueData, elements: &mut HashMap<String, Snapsh
             ("number", serde_json::json!(issue.number)),
             ("title", serde_json::json!(issue.title)),
             ("body", serde_json::json!(issue.body)),
+            ("bodyDigest", serde_json::json!(body_digest(&issue.body))),
             ("state", serde_json::json!(issue.state)),
             ("createdAt", serde_json::json!(issue.created_at)),
             ("updatedAt", serde_json::json!(issue.updated_at)),
@@ -395,6 +397,7 @@ fn build_pull_request_snapshot(
             ("number", serde_json::json!(pr.number)),
             ("title", serde_json::json!(pr.title)),
             ("body", serde_json::json!(pr.body)),
+            ("bodyDigest", serde_json::json!(body_digest(&pr.body))),
             ("state", serde_json::json!(pr.state)),
             ("createdAt", serde_json::json!(pr.created_at)),
             ("updatedAt", serde_json::json!(pr.updated_at)),
@@ -897,6 +900,11 @@ fn actor_database_id(actor: Option<&ActorRef>) -> Option<i64> {
 
 fn actor_type(actor: Option<&ActorRef>) -> Option<String> {
     actor.and_then(|a| a.actor_type.clone())
+}
+
+fn body_digest(body: &Option<String>) -> String {
+    let digest = Sha256::digest(body.as_deref().unwrap_or("").as_bytes());
+    format!("sha256:{}", hex::encode(digest))
 }
 
 fn github_app_database_id(app: Option<&crate::graphql::GitHubAppRef>) -> Option<i64> {
