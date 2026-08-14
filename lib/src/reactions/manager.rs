@@ -666,6 +666,7 @@ impl ReactionManager {
             let seq = match query.fetch_outbox(0).await {
                 Ok(resp) => {
                     let mut replayed_any = false;
+                    let mut last_ok_seq = 0u64;
                     if resp.results.is_empty() {
                         info!(
                             "[{reaction_id}] Fresh start for query '{query_id}' — fetch_outbox(0) returned latest_seq={}",
@@ -678,7 +679,6 @@ impl ReactionManager {
                             resp.results.len(),
                             resp.latest_sequence
                         );
-                        let mut last_ok_seq = 0u64;
                         for entry in &resp.results {
                             let result = (*entry).as_ref().clone();
                             match reaction.enqueue_query_result(result).await {
@@ -701,7 +701,9 @@ impl ReactionManager {
                             );
                         }
                     }
-                    if manager_owns_checkpoint || !replayed_any {
+                    if manager_owns_checkpoint && replayed_any {
+                        last_ok_seq
+                    } else if !replayed_any {
                         resp.latest_sequence
                     } else {
                         info!(
@@ -713,10 +715,21 @@ impl ReactionManager {
                 }
                 Err(FetchError::OutboxGap(gap)) => {
                     info!(
-                        "[{reaction_id}] Fresh start for query '{query_id}' — outbox gap, latest_seq={}",
+                        "[{reaction_id}] Fresh start for query '{query_id}' — applying recovery policy to outbox gap at latest_seq={}",
                         gap.latest_sequence
                     );
-                    gap.latest_sequence
+                    return self
+                        .apply_recovery_policy(
+                            reaction_id,
+                            query_id,
+                            reaction,
+                            query,
+                            reaction.default_recovery_policy(),
+                            state_store,
+                            bootstrap_queries,
+                            metrics,
+                        )
+                        .await;
                 }
                 Err(FetchError::NotRunning { .. } | FetchError::TimedOut) => {
                     info!(
@@ -1756,6 +1769,7 @@ mod tests {
         config: QueryConfig,
         latest_sequence: u64,
         entries: Vec<Arc<QueryResult>>,
+        gap: bool,
     }
 
     impl SequenceOutboxQuery {
@@ -1782,7 +1796,14 @@ mod tests {
                 config,
                 latest_sequence,
                 entries,
+                gap: false,
             }
+        }
+
+        fn with_gap(latest_sequence: u64) -> Self {
+            let mut query = Self::new(Vec::new(), latest_sequence);
+            query.gap = true;
+            query
         }
     }
 
@@ -1823,6 +1844,16 @@ mod tests {
         }
 
         async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError> {
+            if self.gap {
+                return Err(FetchError::OutboxGap(
+                    crate::queries::output_state::OutboxGap {
+                        requested: after_sequence,
+                        earliest_available: self.latest_sequence,
+                        latest_sequence: self.latest_sequence,
+                        config_hash: crate::queries::compute_config_hash(&self.config),
+                    },
+                ));
+            }
             let results = self
                 .entries
                 .iter()
@@ -1850,6 +1881,7 @@ mod tests {
         checkpoint_ownership: ManagerCheckpointOwnership,
         status_handle: ComponentStatusHandle,
         enqueued: Arc<Mutex<Vec<QueryResult>>>,
+        fail_sequence: Option<u64>,
         bootstrap_count: Arc<AtomicUsize>,
     }
 
@@ -1864,6 +1896,7 @@ mod tests {
                 checkpoint_ownership: ManagerCheckpointOwnership::Manager,
                 status_handle: ComponentStatusHandle::new(id),
                 enqueued: Arc::new(Mutex::new(Vec::new())),
+                fail_sequence: None,
                 bootstrap_count: Arc::new(AtomicUsize::new(0)),
             }
         }
@@ -1885,6 +1918,11 @@ mod tests {
 
         fn with_checkpoint_ownership(mut self, mode: ManagerCheckpointOwnership) -> Self {
             self.checkpoint_ownership = mode;
+            self
+        }
+
+        fn with_failed_sequence(mut self, sequence: u64) -> Self {
+            self.fail_sequence = Some(sequence);
             self
         }
     }
@@ -1937,6 +1975,9 @@ mod tests {
             self.checkpoint_ownership
         }
         async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+            if self.fail_sequence == Some(result.sequence) {
+                anyhow::bail!("injected enqueue failure at sequence {}", result.sequence);
+            }
             self.enqueued.lock().await.push(result);
             Ok(())
         }
@@ -2311,6 +2352,91 @@ mod tests {
             "Checkpoint sequence should have advanced from 0, got {}",
             cp.sequence
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_start_strict_policy_rejects_outbox_gap() {
+        let manager = build_test_manager();
+        let reaction: Arc<dyn Reaction> =
+            Arc::new(MockReaction::new("r_fresh_gap", vec!["q1".into()]));
+        let query: Arc<dyn crate::queries::Query> = Arc::new(SequenceOutboxQuery::with_gap(5));
+        let mut bootstrap_queries = Vec::new();
+
+        let error = manager
+            .handle_fresh_start(
+                "r_fresh_gap",
+                "q1",
+                &reaction,
+                &query,
+                &None,
+                &mut bootstrap_queries,
+                &Arc::new(ReactionMetrics::new()),
+            )
+            .await
+            .expect_err("Strict fresh start must not acknowledge an outbox gap");
+
+        assert!(error.to_string().contains("Strict recovery policy"));
+        assert!(bootstrap_queries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fresh_start_checkpoints_only_successfully_enqueued_entries() {
+        let manager = build_test_manager();
+        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let state_store: Option<Arc<dyn crate::state_store::StateStoreProvider>> =
+            Some(store.clone());
+        let reaction = Arc::new(
+            MockReaction::new("r_partial_fresh", vec!["q1".into()]).with_failed_sequence(2),
+        );
+        let reaction_trait: Arc<dyn Reaction> = reaction.clone();
+        let result_1 = Arc::new(QueryResult::new(
+            "q1".to_string(),
+            1,
+            chrono::Utc::now(),
+            vec![ResultDiff::Noop],
+            HashMap::new(),
+        ));
+        let result_2 = Arc::new(QueryResult::new(
+            "q1".to_string(),
+            2,
+            chrono::Utc::now() + chrono::Duration::milliseconds(1),
+            vec![ResultDiff::Noop],
+            HashMap::new(),
+        ));
+        let query: Arc<dyn crate::queries::Query> =
+            Arc::new(SequenceOutboxQuery::new(vec![result_1, result_2], 2));
+        let mut bootstrap_queries = Vec::new();
+
+        let checkpoint = manager
+            .handle_fresh_start(
+                "r_partial_fresh",
+                "q1",
+                &reaction_trait,
+                &query,
+                &state_store,
+                &mut bootstrap_queries,
+                &Arc::new(ReactionMetrics::new()),
+            )
+            .await
+            .expect("partial replay preserves the successful prefix");
+
+        assert_eq!(checkpoint.sequence, 1);
+        assert_eq!(
+            reaction
+                .enqueued
+                .lock()
+                .await
+                .iter()
+                .map(|result| result.sequence)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        let persisted =
+            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r_partial_fresh", "q1")
+                .await
+                .unwrap()
+                .expect("manager checkpoint");
+        assert_eq!(persisted.sequence, 1);
     }
 
     #[tokio::test]

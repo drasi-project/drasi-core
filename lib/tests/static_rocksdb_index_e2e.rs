@@ -516,6 +516,30 @@ async fn static_rocksdb_config_change_resets_outbox_sequence_space() -> Result<(
     );
 
     core2.shutdown().await?;
+
+    let provider3 = build_provider_from_config(&backend_config).await;
+    let (source3, _handle3) = MockSource::new("people-src")?;
+    let core3 = DrasiLib::builder()
+        .with_id("rocksdb-config-3")
+        .with_index_provider("rocks-1", provider3)
+        .with_source(source3)
+        .with_query(person_query_with_text(
+            "rocks-1",
+            "MATCH (p:Person) WHERE p.age >= 0 RETURN p.name AS name, p.age AS age",
+        ))
+        .build()
+        .await?;
+    core3.start().await?;
+
+    let recovered = wait_for_results(&core3, "people", 1).await;
+    assert_eq!(
+        recovered.len(),
+        1,
+        "rows from the previous query config must not reappear after another restart: {recovered:?}"
+    );
+    assert_eq!(recovered[0]["name"], "Carol");
+
+    core3.shutdown().await?;
     Ok(())
 }
 

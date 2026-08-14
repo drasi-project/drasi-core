@@ -147,6 +147,13 @@ impl QueryOutputState {
         self.results = results;
     }
 
+    /// Clear materialized rows and replay entries without rewinding the global
+    /// sequence clock.
+    pub fn clear_data_preserving_sequence(&mut self) {
+        self.results.clear();
+        self.outbox.clear();
+    }
+
     /// Apply a set of result diffs to the live result set using O(1) HashMap operations.
     ///
     /// This does NOT increment the sequence or push to the outbox — that is done
@@ -614,6 +621,23 @@ mod tests {
             vec![1, 2]
         );
         assert_eq!(state.as_of_sequence(), 2);
+    }
+
+    #[test]
+    fn clearing_data_preserves_sequence_clock() {
+        let mut state = QueryOutputState::new(2);
+        let diffs = vec![ResultDiff::Add {
+            data: serde_json::json!({"name": "Alice"}),
+            row_signature: 100,
+        }];
+        state.apply_diffs(&diffs);
+        state.advance_sequence_and_push(make_query_result("q1", diffs));
+
+        state.clear_data_preserving_sequence();
+
+        assert_eq!(state.as_of_sequence(), 1);
+        assert_eq!(state.results_len(), 0);
+        assert_eq!(state.outbox_len(), 0);
     }
 
     #[test]

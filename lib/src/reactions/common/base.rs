@@ -1062,11 +1062,12 @@ mod tests {
         };
 
         // Enqueue events: seq 3 (dup), seq 5 (dup), seq 6, seq 7
-        for seq in [3u64, 5, 6, 7] {
+        let timestamp = chrono::Utc::now();
+        for (offset, seq) in [3u64, 5, 6, 7].into_iter().enumerate() {
             let result = crate::channels::QueryResult {
                 query_id: "q1".to_string(),
                 sequence: seq,
-                timestamp: chrono::Utc::now(),
+                timestamp: timestamp + chrono::Duration::milliseconds(offset as i64),
                 results: vec![],
                 metadata: Default::default(),
                 profiling: None,
