@@ -142,6 +142,36 @@ mod tests {
     }
 
     #[test]
+    fn query_result_without_profiling_round_trips_through_messagepack() {
+        let result = QueryResult::new(
+            "query-1".to_string(),
+            7,
+            chrono::Utc::now(),
+            vec![ResultDiff::Update {
+                data: serde_json::json!({"name": "After"}),
+                before: serde_json::json!({"name": "Before"}),
+                after: serde_json::json!({"name": "After"}),
+                grouping_keys: None,
+                row_signature: 1,
+            }],
+            std::collections::HashMap::new(),
+        );
+
+        let encoded = rmp_serde::to_vec_named(&result).unwrap();
+        let decoded: QueryResult = rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.query_id, "query-1");
+        assert_eq!(decoded.sequence, 7);
+        assert!(decoded.profiling.is_none());
+        assert!(matches!(
+            decoded.results.as_slice(),
+            [ResultDiff::Update {
+                grouping_keys: None,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
     fn test_event_channels_creation() {
         let (channels, receivers) = EventChannels::new();
 

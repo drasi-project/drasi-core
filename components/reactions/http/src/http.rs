@@ -27,6 +27,7 @@ use drasi_lib::channels::ComponentStatus;
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::reactions::common::CheckpointState;
+use drasi_lib::reactions::ManagerCheckpointOwnership;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::Reaction;
 
@@ -261,5 +262,9 @@ impl Reaction for HttpReaction {
     /// Operators can override to `AutoSkipGap` for uptime-over-completeness.
     fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
         ReactionRecoveryPolicy::Strict
+    }
+
+    fn checkpoint_ownership(&self) -> ManagerCheckpointOwnership {
+        ManagerCheckpointOwnership::Reaction
     }
 }

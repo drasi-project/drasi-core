@@ -1175,12 +1175,10 @@ mod output_state_integration_tests {
             .unwrap()
             .expect("fetch_snapshot should return Ok");
 
-        // After bootstrap: results should contain the bootstrapped data,
-        // sequence should be 0 (bootstrap doesn't advance sequence)
-        assert_eq!(snapshot.as_of_sequence, 0);
-        // The result set may or may not contain the bootstrap row depending on
-        // whether the query engine matched it. The important invariant is that
-        // the snapshot resolved and as_of_sequence is 0.
+        // A completed bootstrap publishes the retained result set as the first
+        // replayable output.
+        assert_eq!(snapshot.as_of_sequence, 1);
+        assert_eq!(snapshot.len(), 1);
     }
 
     #[tokio::test]
@@ -1366,7 +1364,7 @@ mod output_state_integration_tests {
     }
 
     #[tokio::test]
-    async fn test_bootstrap_populates_results_but_not_outbox() {
+    async fn test_bootstrap_publishes_retained_results_to_outbox() {
         let (manager, source_manager, graph) = create_test_manager_with_graph().await;
         let mut event_rx = graph.read().await.subscribe();
 
@@ -1412,18 +1410,17 @@ mod output_state_integration_tests {
         let query = manager.get_query_instance("bs-query2").await.unwrap();
         let snap = query.fetch_snapshot().await.unwrap();
 
-        // Key invariant: after bootstrap, outbox is empty and sequence is 0
+        // Bootstrap publishes one atomic retained-result output.
         assert_eq!(
-            snap.as_of_sequence, 0,
-            "Bootstrap should not advance the sequence counter"
+            snap.as_of_sequence, 1,
+            "Bootstrap should publish a replayable output"
         );
 
         let outbox = query.fetch_outbox(0).await.unwrap();
-        assert!(
-            outbox.results.is_empty(),
-            "Outbox should be empty after bootstrap (only live events populate it)"
-        );
-        assert_eq!(outbox.latest_sequence, 0);
+        assert_eq!(outbox.results.len(), 1);
+        assert_eq!(outbox.results[0].sequence, 1);
+        assert_eq!(outbox.results[0].results.len(), 3);
+        assert_eq!(outbox.latest_sequence, 1);
     }
 
     #[tokio::test]

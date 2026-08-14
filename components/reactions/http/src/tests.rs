@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 
 use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
+use drasi_lib::reactions::ManagerCheckpointOwnership;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::Reaction;
 
@@ -56,6 +57,10 @@ fn http_recovery_archetype_defaults() {
     assert!(!r.is_durable());
     assert!(!r.needs_snapshot_on_fresh_start());
     assert_eq!(r.default_recovery_policy(), ReactionRecoveryPolicy::Strict);
+    assert_eq!(
+        r.checkpoint_ownership(),
+        ManagerCheckpointOwnership::Reaction
+    );
 }
 
 #[test]

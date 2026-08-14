@@ -28,6 +28,7 @@ use wiremock::matchers::{body_string_contains, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use drasi_lib::state_store::{StateStoreProvider, StateStoreResult};
+use drasi_lib::{reactions::ManagerCheckpointOwnership, Reaction};
 use drasi_plugin_sdk::prelude::ReactionPluginDescriptor;
 
 use crate::config::GitHubProjectItemRefreshConfig;
@@ -42,6 +43,20 @@ use crate::processing::{parse_invalidation_input, AddRowOutcome, RefreshProcesso
 use crate::state_store::RefreshStateStore;
 
 const EXPECTED_STATUS_FIELD_NODE_ID: &str = "PVTSSF_lADOCX0YF84BgNE3zhaadbw";
+
+#[test]
+fn checkpoint_advances_only_after_reaction_processing() {
+    let reaction = crate::reaction::GitHubProjectItemRefreshReaction::new(
+        "test",
+        vec!["query".to_string()],
+        GitHubProjectItemRefreshConfig::default(),
+    );
+
+    assert_eq!(
+        reaction.checkpoint_ownership(),
+        ManagerCheckpointOwnership::Reaction
+    );
+}
 
 struct DurableMemoryStateStore {
     inner: drasi_lib::MemoryStateStoreProvider,

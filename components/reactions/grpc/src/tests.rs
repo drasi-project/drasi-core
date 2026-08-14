@@ -38,6 +38,7 @@ fn test_grpc_builder_defaults() {
 
 #[test]
 fn test_grpc_recovery_archetype_defaults() {
+    use drasi_lib::reactions::ManagerCheckpointOwnership;
     use drasi_lib::recovery::ReactionRecoveryPolicy;
     let reaction = GrpcReactionBuilder::new("test-reaction").build().unwrap();
     // gRPC is a stateless at-least-once trigger reaction (archetype 2a).
@@ -46,6 +47,10 @@ fn test_grpc_recovery_archetype_defaults() {
     assert_eq!(
         reaction.default_recovery_policy(),
         ReactionRecoveryPolicy::Strict
+    );
+    assert_eq!(
+        reaction.checkpoint_ownership(),
+        ManagerCheckpointOwnership::Reaction
     );
 }
 

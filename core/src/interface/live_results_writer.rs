@@ -73,4 +73,24 @@ pub trait LiveResultsWriter: Send + Sync {
     ///
     /// Useful for diagnostics and capacity monitoring.
     async fn row_count(&self, query_id: &str) -> Result<usize, IndexError>;
+
+    /// Read the output sequence represented by the stored snapshot.
+    ///
+    /// Backends that certify snapshots through a separate checkpoint store may
+    /// leave this unimplemented.
+    async fn read_snapshot_sequence(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
+        Ok(None)
+    }
+
+    /// Record the output sequence represented by the stored snapshot.
+    ///
+    /// Backends that certify snapshots through a separate checkpoint store may
+    /// leave this unimplemented.
+    async fn write_snapshot_sequence(
+        &self,
+        _query_id: &str,
+        _sequence: u64,
+    ) -> Result<(), IndexError> {
+        Ok(())
+    }
 }

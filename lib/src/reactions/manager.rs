@@ -49,6 +49,28 @@ fn to_policy_kind(policy: &ReactionRecoveryPolicy) -> RecoveryPolicyKind {
     }
 }
 
+#[derive(Debug)]
+struct StartupCheckpoint {
+    checkpoint: ReactionCheckpoint,
+    forwarded_sequence: u64,
+}
+
+impl StartupCheckpoint {
+    fn new(checkpoint: ReactionCheckpoint) -> Self {
+        Self {
+            forwarded_sequence: checkpoint.sequence,
+            checkpoint,
+        }
+    }
+
+    fn forwarder_checkpoint(&self) -> ReactionCheckpoint {
+        ReactionCheckpoint {
+            sequence: self.forwarded_sequence,
+            config_hash: self.checkpoint.config_hash,
+        }
+    }
+}
+
 /// Context passed to `handle_broadcast_gap` to avoid excessive parameter counts.
 ///
 /// Groups the shared forwarder-task state that the recovery function needs.
@@ -502,6 +524,7 @@ impl ReactionManager {
         // 3. Per-query bootstrap: build the initial checkpoint map and collect
         //    any queries that need a full bootstrap hook call.
         let mut initial_checkpoints: HashMap<String, ReactionCheckpoint> = HashMap::new();
+        let mut forwarder_checkpoints: HashMap<String, ReactionCheckpoint> = HashMap::new();
         let mut bootstrap_queries: Vec<(String, Arc<dyn Query>)> = Vec::new();
 
         for query_id in &query_ids {
@@ -521,7 +544,7 @@ impl ReactionManager {
             match existing_checkpoints.get(query_id) {
                 None => {
                     // No checkpoint — fresh start for this query.
-                    let cp = self
+                    let startup = self
                         .handle_fresh_start(
                             reaction_id,
                             query_id,
@@ -532,7 +555,8 @@ impl ReactionManager {
                             &per_query_metrics,
                         )
                         .await?;
-                    initial_checkpoints.insert(query_id.clone(), cp);
+                    initial_checkpoints.insert(query_id.clone(), startup.checkpoint.clone());
+                    forwarder_checkpoints.insert(query_id.clone(), startup.forwarder_checkpoint());
                 }
                 Some(cp) => {
                     // Checkpoint exists — check config hash.
@@ -558,10 +582,11 @@ impl ReactionManager {
                                 &per_query_metrics,
                             )
                             .await?;
+                        forwarder_checkpoints.insert(query_id.clone(), new_cp.clone());
                         initial_checkpoints.insert(query_id.clone(), new_cp);
                     } else {
                         // Hash matches — try to catch up via outbox.
-                        let new_cp = self
+                        let startup = self
                             .handle_outbox_catchup(
                                 reaction_id,
                                 query_id,
@@ -574,7 +599,9 @@ impl ReactionManager {
                                 &per_query_metrics,
                             )
                             .await?;
-                        initial_checkpoints.insert(query_id.clone(), new_cp);
+                        initial_checkpoints.insert(query_id.clone(), startup.checkpoint.clone());
+                        forwarder_checkpoints
+                            .insert(query_id.clone(), startup.forwarder_checkpoint());
                     }
                 }
             }
@@ -621,7 +648,7 @@ impl ReactionManager {
         }
 
         // Publish the computed checkpoints so forwarders can filter stale events.
-        *shared_checkpoints.write().await = initial_checkpoints;
+        *shared_checkpoints.write().await = forwarder_checkpoints;
 
         Ok(())
     }
@@ -639,7 +666,7 @@ impl ReactionManager {
         state_store: &Option<Arc<dyn StateStoreProvider>>,
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
         metrics: &Arc<ReactionMetrics>,
-    ) -> Result<ReactionCheckpoint> {
+    ) -> Result<StartupCheckpoint> {
         let config_hash = crate::queries::compute_config_hash(query.get_config());
 
         if reaction.needs_snapshot_on_fresh_start() {
@@ -655,15 +682,30 @@ impl ReactionManager {
             };
 
             bootstrap_queries.push((query_id.to_string(), query.clone()));
-            Ok(cp)
+            Ok(StartupCheckpoint::new(cp))
         } else {
             // No snapshot needed — replay any outbox entries produced during this
             // startup cycle (e.g., from source replay) and record the checkpoint.
             // Without this replay, results produced before the reaction subscribes
             // to the broadcast channel would be silently skipped.
             let manager_owns_checkpoint = Self::manager_owns_enqueue_checkpoint(reaction);
+            if !manager_owns_checkpoint {
+                if let Some(store) = state_store.as_ref() {
+                    Self::persist_manager_checkpoint(
+                        store.as_ref(),
+                        reaction_id,
+                        query_id,
+                        &ReactionCheckpoint {
+                            sequence: 0,
+                            config_hash,
+                        },
+                        false,
+                    )
+                    .await?;
+                }
+            }
             metrics.record_fetch_outbox();
-            let seq = match query.fetch_outbox(0).await {
+            let (seq, forwarded_sequence) = match query.fetch_outbox(0).await {
                 Ok(resp) => {
                     let mut replayed_any = false;
                     let mut last_ok_seq = 0u64;
@@ -701,7 +743,7 @@ impl ReactionManager {
                             );
                         }
                     }
-                    if manager_owns_checkpoint && replayed_any {
+                    let checkpoint_sequence = if manager_owns_checkpoint && replayed_any {
                         last_ok_seq
                     } else if !replayed_any {
                         resp.latest_sequence
@@ -711,14 +753,20 @@ impl ReactionManager {
                              with reaction-owned checkpoints; seeding checkpoint at seq=0 until reaction acks processing"
                         );
                         0
-                    }
+                    };
+                    let forwarded_sequence = if replayed_any {
+                        last_ok_seq
+                    } else {
+                        resp.latest_sequence
+                    };
+                    (checkpoint_sequence, forwarded_sequence)
                 }
                 Err(FetchError::OutboxGap(gap)) => {
                     info!(
                         "[{reaction_id}] Fresh start for query '{query_id}' — applying recovery policy to outbox gap at latest_seq={}",
                         gap.latest_sequence
                     );
-                    return self
+                    let checkpoint = self
                         .apply_recovery_policy(
                             reaction_id,
                             query_id,
@@ -729,14 +777,15 @@ impl ReactionManager {
                             bootstrap_queries,
                             metrics,
                         )
-                        .await;
+                        .await?;
+                    return Ok(StartupCheckpoint::new(checkpoint));
                 }
                 Err(FetchError::NotRunning { .. } | FetchError::TimedOut) => {
                     info!(
                         "[{reaction_id}] Fresh start for query '{query_id}' — \
                          query not yet running, starting from sequence 0"
                     );
-                    0
+                    (0, 0)
                 }
             };
 
@@ -756,7 +805,10 @@ impl ReactionManager {
                 .await?;
             }
 
-            Ok(cp)
+            Ok(StartupCheckpoint {
+                checkpoint: cp,
+                forwarded_sequence,
+            })
         }
     }
 
@@ -776,7 +828,7 @@ impl ReactionManager {
         state_store: &Option<Arc<dyn StateStoreProvider>>,
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
         metrics: &Arc<ReactionMetrics>,
-    ) -> Result<ReactionCheckpoint> {
+    ) -> Result<StartupCheckpoint> {
         let manager_owns_checkpoint = Self::manager_owns_enqueue_checkpoint(reaction);
         metrics.record_fetch_outbox();
         match query.fetch_outbox(checkpoint.sequence).await {
@@ -830,23 +882,28 @@ impl ReactionManager {
                     }
                 }
 
-                Ok(cp)
+                Ok(StartupCheckpoint {
+                    checkpoint: cp,
+                    forwarded_sequence: last_ok_seq,
+                })
             }
             Err(FetchError::OutboxGap(_gap)) => {
                 info!(
                     "[{reaction_id}] Outbox gap for query '{query_id}' — applying recovery policy"
                 );
-                self.apply_recovery_policy(
-                    reaction_id,
-                    query_id,
-                    reaction,
-                    query,
-                    policy,
-                    state_store,
-                    bootstrap_queries,
-                    metrics,
-                )
-                .await
+                let checkpoint = self
+                    .apply_recovery_policy(
+                        reaction_id,
+                        query_id,
+                        reaction,
+                        query,
+                        policy,
+                        state_store,
+                        bootstrap_queries,
+                        metrics,
+                    )
+                    .await?;
+                Ok(StartupCheckpoint::new(checkpoint))
             }
             Err(FetchError::NotRunning { .. } | FetchError::TimedOut) => {
                 // Query not running — keep the existing checkpoint as-is.
@@ -856,7 +913,7 @@ impl ReactionManager {
                      keeping existing checkpoint at seq={}",
                     checkpoint.sequence
                 );
-                Ok(checkpoint.clone())
+                Ok(StartupCheckpoint::new(checkpoint.clone()))
             }
         }
     }
@@ -2420,7 +2477,8 @@ mod tests {
             .await
             .expect("partial replay preserves the successful prefix");
 
-        assert_eq!(checkpoint.sequence, 1);
+        assert_eq!(checkpoint.checkpoint.sequence, 1);
+        assert_eq!(checkpoint.forwarded_sequence, 1);
         assert_eq!(
             reaction
                 .enqueued
@@ -2500,9 +2558,10 @@ mod tests {
             .await
             .expect("first catchup succeeds");
         assert_eq!(
-            first_cp.sequence, 10,
+            first_cp.checkpoint.sequence, 10,
             "reaction-owned replay must not advance checkpoint at enqueue time"
         );
+        assert_eq!(first_cp.forwarded_sequence, 12);
         let persisted_after_first =
             crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r_replay_owned", "q1")
                 .await

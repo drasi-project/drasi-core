@@ -33,6 +33,7 @@ use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::reactions::common::CheckpointState;
+use drasi_lib::reactions::ManagerCheckpointOwnership;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::Reaction;
@@ -268,6 +269,10 @@ impl Reaction for CopilotAgentTaskReaction {
     /// `CopilotAgentTaskReactionConfig::strict_recovery`.
     fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
         ReactionRecoveryPolicy::Strict
+    }
+
+    fn checkpoint_ownership(&self) -> ManagerCheckpointOwnership {
+        ManagerCheckpointOwnership::Reaction
     }
 }
 
@@ -807,5 +812,26 @@ async fn post_comment_and_finish(
                     .await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_advances_only_after_reaction_processing() {
+        let reaction = CopilotAgentTaskReaction::from_builder(
+            "test".to_string(),
+            vec!["query".to_string()],
+            CopilotAgentTaskReactionConfig::default(),
+            None,
+            true,
+        );
+
+        assert_eq!(
+            reaction.checkpoint_ownership(),
+            ManagerCheckpointOwnership::Reaction
+        );
     }
 }

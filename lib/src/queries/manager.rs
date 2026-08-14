@@ -59,6 +59,312 @@ use crate::state_store::{StateStoreCompareAndSwapResult, StateStoreError, StateS
 use tracing::Instrument;
 
 const QUERY_OUTPUT_SEQUENCE_STORE_ID: &str = "__drasi_query_output_sequences";
+const QUERY_OUTPUT_OUTBOX_STORE_PREFIX: &str = "__drasi_query_outbox:";
+const QUERY_OUTPUT_LIVE_RESULTS_STORE_PREFIX: &str = "__drasi_query_live_results:";
+const QUERY_OUTPUT_OUTBOX_CONFIG_KEY: &str = "__config_hash";
+const QUERY_OUTPUT_SNAPSHOT_SEQUENCE_KEY: &str = "__snapshot_sequence";
+const QUERY_OUTPUT_RESET_KEY_PREFIX: &str = "reset:";
+
+struct StateStoreQueryOutputWriter {
+    store: Arc<dyn StateStoreProvider>,
+    query_id: String,
+    store_id: String,
+    live_results_store_id: String,
+    config_hash: u64,
+    reset_baseline: u64,
+}
+
+impl StateStoreQueryOutputWriter {
+    fn new(
+        store: Arc<dyn StateStoreProvider>,
+        query_id: &str,
+        config_hash: u64,
+        reset_baseline: u64,
+    ) -> Self {
+        Self {
+            store,
+            query_id: query_id.to_string(),
+            store_id: format!("{QUERY_OUTPUT_OUTBOX_STORE_PREFIX}{query_id}"),
+            live_results_store_id: format!("{QUERY_OUTPUT_LIVE_RESULTS_STORE_PREFIX}{query_id}"),
+            config_hash,
+            reset_baseline,
+        }
+    }
+
+    fn sequence_key(sequence: u64) -> String {
+        format!("{sequence:020}")
+    }
+
+    async fn prepare(&self) -> Result<bool> {
+        let expected = self.config_hash.to_le_bytes();
+        match self
+            .store
+            .get(&self.store_id, QUERY_OUTPUT_OUTBOX_CONFIG_KEY)
+            .await?
+        {
+            Some(stored) if stored.as_slice() == expected => Ok(false),
+            Some(_) => {
+                write_durable_output_reset(
+                    self.store.as_ref(),
+                    &self.query_id,
+                    self.config_hash,
+                    self.reset_baseline,
+                )
+                .await?;
+                self.store.clear_store(&self.store_id).await?;
+                self.store.clear_store(&self.live_results_store_id).await?;
+                self.store
+                    .set(
+                        &self.store_id,
+                        QUERY_OUTPUT_OUTBOX_CONFIG_KEY,
+                        expected.to_vec(),
+                    )
+                    .await?;
+                Ok(true)
+            }
+            None => {
+                self.store
+                    .set(
+                        &self.store_id,
+                        QUERY_OUTPUT_OUTBOX_CONFIG_KEY,
+                        expected.to_vec(),
+                    )
+                    .await?;
+                Ok(false)
+            }
+        }
+    }
+
+    async fn sequence_keys(&self) -> Result<Vec<(u64, String)>, drasi_core::interface::IndexError> {
+        let mut keys = self
+            .store
+            .list_keys(&self.store_id)
+            .await
+            .map_err(drasi_core::interface::IndexError::other)?
+            .into_iter()
+            .filter_map(|key| key.parse::<u64>().ok().map(|sequence| (sequence, key)))
+            .collect::<Vec<_>>();
+        keys.sort_unstable_by_key(|(sequence, _)| *sequence);
+        Ok(keys)
+    }
+
+    async fn live_result_keys(
+        &self,
+    ) -> Result<Vec<(u64, String)>, drasi_core::interface::IndexError> {
+        let mut keys = self
+            .store
+            .list_keys(&self.live_results_store_id)
+            .await
+            .map_err(drasi_core::interface::IndexError::other)?
+            .into_iter()
+            .filter_map(|key| key.parse::<u64>().ok().map(|signature| (signature, key)))
+            .collect::<Vec<_>>();
+        keys.sort_unstable_by_key(|(signature, _)| *signature);
+        Ok(keys)
+    }
+}
+
+#[async_trait]
+impl OutboxWriter for StateStoreQueryOutputWriter {
+    async fn append(
+        &self,
+        _query_id: &str,
+        sequence: u64,
+        data: &[u8],
+    ) -> Result<(), drasi_core::interface::IndexError> {
+        self.store
+            .set(&self.store_id, &Self::sequence_key(sequence), data.to_vec())
+            .await
+            .map_err(drasi_core::interface::IndexError::other)
+    }
+
+    async fn read_from(
+        &self,
+        _query_id: &str,
+        after_sequence: u64,
+    ) -> Result<Vec<(u64, Vec<u8>)>, drasi_core::interface::IndexError> {
+        let keys = self
+            .sequence_keys()
+            .await?
+            .into_iter()
+            .filter(|(sequence, _)| *sequence > after_sequence)
+            .collect::<Vec<_>>();
+        let key_refs = keys.iter().map(|(_, key)| key.as_str()).collect::<Vec<_>>();
+        let values = self
+            .store
+            .get_many(&self.store_id, &key_refs)
+            .await
+            .map_err(drasi_core::interface::IndexError::other)?;
+
+        keys.into_iter()
+            .map(|(sequence, key)| {
+                values
+                    .get(&key)
+                    .cloned()
+                    .map(|data| (sequence, data))
+                    .ok_or(drasi_core::interface::IndexError::CorruptedData)
+            })
+            .collect()
+    }
+
+    async fn read_latest_sequence(
+        &self,
+        _query_id: &str,
+    ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
+        Ok(self
+            .sequence_keys()
+            .await?
+            .last()
+            .map(|(sequence, _)| *sequence))
+    }
+
+    async fn clear(&self, _query_id: &str) -> Result<(), drasi_core::interface::IndexError> {
+        self.store
+            .clear_store(&self.store_id)
+            .await
+            .map_err(drasi_core::interface::IndexError::other)?;
+        self.store
+            .set(
+                &self.store_id,
+                QUERY_OUTPUT_OUTBOX_CONFIG_KEY,
+                self.config_hash.to_le_bytes().to_vec(),
+            )
+            .await
+            .map_err(drasi_core::interface::IndexError::other)?;
+        let mut reset = Vec::with_capacity(16);
+        reset.extend_from_slice(&self.config_hash.to_le_bytes());
+        reset.extend_from_slice(&self.reset_baseline.to_le_bytes());
+        self.store
+            .set(
+                QUERY_OUTPUT_SEQUENCE_STORE_ID,
+                &format!("{QUERY_OUTPUT_RESET_KEY_PREFIX}{}", self.query_id),
+                reset,
+            )
+            .await
+            .map_err(drasi_core::interface::IndexError::other)
+    }
+
+    async fn trim_to_capacity(
+        &self,
+        _query_id: &str,
+        capacity: usize,
+    ) -> Result<usize, drasi_core::interface::IndexError> {
+        let keys = self.sequence_keys().await?;
+        let remove_count = keys.len().saturating_sub(capacity);
+        if remove_count == 0 {
+            return Ok(0);
+        }
+        let remove = keys
+            .iter()
+            .take(remove_count)
+            .map(|(_, key)| key.as_str())
+            .collect::<Vec<_>>();
+        self.store
+            .delete_many(&self.store_id, &remove)
+            .await
+            .map_err(drasi_core::interface::IndexError::other)
+    }
+}
+
+#[async_trait]
+impl LiveResultsWriter for StateStoreQueryOutputWriter {
+    async fn apply_mutations(
+        &self,
+        _query_id: &str,
+        mutations: &[drasi_core::interface::RowMutation<'_>],
+    ) -> Result<(), drasi_core::interface::IndexError> {
+        let mut deletes = Vec::new();
+        for mutation in mutations {
+            let key = Self::sequence_key(mutation.row_signature);
+            if let Some(data) = mutation.data {
+                self.store
+                    .set(&self.live_results_store_id, &key, data.to_vec())
+                    .await
+                    .map_err(drasi_core::interface::IndexError::other)?;
+            } else {
+                deletes.push(key);
+            }
+        }
+        if !deletes.is_empty() {
+            let delete_refs = deletes.iter().map(String::as_str).collect::<Vec<_>>();
+            self.store
+                .delete_many(&self.live_results_store_id, &delete_refs)
+                .await
+                .map_err(drasi_core::interface::IndexError::other)?;
+        }
+        Ok(())
+    }
+
+    async fn read_snapshot(
+        &self,
+        _query_id: &str,
+    ) -> Result<Vec<(u64, Vec<u8>)>, drasi_core::interface::IndexError> {
+        let keys = self.live_result_keys().await?;
+        let key_refs = keys.iter().map(|(_, key)| key.as_str()).collect::<Vec<_>>();
+        let values = self
+            .store
+            .get_many(&self.live_results_store_id, &key_refs)
+            .await
+            .map_err(drasi_core::interface::IndexError::other)?;
+        keys.into_iter()
+            .map(|(signature, key)| {
+                values
+                    .get(&key)
+                    .cloned()
+                    .map(|data| (signature, data))
+                    .ok_or(drasi_core::interface::IndexError::CorruptedData)
+            })
+            .collect()
+    }
+
+    async fn clear(&self, _query_id: &str) -> Result<(), drasi_core::interface::IndexError> {
+        self.store
+            .clear_store(&self.live_results_store_id)
+            .await
+            .map(|_| ())
+            .map_err(drasi_core::interface::IndexError::other)
+    }
+
+    async fn row_count(&self, _query_id: &str) -> Result<usize, drasi_core::interface::IndexError> {
+        Ok(self.live_result_keys().await?.len())
+    }
+
+    async fn read_snapshot_sequence(
+        &self,
+        _query_id: &str,
+    ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
+        let Some(bytes) = self
+            .store
+            .get(
+                &self.live_results_store_id,
+                QUERY_OUTPUT_SNAPSHOT_SEQUENCE_KEY,
+            )
+            .await
+            .map_err(drasi_core::interface::IndexError::other)?
+        else {
+            return Ok(None);
+        };
+        let encoded: [u8; 8] = bytes
+            .try_into()
+            .map_err(|_| drasi_core::interface::IndexError::CorruptedData)?;
+        Ok(Some(u64::from_le_bytes(encoded)))
+    }
+
+    async fn write_snapshot_sequence(
+        &self,
+        _query_id: &str,
+        sequence: u64,
+    ) -> Result<(), drasi_core::interface::IndexError> {
+        self.store
+            .set(
+                &self.live_results_store_id,
+                QUERY_OUTPUT_SNAPSHOT_SEQUENCE_KEY,
+                sequence.to_le_bytes().to_vec(),
+            )
+            .await
+            .map_err(drasi_core::interface::IndexError::other)
+    }
+}
 
 async fn read_durable_output_sequence(
     store: &dyn StateStoreProvider,
@@ -124,6 +430,54 @@ async fn write_durable_output_sequence(
     ))
 }
 
+async fn write_durable_output_reset(
+    store: &dyn StateStoreProvider,
+    query_id: &str,
+    config_hash: u64,
+    sequence: u64,
+) -> Result<()> {
+    let mut value = Vec::with_capacity(16);
+    value.extend_from_slice(&config_hash.to_le_bytes());
+    value.extend_from_slice(&sequence.to_le_bytes());
+    store
+        .set(
+            QUERY_OUTPUT_SEQUENCE_STORE_ID,
+            &format!("{QUERY_OUTPUT_RESET_KEY_PREFIX}{query_id}"),
+            value,
+        )
+        .await?;
+    Ok(())
+}
+
+async fn read_durable_output_reset(
+    store: &dyn StateStoreProvider,
+    query_id: &str,
+    config_hash: u64,
+) -> Result<Option<u64>> {
+    let Some(bytes) = store
+        .get(
+            QUERY_OUTPUT_SEQUENCE_STORE_ID,
+            &format!("{QUERY_OUTPUT_RESET_KEY_PREFIX}{query_id}"),
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    if bytes.len() != 16 {
+        anyhow::bail!(
+            "Invalid durable output reset marker for query '{query_id}': expected 16 bytes, got {}",
+            bytes.len()
+        );
+    }
+    let stored_hash = u64::from_le_bytes(bytes[..8].try_into().expect("validated reset marker"));
+    if stored_hash != config_hash {
+        return Ok(None);
+    }
+    Ok(Some(u64::from_le_bytes(
+        bytes[8..].try_into().expect("validated reset marker"),
+    )))
+}
+
 fn serialize_live_result_mutations(result: &QueryResult) -> Result<Vec<(u64, Option<Vec<u8>>)>> {
     result
         .results
@@ -177,6 +531,144 @@ async fn persist_live_result(
             .apply_mutations(query_id, &row_mutations)
             .await
             .context("Failed to persist live result mutations")?;
+    }
+    writer
+        .write_snapshot_sequence(query_id, result.sequence)
+        .await
+        .context("Failed to persist live result sequence")?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_bootstrap_output(
+    query_id: &str,
+    output_state: &Arc<RwLock<QueryOutputState>>,
+    pre_bootstrap_results: &im::HashMap<u64, serde_json::Value>,
+    dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>>,
+    outbox_writer: &Option<Arc<dyn OutboxWriter>>,
+    live_results_writer: &Option<Arc<dyn LiveResultsWriter>>,
+    checkpoint_store: &Arc<dyn CheckpointStore>,
+    output_sequence_store: &Option<Arc<dyn StateStoreProvider>>,
+    outbox_capacity: usize,
+    output_metrics: &Arc<QueryOutputMetrics>,
+) -> Result<()> {
+    let (result, previous_sequence) = {
+        let state = output_state.read().await;
+        let current_results = state.clone_results();
+        let mut diffs = Vec::new();
+        for (row_signature, before) in pre_bootstrap_results {
+            match current_results.get(row_signature) {
+                None => diffs.push(ResultDiff::Delete {
+                    data: before.clone(),
+                    row_signature: *row_signature,
+                }),
+                Some(after) if after != before => diffs.push(ResultDiff::Update {
+                    data: after.clone(),
+                    before: before.clone(),
+                    after: after.clone(),
+                    grouping_keys: None,
+                    row_signature: *row_signature,
+                }),
+                Some(_) => {}
+            }
+        }
+        for (row_signature, data) in &current_results {
+            if !pre_bootstrap_results.contains_key(row_signature) {
+                diffs.push(ResultDiff::Add {
+                    data: data.clone(),
+                    row_signature: *row_signature,
+                });
+            }
+        }
+        diffs.sort_unstable_by_key(|diff| match diff {
+            ResultDiff::Add { row_signature, .. }
+            | ResultDiff::Delete { row_signature, .. }
+            | ResultDiff::Update { row_signature, .. }
+            | ResultDiff::Aggregation { row_signature, .. } => *row_signature,
+            ResultDiff::Noop => 0,
+        });
+        if diffs.is_empty() {
+            return Ok(());
+        }
+        let sequence = state
+            .as_of_sequence()
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Bootstrap output sequence overflow"))?;
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "bootstrap_snapshot".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        metadata.insert(
+            "result_count".to_string(),
+            serde_json::Value::Number(diffs.len().into()),
+        );
+        let result = Arc::new(QueryResult::new(
+            query_id.to_string(),
+            sequence,
+            chrono::Utc::now(),
+            diffs,
+            metadata,
+        ));
+        (result, state.as_of_sequence())
+    };
+
+    if let Some(writer) = outbox_writer {
+        let data = rmp_serde::to_vec_named(result.as_ref())
+            .context("Failed to serialize bootstrap query output")?;
+        writer
+            .append(query_id, result.sequence, &data)
+            .await
+            .context("Failed to persist bootstrap query output")?;
+    }
+    if let Some(writer) = live_results_writer {
+        persist_live_result(writer.as_ref(), query_id, result.as_ref())
+            .await
+            .context("Failed to persist bootstrap live results")?;
+    }
+    if !advance_result_sequence_if_contiguous(checkpoint_store.as_ref(), query_id, result.sequence)
+        .await?
+    {
+        anyhow::bail!(
+            "Bootstrap output sequence {} for query '{query_id}' is not contiguous",
+            result.sequence
+        );
+    }
+    if let Some(store) = output_sequence_store {
+        write_durable_output_sequence(store.as_ref(), query_id, result.sequence).await?;
+    }
+    if let Some(writer) = outbox_writer {
+        if let Err(error) = writer.trim_to_capacity(query_id, outbox_capacity).await {
+            warn!("Query '{query_id}' failed to trim bootstrap query outbox: {error}");
+        }
+    }
+
+    {
+        let mut state = output_state.write().await;
+        if state.as_of_sequence() != previous_sequence {
+            anyhow::bail!(
+                "Bootstrap output state for query '{query_id}' advanced concurrently from sequence {previous_sequence} to {}",
+                state.as_of_sequence()
+            );
+        }
+        let pushed = state.advance_sequence_and_push(result.as_ref().clone());
+        debug_assert_eq!(pushed.sequence, result.sequence);
+        output_metrics.record_seq_advance();
+        output_metrics.record_live_results_count(state.results_len());
+        output_metrics.update_outbox(
+            state.outbox_len(),
+            state.outbox_earliest_seq().unwrap_or(0),
+            state.as_of_sequence(),
+        );
+    }
+
+    let dispatchers = dispatchers.read().await;
+    for dispatcher in dispatchers.iter() {
+        dispatcher
+            .dispatch_change(result.clone())
+            .await
+            .context("Failed to dispatch bootstrap query output")?;
     }
     Ok(())
 }
@@ -249,12 +741,15 @@ fn decode_persisted_outbox(
 fn ensure_persistent_outbox_reaches(
     query_id: &str,
     latest_sequence: Option<u64>,
+    reset_sequence: Option<u64>,
     sequence_baseline: u64,
 ) -> Result<()> {
-    if sequence_baseline > latest_sequence.unwrap_or(0) {
+    let certified_sequence = latest_sequence
+        .unwrap_or(0)
+        .max(reset_sequence.unwrap_or(0));
+    if sequence_baseline > certified_sequence {
         anyhow::bail!(
-            "Persistent outbox for query '{query_id}' ends at sequence {} below the restart baseline {sequence_baseline}; refusing to discard valid replay history across a durable gap",
-            latest_sequence.unwrap_or(0)
+            "Persistent outbox for query '{query_id}' is certified only through sequence {certified_sequence} below the restart baseline {sequence_baseline}; refusing to discard valid replay history across a durable gap"
         );
     }
     Ok(())
@@ -438,10 +933,16 @@ mod tests {
 
     #[test]
     fn rejects_persistent_outbox_tail_gap_without_deleting_prefix() {
-        let error = ensure_persistent_outbox_reaches("q1", Some(4), 5)
+        let error = ensure_persistent_outbox_reaches("q1", Some(4), None, 5)
             .expect_err("outbox tail gap must fail closed");
 
-        assert!(error.to_string().contains("ends at sequence 4"));
+        assert!(error.to_string().contains("only through sequence 4"));
+    }
+
+    #[test]
+    fn accepts_intentional_output_reset_at_restart_baseline() {
+        ensure_persistent_outbox_reaches("q1", None, Some(5), 5)
+            .expect("durable reset marker certifies an intentionally empty outbox");
     }
 
     #[tokio::test]
@@ -693,7 +1194,7 @@ async fn dispatch_query_results(
     let mut outbox_ok = true;
     if let Some(writer) = outbox_writer {
         // Serialize the QueryResult for the outbox using MessagePack (compact binary)
-        match rmp_serde::to_vec(arc_result.as_ref()) {
+        match rmp_serde::to_vec_named(arc_result.as_ref()) {
             Ok(data) => {
                 if let Err(e) = writer.append(query_id, arc_result.sequence, &data).await {
                     warn!(
@@ -900,6 +1401,15 @@ impl DrasiQuery {
         self.clear_persistent_output().await?;
         let mut state = self.output_state.write().await;
         state.clear_data_preserving_sequence();
+        if let Some(store) = self.output_sequence_store.as_ref() {
+            write_durable_output_reset(
+                store.as_ref(),
+                &self.base.config.id,
+                self.config_hash,
+                state.as_of_sequence(),
+            )
+            .await?;
+        }
         self.output_metrics
             .update_outbox(0, 0, state.as_of_sequence());
         Ok(())
@@ -1256,6 +1766,30 @@ impl Query for DrasiQuery {
             session_control = None;
         };
 
+        if let Some(store) = self.output_sequence_store.as_ref() {
+            let needs_outbox = self.outbox_writer.read().await.is_none();
+            let needs_live_results = self.live_results_writer.read().await.is_none();
+            if needs_outbox || needs_live_results {
+                let reset_baseline = self.output_state.read().await.as_of_sequence();
+                let writer = Arc::new(StateStoreQueryOutputWriter::new(
+                    store.clone(),
+                    &self.base.config.id,
+                    self.config_hash,
+                    reset_baseline,
+                ));
+                writer
+                    .prepare()
+                    .await
+                    .context("Failed to prepare durable query output storage")?;
+                if needs_outbox {
+                    *self.outbox_writer.write().await = Some(writer.clone());
+                }
+                if needs_live_results {
+                    *self.live_results_writer.write().await = Some(writer);
+                }
+            }
+        }
+
         // Persist the checkpoint_store for future stop/start cycles
         *self.checkpoint_store.write().await = Some(checkpoint_store.clone());
 
@@ -1551,110 +2085,125 @@ impl Query for DrasiQuery {
         let mut persisted_results = None;
         let mut persisted_snapshot_sequence = None;
         let mut clear_unversioned_live_results = false;
+        let live_results_writer = self.live_results_writer.read().await.clone();
+        let durable_reset_sequence = if let Some(store) = self.output_sequence_store.as_ref() {
+            read_durable_output_reset(store.as_ref(), &self.base.config.id, self.config_hash)
+                .await?
+        } else {
+            None
+        };
+        let mut persisted_result_sequence = None;
         if persistent_state_matches {
-            let persisted_result_sequence = checkpoint_store
+            persisted_result_sequence = checkpoint_store
                 .read_result_sequence(&self.base.config.id)
                 .await
                 .context("Failed to read persisted query result sequence")?;
             if let Some(sequence) = persisted_result_sequence {
                 sequence_baseline = sequence_baseline.max(sequence);
             }
+        }
 
-            let live_results_writer = self.live_results_writer.read().await.clone();
-            if let Some(writer) = live_results_writer.as_ref() {
-                let snapshot_sequence = persisted_result_sequence.unwrap_or(0);
-                persisted_snapshot_sequence = Some(snapshot_sequence);
-                let mut results = im::HashMap::new();
-                if persisted_result_sequence.is_some() {
-                    let rows = writer
-                        .read_snapshot(&self.base.config.id)
-                        .await
-                        .context("Failed to read persisted query result snapshot")?;
-                    for (row_signature, data) in rows {
-                        let value = rmp_serde::from_slice::<serde_json::Value>(&data).with_context(
-                            || {
-                                format!(
+        if let Some(writer) = live_results_writer.as_ref() {
+            let writer_sequence = writer
+                .read_snapshot_sequence(&self.base.config.id)
+                .await
+                .context("Failed to read persisted query result snapshot sequence")?;
+            let snapshot_sequence =
+                [writer_sequence, persisted_result_sequence, durable_reset_sequence]
+                    .into_iter()
+                    .flatten()
+                    .max();
+            persisted_snapshot_sequence = Some(snapshot_sequence.unwrap_or(0));
+            let mut results = im::HashMap::new();
+            if snapshot_sequence.is_some() {
+                let rows = writer
+                    .read_snapshot(&self.base.config.id)
+                    .await
+                    .context("Failed to read persisted query result snapshot")?;
+                for (row_signature, data) in rows {
+                    let value =
+                        rmp_serde::from_slice::<serde_json::Value>(&data).with_context(|| {
+                            format!(
                                     "Failed to deserialize persisted row {row_signature} for query '{}'",
                                     self.base.config.id
                                 )
-                            },
-                        )?;
-                        results.insert(row_signature, value);
-                    }
-                } else {
-                    // Rows without a watermark cannot be tied to this config or
-                    // sequence. Reconstruct them from a complete outbox below.
-                    clear_unversioned_live_results = true;
+                        })?;
+                    results.insert(row_signature, value);
                 }
-                persisted_results = Some(results);
+            } else {
+                // Rows without a watermark cannot be tied to this config or
+                // sequence. Reconstruct them from a complete outbox below.
+                clear_unversioned_live_results = true;
+            }
+            persisted_results = Some(results);
+        }
+
+        let outbox_writer = self.outbox_writer.read().await.clone();
+        if let Some(writer) = outbox_writer.as_ref() {
+            let latest_sequence = writer
+                .read_latest_sequence(&self.base.config.id)
+                .await
+                .context("Failed to read persisted query outbox sequence")?;
+            if let Some(sequence) = latest_sequence {
+                sequence_baseline = sequence_baseline.max(sequence);
             }
 
-            let outbox_writer = self.outbox_writer.read().await.clone();
-            if let Some(writer) = outbox_writer.as_ref() {
-                let latest_sequence = writer
-                    .read_latest_sequence(&self.base.config.id)
-                    .await
-                    .context("Failed to read persisted query outbox sequence")?;
-                if let Some(sequence) = latest_sequence {
-                    sequence_baseline = sequence_baseline.max(sequence);
+            let entries = writer
+                .read_from(&self.base.config.id, 0)
+                .await
+                .context("Failed to read persisted query outbox")?;
+            persisted_outbox =
+                decode_persisted_outbox(&self.base.config.id, latest_sequence, entries)?;
+            ensure_persistent_outbox_reaches(
+                &self.base.config.id,
+                latest_sequence,
+                durable_reset_sequence,
+                sequence_baseline,
+            )?;
+        }
+
+        if let (Some(writer), Some(snapshot_sequence)) =
+            (live_results_writer.as_ref(), persisted_snapshot_sequence)
+        {
+            let mut repair_entries = Vec::new();
+            if snapshot_sequence < sequence_baseline {
+                let required_first = snapshot_sequence.checked_add(1).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Persistent result sequence overflow for query '{}'",
+                        self.base.config.id
+                    )
+                })?;
+                repair_entries = persisted_outbox
+                    .iter()
+                    .filter(|entry| entry.sequence >= required_first)
+                    .collect();
+                let first = repair_entries.first().map(|entry| entry.sequence);
+                let last = repair_entries.last().map(|entry| entry.sequence);
+                if first != Some(required_first) || last != Some(sequence_baseline) {
+                    anyhow::bail!(
+                        "Persistent live results for query '{}' are only certified through sequence {}, but the outbox cannot repair the complete range {}..={}",
+                        self.base.config.id,
+                        snapshot_sequence,
+                        required_first,
+                        sequence_baseline
+                    );
                 }
-
-                let entries = writer
-                    .read_from(&self.base.config.id, 0)
-                    .await
-                    .context("Failed to read persisted query outbox")?;
-                persisted_outbox =
-                    decode_persisted_outbox(&self.base.config.id, latest_sequence, entries)?;
-                ensure_persistent_outbox_reaches(
-                    &self.base.config.id,
-                    latest_sequence,
-                    sequence_baseline,
-                )?;
             }
-
-            if let (Some(writer), Some(snapshot_sequence)) =
-                (live_results_writer.as_ref(), persisted_snapshot_sequence)
-            {
-                let mut repair_entries = Vec::new();
-                if snapshot_sequence < sequence_baseline {
-                    let required_first = snapshot_sequence.checked_add(1).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Persistent result sequence overflow for query '{}'",
-                            self.base.config.id
+            if clear_unversioned_live_results {
+                writer
+                    .clear(&self.base.config.id)
+                    .await
+                    .context("Failed to clear unversioned persistent live results")?;
+            }
+            for entry in repair_entries {
+                persist_live_result(writer.as_ref(), &self.base.config.id, entry.as_ref())
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to repair persistent live results for query '{}' at sequence {}",
+                            self.base.config.id, entry.sequence
                         )
                     })?;
-                    repair_entries = persisted_outbox
-                        .iter()
-                        .filter(|entry| entry.sequence >= required_first)
-                        .collect();
-                    let first = repair_entries.first().map(|entry| entry.sequence);
-                    let last = repair_entries.last().map(|entry| entry.sequence);
-                    if first != Some(required_first) || last != Some(sequence_baseline) {
-                        anyhow::bail!(
-                            "Persistent live results for query '{}' are only certified through sequence {}, but the outbox cannot repair the complete range {}..={}",
-                            self.base.config.id,
-                            snapshot_sequence,
-                            required_first,
-                            sequence_baseline
-                        );
-                    }
-                }
-                if clear_unversioned_live_results {
-                    writer
-                        .clear(&self.base.config.id)
-                        .await
-                        .context("Failed to clear unversioned persistent live results")?;
-                }
-                for entry in repair_entries {
-                    persist_live_result(writer.as_ref(), &self.base.config.id, entry.as_ref())
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "Failed to repair persistent live results for query '{}' at sequence {}",
-                                self.base.config.id, entry.sequence
-                            )
-                        })?;
-                }
             }
         }
 
@@ -1674,19 +2223,19 @@ impl Query for DrasiQuery {
                     .map_err(|error| anyhow::anyhow!("Failed to restore query output: {error}"))?;
             }
             sequence_baseline = state.as_of_sequence();
-            let is_cold_state = state.outbox_len() == 0 && state.results_len() == 0;
-            if is_cold_state {
+            if state.results_len() == 0 {
                 if let Some(results) = persisted_results {
                     state.restore_results(results);
-                    if let Some(snapshot_sequence) = persisted_snapshot_sequence {
-                        for entry in persisted_outbox
-                            .iter()
-                            .filter(|entry| entry.sequence > snapshot_sequence)
-                        {
-                            state.apply_diffs(&entry.results);
-                        }
+                    let snapshot_sequence = persisted_snapshot_sequence.unwrap_or(0);
+                    for entry in persisted_outbox
+                        .iter()
+                        .filter(|entry| entry.sequence > snapshot_sequence)
+                    {
+                        state.apply_diffs(&entry.results);
                     }
                 }
+            }
+            if state.outbox_len() == 0 {
                 state.restore_outbox(persisted_outbox);
             }
             self.output_metrics.update_outbox(
@@ -1827,6 +2376,7 @@ impl Query for DrasiQuery {
         // retry the entire loop with resume_from cleared to trigger full
         // re-bootstrap. The retry runs at most once.
         let mut auto_reset_retry = false;
+        let mut reset_output_baseline = None;
 
         'subscribe_loop: loop {
             // On AutoReset retry: clear resume positions so sources bootstrap from scratch.
@@ -2029,6 +2579,9 @@ impl Query for DrasiQuery {
                                                         "AutoReset aborted: failed to clear checkpoints: {ce}",
                                                     ));
                                                 }
+                                                reset_output_baseline = Some(
+                                                    self.output_state.read().await.clone_results(),
+                                                );
                                                 if let Err(oe) = self.clear_output_data().await {
                                                     if let Some(sc) = &session_control {
                                                         let _ = sc.rollback();
@@ -2251,6 +2804,19 @@ impl Query for DrasiQuery {
 
         // NEW: Handle bootstrap channels
         if !bootstrap_channels.is_empty() {
+            let complete_bootstrap = bootstrap_channels.len() == sources_to_subscribe.len();
+            if auto_reset_retry && !complete_bootstrap {
+                let message = format!(
+                    "Query '{}' cannot complete AutoReset because only {}/{} sources supplied bootstrap snapshots",
+                    self.base.config.id,
+                    bootstrap_channels.len(),
+                    sources_to_subscribe.len()
+                );
+                self.base
+                    .set_status(ComponentStatus::Error, Some(message.clone()))
+                    .await;
+                return Err(anyhow::anyhow!(message));
+            }
             info!(
                 "Query '{}' starting bootstrap from {} sources",
                 self.base.config.id,
@@ -2290,6 +2856,15 @@ impl Query for DrasiQuery {
             let bootstrap_state = self.bootstrap_state.clone();
             let instance_id = self.instance_id.clone();
             let bootstrap_output_state = self.output_state.clone();
+            let pre_bootstrap_results = reset_output_baseline
+                .take()
+                .unwrap_or(self.output_state.read().await.clone_results());
+            if complete_bootstrap {
+                self.output_state
+                    .write()
+                    .await
+                    .clear_results_preserving_outbox();
+            }
 
             let mut bootstrap_handles = Vec::new();
             let mut abort_handles = Vec::new();
@@ -2321,6 +2896,7 @@ impl Query for DrasiQuery {
                 let handle: tokio::task::JoinHandle<(String, anyhow::Result<Option<crate::bootstrap::BootstrapResult>>)> = tokio::spawn(
                     async move {
                         let mut count = 0u64;
+                        let mut evaluation_error = None;
 
                         while let Some(bootstrap_event) = bootstrap_rx.recv().await {
                             count += 1;
@@ -2384,8 +2960,16 @@ impl Query for DrasiQuery {
                                     error!(
                                         "[BOOTSTRAP] Query '{query_id_clone}' failed to process bootstrap event from source '{source_id_clone}': {e}"
                                     );
+                                    evaluation_error = Some(anyhow::anyhow!(
+                                        "Query '{query_id_clone}' failed to process bootstrap event {count} from source '{source_id_clone}': {e}"
+                                    ));
+                                    break;
                                 }
                             }
+                        }
+
+                        if let Some(error) = evaluation_error {
+                            return (source_id_clone, Err(error));
                         }
 
                         info!(
@@ -2460,6 +3044,15 @@ impl Query for DrasiQuery {
                 let base_dispatchers_clone = base_dispatchers.clone();
                 let checkpoint_store_for_supervisor = checkpoint_store.clone();
                 let session_control_for_supervisor = session_control.clone();
+                let output_state_for_supervisor = self.output_state.clone();
+                let pre_bootstrap_results_for_supervisor = pre_bootstrap_results.clone();
+                let outbox_writer_for_supervisor = self.outbox_writer.read().await.clone();
+                let live_results_writer_for_supervisor =
+                    self.live_results_writer.read().await.clone();
+                let output_sequence_store_for_supervisor = self.output_sequence_store.clone();
+                let outbox_capacity_for_supervisor =
+                    self.output_state.read().await.outbox_capacity();
+                let output_metrics_for_supervisor = self.output_metrics.clone();
 
                 let span = tracing::info_span!(
                     "bootstrap_supervisor",
@@ -2546,9 +3139,41 @@ impl Query for DrasiQuery {
                             handover_positions.len()
                         );
 
+                        // Make the bootstrap output durable before committing source
+                        // handover positions. A crash may safely repeat bootstrap, but
+                        // must never resume past a snapshot that reactions cannot replay.
+                        if let Err(e) = publish_bootstrap_output(
+                            &query_id_clone,
+                            &output_state_for_supervisor,
+                            &pre_bootstrap_results_for_supervisor,
+                            &base_dispatchers_clone,
+                            &outbox_writer_for_supervisor,
+                            &live_results_writer_for_supervisor,
+                            &checkpoint_store_for_supervisor,
+                            &output_sequence_store_for_supervisor,
+                            outbox_capacity_for_supervisor,
+                            &output_metrics_for_supervisor,
+                        )
+                        .await
+                        {
+                            error!(
+                                "[BOOTSTRAP] Query '{query_id_clone}' failed to publish durable bootstrap output: {e:#}"
+                            );
+                            reporter_clone
+                                .set_status(
+                                    ComponentStatus::Error,
+                                    Some(format!(
+                                        "Bootstrap output persistence failed: {e:#}"
+                                    )),
+                                )
+                                .await;
+                            bootstrap_gate_clone.notify_one();
+                            return;
+                        }
+
                         // Persist recovery checkpoints before opening the gate.
-                        // This ensures crash-after-bootstrap-before-first-streaming-event
-                        // doesn't lose progress and avoids a redundant re-bootstrap.
+                        // This avoids a redundant re-bootstrap after successful output
+                        // publication while preserving crash-safe replay.
                         if !handover_positions.is_empty() {
                             let session_ok = if let Some(sc) = &session_control_for_supervisor {
                                 match sc.begin().await {
@@ -3520,6 +4145,27 @@ impl QueryManager {
         .await?;
 
         if let Some(store) = self.state_store.read().await.as_ref() {
+            store
+                .clear_store(&format!("{QUERY_OUTPUT_OUTBOX_STORE_PREFIX}{id}"))
+                .await
+                .with_context(|| {
+                    format!("Failed to clear durable outbox for removed query '{id}'")
+                })?;
+            store
+                .clear_store(&format!("{QUERY_OUTPUT_LIVE_RESULTS_STORE_PREFIX}{id}"))
+                .await
+                .with_context(|| {
+                    format!("Failed to clear durable live results for removed query '{id}'")
+                })?;
+            store
+                .delete(
+                    QUERY_OUTPUT_SEQUENCE_STORE_ID,
+                    &format!("{QUERY_OUTPUT_RESET_KEY_PREFIX}{id}"),
+                )
+                .await
+                .with_context(|| {
+                    format!("Failed to clear durable output reset for removed query '{id}'")
+                })?;
             store
                 .delete(QUERY_OUTPUT_SEQUENCE_STORE_ID, &id)
                 .await

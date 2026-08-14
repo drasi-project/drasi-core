@@ -414,7 +414,7 @@ pub enum ResultDiff {
         data: serde_json::Value,
         before: serde_json::Value,
         after: serde_json::Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         grouping_keys: Option<Vec<String>>,
         #[serde(default)]
         row_signature: u64,
@@ -446,7 +446,7 @@ pub struct QueryResult {
     pub results: Vec<ResultDiff>,
     pub metadata: HashMap<String, serde_json::Value>,
     /// Optional profiling metadata for performance tracking
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profiling: Option<ProfilingMetadata>,
 }
 

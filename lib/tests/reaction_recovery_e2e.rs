@@ -21,11 +21,22 @@
 mod mock_source;
 
 use anyhow::Result;
-use drasi_lib::channels::{ComponentStatus, QueryResult};
+use async_trait::async_trait;
+use drasi_core::models::{
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
+use drasi_lib::channels::{
+    BootstrapEvent, BootstrapEventSender, ComponentStatus, QueryResult, ResultDiff,
+};
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::reactions::{ManagerCheckpointOwnership, ReactionCheckpoint};
 use drasi_lib::recovery::ReactionRecoveryPolicy;
-use drasi_lib::{DispatchMode, DrasiLib, MemoryStateStoreProvider, Query, Reaction};
+use drasi_lib::state_store::StateStoreProvider;
+use drasi_lib::{DispatchMode, DrasiLib, MemoryStateStoreProvider, Query, Reaction, Source};
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -277,6 +288,166 @@ impl Reaction for RecordingReaction {
     }
 }
 
+struct StaticPersonBootstrap {
+    name: Option<String>,
+}
+
+#[async_trait]
+impl BootstrapProvider for StaticPersonBootstrap {
+    async fn bootstrap(
+        &self,
+        _request: BootstrapRequest,
+        _context: &BootstrapContext,
+        event_tx: BootstrapEventSender,
+        _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
+    ) -> Result<BootstrapResult> {
+        if let Some(name) = self.name.as_deref() {
+            let mut properties = ElementPropertyMap::new();
+            properties.insert("name", ElementValue::String(Arc::from(name)));
+            let element = Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("bootstrap-source", "candidate-1"),
+                    labels: Arc::from(vec![Arc::from("Person")]),
+                    effective_from: 1,
+                },
+                properties,
+            };
+            event_tx
+                .send(BootstrapEvent {
+                    source_id: "bootstrap-source".to_string(),
+                    change: SourceChange::Insert { element },
+                    timestamp: chrono::Utc::now(),
+                    sequence: 1,
+                })
+                .await?;
+        }
+        Ok(BootstrapResult {
+            event_count: usize::from(self.name.is_some()),
+            source_position: None,
+        })
+    }
+}
+
+struct BootstrapAckReaction {
+    base: ReactionBase,
+    tx: mpsc::UnboundedSender<QueryResult>,
+    acknowledge: bool,
+}
+
+#[async_trait]
+impl Reaction for BootstrapAckReaction {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "bootstrap-ack"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        HashMap::new()
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.queries.clone()
+    }
+
+    async fn initialize(&self, context: ReactionRuntimeContext) {
+        self.base.initialize(context).await;
+    }
+
+    async fn start(&self) -> Result<()> {
+        self.base.set_status(ComponentStatus::Running, None).await;
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.base.set_status(ComponentStatus::Stopped, None).await;
+        Ok(())
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+        if self.acknowledge {
+            let checkpoint = self
+                .base
+                .read_checkpoint(&result.query_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("replay checkpoint was not seeded"))?;
+            self.base
+                .write_checkpoint(
+                    &result.query_id,
+                    &ReactionCheckpoint {
+                        sequence: result.sequence,
+                        config_hash: checkpoint.config_hash,
+                    },
+                )
+                .await?;
+        }
+        self.tx
+            .send(result)
+            .map_err(|_| anyhow::anyhow!("bootstrap recording receiver closed"))
+    }
+
+    fn is_durable(&self) -> bool {
+        true
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        false
+    }
+
+    fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
+        ReactionRecoveryPolicy::Strict
+    }
+
+    fn checkpoint_ownership(&self) -> ManagerCheckpointOwnership {
+        ManagerCheckpointOwnership::Reaction
+    }
+}
+
+async fn build_bootstrap_recovery_run(
+    state_store: Arc<DurableMemoryStateStoreProvider>,
+    acknowledge: bool,
+    candidate_name: Option<&str>,
+) -> Result<(DrasiLib, mpsc::UnboundedReceiver<QueryResult>)> {
+    let (source, _handle) = MockSource::new("bootstrap-source")?;
+    source
+        .set_bootstrap_provider(Box::new(StaticPersonBootstrap {
+            name: candidate_name.map(str::to_string),
+        }))
+        .await;
+    let (tx, rx) = mpsc::unbounded_channel();
+    let reaction = BootstrapAckReaction {
+        base: ReactionBase::new(ReactionBaseParams::new(
+            "bootstrap-reaction",
+            vec!["bootstrap-query".to_string()],
+        )),
+        tx,
+        acknowledge,
+    };
+    let core = DrasiLib::builder()
+        .with_id("bootstrap-recovery")
+        .with_state_store_provider(state_store)
+        .with_source(source)
+        .with_query(
+            Query::cypher("bootstrap-query")
+                .query("MATCH (p:Person) RETURN p.name AS name")
+                .from_source("bootstrap-source")
+                .enable_bootstrap(true)
+                .auto_start(true)
+                .build(),
+        )
+        .with_reaction(reaction)
+        .build()
+        .await?;
+    core.start().await?;
+    Ok((core, rx))
+}
+
 // ============================================================================
 // Helper
 // ============================================================================
@@ -308,6 +479,282 @@ async fn stop_reaction_and_wait(core: &DrasiLib, id: &str) -> Result<()> {
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[tokio::test]
+async fn test_bootstrap_output_replays_until_reaction_acknowledges() -> Result<()> {
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (first, mut first_rx) =
+        build_bootstrap_recovery_run(state_store.clone(), false, Some("Bootstrap Candidate"))
+            .await?;
+    let first_result = timeout(Duration::from_secs(5), first_rx.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("first reaction receiver closed"))?;
+    assert_eq!(first_result.sequence, 1);
+    assert_eq!(
+        first_result.metadata.get("bootstrap_snapshot"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    let persisted = state_store
+        .get(
+            "__drasi_query_outbox:bootstrap-query",
+            "00000000000000000001",
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("bootstrap outbox entry was not persisted"))?;
+    let persisted_result: QueryResult = rmp_serde::from_slice(&persisted)?;
+    assert_eq!(persisted_result.sequence, 1);
+    first.shutdown().await?;
+
+    let (second, mut second_rx) =
+        build_bootstrap_recovery_run(state_store.clone(), true, Some("Bootstrap Candidate"))
+            .await?;
+    let replay = timeout(Duration::from_secs(5), second_rx.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("second reaction receiver closed"))?;
+    assert_eq!(replay.sequence, 1);
+    assert!(
+        timeout(Duration::from_millis(300), second_rx.recv())
+            .await
+            .is_err(),
+        "unacknowledged bootstrap output was replayed more than once"
+    );
+    second.shutdown().await?;
+
+    let (third, mut third_rx) =
+        build_bootstrap_recovery_run(state_store, true, Some("Bootstrap Candidate")).await?;
+    assert!(
+        timeout(Duration::from_millis(300), third_rx.recv())
+            .await
+            .is_err(),
+        "acknowledged bootstrap output was replayed"
+    );
+    third.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_missing_snapshot_watermark_repairs_from_complete_outbox() -> Result<()> {
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (first, mut first_rx) =
+        build_bootstrap_recovery_run(state_store.clone(), false, Some("Bootstrap Candidate"))
+            .await?;
+    timeout(Duration::from_secs(5), first_rx.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("initial reaction receiver closed"))?;
+    first.shutdown().await?;
+
+    state_store
+        .clear_store("__drasi_query_live_results:bootstrap-query")
+        .await?;
+
+    let (second, mut second_rx) =
+        build_bootstrap_recovery_run(state_store, true, Some("Bootstrap Candidate")).await?;
+    let replay = timeout(Duration::from_secs(5), second_rx.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("repaired reaction receiver closed"))?;
+    assert_eq!(replay.sequence, 1);
+    assert!(
+        timeout(Duration::from_millis(300), second_rx.recv())
+            .await
+            .is_err(),
+        "repaired bootstrap snapshot was republished at a new sequence"
+    );
+    second.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_fresh_reaction_ack_is_not_overwritten_by_startup_seed() -> Result<()> {
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (first, mut first_rx) =
+        build_bootstrap_recovery_run(state_store.clone(), true, Some("Bootstrap Candidate"))
+            .await?;
+    let delivered = timeout(Duration::from_secs(5), first_rx.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("fresh reaction receiver closed"))?;
+    assert_eq!(delivered.sequence, 1);
+    assert!(
+        timeout(Duration::from_millis(300), first_rx.recv())
+            .await
+            .is_err(),
+        "startup replay was duplicated by the buffered live subscription"
+    );
+    first.shutdown().await?;
+
+    let (second, mut second_rx) =
+        build_bootstrap_recovery_run(state_store, true, Some("Bootstrap Candidate")).await?;
+    assert!(
+        timeout(Duration::from_millis(300), second_rx.recv())
+            .await
+            .is_err(),
+        "fresh-start acknowledgment was overwritten by the manager seed"
+    );
+    second.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_rebootstrap_publishes_only_changed_retained_rows() -> Result<()> {
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (first, mut first_rx) =
+        build_bootstrap_recovery_run(state_store.clone(), true, Some("Before")).await?;
+    let initial = timeout(Duration::from_secs(5), first_rx.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("initial reaction receiver closed"))?;
+    assert_eq!(initial.sequence, 1);
+    assert!(matches!(
+        initial.results.as_slice(),
+        [ResultDiff::Add { .. }]
+    ));
+    first.shutdown().await?;
+
+    let (second, mut second_rx) =
+        build_bootstrap_recovery_run(state_store.clone(), true, Some("After")).await?;
+    let changed = timeout(Duration::from_secs(5), second_rx.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("changed reaction receiver closed"))?;
+    assert_eq!(changed.sequence, 2);
+    assert!(matches!(
+        changed.results.as_slice(),
+        [ResultDiff::Update { before, after, .. }]
+            if before["name"] == "Before" && after["name"] == "After"
+    ));
+    second.shutdown().await?;
+
+    let (third, mut third_rx) =
+        build_bootstrap_recovery_run(state_store, true, Some("After")).await?;
+    assert!(
+        timeout(Duration::from_millis(300), third_rx.recv())
+            .await
+            .is_err(),
+        "unchanged retained row was republished"
+    );
+    third.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_rebootstrap_publishes_deleted_retained_rows() -> Result<()> {
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (first, mut first_rx) =
+        build_bootstrap_recovery_run(state_store.clone(), true, Some("Candidate")).await?;
+    timeout(Duration::from_secs(5), first_rx.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("initial reaction receiver closed"))?;
+    first.shutdown().await?;
+
+    let (second, mut second_rx) = build_bootstrap_recovery_run(state_store, true, None).await?;
+    let deleted = timeout(Duration::from_secs(5), second_rx.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("delete reaction receiver closed"))?;
+    assert_eq!(deleted.sequence, 2);
+    assert!(matches!(
+        deleted.results.as_slice(),
+        [ResultDiff::Delete { data, .. }] if data["name"] == "Candidate"
+    ));
+    second.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_missing_durable_outbox_fails_closed_before_bootstrap() -> Result<()> {
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    state_store
+        .set(
+            "__drasi_query_output_sequences",
+            "bootstrap-query",
+            5u64.to_le_bytes().to_vec(),
+        )
+        .await?;
+
+    let (source, _handle) = MockSource::new("bootstrap-source")?;
+    source
+        .set_bootstrap_provider(Box::new(StaticPersonBootstrap {
+            name: Some("Bootstrap Candidate".to_string()),
+        }))
+        .await;
+    let core = DrasiLib::builder()
+        .with_id("bootstrap-gap")
+        .with_state_store_provider(state_store)
+        .with_source(source)
+        .with_query(
+            Query::cypher("bootstrap-query")
+                .query("MATCH (p:Person) RETURN p.name AS name")
+                .from_source("bootstrap-source")
+                .enable_bootstrap(true)
+                .auto_start(true)
+                .build(),
+        )
+        .build()
+        .await?;
+    core.start().await?;
+    let query_status = core
+        .list_queries()
+        .await?
+        .into_iter()
+        .find(|(id, _)| id == "bootstrap-query")
+        .map(|(_, status)| status);
+    assert_eq!(query_status, Some(ComponentStatus::Error));
+    core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_config_reset_with_empty_bootstrap_remains_restartable() -> Result<()> {
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    for query_text in [
+        "MATCH (p:Person) RETURN p.name AS name",
+        "MATCH (p:Employee) RETURN p.name AS name",
+        "MATCH (p:Employee) RETURN p.name AS name",
+    ] {
+        let (source, _handle) = MockSource::new("bootstrap-source")?;
+        source
+            .set_bootstrap_provider(Box::new(StaticPersonBootstrap {
+                name: Some("Bootstrap Candidate".to_string()),
+            }))
+            .await;
+        let core = DrasiLib::builder()
+            .with_id("bootstrap-config-reset")
+            .with_state_store_provider(state_store.clone())
+            .with_source(source)
+            .with_query(
+                Query::cypher("bootstrap-query")
+                    .query(query_text)
+                    .from_source("bootstrap-source")
+                    .enable_bootstrap(true)
+                    .auto_start(true)
+                    .build(),
+            )
+            .build()
+            .await?;
+        core.start().await?;
+        let status = timeout(Duration::from_secs(5), async {
+            loop {
+                let status = core
+                    .list_queries()
+                    .await
+                    .expect("query list")
+                    .into_iter()
+                    .find(|(id, _)| id == "bootstrap-query")
+                    .map(|(_, status)| status);
+                if status != Some(ComponentStatus::Starting) {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        assert_eq!(status, Some(ComponentStatus::Running));
+        core.shutdown().await?;
+    }
+    Ok(())
+}
 
 /// Test 1: Reaction replays missed events from outbox after restart.
 #[tokio::test]

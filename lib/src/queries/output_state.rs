@@ -154,6 +154,12 @@ impl QueryOutputState {
         self.outbox.clear();
     }
 
+    /// Clear retained rows before rebuilding them from a complete bootstrap,
+    /// while preserving the sequence clock and replay outbox.
+    pub fn clear_results_preserving_outbox(&mut self) {
+        self.results.clear();
+    }
+
     /// Apply a set of result diffs to the live result set using O(1) HashMap operations.
     ///
     /// This does NOT increment the sequence or push to the outbox — that is done
