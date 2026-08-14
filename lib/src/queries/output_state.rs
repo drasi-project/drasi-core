@@ -89,6 +89,38 @@ impl QueryOutputState {
         }
     }
 
+    /// Move the output sequence and every retained outbox entry forward by
+    /// `delta`.
+    ///
+    /// This is used when restoring the durable sequence clock before reactions
+    /// compare their persisted checkpoints with results produced by a newly
+    /// constructed query.
+    pub fn rebase_sequence(&mut self, delta: u64) -> Result<(), &'static str> {
+        if delta == 0 {
+            return Ok(());
+        }
+
+        let rebased_sequence = self
+            .as_of_sequence
+            .checked_add(delta)
+            .ok_or("query output sequence overflow")?;
+
+        let mut rebased_outbox = VecDeque::with_capacity(self.outbox.len());
+        for result in &self.outbox {
+            let sequence = result
+                .sequence
+                .checked_add(delta)
+                .ok_or("query outbox sequence overflow")?;
+            let mut rebased = result.as_ref().clone();
+            rebased.sequence = sequence;
+            rebased_outbox.push_back(Arc::new(rebased));
+        }
+
+        self.as_of_sequence = rebased_sequence;
+        self.outbox = rebased_outbox;
+        Ok(())
+    }
+
     /// Apply a set of result diffs to the live result set using O(1) HashMap operations.
     ///
     /// This does NOT increment the sequence or push to the outbox — that is done
@@ -630,6 +662,32 @@ mod tests {
         let arc = state.advance_sequence_and_push(result);
         assert_eq!(arc.sequence, 2);
         assert_eq!(state.outbox.len(), 2);
+    }
+
+    #[test]
+    fn rebase_sequence_preserves_retained_outbox_order() {
+        let mut state = QueryOutputState::new(3);
+        for _ in 0..2 {
+            state.advance_sequence_and_push(make_query_result("q1", vec![]));
+        }
+
+        state.rebase_sequence(7).unwrap();
+
+        assert_eq!(state.as_of_sequence(), 9);
+        let entries = state.fetch_outbox_after(7).unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![8, 9]
+        );
+        assert_eq!(
+            state
+                .advance_sequence_and_push(make_query_result("q1", vec![]))
+                .sequence,
+            10
+        );
     }
 
     #[test]

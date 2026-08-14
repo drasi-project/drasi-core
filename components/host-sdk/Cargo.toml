@@ -64,3 +64,4 @@ im = "15"
 tokio-stream = "0.1"
 drasi-state-store-redb = { path = "../state_stores/redb" }
 async-stream = "0.3"
+bincode = "1.3"
