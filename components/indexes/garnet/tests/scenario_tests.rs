@@ -1517,6 +1517,51 @@ mod checkpoint_tests {
 
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
+    async fn checkpoint_result_sequence_is_atomic_and_monotonic() {
+        let redis = shared_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let subject = Arc::new(GarnetCheckpointStore::new(
+            &query_id,
+            connection,
+            session_state,
+        ));
+
+        let writes = (0..128_u64).rev().map(|sequence| {
+            let subject = subject.clone();
+            let query_id = query_id.clone();
+            async move {
+                subject
+                    .write_result_sequence(&query_id, sequence)
+                    .await
+                    .unwrap();
+            }
+        });
+        futures::future::join_all(writes).await;
+        assert_eq!(
+            subject.read_result_sequence(&query_id).await.unwrap(),
+            Some(127)
+        );
+
+        subject
+            .write_result_sequence(&query_id, u64::MAX)
+            .await
+            .unwrap();
+        subject.write_result_sequence(&query_id, 1).await.unwrap();
+        assert_eq!(
+            subject.read_result_sequence(&query_id).await.unwrap(),
+            Some(u64::MAX)
+        );
+
+        subject.clear_checkpoints().await.unwrap();
+        assert_eq!(subject.read_result_sequence(&query_id).await.unwrap(), None);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
     async fn result_sequence_counter() {
         let redis = shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();

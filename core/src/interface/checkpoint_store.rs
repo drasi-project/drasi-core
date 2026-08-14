@@ -111,7 +111,8 @@ pub trait CheckpointStore: Send + Sync {
     /// Reads committed state directly; does not require an active session.
     async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError>;
 
-    /// Delete all source checkpoints and the config hash.
+    /// Delete all source checkpoints, the result-sequence watermark, and the
+    /// config hash.
     ///
     /// Used during auto-reset recovery and `delete_query(cleanup: true)`.
     /// Standalone commit; not part of any outer session transaction.
@@ -135,6 +136,8 @@ pub trait CheckpointStore: Send + Sync {
     /// transaction. Records the highest sequence that was durably persisted so
     /// that recovery can detect outbox gaps (compare with the index's committed
     /// sequence from `stage_checkpoint`).
+    ///
+    /// Implementations must not replace an existing value with a lower sequence.
     ///
     /// Standalone commit — does not require an active session.
     ///

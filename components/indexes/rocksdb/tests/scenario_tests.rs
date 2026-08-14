@@ -771,6 +771,14 @@ mod checkpoint_tests {
             .write_config_hash(42)
             .await
             .expect("write_config_hash should succeed without a session");
+        subject
+            .write_result_sequence(&query_id, 42)
+            .await
+            .expect("write_result_sequence should succeed without a session");
+        subject
+            .write_result_sequence(&query_id, 7)
+            .await
+            .expect("result sequence writes must be monotonic");
 
         // --- Read config hash without a session ---
         let hash = subject
@@ -778,6 +786,11 @@ mod checkpoint_tests {
             .await
             .expect("read_config_hash should succeed without a session");
         assert_eq!(hash, Some(42));
+        assert_eq!(
+            subject.read_result_sequence(&query_id).await.unwrap(),
+            Some(42),
+            "a lower write must not rewind the durable result sequence"
+        );
 
         // --- Stage a checkpoint, commit, then clear without a session ---
         session_control.begin().await.unwrap();
@@ -805,5 +818,10 @@ mod checkpoint_tests {
         assert!(all.is_empty());
         let hash = subject.read_config_hash().await.unwrap();
         assert!(hash.is_none());
+        assert_eq!(
+            subject.read_result_sequence(&query_id).await.unwrap(),
+            None,
+            "clearing checkpoints must clear the result sequence"
+        );
     }
 }

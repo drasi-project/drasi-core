@@ -15,11 +15,13 @@
 //! RocksDB implementation of [`CheckpointStore`].
 //!
 //! Uses a dedicated `stream_state` column family to store per-source checkpoint
-//! sequences, opaque source position bytes, and a config hash.
+//! sequences, opaque source position bytes, a result-sequence watermark, and a
+//! config hash.
 //!
 //! Keys:
 //! - `source_sequence:{source_id}` → 8-byte big-endian `u64` sequence
 //! - `source_position:{source_id}` → raw opaque bytes
+//! - `result_sequence:{query_id}` → 8-byte big-endian `u64` sequence
 //! - `config_hash` → 8-byte big-endian `u64`
 //!
 //! `stage_checkpoint` writes into the active session transaction so it commits
@@ -295,6 +297,22 @@ impl CheckpointStore for RocksDbCheckpointStore {
                 db.delete_cf(&cf, key).map_err(IndexError::other)?;
             }
 
+            // Delete all result_sequence: keys
+            let result_prefix = RESULT_SEQUENCE_PREFIX.as_bytes();
+            let keys_to_delete: Vec<Vec<u8>> = db
+                .prefix_iterator_cf(&cf, result_prefix)
+                .take_while(|item| {
+                    item.as_ref()
+                        .map(|(k, _)| k.starts_with(result_prefix))
+                        .unwrap_or(false)
+                })
+                .filter_map(|item| item.ok().map(|(k, _)| k.to_vec()))
+                .collect();
+
+            for key in &keys_to_delete {
+                db.delete_cf(&cf, key).map_err(IndexError::other)?;
+            }
+
             // Delete config hash
             db.delete_cf(&cf, CONFIG_HASH_KEY)
                 .map_err(IndexError::other)?;
@@ -359,8 +377,27 @@ impl CheckpointStore for RocksDbCheckpointStore {
             let cf = db
                 .cf_handle(STREAM_STATE_CF)
                 .expect("stream_state cf not found");
-            db.put_cf(&cf, &key, sequence.to_be_bytes())
-                .map_err(IndexError::other)
+
+            let txn = db.transaction();
+            let current = txn
+                .get_for_update_cf(&cf, &key, true)
+                .map_err(IndexError::other)?
+                .map(|value| {
+                    let bytes: [u8; 8] = value
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| IndexError::CorruptedData)?;
+                    Ok::<u64, IndexError>(u64::from_be_bytes(bytes))
+                })
+                .transpose()?;
+
+            if current.is_some_and(|current| current >= sequence) {
+                return Ok(());
+            }
+
+            txn.put_cf(&cf, &key, sequence.to_be_bytes())
+                .map_err(IndexError::other)?;
+            txn.commit().map_err(IndexError::other)
         });
 
         match task.await {

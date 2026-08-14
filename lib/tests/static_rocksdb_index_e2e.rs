@@ -32,15 +32,89 @@
 mod mock_source;
 
 use anyhow::Result;
+use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use drasi_index_rocksdb::RocksDbIndexDescriptor;
-use drasi_lib::{ComponentStatus, DrasiLib, Query, StorageBackendRef};
+use drasi_lib::channels::QueryResult;
+use drasi_lib::context::ReactionRuntimeContext;
+use drasi_lib::reactions::{ReactionBase, ReactionBaseParams};
+use drasi_lib::{ComponentStatus, DrasiLib, Query, Reaction, StorageBackendRef};
 use drasi_plugin_sdk::IndexBackendPluginDescriptor;
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use serde_json::json;
 use tempfile::TempDir;
+use tokio::sync::mpsc;
+
+struct RecordingReaction {
+    base: ReactionBase,
+    delivered: mpsc::UnboundedSender<QueryResult>,
+}
+
+impl RecordingReaction {
+    fn new() -> (Self, mpsc::UnboundedReceiver<QueryResult>) {
+        let (delivered, receiver) = mpsc::unbounded_channel();
+        (
+            Self {
+                base: ReactionBase::new(ReactionBaseParams::new(
+                    "recorder",
+                    vec!["people".to_string()],
+                )),
+                delivered,
+            },
+            receiver,
+        )
+    }
+}
+
+#[async_trait]
+impl Reaction for RecordingReaction {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "recording"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        HashMap::new()
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.queries.clone()
+    }
+
+    fn auto_start(&self) -> bool {
+        true
+    }
+
+    async fn initialize(&self, context: ReactionRuntimeContext) {
+        self.base.initialize(context).await;
+    }
+
+    async fn start(&self) -> Result<()> {
+        self.base.set_status(ComponentStatus::Running, None).await;
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.base.set_status(ComponentStatus::Stopped, None).await;
+        Ok(())
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+        self.delivered
+            .send(result)
+            .map_err(|_| anyhow::anyhow!("recording receiver closed"))
+    }
+}
 
 /// Build a RocksDB-backed index provider the way `drasi-server` would: from a
 /// JSON storage-backend config, via the statically-linked descriptor.
@@ -77,8 +151,15 @@ async fn insert_person(handle: &MockSourceHandle, id: &str, name: &str, age: i64
 }
 
 fn person_query(storage_backend: &str) -> drasi_lib::config::QueryConfig {
+    person_query_with_text(
+        storage_backend,
+        "MATCH (p:Person) RETURN p.name AS name, p.age AS age",
+    )
+}
+
+fn person_query_with_text(storage_backend: &str, query: &str) -> drasi_lib::config::QueryConfig {
     Query::cypher("people")
-        .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+        .query(query)
         .from_source("people-src")
         .auto_start(true)
         .enable_bootstrap(true)
@@ -119,6 +200,13 @@ async fn wait_for_query_status(core: &DrasiLib, query_id: &str, expected: Compon
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+async fn receive_result(receiver: &mut mpsc::UnboundedReceiver<QueryResult>) -> QueryResult {
+    tokio::time::timeout(Duration::from_secs(10), receiver.recv())
+        .await
+        .expect("timed out waiting for reaction result")
+        .expect("recording reaction closed")
 }
 
 /// Proves the full static-link path: descriptor DTO -> provider -> named
@@ -304,12 +392,14 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
     // A fresh provider on the same on-disk path; this open acquires the RocksDB
     // LOCK, which only succeeds if the first engine's `shutdown()` released it.
     let provider2 = build_provider_from_config(&backend_config).await;
-    let (source2, _handle2) = MockSource::new("people-src")?;
+    let (source2, handle2) = MockSource::new("people-src")?;
+    let (reaction2, mut receiver2) = RecordingReaction::new();
     let core2 = Arc::new(
         DrasiLib::builder()
             .with_id("static-rocksdb-2")
             .with_index_provider("rocks-1", provider2)
             .with_source(source2)
+            .with_reaction(reaction2)
             .with_query(
                 Query::cypher("people")
                     .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
@@ -345,6 +435,25 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
     assert!(names.contains(&"Bob"), "missing Bob in {recovered:?}");
     assert!(names.contains(&"Carol"), "missing Carol in {recovered:?}");
 
+    // A reaction introduced only in the reopened engine must receive the
+    // persisted, unacknowledged outbox exactly once.
+    for expected_sequence in 1..=3 {
+        assert_eq!(
+            receive_result(&mut receiver2).await.sequence,
+            expected_sequence
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), receiver2.recv())
+            .await
+            .is_err(),
+        "persisted outbox entries must not be replayed twice"
+    );
+
+    // The next live result continues after the durable outbox watermark.
+    insert_person(&handle2, "p4", "Diana", 33).await?;
+    assert_eq!(receive_result(&mut receiver2).await.sequence, 4);
+
     core2.shutdown().await?;
 
     // Keep the first engine alive until the very end so the test proves the lock was
@@ -352,6 +461,64 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
     drop(core1);
     Ok(())
 }
+
+#[tokio::test]
+async fn static_rocksdb_config_change_resets_outbox_sequence_space() -> Result<()> {
+    let data_dir = TempDir::new()?;
+    let backend_config = json!({
+        "kind": "rocksdb",
+        "path": data_dir.path().to_string_lossy(),
+        "enableArchive": false,
+    });
+
+    let provider1 = build_provider_from_config(&backend_config).await;
+    let (source1, handle1) = MockSource::new("people-src")?;
+    let core1 = DrasiLib::builder()
+        .with_id("rocksdb-config-1")
+        .with_index_provider("rocks-1", provider1)
+        .with_source(source1)
+        .with_query(person_query("rocks-1"))
+        .build()
+        .await?;
+    core1.start().await?;
+    insert_person(&handle1, "p1", "Alice", 30).await?;
+    insert_person(&handle1, "p2", "Bob", 25).await?;
+    assert_eq!(wait_for_results(&core1, "people", 2).await.len(), 2);
+    core1.shutdown().await?;
+
+    let provider2 = build_provider_from_config(&backend_config).await;
+    let (source2, handle2) = MockSource::new("people-src")?;
+    let (reaction2, mut receiver2) = RecordingReaction::new();
+    let core2 = DrasiLib::builder()
+        .with_id("rocksdb-config-2")
+        .with_index_provider("rocks-1", provider2)
+        .with_source(source2)
+        .with_query(person_query_with_text(
+            "rocks-1",
+            "MATCH (p:Person) WHERE p.age >= 0 RETURN p.name AS name, p.age AS age",
+        ))
+        .with_reaction(reaction2)
+        .build()
+        .await?;
+    core2.start().await?;
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), receiver2.recv())
+            .await
+            .is_err(),
+        "outbox entries from the old query config must not be replayed"
+    );
+    insert_person(&handle2, "p3", "Carol", 41).await?;
+    assert_eq!(
+        receive_result(&mut receiver2).await.sequence,
+        1,
+        "the changed query config must start a fresh sequence space"
+    );
+
+    core2.shutdown().await?;
+    Ok(())
+}
+
 /// instance-wide `persist_index` flag: a query with **no** `storage_backend` is
 /// transparently backed by the default RocksDB provider (rather than falling back
 /// to in-memory), and that data is durable across a query stop/start cycle.

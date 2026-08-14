@@ -133,7 +133,8 @@ impl CheckpointStore for InMemoryCheckpointStore {
 
     async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
         let mut data = self.result_sequences.write().await;
-        data.insert(query_id.to_string(), sequence);
+        let current = data.entry(query_id.to_string()).or_insert(0);
+        *current = (*current).max(sequence);
         Ok(())
     }
 
@@ -217,5 +218,17 @@ mod tests {
             .unwrap();
         let cp = store.read_checkpoint("src-cosmos").await.unwrap().unwrap();
         assert_eq!(cp.source_position.as_ref(), Some(&big_pos));
+    }
+
+    #[tokio::test]
+    async fn result_sequence_is_monotonic_and_cleared_with_checkpoints() {
+        let store = InMemoryCheckpointStore::new();
+
+        store.write_result_sequence("q1", 42).await.unwrap();
+        store.write_result_sequence("q1", 7).await.unwrap();
+        assert_eq!(store.read_result_sequence("q1").await.unwrap(), Some(42));
+
+        store.clear_checkpoints().await.unwrap();
+        assert_eq!(store.read_result_sequence("q1").await.unwrap(), None);
     }
 }

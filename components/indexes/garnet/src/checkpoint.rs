@@ -22,6 +22,7 @@
 //! - `ss:{<query_id>}:seq:<source_id>` → decimal u64 sequence
 //! - `ss:{<query_id>}:pos:<source_id>` → raw opaque bytes
 //! - `ss:{<query_id>}:sources` → JSON array of source IDs with checkpoints
+//! - `ss:{<query_id>}:result_seq` → decimal u64 sequence
 //! - `ss:{<query_id>}:config_hash` → decimal u64 hash
 //!
 //! `stage_checkpoint` writes into the active `GarnetSessionState` write buffer
@@ -270,6 +271,11 @@ impl CheckpointStore for GarnetCheckpointStore {
             .await
             .map_err(IndexError::other)?;
 
+        let result_sequence_key = self.result_sequence_key();
+        con.del::<&str, ()>(&result_sequence_key)
+            .await
+            .map_err(IndexError::other)?;
+
         Ok(())
     }
 
@@ -298,7 +304,26 @@ impl CheckpointStore for GarnetCheckpointStore {
     ) -> Result<(), IndexError> {
         let key = self.result_sequence_key();
         let mut con = self.connection.clone();
-        con.set::<&str, String, ()>(&key, sequence.to_string())
+
+        // Compare decimal strings by length and then lexicographically so the
+        // full u64 range remains exact (Lua numbers are only precise to 2^53).
+        const WRITE_MAX_SEQUENCE: &str = r#"
+            local current = redis.call('GET', KEYS[1])
+            local candidate = ARGV[1]
+            if not current
+                or string.len(candidate) > string.len(current)
+                or (string.len(candidate) == string.len(current) and candidate > current)
+            then
+                redis.call('SET', KEYS[1], candidate)
+                return 1
+            end
+            return 0
+        "#;
+
+        redis::Script::new(WRITE_MAX_SEQUENCE)
+            .key(&key)
+            .arg(sequence.to_string())
+            .invoke_async::<_, i32>(&mut con)
             .await
             .map_err(IndexError::other)?;
         Ok(())

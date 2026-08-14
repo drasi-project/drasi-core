@@ -121,6 +121,32 @@ impl QueryOutputState {
         Ok(())
     }
 
+    /// Restore pre-validated durable outbox entries into an empty live ring.
+    ///
+    /// Entries must be ordered by strictly increasing sequence. The caller
+    /// validates persisted keys and payloads before invoking this method.
+    pub fn restore_outbox(&mut self, entries: Vec<Arc<QueryResult>>) {
+        debug_assert!(
+            entries
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence),
+            "restored outbox entries must be strictly ordered"
+        );
+
+        for entry in entries {
+            self.as_of_sequence = self.as_of_sequence.max(entry.sequence);
+            if self.outbox.len() >= self.outbox_capacity {
+                self.outbox.pop_front();
+            }
+            self.outbox.push_back(entry);
+        }
+    }
+
+    /// Restore a durable live-result snapshot into a newly constructed state.
+    pub fn restore_results(&mut self, results: im::HashMap<u64, serde_json::Value>) {
+        self.results = results;
+    }
+
     /// Apply a set of result diffs to the live result set using O(1) HashMap operations.
     ///
     /// This does NOT increment the sequence or push to the outbox — that is done
@@ -561,6 +587,33 @@ mod tests {
             state.results.get(&100),
             Some(&serde_json::json!({"name": "Alice"}))
         );
+    }
+
+    #[test]
+    fn restores_durable_outbox_for_replay() {
+        let mut state = QueryOutputState::new(2);
+        let first = Arc::new(make_query_result(
+            "q1",
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"name": "Alice"}),
+                row_signature: 100,
+            }],
+        ));
+        let mut second = (*first).clone();
+        second.sequence = 2;
+        let mut first = (*first).clone();
+        first.sequence = 1;
+        state.restore_outbox(vec![Arc::new(first), Arc::new(second)]);
+
+        let replay = state.fetch_outbox_after(0).unwrap();
+        assert_eq!(
+            replay
+                .iter()
+                .map(|result| result.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(state.as_of_sequence(), 2);
     }
 
     #[test]

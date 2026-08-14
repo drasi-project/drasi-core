@@ -725,6 +725,17 @@ impl DrasiQuery {
         })
     }
 
+    async fn clear_persistent_outbox(&self) -> Result<()> {
+        let writer = self.outbox_writer.read().await.clone();
+        if let Some(writer) = writer {
+            writer
+                .clear(&self.base.config.id)
+                .await
+                .context("Failed to clear persistent query outbox")?;
+        }
+        Ok(())
+    }
+
     /// Initialize the query with runtime context.
     ///
     /// Wires the status handle to the component graph, following the same
@@ -1007,6 +1018,7 @@ impl Query for DrasiQuery {
         let result_index: Option<Arc<dyn drasi_core::interface::ResultIndex>>;
         let future_queue: Option<Arc<dyn drasi_core::interface::FutureQueue>>;
         let session_control: Option<Arc<dyn drasi_core::interface::SessionControl>>;
+        let mut persistent_state_matches = false;
 
         if let Some(backend_ref) = self
             .base
@@ -1174,33 +1186,18 @@ impl Query for DrasiQuery {
                         "Query '{}' config hash changed ({stored_hash} -> {current_hash}), clearing all persistent state for full bootstrap",
                         self.base.config.id
                     );
-                    // Clear checkpoints first. Only write the new config hash if
-                    // clearing succeeded — otherwise stale checkpoints would be
-                    // resumed with the wrong config on the next restart.
-                    match checkpoint_store.clear_checkpoints().await {
-                        Ok(()) => {
-                            if let Err(e) = checkpoint_store.write_config_hash(current_hash).await {
-                                warn!(
-                                    "Query '{}' failed to write new config hash: {e}",
-                                    self.base.config.id
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            let msg = format!(
-                                "Query '{}' failed to clear checkpoints on config change: {e}. \
-                                 Cannot start with stale checkpoint data from a different config.",
-                                self.base.config.id
-                            );
-                            error!("{msg}");
-                            self.base
-                                .set_status(ComponentStatus::Error, Some(msg.clone()))
-                                .await;
-                            return Err(anyhow::anyhow!(msg));
-                        }
+                    if let Err(e) = checkpoint_store.clear_checkpoints().await {
+                        let msg = format!(
+                            "Query '{}' failed to clear checkpoints on config change: {e}. \
+                             Cannot start with stale checkpoint data from a different config.",
+                            self.base.config.id
+                        );
+                        error!("{msg}");
+                        self.base
+                            .set_status(ComponentStatus::Error, Some(msg.clone()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
                     }
-                    // Also clear persistent element/result/archive/future indexes
-                    // so stale data from the old config cannot be read during bootstrap.
                     if let Err(e) = clear_persistent_indexes(
                         &self.base.config.id,
                         &element_index,
@@ -1220,19 +1217,48 @@ impl Query for DrasiQuery {
                             .await;
                         return Err(anyhow::anyhow!(msg));
                     }
+                    if let Err(e) = self.clear_persistent_outbox().await {
+                        let msg = format!(
+                            "Query '{}' failed to clear persistent outbox on config change: {e}",
+                            self.base.config.id
+                        );
+                        error!("{msg}");
+                        self.base
+                            .set_status(ComponentStatus::Error, Some(msg.clone()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                    // Write the hash last. If any clear fails, the next startup
+                    // must not trust partially reset state as the new config.
+                    checkpoint_store
+                        .write_config_hash(current_hash)
+                        .await
+                        .context("Failed to write new query config hash")?;
                     false
                 }
                 Ok(None) => {
                     info!(
-                        "Query '{}' no stored config hash (first run), writing hash {current_hash}",
+                        "Query '{}' has no stored config hash, clearing untrusted persistent state and writing hash {current_hash}",
                         self.base.config.id
                     );
-                    if let Err(e) = checkpoint_store.write_config_hash(current_hash).await {
-                        warn!(
-                            "Query '{}' failed to write config hash: {e}",
-                            self.base.config.id
-                        );
-                    }
+                    checkpoint_store
+                        .clear_checkpoints()
+                        .await
+                        .context("Failed to clear checkpoints without a config hash")?;
+                    clear_persistent_indexes(
+                        &self.base.config.id,
+                        &element_index,
+                        &archive_index,
+                        &result_index,
+                        &future_queue,
+                    )
+                    .await
+                    .context("Failed to clear persistent indexes without a config hash")?;
+                    self.clear_persistent_outbox().await?;
+                    checkpoint_store
+                        .write_config_hash(current_hash)
+                        .await
+                        .context("Failed to write initial query config hash")?;
                     false
                 }
                 Err(e) => {
@@ -1241,7 +1267,7 @@ impl Query for DrasiQuery {
                         self.base.config.id
                     );
                     // Cannot trust persistent state if config hash is unreadable —
-                    // clear indexes and checkpoints to ensure a clean bootstrap.
+                    // clear indexes, checkpoints, and outbox before bootstrapping.
                     if let Err(ce) = checkpoint_store.clear_checkpoints().await {
                         let msg = format!(
                             "Query '{}' failed to clear checkpoints on hash read failure: {ce}",
@@ -1272,9 +1298,21 @@ impl Query for DrasiQuery {
                             .await;
                         return Err(anyhow::anyhow!(msg));
                     }
+                    if let Err(oe) = self.clear_persistent_outbox().await {
+                        let msg = format!(
+                            "Query '{}' failed to clear persistent outbox on hash read failure: {oe}",
+                            self.base.config.id
+                        );
+                        error!("{msg}");
+                        self.base
+                            .set_status(ComponentStatus::Error, Some(msg.clone()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
+                    }
                     false
                 }
             };
+            persistent_state_matches = config_matches;
 
             // Only read checkpoints if the config hash matched — otherwise we
             // cleared them above and a full bootstrap will run.
@@ -1334,6 +1372,142 @@ impl Query for DrasiQuery {
                     );
                 }
             }
+        }
+
+        // Hydrate persistent query output state before subscribing to any
+        // source. The shared state-store clock and matching legacy reaction
+        // checkpoints were already merged by `prepare_output_sequence`.
+        let mut sequence_baseline = self.output_state.read().await.as_of_sequence();
+        let mut persisted_outbox = Vec::new();
+        let mut persisted_results = None;
+        if persistent_state_matches {
+            let persisted_result_sequence = checkpoint_store
+                .read_result_sequence(&self.base.config.id)
+                .await
+                .context("Failed to read persisted query result sequence")?;
+            if let Some(sequence) = persisted_result_sequence {
+                sequence_baseline = sequence_baseline.max(sequence);
+            }
+
+            if persisted_result_sequence.is_some() {
+                let live_results_writer = self.live_results_writer.read().await.clone();
+                if let Some(writer) = live_results_writer {
+                    let rows = writer
+                        .read_snapshot(&self.base.config.id)
+                        .await
+                        .context("Failed to read persisted query result snapshot")?;
+                    let mut results = im::HashMap::new();
+                    for (row_signature, data) in rows {
+                        let value = rmp_serde::from_slice::<serde_json::Value>(&data).with_context(
+                            || {
+                                format!(
+                                    "Failed to deserialize persisted row {row_signature} for query '{}'",
+                                    self.base.config.id
+                                )
+                            },
+                        )?;
+                        results.insert(row_signature, value);
+                    }
+                    persisted_results = Some(results);
+                }
+            }
+
+            let outbox_writer = self.outbox_writer.read().await.clone();
+            if let Some(writer) = outbox_writer {
+                let latest_sequence = writer
+                    .read_latest_sequence(&self.base.config.id)
+                    .await
+                    .context("Failed to read persisted query outbox sequence")?;
+                if let Some(sequence) = latest_sequence {
+                    sequence_baseline = sequence_baseline.max(sequence);
+                }
+
+                let entries = writer
+                    .read_from(&self.base.config.id, 0)
+                    .await
+                    .context("Failed to read persisted query outbox")?;
+                let mut previous_sequence: Option<u64> = None;
+                for (stored_sequence, data) in entries {
+                    if previous_sequence
+                        .is_some_and(|previous| previous.checked_add(1) != Some(stored_sequence))
+                    {
+                        anyhow::bail!(
+                            "Persistent outbox for query '{}' is not contiguous at sequence {}",
+                            self.base.config.id,
+                            stored_sequence
+                        );
+                    }
+                    let result: QueryResult = rmp_serde::from_slice(&data).with_context(|| {
+                        format!(
+                            "Failed to deserialize persistent outbox entry {} for query '{}'",
+                            stored_sequence, self.base.config.id
+                        )
+                    })?;
+                    if result.query_id != self.base.config.id || result.sequence != stored_sequence
+                    {
+                        anyhow::bail!(
+                            "Persistent outbox entry {} does not match query '{}' and its storage key",
+                            stored_sequence,
+                            self.base.config.id
+                        );
+                    }
+                    previous_sequence = Some(stored_sequence);
+                    persisted_outbox.push(Arc::new(result));
+                }
+                if latest_sequence != previous_sequence {
+                    anyhow::bail!(
+                        "Persistent outbox latest sequence for query '{}' does not match its entries",
+                        self.base.config.id
+                    );
+                }
+                if let Some(latest_sequence) =
+                    latest_sequence.filter(|latest| *latest < sequence_baseline)
+                {
+                    warn!(
+                        "Query '{}' clearing persistent outbox ending at sequence {} because the restored baseline is {}",
+                        self.base.config.id,
+                        latest_sequence,
+                        sequence_baseline
+                    );
+                    writer
+                        .clear(&self.base.config.id)
+                        .await
+                        .context("Failed to clear incomplete persistent query outbox")?;
+                    persisted_outbox.clear();
+                }
+            }
+        }
+
+        self.establish_output_sequence_floor(sequence_baseline)
+            .await?;
+
+        {
+            let mut state = self.output_state.write().await;
+            let current_sequence = state.as_of_sequence();
+            if current_sequence < sequence_baseline {
+                state
+                    .rebase_sequence(sequence_baseline - current_sequence)
+                    .map_err(|error| anyhow::anyhow!("Failed to restore query output: {error}"))?;
+            }
+            sequence_baseline = state.as_of_sequence();
+            let is_cold_state = state.outbox_len() == 0 && state.results_len() == 0;
+            if is_cold_state {
+                if let Some(results) = persisted_results {
+                    state.restore_results(results);
+                }
+                state.restore_outbox(persisted_outbox);
+            }
+            self.output_metrics.update_outbox(
+                state.outbox_len(),
+                state.outbox_earliest_seq().unwrap_or(0),
+                state.as_of_sequence(),
+            );
+        }
+        if sequence_baseline > 0 {
+            info!(
+                "Query '{}' restored output sequence baseline to {}",
+                self.base.config.id, sequence_baseline
+            );
         }
 
         // Set up FutureQueueSource for temporal query support.

@@ -412,8 +412,8 @@ impl DrasiLib {
             )
             .await;
 
-        // Inject StateStoreProvider into SourceManager and ReactionManager
-        // This allows sources and reactions to persist state
+        // Inject StateStoreProvider into all managers. Queries use it to restore
+        // sequence baselines from durable reaction checkpoints during startup.
         let state_store = self.config.state_store_provider.clone();
         self.source_manager
             .inject_state_store(state_store.clone())
