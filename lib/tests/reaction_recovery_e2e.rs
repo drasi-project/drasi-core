@@ -352,6 +352,10 @@ impl Reaction for BootstrapAckReaction {
         self.base.queries.clone()
     }
 
+    fn auto_start(&self) -> bool {
+        self.base.get_auto_start()
+    }
+
     async fn initialize(&self, context: ReactionRuntimeContext) {
         self.base.initialize(context).await;
     }
@@ -662,13 +666,31 @@ async fn test_rebootstrap_publishes_deleted_retained_rows() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_missing_durable_outbox_fails_closed_before_bootstrap() -> Result<()> {
+async fn test_equal_reaction_checkpoint_and_output_clock_without_outbox_fails_closed() -> Result<()>
+{
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let query_config = Query::cypher("bootstrap-query")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("bootstrap-source")
+        .enable_bootstrap(true)
+        .auto_start(true)
+        .build();
+    let config_hash = drasi_lib::queries::compute_config_hash(&query_config);
     state_store
         .set(
             "__drasi_query_output_sequences",
             "bootstrap-query",
             5u64.to_le_bytes().to_vec(),
+        )
+        .await?;
+    state_store
+        .set(
+            "bootstrap-reaction",
+            "checkpoint:bootstrap-query",
+            bincode::serialize(&ReactionCheckpoint {
+                sequence: 5,
+                config_hash,
+            })?,
         )
         .await?;
 
@@ -678,18 +700,21 @@ async fn test_missing_durable_outbox_fails_closed_before_bootstrap() -> Result<(
             name: Some("Bootstrap Candidate".to_string()),
         }))
         .await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let reaction = BootstrapAckReaction {
+        base: ReactionBase::new(
+            ReactionBaseParams::new("bootstrap-reaction", vec!["bootstrap-query".to_string()])
+                .with_auto_start(false),
+        ),
+        tx,
+        acknowledge: true,
+    };
     let core = DrasiLib::builder()
         .with_id("bootstrap-gap")
         .with_state_store_provider(state_store)
         .with_source(source)
-        .with_query(
-            Query::cypher("bootstrap-query")
-                .query("MATCH (p:Person) RETURN p.name AS name")
-                .from_source("bootstrap-source")
-                .enable_bootstrap(true)
-                .auto_start(true)
-                .build(),
-        )
+        .with_query(query_config)
+        .with_reaction(reaction)
         .build()
         .await?;
     core.start().await?;
@@ -700,6 +725,10 @@ async fn test_missing_durable_outbox_fails_closed_before_bootstrap() -> Result<(
         .find(|(id, _)| id == "bootstrap-query")
         .map(|(_, status)| status);
     assert_eq!(query_status, Some(ComponentStatus::Error));
+    assert!(
+        rx.try_recv().is_err(),
+        "bootstrap-only candidate without output provenance must not be guessed into an Add"
+    );
     core.shutdown().await?;
     Ok(())
 }

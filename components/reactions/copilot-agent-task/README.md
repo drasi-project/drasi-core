@@ -220,13 +220,18 @@ Reserved -> Starting -> Started (comment_posted=false) -> Started (comment_poste
 - `strictRecovery` must be `true`: an ambiguous or failed launch always requires
   reconciliation or operator intervention, never a silent skip or auto-reset.
 
-For state created by a runtime that incorrectly checkpointed a retained row without delivering
-it, stop the reaction and delete only `checkpoint:<query-id>` from that reaction's state-store
-namespace, preserving every `execution:*` record, then restart it. This forces retained-row
-reconciliation while completed execution records suppress duplicate tasks. Do not clear the
-checkpoint if execution records were deleted or the durable store was replaced unless an
-external audit proves the retained candidates were not performed; without either provenance
-source, safe replay cannot be inferred.
+When the query has complete durable output provenance, an incorrect legacy reaction checkpoint
+can be repaired by stopping the reaction, deleting only `checkpoint:<query-id>` from that
+reaction's state-store namespace, preserving every `execution:*` record, and restarting it.
+This forces retained-row reconciliation while completed execution records suppress duplicate
+tasks.
+
+That procedure does **not** repair legacy state where the reaction checkpoint equals a query
+output clock whose outbox payload is missing. Query recovery fails closed before this snapshot
+hook runs because Core cannot tell old acknowledged rows from new bootstrap-only rows. Such a
+state requires a controlled query-output migration that classifies the retained row using the
+preserved execution record or an external audit. Do not delete or replace either provenance
+source and do not synthesize every retained row as an `Add`.
 
 ## Model fallback
 

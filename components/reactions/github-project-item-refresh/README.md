@@ -211,13 +211,19 @@ or `rejected` deliveries are skipped, while an unreserved delivery is processed.
 The host persists the snapshot checkpoint only after the full reconciliation
 succeeds.
 
-To repair legacy state where a retained invalidation was checkpointed but never
-delivered, stop the reaction and delete only `checkpoint:<query-id>` from that
-reaction's state-store namespace. Preserve all `reservation:*`, `publication:*`,
-and `version:*` records, then restart the reaction. Do not use this procedure
-after deleting/replacing the reaction state or after losing terminal delivery
-provenance unless an external audit proves the retained candidates were not
-published; blindly replaying them would not be safe.
+When the query has complete durable output provenance, an incorrect legacy
+reaction checkpoint can be repaired by stopping the reaction and deleting only
+`checkpoint:<query-id>` from that reaction's state-store namespace. Preserve
+all `reservation:*`, `publication:*`, and `version:*` records, then restart the
+reaction.
+
+That procedure does **not** repair legacy state where the reaction checkpoint
+equals a query output clock whose outbox payload is missing. Query recovery
+fails closed before this snapshot hook runs because Core cannot distinguish an
+old acknowledged row from a new bootstrap-only row. Such state requires a
+controlled query-output migration backed by preserved delivery records or an
+external audit. Never synthesize all retained rows as `Add` events after losing
+that provenance.
 
 Terminal publication/reservation pruning is internal and bounded: the reaction
 attempts one prune pass on the first processed ADD after startup/restart, then
