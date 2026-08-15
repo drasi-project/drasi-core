@@ -65,8 +65,8 @@
 //! GitHub Source does not expose an authoritative App attribution for the
 //! comment and review nodes this workflow consumes, so requiring one would
 //! either fail closed on every real event or, worse, invite a
-//! non-authoritative substitute. Admission, the launcher, and the router all
-//! key trust on the database ID and actor type alone.
+//! non-authoritative substitute. The launcher and the router both key trust on
+//! the database ID and actor type alone.
 //!
 //! ## Known limitation: same-identity tokens are not separately attributable
 //!

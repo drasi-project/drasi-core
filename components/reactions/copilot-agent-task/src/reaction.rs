@@ -14,22 +14,26 @@
 
 //! The Copilot Agent Task reaction.
 //!
-//! The launch query only *nominates* a run. For each newly `Add`ed row the
-//! reaction re-reads everything it trusts from GitHub before any write:
+//! Each added launch-query row **is** one authoritative `ResponsibilityAssigned`
+//! comment as the GitHub Source projected it (see [`crate::row`]). For each such
+//! row the reaction:
 //!
-//! 1. validate the row against the configured allowlists;
-//! 2. read the authoritative issue and derive the body digest and `runId`
-//!    (a body edited since the assignment aborts the launch with no effect);
-//! 3. verify the Project item binding and that its status is
+//! 1. validates the row against the configured allowlists and accepts its
+//!    assignment event — unedited (`isEdited == false`), authored by
+//!    `trustedAssignmentAuthorDatabaseId` + `trustedAssignmentAuthorType`,
+//!    strictly parsed, and bound to the row's item, subject, and `bodyDigest`;
+//! 2. re-reads the authoritative issue and requires the **current** body digest
+//!    to still equal the row's `bodyDigest` (a body edited since the assignment
+//!    aborts the launch with no effect);
+//! 3. verifies the Project item binding and that its status is
 //!    `AwaitingValidation`;
-//! 4. read the single trusted, unedited `ResponsibilityAssigned` assignment
-//!    comment (authored by `trustedAssignmentAuthorDatabaseId` +
-//!    `trustedAssignmentAuthorType`) and require its content digest to match;
-//! 5. pin the agent profile to the exact blob the assignment named;
-//! 6. durably reserve the run **before** any external write;
-//! 7. reconcile-or-create exactly one agent task (with one fallback-model
+//! 4. confirms the named assignment comment is still present, trusted, unedited,
+//!    and carries exactly the event the row delivered;
+//! 5. pins the agent profile to the exact blob the assignment named;
+//! 6. durably reserves the run **before** any external write;
+//! 7. reconciles-or-creates exactly one agent task (with one fallback-model
 //!    retry on a clearly-unsupported-model 422); and
-//! 8. post exactly one `ExecutionStarted` WorkGraphEvent/v1 comment, adopting
+//! 8. posts exactly one `ExecutionStarted` WorkGraphEvent/v1 comment, adopting
 //!    one a previous attempt may already have written only when its canonical
 //!    event JSON is byte-identical to the event this reaction intends to post.
 //!
@@ -56,12 +60,12 @@ use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::Reaction;
 use drasi_workgraph_common::{
     comment::{parse_comment, render_comment},
-    dedup::{adopt_published_event, coalesce, ObservedComment},
+    dedup::{adopt_published_event, ObservedComment},
     event::{
-        ExecutionStartedPayload, ResponsibilityAssignedPayload, WorkGraphEvent,
+        ExecutionId, ExecutionStartedPayload, ResponsibilityAssignedPayload, RunId, WorkGraphEvent,
         WorkGraphEventPayload, WorkGraphEventType,
     },
-    ids::{body_digest, event_id, run_id},
+    ids::{body_digest, event_id},
     status::AWAITING_VALIDATION,
     summary::{summary_for, SubjectRef},
 };
@@ -442,17 +446,35 @@ impl LaunchCtx<'_> {
         &self.base.id
     }
 
-    /// Launch one nominated run, resuming any partially completed prior attempt.
+    /// Launch one assigned run, resuming any partially completed prior attempt.
     async fn launch(&self, row: &LaunchRow) -> Result<()> {
-        // 1. Validate the row against the configured allowlists.
+        // 1. Validate the row against the configured allowlists, then accept the
+        //    assignment event it carries: unedited, authored by the trusted
+        //    assignment identity, strictly parsed, and bound to this row's item,
+        //    subject, and issue-body digest.
         row.validate(self.config)
             .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
         let (owner, repo) = row
             .owner_and_repo()
             .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
+        let assignment = row
+            .accept_assignment(self.config)
+            .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
+        let run = assignment.run_id.clone();
+        let digest = assignment.body_digest.clone();
+        let payload = match &assignment.event.payload {
+            WorkGraphEventPayload::ResponsibilityAssigned(payload) => payload.clone(),
+            other => {
+                // Unreachable: acceptance already pinned the event type.
+                return Err(PermanentCandidateError::new(format!(
+                    "assignment row carries a {} payload, not ResponsibilityAssigned",
+                    other.event_type()
+                )));
+            }
+        };
 
-        // 2. Authoritative issue read: the body digest — and therefore the run
-        //    identity — must come from GitHub, never from the query row.
+        // 2. Authoritative issue read: the row's `bodyDigest` must still be the
+        //    issue's current digest, or the run this row names no longer exists.
         let issue = self
             .github
             .issue_snapshot(&row.repository, row.subject_number)
@@ -470,57 +492,35 @@ impl LaunchCtx<'_> {
                 row.repository, row.subject_number, issue.node_id, row.subject_node_id
             )));
         }
-
-        // 3. Bind the run to the current body. A body edited since the
-        //    assignment yields a different `runId` and aborts with no effect.
-        let digest = body_digest(issue.body.as_deref());
-        let run = run_id(&row.project_item_node_id, &row.subject_node_id, &digest);
-        if run.as_str() != row.run_id {
+        let current_digest = body_digest(issue.body.as_deref());
+        if current_digest != digest {
             return Err(PermanentCandidateError::new(format!(
-                "issue body changed since the assignment: row runId '{}' but current body derives '{}'",
-                row.run_id,
-                run.as_str()
+                "issue body changed since the assignment: row bodyDigest '{}' but the current body is '{}'",
+                digest.as_str(),
+                current_digest.as_str()
             )));
         }
-
-        // 4. Verify the Project item binding and status.
-        self.verify_project(row).await?;
-
-        // 5. Adopt the trusted assignment and require its digest to match.
-        let assignment_event_id = event_id(&run, WorkGraphEventType::ResponsibilityAssigned);
-        let comments = self
-            .github
-            .list_issue_comments(&row.repository, row.subject_number)
-            .await
-            .context("failed to list issue comments")?;
-        let assignment = self
-            .read_trusted_comment(
-                &comments,
-                &self.config.trusted_assignment_author(),
-                &assignment_event_id,
-            )
-            .context("assignment reconciliation failed")?
-            .ok_or_else(|| {
-                PermanentCandidateError::new(
-                    "no trusted, unedited ResponsibilityAssigned assignment comment was found",
-                )
-            })?;
-        let payload = match &assignment.comment.event.payload {
-            WorkGraphEventPayload::ResponsibilityAssigned(payload) => payload.clone(),
-            other => {
-                return Err(PermanentCandidateError::new(format!(
-                    "assignment comment carries a {:?} payload, not ResponsibilityAssigned",
-                    other.event_type()
-                )));
-            }
-        };
         if payload.content_digest != digest {
             return Err(PermanentCandidateError::new(
                 "assignment content digest does not match the current issue body",
             ));
         }
 
-        // 6. Pin the profile to the exact blob the assignment named.
+        // 3. Verify the Project item binding and status.
+        self.verify_project(row).await?;
+
+        // 4. Confirm the named assignment comment is still exactly what the row
+        //    delivered. The row is authoritative about *which* event to act on;
+        //    this proves that comment has not since been edited, deleted, or
+        //    replaced by different content.
+        let comments = self
+            .github
+            .list_issue_comments(&row.repository, row.subject_number)
+            .await
+            .context("failed to list issue comments")?;
+        self.verify_assignment_comment(row, &assignment.event, &comments)?;
+
+        // 5. Pin the profile to the exact blob the assignment named.
         let profile = payload.profile_ref.profile().to_string();
         if !self.config.allowed_profiles.iter().any(|p| p == &profile) {
             return Err(PermanentCandidateError::new(format!(
@@ -543,8 +543,8 @@ impl LaunchCtx<'_> {
             }
         }
 
-        // 7. Durable reservation before any external write.
-        let execution = execution_id(&row.run_id);
+        // 6. Durable reservation before any external write.
+        let execution = execution_id(run.as_str());
         let started_event_id = event_id(&run, WorkGraphEventType::ExecutionStarted);
         let intent = ExecutionRecord::new(
             run.as_str(),
@@ -557,7 +557,7 @@ impl LaunchCtx<'_> {
         let mut persisted =
             match create_record_if_absent(self.store.clone(), self.store_id(), &intent).await? {
                 Some(existing) => {
-                    existing.record.ensure_matches(row)?;
+                    existing.record.ensure_matches(run.as_str(), row)?;
                     existing
                 }
                 None => load_record(self.store.clone(), self.store_id(), run.as_str())
@@ -575,17 +575,17 @@ impl LaunchCtx<'_> {
             return Ok(());
         }
 
-        // 8. Reconcile-or-create exactly one agent task.
+        // 7. Reconcile-or-create exactly one agent task.
         let prompt = build_prompt(row.subject_number, execution.as_str());
         if !self
-            .provision_task(row, owner, repo, &profile, &prompt, &mut persisted)
+            .provision_task(row, &execution, &profile, &prompt, &mut persisted)
             .await?
         {
             // A terminal create-task rejection was recorded; skip the run.
             return Ok(());
         }
 
-        // 9. Post exactly one ExecutionStarted comment (adopting a prior write).
+        // 8. Post exactly one ExecutionStarted comment (adopting a prior write).
         self.post_execution_started(row, &run, &execution, &mut persisted)
             .await?;
 
@@ -596,6 +596,55 @@ impl LaunchCtx<'_> {
             row.subject_number,
             execution.as_str()
         );
+        Ok(())
+    }
+
+    /// Require the row's assignment comment to still be exactly what the row
+    /// delivered.
+    ///
+    /// The comment is located by the row's `eventCommentNodeId` — never by
+    /// scanning for something assignment-shaped — and must still be authored by
+    /// the trusted assignment identity, be unedited, parse under the strict
+    /// grammar, and carry canonical event JSON byte-identical to the row's.
+    fn verify_assignment_comment(
+        &self,
+        row: &LaunchRow,
+        accepted: &WorkGraphEvent,
+        comments: &[IssueComment],
+    ) -> Result<()> {
+        let comment = comments
+            .iter()
+            .find(|comment| comment.node_id == row.event_comment_node_id)
+            .ok_or_else(|| {
+                PermanentCandidateError::new(format!(
+                    "assignment comment '{}' no longer exists on {}#{}",
+                    row.event_comment_node_id, row.repository, row.subject_number
+                ))
+            })?;
+        if !comment.is_authored_by(&self.config.trusted_assignment_author()) {
+            return Err(PermanentCandidateError::new(format!(
+                "assignment comment '{}' is not authored by the trusted assignment identity",
+                row.event_comment_node_id
+            )));
+        }
+        if !comment.is_unedited() {
+            return Err(PermanentCandidateError::new(format!(
+                "assignment comment '{}' was edited",
+                row.event_comment_node_id
+            )));
+        }
+        let parsed = parse_comment(&comment.body).map_err(|error| {
+            PermanentCandidateError::new(format!(
+                "assignment comment '{}' no longer parses: {error}",
+                row.event_comment_node_id
+            ))
+        })?;
+        if parsed.event.to_canonical_json() != accepted.to_canonical_json() {
+            return Err(PermanentCandidateError::new(format!(
+                "assignment comment '{}' no longer carries the event the row delivered",
+                row.event_comment_node_id
+            )));
+        }
         Ok(())
     }
 
@@ -663,8 +712,7 @@ impl LaunchCtx<'_> {
     async fn provision_task(
         &self,
         row: &LaunchRow,
-        owner: &str,
-        repo: &str,
+        execution: &ExecutionId,
         profile: &str,
         prompt: &str,
         persisted: &mut PersistedExecutionRecord,
@@ -672,7 +720,8 @@ impl LaunchCtx<'_> {
         if persisted.record.task_confirmed() {
             return Ok(true);
         }
-        let execution = execution_id(&row.run_id);
+        // Already proven well formed by `LaunchRow::validate`.
+        let (owner, repo) = row.owner_and_repo()?;
         let execution = execution.as_str();
 
         // Reconcile first: a task whose prompt/body already carries this
@@ -842,8 +891,8 @@ impl LaunchCtx<'_> {
     async fn post_execution_started(
         &self,
         row: &LaunchRow,
-        run: &drasi_workgraph_common::event::RunId,
-        execution: &drasi_workgraph_common::event::ExecutionId,
+        run: &RunId,
+        execution: &ExecutionId,
         persisted: &mut PersistedExecutionRecord,
     ) -> Result<()> {
         if persisted.record.is_complete() {
@@ -943,23 +992,6 @@ impl LaunchCtx<'_> {
                     })
             })
             .collect()
-    }
-
-    /// Read **another** component's event: coalesce the trusted, unedited
-    /// comments carrying `wanted_event_id`.
-    ///
-    /// Byte-identical duplicates collapse to the earliest; conflicting content
-    /// for one event ID fails closed (propagated as a hard error).
-    fn read_trusted_comment(
-        &self,
-        comments: &[IssueComment],
-        trusted: &drasi_workgraph_common::trust::TrustedAuthor,
-        wanted_event_id: &drasi_workgraph_common::event::EventId,
-    ) -> Result<Option<ObservedComment>> {
-        let observed = self.observed_comments(comments, trusted);
-        let accepted = coalesce(&observed, wanted_event_id)
-            .map_err(|error| anyhow::anyhow!("comment reconciliation failed: {error}"))?;
-        Ok(accepted.cloned())
     }
 
     /// Adopt **this** reaction's own already-published `intended` event.

@@ -5,12 +5,15 @@ workflow. It routes **directly** from a trusted `CompletedIssueValidation`
 comment while the Project Item is still at `AwaitingValidation`.
 
 ```text
-admission          -> ResponsibilityAssigned  -> status AwaitingValidation
+reaction/http      -> ResponsibilityAssigned  -> status AwaitingValidation
 copilot-agent-task -> ExecutionStarted
 issue-validator    -> CompletedIssueValidation
 workgraph-router   -> RoutingDecided          -> AwaitingIssueRiskProfiling
                                                  or NeedsMoreInformation
 ```
+
+The assignment step is the generic [`reaction/http`](../http) reaction, not a
+WorkGraph-specific component.
 
 The event format, the deterministic `runId`/`eventId` algorithms, the outer
 comment grammar, and the author-trust contract all live in
@@ -46,31 +49,63 @@ The routing table is fixed by the event contract, not by configuration:
 
 ## Row contract
 
-Rows added to the single subscribed query must deserialize into
-`RoutingCandidate` (unknown fields are rejected):
+Each row **is** one authoritative `CompletedIssueValidation` comment, exactly as
+the GitHub Source projected it, together with the Project Item it completes. Rows
+must deserialize into `RoutingCandidate` (unknown fields are rejected):
 
-| Field | Type | Notes |
-|---|---|---|
-| `repository` | string | `owner/repo`, must be allowlisted |
-| `subjectNumber` | integer | issue number |
-| `subjectNodeId` | string | `I_…`; re-verified against GitHub |
-| `projectNodeId` | string | `PVT_…`, must be allowlisted |
-| `projectItemNodeId` | string | `PVTI_…` |
-| `projectStatus` | string | must equal `AwaitingValidation` |
+| Field | Source origin | Type | Notes |
+|---|---|---|---|
+| `repository` | `GitHubIssue.repositoryNameWithOwner` | string | `owner/repo`, must be allowlisted |
+| `subjectNumber` | `GitHubIssue.number` | integer | issue number |
+| `subjectNodeId` | `GitHubIssue` node ID | string | `I_…`; re-verified against GitHub |
+| `projectNodeId` | `GitHubProject` node ID | string | `PVT_…`, must be allowlisted |
+| `projectItemNodeId` | `GitHubProjectItem` node ID | string | `PVTI_…` |
+| `projectStatus` | `GitHubProjectItem.statusName` | string | must equal `AwaitingValidation` |
+| **`bodyDigest`** | `GitHubIssue.bodyDigest` | string | **exact Source field name**; `sha256:<64-hex>` of the subject issue body |
+| `eventCommentNodeId` | `GitHubIssueComment` node ID | string | the comment carrying the completion |
+| `eventBody` | `GitHubIssueComment.body` | string | the strict `WorkGraphEvent/v1` comment body |
+| **`authorDatabaseId`** | `GitHubIssueComment.authorDatabaseId` | integer | **exact Source field name**; half the trust key |
+| **`authorType`** | `GitHubIssueComment.authorType` | string | **exact Source field name**; `User` / `Bot` / `Organization` |
+| **`isEdited`** | `GitHubIssueComment.isEdited` | boolean | **exact Source field name**; must be `false` |
 
 `Update` and `Delete` diffs are ignored — only rows newly added to the result set
 can trigger routing.
 
-A row only *nominates* an item. It carries **no** outcome, event ID, or author:
-the decision comes solely from the trusted comments on the issue. Everything is
-re-read from GitHub before any write.
+There is **no `runId` row field**: the run is derived from
+`run_id(projectItemNodeId, subjectNodeId, bodyDigest)`, and the completion event
+must name exactly that run. `bodyDigest` is the *issue* body digest because that
+is the only `bodyDigest` the Source contract defines (it is projected on
+`GitHubIssue`/`GitHubPullRequest`, never on a comment node).
+
+The row still carries **no** outcome, event ID, responsibility, or destination
+status: those come from the accepted event's payload, and the routing table is
+fixed by the event contract. Everything else — the live item status, the
+assignment/start chain, and the current issue body — is re-read from GitHub
+before any write.
+
+```cypher
+MATCH (c:GitHubIssueComment)-[:COMMENT_ON]->(i:GitHubIssue),
+      (pi:GitHubProjectItem)-[:TRACKS]->(i),
+      (pi)-[:IN_PROJECT]->(p:GitHubProject)
+WHERE pi.statusName = 'AwaitingValidation' AND c.isEdited = false
+RETURN i.repositoryNameWithOwner AS repository, i.number AS subjectNumber,
+       elementId(i) AS subjectNodeId, elementId(p) AS projectNodeId,
+       elementId(pi) AS projectItemNodeId, pi.statusName AS projectStatus,
+       i.bodyDigest AS bodyDigest, elementId(c) AS eventCommentNodeId,
+       c.body AS eventBody, c.authorDatabaseId AS authorDatabaseId,
+       c.authorType AS authorType, c.isEdited AS isEdited
+```
 
 ## What must be true before the router writes anything
 
-1. **Current body.** The authoritative issue body is re-read and digested; the
-   `runId` derives from (Project Item, subject, body digest). An issue edited
-   since validation therefore has a different `runId`, so its chain does not
-   exist and the run produces zero side effects.
+0. **The row itself.** `isEdited` must be `false`, `authorDatabaseId` +
+   `authorType` must be exactly the configured trusted identity, and `eventBody`
+   must parse under the strict grammar into a `CompletedIssueValidation` that
+   names this row's item, subject, and
+   `run_id(projectItemNodeId, subjectNodeId, bodyDigest)`.
+1. **Current body.** The authoritative issue body is re-read and digested; it
+   must still equal the row's `bodyDigest`. An issue edited since validation
+   therefore aborts the run with zero side effects.
 2. **Binding.** The Project item must belong to the allowlisted project, its
    content must be the expected issue (node ID, number, repository), and the
    status field must be the pinned `PVTSSF_…` node.
@@ -79,13 +114,18 @@ re-read from GitHub before any write.
    below, never by re-deriving a decision.
 4. **Trusted authorship.** Only comments authored by the configured trusted
    author — numeric database ID **and** actor type — and that GitHub reports as
-   never edited are considered at all.
+   never edited are considered at all. The comment the row names in
+   `eventCommentNodeId` is located by that ID (never by scanning for something
+   completion-shaped) and must still be trusted, unedited, parseable, and carry
+   canonical event JSON byte-identical to the row's.
 5. **A complete chain for that exact run:** `ResponsibilityAssigned` (naming
    `expectedProfile`, carrying the current body digest) → `ExecutionStarted` →
    `CompletedIssueValidation` carrying the *same* `executionId`.
-6. **Exactly one accepted completion.** Byte-identical duplicates coalesce to the
-   earliest physical comment; two comments claiming the same `eventId` with
-   different content fail closed with zero writes.
+6. **Exactly one accepted completion, and it is the row's.** Byte-identical
+   duplicates coalesce to the earliest physical comment; two comments claiming
+   the same `eventId` with different content fail closed with zero writes; and
+   the accepted comment must carry exactly the event the row delivered, so the
+   router can never decide from an event its row did not name.
 
 ## Configuration
 
@@ -174,17 +214,39 @@ let an unrelated later edit to the profile file wedge a completed validation.
   re-derives both; if the completion has been edited, or a different comment now
   claims the completion, or the derived decision differs, the run halts instead
   of routing.
-- **After publication**, the remaining status move is finished from the durable
-  record alone. The record also pins the canonical JSON of the decision it
-  published and an *open-run pointer* from the Project item to that run, so a
-  replay finds the decision even when the issue body (and therefore a freshly
-  derived `runId`) changed afterwards. A decision that is already visible in the
-  issue thread is never stranded by a later edit of its inputs.
-  The published decision comment itself is still reconciled: it must exist, be
-  authored by the trusted author, be unedited, still name the recorded
-  run/item/subject/event ID, and carry exactly the pinned canonical event JSON.
-  If it was edited, deleted, or replaced, the run **halts as a hard error** with
-  zero side effects — it is never skipped as a permanent rejection.
+- **Publication is bracketed by two durable markers.**
+  `decisionPublishAttempted` is written *before* the create-comment request and
+  `decisionCommentNodeId` after the response is observed, so a write whose
+  outcome is unknown (an ambiguous error, a crash mid-request) still leaves a
+  record that says "this decision may already be visible". The open-run pointer
+  is written before either, so such a run is found and resumed even when the
+  issue body — and therefore a freshly derived `runId` — changed afterwards. The
+  flag is one-way, is implied by `decisionCommentNodeId`, and defaults to
+  `false`, so records written before it existed stay resumable exactly as
+  before.
+- **After an attempted publication**, everything is finished from the durable
+  record alone — the intended decision event, the destination status, and the
+  subject all come from the record; the assignment, the start, the completion,
+  and the current issue body are **not** re-derived. A decision that may already
+  be visible in the issue thread is therefore never stranded by a later edit of
+  its inputs. Two shapes exist:
+  - the decision comment ID is durable — the comment is re-verified (it must
+    exist, be authored by the trusted author, be unedited, still name the
+    recorded run/item/subject/event ID, and carry exactly the pinned canonical
+    event JSON) and then the status is applied; or
+  - the write outcome was never observed — the comments are listed and the
+    pinned event reconciled against them under the same strict adoption rule a
+    first attempt uses: an exact match is adopted and its node ID persisted, a
+    comment claiming the same `eventId` with different content fails closed, and
+    only an authoritative listing that does not carry the event may publish the
+    pinned comment (byte-identical to what the first attempt intended). There
+    is never a second decision comment.
+
+  In both shapes, if the decision comment was edited, deleted, or replaced after
+  its node ID became durable, the run **halts as a hard error** with zero side
+  effects — it is never skipped as a permanent rejection.
+- While a run owes an attempted-but-unapplied decision, no other run may claim
+  its Project item.
 - Each side effect is persisted with an exact-bytes compare-and-swap before the
   next one starts, so a stale writer can never clobber newer progress.
 - A failed or unconfirmed write marks the record ambiguous and stops the
@@ -233,12 +295,17 @@ Integration coverage (`tests/integration_test.rs`):
   one `RoutingDecided` comment and one status mutation are produced
 - duplicate delivery routes exactly once
 - a body edited since validation produces zero side effects
-- untrusted authors (a different account, and the trusted database ID under the
-  wrong actor type) and edited completions are never routed
+- rows whose own Source metadata is untrusted (a different account, or the
+  trusted database ID under the wrong actor type) or that report `isEdited` are
+  refused before any GitHub call, and a row that hides an untrusted or edited
+  completion is still refused because no trusted, unedited completion exists
 - a renamed login still routes — trust is keyed on the numeric database ID and
   the actor type
 - an incomplete chain, and a completion from another execution, produce zero
   side effects
+- a completion comment that diverges from the event the row delivered, and a row
+  that names a comment carrying some other event, are never routed (unit tests in
+  `src/reaction.rs`)
 - two trusted completions claiming one event ID fail closed with zero writes
 - byte-identical duplicate completions coalesce to the earliest comment
 - an ambiguous comment write is persisted and never proceeds to the status write
@@ -257,6 +324,12 @@ Integration coverage (`tests/integration_test.rs`):
   persisted status exactly once
 - a published decision comment that is edited, deleted, or replaced by a
   different event halts the resumed run with zero side effects
+- an ambiguous create-comment error whose write **did** land is reconciled after
+  the issue body changes: the replay adopts the landed comment, leaves exactly
+  one decision comment on the issue, and applies the status exactly once
+- an ambiguous create-comment error whose write **did not** land publishes the
+  pinned decision on replay — one further create-comment call, one decision
+  comment, one status mutation — again from durable state alone
 
 ## Dynamic plugin build
 

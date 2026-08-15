@@ -77,11 +77,17 @@ fn make_source() -> (ApplicationSource, ApplicationSourceHandle) {
     ApplicationSource::new(SOURCE, config).expect("create application source")
 }
 
+/// The routing query projects one authoritative `CompletedIssueValidation`
+/// comment (its body, author, and edited flag) plus the subject issue's
+/// `bodyDigest`, exactly as the GitHub Source names those fields.
 fn query_text() -> &'static str {
     "MATCH (r:RoutingCandidate) RETURN \
      r.repository AS repository, r.subjectNumber AS subjectNumber, \
      r.subjectNodeId AS subjectNodeId, r.projectNodeId AS projectNodeId, \
-     r.projectItemNodeId AS projectItemNodeId, r.projectStatus AS projectStatus"
+     r.projectItemNodeId AS projectItemNodeId, r.projectStatus AS projectStatus, \
+     r.bodyDigest AS bodyDigest, r.eventCommentNodeId AS eventCommentNodeId, \
+     r.eventBody AS eventBody, r.authorDatabaseId AS authorDatabaseId, \
+     r.authorType AS authorType, r.isEdited AS isEdited"
 }
 
 fn build_reaction(server_uri: &str, query: &str) -> WorkgraphRouterReaction {
@@ -148,19 +154,90 @@ async fn start_core_with_query(
     (core, handle)
 }
 
-async fn insert_candidate(handle: &ApplicationSourceHandle, node_id: &str, status: &str) {
+/// Every value one routing row carries, so a test can vary exactly one of them.
+struct RowSpec<'a> {
+    /// The item status the query observed.
+    project_status: &'a str,
+    /// The subject issue's `bodyDigest`.
+    body_digest: String,
+    /// The node ID of the comment the row names as the completion.
+    comment_node_id: String,
+    /// The comment body the Source projected.
+    event_body: String,
+    /// The comment's author, as the Source projected it.
+    author: MockAuthor,
+    /// The comment's `isEdited` flag.
+    is_edited: bool,
+}
+
+impl<'a> RowSpec<'a> {
+    /// A row carrying the completion for `body`, `outcome`, and `execution`.
+    fn completion(
+        comment_node_id: &str,
+        body: &str,
+        outcome: ValidationOutcome,
+        execution: &str,
+    ) -> Self {
+        Self {
+            project_status: ROUTABLE_STATUS,
+            body_digest: body_digest(Some(body)).as_str().to_string(),
+            comment_node_id: comment_node_id.to_string(),
+            event_body: completion_body(body, outcome, execution),
+            author: MockAuthor::trusted(),
+            is_edited: false,
+        }
+    }
+
+    /// The canonical row: the trusted, unedited passing completion.
+    fn passing(comment_node_id: &str) -> Self {
+        Self::completion(
+            comment_node_id,
+            ISSUE_BODY,
+            ValidationOutcome::Passed,
+            EXECUTION_SUFFIX,
+        )
+    }
+
+    fn with_status(mut self, status: &'a str) -> Self {
+        self.project_status = status;
+        self
+    }
+
+    fn with_author(mut self, author: MockAuthor) -> Self {
+        self.author = author;
+        self
+    }
+
+    fn edited(mut self) -> Self {
+        self.is_edited = true;
+        self
+    }
+}
+
+async fn insert_row(handle: &ApplicationSourceHandle, node_id: &str, spec: RowSpec<'_>) {
     let properties = PropertyMapBuilder::new()
         .with_string("repository", REPOSITORY)
         .with_integer("subjectNumber", SUBJECT_NUMBER as i64)
         .with_string("subjectNodeId", SUBJECT_NODE_ID)
         .with_string("projectNodeId", PROJECT_NODE_ID)
         .with_string("projectItemNodeId", PROJECT_ITEM_NODE_ID)
-        .with_string("projectStatus", status)
+        .with_string("projectStatus", spec.project_status)
+        .with_string("bodyDigest", spec.body_digest)
+        .with_string("eventCommentNodeId", spec.comment_node_id)
+        .with_string("eventBody", spec.event_body)
+        .with_integer("authorDatabaseId", spec.author.database_id as i64)
+        .with_string("authorType", spec.author.actor_type.as_str())
+        .with_bool("isEdited", spec.is_edited)
         .build();
     handle
         .send_node_insert(node_id, vec!["RoutingCandidate"], properties)
         .await
         .expect("send node insert");
+}
+
+/// Insert the canonical trusted passing-completion row for `comment_node_id`.
+async fn insert_candidate(handle: &ApplicationSourceHandle, node_id: &str, comment_node_id: &str) {
+    insert_row(handle, node_id, RowSpec::passing(comment_node_id)).await;
 }
 
 async fn wait_until<F, Fut>(mut condition: F, max_ms: u64) -> bool
@@ -277,7 +354,8 @@ async fn record(store: &Arc<dyn StateStoreProvider>, body: &str) -> Option<Routi
         .map(|persisted| persisted.record)
 }
 
-fn candidate() -> RoutingCandidate {
+/// The row a seeded durable record was created from.
+fn candidate(completion_node_id: &str) -> RoutingCandidate {
     RoutingCandidate {
         repository: REPOSITORY.to_string(),
         subject_number: SUBJECT_NUMBER,
@@ -285,6 +363,12 @@ fn candidate() -> RoutingCandidate {
         project_node_id: PROJECT_NODE_ID.to_string(),
         project_item_node_id: PROJECT_ITEM_NODE_ID.to_string(),
         project_status: ROUTABLE_STATUS.to_string(),
+        body_digest: body_digest(Some(ISSUE_BODY)).as_str().to_string(),
+        event_comment_node_id: completion_node_id.to_string(),
+        event_body: completion_body(ISSUE_BODY, ValidationOutcome::Passed, EXECUTION_SUFFIX),
+        author_database_id: TRUSTED_AUTHOR_DATABASE_ID,
+        author_type: TRUSTED_AUTHOR_TYPE.as_str().to_string(),
+        is_edited: false,
     }
 }
 
@@ -331,7 +415,7 @@ async fn passing_validation_routes_directly_to_risk_profiling() {
     let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-passed").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
 
     assert!(
         wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
@@ -380,10 +464,20 @@ async fn failing_validation_routes_directly_to_needs_more_information() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Failed);
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Failed);
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-failed").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_row(
+        &handle,
+        "candidate-1",
+        RowSpec::completion(
+            &completion_node_id,
+            ISSUE_BODY,
+            ValidationOutcome::Failed,
+            EXECUTION_SUFFIX,
+        ),
+    )
+    .await;
 
     assert!(
         wait_until(|| async { github.status() == FAILED_STATUS }, 5000).await,
@@ -415,7 +509,7 @@ async fn routing_never_visits_an_intermediate_status() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-direct").await;
 
@@ -436,7 +530,7 @@ async fn routing_never_visits_an_intermediate_status() {
         }
     });
 
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
     assert!(
         wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
         "project item was never routed"
@@ -492,17 +586,17 @@ async fn duplicate_delivery_routes_exactly_once() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-duplicate").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
     assert!(
         wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
         "first delivery never routed"
     );
 
     // The same logical row arrives again under a different node ID.
-    insert_candidate(&handle, "candidate-2", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-2", &completion_node_id).await;
     tokio::time::sleep(Duration::from_millis(750)).await;
 
     assert_eq!(
@@ -527,12 +621,12 @@ async fn a_body_edited_since_validation_yields_zero_side_effects() {
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
     // The whole chain was written for the original body...
-    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
     // ...but the issue has been edited since.
     github.set_issue_body(Some("Completely rewritten body."));
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-edited-body").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
     tokio::time::sleep(Duration::from_millis(750)).await;
 
     assert_eq!(
@@ -570,14 +664,36 @@ async fn untrusted_and_edited_completions_are_never_routed() {
 
     let completion = completion_body(ISSUE_BODY, ValidationOutcome::Passed, EXECUTION_SUFFIX);
     // A completely different account...
-    github.seed_comment(&completion, &MockAuthor::untrusted(), false);
+    let untrusted = github.seed_comment(&completion, &MockAuthor::untrusted(), false);
     // ...the trusted numeric database ID under the wrong actor type...
     github.seed_comment(&completion, &MockAuthor::wrong_actor_type(), false);
     // ...and the trusted account, but edited afterwards.
-    github.seed_comment(&completion, &MockAuthor::trusted(), true);
+    let edited = github.seed_comment(&completion, &MockAuthor::trusted(), true);
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-untrusted").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    // Rows whose own Source author metadata is untrusted, or that report the
+    // edit, are refused before any GitHub call...
+    insert_row(
+        &handle,
+        "candidate-untrusted",
+        RowSpec::passing(&untrusted).with_author(MockAuthor::untrusted()),
+    )
+    .await;
+    insert_row(
+        &handle,
+        "candidate-wrong-type",
+        RowSpec::passing(&untrusted).with_author(MockAuthor::wrong_actor_type()),
+    )
+    .await;
+    insert_row(
+        &handle,
+        "candidate-edited",
+        RowSpec::passing(&edited).edited(),
+    )
+    .await;
+    // ...and a row that claims those comments are trusted and unedited is still
+    // refused, because no trusted, unedited completion exists on the issue.
+    insert_candidate(&handle, "candidate-1", &untrusted).await;
     tokio::time::sleep(Duration::from_millis(750)).await;
 
     assert_eq!(
@@ -604,7 +720,7 @@ async fn a_renamed_login_still_routes() {
 
     github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     github.seed_comment(&started_body(ISSUE_BODY), &MockAuthor::trusted(), false);
-    github.seed_comment(
+    let completion_node_id = github.seed_comment(
         &completion_body(ISSUE_BODY, ValidationOutcome::Passed, EXECUTION_SUFFIX),
         // Same node ID, database ID, and actor type; different login.
         &MockAuthor::trusted_renamed(),
@@ -612,7 +728,7 @@ async fn a_renamed_login_still_routes() {
     );
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-renamed").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
 
     assert!(
         wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
@@ -638,7 +754,8 @@ async fn an_incomplete_chain_yields_zero_side_effects() {
     github.seed_comment(&started_body(ISSUE_BODY), &MockAuthor::trusted(), false);
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-incomplete").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    // A well-formed row for a completion that is not on the issue at all.
+    insert_candidate(&handle, "candidate-1", "IC_not_posted").await;
     tokio::time::sleep(Duration::from_millis(750)).await;
 
     assert_eq!(github.create_comment_calls(), 0);
@@ -661,18 +778,25 @@ async fn a_completion_from_another_execution_is_rejected() {
 
     github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     github.seed_comment(&started_body(ISSUE_BODY), &MockAuthor::trusted(), false);
-    github.seed_comment(
-        &completion_body(
-            ISSUE_BODY,
-            ValidationOutcome::Passed,
-            "11111111-2222-3333-4444-555555555555",
-        ),
+    const OTHER_EXECUTION: &str = "11111111-2222-3333-4444-555555555555";
+    let completion_node_id = github.seed_comment(
+        &completion_body(ISSUE_BODY, ValidationOutcome::Passed, OTHER_EXECUTION),
         &MockAuthor::trusted(),
         false,
     );
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-exec-mismatch").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_row(
+        &handle,
+        "candidate-1",
+        RowSpec::completion(
+            &completion_node_id,
+            ISSUE_BODY,
+            ValidationOutcome::Passed,
+            OTHER_EXECUTION,
+        ),
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(750)).await;
 
     assert_eq!(github.create_comment_calls(), 0);
@@ -696,7 +820,7 @@ async fn conflicting_duplicate_completions_fail_closed() {
     github.seed_comment(&started_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     // Same run and event type — therefore the same deterministic event ID —
     // but contradictory outcomes.
-    github.seed_comment(
+    let completion_node_id = github.seed_comment(
         &completion_body(ISSUE_BODY, ValidationOutcome::Passed, EXECUTION_SUFFIX),
         &MockAuthor::trusted(),
         false,
@@ -708,7 +832,7 @@ async fn conflicting_duplicate_completions_fail_closed() {
     );
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-conflict").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
     tokio::time::sleep(Duration::from_millis(750)).await;
 
     assert_eq!(
@@ -752,7 +876,7 @@ async fn identical_duplicate_completions_coalesce() {
     github.seed_comment(&duplicate, &MockAuthor::trusted(), false);
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-duplicates").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-1", &first).await;
 
     assert!(
         wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
@@ -797,10 +921,10 @@ async fn restart_after_ambiguous_write_adopts_the_existing_comment() {
     let mut seeded = RoutingRecord::new(
         &expected_run_id(ISSUE_BODY),
         event.event_id.as_str(),
-        &candidate(),
+        &candidate(&completion_node_id),
         body_digest(Some(ISSUE_BODY)).as_str(),
         AcceptedCompletion {
-            comment_node_id: completion_node_id,
+            comment_node_id: completion_node_id.clone(),
             body_hash: comment_body_hash(&completion_body(
                 ISSUE_BODY,
                 ValidationOutcome::Passed,
@@ -817,7 +941,7 @@ async fn restart_after_ambiguous_write_adopts_the_existing_comment() {
         .expect("seed ambiguous record");
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-restart").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
 
     assert!(
         wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
@@ -863,7 +987,7 @@ async fn a_completion_edited_after_acceptance_halts_the_resumed_run() {
     let seeded = RoutingRecord::new(
         &expected_run_id(ISSUE_BODY),
         event.event_id.as_str(),
-        &candidate(),
+        &candidate(&completion_node_id),
         body_digest(Some(ISSUE_BODY)).as_str(),
         AcceptedCompletion {
             comment_node_id: completion_node_id.clone(),
@@ -878,7 +1002,7 @@ async fn a_completion_edited_after_acceptance_halts_the_resumed_run() {
         .expect("seed record");
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-edited-completion").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
     tokio::time::sleep(Duration::from_millis(750)).await;
 
     assert_eq!(
@@ -902,15 +1026,20 @@ async fn stale_and_misbound_rows_have_zero_side_effects() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-stale").await;
 
     // A row claiming a status the item does not hold.
-    insert_candidate(&handle, "candidate-stale-status", "Triage").await;
+    insert_row(
+        &handle,
+        "candidate-stale-status",
+        RowSpec::passing(&completion_node_id).with_status("Triage"),
+    )
+    .await;
     // A row whose subject node does not match what GitHub reports.
     github.set_issue_node_id("I_somethingelse");
-    insert_candidate(&handle, "candidate-misbound", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-misbound", &completion_node_id).await;
     tokio::time::sleep(Duration::from_millis(750)).await;
 
     assert_eq!(github.create_comment_calls(), 0, "no comment may be posted");
@@ -930,13 +1059,13 @@ async fn ambiguous_comment_write_is_persisted_and_halts_before_status() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
 
     // The server accepts the comment but the client times out waiting.
     github.set_create_comment_delay(Some(Duration::from_millis(2500)));
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-ambiguous").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
 
     assert!(
         wait_until(
@@ -984,7 +1113,7 @@ async fn a_rewritten_completion_body_is_not_routed() {
     );
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-rewritten").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
     tokio::time::sleep(Duration::from_millis(750)).await;
 
     assert_eq!(github.create_comment_calls(), 0);
@@ -1023,7 +1152,7 @@ async fn a_silently_resummarised_completion_halts_the_resumed_run() {
     let seeded = RoutingRecord::new(
         &expected_run_id(ISSUE_BODY),
         event.event_id.as_str(),
-        &candidate(),
+        &candidate(&completion_node_id),
         body_digest(Some(ISSUE_BODY)).as_str(),
         AcceptedCompletion {
             comment_node_id: completion_node_id.clone(),
@@ -1048,7 +1177,7 @@ async fn a_silently_resummarised_completion_halts_the_resumed_run() {
     );
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-resummarised").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
     tokio::time::sleep(Duration::from_millis(750)).await;
 
     assert_eq!(
@@ -1083,7 +1212,7 @@ async fn a_divergent_preexisting_decision_is_never_adopted() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
 
     // Trusted, unedited, and carrying the exact event ID this run will decide —
     // but the opposite decision.
@@ -1093,7 +1222,7 @@ async fn a_divergent_preexisting_decision_is_never_adopted() {
     github.seed_comment(&divergent, &MockAuthor::trusted(), false);
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "router-divergent").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
 
     assert!(
         wait_for_halt(&core).await,
@@ -1140,13 +1269,13 @@ async fn a_status_failure_after_publication_is_finished_from_durable_state() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
 
     // The decision comment lands, then the status mutation fails transiently.
     github.fail_next_status_mutations(1);
 
     let (first, handle) = start_core(&server.uri(), store.clone(), "router-poststatus-1").await;
-    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
     assert!(
         wait_until(
             || async {
@@ -1185,7 +1314,7 @@ async fn a_status_failure_after_publication_is_finished_from_durable_state() {
         "route-workgraph-items-after-restart",
     )
     .await;
-    insert_candidate(&handle, "candidate-replay", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-replay", &completion_node_id).await;
 
     assert!(
         wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
@@ -1216,7 +1345,7 @@ async fn a_status_failure_after_publication_is_finished_from_durable_state() {
     // the reaction to actually read GitHub again, so "no further writes" is a
     // statement about a processed row and not about an unprocessed one.
     let reads_before = github.issue_reads();
-    insert_candidate(&handle, "candidate-replay-2", ROUTABLE_STATUS).await;
+    insert_candidate(&handle, "candidate-replay-2", &completion_node_id).await;
     assert!(
         wait_until(|| async { github.issue_reads() > reads_before }, 5000).await,
         "the repeated delivery was never processed"
@@ -1269,10 +1398,10 @@ async fn a_tampered_published_decision_halts_the_resumed_run() {
         let mut seeded = RoutingRecord::new(
             &expected_run_id(ISSUE_BODY),
             event.event_id.as_str(),
-            &candidate(),
+            &candidate(&completion_node_id),
             body_digest(Some(ISSUE_BODY)).as_str(),
             AcceptedCompletion {
-                comment_node_id: completion_node_id,
+                comment_node_id: completion_node_id.clone(),
                 body_hash: comment_body_hash(&completion_body(
                     ISSUE_BODY,
                     ValidationOutcome::Passed,
@@ -1307,7 +1436,7 @@ async fn a_tampered_published_decision_halts_the_resumed_run() {
         }
 
         let (core, handle) = start_core(&server.uri(), store.clone(), core_id).await;
-        insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+        insert_candidate(&handle, "candidate-1", &completion_node_id).await;
 
         assert!(
             wait_for_halt(&core).await,
@@ -1341,4 +1470,229 @@ async fn a_tampered_published_decision_halts_the_resumed_run() {
     run_case(Tamper::Edited, "router-tampered-edited").await;
     run_case(Tamper::Deleted, "router-tampered-deleted").await;
     run_case(Tamper::Divergent, "router-tampered-divergent").await;
+}
+
+// ---------------------------------------------------------------------
+// 21. An ambiguous create-comment error whose write actually landed is
+//     reconciled on replay, even after the issue body changes.
+//
+// This is the regression the durable "publication attempted" marker exists
+// for: the first attempt never learns the comment node ID, so before the
+// marker the record looked pre-publication, and a replay whose issue body had
+// changed since would re-derive a *different* run, find no chain, and skip the
+// row forever — stranding a `RoutingDecided` comment that is already visible in
+// the issue thread.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn an_ambiguous_write_that_landed_is_adopted_after_the_body_changes() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+    let decision_body = expected_decision_body(ISSUE_BODY, ValidationOutcome::Passed);
+
+    // The server accepts the comment but the client never sees the response.
+    github.set_create_comment_delay(Some(Duration::from_millis(2500)));
+
+    let (first, handle) = start_core(&server.uri(), store.clone(), "router-landed-1").await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
+
+    assert!(
+        wait_until(
+            || async {
+                record(&store, ISSUE_BODY)
+                    .await
+                    .is_some_and(|record| record.ambiguous)
+            },
+            8000
+        )
+        .await,
+        "the ambiguous write must be persisted"
+    );
+    let attempted = record(&store, ISSUE_BODY).await.expect("record exists");
+    assert!(
+        attempted.decision_publish_attempted,
+        "the attempt must be durable before the write"
+    );
+    assert!(
+        attempted.decision_comment_node_id.is_none(),
+        "the write outcome was never observed"
+    );
+    assert!(!attempted.status_applied);
+    assert_eq!(github.create_comment_calls(), 1);
+    assert_eq!(
+        github
+            .comment_bodies()
+            .iter()
+            .filter(|body| *body == &decision_body)
+            .count(),
+        1,
+        "the decision did land, unobserved"
+    );
+    assert_eq!(github.status(), ROUTABLE_STATUS, "the status did not move");
+    first.stop().await.expect("stop first core");
+
+    // The issue body is edited before the replay: a fresh derivation would now
+    // produce a different runId with no chain at all, which must NOT strand the
+    // decision that is already visible in the thread.
+    github.set_create_comment_delay(None);
+    github.set_issue_body(Some("Rewritten while the router was down.\n"));
+
+    let (second, handle) = start_core_with_query(
+        &server.uri(),
+        store.clone(),
+        "router-landed-2",
+        "route-workgraph-items-after-restart",
+    )
+    .await;
+    insert_candidate(&handle, "candidate-replay", &completion_node_id).await;
+
+    assert!(
+        wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
+        "the replay never completed the landed decision; status is '{}' and the reaction is {:?}",
+        github.status(),
+        reaction_status(&second).await
+    );
+    assert_eq!(
+        github.create_comment_calls(),
+        1,
+        "the landed decision must be adopted, not re-posted"
+    );
+    assert_eq!(
+        github
+            .comment_bodies()
+            .iter()
+            .filter(|body| *body == &decision_body)
+            .count(),
+        1,
+        "exactly one decision comment may exist"
+    );
+    assert_eq!(
+        github.status_mutations(),
+        1,
+        "the persisted status move must be applied exactly once"
+    );
+
+    let finished = record(&store, ISSUE_BODY).await.expect("record exists");
+    assert!(finished.is_complete());
+    assert!(!finished.ambiguous);
+    assert_eq!(finished.to_status, PASSED_STATUS);
+    assert!(
+        finished.decision_comment_node_id.is_some(),
+        "the adopted comment ID must be durable"
+    );
+
+    // Delivering the row again is a no-op: the run is complete.
+    let reads_before = github.issue_reads();
+    insert_candidate(&handle, "candidate-replay-2", &completion_node_id).await;
+    assert!(
+        wait_until(|| async { github.issue_reads() > reads_before }, 5000).await,
+        "the repeated delivery was never processed"
+    );
+    assert_eq!(github.status_mutations(), 1, "still exactly once");
+    assert_eq!(github.create_comment_calls(), 1, "still one comment");
+    assert_eq!(reaction_status(&second).await, ComponentStatus::Running);
+
+    second.stop().await.expect("stop second core");
+}
+
+// ---------------------------------------------------------------------
+// 22. An ambiguous create-comment error whose write did *not* land publishes
+//     the pinned decision on replay — exactly once — even after the issue body
+//     changes.
+//
+// The mirror image of case 21: the same durable state resolves to the opposite
+// physical outcome, and the harness distinguishes them by the number of
+// create-comment calls the server saw.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn an_ambiguous_write_that_never_landed_publishes_the_pinned_decision() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+    let decision_body = expected_decision_body(ISSUE_BODY, ValidationOutcome::Passed);
+
+    // The create fails without appending the comment.
+    github.fail_next_comment_creates(1);
+
+    let (first, handle) = start_core(&server.uri(), store.clone(), "router-unlanded-1").await;
+    insert_candidate(&handle, "candidate-1", &completion_node_id).await;
+
+    assert!(
+        wait_until(
+            || async {
+                record(&store, ISSUE_BODY)
+                    .await
+                    .is_some_and(|record| record.ambiguous)
+            },
+            8000
+        )
+        .await,
+        "the failed write must be persisted as ambiguous"
+    );
+    let attempted = record(&store, ISSUE_BODY).await.expect("record exists");
+    assert!(
+        attempted.decision_publish_attempted,
+        "the attempt must be durable even though nothing landed"
+    );
+    assert!(attempted.decision_comment_node_id.is_none());
+    assert_eq!(github.create_comment_calls(), 1);
+    assert_eq!(
+        github
+            .comment_bodies()
+            .iter()
+            .filter(|body| *body == &decision_body)
+            .count(),
+        0,
+        "nothing landed"
+    );
+    assert_eq!(github.status(), ROUTABLE_STATUS);
+    first.stop().await.expect("stop first core");
+
+    // The issue body changes here too: the replay must publish the *pinned*
+    // decision from durable state rather than re-deriving anything.
+    github.set_issue_body(Some("Rewritten while the router was down.\n"));
+
+    let (second, handle) = start_core_with_query(
+        &server.uri(),
+        store.clone(),
+        "router-unlanded-2",
+        "route-workgraph-items-after-restart",
+    )
+    .await;
+    insert_candidate(&handle, "candidate-replay", &completion_node_id).await;
+
+    assert!(
+        wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
+        "the replay never published the pinned decision; status is '{}' and the reaction is {:?}",
+        github.status(),
+        reaction_status(&second).await
+    );
+    assert_eq!(
+        github.create_comment_calls(),
+        2,
+        "exactly one further create-comment call was needed"
+    );
+    assert_eq!(
+        github
+            .comment_bodies()
+            .iter()
+            .filter(|body| *body == &decision_body)
+            .count(),
+        1,
+        "the replay publishes exactly one decision, byte-identical to the pinned one"
+    );
+    assert_eq!(github.status_mutations(), 1, "applied exactly once");
+
+    let finished = record(&store, ISSUE_BODY).await.expect("record exists");
+    assert!(finished.is_complete());
+    assert!(!finished.ambiguous);
+    assert_eq!(finished.to_status, PASSED_STATUS);
+
+    second.stop().await.expect("stop second core");
 }

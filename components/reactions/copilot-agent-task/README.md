@@ -1,15 +1,19 @@
 # Drasi Copilot Agent Task Reaction
 
 `drasi-reaction-copilot-agent-task` is a Drasi reaction plugin ([`drasi-lib`](../../../lib))
-that launches GitHub Copilot coding-agent tasks for nominated WorkGraph runs. It is the
-second of the three in-repo reactions in the WorkGraph pipeline:
+that launches GitHub Copilot coding-agent tasks for assigned WorkGraph runs. It is the
+first of the two in-repo WorkGraph reactions:
 
 ```text
-workgraph-admission -> ResponsibilityAssigned    -> Project status AwaitingValidation
+reaction/http       -> ResponsibilityAssigned    -> Project status AwaitingValidation
 copilot-agent-task  -> ExecutionStarted
 issue-validator     -> CompletedIssueValidation     (posted by an external JS reporter)
 workgraph-router    -> RoutingDecided             -> AwaitingIssueRiskProfiling | NeedsMoreInformation
 ```
+
+The assignment step is the generic [`reaction/http`](../http) reaction driven by a
+query, so only this reaction and [`workgraph-router`](../workgraph-router) are
+WorkGraph-specific components.
 
 Every event is the shared `WorkGraphEvent/v1` format defined by
 [`drasi-workgraph-common`](../../workgraph-common). This reaction subscribes to a single
@@ -78,29 +82,61 @@ and execution records must survive restarts. Configure one on `DrasiLib::builder
 
 ## Launch row schema
 
-Each row returned by the launch query must contain **exactly** the following fields (camelCase,
-as `RETURN ... AS <name>` aliases in Cypher). Unknown fields are rejected (`deny_unknown_fields`).
+Each row **is** one authoritative `ResponsibilityAssigned` comment, exactly as the GitHub
+Source projected it. The reaction never scans an issue thread for "something that looks like an
+assignment": the row names the event, and the shared
+[`accept_event_row`](../../workgraph-common/src/row.rs) seam proves it.
 
-| Field | Type | Notes |
-|---|---|---|
-| `repository` | string | `"owner/repo"`; must be in `allowedRepositories` |
-| `subjectNumber` | integer | Subject issue number (`> 0`) |
-| `subjectNodeId` | string | GitHub issue node ID (`I_…`) |
-| `projectNodeId` | string | GitHub Projects (v2) node ID (`PVT_…`) |
-| `projectItemNodeId` | string | GitHub Projects (v2) item node ID (`PVTI_…`) |
-| `runId` | string | Deterministic run identifier (`run:<64-hex>`); must parse as a `RunId` |
-| `requestedModel` | string | Must be in `allowedModels` |
-| `fallbackModel` | string (optional) | If present, must be in `allowedModels` and differ from `requestedModel` |
-| `baseRef` | string | Git ref the task runs against and the profile blob is read from |
+Rows must contain **exactly** the following fields (camelCase, as `RETURN ... AS <name>`
+aliases in Cypher). Unknown fields are rejected (`deny_unknown_fields`).
 
-The `runId` binds the Project item, the subject issue, and the exact issue-body digest. The
-reaction re-derives it from live GitHub state
-(`run_id(projectItemNodeId, subjectNodeId, body_digest(currentBody))`) and requires an exact
-match, so a body edited since the row was emitted aborts the launch with zero side effects
-rather than proceeding on stale information.
+| Field | Source origin | Type | Notes |
+|---|---|---|---|
+| `repository` | `GitHubIssue.repositoryNameWithOwner` | string | `"owner/repo"`; must be in `allowedRepositories` |
+| `subjectNumber` | `GitHubIssue.number` | integer | Subject issue number (`> 0`) |
+| `subjectNodeId` | `GitHubIssue` node ID | string | GitHub issue node ID (`I_…`) |
+| `projectNodeId` | `GitHubProject` node ID | string | GitHub Projects (v2) node ID (`PVT_…`) |
+| `projectItemNodeId` | `GitHubProjectItem` node ID | string | GitHub Projects (v2) item node ID (`PVTI_…`) |
+| `projectStatus` | `GitHubProjectItem.statusName` | string | Must equal `AwaitingValidation` |
+| **`bodyDigest`** | `GitHubIssue.bodyDigest` | string | **Exact Source field name.** `sha256:<64-hex>` of the subject issue body |
+| `eventCommentNodeId` | `GitHubIssueComment` node ID | string | The comment carrying the assignment |
+| `eventBody` | `GitHubIssueComment.body` | string | The strict `WorkGraphEvent/v1` comment body |
+| **`authorDatabaseId`** | `GitHubIssueComment.authorDatabaseId` | integer | **Exact Source field name.** Half the trust key |
+| **`authorType`** | `GitHubIssueComment.authorType` | string | **Exact Source field name.** `User` / `Bot` / `Organization` |
+| **`isEdited`** | `GitHubIssueComment.isEdited` | boolean | **Exact Source field name.** Must be `false` |
+| `requestedModel` | query policy | string | Must be in `allowedModels` |
+| `fallbackModel` | query policy | string (optional) | If present, must be in `allowedModels` and differ from `requestedModel` |
+| `baseRef` | query policy | string | Git ref the task runs against and the profile blob is read from |
 
-The `executionId` (`execution:<uuid-v5>`) is derived deterministically from `runId` alone — it
+There is **no `runId` row field**. The run is derived from the row's own binding —
+`run_id(projectItemNodeId, subjectNodeId, bodyDigest)` — and the assignment event must name
+exactly that run, so a row can never nominate a run its binding does not produce. `bodyDigest`
+is the *issue* body digest because that is the only `bodyDigest` the Source contract defines
+(it is projected on `GitHubIssue`/`GitHubPullRequest`, never on a comment node), and it is the
+same value that binds the run.
+
+The reaction still re-reads the issue before any write and requires the **current** digest to
+equal the row's `bodyDigest`, so a body edited since the row was emitted aborts the launch with
+zero side effects rather than proceeding on stale information.
+
+The `executionId` (`execution:<uuid-v5>`) is derived deterministically from the run alone — it
 is not a query-row input, and there is exactly one execution per run.
+
+A launch query therefore looks like:
+
+```cypher
+MATCH (c:GitHubIssueComment)-[:COMMENT_ON]->(i:GitHubIssue),
+      (pi:GitHubProjectItem)-[:TRACKS]->(i),
+      (pi)-[:IN_PROJECT]->(p:GitHubProject)
+WHERE pi.statusName = 'AwaitingValidation' AND c.isEdited = false
+RETURN i.repositoryNameWithOwner AS repository, i.number AS subjectNumber,
+       elementId(i) AS subjectNodeId, elementId(p) AS projectNodeId,
+       elementId(pi) AS projectItemNodeId, pi.statusName AS projectStatus,
+       i.bodyDigest AS bodyDigest, elementId(c) AS eventCommentNodeId,
+       c.body AS eventBody, c.authorDatabaseId AS authorDatabaseId,
+       c.authorType AS authorType, c.isEdited AS isEdited,
+       'gpt-5.6-sol' AS requestedModel, 'main' AS baseRef
+```
 
 ## Configuration reference
 
@@ -114,7 +150,7 @@ is not a query-row input, and there is exactly one execution per run.
 | `allowedRepositories` | string[] | — | **Required, non-empty** (fail-closed) |
 | `allowedProfiles` | string[] | — | **Required, non-empty** |
 | `allowedModels` | string[] | — | **Required, non-empty** |
-| `trustedAssignmentAuthorDatabaseId` | u64 | — | **Required, > 0.** Numeric GitHub database ID whose `ResponsibilityAssigned` comments are trusted (admission's identity) — see [Author trust](#author-trust) |
+| `trustedAssignmentAuthorDatabaseId` | u64 | — | **Required, > 0.** Numeric GitHub database ID whose `ResponsibilityAssigned` comments are trusted (the assigning reaction's identity) — see [Author trust](#author-trust) |
 | `trustedAssignmentAuthorType` | string | `Bot` | `User`, `Bot`, or `Organization` — the other half of the assignment trust key |
 | `trustedExecutionAuthorDatabaseId` | u64 | — | **Required, > 0.** Numeric GitHub database ID **this** reaction posts as, used only to adopt its own `ExecutionStarted` comment. Must be the account `token` authenticates as |
 | `trustedExecutionAuthorType` | string | `Bot` | `User`, `Bot`, or `Organization` — the other half of the execution trust key |
@@ -184,33 +220,35 @@ For each added row the reaction executes the following steps in order. Every sem
 is a **permanent** rejection (logged and skipped, the reaction stays healthy); transient and
 ambiguous failures stop the reaction so the batch replays on restart.
 
-1. **Validate** the row against the allowlists and the frozen identifier grammar.
+1. **Validate** the row against the allowlists and the frozen identifier grammar, then
+   **accept its assignment event**: `isEdited` must be `false`, `authorDatabaseId` +
+   `authorType` must be exactly the configured trusted assignment identity, `eventBody` must
+   parse under the strict `WorkGraphEvent/v1` grammar into a `ResponsibilityAssigned`, and that
+   event must name this row's item, subject, and `run_id(projectItemNodeId, subjectNodeId,
+   bodyDigest)`.
 2. **Read the authoritative issue** — `GET /repos/{owner}/{repo}/issues/{number}`; require
-   `state == "open"` and `node_id == subjectNodeId`. Take the current `body` (may be null).
-3. **Bind the run** — `digest = body_digest(body)`;
-   require `run_id(projectItemNodeId, subjectNodeId, digest) == runId`. A mismatch means the
-   issue body changed since the assignment and aborts with **zero side effects**.
-4. **Verify the Project item** (GraphQL) — the item belongs to `projectNodeId`, its content is
+   `state == "open"`, `node_id == subjectNodeId`, and `body_digest(body) == bodyDigest`. A
+   mismatch means the issue body changed since the assignment and aborts with **zero side
+   effects**. The assignment's `contentDigest` must equal that digest too.
+3. **Verify the Project item** (GraphQL) — the item belongs to `projectNodeId`, its content is
    the expected Issue (node ID + number + repository), its status field node ID equals
    `expectedProjectStatusFieldNodeId`, and its current status is exactly `AwaitingValidation`.
-5. **Adopt the trusted assignment** — list issue comments, parse each with the shared
-   `parse_comment` (ignoring non-WorkGraph comments), keep only those authored by a trusted
-   user ID **and** unedited (`created_at == updated_at`), then `coalesce` them by the
-   deterministic `ResponsibilityAssigned` event ID. Exactly one accepted assignment is
-   required; byte-identical duplicates coalesce, and conflicting content for one event ID
-   **fails closed**. The assignment's `contentDigest` must equal the bound digest.
-6. **Pin the profile** — `GET /repos/{owner}/{repo}/contents/.github/agents/{profile}.agent.md?ref={baseRef}`
+4. **Confirm the named assignment comment** — list issue comments and locate
+   `eventCommentNodeId` (never "something assignment-shaped"); it must still be authored by the
+   trusted assignment identity, be unedited (`created_at == updated_at`), parse under the strict
+   grammar, and carry canonical event JSON byte-identical to the row's.
+5. **Pin the profile** — `GET /repos/{owner}/{repo}/contents/.github/agents/{profile}.agent.md?ref={baseRef}`
    where `{profile}` comes from the assignment's `profileRef`; require the returned blob `sha`
    to equal the SHA the `profileRef` pins, and require `{profile}` to be in `allowedProfiles`.
-7. **Reserve** — compute `executionId` from `runId`, then durably create-if-absent an
+6. **Reserve** — compute `executionId` from the run, then durably create-if-absent an
    `ExecutionRecord` keyed by `execution:{runId}` **before** any external write. An existing
    record must describe the same run/repository/subject/item; the reaction resumes from its
    state.
-8. **Create or adopt one task** — reconcile first (adopt the single task whose prompt carries
+7. **Create or adopt one task** — reconcile first (adopt the single task whose prompt carries
    the `executionId`; ≥2 matches fail closed), otherwise `POST /agents/repos/{owner}/{repo}/tasks`.
-9. **Post one `ExecutionStarted` comment** — adopting a prior write via the same
-   trusted-author + unedited + coalesce procedure keyed by the `ExecutionStarted` event ID, so
-   an ambiguous write is never duplicated.
+8. **Post one `ExecutionStarted` comment** — adopting a prior write only when its canonical
+   event JSON is byte-identical to the intended event, so an ambiguous write is never
+   duplicated and a divergent comment claiming that event ID fails closed.
 
 ## Reservation, idempotency, and recovery
 
@@ -412,15 +450,23 @@ make update-schema     # regenerate schema/workgraph-execution-state-v1.schema.j
 Integration coverage (`tests/integration_test.rs`) includes: the full happy path (exactly one
 task and one canonical `ExecutionStarted` comment whose body is computed independently in the
 test), the two-field reporter prompt, duplicate delivery (one task + one comment), a current
-body whose digest no longer matches `runId` (zero side effects), a missing / untrusted-author /
-edited assignment (zero side effects), two trusted comments claiming one assignment event ID
-(fail closed), profile-blob SHA drift (zero side effects), a Project status other than
-`AwaitingValidation` (zero side effects), exactly-once model fallback on an unsupported-model
-`422` and no fallback on an unrelated `422`, ambiguous task creation (persists `Ambiguous`,
-posts no comment) with a restart that adopts the single correlated task and posts one comment,
-a pre-existing `ExecutionStarted` comment that claims this run's event ID with a different
-payload (never adopted: zero task writes, zero comment writes, the run is not completed),
-and token redaction in `Debug` output.
+issue body whose digest no longer matches the row's `bodyDigest` (zero side effects), a row
+naming a comment that no longer exists (zero side effects), rows whose Source
+`authorDatabaseId`/`authorType` are not the trusted assignment identity — including this
+reaction's own identity — while a perfectly good assignment sits on the issue (zero side
+effects), an edited assignment reported either by the row's `isEdited` or only by GitHub (zero
+side effects), a named comment whose content diverges from the row's event (zero side effects),
+profile-blob SHA drift (zero side effects), a Project status other than `AwaitingValidation`
+(zero side effects), exactly-once model fallback on an unsupported-model `422` and no fallback
+on an unrelated `422`, ambiguous task creation (persists `Ambiguous`, posts no comment) with a
+restart that adopts the single correlated task and posts one comment, a pre-existing
+`ExecutionStarted` comment that claims this run's event ID with a different payload (never
+adopted: zero task writes, zero comment writes, the run is not completed), and token redaction
+in `Debug` output.
+
+Row-level acceptance itself (author trust, `isEdited`, `bodyDigest`/run binding, event type,
+subject/item binding, and legacy bodies) is unit-tested in `src/row.rs`, over the single shared
+implementation in [`drasi-workgraph-common`](../../workgraph-common/src/row.rs).
 
 ## Dynamic plugin build
 

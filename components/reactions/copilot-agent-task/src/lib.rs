@@ -134,7 +134,8 @@ impl CopilotAgentTaskReactionBuilder {
     }
 
     /// Numeric GitHub database ID of the identity whose
-    /// `ResponsibilityAssigned` comments are trusted (admission's identity).
+    /// `ResponsibilityAssigned` comments are trusted (the assigning reaction's
+    /// identity).
     pub fn with_trusted_assignment_author_database_id(mut self, database_id: u64) -> Self {
         self.config.trusted_assignment_author_database_id = database_id;
         self

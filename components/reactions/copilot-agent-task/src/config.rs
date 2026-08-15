@@ -117,8 +117,8 @@ pub struct CopilotAgentTaskReactionConfig {
     pub allowed_models: Vec<String>,
 
     /// Numeric GitHub database ID of the identity whose
-    /// `ResponsibilityAssigned` comments this reaction trusts (the admission
-    /// reaction's identity).
+    /// `ResponsibilityAssigned` comments this reaction trusts (the identity the
+    /// assigning HTTP reaction posts as).
     ///
     /// Together with [`Self::trusted_assignment_author_type`] this is the whole
     /// trust key for the assignment. Node IDs are audit data on the observed

@@ -59,7 +59,7 @@ impl StateStoreProvider for DurableMemoryStateStoreProvider {
         self.inner.set(store_id, key, value).await
     }
 
-    /// Forwarded so admission's intent-before-side-effect record really is
+    /// Forwarded so the router's intent-before-side-effect record really is
     /// created atomically; the trait default reports CAS as unsupported.
     async fn create_if_absent(
         &self,

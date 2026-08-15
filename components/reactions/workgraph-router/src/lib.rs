@@ -21,7 +21,7 @@
 //! Project Item is still at `AwaitingValidation`:
 //!
 //! ```text
-//! admission          -> ResponsibilityAssigned  -> status AwaitingValidation
+//! reaction/http      -> ResponsibilityAssigned  -> status AwaitingValidation
 //! copilot-agent-task -> ExecutionStarted
 //! issue-validator    -> CompletedIssueValidation
 //! workgraph-router   -> RoutingDecided          -> AwaitingIssueRiskProfiling

@@ -145,6 +145,7 @@ pub struct GithubState {
     pub issue_reads: Arc<AtomicUsize>,
     comment_delay: Arc<Mutex<Option<Duration>>>,
     status_mutation_failures: Arc<AtomicUsize>,
+    comment_create_failures: Arc<AtomicUsize>,
 }
 
 impl GithubState {
@@ -161,6 +162,7 @@ impl GithubState {
             issue_reads: Arc::new(AtomicUsize::new(0)),
             comment_delay: Arc::new(Mutex::new(None)),
             status_mutation_failures: Arc::new(AtomicUsize::new(0)),
+            comment_create_failures: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -263,6 +265,17 @@ impl GithubState {
     pub fn fail_next_status_mutations(&self, count: usize) {
         self.status_mutation_failures.store(count, Ordering::SeqCst);
     }
+
+    /// Fail the next `count` create-comment calls with HTTP 500 **without**
+    /// appending the comment.
+    ///
+    /// This is the other half of an ambiguous write: the client sees a failure
+    /// it cannot interpret, and the comment genuinely never landed. Paired with
+    /// [`Self::set_create_comment_delay`] — where the comment *does* land — it
+    /// lets a test distinguish the two recoveries.
+    pub fn fail_next_comment_creates(&self, count: usize) {
+        self.comment_create_failures.store(count, Ordering::SeqCst);
+    }
 }
 
 fn comment_value(node_id: &str, body: &str, author: &MockAuthor, edited: bool) -> Value {
@@ -305,6 +318,15 @@ struct CreateCommentResponder(GithubState);
 impl Respond for CreateCommentResponder {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         self.0.create_comment_calls.fetch_add(1, Ordering::SeqCst);
+        let remaining = self.0.comment_create_failures.load(Ordering::SeqCst);
+        if remaining > 0 {
+            self.0
+                .comment_create_failures
+                .store(remaining - 1, Ordering::SeqCst);
+            return ResponseTemplate::new(500).set_body_json(json!({
+                "message": "internal error"
+            }));
+        }
         let payload: Value = serde_json::from_slice(&request.body).expect("comment body is JSON");
         let body = payload["body"].as_str().unwrap_or_default().to_string();
         let index = self.0.comment_seq.fetch_add(1, Ordering::SeqCst) + 1;

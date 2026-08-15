@@ -141,6 +141,14 @@ The GitHub source projects comment authorship as exactly `authorId` (the account
 node ID, audit data), `authorDatabaseId` (numeric), `authorType`, and `authorLogin`
 (display only); WorkGraph components key trust on `authorDatabaseId` + `authorType`
 alone and never on a name promoted out of the comment body.
+
+A WorkGraph reaction is triggered by a row, not by polling a thread, so the query that
+feeds it returns the comment itself plus the exact Source metadata that decides whether
+it may be acted on: `authorDatabaseId`, `authorType`, `isEdited` (all projected on
+`GitHubIssueComment`), and `bodyDigest` (projected on `GitHubIssue`/`GitHubPullRequest`
+as `"sha256:" + lowerHex(sha256(utf8(body ?? "")))`, which is also the third input to
+`runId`). Those four names are used verbatim in the row contracts of
+`components/reactions/copilot-agent-task` and `components/reactions/workgraph-router`.
 See `components/workgraph-common` for the typed parser, the deterministic
 `runId`/`eventId` algorithms, the author-trust contract, and cross-language test
 vectors.

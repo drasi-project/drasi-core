@@ -14,14 +14,21 @@
 
 //! The routing reaction.
 //!
-//! For one nominated Project Item + Issue row it:
+//! Each added row **is** one authoritative `CompletedIssueValidation` comment as
+//! the GitHub Source projected it (see [`crate::candidate`]). For one such row
+//! the reaction:
 //!
-//! 1. re-reads the authoritative issue and derives the body digest and `runId`;
-//! 2. verifies the Project item binding and that the item is still at
-//!    `AwaitingValidation`;
-//! 3. reads the trusted, unedited WorkGraph comments on the issue and requires
-//!    a coherent `ResponsibilityAssigned` → `ExecutionStarted` →
-//!    `CompletedIssueValidation` chain for that exact run;
+//! 1. accepts the row's completion event — unedited (`isEdited == false`),
+//!    authored by `trustedAuthorDatabaseId` + `trustedAuthorType`, strictly
+//!    parsed, and bound to the row's item, subject, and `bodyDigest`;
+//! 2. re-reads the authoritative issue and requires its **current** body digest
+//!    to still equal the row's `bodyDigest`, then verifies the Project item
+//!    binding and that the item is still at `AwaitingValidation`;
+//! 3. requires the rest of the chain — a trusted `ResponsibilityAssigned` (with
+//!    the expected profile and the same body digest) and a trusted
+//!    `ExecutionStarted` whose execution the completion agrees with — to be
+//!    active on the issue, and requires exactly **one** accepted completion,
+//!    carrying exactly the event the row delivered;
 //! 4. writes a durable intent record — pinning the accepted completion comment,
 //!    its body hash, and the canonical JSON of the decision it will publish —
 //!    **before** touching GitHub;
@@ -37,19 +44,21 @@
 //!
 //! # Before and after publication
 //!
-//! Steps 1–3 are the *pre-publication* guard: nothing is written until the
-//! current issue body still derives this run, the chain is coherent, and the
-//! completion the decision came from is unchanged.
+//! Steps 1–3 are the *pre-publication* guard: nothing is written until the row's
+//! completion is trusted, the current issue body still derives this run, the
+//! chain is coherent, and the completion the decision came from is unchanged.
 //!
-//! Once the decision comment is durably recorded as published (or adopted),
-//! that guard is over. The remaining status move is finished **from the
-//! persisted record** — see [`resume_published_decision`] — because a decision
-//! that is already visible in the issue thread must not be stranded merely
-//! because the issue body or the completion input changed afterwards. What is
-//! still reconciled is the published decision comment itself: it must exist, be
-//! trusted, be unedited, stay bound to the recorded run/item/subject, and carry
-//! exactly the canonical event JSON the record pinned. Any deviation is a hard
-//! halt with zero further side effects — never a skippable rejection.
+//! Once the decision comment is durably recorded as published (or adopted), or
+//! merely as *attempted*, that guard is over. The remaining work is finished
+//! **from the persisted record** — see [`resume_attempted_decision`] — because
+//! a decision that may already be visible in the issue thread must not be
+//! stranded merely because the issue body or the completion input changed
+//! afterwards. What is still reconciled is the decision comment itself: it must
+//! exist (or be created from the pinned event when an authoritative listing
+//! shows the write never landed), be trusted, be unedited, stay bound to the
+//! recorded run/item/subject, and carry exactly the canonical event JSON the
+//! record pinned. Any deviation is a hard halt with zero further side effects —
+//! never a skippable rejection.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,7 +80,8 @@ use drasi_workgraph_common::{
         CompletedIssueValidationPayload, EventId, ExecutionId, ResponsibilityAssignedPayload,
         RoutingDecidedPayload, WorkGraphEvent, WorkGraphEventPayload, WorkGraphEventType,
     },
-    ids::{body_digest, event_id, run_id},
+    ids::{body_digest, event_id},
+    row::AcceptedEventRow,
     summary::{summary_for, SubjectRef},
 };
 use log::{error, info, warn};
@@ -358,13 +368,14 @@ async fn route(
         .await
         .ok_or_else(|| anyhow::anyhow!("a durable state store is required for workgraph-router"))?;
 
-    // 0. A decision that is already published owns this item. Finish it from
+    // 0. A decision this item may already show owns the item. Finish it from
     //    durable state before looking at anything live: re-deriving the chain
     //    (or a new run from a changed issue body) would strand a decision the
-    //    issue thread already shows.
-    if let Some(persisted) = published_but_unapplied_run(store.clone(), &base.id, candidate).await?
+    //    issue thread already shows — or, after an unobserved write, one it may
+    //    show without this process ever having seen its comment ID.
+    if let Some(persisted) = attempted_but_unapplied_run(store.clone(), &base.id, candidate).await?
     {
-        return resume_published_decision(
+        return resume_attempted_decision(
             reaction_name,
             base,
             config,
@@ -376,8 +387,18 @@ async fn route(
         .await;
     }
 
-    // 1. Authoritative issue read. The body digest — and therefore the run
-    //    identity — must come from GitHub, never from the query row.
+    // 1. Accept the row's completion event: unedited, authored by the trusted
+    //    identity, strictly parsed, and bound to this row's item, subject, and
+    //    `bodyDigest`. The run comes from that binding, never from the event
+    //    JSON alone.
+    let accepted_row = candidate
+        .accept_completion(config)
+        .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
+    let run = accepted_row.run_id.clone();
+    let digest = accepted_row.body_digest.clone();
+
+    // 2. Authoritative issue read: the row's `bodyDigest` must still be the
+    //    issue's current digest, or the run this row names no longer exists.
     let issue = github
         .issue_snapshot(&candidate.repository, candidate.subject_number)
         .await
@@ -391,15 +412,16 @@ async fn route(
             candidate.subject_node_id
         )));
     }
+    let current_digest = body_digest(issue.body.as_deref());
+    if current_digest != digest {
+        return Err(PermanentCandidateError::new(format!(
+            "issue body changed since the completion: row bodyDigest '{}' but the current body is '{}'",
+            digest.as_str(),
+            current_digest.as_str()
+        )));
+    }
 
-    let digest = body_digest(issue.body.as_deref());
-    let run = run_id(
-        &candidate.project_item_node_id,
-        &candidate.subject_node_id,
-        &digest,
-    );
-
-    // 2. Verify the Project binding and that the item is still routable. The
+    // 3. Verify the Project binding and that the item is still routable. The
     //    decided destinations are tolerated so a resumed run can finish.
     let item = ProjectItemRef {
         project_node_id: &candidate.project_node_id,
@@ -422,12 +444,14 @@ async fn route(
         )));
     }
 
-    // 3. Read the trusted chain for this exact run.
+    // 4. Confirm the comment the row names, then require the rest of the chain
+    //    to be active and the row's completion to be the one accepted completion.
     let comments = github
         .list_issue_comments(&candidate.repository, candidate.subject_number)
         .await
         .context("failed to list issue comments")?;
-    let chain = trusted_chain(config, candidate, &run, &digest, &comments)?;
+    verify_named_completion_comment(config, candidate, &accepted_row.event, &comments)?;
+    let chain = trusted_chain(config, candidate, &accepted_row, &run, &digest, &comments)?;
 
     let decision = RoutingDecidedPayload::for_outcome(chain.completion.outcome);
     let event = WorkGraphEvent::new(
@@ -447,7 +471,7 @@ async fn route(
     let body = render_comment(&event, &summary)
         .map_err(|error| anyhow::anyhow!("failed to render the routing comment: {error}"))?;
 
-    // 4. Durable intent before any external effect.
+    // 5. Durable intent before any external effect.
     let intent = RoutingRecord::new(
         run.as_str(),
         event.event_id.as_str(),
@@ -483,63 +507,29 @@ async fn route(
         return Ok(());
     }
 
-    // 4b. Point the item at this run *before* the first external effect, so a
+    // 5b. Point the item at this run *before* the first external effect, so a
     //     later attempt can find this decision even if the issue body (and with
     //     it a freshly derived `runId`) changes after publication.
     claim_open_run(store.clone(), &base.id, candidate, run.as_str()).await?;
 
-    // 5. Exactly one decision comment, adopting an earlier write if present.
+    // 6. Exactly one decision comment, adopting an earlier write if present.
     //    `published_in_this_pass` carries the physical comment this pass saw, so
-    //    step 6 can verify it without another round trip.
+    //    step 7 can verify it without another round trip.
     let mut published_in_this_pass: Option<IssueComment> = None;
     if persisted.record.decision_comment_node_id.is_none() {
-        // Re-read immediately before writing: a decision comment that landed
-        // after the chain was read must be adopted, not duplicated. Adoption
-        // requires canonical event JSON byte-identical to `event`; a divergent
-        // comment claiming this event ID fails closed.
-        let latest = github
-            .list_issue_comments(&candidate.repository, candidate.subject_number)
-            .await
-            .context("failed to list issue comments before posting the decision")?;
-        let adopted = adopt_own_published_comment(config, &latest, &event)
-            .context("routing-decision reconciliation failed")?;
-        let (comment_node_id, published) = match adopted {
-            Some(observation) => {
-                info!(
-                    "[{reaction_name}] adopted existing routing comment '{}' for run '{run}'",
-                    observation.comment_node_id
-                );
-                let physical = latest
-                    .iter()
-                    .find(|comment| comment.node_id == observation.comment_node_id)
-                    .cloned();
-                (observation.comment_node_id, physical)
-            }
-            None => {
-                match github
-                    .create_issue_comment(&candidate.repository, candidate.subject_number, &body)
-                    .await
-                {
-                    Ok(comment) => (comment.node_id.clone(), Some(comment)),
-                    Err(error) => {
-                        // The write may or may not have landed; mark the run
-                        // ambiguous so the next attempt reconciles instead of
-                        // blindly posting again.
-                        let mut ambiguous = persisted.record.clone();
-                        ambiguous.set_error(format!("{error:#}"), true);
-                        persist(store.clone(), &base.id, &mut persisted, ambiguous).await?;
-                        return Err(error).context("failed to post the routing comment");
-                    }
-                }
-            }
-        };
-        let mut updated = persisted.record.clone();
-        updated.set_decision_comment(comment_node_id);
-        persist(store.clone(), &base.id, &mut persisted, updated).await?;
-        published_in_this_pass = published;
+        published_in_this_pass = publish_decision_comment(
+            base,
+            config,
+            github,
+            store.clone(),
+            &mut persisted,
+            &event,
+            &body,
+        )
+        .await?;
     }
 
-    // 6. Move directly to the final status — through the *same* verified finish
+    // 7. Move directly to the final status — through the *same* verified finish
     //    a resumed run uses, so a status can never move for a decision comment
     //    that was not checked in this pass.
     finish_published_decision(
@@ -570,13 +560,18 @@ fn is_decided_status(status: &str) -> bool {
         || status == drasi_workgraph_common::status::NEEDS_MORE_INFORMATION
 }
 
-/// The run that owns `candidate`'s Project item when its decision is published
-/// but its final status move has not been applied yet.
+/// The run that owns `candidate`'s Project item when publishing its decision
+/// has been attempted but its final status move has not been applied yet.
 ///
-/// Returns `None` when the item has no open run, when that run is still
-/// pre-publication (so the normal derivation path applies), or when it is
-/// already complete.
-async fn published_but_unapplied_run(
+/// "Attempted" deliberately includes a run whose create-comment outcome was
+/// never observed: its decision may already be visible in the issue thread, so
+/// it must be reconciled from durable state rather than skipped by a fresh
+/// derivation (which a later issue-body edit would otherwise silently do).
+///
+/// Returns `None` when the item has no open run, when that run has not yet
+/// reached the publication attempt (so the normal derivation path applies), or
+/// when it is already complete.
+async fn attempted_but_unapplied_run(
     store: Arc<dyn StateStoreProvider>,
     store_id: &str,
     candidate: &RoutingCandidate,
@@ -595,23 +590,29 @@ async fn published_but_unapplied_run(
     };
     Ok(persisted
         .record
-        .is_published_but_unapplied()
+        .is_publish_attempted_but_unapplied()
         .then_some(persisted))
 }
 
-/// Finish a run whose decision comment is already published.
+/// Finish a run whose decision publication has already been attempted.
 ///
-/// Nothing is re-derived from live state: the destination status comes from the
-/// persisted record, so a run cannot be stranded by an issue body or completion
-/// comment that changed after publication. What *is* re-verified is the
-/// published decision comment itself — it must still exist, be authored by the
-/// trusted author, be unedited, name the recorded run, item, subject, and event
-/// ID, and carry exactly the canonical event JSON the record pinned.
+/// Nothing is re-derived from live state: the intended decision event, the
+/// destination status, and the subject all come from the persisted record, so a
+/// run cannot be stranded by an issue body or completion comment that changed
+/// after the attempt. Two shapes exist:
+///
+/// * the decision comment node ID is durable — the published comment is
+///   re-verified and the status applied; or
+/// * the write outcome was never observed — the comments are listed and the
+///   pinned event is reconciled against them with the same strict adoption rule
+///   a first attempt uses: an exact match is adopted, a divergent comment
+///   claiming the same event ID fails closed, and only an authoritative listing
+///   without the event may publish the pinned comment.
 ///
 /// Every failure here is a **hard error**, never a [`PermanentCandidateError`]:
 /// the reaction stops with zero further side effects rather than skipping a row
-/// whose decision is already visible in the issue thread.
-async fn resume_published_decision(
+/// whose decision may already be visible in the issue thread.
+async fn resume_attempted_decision(
     reaction_name: &str,
     base: &ReactionBase,
     config: &WorkgraphRouterReactionConfig,
@@ -623,11 +624,33 @@ async fn resume_published_decision(
     persisted
         .record
         .ensure_matches(candidate)
-        .context("the published decision does not belong to this row")?;
+        .context("the attempted decision does not belong to this row")?;
     let run_id = persisted.record.run_id.clone();
     let to_status = persisted.record.to_status.clone();
 
-    // Nothing observed in this pass, so the published comment is re-read.
+    // An unobserved write is reconciled first, from the pinned event only.
+    let mut observed: Option<IssueComment> = None;
+    if persisted.record.decision_comment_node_id.is_none() {
+        let intended = pinned_decision_event(&persisted.record)?;
+        let body = render_pinned_decision(&persisted.record, &intended)?;
+        warn!(
+            "[{reaction_name}] run '{run_id}' attempted a decision comment whose outcome was never \
+             observed; reconciling {}#{} against the persisted decision",
+            persisted.record.repository, persisted.record.subject_number
+        );
+        observed = publish_decision_comment(
+            base,
+            config,
+            github,
+            store.clone(),
+            &mut persisted,
+            &intended,
+            &body,
+        )
+        .await?;
+    }
+
+    // When nothing was observed in this pass the published comment is re-read.
     finish_published_decision(
         reaction_name,
         base,
@@ -635,7 +658,7 @@ async fn resume_published_decision(
         config,
         store,
         &mut persisted,
-        None,
+        observed,
     )
     .await?;
 
@@ -644,6 +667,145 @@ async fn resume_published_decision(
         persisted.record.repository, persisted.record.subject_number
     );
     Ok(())
+}
+
+/// The `RoutingDecided` event a record pinned before its first GitHub write.
+///
+/// Re-parsed under the strict grammar and required to still bind the record's
+/// run, event, item, and subject: a record whose pinned event says anything
+/// else is corrupt and must never produce a write.
+fn pinned_decision_event(record: &RoutingRecord) -> anyhow::Result<WorkGraphEvent> {
+    let event = WorkGraphEvent::from_json(&record.decision_event_json).map_err(|error| {
+        anyhow::anyhow!(
+            "the decision event pinned by run '{}' no longer parses: {error}",
+            record.run_id
+        )
+    })?;
+    if event.run_id.as_str() != record.run_id
+        || event.event_id.as_str() != record.event_id
+        || event.project_item_node_id != record.project_item_node_id
+        || event.subject_node_id != record.subject_node_id
+    {
+        anyhow::bail!(
+            "the decision event pinned by run '{}' does not bind run '{}', item '{}', and subject '{}'",
+            record.run_id,
+            record.run_id,
+            record.project_item_node_id,
+            record.subject_node_id
+        );
+    }
+    let pinned_status = match &event.payload {
+        WorkGraphEventPayload::RoutingDecided(decision) => decision.to_status.as_str().to_string(),
+        other => anyhow::bail!(
+            "the event pinned by run '{}' is a {} event, not a routing decision",
+            record.run_id,
+            other.event_type()
+        ),
+    };
+    // The destination is read from the record, so a record that disagrees with
+    // the decision it pinned is corrupt: publishing it would announce one
+    // destination and move the item to another.
+    if pinned_status != record.to_status {
+        anyhow::bail!(
+            "the decision pinned by run '{}' routes to '{pinned_status}' but the record names '{}'",
+            record.run_id,
+            record.to_status
+        );
+    }
+    Ok(event)
+}
+
+/// Render the exact comment body a record's pinned decision must be published
+/// as, from durable state alone.
+fn render_pinned_decision(
+    record: &RoutingRecord,
+    intended: &WorkGraphEvent,
+) -> anyhow::Result<String> {
+    let summary = summary_for(
+        intended,
+        SubjectRef {
+            repository: &record.repository,
+            number: record.subject_number,
+        },
+    );
+    render_comment(intended, &summary)
+        .map_err(|error| anyhow::anyhow!("failed to render the routing comment: {error}"))
+}
+
+/// Publish exactly one decision comment for a run, adopting an earlier write.
+///
+/// The comments are listed immediately before writing, so a decision comment
+/// that landed since the last read is adopted rather than duplicated. Adoption
+/// requires canonical event JSON byte-identical to `intended`; a divergent
+/// comment claiming the same event ID fails closed.
+///
+/// When the authoritative listing does not carry the event, the write is
+/// preceded by a durable "publication attempted" marker, so an outcome this
+/// process never observes still leaves the run resumable from its pinned
+/// decision instead of re-derivable from live state.
+///
+/// Returns the physical comment this pass observed (adopted or created), if
+/// GitHub reported one, so the caller can verify it without another round trip.
+async fn publish_decision_comment(
+    base: &ReactionBase,
+    config: &WorkgraphRouterReactionConfig,
+    github: &GithubClient,
+    store: Arc<dyn StateStoreProvider>,
+    persisted: &mut PersistedRoutingRecord,
+    intended: &WorkGraphEvent,
+    body: &str,
+) -> anyhow::Result<Option<IssueComment>> {
+    let repository = persisted.record.repository.clone();
+    let subject_number = persisted.record.subject_number;
+    let run_id = persisted.record.run_id.clone();
+
+    let latest = github
+        .list_issue_comments(&repository, subject_number)
+        .await
+        .context("failed to list issue comments before posting the decision")?;
+    let adopted = adopt_own_published_comment(config, &latest, intended)
+        .context("routing-decision reconciliation failed")?;
+    let (comment_node_id, published) = match adopted {
+        Some(observation) => {
+            info!(
+                "[{}] adopted existing routing comment '{}' for run '{run_id}'",
+                base.id, observation.comment_node_id
+            );
+            let physical = latest
+                .iter()
+                .find(|comment| comment.node_id == observation.comment_node_id)
+                .cloned();
+            (observation.comment_node_id, physical)
+        }
+        None => {
+            // Durable intent to write, before the write: an unobserved outcome
+            // must still be recognisable as "the decision may be published".
+            if !persisted.record.decision_publish_attempted {
+                let mut attempted = persisted.record.clone();
+                attempted.mark_decision_publish_attempted();
+                persist(store.clone(), &base.id, persisted, attempted).await?;
+            }
+            match github
+                .create_issue_comment(&repository, subject_number, body)
+                .await
+            {
+                Ok(comment) => (comment.node_id.clone(), Some(comment)),
+                Err(error) => {
+                    // The write may or may not have landed; mark the run
+                    // ambiguous so the next attempt reconciles instead of
+                    // blindly posting again.
+                    let mut ambiguous = persisted.record.clone();
+                    ambiguous.set_error(format!("{error:#}"), true);
+                    persist(store.clone(), &base.id, persisted, ambiguous).await?;
+                    return Err(error).context("failed to post the routing comment");
+                }
+            }
+        }
+    };
+    let mut updated = persisted.record.clone();
+    updated.set_decision_comment(comment_node_id);
+    persist(store, &base.id, persisted, updated).await?;
+    Ok(published)
 }
 
 /// Apply the final status move for a run whose decision comment is durable.
@@ -726,22 +888,23 @@ async fn finish_published_decision(
 
 /// Point the Project item at `run_id` before this run's first external effect.
 ///
-/// Refuses to take the item from a *different* run whose decision is already
-/// published but not applied: that run's decision is visible in the issue
-/// thread and must be finished, not abandoned. In the sequential processing
-/// loop this cannot normally happen (such a run is resumed at step 0), so it is
-/// a fail-closed guard against a concurrent writer, not a routine branch.
+/// Refuses to take the item from a *different* run that has already attempted
+/// its decision without applying the status: that run's decision may be visible
+/// in the issue thread and must be finished, not abandoned. In the sequential
+/// processing loop this cannot normally happen (such a run is resumed at step
+/// 0), so it is a fail-closed guard against a concurrent writer, not a routine
+/// branch.
 async fn claim_open_run(
     store: Arc<dyn StateStoreProvider>,
     store_id: &str,
     candidate: &RoutingCandidate,
     run_id: &str,
 ) -> anyhow::Result<()> {
-    if let Some(incumbent) = published_but_unapplied_run(store.clone(), store_id, candidate).await?
+    if let Some(incumbent) = attempted_but_unapplied_run(store.clone(), store_id, candidate).await?
     {
         if incumbent.record.run_id != run_id {
             anyhow::bail!(
-                "project item '{}' still owes the published decision of run '{}'; refusing to start run '{run_id}'",
+                "project item '{}' still owes the decision of run '{}'; refusing to start run '{run_id}'",
                 candidate.project_item_node_id,
                 incumbent.record.run_id
             );
@@ -808,7 +971,63 @@ fn verify_published_decision(
     Ok(())
 }
 
-/// Require a complete, coherent, trusted event chain for one run.
+/// Require the comment the row names to still be exactly what the row
+/// delivered.
+///
+/// The comment is located by the row's `eventCommentNodeId` — never by scanning
+/// for something completion-shaped — and must still be authored by the trusted
+/// identity, be unedited, parse under the strict grammar, and carry canonical
+/// event JSON byte-identical to the row's. A row can therefore never name one
+/// comment while carrying another comment's event.
+///
+/// This is deliberately *not* the same check as accepting a completion: the
+/// accepted completion is the earliest physical comment carrying that event
+/// (see [`trusted_chain`]), which may be an earlier byte-identical duplicate of
+/// the one the row named.
+fn verify_named_completion_comment(
+    config: &WorkgraphRouterReactionConfig,
+    candidate: &RoutingCandidate,
+    accepted: &WorkGraphEvent,
+    comments: &[IssueComment],
+) -> anyhow::Result<()> {
+    let comment = comments
+        .iter()
+        .find(|comment| comment.node_id == candidate.event_comment_node_id)
+        .ok_or_else(|| {
+            PermanentCandidateError::new(format!(
+                "completion comment '{}' no longer exists on {}#{}",
+                candidate.event_comment_node_id, candidate.repository, candidate.subject_number
+            ))
+        })?;
+    if !comment.is_authored_by(&config.trusted_author()) {
+        return Err(PermanentCandidateError::new(format!(
+            "completion comment '{}' is not authored by the trusted identity",
+            candidate.event_comment_node_id
+        )));
+    }
+    if !comment.is_unedited() {
+        return Err(PermanentCandidateError::new(format!(
+            "completion comment '{}' was edited",
+            candidate.event_comment_node_id
+        )));
+    }
+    let parsed = parse_comment(&comment.body).map_err(|error| {
+        PermanentCandidateError::new(format!(
+            "completion comment '{}' no longer parses: {error}",
+            candidate.event_comment_node_id
+        ))
+    })?;
+    if parsed.event.to_canonical_json() != accepted.to_canonical_json() {
+        return Err(PermanentCandidateError::new(format!(
+            "completion comment '{}' no longer carries the event the row delivered",
+            candidate.event_comment_node_id
+        )));
+    }
+    Ok(())
+}
+
+/// Require the rest of a complete, coherent, trusted event chain for one run,
+/// and require the row's completion to be the one accepted completion.
 ///
 /// Every step is verified against the *current* authoritative state:
 ///
@@ -818,12 +1037,16 @@ fn verify_published_decision(
 /// * the assignment must name the expected profile and must bind to the current
 ///   issue-body digest;
 /// * an `ExecutionStarted` must exist, and the completion must carry the same
-///   `executionId`; and
+///   `executionId`;
 /// * exactly one completion is accepted — byte-identical duplicates coalesce
-///   and contradictory ones fail closed.
+///   and contradictory ones fail closed; and
+/// * that accepted completion must carry **exactly** the event the row
+///   delivered, so the router can never decide from an event the row did not
+///   name.
 fn trusted_chain(
     config: &WorkgraphRouterReactionConfig,
     candidate: &RoutingCandidate,
+    accepted_row: &AcceptedEventRow,
     run: &drasi_workgraph_common::event::RunId,
     digest: &drasi_workgraph_common::event::Sha256Digest,
     comments: &[IssueComment],
@@ -887,6 +1110,15 @@ fn trusted_chain(
                 "no trusted, unedited CompletedIssueValidation comment exists for this run yet",
             )
         })?;
+    // The row is authoritative about *which* completion this decision comes
+    // from: the accepted comment must carry exactly that event, or the
+    // completion has since been changed and nothing may be decided from it.
+    if completion.comment.event.to_canonical_json() != accepted_row.event.to_canonical_json() {
+        return Err(PermanentCandidateError::new(format!(
+            "the accepted completion comment '{}' does not carry the completion event the row delivered",
+            completion.comment_node_id
+        )));
+    }
     let completion_payload = match &completion.comment.event.payload {
         WorkGraphEventPayload::CompletedIssueValidation(payload) => payload.clone(),
         other => {
@@ -1048,7 +1280,8 @@ mod tests {
         }
     }
 
-    fn candidate() -> RoutingCandidate {
+    /// A row carrying the exact completion comment named by `execution`.
+    fn candidate_for(outcome: ValidationOutcome, execution: &str) -> RoutingCandidate {
         RoutingCandidate {
             repository: "drasi-project/drasi-core".to_string(),
             subject_number: 742,
@@ -1056,7 +1289,29 @@ mod tests {
             project_node_id: "PVT_project".to_string(),
             project_item_node_id: ITEM.to_string(),
             project_status: ROUTABLE_STATUS.to_string(),
+            body_digest: body_digest(Some(BODY)).as_str().to_string(),
+            event_comment_node_id: "IC_complete".to_string(),
+            event_body: event_body(&completion_event(outcome, execution)),
+            author_database_id: 4021243,
+            author_type: "Bot".to_string(),
+            is_edited: false,
         }
+    }
+
+    fn candidate() -> RoutingCandidate {
+        candidate_for(ValidationOutcome::Passed, "exec-1")
+    }
+
+    /// The canonical comment body for an event.
+    fn event_body(event: &WorkGraphEvent) -> String {
+        let summary = summary_for(
+            event,
+            SubjectRef {
+                repository: "drasi-project/drasi-core",
+                number: 742,
+            },
+        );
+        render_comment(event, &summary).expect("render")
     }
 
     fn trusted_identity() -> AuthorIdentity {
@@ -1083,7 +1338,7 @@ mod tests {
     }
 
     fn run() -> drasi_workgraph_common::event::RunId {
-        run_id(ITEM, SUBJECT, &body_digest(Some(BODY)))
+        drasi_workgraph_common::ids::run_id(ITEM, SUBJECT, &body_digest(Some(BODY)))
     }
 
     fn assignment_event() -> WorkGraphEvent {
@@ -1143,11 +1398,31 @@ mod tests {
         ]
     }
 
+    /// Run the chain check for `candidate` against `comments`.
+    fn chain_with(
+        config: &WorkgraphRouterReactionConfig,
+        candidate: &RoutingCandidate,
+        digest: &drasi_workgraph_common::event::Sha256Digest,
+        comments: &[IssueComment],
+    ) -> anyhow::Result<TrustedChain> {
+        let accepted = candidate
+            .accept_completion(config)
+            .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
+        trusted_chain(config, candidate, &accepted, &run(), digest, comments)
+    }
+
     fn chain_for(comments: &[IssueComment]) -> anyhow::Result<TrustedChain> {
-        trusted_chain(
+        chain_with(&config(), &candidate(), &body_digest(Some(BODY)), comments)
+    }
+
+    /// The chain check for a row whose completion names `outcome`.
+    fn chain_for_outcome(
+        outcome: ValidationOutcome,
+        comments: &[IssueComment],
+    ) -> anyhow::Result<TrustedChain> {
+        chain_with(
             &config(),
-            &candidate(),
-            &run(),
+            &candidate_for(outcome, "exec-1"),
             &body_digest(Some(BODY)),
             comments,
         )
@@ -1171,7 +1446,11 @@ mod tests {
             RoutingToStatus::AwaitingIssueRiskProfiling
         );
 
-        let failed = chain_for(&full_chain(ValidationOutcome::Failed)).expect("chain");
+        let failed = chain_for_outcome(
+            ValidationOutcome::Failed,
+            &full_chain(ValidationOutcome::Failed),
+        )
+        .expect("chain");
         let decision = RoutingDecidedPayload::for_outcome(failed.completion.outcome);
         assert_eq!(decision.to_status, RoutingToStatus::NeedsMoreInformation);
     }
@@ -1255,10 +1534,35 @@ mod tests {
             &completion_event(ValidationOutcome::Passed, "exec-other"),
             trusted_identity(),
         );
-        assert!(chain_for(&comments)
-            .expect_err("execution mismatch")
-            .to_string()
-            .contains("execution"));
+        // The row delivers that same completion, so it is accepted as a row and
+        // rejected on the execution it reports.
+        let row = candidate_for(ValidationOutcome::Passed, "exec-other");
+        assert!(
+            chain_with(&config(), &row, &body_digest(Some(BODY)), &comments)
+                .expect_err("execution mismatch")
+                .to_string()
+                .contains("execution")
+        );
+    }
+
+    #[test]
+    fn a_completion_comment_that_diverges_from_the_row_is_rejected() {
+        // The issue thread's accepted completion says 'failed' while the row
+        // delivered a 'passed' completion for the same event ID: the router must
+        // never decide from an event the row did not name.
+        let mut comments = full_chain(ValidationOutcome::Passed);
+        comments[2] = comment(
+            "IC_complete",
+            &completion_event(ValidationOutcome::Failed, "exec-1"),
+            trusted_identity(),
+        );
+        let error = chain_for(&comments).expect_err("divergent completion");
+        assert!(
+            error
+                .to_string()
+                .contains("does not carry the completion event the row delivered"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1266,10 +1570,9 @@ mod tests {
         // The assignment for a *different* body digest has a different runId
         // and therefore a different eventId: the chain simply does not exist.
         let other_digest = body_digest(Some("a different body"));
-        let error = trusted_chain(
+        let error = chain_with(
             &config(),
             &candidate(),
-            &run(),
             &other_digest,
             &full_chain(ValidationOutcome::Passed),
         )
@@ -1281,10 +1584,9 @@ mod tests {
     fn a_foreign_profile_is_not_routed() {
         let mut config = config();
         config.expected_profile = "issue-risk-profiler".to_string();
-        let error = trusted_chain(
+        let error = chain_with(
             &config,
             &candidate(),
-            &run(),
             &body_digest(Some(BODY)),
             &full_chain(ValidationOutcome::Passed),
         )
@@ -1324,17 +1626,75 @@ mod tests {
     fn a_misbound_event_is_rejected() {
         let mut row = candidate();
         row.project_item_node_id = "PVTI_other".to_string();
-        // The row's item no longer matches the events' item, so the run derived
-        // for that row cannot find its chain at all.
-        let error = trusted_chain(
+        // The row's item no longer matches the event it carries, so the row is
+        // never accepted in the first place.
+        let error = chain_with(
             &config(),
             &row,
-            &run(),
             &body_digest(Some(BODY)),
             &full_chain(ValidationOutcome::Passed),
         )
         .expect_err("misbound row");
         assert!(error.to_string().contains("project item"), "{error}");
+    }
+
+    #[test]
+    fn a_row_must_name_the_comment_that_carries_its_event() {
+        let comments = full_chain(ValidationOutcome::Passed);
+        let row = candidate();
+        let accepted = row.accept_completion(&config()).expect("accepted");
+
+        verify_named_completion_comment(&config(), &row, &accepted.event, &comments)
+            .expect("the named completion comment carries the row's event");
+
+        // Naming the assignment comment while carrying a completion event.
+        let mut misnamed = candidate();
+        misnamed.event_comment_node_id = "IC_assign".to_string();
+        let error =
+            verify_named_completion_comment(&config(), &misnamed, &accepted.event, &comments)
+                .expect_err("a row may not name a comment carrying another event");
+        assert!(
+            error
+                .to_string()
+                .contains("no longer carries the event the row delivered"),
+            "{error}"
+        );
+        assert!(
+            error.downcast_ref::<PermanentCandidateError>().is_some(),
+            "a mis-named row is skippable, not a halt: {error}"
+        );
+
+        // Naming a comment that is not on the issue at all.
+        let mut missing = candidate();
+        missing.event_comment_node_id = "IC_deleted".to_string();
+        assert!(
+            verify_named_completion_comment(&config(), &missing, &accepted.event, &comments)
+                .expect_err("a deleted completion comment is rejected")
+                .to_string()
+                .contains("no longer exists")
+        );
+
+        // The named comment is untrusted or edited.
+        let untrusted = comment(
+            "IC_complete",
+            &completion_event(ValidationOutcome::Passed, "exec-1"),
+            AuthorIdentity::new(66, ActorType::User),
+        );
+        assert!(
+            verify_named_completion_comment(&config(), &row, &accepted.event, &[untrusted])
+                .expect_err("an untrusted completion comment is rejected")
+                .to_string()
+                .contains("trusted identity")
+        );
+
+        let mut edited = comments[2].clone();
+        edited.updated_at = Some("2026-08-14T03:00:00Z".to_string());
+        assert!(
+            verify_named_completion_comment(&config(), &row, &accepted.event, &[edited])
+                .expect_err("an edited completion comment is rejected")
+                .to_string()
+                .contains("was edited")
+        );
     }
 
     #[test]
@@ -1357,19 +1717,7 @@ mod tests {
     }
 
     fn published_record(event: &WorkGraphEvent, comment_node_id: &str) -> RoutingRecord {
-        let mut record = RoutingRecord::new(
-            run().as_str(),
-            event.event_id.as_str(),
-            &candidate(),
-            body_digest(Some(BODY)).as_str(),
-            AcceptedCompletion {
-                comment_node_id: "IC_complete".to_string(),
-                body_hash: comment_body_hash("body"),
-            },
-            "passed",
-            RoutingToStatus::AwaitingIssueRiskProfiling.as_str(),
-            &event.to_canonical_json(),
-        );
+        let mut record = intent_record(event);
         record.set_decision_comment(comment_node_id);
         record
     }
@@ -1431,7 +1779,7 @@ mod tests {
 
         // A comment carrying a different run entirely.
         let other_run = WorkGraphEvent::new(
-            run_id(ITEM, SUBJECT, &body_digest(Some("another body"))),
+            drasi_workgraph_common::ids::run_id(ITEM, SUBJECT, &body_digest(Some("another body"))),
             ITEM,
             SUBJECT,
             WorkGraphEventPayload::RoutingDecided(RoutingDecidedPayload::for_outcome(
@@ -1476,5 +1824,179 @@ mod tests {
                 .comment_node_id,
             "IC_ours"
         );
+    }
+
+    /// Seed a run's record and the item's open-run pointer.
+    async fn seed_open_run(
+        store: &Arc<dyn StateStoreProvider>,
+        record: &RoutingRecord,
+    ) -> anyhow::Result<()> {
+        create_record_if_absent(store.clone(), "router", record).await?;
+        set_open_run(
+            store.clone(),
+            "router",
+            &record.project_item_node_id,
+            &record.run_id,
+        )
+        .await
+    }
+
+    fn intent_record(event: &WorkGraphEvent) -> RoutingRecord {
+        RoutingRecord::new(
+            run().as_str(),
+            event.event_id.as_str(),
+            &candidate(),
+            body_digest(Some(BODY)).as_str(),
+            AcceptedCompletion {
+                comment_node_id: "IC_complete".to_string(),
+                body_hash: comment_body_hash("body"),
+            },
+            "passed",
+            RoutingToStatus::AwaitingIssueRiskProfiling.as_str(),
+            &event.to_canonical_json(),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_attempted_but_unobserved_decision_still_owns_the_item() {
+        use drasi_lib::state_store::MemoryStateStoreProvider;
+
+        let event = decision_event(ValidationOutcome::Passed);
+
+        // No pointer at all: the normal derivation path applies.
+        let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+        create_record_if_absent(store.clone(), "router", &intent_record(&event))
+            .await
+            .expect("seed record");
+        assert!(
+            attempted_but_unapplied_run(store, "router", &candidate())
+                .await
+                .expect("select")
+                .is_none(),
+            "a run without an open-run pointer does not own the item"
+        );
+
+        // Pointer, but the run has not reached its write yet.
+        let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+        seed_open_run(&store, &intent_record(&event))
+            .await
+            .expect("seed");
+        assert!(
+            attempted_but_unapplied_run(store, "router", &candidate())
+                .await
+                .expect("select")
+                .is_none(),
+            "a pre-publication run is re-derived, not resumed"
+        );
+
+        // Publication was attempted and its outcome never observed: this is the
+        // state a fresh derivation must never skip.
+        let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+        let mut attempted = intent_record(&event);
+        attempted.mark_decision_publish_attempted();
+        attempted.set_error("create comment request failed: operation timed out", true);
+        seed_open_run(&store, &attempted).await.expect("seed");
+        let selected = attempted_but_unapplied_run(store, "router", &candidate())
+            .await
+            .expect("select")
+            .expect("an attempted decision owns the item");
+        assert!(selected.record.decision_comment_node_id.is_none());
+        assert!(selected.record.decision_publish_attempted);
+
+        // A published decision still owns the item.
+        let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+        let mut published = intent_record(&event);
+        published.set_decision_comment("IC_decision");
+        seed_open_run(&store, &published).await.expect("seed");
+        assert!(attempted_but_unapplied_run(store, "router", &candidate())
+            .await
+            .expect("select")
+            .is_some());
+
+        // A finished run releases it.
+        let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+        let mut complete = intent_record(&event);
+        complete.set_decision_comment("IC_decision");
+        complete.set_status_applied();
+        seed_open_run(&store, &complete).await.expect("seed");
+        assert!(
+            attempted_but_unapplied_run(store, "router", &candidate())
+                .await
+                .expect("select")
+                .is_none(),
+            "a completed run must not wedge the item"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_run_may_not_take_an_item_that_owes_an_attempted_decision() {
+        use drasi_lib::state_store::MemoryStateStoreProvider;
+
+        let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+        let mut attempted = intent_record(&decision_event(ValidationOutcome::Passed));
+        attempted.mark_decision_publish_attempted();
+        seed_open_run(&store, &attempted).await.expect("seed");
+
+        let error = claim_open_run(store.clone(), "router", &candidate(), "run:another")
+            .await
+            .expect_err("a different run must not take the item");
+        assert!(
+            format!("{error:#}").contains("still owes the decision of run"),
+            "{error:#}"
+        );
+
+        // The owning run itself re-claims freely.
+        claim_open_run(store, "router", &candidate(), &attempted.run_id)
+            .await
+            .expect("the owning run keeps the item");
+    }
+
+    #[test]
+    fn a_resumed_run_republishes_exactly_the_pinned_decision() {
+        let event = decision_event(ValidationOutcome::Passed);
+        let record = intent_record(&event);
+
+        let pinned = pinned_decision_event(&record).expect("the pinned event parses");
+        assert_eq!(pinned.to_canonical_json(), event.to_canonical_json());
+        assert_eq!(
+            render_pinned_decision(&record, &pinned).expect("render"),
+            event_body(&event),
+            "a resumed run must publish byte-identically to a first attempt"
+        );
+
+        // A record whose pinned event is corrupt, mis-bound, or not a decision
+        // must never produce a write.
+        let mut unparseable = record.clone();
+        unparseable.decision_event_json = "{".to_string();
+        assert!(pinned_decision_event(&unparseable)
+            .expect_err("corrupt JSON")
+            .to_string()
+            .contains("no longer parses"));
+
+        let mut rebound = record.clone();
+        rebound.event_id = "event:something-else".to_string();
+        assert!(pinned_decision_event(&rebound)
+            .expect_err("mis-bound event")
+            .to_string()
+            .contains("does not bind run"));
+
+        let mut wrong_type = record.clone();
+        wrong_type.decision_event_json = started_event().to_canonical_json();
+        wrong_type.run_id = started_event().run_id.as_str().to_string();
+        wrong_type.event_id = started_event().event_id.as_str().to_string();
+        assert!(pinned_decision_event(&wrong_type)
+            .expect_err("not a routing decision")
+            .to_string()
+            .contains("not a routing decision"));
+
+        // The record's destination must agree with the decision it pinned:
+        // publishing one destination while moving the item to another is a
+        // corruption the resume path must never act on.
+        let mut mismatched = record.clone();
+        mismatched.to_status = RoutingToStatus::NeedsMoreInformation.as_str().to_string();
+        assert!(pinned_decision_event(&mismatched)
+            .expect_err("destination mismatch")
+            .to_string()
+            .contains("but the record names"));
     }
 }

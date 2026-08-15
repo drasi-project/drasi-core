@@ -27,12 +27,19 @@
 //! * the decided destination status and outcome, so a resumed run finishes the
 //!   same decision instead of re-deriving one; and
 //! * the **canonical JSON of the `RoutingDecided` event** the run intends to
-//!   publish, so a resumed run can verify the published decision comment
-//!   without re-deriving anything from live state.
+//!   publish, so a resumed run can verify — or, after an unobserved write,
+//!   re-issue — the decision comment without re-deriving anything from live
+//!   state.
+//!
+//! Publication is bracketed by two durable markers: `decisionPublishAttempted`
+//! is written *before* the create-comment request, and
+//! `decisionCommentNodeId` *after* it is observed. A run that carries the first
+//! without the second is exactly the "the decision may already be visible"
+//! case, and is resumed from the pinned event rather than re-derived.
 //!
 //! A second key — the **open-run pointer** for a Project item — maps the item
 //! to the run that currently owns it. It is written before the first GitHub
-//! write, and it is what lets a resumed run find its own published decision
+//! write, and it is what lets a resumed run find its own attempted decision
 //! even when the issue body (and therefore the `runId` a fresh derivation would
 //! produce) has changed since publication.
 //!
@@ -114,6 +121,19 @@ pub struct RoutingRecord {
     /// exact bytes, so the comparison never depends on re-deriving anything
     /// from live GitHub state.
     pub decision_event_json: String,
+    /// Whether a decision-comment write has been *attempted* for this run.
+    ///
+    /// Written durably **before** the create-comment request, so a run whose
+    /// write outcome was never observed is still recognisable as "the decision
+    /// may already be visible in the issue thread". It is a one-way flag: it is
+    /// never cleared, and it is implied by
+    /// [`Self::decision_comment_node_id`] being set.
+    ///
+    /// Records written before this field existed decode as `false`; such a
+    /// record is still resumable whenever it names a decision comment, which is
+    /// the only state an older writer could durably reach after a write.
+    #[serde(default)]
+    pub decision_publish_attempted: bool,
     /// The decision comment node ID, once that comment is durable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_comment_node_id: Option<String>,
@@ -160,6 +180,7 @@ impl RoutingRecord {
             outcome: outcome.to_string(),
             to_status: to_status.to_string(),
             decision_event_json: decision_event_json.to_string(),
+            decision_publish_attempted: false,
             decision_comment_node_id: None,
             status_applied: false,
             ambiguous: false,
@@ -182,6 +203,20 @@ impl RoutingRecord {
     /// thread, so abandoning it would strand the item.
     pub fn is_published_but_unapplied(&self) -> bool {
         self.decision_comment_node_id.is_some() && !self.status_applied
+    }
+
+    /// Whether publication of the decision was *attempted* — successfully or
+    /// with an unknown outcome — while the final status move is still pending.
+    ///
+    /// This is the state that owns the Project item. It is deliberately wider
+    /// than [`Self::is_published_but_unapplied`]: after an ambiguous
+    /// create-comment error the decision may already be visible in the issue
+    /// thread even though no comment node ID was ever observed, so such a run
+    /// must be resumed from its persisted intent rather than re-derived from
+    /// live state (which a later issue-body edit would silently skip).
+    pub fn is_publish_attempted_but_unapplied(&self) -> bool {
+        !self.status_applied
+            && (self.decision_publish_attempted || self.is_published_but_unapplied())
     }
 
     /// Reject a record that describes a different subject than the current row.
@@ -255,9 +290,20 @@ impl RoutingRecord {
         self.updated_at = Utc::now().to_rfc3339();
     }
 
+    /// Record that a decision-comment write is about to be issued.
+    ///
+    /// Persisted **before** the write, so an unobserved outcome still leaves a
+    /// durable "this decision may be published" marker. Diagnostics are left
+    /// untouched: this transition reports an intent, not a result.
+    pub fn mark_decision_publish_attempted(&mut self) {
+        self.decision_publish_attempted = true;
+        self.touch();
+    }
+
     /// Record the comment that carries the routing decision.
     pub fn set_decision_comment(&mut self, comment_node_id: impl Into<String>) {
         self.decision_comment_node_id = Some(comment_node_id.into());
+        self.decision_publish_attempted = true;
         self.ambiguous = false;
         self.last_error = None;
         self.touch();
@@ -447,6 +493,12 @@ mod tests {
             project_node_id: "PVT_project".to_string(),
             project_item_node_id: "PVTI_item".to_string(),
             project_status: ROUTABLE_STATUS.to_string(),
+            body_digest: format!("sha256:{}", "a".repeat(64)),
+            event_comment_node_id: "IC_completion".to_string(),
+            event_body: "WorkGraphEvent/v1".to_string(),
+            author_database_id: 4021243,
+            author_type: "Bot".to_string(),
+            is_edited: false,
         }
     }
 
@@ -619,6 +671,109 @@ mod tests {
     #[test]
     fn the_intended_decision_event_is_pinned_by_the_record() {
         assert_eq!(record().decision_event_json, DECISION_JSON);
+    }
+
+    #[test]
+    fn an_attempted_publication_owns_the_item_before_any_comment_id_exists() {
+        let mut record = record();
+        assert!(!record.decision_publish_attempted);
+        assert!(
+            !record.is_publish_attempted_but_unapplied(),
+            "a run that has not reached its write does not own the item"
+        );
+
+        // Written immediately before the create-comment request.
+        record.mark_decision_publish_attempted();
+        assert!(record.decision_publish_attempted);
+        assert!(
+            record.is_publish_attempted_but_unapplied(),
+            "an attempted decision must be resumable even without a comment ID"
+        );
+        assert!(
+            !record.is_published_but_unapplied(),
+            "nothing is published until a comment ID is durable"
+        );
+        assert!(record.decision_comment_node_id.is_none());
+        assert!(!record.is_complete());
+
+        // The unobserved outcome is then recorded as ambiguous: the run still
+        // owns the item, and the diagnostics do not change that.
+        record.set_error("create comment request failed: operation timed out", true);
+        assert!(record.decision_publish_attempted, "attempts are one-way");
+        assert!(record.is_publish_attempted_but_unapplied());
+
+        record.set_decision_comment("IC_1");
+        assert!(record.is_publish_attempted_but_unapplied());
+        assert!(record.is_published_but_unapplied());
+
+        record.set_status_applied();
+        assert!(
+            !record.is_publish_attempted_but_unapplied(),
+            "a finished run no longer owns the item"
+        );
+    }
+
+    #[test]
+    fn marking_an_attempt_keeps_the_diagnostics_of_the_previous_failure() {
+        let mut record = record();
+        record.set_error("transport failure", true);
+        record.mark_decision_publish_attempted();
+        assert!(record.ambiguous, "an attempt does not resolve ambiguity");
+        assert_eq!(record.last_error.as_deref(), Some("transport failure"));
+    }
+
+    #[test]
+    fn an_observed_publication_implies_an_attempt() {
+        let mut record = record();
+        record.set_decision_comment("IC_1");
+        assert!(
+            record.decision_publish_attempted,
+            "a durable comment ID means the write was attempted"
+        );
+    }
+
+    #[test]
+    fn the_attempt_flag_round_trips_and_defaults_safely() {
+        let mut record = record();
+        record.mark_decision_publish_attempted();
+        let bytes = serialize(&record).expect("serialize");
+        let decoded: RoutingRecord = serde_json::from_slice(&bytes).expect("decode");
+        assert_eq!(decoded, record);
+        assert!(decoded.decision_publish_attempted);
+
+        // A record written before this field existed decodes as "not
+        // attempted"; when it names a decision comment it is still resumable,
+        // which is the only post-write state an older writer could reach.
+        let legacy = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": ROUTING_RECORD_SCHEMA,
+            "runId": "run:abc",
+            "eventId": "event:abc",
+            "repository": "drasi-project/drasi-core",
+            "subjectNumber": 742,
+            "subjectNodeId": "I_subject",
+            "projectNodeId": "PVT_project",
+            "projectItemNodeId": "PVTI_item",
+            "contentDigest": "sha256:abc",
+            "acceptedCompletion": {
+                "commentNodeId": "IC_completion",
+                "bodyHash": accepted().body_hash,
+            },
+            "outcome": "passed",
+            "toStatus": "AwaitingIssueRiskProfiling",
+            "decisionEventJson": DECISION_JSON,
+            "decisionCommentNodeId": "IC_1",
+            "statusApplied": false,
+            "ambiguous": false,
+            "createdAt": "2026-08-14T00:00:00Z",
+            "updatedAt": "2026-08-14T00:00:00Z",
+        }))
+        .expect("legacy json");
+        let decoded: RoutingRecord = serde_json::from_slice(&legacy).expect("decode legacy");
+        assert!(!decoded.decision_publish_attempted);
+        assert!(
+            decoded.is_publish_attempted_but_unapplied(),
+            "a legacy published record must still be resumable"
+        );
     }
 
     #[tokio::test]

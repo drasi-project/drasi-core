@@ -182,15 +182,17 @@ impl ExecutionRecord {
     ///
     /// The `runId` binds the Project Item, the subject, and the body digest, so
     /// a mismatch here means the state store has been corrupted or a `runId`
-    /// collision occurred; either way, writing again would be unsafe.
-    pub fn ensure_matches(&self, row: &LaunchRow) -> anyhow::Result<()> {
+    /// collision occurred; either way, writing again would be unsafe. The run is
+    /// passed explicitly because it is *derived* from the row's binding rather
+    /// than carried by the row.
+    pub fn ensure_matches(&self, run_id: &str, row: &LaunchRow) -> anyhow::Result<()> {
         if self.schema_version != EXECUTION_RECORD_SCHEMA {
             anyhow::bail!(
                 "execution record schema '{}' is not '{EXECUTION_RECORD_SCHEMA}'",
                 self.schema_version
             );
         }
-        if self.run_id != row.run_id
+        if self.run_id != run_id
             || self.repository != row.repository
             || self.subject_number != row.subject_number
             || self.subject_node_id != row.subject_node_id
@@ -427,7 +429,13 @@ mod tests {
             subject_node_id: "I_subject".to_string(),
             project_node_id: "PVT_project".to_string(),
             project_item_node_id: "PVTI_item".to_string(),
-            run_id: RUN_ID.to_string(),
+            project_status: drasi_workgraph_common::status::AWAITING_VALIDATION.to_string(),
+            body_digest: format!("sha256:{}", "a".repeat(64)),
+            event_comment_node_id: "IC_assignment".to_string(),
+            event_body: "WorkGraphEvent/v1".to_string(),
+            author_database_id: 4021243,
+            author_type: "Bot".to_string(),
+            is_edited: false,
             requested_model: "gpt-5".to_string(),
             fallback_model: Some("gpt-4".to_string()),
             base_ref: "main".to_string(),
@@ -509,17 +517,22 @@ mod tests {
     }
 
     #[test]
-    fn record_identity_is_checked_against_the_row() {
+    fn record_identity_is_checked_against_the_row_and_the_derived_run() {
         let record = record();
-        record.ensure_matches(&row()).expect("matching row");
+        record.ensure_matches(RUN_ID, &row()).expect("matching row");
 
         let mut other = row();
         other.project_item_node_id = "PVTI_other".to_string();
-        assert!(record.ensure_matches(&other).is_err());
+        assert!(record.ensure_matches(RUN_ID, &other).is_err());
+
+        // A row whose binding derives a different run can never adopt this
+        // record, even when every other field matches.
+        let other_run = "run:3333333333333333333333333333333333333333333333333333333333333333";
+        assert!(record.ensure_matches(other_run, &row()).is_err());
 
         let mut wrong_schema = record.clone();
         wrong_schema.schema_version = "workgraph.execution-record/v0".to_string();
-        assert!(wrong_schema.ensure_matches(&row()).is_err());
+        assert!(wrong_schema.ensure_matches(RUN_ID, &row()).is_err());
     }
 
     #[test]

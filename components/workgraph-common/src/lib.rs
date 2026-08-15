@@ -23,6 +23,8 @@
 //! * the [common event envelope](event) and its four exact payloads;
 //! * the [deterministic identifiers](ids) — body digest, `runId`, `eventId`;
 //! * the [generated human summaries](summary);
+//! * the [authoritative Source row contract](row) every reaction is triggered
+//!   by;
 //! * [duplicate coalescing and conflict detection](dedup); and
 //! * the [immutable author identity](trust) every component keys trust on.
 //!
@@ -48,12 +50,18 @@
 //! # Minimal workflow
 //!
 //! ```text
-//! admission          -> ResponsibilityAssigned  -> status AwaitingValidation
+//! reaction/http      -> ResponsibilityAssigned  -> status AwaitingValidation
 //! copilot-agent-task -> ExecutionStarted
 //! issue-validator    -> CompletedIssueValidation
 //! workgraph-router   -> RoutingDecided          -> status AwaitingIssueRiskProfiling
 //!                                                      or NeedsMoreInformation
 //! ```
+//!
+//! Only the middle and last steps are WorkGraph-specific reactions. The
+//! assignment step is the generic [`reaction/http`] reaction driven by a query,
+//! so this repository ships no WorkGraph-specific assignment component.
+//!
+//! [`reaction/http`]: https://github.com/drasi-project/drasi-core/tree/main/components/reactions/http
 //!
 //! # Example
 //!
@@ -100,6 +108,7 @@ pub mod comment;
 pub mod dedup;
 pub mod event;
 pub mod ids;
+pub mod row;
 pub mod summary;
 pub mod trust;
 
@@ -116,6 +125,10 @@ pub use event::{
     WorkGraphEventType, SCHEMA_VERSION,
 };
 pub use ids::{body_digest, event_id, run_id};
+pub use row::{
+    accept_event_row, AcceptedEventRow, EventRow, RowError, AUTHOR_DATABASE_ID_FIELD,
+    AUTHOR_TYPE_FIELD, BODY_DIGEST_FIELD, IS_EDITED_FIELD,
+};
 pub use summary::{summary_for, SubjectRef};
 pub use trust::{
     author_identity_from_github_user, author_identity_from_source_row, is_trusted,
@@ -124,7 +137,8 @@ pub use trust::{
 
 /// Project status tokens used by the minimal WorkGraph workflow.
 pub mod status {
-    /// Set by the admission reaction once a responsibility is assigned.
+    /// Set once a responsibility is assigned (by the generic HTTP reaction
+    /// that writes the `ResponsibilityAssigned` comment).
     pub const AWAITING_VALIDATION: &str = "AwaitingValidation";
     /// Terminal status for a passing validation.
     pub const AWAITING_ISSUE_RISK_PROFILING: &str = "AwaitingIssueRiskProfiling";

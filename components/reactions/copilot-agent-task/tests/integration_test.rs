@@ -81,11 +81,17 @@ fn make_source() -> (ApplicationSource, ApplicationSourceHandle) {
     ApplicationSource::new(SOURCE, config).expect("create application source")
 }
 
+/// The launch query projects one authoritative `ResponsibilityAssigned` comment
+/// (its body, author, and edited flag) plus the subject issue's `bodyDigest`,
+/// exactly as the GitHub Source names those fields.
 fn query_text() -> &'static str {
     "MATCH (r:LaunchCandidate) RETURN \
      r.repository AS repository, r.subjectNumber AS subjectNumber, \
      r.subjectNodeId AS subjectNodeId, r.projectNodeId AS projectNodeId, \
-     r.projectItemNodeId AS projectItemNodeId, r.runId AS runId, \
+     r.projectItemNodeId AS projectItemNodeId, r.projectStatus AS projectStatus, \
+     r.bodyDigest AS bodyDigest, r.eventCommentNodeId AS eventCommentNodeId, \
+     r.eventBody AS eventBody, r.authorDatabaseId AS authorDatabaseId, \
+     r.authorType AS authorType, r.isEdited AS isEdited, \
      r.requestedModel AS requestedModel, r.fallbackModel AS fallbackModel, \
      r.baseRef AS baseRef"
 }
@@ -141,28 +147,82 @@ async fn start_core(
     (core, handle)
 }
 
-async fn insert_launch_row(
-    handle: &ApplicationSourceHandle,
-    node_id: &str,
-    run_id_value: &str,
-    fallback: Option<&str>,
-) {
+/// Every value one launch row carries, so a test can vary exactly one of them.
+struct RowSpec<'a> {
+    /// The node ID of the comment the row names as the assignment.
+    comment_node_id: &'a str,
+    /// The comment body the Source projected.
+    event_body: String,
+    /// The comment's author, as the Source projected it.
+    author: MockAuthor,
+    /// The comment's `isEdited` flag.
+    is_edited: bool,
+    /// The subject issue's `bodyDigest`.
+    body_digest: String,
+    /// The item status the query observed.
+    project_status: &'a str,
+    /// An optional fallback model.
+    fallback: Option<&'a str>,
+}
+
+impl<'a> RowSpec<'a> {
+    /// The canonical row: the trusted, unedited assignment for `ISSUE_BODY`.
+    fn trusted(comment_node_id: &'a str) -> Self {
+        Self {
+            comment_node_id,
+            event_body: assignment_body(ISSUE_BODY),
+            author: MockAuthor::trusted(),
+            is_edited: false,
+            body_digest: body_digest(Some(ISSUE_BODY)).as_str().to_string(),
+            project_status: mock_github::AWAITING_VALIDATION,
+            fallback: None,
+        }
+    }
+
+    fn with_author(mut self, author: MockAuthor) -> Self {
+        self.author = author;
+        self
+    }
+
+    fn edited(mut self) -> Self {
+        self.is_edited = true;
+        self
+    }
+
+    fn with_fallback(mut self, fallback: &'a str) -> Self {
+        self.fallback = Some(fallback);
+        self
+    }
+}
+
+async fn insert_row(handle: &ApplicationSourceHandle, node_id: &str, spec: RowSpec<'_>) {
     let mut builder = PropertyMapBuilder::new()
         .with_string("repository", REPOSITORY)
         .with_integer("subjectNumber", SUBJECT_NUMBER as i64)
         .with_string("subjectNodeId", SUBJECT_NODE_ID)
         .with_string("projectNodeId", PROJECT_NODE_ID)
         .with_string("projectItemNodeId", PROJECT_ITEM_NODE_ID)
-        .with_string("runId", run_id_value)
+        .with_string("projectStatus", spec.project_status)
+        .with_string("bodyDigest", spec.body_digest)
+        .with_string("eventCommentNodeId", spec.comment_node_id)
+        .with_string("eventBody", spec.event_body)
+        .with_integer("authorDatabaseId", spec.author.database_id as i64)
+        .with_string("authorType", spec.author.actor_type.as_str())
+        .with_bool("isEdited", spec.is_edited)
         .with_string("requestedModel", REQUESTED_MODEL)
         .with_string("baseRef", BASE_REF);
-    if let Some(fallback) = fallback {
+    if let Some(fallback) = spec.fallback {
         builder = builder.with_string("fallbackModel", fallback);
     }
     handle
         .send_node_insert(node_id, vec!["LaunchCandidate"], builder.build())
         .await
         .expect("send node insert");
+}
+
+/// Insert the canonical trusted assignment row for `comment_node_id`.
+async fn insert_launch_row(handle: &ApplicationSourceHandle, node_id: &str, comment_node_id: &str) {
+    insert_row(handle, node_id, RowSpec::trusted(comment_node_id)).await;
 }
 
 async fn wait_until<F, Fut>(mut condition: F, max_ms: u64) -> bool
@@ -294,11 +354,12 @@ async fn wait_for_halt(core: &Arc<DrasiLib>) -> bool {
 async fn happy_path_creates_one_task_and_one_execution_started_comment() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
-    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let assignment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-happy").await;
-    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    insert_launch_row(&handle, "candidate-1", &assignment).await;
 
     assert!(
         wait_until(|| async { github.create_comment_calls() == 1 }, 5000).await,
@@ -369,11 +430,12 @@ async fn happy_path_creates_one_task_and_one_execution_started_comment() {
 async fn duplicate_delivery_creates_one_task_and_one_comment() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
-    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let assignment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-duplicate").await;
-    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    insert_launch_row(&handle, "candidate-1", &assignment).await;
     assert!(
         wait_until(|| async { github.create_comment_calls() == 1 }, 5000).await,
         "the first launch never completed"
@@ -381,7 +443,7 @@ async fn duplicate_delivery_creates_one_task_and_one_comment() {
 
     // A second, distinct row for the same run identity: the durable record must
     // suppress every side effect.
-    insert_launch_row(&handle, "candidate-2", &run_id_for(ISSUE_BODY), None).await;
+    insert_launch_row(&handle, "candidate-2", &assignment).await;
     tokio::time::sleep(Duration::from_millis(750)).await;
 
     assert_eq!(github.create_task_calls(), 1, "no second task");
@@ -398,14 +460,15 @@ async fn duplicate_delivery_creates_one_task_and_one_comment() {
 async fn stale_body_digest_yields_zero_side_effects() {
     const EDITED: &str = "This issue body was edited after the assignment.\n";
     let server = MockServer::start().await;
-    // GitHub now serves an edited body, but the row still nominates the run
-    // derived from the original body.
+    // GitHub now serves an edited body, but the row still carries the
+    // `bodyDigest` the Source projected before the edit.
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(EDITED)).await;
-    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let assignment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-stale").await;
-    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    insert_launch_row(&handle, "candidate-1", &assignment).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     assert_eq!(github.create_task_calls(), 0, "no task on a stale digest");
@@ -422,17 +485,18 @@ async fn stale_body_digest_yields_zero_side_effects() {
 }
 
 // ---------------------------------------------------------------------
-// 4. No trusted assignment comment at all: zero side effects.
+// 4. The comment the row names no longer exists: zero side effects.
 // ---------------------------------------------------------------------
 #[tokio::test]
 #[ignore]
-async fn missing_assignment_yields_zero_side_effects() {
+async fn missing_assignment_comment_yields_zero_side_effects() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-noassign").await;
-    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    // The row is well formed but names a comment that is not on the issue.
+    insert_launch_row(&handle, "candidate-1", "IC_deleted").await;
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     assert_eq!(github.create_task_calls(), 0);
@@ -442,32 +506,40 @@ async fn missing_assignment_yields_zero_side_effects() {
 }
 
 // ---------------------------------------------------------------------
-// 5. An assignment authored by an untrusted user ID is never adopted.
+// 5. A row whose Source author metadata is not the trusted assignment identity
+//    is never launched — even when the issue does carry a valid assignment.
 // ---------------------------------------------------------------------
 #[tokio::test]
 #[ignore]
-async fn untrusted_author_assignment_is_ignored() {
+async fn untrusted_row_author_is_never_launched() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
-    github.seed_comment(
-        &assignment_body(ISSUE_BODY),
-        &MockAuthor::untrusted(),
-        false,
-    );
-    // The trusted numeric database ID under the wrong actor type is not the
-    // trusted author either.
-    github.seed_comment(
-        &assignment_body(ISSUE_BODY),
-        &MockAuthor::wrong_actor_type(),
-        false,
-    );
-    // Neither is this reaction's own identity: it may not write its own
-    // assignment.
-    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::launcher(), false);
+    // A perfectly good assignment exists on the issue: only the row's own
+    // `authorDatabaseId`/`authorType` decide whether it may be acted on.
+    let assignment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-untrusted").await;
-    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    for (index, author) in [
+        MockAuthor::untrusted(),
+        // The trusted numeric database ID under the wrong actor type is not the
+        // trusted author either.
+        MockAuthor::wrong_actor_type(),
+        // Neither is this reaction's own identity: it may not write its own
+        // assignment.
+        MockAuthor::launcher(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        insert_row(
+            &handle,
+            &format!("candidate-{index}"),
+            RowSpec::trusted(&assignment).with_author(author),
+        )
+        .await;
+    }
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     assert_eq!(github.create_task_calls(), 0);
@@ -477,18 +549,31 @@ async fn untrusted_author_assignment_is_ignored() {
 }
 
 // ---------------------------------------------------------------------
-// 6. An edited trusted assignment is never adopted.
+// 6. An edited assignment is never launched, whether the edit is reported by
+//    the row (`isEdited`) or only by GitHub.
 // ---------------------------------------------------------------------
 #[tokio::test]
 #[ignore]
-async fn edited_assignment_is_ignored() {
+async fn edited_assignment_is_never_launched() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
-    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), true);
+    // Seeded as edited: the live comment is edited even though a row could
+    // still claim otherwise.
+    let edited_comment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), true);
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-edited").await;
-    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    // The row itself reports the edit.
+    insert_row(
+        &handle,
+        "candidate-1",
+        RowSpec::trusted(&edited_comment).edited(),
+    )
+    .await;
+    // ...and a row that hides the edit is still refused, because the named
+    // comment is re-checked against GitHub before any write.
+    insert_launch_row(&handle, "candidate-2", &edited_comment).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     assert_eq!(github.create_task_calls(), 0);
@@ -498,17 +583,17 @@ async fn edited_assignment_is_ignored() {
 }
 
 // ---------------------------------------------------------------------
-// 7. Two trusted comments claiming one assignment event ID fail closed.
+// 7. A named comment whose content differs from the row's event is never
+//    launched. `eventId` covers the run and the event type only, so two
+//    assignments can claim one event ID with contradictory profile pins.
 // ---------------------------------------------------------------------
 #[tokio::test]
 #[ignore]
-async fn conflicting_assignments_fail_closed() {
+async fn an_assignment_comment_that_diverges_from_the_row_is_never_launched() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
-    // Same run and event type — therefore the same deterministic event ID — but
-    // contradictory profile pins.
-    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
-    github.seed_comment(
+    // The live comment pins a different profile blob than the row's event.
+    let assignment = github.seed_comment(
         &assignment_body_with_profile(ISSUE_BODY, PROFILE_NAME, &"a".repeat(40)),
         &MockAuthor::trusted(),
         false,
@@ -516,7 +601,7 @@ async fn conflicting_assignments_fail_closed() {
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-conflict").await;
-    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    insert_launch_row(&handle, "candidate-1", &assignment).await;
     tokio::time::sleep(Duration::from_millis(750)).await;
 
     assert_eq!(
@@ -529,6 +614,7 @@ async fn conflicting_assignments_fail_closed() {
         0,
         "no comment on a contradiction"
     );
+    assert!(load(&store, ISSUE_BODY).await.is_none());
     core.stop().await.expect("stop core");
 }
 
@@ -540,13 +626,14 @@ async fn conflicting_assignments_fail_closed() {
 async fn profile_blob_sha_drift_yields_zero_side_effects() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
-    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let assignment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     // The live profile blob moved on since the assignment pinned it.
     github.set_profile_sha(Some(&"b".repeat(40)));
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-drift").await;
-    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    insert_launch_row(&handle, "candidate-1", &assignment).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     assert_eq!(github.create_task_calls(), 0);
@@ -563,12 +650,13 @@ async fn profile_blob_sha_drift_yields_zero_side_effects() {
 async fn wrong_project_status_yields_zero_side_effects() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
-    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let assignment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     github.set_status("AwaitingIssueRiskProfiling");
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-status").await;
-    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    insert_launch_row(&handle, "candidate-1", &assignment).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     assert_eq!(github.create_task_calls(), 0);
@@ -577,7 +665,7 @@ async fn wrong_project_status_yields_zero_side_effects() {
 
     // The reaction stays healthy: restoring the status lets a good row succeed.
     github.set_status(mock_github::AWAITING_VALIDATION);
-    insert_launch_row(&handle, "candidate-good", &run_id_for(ISSUE_BODY), None).await;
+    insert_launch_row(&handle, "candidate-good", &assignment).await;
     assert!(
         wait_until(|| async { github.create_comment_calls() == 1 }, 5000).await,
         "a permanent rejection must not wedge the reaction"
@@ -594,16 +682,16 @@ async fn wrong_project_status_yields_zero_side_effects() {
 async fn exactly_once_model_fallback_on_unsupported_model() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
-    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let assignment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     github.add_unsupported_model(REQUESTED_MODEL);
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-fallback").await;
-    insert_launch_row(
+    insert_row(
         &handle,
         "candidate-1",
-        &run_id_for(ISSUE_BODY),
-        Some(FALLBACK_MODEL),
+        RowSpec::trusted(&assignment).with_fallback(FALLBACK_MODEL),
     )
     .await;
 
@@ -633,7 +721,8 @@ async fn exactly_once_model_fallback_on_unsupported_model() {
 async fn no_fallback_on_unrelated_422() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
-    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let assignment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     github.force_task_status(
         422,
         serde_json::json!({ "message": "Validation failed: base_ref does not exist" }),
@@ -641,11 +730,10 @@ async fn no_fallback_on_unrelated_422() {
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-unrelated").await;
-    insert_launch_row(
+    insert_row(
         &handle,
         "candidate-1",
-        &run_id_for(ISSUE_BODY),
-        Some(FALLBACK_MODEL),
+        RowSpec::trusted(&assignment).with_fallback(FALLBACK_MODEL),
     )
     .await;
 
@@ -682,7 +770,8 @@ async fn no_fallback_on_unrelated_422() {
 async fn ambiguous_task_creation_persists_and_posts_no_comment() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
-    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let assignment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     // The server records the task but the response never arrives inside the
@@ -690,7 +779,7 @@ async fn ambiguous_task_creation_persists_and_posts_no_comment() {
     github.set_create_task_delay(Some(Duration::from_millis(1500)));
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-ambiguous").await;
-    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    insert_launch_row(&handle, "candidate-1", &assignment).await;
 
     assert!(
         wait_until(
@@ -734,7 +823,8 @@ async fn ambiguous_task_creation_persists_and_posts_no_comment() {
 async fn restart_after_ambiguous_adopts_task_and_posts_one_comment() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
-    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let assignment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     // The write the previous process could not confirm did in fact land: a task
@@ -752,7 +842,13 @@ async fn restart_after_ambiguous_adopts_task_and_posts_one_comment() {
         subject_node_id: SUBJECT_NODE_ID.to_string(),
         project_node_id: PROJECT_NODE_ID.to_string(),
         project_item_node_id: PROJECT_ITEM_NODE_ID.to_string(),
-        run_id: run.as_str().to_string(),
+        project_status: mock_github::AWAITING_VALIDATION.to_string(),
+        body_digest: digest.as_str().to_string(),
+        event_comment_node_id: assignment.clone(),
+        event_body: assignment_body(ISSUE_BODY),
+        author_database_id: TRUSTED_AUTHOR_DATABASE_ID,
+        author_type: TRUSTED_AUTHOR_TYPE.as_str().to_string(),
+        is_edited: false,
         requested_model: REQUESTED_MODEL.to_string(),
         fallback_model: None,
         base_ref: BASE_REF.to_string(),
@@ -772,7 +868,7 @@ async fn restart_after_ambiguous_adopts_task_and_posts_one_comment() {
         .expect("seed ambiguous record");
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-restart").await;
-    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    insert_launch_row(&handle, "candidate-1", &assignment).await;
 
     assert!(
         wait_until(|| async { github.create_comment_calls() == 1 }, 5000).await,
@@ -813,7 +909,8 @@ async fn restart_after_ambiguous_adopts_task_and_posts_one_comment() {
 async fn a_divergent_preexisting_execution_started_is_never_adopted() {
     let server = MockServer::start().await;
     let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
-    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let assignment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
     // The task for this execution already exists, so it is adopted and the run
@@ -854,7 +951,7 @@ async fn a_divergent_preexisting_execution_started_is_never_adopted() {
     github.seed_comment(&divergent_body, &MockAuthor::launcher(), false);
 
     let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-divergent").await;
-    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    insert_launch_row(&handle, "candidate-1", &assignment).await;
 
     assert!(
         wait_for_halt(&core).await,

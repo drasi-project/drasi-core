@@ -70,7 +70,8 @@ pub struct CopilotAgentTaskReactionConfigDto {
     pub allowed_models: Vec<String>,
 
     /// Numeric GitHub database ID of the identity whose
-    /// `ResponsibilityAssigned` comments are trusted (admission's identity).
+    /// `ResponsibilityAssigned` comments are trusted (the assigning reaction's
+    /// identity).
     /// Together with `trustedAssignmentAuthorType` this is the whole trust key:
     /// no node ID and no GitHub App attribution is configured or accepted.
     #[schema(value_type = ConfigValueU64)]
