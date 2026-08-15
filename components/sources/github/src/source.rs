@@ -23,7 +23,7 @@ use crate::hydrator::{
 use crate::mapping::{node_labels, relation_labels};
 use crate::reconciler::{run_reconciler_loop, ReconcilerParams};
 use crate::types::HydratorHealth;
-use crate::webhook::{serve_webhook_listener, WebhookServerParams};
+use crate::webhook::{compact_dedupe_markers, serve_webhook_listener, WebhookServerParams};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use drasi_lib::channels::{ComponentStatus, DispatchMode, SubscriptionResponse};
@@ -68,16 +68,7 @@ impl Source for GitHubSource {
     }
 
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        if self.base.raw_config().is_some() {
-            return self.base.properties_or_serialize(&self.config);
-        }
-
-        let mut properties = self.base.properties_or_serialize(&self.config);
-        properties.remove("token");
-        if let Some(serde_json::Value::Object(webhook)) = properties.get_mut("webhook") {
-            webhook.remove("secret");
-        }
-        properties
+        self.base.properties_or_serialize(&self.config)
     }
 
     fn auto_start(&self) -> bool {
@@ -169,6 +160,10 @@ impl Source for GitHubSource {
         }
         save_effective_repos(state_store.as_ref(), &self.base.id, &effective).await?;
         *self.effective_repos.write().await = effective.clone();
+        *self.hydrator_health.write().await = HydratorHealth::default();
+        compact_dedupe_markers(state_store.as_ref(), wal.as_ref(), &self.base.id)
+            .await
+            .context("Failed to compact delivery dedupe markers during startup")?;
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         *self.shutdown_tx.write().await = Some(shutdown_tx);
@@ -212,9 +207,33 @@ impl Source for GitHubSource {
             processing_gate: self.processing_gate.clone(),
             shutdown: shutdown_rx.clone(),
         };
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("GitHub source running".to_string()),
+            )
+            .await;
+        let hydrator_failure_health = self.hydrator_health.clone();
+        let hydrator_failure_base = self.base.clone_shared();
+        let hydrator_failure_source_id = self.base.id.clone();
         let hydrator_handle = tokio::spawn(async move {
             if let Err(err) = run_hydrator_loop(hydrator_params).await {
-                error!("GitHub hydrator task failed: {err:#}");
+                let message = format!("{err:#}");
+                {
+                    let mut health = hydrator_failure_health.write().await;
+                    health.terminal = true;
+                    health.next_retry_secs = None;
+                    health.last_error = Some(message.clone());
+                }
+                hydrator_failure_base
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some("GitHub hydrator terminated; source restart required".to_string()),
+                    )
+                    .await;
+                error!(
+                    "[{hydrator_failure_source_id}] GitHub hydrator task failed terminally: {message}"
+                );
             }
         });
 
@@ -244,12 +263,6 @@ impl Source for GitHubSource {
             handles.push(reconciler_handle);
         }
 
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some("GitHub source running".to_string()),
-            )
-            .await;
         info!("[{}] GitHub source started", self.base.id);
         Ok(())
     }

@@ -528,6 +528,10 @@ fn test_valid_state_transitions() {
         &ComponentStatus::Error,
         &ComponentStatus::Stopped
     ));
+    assert!(is_valid_transition(
+        &ComponentStatus::Error,
+        &ComponentStatus::Stopping
+    ));
 }
 
 #[test]
@@ -885,7 +889,7 @@ fn test_validate_and_transition_nonexistent_component() {
 }
 
 #[test]
-fn test_validate_and_transition_cannot_stop_error_state() {
+fn test_validate_and_transition_can_stop_error_state_for_cleanup() {
     let mut graph = create_test_graph();
     graph.add_component(source_node("s1")).unwrap();
     graph
@@ -895,12 +899,12 @@ fn test_validate_and_transition_cannot_stop_error_state() {
         .validate_and_transition("s1", ComponentStatus::Error, None)
         .unwrap();
 
-    let result = graph.validate_and_transition("s1", ComponentStatus::Stopping, None);
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("error state"),
-        "Expected 'error state' in: {err_msg}"
+    graph
+        .validate_and_transition("s1", ComponentStatus::Stopping, None)
+        .unwrap();
+    assert_eq!(
+        graph.get_component("s1").unwrap().status,
+        ComponentStatus::Stopping
     );
 }
 

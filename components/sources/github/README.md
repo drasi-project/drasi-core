@@ -25,6 +25,9 @@ This source accepts **signed GitHub webhooks**, durably admits each delivery int
 - Runtime delivery is **at-least-once** from admitted webhook to emitted `SourceChange`.
 - Crash window: if the process crashes after dispatch but before the root committed-marker snapshot write, the admitted WAL record can replay and emit duplicate `SourceChange` events on recovery.
 - Consumers/queries must assume **idempotent/convergent processing** (duplicates are valid).
+- Delivery GUID markers are retained while their admission remains replayable in the WAL, then
+  compacted. A very old GitHub retry may be admitted again after both its WAL record and marker
+  have been pruned; this is part of the at-least-once convergence contract.
 - Receive order is FIFO by this source’s admitted WAL/hydrator sequencing, **not GitHub global causal order**.
 - The webhook inbox/admission seam and the WAL/hydrator seam are intentionally durability-first, not exactly-once.
 

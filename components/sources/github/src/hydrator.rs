@@ -18,7 +18,7 @@ use crate::config::ProjectSpec;
 use crate::graphql::{FetchedRoot, GitHubGraphQLClient};
 use crate::mapping::{map_root_delete_from_snapshot, map_root_diff};
 use crate::types::{HydratorHealth, RootSnapshot, SnapshotElement, WebhookLocator};
-use crate::webhook::{decode_admission_change, warn_unhealthy_hydrator};
+use crate::webhook::{compact_dedupe_markers, decode_admission_change, warn_unhealthy_hydrator};
 use anyhow::{Context, Result};
 use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
@@ -27,6 +27,7 @@ use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::wal::WalProvider;
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::time::{sleep, Duration};
@@ -34,6 +35,17 @@ use tokio::time::{sleep, Duration};
 const ROOT_SNAPSHOT_PREFIX: &str = "root-snapshot:";
 const RECONCILE_INDEX_KEY: &str = "reconcile-index";
 const EFFECTIVE_REPOS_KEY: &str = "effective-repos";
+
+#[derive(Debug)]
+struct RetryableHydrationError(anyhow::Error);
+
+impl fmt::Display for RetryableHydrationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for RetryableHydrationError {}
 
 pub struct HydratorParams {
     pub source_id: String,
@@ -94,6 +106,9 @@ pub async fn run_hydrator_loop(params: HydratorParams) -> Result<()> {
                 *params.health.write().await = HydratorHealth::default();
             }
             Err(err) => {
+                if err.downcast_ref::<RetryableHydrationError>().is_none() {
+                    return Err(err.context("Hydrator encountered a terminal processing failure"));
+                }
                 retry_count = retry_count.saturating_add(1);
                 let delay_secs = (1u64 << retry_count.min(6)).min(60);
                 let delivery_id = decode_admission_change(&admission)
@@ -148,9 +163,7 @@ pub(crate) async fn process_admission(
             "[{}] Skipping unsupported event type '{}' for delivery {}",
             params.source_id, locator.event_type, delivery_id
         );
-        params
-            .wal
-            .prune_up_to(&params.source_id, sequence)
+        prune_and_compact(params, sequence)
             .await
             .context("Failed to prune unsupported delivery from WAL")?;
         return Ok(());
@@ -164,9 +177,7 @@ pub(crate) async fn process_admission(
                 "[{}] Skipping delivery {} for non-effective repo {}",
                 params.source_id, delivery_id, repo
             );
-            params
-                .wal
-                .prune_up_to(&params.source_id, sequence)
+            prune_and_compact(params, sequence)
                 .await
                 .context("Failed to prune skipped delivery from WAL")?;
             return Ok(());
@@ -189,13 +200,9 @@ pub(crate) async fn process_admission(
             "[{}] Delivery {} already committed after locator hydration, pruning WAL",
             params.source_id, delivery_id
         );
-        params
-            .wal
-            .prune_up_to(&params.source_id, sequence)
-            .await
-            .with_context(|| {
-                format!("Failed to prune already-committed delivery {delivery_id} from WAL")
-            })?;
+        prune_and_compact(params, sequence).await.with_context(|| {
+            format!("Failed to prune already-committed delivery {delivery_id} from WAL")
+        })?;
         return Ok(());
     }
     let fetched = if is_immediate_authoritative_removal(&locator) {
@@ -205,6 +212,7 @@ pub(crate) async fn process_admission(
             .api_client
             .fetch_root_from_locator(&locator)
             .await
+            .map_err(RetryableHydrationError)
             .with_context(|| {
                 format!(
                     "Failed to hydrate locator event={} action={} node_id={:?}",
@@ -218,20 +226,17 @@ pub(crate) async fn process_admission(
                 "[{}] Treating absent stale delivery {} as converged because a later authoritative delete is durable",
                 params.source_id, delivery_id
             );
-            params
-                .wal
-                .prune_up_to(&params.source_id, sequence)
-                .await
-                .with_context(|| {
-                    format!("Failed to prune stale delivery {delivery_id} from WAL")
-                })?;
+            prune_and_compact(params, sequence).await.with_context(|| {
+                format!("Failed to prune stale delivery {delivery_id} from WAL")
+            })?;
             return Ok(());
         }
-        anyhow::bail!(
+        return Err(RetryableHydrationError(anyhow::anyhow!(
             "GraphQL returned node=null for non-delete action '{}' (event '{}'); treating as transient",
             locator.action,
             locator.event_type
-        );
+        ))
+        .into());
     }
 
     if let Some(authoritative_repo) = fetched.as_ref().and_then(FetchedRoot::repository_full_name) {
@@ -240,9 +245,7 @@ pub(crate) async fn process_admission(
                 "[{}] Skipping delivery {} because authoritative repository {} is outside effective scope",
                 params.source_id, delivery_id, authoritative_repo
             );
-            params
-                .wal
-                .prune_up_to(&params.source_id, sequence)
+            prune_and_compact(params, sequence)
                 .await
                 .context("Failed to prune authoritative out-of-scope delivery from WAL")?;
             return Ok(());
@@ -259,9 +262,7 @@ pub(crate) async fn process_admission(
                     "[{}] Skipping delivery {} because archived project item {:?} has no matching durable state",
                     params.source_id, delivery_id, locator.node_id
                 );
-                params
-                    .wal
-                    .prune_up_to(&params.source_id, sequence)
+                prune_and_compact(params, sequence)
                     .await
                     .context("Failed to prune unknown archived project item delivery from WAL")?;
                 return Ok(());
@@ -280,9 +281,7 @@ pub(crate) async fn process_admission(
                 "[{}] Skipping delivery {} because authoritative project identity could not be resolved",
                 params.source_id, delivery_id
             );
-                params
-                    .wal
-                    .prune_up_to(&params.source_id, sequence)
+                prune_and_compact(params, sequence)
                     .await
                     .context("Failed to prune skipped project delivery from WAL")?;
                 return Ok(());
@@ -296,9 +295,7 @@ pub(crate) async fn process_admission(
                     identity.owner,
                     identity.number
                 );
-                params
-                    .wal
-                    .prune_up_to(&params.source_id, sequence)
+                prune_and_compact(params, sequence)
                     .await
                     .context("Failed to prune skipped project delivery from WAL")?;
                 return Ok(());
@@ -402,12 +399,31 @@ pub(crate) async fn process_admission(
         .await?;
     }
 
-    params
-        .wal
-        .prune_up_to(&params.source_id, sequence)
+    prune_and_compact(params, sequence)
         .await
         .with_context(|| format!("Failed to prune WAL admission for delivery {delivery_id}"))?;
 
+    Ok(())
+}
+
+async fn prune_and_compact(params: &HydratorParams, sequence: u64) -> Result<()> {
+    const DEDUPE_COMPACTION_INTERVAL: u64 = 128;
+
+    let _health_guard = params.health.write().await;
+    params.wal.prune_up_to(&params.source_id, sequence).await?;
+    let wal_is_empty = params
+        .wal
+        .oldest_sequence(&params.source_id)
+        .await?
+        .is_none();
+    if wal_is_empty || sequence.is_multiple_of(DEDUPE_COMPACTION_INTERVAL) {
+        compact_dedupe_markers(
+            params.state_store.as_ref(),
+            params.wal.as_ref(),
+            &params.source_id,
+        )
+        .await?;
+    }
     Ok(())
 }
 

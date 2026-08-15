@@ -19,6 +19,7 @@ use drasi_lib::wal::CapacityPolicy;
 use drasi_lib::DurabilityConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fmt;
 
 fn default_host() -> String {
     "0.0.0.0".to_string()
@@ -55,7 +56,7 @@ pub struct ProjectSpec {
 }
 
 /// Webhook listener configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WebhookConfig {
     /// Listener host.
@@ -74,8 +75,20 @@ pub struct WebhookConfig {
     pub body_limit_bytes: usize,
 }
 
+impl fmt::Debug for WebhookConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebhookConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("path", &self.path)
+            .field("secret", &"[REDACTED]")
+            .field("body_limit_bytes", &self.body_limit_bytes)
+            .finish()
+    }
+}
+
 /// Source configuration for the authorized GitHub source.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GitHubSourceConfig {
     /// Resolved GitHub PAT token.
@@ -100,6 +113,21 @@ pub struct GitHubSourceConfig {
     /// Skip initial bootstrap/reconcile pass.
     #[serde(default)]
     pub skip_initial_bootstrap: bool,
+}
+
+impl fmt::Debug for GitHubSourceConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitHubSourceConfig")
+            .field("token", &"[REDACTED]")
+            .field("repositories", &self.repositories)
+            .field("projects", &self.projects)
+            .field("webhook", &self.webhook)
+            .field("reconcile_interval_secs", &self.reconcile_interval_secs)
+            .field("durability", &self.durability)
+            .field("graphql_url", &self.graphql_url)
+            .field("skip_initial_bootstrap", &self.skip_initial_bootstrap)
+            .finish()
+    }
 }
 
 impl Default for GitHubSourceConfig {

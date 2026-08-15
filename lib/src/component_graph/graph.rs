@@ -1224,7 +1224,7 @@ pub(super) fn is_valid_relationship(
 ///   ↓
 /// Reconfiguring ──→ Stopped | Starting | Error
 ///
-/// Error ──→ Starting (retry) | Stopped (reset)
+/// Error ──→ Starting (retry) | Stopping (cleanup) | Stopped (reset)
 ///
 /// Note: Added and Removed are set by the graph on add/remove_component()
 /// and are NOT valid targets for validate_and_transition().
@@ -1248,6 +1248,7 @@ pub(super) fn is_valid_transition(from: &ComponentStatus, to: &ComponentStatus) 
             | (Stopping, Error)
             // Error recovery
             | (Error, Starting) // retry
+            | (Error, Stopping) // clean up failed runtime before retry
             | (Error, Stopped) // reset
             // Reconfiguration (from any stable state)
             | (Added, Reconfiguring)
@@ -1283,9 +1284,6 @@ fn describe_invalid_transition(id: &str, from: &ComponentStatus, to: &ComponentS
             format!("Cannot stop component '{id}': it is already stopped")
         }
         (Stopping, Stopping) => format!("Component '{id}' is already stopping"),
-        (Error, Stopping) => {
-            format!("Cannot stop component '{id}': it is in error state")
-        }
         // Trying to reconfigure during a transition
         (Starting, Reconfiguring) => {
             format!("Cannot reconfigure component '{id}' while it is starting")

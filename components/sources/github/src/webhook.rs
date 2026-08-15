@@ -29,6 +29,7 @@ use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::wal::{WalError, WalProvider};
 use hmac::{Hmac, Mac};
 use log::{debug, error, warn};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Sha256;
 use std::net::SocketAddr;
@@ -41,6 +42,15 @@ type HmacSha256 = Hmac<Sha256>;
 
 const DELIVERY_LABEL: &str = "__GitHubDelivery";
 const DEDUPE_KEY_PREFIX: &str = "dedupe:";
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DedupeMarker {
+    delivery_id: String,
+    admitted_sequence: u64,
+    event_type: String,
+    action: String,
+}
 
 #[derive(Clone)]
 pub struct WebhookServerParams {
@@ -144,7 +154,7 @@ async fn webhook_handler(
 
 async fn health_handler(State(state): State<Arc<WebhookState>>) -> impl IntoResponse {
     let health = state.hydrator_health.read().await.clone();
-    let degraded = health.stalled_delivery_id.is_some();
+    let degraded = health.terminal || health.stalled_delivery_id.is_some();
     let status = if degraded { "degraded" } else { "ok" };
     let code = if degraded {
         StatusCode::SERVICE_UNAVAILABLE
@@ -162,7 +172,7 @@ async fn health_handler(State(state): State<Arc<WebhookState>>) -> impl IntoResp
 }
 
 #[derive(Debug)]
-enum DeliveryError {
+pub(crate) enum DeliveryError {
     Unauthorized(String),
     BadRequest(String),
     ServiceUnavailable(String),
@@ -195,6 +205,12 @@ async fn handle_delivery(
         .map_err(|e| DeliveryError::Internal(format!("Failed to encode delivery: {e}")))?;
 
     let _guard = state.admission_gate.lock().await;
+    let _health_guard = state.hydrator_health.write().await;
+    if _health_guard.terminal {
+        return Err(DeliveryError::ServiceUnavailable(
+            "Hydrator is unavailable; retry after the source is restarted".to_string(),
+        ));
+    }
     let dedupe_key = format!("{DEDUPE_KEY_PREFIX}{delivery_id}");
     let is_duplicate = state
         .state_store
@@ -262,7 +278,7 @@ async fn handle_delivery(
     }
 }
 
-async fn persist_dedupe_marker(
+pub(crate) async fn persist_dedupe_marker(
     state_store: &dyn StateStoreProvider,
     source_id: &str,
     dedupe_key: &str,
@@ -271,12 +287,12 @@ async fn persist_dedupe_marker(
     event_type: &str,
     action: &str,
 ) -> Result<(), DeliveryError> {
-    let dedupe_value = json!({
-        "deliveryId": delivery_id,
-        "admittedSequence": admitted_sequence,
-        "eventType": event_type,
-        "action": action
-    });
+    let dedupe_value = DedupeMarker {
+        delivery_id: delivery_id.to_string(),
+        admitted_sequence,
+        event_type: event_type.to_string(),
+        action: action.to_string(),
+    };
     state_store
         .set(
             source_id,
@@ -289,7 +305,62 @@ async fn persist_dedupe_marker(
     Ok(())
 }
 
-async fn find_delivery_in_wal(
+pub(crate) async fn compact_dedupe_markers(
+    state_store: &dyn StateStoreProvider,
+    wal: &dyn WalProvider,
+    source_id: &str,
+) -> Result<()> {
+    let oldest = wal
+        .oldest_sequence(source_id)
+        .await
+        .context("Failed to find oldest WAL sequence during dedupe compaction")?;
+    let head = if oldest.is_none() {
+        Some(
+            wal.head_sequence(source_id)
+                .await
+                .context("Failed to find WAL head during dedupe compaction")?,
+        )
+    } else {
+        None
+    };
+
+    let keys = state_store
+        .list_keys(source_id)
+        .await
+        .context("Failed to list dedupe markers")?;
+    let mut obsolete = Vec::new();
+    for key in keys
+        .into_iter()
+        .filter(|key| key.starts_with(DEDUPE_KEY_PREFIX))
+    {
+        let Some(value) = state_store
+            .get(source_id, &key)
+            .await
+            .with_context(|| format!("Failed to read dedupe marker '{key}'"))?
+        else {
+            continue;
+        };
+        let marker: DedupeMarker = serde_json::from_slice(&value)
+            .with_context(|| format!("Failed to deserialize dedupe marker '{key}'"))?;
+        let is_obsolete = oldest
+            .map(|oldest| marker.admitted_sequence < oldest)
+            .unwrap_or_else(|| head.is_some_and(|head| marker.admitted_sequence <= head));
+        if is_obsolete {
+            obsolete.push(key);
+        }
+    }
+
+    if !obsolete.is_empty() {
+        let key_refs: Vec<&str> = obsolete.iter().map(String::as_str).collect();
+        state_store
+            .delete_many(source_id, &key_refs)
+            .await
+            .context("Failed to delete obsolete dedupe markers")?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn find_delivery_in_wal(
     wal: &dyn WalProvider,
     source_id: &str,
     delivery_id: &str,

@@ -47,6 +47,8 @@ pub struct HydratorHealth {
     pub retry_count: u32,
     pub next_retry_secs: Option<u64>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub terminal: bool,
 }
 
 /// Serializable element snapshot used for root-level diffing.
