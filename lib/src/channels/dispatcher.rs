@@ -184,6 +184,11 @@ pub trait ChangeDispatcher<T>: Send + Sync
 where
     T: Clone + Send + Sync + 'static,
 {
+    /// Whether this dispatcher currently has a live receiver.
+    fn has_live_receiver(&self) -> bool {
+        true
+    }
+
     /// Dispatch a single change to all subscribers
     async fn dispatch_change(&self, change: Arc<T>) -> Result<()>;
 
@@ -237,6 +242,10 @@ impl<T> ChangeDispatcher<T> for BroadcastChangeDispatcher<T>
 where
     T: Clone + Send + Sync + 'static,
 {
+    fn has_live_receiver(&self) -> bool {
+        self.tx.receiver_count() > 0
+    }
+
     async fn dispatch_change(&self, change: Arc<T>) -> Result<()> {
         // Ignore send errors if there are no receivers
         let _ = self.tx.send(change);
@@ -308,6 +317,10 @@ impl<T> ChangeDispatcher<T> for ChannelChangeDispatcher<T>
 where
     T: Clone + Send + Sync + 'static,
 {
+    fn has_live_receiver(&self) -> bool {
+        !self.tx.is_closed()
+    }
+
     async fn dispatch_change(&self, change: Arc<T>) -> Result<()> {
         self.tx
             .send(change)
