@@ -5,7 +5,7 @@ use crate::graphql::{
     ProjectFieldRef, ProjectIdentityRef, ProjectItemContent, ProjectItemData,
     ProjectItemFieldValue, PullRequestData, RepositoryRef,
 };
-use crate::mapping::{map_root_diff, node_labels, relation_labels};
+use crate::mapping::{map_root_diff, map_webhook_object_delete, node_labels, relation_labels};
 use crate::webhook::{parse_locator, verify_signature};
 use drasi_core::models::ElementValue;
 use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
@@ -406,6 +406,43 @@ fn webhook_hmac_and_locator_contract() {
     assert_eq!(locator.action, "edited");
     assert_eq!(locator.node_id.as_deref(), Some("I_1"));
     assert_eq!(locator.repository_full_name.as_deref(), Some("acme/repo"));
+}
+
+#[test]
+fn deleted_webhook_requires_node_id_and_maps_one_object_delete() {
+    let malformed = serde_json::to_vec(&json!({
+        "action": "deleted",
+        "issue": {},
+        "repository": { "full_name": "acme/repo" }
+    }))
+    .expect("serialize malformed delete");
+    assert!(
+        parse_locator("issues", &malformed).is_err(),
+        "deleted delivery without node ID must be rejected before admission"
+    );
+
+    let body = serde_json::to_vec(&json!({
+        "action": "deleted",
+        "issue": { "node_id": "I_DELETE" },
+        "repository": { "full_name": "acme/repo" }
+    }))
+    .expect("serialize delete");
+    let locator = parse_locator("issues", &body).expect("parse delete locator");
+    let change =
+        map_webhook_object_delete("github-source", &locator, 42).expect("map object delete");
+    let drasi_core::models::SourceChange::Delete { metadata } = change else {
+        panic!("expected exactly one delete change");
+    };
+    assert_eq!(metadata.reference.source_id.as_ref(), "github-source");
+    assert_eq!(metadata.reference.element_id.as_ref(), "I_DELETE");
+    assert_eq!(
+        metadata
+            .labels
+            .iter()
+            .map(|label| label.as_ref())
+            .collect::<Vec<_>>(),
+        vec!["GitHubIssue"]
+    );
 }
 
 #[test]

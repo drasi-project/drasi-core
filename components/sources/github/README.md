@@ -37,7 +37,7 @@ Flow:
 - At-least-once/convergent delivery.
 - Crash window between output append and inbox prune can replay a delivery; deterministic authoritative diffing converges state.
 - Non-delete `node: null` hydrations are retried with bounded attempts, then treated as `gone-before-hydration` and FIFO advances.
-- A durable ownership adjacency covers authoritative parent-delete cascades for comments, reviews, review comments, and Project Items; `TRACKS` remains non-owning.
+- A literal `deleted` webhook action bypasses GraphQL and emits exactly one delete for the identified GitHub object. It does not infer cascade or relation deletes.
 
 ## Public config (v1)
 
