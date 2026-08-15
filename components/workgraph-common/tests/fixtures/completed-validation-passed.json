@@ -1,0 +1,22 @@
+{
+  "name": "completed-validation-passed",
+  "expectedAccepted": true,
+  "subject": {
+    "nodeType": "GitHubIssue",
+    "projectItemNodeId": "PVTI_example",
+    "nodeId": "I_example",
+    "body": "Context\nWorkGraph-Validation: pass\n",
+    "bodyDigest": "sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa"
+  },
+  "comment": {
+    "nodeId": "IC_completion_pass",
+    "authorLogin": "reporter[bot]",
+    "authorId": "B_reporter",
+    "authorDatabaseId": 1003,
+    "authorType": "Bot",
+    "createdAt": "2026-08-14T21:00:03Z",
+    "updatedAt": "2026-08-14T21:00:03Z",
+    "isEdited": false,
+    "body": "WorkGraphEvent/v1\n\nIssue validation passed.\n\n{\n  \"schemaVersion\": \"workgraph.event/v1\",\n  \"eventId\": \"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:CompletedIssueValidation\",\n  \"eventType\": \"CompletedIssueValidation\",\n  \"runId\": \"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\n  \"projectItemNodeId\": \"PVTI_example\",\n  \"subjectNodeId\": \"I_example\",\n  \"payload\": {\n    \"executionId\": \"execution:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\n    \"outcome\": \"passed\",\n    \"reasonCode\": \"required-marker-present\"\n  }\n}"
+  }
+}

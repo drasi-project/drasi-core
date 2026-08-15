@@ -35,6 +35,7 @@ const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 /// Maximum length of a downstream-supplied string (response body, rendered URL)
 /// allowed into a log line.
 const MAX_LOG_FIELD_LEN: usize = 512;
+const MAX_GRAPHQL_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// Bound and sanitize a downstream-controlled string before logging it: cap the
 /// length and strip control characters (notably CR/LF) so a hostile or
@@ -67,6 +68,12 @@ pub(crate) enum DeliveryOutcome {
     Delivered,
     /// The event was permanently undeliverable and dropped.
     Dropped,
+}
+
+pub(crate) struct DeliveryOptions<'a> {
+    pub reaction_name: &'a str,
+    pub description: &'a str,
+    pub fail_on_graphql_errors: bool,
 }
 
 /// Build a [`Handlebars`] registry pre-loaded with the `json` helper used
@@ -192,6 +199,16 @@ pub(crate) fn render_batch_item(
             default_item(notification)
         }
     }
+}
+
+/// Resolve the GraphQL response policy for one adaptive batch item.
+pub(crate) fn batch_graphql_error_policy(
+    config: &HttpReactionConfig,
+    notification: &DefaultChangeNotification,
+) -> bool {
+    config
+        .get_template_spec(&notification.query_id, notification.operation_type())
+        .is_some_and(|spec| spec.extension.fail_on_graphql_errors)
 }
 
 /// Serialize the default change-notification envelope as a JSON value (the
@@ -329,8 +346,11 @@ pub(crate) async fn process_result(
         full_url,
         headers,
         body,
-        reaction_name,
-        "HTTP request",
+        DeliveryOptions {
+            reaction_name,
+            description: "HTTP request",
+            fail_on_graphql_errors: call_spec.extension.fail_on_graphql_errors,
+        },
     )
     .await
 }
@@ -371,8 +391,11 @@ pub(crate) async fn post_default_notification(
         full_url,
         headers,
         body,
-        reaction_name,
-        "default-notification HTTP request",
+        DeliveryOptions {
+            reaction_name,
+            description: "default-notification HTTP request",
+            fail_on_graphql_errors: false,
+        },
     )
     .await
 }
@@ -383,9 +406,13 @@ pub(crate) async fn send_with_retry(
     url: String,
     headers: HeaderMap,
     body: String,
-    reaction_name: &str,
-    description: &str,
+    options: DeliveryOptions<'_>,
 ) -> Result<DeliveryOutcome> {
+    let DeliveryOptions {
+        reaction_name,
+        description,
+        fail_on_graphql_errors,
+    } = options;
     let mut backoff = INITIAL_RETRY_BACKOFF;
 
     for attempt in 1..=MAX_DELIVERY_ATTEMPTS {
@@ -397,7 +424,7 @@ pub(crate) async fn send_with_retry(
             .await;
 
         match response {
-            Ok(response) => {
+            Ok(mut response) => {
                 let status = response.status();
                 debug!(
                     "[{reaction_name}] {description} {method} {url} attempt {attempt} - Status: {}",
@@ -405,6 +432,25 @@ pub(crate) async fn send_with_retry(
                 );
 
                 if status.is_success() {
+                    if fail_on_graphql_errors {
+                        let validation = match read_bounded_response_body(&mut response).await {
+                            Ok(response_body) => validate_graphql_response(&response_body),
+                            Err(error) => Err(error),
+                        };
+                        if let Err(error) = validation {
+                            if attempt < MAX_DELIVERY_ATTEMPTS {
+                                warn!(
+                                    "[{reaction_name}] Retryable {description} GraphQL response failure on attempt {attempt}: {error}; retrying"
+                                );
+                                tokio::time::sleep(backoff).await;
+                                backoff = backoff.saturating_mul(2);
+                                continue;
+                            }
+                            return Err(anyhow!(
+                                "{description} failed after {MAX_DELIVERY_ATTEMPTS} attempts: {error}"
+                            ));
+                        }
+                    }
                     return Ok(DeliveryOutcome::Delivered);
                 }
 
@@ -473,6 +519,36 @@ pub(crate) async fn send_with_retry(
     }
 
     unreachable!("retry loop always returns")
+}
+
+async fn read_bounded_response_body(response: &mut reqwest::Response) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > MAX_GRAPHQL_RESPONSE_BYTES {
+            return Err(anyhow!(
+                "GraphQL response exceeded the {MAX_GRAPHQL_RESPONSE_BYTES} byte limit"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+pub(crate) fn validate_graphql_response(body: &[u8]) -> Result<()> {
+    let value: Value =
+        serde_json::from_slice(body).map_err(|_| anyhow!("GraphQL response was not valid JSON"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("GraphQL response was not a top-level JSON object"))?;
+    match object.get("errors") {
+        None => Ok(()),
+        Some(Value::Array(errors)) if errors.is_empty() => Ok(()),
+        Some(Value::Array(errors)) => Err(anyhow!(
+            "GraphQL response contained {} error(s); response messages were omitted",
+            errors.len()
+        )),
+        Some(_) => Err(anyhow!("GraphQL response field 'errors' was not an array")),
+    }
 }
 
 /// How a non-2xx HTTP response status should be handled.

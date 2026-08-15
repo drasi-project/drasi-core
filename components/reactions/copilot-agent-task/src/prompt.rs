@@ -12,382 +12,86 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `WorkGraphEvent/v1` schema, the launch prompt built around it, and the
-//! `workgraph.execution/v1` issue-comment envelope posted after a
-//! successful launch.
+//! The coding-agent prompt.
 //!
-//! # Contract
+//! The prompt hands the reporter **exactly two** values — `subjectNumber` and
+//! `executionId` — and instructs it to call `workgraph/report_completion`
+//! exactly once with only those two arguments. Every other correlation value
+//! (`runId`, `projectItemNodeId`, `subjectNodeId`, `eventId`) is derived by the
+//! reporter from the trusted WorkGraph comments on the issue, never from the
+//! prompt, so a tampered prompt cannot redirect or forge a completion event.
 //!
-//! The prompt sent to the Copilot coding-agent task supplies the exact
-//! nine-field input accepted by the scoped `workgraph/report_completion`
-//! tool. The custom agent validates the issue, then calls that reporter once.
-//! The reporter owns the canonical `WorkGraphEvent/v1` comment and must
-//! persist it before moving the Project item to `AwaitingRouting`.
-//!
-//! The reaction itself posts a *different*, immediate envelope —
-//! `workgraph.execution/v1` — as a single issue comment right after the task
-//! is confirmed created. It records the launch itself (not the eventual
-//! task outcome) so the router and any humans watching the issue can see,
-//! from GitHub alone, that a task was launched and which correlation IDs to
-//! expect back.
+//! The prompt is data handed to an external agent; it must **never** be logged.
 
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-
-use crate::row::LaunchRow;
-use crate::state::ExecutionRecord;
-
-/// The exact `WorkGraphEvent/v1` schema the launched agent must produce.
-/// Kept here (rather than only in prose) so the prompt can embed a literal,
-/// checkable JSON Schema fragment instead of an informal description.
-pub fn work_graph_event_v1_schema() -> Value {
-    serde_json::from_str(include_str!("../schema/workgraph-event-v1.schema.json"))
-        .expect("committed WorkGraphEvent/v1 schema must be valid JSON")
-}
-
-/// The exact `workgraph.execution/v1` schema, mirrored by hand in
-/// `schema/workgraph-execution-v1.schema.json` (see
-/// `tests/output_schema.rs` for the drift guard).
-pub fn workgraph_execution_v1_schema() -> Value {
-    json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$id": "https://drasi.io/schemas/workgraph/workgraph.execution-v1.json",
-        "title": "workgraph.execution/v1",
-        "description": "The single, pure-JSON issue comment the reaction posts immediately after a task is confirmed created (HTTP 201). Mirrors WorkGraphExecutionCommentV1 in src/prompt.rs — keep in sync.",
-        "type": "object",
-        "required": [
-            "schemaVersion", "messageType", "routeId", "responsibilityId", "executionId",
-            "expectedEventId", "requiredEventType", "taskId", "taskUrl", "agentProfile",
-            "profileRef", "requestedModel", "actualModel", "state", "startedAt"
-        ],
-        "properties": {
-            "schemaVersion": { "const": "workgraph.execution/v1" },
-            "messageType": { "const": "execution" },
-            "routeId": { "type": "string" },
-            "responsibilityId": { "type": "string" },
-            "executionId": { "type": "string" },
-            "expectedEventId": { "type": "string" },
-            "requiredEventType": { "const": "CompletedIssueValidation" },
-            "taskId": { "type": "string" },
-            "taskUrl": { "type": "string" },
-            "agentProfile": { "type": "string" },
-            "profileRef": { "type": "string" },
-            "requestedModel": { "type": "string" },
-            "actualModel": { "type": "string" },
-            "state": { "const": "started" },
-            "startedAt": { "type": "string", "format": "date-time" }
-        },
-        "additionalProperties": false
-    })
-}
-
-/// Build the exact prompt sent as the Agent Task's `prompt` field.
+/// Build the coding-agent prompt for one execution.
 ///
-/// Embeds the exact nine-field reporter input, the literal
-/// `WorkGraphEvent/v1` schema, and the event-before-status ordering contract.
-pub fn build_prompt(row: &LaunchRow, execution_id: &str, expected_event_id: &str) -> String {
-    let schema = work_graph_event_v1_schema();
-    let schema_json = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| "{}".to_string());
-    let target = target_payload(row, execution_id, expected_event_id);
-    let target_json = serde_json::to_string_pretty(&target).unwrap_or_else(|_| "{}".to_string());
-
+/// `execution_id` is the stable `execution:<runId>` identifier for this run (see
+/// [`crate::ids::execution_id`]); embedding it lets the reconciliation seam find
+/// a task whose creation response was lost.
+pub fn build_prompt(subject_number: u64, execution_id: &str) -> String {
     format!(
-        r#"You are operating as the "{agent_profile}" custom agent.
-
-## Trusted task input
-
-Validate exactly this one target. Copy every value verbatim. Do not discover,
-infer, or act on another target.
-
-```json
-{target_json}
-```
-
-After applying the validation rule defined by the custom agent profile, call
-`workgraph/report_completion` exactly once with exactly the nine fields above.
-Do not add a result, timestamp, comment body, repository, Project, field,
-status, actor, event type, REST operation, GraphQL document, or any other
-argument. If the reporter is unavailable or fails, surface that error without
-attempting another mutation.
-
-## Reporter completion contract
-
-The reporter must persist exactly one `{required_event_type}` issue comment
-with no text before or after this exact framing:
-
-WorkGraphEvent/v1
-```json
-{{the JSON object required by the schema below}}
-```
-
-The reporter-owned object must set `eventId` to `expectedEventId`,
-`executionId` to `executionId`, and `contentVersion` to `contentVersion` from
-the trusted task input. Its JSON Schema is:
-
-```json
-{schema_json}
-```
-
-## Ordering requirement
-
-The scoped reporter, not the agent directly, owns both mutations. It must
-confirm the `{required_event_type}` comment exists before it changes this
-Project item's Status to `AwaitingRouting`. Never substitute a generic comment
-or Project mutation tool.
-
-## Task
-
-Carry out the target responsibility using the custom agent profile pinned by
-the target's `profileRef`. Do not open a pull request as part of this task.
-"#,
-        agent_profile = row.agent_profile,
-        required_event_type = row.required_event_type,
-        schema_json = schema_json,
-        target_json = target_json,
+        "You are validating GitHub issue #{subject_number} in this repository.\n\
+         \n\
+         When you have finished, call the `workgraph/report_completion` tool exactly once, \
+         with exactly these two arguments and no others:\n\
+         - subjectNumber: {subject_number}\n\
+         - executionId: {execution_id}\n\
+         \n\
+         Do not pass any other correlation values. The reporter derives everything else it needs \
+         (runId, projectItemNodeId, subjectNodeId, eventId) from the trusted WorkGraph comments on \
+         the issue, not from this prompt. Do not open a pull request.\n"
     )
-}
-
-/// Exact input accepted by the issue-validator's scoped completion reporter.
-pub fn target_payload(row: &LaunchRow, execution_id: &str, expected_event_id: &str) -> Value {
-    json!({
-        "projectItemNodeId": row.project_item_node_id,
-        "subjectNodeId": row.issue_node_id,
-        "subjectNumber": row.issue_number,
-        "routeId": row.route_id,
-        "responsibilityId": row.responsibility_id,
-        "executionId": execution_id,
-        "expectedEventId": expected_event_id,
-        "contentVersion": row.issue_content_version,
-        "profileRef": row.profile_ref,
-    })
-}
-
-/// The `workgraph.execution/v1` envelope posted as a single, pure-JSON issue
-/// comment right after the task is confirmed created.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkGraphExecutionCommentV1 {
-    pub schema_version: String,
-    pub message_type: String,
-    pub route_id: String,
-    pub responsibility_id: String,
-    pub execution_id: String,
-    pub expected_event_id: String,
-    pub required_event_type: String,
-    pub task_id: String,
-    pub task_url: String,
-    pub agent_profile: String,
-    pub profile_ref: String,
-    pub requested_model: String,
-    pub actual_model: String,
-    pub state: String,
-    pub started_at: String,
-}
-
-pub const WORKGRAPH_EXECUTION_SCHEMA_V1: &str = "workgraph.execution/v1";
-
-impl WorkGraphExecutionCommentV1 {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        record: &ExecutionRecord,
-        execution_id: &str,
-        expected_event_id: &str,
-        task_id: &str,
-        task_url: &str,
-        actual_model: &str,
-        started_at: &chrono::DateTime<chrono::Utc>,
-    ) -> Self {
-        Self {
-            schema_version: WORKGRAPH_EXECUTION_SCHEMA_V1.to_string(),
-            message_type: "execution".to_string(),
-            route_id: record.route_id.clone(),
-            responsibility_id: record.responsibility_id.clone(),
-            execution_id: execution_id.to_string(),
-            expected_event_id: expected_event_id.to_string(),
-            required_event_type: record.required_event_type.clone(),
-            task_id: task_id.to_string(),
-            task_url: task_url.to_string(),
-            agent_profile: record.agent_profile.clone(),
-            profile_ref: record.profile_ref.clone(),
-            requested_model: record.requested_model.clone(),
-            actual_model: actual_model.to_string(),
-            state: "started".to_string(),
-            started_at: started_at.to_rfc3339(),
-        }
-    }
-
-    /// Render as the exact pure-JSON comment body (no markdown fencing —
-    /// "trusted pure-JSON" per the reaction's contract).
-    pub fn to_comment_body(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn sample_row() -> LaunchRow {
-        LaunchRow {
-            repository: "drasi-project/drasi-core".to_string(),
-            issue_number: 42,
-            issue_url: "https://github.com/drasi-project/drasi-core/issues/42".to_string(),
-            issue_node_id: "I_kwDOtest".to_string(),
-            project_item_node_id: "PVTI_test".to_string(),
-            project_node_id: "PVT_test".to_string(),
-            project_owner: "drasi-project".to_string(),
-            project_number: 3,
-            subject_type: "Issue".to_string(),
-            actor_type: "Agent".to_string(),
-            actor_id: "issue-validator".to_string(),
-            route_id: "route-1".to_string(),
-            responsibility_id: "resp-1".to_string(),
-            issue_content_version: "2026-08-13T19:00:00Z".to_string(),
-            agent_profile: "issue-validator".to_string(),
-            profile_ref: "issue-validator@0123456789abcdef0123456789abcdef01234567".to_string(),
-            requested_model: "gpt-5".to_string(),
-            fallback_model: Some("gpt-4".to_string()),
-            required_event_type: "CompletedIssueValidation".to_string(),
-            base_ref: "main".to_string(),
-            expected_project_status: "AwaitingValidation".to_string(),
-        }
+
+    const EXECUTION_ID: &str = "execution:validation:PVTI_item:sha256:\
+        aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn prompt_carries_only_the_two_correlation_inputs() {
+        let prompt = build_prompt(742, EXECUTION_ID);
+        assert!(prompt.contains("subjectNumber"), "must name subjectNumber");
+        assert!(prompt.contains("executionId"), "must name executionId");
+        assert!(
+            prompt.contains("742"),
+            "must carry the subject number value"
+        );
+        assert!(
+            prompt.contains(EXECUTION_ID),
+            "must carry the execution id value"
+        );
+        assert!(
+            prompt.contains("workgraph/report_completion"),
+            "must instruct the single report_completion call"
+        );
+        assert!(
+            prompt.contains("exactly once"),
+            "must require exactly one report"
+        );
     }
 
     #[test]
-    fn prompt_contains_all_correlation_ids() {
-        let row = sample_row();
-        let prompt = build_prompt(
-            &row,
-            "execution:exec-123",
-            "event:execution:exec-123:CompletedIssueValidation",
-        );
-        for needle in [
-            "execution:exec-123",
-            "event:execution:exec-123:CompletedIssueValidation",
-            "route-1",
-            "resp-1",
-            "2026-08-13T19:00:00Z",
-            "CompletedIssueValidation",
-            "AwaitingRouting",
-            "issue-validator@0123456789abcdef0123456789abcdef01234567",
-            "\"subjectNumber\": 42",
-            "`workgraph/report_completion` exactly once",
-        ] {
-            assert!(prompt.contains(needle), "prompt missing '{needle}'");
-        }
-    }
-
-    #[test]
-    fn target_payload_has_exact_frozen_fields() {
-        let target = target_payload(
-            &sample_row(),
-            "execution:exec-123",
-            "event:execution:exec-123:CompletedIssueValidation",
-        );
-        let actual: std::collections::BTreeSet<&str> = target
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        let expected = std::collections::BTreeSet::from([
-            "projectItemNodeId",
-            "subjectNodeId",
-            "subjectNumber",
+    fn prompt_omits_every_removed_field() {
+        let prompt = build_prompt(742, EXECUTION_ID);
+        for forbidden in [
             "routeId",
             "responsibilityId",
-            "executionId",
+            "contentVersion",
+            "profileRef",
             "expectedEventId",
-            "contentVersion",
-            "profileRef",
-        ]);
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn prompt_delegates_event_before_status_to_scoped_reporter() {
-        let row = sample_row();
-        let prompt = build_prompt(
-            &row,
-            "execution:exec-123",
-            "event:execution:exec-123:CompletedIssueValidation",
-        );
-        let completion_pos = prompt.find("comment exists before it changes").unwrap();
-        let status_pos = prompt.find("Status to `AwaitingRouting`").unwrap();
-        assert!(completion_pos < status_pos);
-        assert!(prompt.contains("Never substitute a generic comment"));
-    }
-
-    #[test]
-    fn schema_requires_workgraph_event_v1_fields() {
-        let schema = work_graph_event_v1_schema();
-        let required = schema["required"].as_array().unwrap();
-        let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        for field in [
-            "schemaVersion",
-            "eventType",
-            "eventId",
-            "projectItemNodeId",
-            "subjectType",
-            "subjectNodeId",
-            "repository",
-            "subjectNumber",
-            "actorType",
-            "actorId",
-            "routeId",
-            "responsibilityId",
-            "executionId",
-            "contentVersion",
-            "profileRef",
-            "result",
-            "completedAt",
+            "AwaitingRouting",
+            "WorkGraphEvent/v1",
+            "requiredEventType",
+            "actualModel",
+            "requestedModel",
         ] {
-            assert!(names.contains(&field), "schema missing required '{field}'");
+            assert!(
+                !prompt.contains(forbidden),
+                "prompt must not mention '{forbidden}'"
+            );
         }
-    }
-
-    #[test]
-    fn comment_envelope_is_pure_json_with_expected_fields() {
-        let row = sample_row();
-        let record = ExecutionRecord::new_reserved(
-            &row.route_id,
-            &row.responsibility_id,
-            1,
-            "execution:exec-123",
-            "event:execution:exec-123:CompletedIssueValidation",
-            &row.required_event_type,
-            &row.repository,
-            row.issue_number,
-            &row.issue_node_id,
-            &row.agent_profile,
-            &row.profile_ref,
-            &row.requested_model,
-            row.fallback_model.as_deref(),
-        );
-        let ts = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let envelope = WorkGraphExecutionCommentV1::new(
-            &record,
-            "execution:exec-123",
-            "event:execution:exec-123:CompletedIssueValidation",
-            "task-1",
-            "https://github.com/tasks/1",
-            "gpt-5",
-            &ts,
-        );
-        let body = envelope.to_comment_body();
-        let parsed: Value = serde_json::from_str(&body).expect("comment body is pure JSON");
-        assert_eq!(parsed["schemaVersion"], "workgraph.execution/v1");
-        assert_eq!(parsed["messageType"], "execution");
-        assert_eq!(
-            parsed["expectedEventId"],
-            "event:execution:exec-123:CompletedIssueValidation"
-        );
-        assert_eq!(parsed["requiredEventType"], "CompletedIssueValidation");
-        assert_eq!(parsed["executionId"], "execution:exec-123");
-        assert_eq!(parsed["taskId"], "task-1");
-        assert_eq!(parsed["requestedModel"], "gpt-5");
-        assert_eq!(parsed["actualModel"], "gpt-5");
-        assert_eq!(parsed["state"], "started");
     }
 }

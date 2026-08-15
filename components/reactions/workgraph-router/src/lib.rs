@@ -14,23 +14,58 @@
 
 #![allow(unexpected_cfgs)]
 
+//! WorkGraph router reaction plugin for Drasi.
+//!
+//! The router is the last step of the minimal WorkGraph workflow. It routes
+//! **directly** from a trusted `CompletedIssueValidation` comment while the
+//! Project Item is still at `AwaitingValidation`:
+//!
+//! ```text
+//! reaction/http      -> ResponsibilityAssigned  -> status AwaitingValidation
+//! copilot-agent-task -> ExecutionStarted
+//! issue-validator    -> CompletedIssueValidation
+//! workgraph-router   -> RoutingDecided          -> AwaitingIssueRiskProfiling
+//!                                                  or NeedsMoreInformation
+//! ```
+//!
+//! One `RoutingDecided` comment is posted and the item then moves straight to
+//! its final status. There is no intermediate `AwaitingRouting` status and no
+//! fifth "next responsibility assigned" event: the next responsibility travels
+//! inside the `RoutingDecided` payload.
+//!
+//! See `README.md` for the row contract, configuration, and recovery model.
+//!
+//! ## Quick start
+//!
+//! ```
+//! # fn main() -> anyhow::Result<()> {
+//! use drasi_reaction_workgraph_router::{ActorType, WorkgraphRouterReaction};
+//!
+//! let reaction = WorkgraphRouterReaction::builder("workgraph-router")
+//!     .with_query("route-workgraph-items")
+//!     .with_allowed_repositories(vec!["drasi-project/drasi-core".to_string()])
+//!     .with_allowed_projects(vec!["PVT_project".to_string()])
+//!     .with_expected_project_status_field_node_id("PVTSSF_status")
+//!     .with_trusted_author_database_id(4021243)
+//!     .with_trusted_author_type(ActorType::Bot)
+//!     .build()?;
+//! # let _ = reaction;
+//! # Ok(())
+//! # }
+//! ```
+
 pub mod candidate;
 pub mod config;
-pub mod decision;
 pub mod descriptor;
 pub mod github_client;
 pub mod reaction;
-pub mod reconciliation;
-pub mod rules;
 pub mod state;
-pub mod validation;
 
-#[cfg(test)]
-mod tests;
-
-pub use config::{StatusTransition, WorkgraphRouterReactionConfig};
-use drasi_lib::recovery::ReactionRecoveryPolicy;
+pub use candidate::RoutingCandidate;
+pub use config::{WorkgraphRouterReactionConfig, ROUTABLE_STATUS, ROUTED_PROFILE};
+pub use drasi_workgraph_common::trust::{ActorType, TrustedAuthor};
 pub use reaction::WorkgraphRouterReaction;
+pub use state::{AcceptedCompletion, RoutingRecord};
 
 /// Builder for [`WorkgraphRouterReaction`].
 pub struct WorkgraphRouterReactionBuilder {
@@ -39,10 +74,10 @@ pub struct WorkgraphRouterReactionBuilder {
     config: WorkgraphRouterReactionConfig,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
-    recovery_policy: Option<ReactionRecoveryPolicy>,
 }
 
 impl WorkgraphRouterReactionBuilder {
+    /// Start building a reaction with the given ID.
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -50,194 +85,126 @@ impl WorkgraphRouterReactionBuilder {
             config: WorkgraphRouterReactionConfig::default(),
             priority_queue_capacity: None,
             auto_start: true,
-            recovery_policy: None,
         }
     }
 
+    /// Replace the subscribed queries.
     pub fn with_queries(mut self, queries: Vec<String>) -> Self {
         self.queries = queries;
         self
     }
 
+    /// Subscribe to one query.
     pub fn with_query(mut self, query: impl Into<String>) -> Self {
         self.queries.push(query.into());
         self
     }
 
-    pub fn from_query(mut self, query: impl Into<String>) -> Self {
-        self.queries.push(query.into());
-        self
-    }
-
-    pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
-        self.priority_queue_capacity = Some(capacity);
-        self
-    }
-
-    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
-        self.auto_start = auto_start;
-        self
-    }
-
-    pub fn with_recovery_policy(mut self, policy: ReactionRecoveryPolicy) -> Self {
-        self.recovery_policy = Some(policy);
-        self
-    }
-
-    pub fn with_policy_id(mut self, value: impl Into<String>) -> Self {
-        self.config.policy_id = value.into();
-        self
-    }
-
-    pub fn with_policy_type(mut self, value: impl Into<String>) -> Self {
-        self.config.policy_type = value.into();
-        self
-    }
-
-    pub fn with_policy_version(mut self, value: impl Into<String>) -> Self {
-        self.config.policy_version = value.into();
-        self
-    }
-
-    pub fn with_allowed_projects(mut self, values: Vec<String>) -> Self {
-        self.config.allowed_projects = values;
-        self
-    }
-
-    pub fn with_allowed_repos(mut self, values: Vec<String>) -> Self {
-        self.config.allowed_repos = values;
-        self
-    }
-
-    pub fn with_allowed_event_types(mut self, values: Vec<String>) -> Self {
-        self.config.allowed_event_types = values;
-        self
-    }
-
-    pub fn with_allowed_status_transitions(mut self, values: Vec<StatusTransition>) -> Self {
-        self.config.allowed_status_transitions = values;
-        self
-    }
-
-    pub fn with_allowed_responsibility_types(mut self, values: Vec<String>) -> Self {
-        self.config.allowed_responsibility_types = values;
-        self
-    }
-
-    pub fn with_allowed_actors(mut self, values: Vec<String>) -> Self {
-        self.config.allowed_actors = values;
-        self
-    }
-
-    pub fn with_trusted_routing_authors(mut self, values: Vec<String>) -> Self {
-        self.config.trusted_routing_authors = values;
-        self
-    }
-
-    pub fn with_trusted_launcher_authors(mut self, values: Vec<String>) -> Self {
-        self.config.trusted_launcher_authors = values;
-        self
-    }
-
-    pub fn with_trusted_agent_authors(mut self, values: Vec<String>) -> Self {
-        self.config.trusted_agent_authors = values;
-        self
-    }
-
-    pub fn with_trusted_router_authors(mut self, values: Vec<String>) -> Self {
-        self.config.trusted_router_authors = values;
-        self
-    }
-
-    pub fn with_trusted_routing_user_ids(mut self, values: Vec<u64>) -> Self {
-        self.config.trusted_routing_user_ids = values;
-        self
-    }
-
-    pub fn with_trusted_launcher_user_ids(mut self, values: Vec<u64>) -> Self {
-        self.config.trusted_launcher_user_ids = values;
-        self
-    }
-
-    pub fn with_trusted_agent_user_ids(mut self, values: Vec<u64>) -> Self {
-        self.config.trusted_agent_user_ids = values;
-        self
-    }
-
-    pub fn with_trusted_router_user_ids(mut self, values: Vec<u64>) -> Self {
-        self.config.trusted_router_user_ids = values;
-        self
-    }
-
-    pub fn with_trusted_router_author_node_ids(mut self, values: Vec<String>) -> Self {
-        self.config.trusted_router_author_node_ids = values;
-        self
-    }
-
-    pub fn with_trusted_router_author_database_ids(mut self, values: Vec<u64>) -> Self {
-        self.config.trusted_router_author_database_ids = values;
-        self
-    }
-
-    pub fn with_github_graphql_url(mut self, value: impl Into<String>) -> Self {
-        self.config.github_graphql_url = value.into();
-        self
-    }
-
+    /// Override the GitHub REST base URL.
     pub fn with_github_rest_url(mut self, value: impl Into<String>) -> Self {
         self.config.github_rest_url = value.into();
         self
     }
 
+    /// Override the GitHub GraphQL endpoint.
+    pub fn with_github_graphql_url(mut self, value: impl Into<String>) -> Self {
+        self.config.github_graphql_url = value.into();
+        self
+    }
+
+    /// Override the environment variable holding the GitHub token.
     pub fn with_github_token_env(mut self, value: impl Into<String>) -> Self {
         self.config.github_token_env = value.into();
         self
     }
 
+    /// Set the repository allowlist.
+    pub fn with_allowed_repositories(mut self, values: Vec<String>) -> Self {
+        self.config.allowed_repositories = values;
+        self
+    }
+
+    /// Set the Project allowlist.
+    pub fn with_allowed_projects(mut self, values: Vec<String>) -> Self {
+        self.config.allowed_projects = values;
+        self
+    }
+
+    /// Override the Project status field name.
     pub fn with_project_status_field_name(mut self, value: impl Into<String>) -> Self {
         self.config.project_status_field_name = value.into();
         self
     }
 
+    /// Pin the Project status field node ID.
     pub fn with_expected_project_status_field_node_id(mut self, value: impl Into<String>) -> Self {
         self.config.expected_project_status_field_node_id = value.into();
         self
     }
 
+    /// Override the agent profile the routed assignment must name.
+    pub fn with_expected_profile(mut self, value: impl Into<String>) -> Self {
+        self.config.expected_profile = value.into();
+        self
+    }
+
+    /// Set the numeric GitHub database ID whose comments are trusted (and
+    /// which this reaction posts as). Required: half of the trust key.
+    pub fn with_trusted_author_database_id(mut self, value: u64) -> Self {
+        self.config.trusted_author_database_id = value;
+        self
+    }
+
+    /// Set the actor type of the trusted identity (the other half).
+    pub fn with_trusted_author_type(mut self, value: ActorType) -> Self {
+        self.config.trusted_author_type = value;
+        self
+    }
+
+    /// Override the per-request timeout.
     pub fn with_timeout_secs(mut self, value: u64) -> Self {
         self.config.timeout_secs = value;
         self
     }
 
-    pub fn with_reservation_lease_secs(mut self, value: u64) -> Self {
-        self.config.reservation_lease_secs = value;
-        self
-    }
-
+    /// Override strict recovery (must remain `true`).
     pub fn with_strict_recovery(mut self, value: bool) -> Self {
         self.config.strict_recovery = value;
         self
     }
 
+    /// Override the reaction input queue capacity.
+    pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
+        self.priority_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Control auto-start behavior.
+    pub fn with_auto_start(mut self, auto_start: bool) -> Self {
+        self.auto_start = auto_start;
+        self
+    }
+
+    /// Replace the whole configuration.
     pub fn with_config(mut self, config: WorkgraphRouterReactionConfig) -> Self {
         self.config = config;
         self
     }
 
+    /// Validate the configuration and build the reaction.
     pub fn build(self) -> anyhow::Result<WorkgraphRouterReaction> {
-        self.config
-            .validate(&self.queries, self.priority_queue_capacity)?;
+        self.config.validate(&self.queries)?;
         Ok(WorkgraphRouterReaction::from_builder(
             self.id,
             self.queries,
             self.config,
             self.priority_queue_capacity,
             self.auto_start,
-            self.recovery_policy,
         ))
     }
 }
 
+/// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
     plugin_id = "workgraph-router-reaction",

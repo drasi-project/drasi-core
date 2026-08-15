@@ -14,7 +14,8 @@
 
 //! Configuration for the Copilot Agent Task reaction.
 
-use anyhow::{bail, Context};
+use anyhow::bail;
+use drasi_workgraph_common::trust::{validate_trusted_author, ActorType, TrustedAuthor};
 use serde::{Deserialize, Serialize};
 
 /// Default GitHub REST API base URL.
@@ -39,17 +40,16 @@ pub fn default_request_timeout_ms() -> u64 {
     30_000
 }
 
-/// Settings for the single `workgraph.execution/v1` comment posted per
-/// successful launch.
+/// Settings for the single `ExecutionStarted` WorkGraphEvent/v1 comment posted
+/// per successful launch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CommentApiConfig {
-    /// Number of GraphQL comment-post attempts within a single processing
-    /// pass before treating the failure as transient and stopping (the next
-    /// restart resumes at the comment step — the task is never recreated).
+    /// Number of authoritative reconciliation reads after an ambiguous task or
+    /// comment write before failing stopped. Ambiguous writes are never retried.
     #[serde(default = "CommentApiConfig::default_max_attempts")]
     pub max_attempts: u32,
-    /// Backoff between in-process retry attempts.
+    /// Backoff between authoritative reconciliation reads.
     #[serde(default = "CommentApiConfig::default_retry_backoff_ms")]
     pub retry_backoff_ms: u64,
 }
@@ -115,6 +115,38 @@ pub struct CopilotAgentTaskReactionConfig {
     /// `fallbackModel`. Must be non-empty.
     pub allowed_models: Vec<String>,
 
+    /// Numeric GitHub database ID of the identity whose
+    /// `ResponsibilityAssigned` comments this reaction trusts (the identity the
+    /// assigning HTTP reaction posts as).
+    ///
+    /// Together with [`Self::trusted_assignment_author_type`] this is the whole
+    /// trust key for the assignment. Node IDs are audit data on the observed
+    /// author and are never configured; logins are never used for trust
+    /// because they can be renamed and reclaimed; no GitHub App attribution is
+    /// involved. See [`drasi_workgraph_common::trust`].
+    pub trusted_assignment_author_database_id: u64,
+
+    /// Actor type of the identity whose `ResponsibilityAssigned` comments this
+    /// reaction trusts.
+    #[serde(default = "CopilotAgentTaskReactionConfig::default_actor_type")]
+    pub trusted_assignment_author_type: ActorType,
+
+    /// Numeric GitHub database ID of the identity **this** reaction posts as.
+    ///
+    /// Used only to adopt its own `ExecutionStarted` comment after an ambiguous
+    /// write. It must name the same account as `token` authenticates as (and as
+    /// `expectedGithubUserId`, when that preflight is configured).
+    pub trusted_execution_author_database_id: u64,
+
+    /// Actor type of the identity this reaction posts as.
+    #[serde(default = "CopilotAgentTaskReactionConfig::default_actor_type")]
+    pub trusted_execution_author_type: ActorType,
+
+    /// Immutable node ID (`PVTSSF_...`) of the Project single-select status
+    /// field. Preflight requires the item's status field to be exactly this
+    /// node and its value to be `AwaitingValidation`.
+    pub expected_project_status_field_node_id: String,
+
     /// Per-request HTTP timeout in milliseconds.
     #[serde(default = "default_request_timeout_ms")]
     pub request_timeout_ms: u64,
@@ -138,6 +170,26 @@ impl CopilotAgentTaskReactionConfig {
     fn default_strict_recovery() -> bool {
         true
     }
+
+    fn default_actor_type() -> ActorType {
+        ActorType::Bot
+    }
+
+    /// The trusted author of the `ResponsibilityAssigned` assignment.
+    pub fn trusted_assignment_author(&self) -> TrustedAuthor {
+        TrustedAuthor::new(
+            self.trusted_assignment_author_database_id,
+            self.trusted_assignment_author_type,
+        )
+    }
+
+    /// The trusted author of this reaction's own `ExecutionStarted` comment.
+    pub fn trusted_execution_author(&self) -> TrustedAuthor {
+        TrustedAuthor::new(
+            self.trusted_execution_author_database_id,
+            self.trusted_execution_author_type,
+        )
+    }
 }
 
 impl Default for CopilotAgentTaskReactionConfig {
@@ -151,6 +203,11 @@ impl Default for CopilotAgentTaskReactionConfig {
             allowed_repositories: Vec::new(),
             allowed_profiles: Vec::new(),
             allowed_models: Vec::new(),
+            trusted_assignment_author_database_id: 0,
+            trusted_assignment_author_type: Self::default_actor_type(),
+            trusted_execution_author_database_id: 0,
+            trusted_execution_author_type: Self::default_actor_type(),
+            expected_project_status_field_node_id: String::new(),
             request_timeout_ms: default_request_timeout_ms(),
             comment_api: CommentApiConfig::default(),
             strict_recovery: Self::default_strict_recovery(),
@@ -169,6 +226,26 @@ impl std::fmt::Debug for CopilotAgentTaskReactionConfig {
             .field("allowed_repositories", &self.allowed_repositories)
             .field("allowed_profiles", &self.allowed_profiles)
             .field("allowed_models", &self.allowed_models)
+            .field(
+                "trusted_assignment_author_database_id",
+                &self.trusted_assignment_author_database_id,
+            )
+            .field(
+                "trusted_assignment_author_type",
+                &self.trusted_assignment_author_type,
+            )
+            .field(
+                "trusted_execution_author_database_id",
+                &self.trusted_execution_author_database_id,
+            )
+            .field(
+                "trusted_execution_author_type",
+                &self.trusted_execution_author_type,
+            )
+            .field(
+                "expected_project_status_field_node_id",
+                &self.expected_project_status_field_node_id,
+            )
             .field("request_timeout_ms", &self.request_timeout_ms)
             .field("comment_api", &self.comment_api)
             .field("strict_recovery", &self.strict_recovery)
@@ -208,6 +285,36 @@ impl CopilotAgentTaskReactionConfig {
         if self.allowed_models.is_empty() {
             bail!("`allowedModels` must not be empty (fail-closed: nothing is allowed by default)");
         }
+        validate_trusted_author(
+            "trustedAssignmentAuthorDatabaseId",
+            &self.trusted_assignment_author(),
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        validate_trusted_author(
+            "trustedExecutionAuthorDatabaseId",
+            &self.trusted_execution_author(),
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        // Both name this reaction's own account, so a disagreement is a
+        // misconfiguration that would make the reaction unable to adopt its own
+        // `ExecutionStarted` comment — and therefore post a duplicate one.
+        if let Some(expected) = self.expected_github_user_id.as_deref() {
+            if expected != self.trusted_execution_author_database_id.to_string() {
+                bail!(
+                    "`expectedGithubUserId` ({expected}) must be the same account as \
+                     `trustedExecutionAuthorDatabaseId` ({})",
+                    self.trusted_execution_author_database_id
+                );
+            }
+        }
+        if !self
+            .expected_project_status_field_node_id
+            .starts_with("PVTSSF_")
+        {
+            bail!(
+                "`expectedProjectStatusFieldNodeId` must be a Projects v2 single-select field node ID starting with 'PVTSSF_'"
+            );
+        }
         if self.request_timeout_ms == 0 {
             bail!("`requestTimeoutMs` must be greater than 0");
         }
@@ -220,11 +327,27 @@ impl CopilotAgentTaskReactionConfig {
                  require reconciliation, never a silent skip"
             );
         }
-        reqwest::Url::parse(&self.github_api_base_url)
-            .with_context(|| format!("invalid `githubApiBaseUrl`: {}", self.github_api_base_url))?;
-        reqwest::Url::parse(&self.github_graphql_url)
-            .with_context(|| format!("invalid `githubGraphqlUrl`: {}", self.github_graphql_url))?;
+        validate_endpoint("githubApiBaseUrl", &self.github_api_base_url)?;
+        validate_endpoint("githubGraphqlUrl", &self.github_graphql_url)?;
         Ok(())
+    }
+}
+
+/// Validate an HTTP(S) endpoint: it must parse, must not embed credentials, and
+/// must use `https` (plain `http` is allowed only for loopback test servers).
+fn validate_endpoint(field: &str, value: &str) -> anyhow::Result<()> {
+    let url = reqwest::Url::parse(value)
+        .map_err(|error| anyhow::anyhow!("{field} '{value}' is not a valid URL: {error}"))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        anyhow::bail!("{field} must not embed credentials");
+    }
+    let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if loopback => Ok(()),
+        scheme => anyhow::bail!(
+            "{field} scheme '{scheme}' is not allowed; use https (http is permitted only for loopback test endpoints)"
+        ),
     }
 }
 
@@ -238,6 +361,11 @@ mod tests {
             allowed_repositories: vec!["drasi-project/drasi-core".to_string()],
             allowed_profiles: vec!["issue-validator".to_string()],
             allowed_models: vec!["gpt-5".to_string()],
+            trusted_assignment_author_database_id: 4021243,
+            trusted_assignment_author_type: ActorType::Bot,
+            trusted_execution_author_database_id: 90210,
+            trusted_execution_author_type: ActorType::Bot,
+            expected_project_status_field_node_id: "PVTSSF_status".to_string(),
             ..Default::default()
         }
     }
@@ -250,8 +378,26 @@ mod tests {
     #[test]
     fn accepts_numeric_expected_github_user_id() {
         let mut config = valid_config();
-        config.expected_github_user_id = Some("4021243".to_string());
+        config.expected_github_user_id = Some("90210".to_string());
         assert!(config.validate(&["query-1".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn the_token_owner_guard_must_name_the_execution_author() {
+        // Both describe this reaction's own account; if they disagreed, the
+        // reaction could never adopt its own ExecutionStarted comment and would
+        // post a duplicate instead.
+        let mut config = valid_config();
+        config.expected_github_user_id = Some("4021243".to_string());
+        let error = config
+            .validate(&["query-1".to_string()])
+            .expect_err("mismatched token owner");
+        assert!(
+            error
+                .to_string()
+                .contains("trustedExecutionAuthorDatabaseId"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -306,6 +452,126 @@ mod tests {
         let mut cfg = valid_config();
         cfg.github_api_base_url = "not a url".to_string();
         assert!(cfg.validate(&["q".to_string()]).is_err());
+    }
+
+    #[test]
+    fn requires_an_authoritative_database_id_for_both_roles() {
+        let mut cfg = valid_config();
+        cfg.trusted_assignment_author_database_id = 0;
+        let error = cfg
+            .validate(&["q".to_string()])
+            .expect_err("no assignment author");
+        assert!(error
+            .to_string()
+            .contains("trustedAssignmentAuthorDatabaseId"));
+
+        let mut cfg = valid_config();
+        cfg.trusted_execution_author_database_id = 0;
+        let error = cfg
+            .validate(&["q".to_string()])
+            .expect_err("no execution author");
+        assert!(error
+            .to_string()
+            .contains("trustedExecutionAuthorDatabaseId"));
+    }
+
+    #[test]
+    fn each_role_keeps_its_own_database_id_and_actor_type() {
+        let cfg = valid_config();
+        assert_eq!(
+            cfg.trusted_assignment_author(),
+            TrustedAuthor::new(4021243, ActorType::Bot)
+        );
+        assert_eq!(
+            cfg.trusted_execution_author(),
+            TrustedAuthor::new(90210, ActorType::Bot)
+        );
+
+        let mut cfg = valid_config();
+        cfg.trusted_execution_author_type = ActorType::User;
+        assert_eq!(
+            cfg.trusted_execution_author(),
+            TrustedAuthor::new(90210, ActorType::User)
+        );
+        assert_eq!(
+            cfg.trusted_assignment_author(),
+            TrustedAuthor::new(4021243, ActorType::Bot),
+            "the roles must not share a trust value"
+        );
+    }
+
+    #[test]
+    fn actor_types_default_to_bot_and_no_node_id_is_configurable() {
+        let cfg: CopilotAgentTaskReactionConfig = serde_json::from_value(serde_json::json!({
+            "token": "ghp_test",
+            "allowedRepositories": ["o/r"],
+            "allowedProfiles": ["issue-validator"],
+            "allowedModels": ["gpt-5"],
+            "trustedAssignmentAuthorDatabaseId": 4021243,
+            "trustedExecutionAuthorDatabaseId": 90210,
+            "expectedProjectStatusFieldNodeId": "PVTSSF_status"
+        }))
+        .expect("actor types default");
+        assert_eq!(cfg.trusted_assignment_author_type, ActorType::Bot);
+        assert_eq!(cfg.trusted_execution_author_type, ActorType::Bot);
+        cfg.validate(&["q".to_string()]).expect("valid");
+
+        for removed in ["trustedAssignmentAuthors", "trustedAssignmentAuthorNodeId"] {
+            let mut json = serde_json::json!({
+                "token": "ghp_test",
+                "allowedRepositories": ["o/r"],
+                "allowedProfiles": ["issue-validator"],
+                "allowedModels": ["gpt-5"],
+                "trustedAssignmentAuthorDatabaseId": 4021243,
+                "trustedExecutionAuthorDatabaseId": 90210,
+                "expectedProjectStatusFieldNodeId": "PVTSSF_status"
+            });
+            json[removed] = serde_json::json!("x");
+            let error = serde_json::from_value::<CopilotAgentTaskReactionConfig>(json)
+                .expect_err("removed trust field must be rejected");
+            assert!(error.to_string().contains(removed), "{error}");
+        }
+    }
+
+    #[test]
+    fn rejects_bad_status_field_node_id() {
+        let mut cfg = valid_config();
+        cfg.expected_project_status_field_node_id = "PVTF_wrongprefix".to_string();
+        let error = cfg
+            .validate(&["q".to_string()])
+            .expect_err("bad status field node id");
+        assert!(error
+            .to_string()
+            .contains("expectedProjectStatusFieldNodeId"));
+    }
+
+    #[test]
+    fn rejects_endpoint_with_credentials() {
+        let mut cfg = valid_config();
+        cfg.github_api_base_url = "https://user:pass@api.github.com".to_string();
+        let error = cfg
+            .validate(&["q".to_string()])
+            .expect_err("credentials in URL");
+        assert!(error.to_string().contains("must not embed credentials"));
+    }
+
+    #[test]
+    fn rejects_non_https_non_loopback_endpoint() {
+        let mut cfg = valid_config();
+        cfg.github_api_base_url = "http://api.github.com".to_string();
+        let error = cfg
+            .validate(&["q".to_string()])
+            .expect_err("plain http on a public host");
+        assert!(error.to_string().contains("is not allowed"));
+    }
+
+    #[test]
+    fn allows_http_loopback_endpoint() {
+        let mut cfg = valid_config();
+        cfg.github_api_base_url = "http://127.0.0.1:8080".to_string();
+        cfg.github_graphql_url = "http://localhost:8080/graphql".to_string();
+        cfg.validate(&["q".to_string()])
+            .expect("loopback http is allowed for tests");
     }
 
     #[test]

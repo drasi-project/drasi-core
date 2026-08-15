@@ -78,8 +78,16 @@ drasi-middleware = { version = "0.3", features = ["bundled-jq"] }
 
 A query has one middleware pipeline for each source ID. Middleware in that pipeline
 therefore needs to pass unrelated elements through. This example recognizes only
-comments with a versioned header and fenced JSON payload while issues, relations,
-and ordinary comments continue unchanged:
+comments written in the strict `WorkGraphEvent/v1` grammar
+
+```text
+WorkGraphEvent/v1<LF><LF><summary><LF><LF><json>
+```
+
+— marker line, empty line, one summary line of at most 120 characters, empty line,
+then one raw JSON object that ends at end-of-comment. There is no Markdown fence.
+Issues, relations, ordinary comments, and comments in any other shape (including
+retired pure-JSON and fenced bodies) continue unchanged:
 
 ```yaml
 middleware:
@@ -87,9 +95,9 @@ middleware:
     kind: regex_extract
     config:
       target_property: body
-      pattern: '(?s)^Event/v1\s*\n```json\s*(?<payload>.*?)\s*```'
+      pattern: '(?s)^WorkGraphEvent/v1\r?\n\r?\n(?<summary>[^\r\n]{1,120})\r?\n\r?\n(?<payload>\{.*\})$'
       capture_group: payload
-      output_property: event_payload
+      output_property: workgraphEventJson
       max_capture_size: 65536
       on_missing: passthrough
       on_no_match: passthrough
@@ -98,8 +106,8 @@ middleware:
   - name: parse_event_payload
     kind: parse_json
     config:
-      target_property: event_payload
-      output_property: event
+      target_property: workgraphEventJson
+      output_property: workgraphEvent
       on_missing: passthrough
       on_error: fail
   - name: derive_event_graph
@@ -109,14 +117,48 @@ middleware:
       include_source_metadata: true
       reconcile: true
       mappings:
-        Comment:
+        GitHubComment:
           insert: &event_mappings
             - elementType: Node
-              label: '"Event"'
+              label: '"WorkGraphEvent"'
               id: .id
-              query: 'if .event then .event else empty end'
+              query: >-
+                if .workgraphEvent and .workgraphEvent.schemaVersion == "workgraph.event/v1"
+                then {id: .workgraphEvent.eventId, eventId: .workgraphEvent.eventId,
+                      eventType: .workgraphEvent.eventType, runId: .workgraphEvent.runId,
+                      projectItemNodeId: .workgraphEvent.projectItemNodeId,
+                      subjectNodeId: .workgraphEvent.subjectNodeId}
+                else empty end
           update: *event_mappings
 ```
+
+The `\r?\n` alternatives normalize the CRLF that GitHub's web UI submits. Anchoring
+the payload with `\{.*\}$` is what makes trailing text impossible to smuggle past
+extraction, and the `schemaVersion` guard in jq is what keeps foreign envelopes out
+of the graph. The event envelope carries no actor or timestamp by design: identity
+and time come from the authoritative source's own metadata, never from comment text.
+The GitHub source projects comment authorship as exactly `authorId` (the account's
+node ID, audit data), `authorDatabaseId` (numeric), `authorType`, and `authorLogin`
+(display only); WorkGraph components key trust on `authorDatabaseId` + `authorType`
+alone and never on a name promoted out of the comment body.
+
+A WorkGraph reaction is triggered by a row, not by polling a thread, so the query that
+feeds it returns the comment itself plus the exact Source metadata that decides whether
+it may be acted on: `authorDatabaseId`, `authorType`, `isEdited` (all projected on
+`GitHubIssueComment`), and `bodyDigest` (projected on `GitHubIssue`/`GitHubPullRequest`
+as `"sha256:" + lowerHex(sha256(utf8(body ?? "")))`, which is also the third input to
+`runId`). Those four names are used verbatim in the row contracts of
+`components/reactions/copilot-agent-task` and `components/reactions/workgraph-router`.
+See `components/workgraph-common` for the typed parser, the deterministic
+`runId`/`eventId` algorithms, the author-trust contract, and cross-language test
+vectors.
+
+The regex is deliberately a *coarse* pre-filter: it is slightly more permissive
+than the shared parser about what may appear inside the summary line. That is
+safe because nothing routes on the summary and because every component that acts
+on an event re-parses the comment with `parse_comment` (which enforces the full
+summary rules) before trusting it. Promotion into the graph is for querying, not
+for authorization.
 
 `preserve_input` tees the input change after the derived changes, keeping the
 source element available to queries and to later reconciliation. With

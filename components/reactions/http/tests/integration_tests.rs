@@ -91,12 +91,28 @@ async fn wait_for_requests(server: &wiremock::MockServer, expected: usize, max_m
         if count >= expected {
             return;
         }
+
         if std::time::Instant::now() >= deadline {
             panic!(
                 "timed out after {max_ms}ms waiting for {expected} request(s); observed {count}"
             );
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn graphql_template(fail_on_graphql_errors: bool) -> HttpQueryConfig {
+    HttpQueryConfig {
+        added: Some(TemplateSpec {
+            template: r#"{"query":"query { viewer { login } }"}"#.to_string(),
+            extension: HttpCallExt {
+                url: "/graphql".to_string(),
+                method: "POST".to_string(),
+                headers: HashMap::new(),
+                fail_on_graphql_errors,
+            },
+        }),
+        ..Default::default()
     }
 }
 
@@ -228,6 +244,7 @@ async fn standard_uses_per_query_template() {
             url: "/items/{{after.id}}".to_string(),
             method: "PUT".to_string(),
             headers,
+            fail_on_graphql_errors: false,
         },
     };
     let r = Arc::new(
@@ -276,6 +293,7 @@ async fn standard_body_render_error_uses_default_envelope_on_configured_route() 
             url: "/items".to_string(),
             method: "POST".to_string(),
             headers: HashMap::new(),
+            fail_on_graphql_errors: false,
         },
     };
     let r = Arc::new(
@@ -360,6 +378,7 @@ async fn standard_update_template_receives_before_and_after() {
             url: "/items/{{after.id}}".to_string(),
             method: "PUT".to_string(),
             headers: HashMap::new(),
+            fail_on_graphql_errors: false,
         },
     };
     let r = Arc::new(
@@ -409,6 +428,7 @@ async fn standard_delete_template_receives_before() {
             url: "/items/{{before.id}}".to_string(),
             method: "DELETE".to_string(),
             headers: HashMap::new(),
+            fail_on_graphql_errors: false,
         },
     };
     let r = Arc::new(
@@ -515,11 +535,213 @@ async fn standard_fail_stops_on_server_error_under_strict() {
             errored = true;
             break;
         }
+
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert!(
         errored,
         "reaction must fail-stop (Error) on sustained 5xx delivery failure under Strict"
+    );
+    r.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn graphql_response_policy_accepts_data_and_absent_or_empty_errors() {
+    for (name, response_body) in [
+        ("data", json!({"data": {"viewer": {"login": "octocat"}}})),
+        (
+            "empty-errors",
+            json!({"data": {"viewer": {"login": "octocat"}}, "errors": []}),
+        ),
+        ("errors-only-empty", json!({"errors": []})),
+    ] {
+        let server = mock_server::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+            .mount(&server)
+            .await;
+        let r = Arc::new(
+            HttpReaction::builder(format!("graphql-{name}"))
+                .with_base_url(server.uri())
+                .with_query("q1")
+                .with_query_template("q1", graphql_template(true))
+                .build()
+                .unwrap(),
+        );
+        r.start().await.unwrap();
+        enqueue_add(&r, "q1", json!({"id": 1})).await;
+        wait_for_requests(&server, 1, 2000).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            matches!(r.status().await, ComponentStatus::Running),
+            "{name}"
+        );
+        r.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn graphql_response_policy_defaults_false_and_preserves_2xx_behavior() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .mount(&server)
+        .await;
+    let r = Arc::new(
+        HttpReaction::builder("graphql-default-false")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_query_template("q1", graphql_template(false))
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    wait_for_requests(&server, 1, 2000).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(matches!(r.status().await, ComponentStatus::Running));
+    r.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn graphql_errors_retry_then_fail_stop_under_strict_policy() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"partial": true},
+            "errors": [{"message": "token ghp_must_never_be_logged"}]
+        })))
+        .mount(&server)
+        .await;
+    let r = Arc::new(
+        HttpReaction::builder("graphql-errors-strict")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_query_template("q1", graphql_template(true))
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    wait_for_requests(&server, 3, 3000).await;
+    for _ in 0..50 {
+        if matches!(r.status().await, ComponentStatus::Error) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(matches!(r.status().await, ComponentStatus::Error));
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    r.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn adaptive_graphql_errors_retry_then_fail_stop_under_strict_policy() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/batch"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"partial": true},
+            "errors": [{"message": "token ghp_must_never_be_logged"}]
+        })))
+        .mount(&server)
+        .await;
+    let r = Arc::new(
+        HttpReaction::builder("adaptive-graphql-errors-strict")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_query_template("q1", graphql_template(true))
+            .with_adaptive(AdaptiveBatchConfig {
+                adaptive_min_batch_size: 1,
+                adaptive_max_batch_size: 16,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 50,
+            })
+            .with_batch_endpoint("/batch")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    wait_for_requests(&server, 3, 3000).await;
+    for _ in 0..50 {
+        if matches!(r.status().await, ComponentStatus::Error) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(matches!(r.status().await, ComponentStatus::Error));
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    r.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn adaptive_graphql_policy_defaults_false_and_preserves_2xx_behavior() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/batch"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .mount(&server)
+        .await;
+    let r = Arc::new(
+        HttpReaction::builder("adaptive-graphql-default-false")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_query_template("q1", graphql_template(false))
+            .with_adaptive(AdaptiveBatchConfig {
+                adaptive_min_batch_size: 1,
+                adaptive_max_batch_size: 16,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 50,
+            })
+            .with_batch_endpoint("/batch")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    wait_for_requests(&server, 1, 2000).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(matches!(r.status().await, ComponentStatus::Running));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    r.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn adaptive_batch_rejects_mixed_graphql_error_policies_before_delivery() {
+    let server = mock_server::start().await;
+    let r = Arc::new(
+        HttpReaction::builder("adaptive-graphql-mixed")
+            .with_base_url(server.uri())
+            .with_queries(vec!["q1".to_string(), "q2".to_string()])
+            .with_query_template("q1", graphql_template(true))
+            .with_query_template("q2", graphql_template(false))
+            .with_adaptive(AdaptiveBatchConfig {
+                adaptive_min_batch_size: 2,
+                adaptive_max_batch_size: 16,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 500,
+            })
+            .with_batch_endpoint("/batch")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(&r, "q2", json!({"id": 2})).await;
+    for _ in 0..50 {
+        if matches!(r.status().await, ComponentStatus::Error) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(matches!(r.status().await, ComponentStatus::Error));
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "mixed policy batches must fail before an HTTP write"
     );
     r.stop().await.unwrap();
 }
@@ -814,6 +1036,7 @@ async fn ssrf_guard_blocks_absolute_url_with_mismatched_host() {
             url: "http://evil.example.com/x".to_string(),
             method: "POST".to_string(),
             headers: HashMap::new(),
+            fail_on_graphql_errors: false,
         },
     };
     // DELETE template renders a safe relative URL — must be delivered, and
@@ -824,6 +1047,7 @@ async fn ssrf_guard_blocks_absolute_url_with_mismatched_host() {
             url: "/safe".to_string(),
             method: "POST".to_string(),
             headers: HashMap::new(),
+            fail_on_graphql_errors: false,
         },
     };
 
@@ -1152,6 +1376,7 @@ async fn template_context_exposes_query_id_metadata_and_operation() {
             url: "/ingest".to_string(),
             method: "POST".to_string(),
             headers: HashMap::new(),
+            fail_on_graphql_errors: false,
         },
     };
     let r = Arc::new(
@@ -1213,6 +1438,7 @@ async fn route_resolves_via_last_dotted_segment() {
             url: "/seg".to_string(),
             method: "POST".to_string(),
             headers: HashMap::new(),
+            fail_on_graphql_errors: false,
         },
     };
     let r = Arc::new(
@@ -1421,6 +1647,7 @@ async fn standard_absolute_url_matching_base_is_allowed() {
             url: absolute,
             method: "POST".to_string(),
             headers: HashMap::new(),
+            fail_on_graphql_errors: false,
         },
     };
     let r = Arc::new(
@@ -1464,6 +1691,7 @@ async fn standard_url_render_failure_falls_back_to_changes_endpoint() {
             url: "/items/{{badhelper after.id}}".to_string(),
             method: "POST".to_string(),
             headers: HashMap::new(),
+            fail_on_graphql_errors: false,
         },
     };
     let r = Arc::new(
@@ -1508,6 +1736,7 @@ async fn standard_header_render_failure_drops_only_that_header() {
             url: "/h".to_string(),
             method: "POST".to_string(),
             headers,
+            fail_on_graphql_errors: false,
         },
     };
     let r = Arc::new(
@@ -1558,6 +1787,7 @@ async fn standard_routes_two_queries_to_distinct_endpoints() {
                 url: url.to_string(),
                 method: "POST".to_string(),
                 headers: HashMap::new(),
+                fail_on_graphql_errors: false,
             },
         }),
         ..Default::default()

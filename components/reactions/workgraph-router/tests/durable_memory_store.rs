@@ -14,9 +14,9 @@
 
 //! A `MemoryStateStoreProvider` wrapper that reports itself as durable.
 //!
-//! The Copilot Agent Task reaction requires (`is_durable() == true`) a state
-//! store the host considers durable, since reservation/execution records
-//! must genuinely survive restarts for idempotency to hold. Exercising that
+//! The WorkGraph router reaction requires (`is_durable() == true`) a state
+//! store the host considers durable, since routing records must genuinely
+//! survive restarts for idempotency to hold. Exercising that
 //! *logic* in tests does not require real disk persistence (unlike, say,
 //! testing an actual crash/restart of the OS process) — the tests in this
 //! directory simulate "restart" by reusing the same `Arc<dyn
@@ -59,8 +59,8 @@ impl StateStoreProvider for DurableMemoryStateStoreProvider {
         self.inner.set(store_id, key, value).await
     }
 
-    /// Forwarded so the reaction's intent-before-side-effect reservation really
-    /// is created atomically; the trait default reports CAS as unsupported.
+    /// Forwarded so the router's intent-before-side-effect record really is
+    /// created atomically; the trait default reports CAS as unsupported.
     async fn create_if_absent(
         &self,
         store_id: &str,

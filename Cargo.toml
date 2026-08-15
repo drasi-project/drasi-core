@@ -11,6 +11,7 @@ members = [
   "lib",
 
   # Shared component libraries
+  "components/workgraph-common",
   "components/mssql-common",
   "components/mysql-common",
   "components/kubernetes-common",
@@ -213,6 +214,8 @@ drasi-source-neo4j = { version = "0.1.4", path = "components/sources/neo4j" }
 drasi-bootstrap-neo4j = { version = "0.1.4", path = "components/bootstrappers/neo4j" }
 drasi-neo4j-common = { version = "0.1.4", path = "components/neo4j-common" }
 drasi-bootstrap-sqlite = { version = "0.1.9", path = "components/bootstrappers/sqlite" }
+drasi-workgraph-common = { version = "0.1.0", path = "components/workgraph-common" }
+drasi-reaction-workgraph-router = { version = "0.1.0", path = "components/reactions/workgraph-router" }
 
 [workspace.lints.rust]
 warnings = "deny"

@@ -32,7 +32,7 @@ use crate::adaptive_batcher::{AdaptiveBatcher, AdaptiveBatcherConfig};
 use crate::batch::send_coalesced_batch;
 use crate::config::HttpReactionConfig;
 use crate::output::DefaultChangeNotification;
-use crate::process::{build_handlebars, render_batch_item};
+use crate::process::{batch_graphql_error_policy, build_handlebars, render_batch_item};
 use drasi_lib::reactions::common::{batch_checkpoint_candidates, CheckpointState, FailureAction};
 
 /// One coalesced batch item: the rendered wire payload plus the identity needed
@@ -42,6 +42,7 @@ use drasi_lib::reactions::common::{batch_checkpoint_candidates, CheckpointState,
 /// keeps a `QueryResult` split across batches at-least-once correct.
 pub(crate) struct BatchItem {
     pub payload: serde_json::Value,
+    pub fail_on_graphql_errors: bool,
     pub query_id: String,
     pub sequence: u64,
     pub is_terminal: bool,
@@ -107,7 +108,7 @@ pub(crate) async fn run_adaptive_loop(
                 let mut meta = Vec::with_capacity(batch_size);
                 for item in batch {
                     meta.push((item.query_id, item.sequence, item.is_terminal));
-                    payloads.push(item.payload);
+                    payloads.push((item.payload, item.fail_on_graphql_errors));
                 }
                 let (completed, seen) = batch_checkpoint_candidates(meta);
 
@@ -227,6 +228,7 @@ pub(crate) async fn run_adaptive_loop(
             let payload = render_batch_item(&handlebars, &config, notification, &reaction_name);
             let item = BatchItem {
                 payload,
+                fail_on_graphql_errors: batch_graphql_error_policy(&config, notification),
                 query_id: query_id.clone(),
                 sequence: seq,
                 is_terminal: i == last_idx,
@@ -294,18 +296,30 @@ async fn deliver_batch(
     client: &Client,
     config: &HttpReactionConfig,
     reaction_name: &str,
-    batch: Vec<serde_json::Value>,
+    batch: Vec<(serde_json::Value, bool)>,
 ) -> anyhow::Result<()> {
     let Some(batch_endpoint) = config.batch_endpoint.as_ref() else {
         anyhow::bail!("adaptive HTTP delivery requires batchEndpoint");
     };
+
+    let fail_on_graphql_errors = batch.first().map(|(_, policy)| *policy).unwrap_or(false);
+    if batch
+        .iter()
+        .any(|(_, policy)| *policy != fail_on_graphql_errors)
+    {
+        anyhow::bail!(
+            "adaptive batch mixes failOnGraphqlErrors policies; refusing to weaken per-request response validation"
+        );
+    }
+    let payloads = batch.into_iter().map(|(payload, _)| payload).collect();
 
     send_coalesced_batch(
         client,
         &config.base_url,
         batch_endpoint,
         &config.token,
-        batch,
+        payloads,
+        fail_on_graphql_errors,
         reaction_name,
     )
     .await

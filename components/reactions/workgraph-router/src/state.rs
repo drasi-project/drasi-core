@@ -12,313 +12,821 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Durable routing state.
+//!
+//! Exactly one record exists per `runId`, and it is written **before** the
+//! first GitHub write. That ordering is what makes recovery decidable: if a
+//! record exists, routing may already have had an external effect, so the
+//! reaction reconciles against GitHub rather than retrying blindly.
+//!
+//! The record also pins the decision's inputs *and* its intended output:
+//!
+//! * the **accepted completion comment** — its immutable node ID *and* the
+//!   SHA-256 of the exact body that was accepted — so a completion edited after
+//!   the fact can never quietly change what the router already decided;
+//! * the decided destination status and outcome, so a resumed run finishes the
+//!   same decision instead of re-deriving one; and
+//! * the **canonical JSON of the `RoutingDecided` event** the run intends to
+//!   publish, so a resumed run can verify — or, after an unobserved write,
+//!   re-issue — the decision comment without re-deriving anything from live
+//!   state.
+//!
+//! Publication is bracketed by two durable markers: `decisionPublishAttempted`
+//! is written *before* the create-comment request, and
+//! `decisionCommentNodeId` *after* it is observed. A run that carries the first
+//! without the second is exactly the "the decision may already be visible"
+//! case, and is resumed from the pinned event rather than re-derived.
+//!
+//! A second key — the **open-run pointer** for a Project item — maps the item
+//! to the run that currently owns it. It is written before the first GitHub
+//! write, and it is what lets a resumed run find its own attempted decision
+//! even when the issue body (and therefore the `runId` a fresh derivation would
+//! produce) has changed since publication.
+//!
+//! Every mutation is an exact-bytes compare-and-swap, so a stale in-memory copy
+//! can never clobber newer progress.
+
 use std::sync::Arc;
 
 use chrono::Utc;
 use drasi_lib::state_store::{StateStoreCompareAndSwapResult, StateStoreProvider};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::candidate::RoutingCandidate;
-use crate::decision::RoutingDecision;
 
-const RESERVATION_PREFIX: &str = "workgraph-router/reservations/";
-const ROUTING_STATE_PREFIX: &str = "workgraph-router/state/";
+/// State-store key prefix for routing records.
+pub const ROUTING_RECORD_PREFIX: &str = "workgraph-router/runs/";
 
+/// State-store key prefix for the per-Project-item open-run pointer.
+pub const ROUTING_ITEM_PREFIX: &str = "workgraph-router/items/";
+
+/// Schema version of the persisted record.
+pub const ROUTING_RECORD_SCHEMA: &str = "workgraph.routing-record/v1";
+
+/// Schema version of the persisted open-run pointer.
+pub const ROUTING_ITEM_SCHEMA: &str = "workgraph.routing-item/v1";
+
+/// Digest the exact bytes of an accepted comment body.
+///
+/// Used to detect an edit to a comment the router has already accepted as the
+/// authoritative input to a decision.
+pub fn comment_body_hash(body: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(body.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+/// The physical comment the router accepted as the completion for a run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AcceptedCompletion {
+    /// The immutable comment node ID that carried the completion event.
+    pub comment_node_id: String,
+    /// SHA-256 of the exact accepted comment body.
+    pub body_hash: String,
+}
+
+/// The durable record for one routing decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReservationRecord {
-    pub reservation_key: String,
-    pub execution_id: String,
-    pub required_event_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_instance_id: Option<String>,
-    #[serde(default = "default_fencing_epoch")]
-    pub fencing_epoch: u64,
+pub struct RoutingRecord {
+    /// Record schema version.
+    pub schema_version: String,
+    /// The deterministic run identifier this record routes.
+    pub run_id: String,
+    /// The deterministic `RoutingDecided` event identifier.
+    pub event_id: String,
+    /// `owner/repo` of the subject issue.
+    pub repository: String,
+    /// The subject issue number.
+    pub subject_number: u64,
+    /// The subject issue node ID.
+    pub subject_node_id: String,
+    /// The Project node ID.
+    pub project_node_id: String,
+    /// The Project item node ID.
+    pub project_item_node_id: String,
+    /// The issue-body digest this run is bound to.
+    pub content_digest: String,
+    /// The completion comment the decision was derived from.
+    pub accepted_completion: AcceptedCompletion,
+    /// The validation outcome that produced the decision.
+    pub outcome: String,
+    /// The status the item is being routed to.
+    pub to_status: String,
+    /// Canonical JSON of the `RoutingDecided` event this run publishes.
+    ///
+    /// A resumed run compares the published decision comment against these
+    /// exact bytes, so the comparison never depends on re-deriving anything
+    /// from live GitHub state.
+    pub decision_event_json: String,
+    /// Whether a decision-comment write has been *attempted* for this run.
+    ///
+    /// Written durably **before** the create-comment request, so a run whose
+    /// write outcome was never observed is still recognisable as "the decision
+    /// may already be visible in the issue thread". It is a one-way flag: it is
+    /// never cleared, and it is implied by
+    /// [`Self::decision_comment_node_id`] being set.
+    ///
+    /// Records written before this field existed decode as `false`; such a
+    /// record is still resumable whenever it names a decision comment, which is
+    /// the only state an older writer could durably reach after a write.
     #[serde(default)]
-    pub lease_expires_at_unix_secs: i64,
-    pub policy_id: String,
-    pub policy_type: String,
-    pub policy_version: String,
+    pub decision_publish_attempted: bool,
+    /// The decision comment node ID, once that comment is durable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decision_id: Option<String>,
-    pub created_at: String,
-    pub completed: bool,
-}
-
-fn default_fencing_epoch() -> u64 {
-    1
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SideEffectProgress {
-    pub decision_comment_written: bool,
-    pub responsibility_written: bool,
-    pub project_status_updated: bool,
-}
-
-impl SideEffectProgress {
-    pub fn is_complete(&self) -> bool {
-        self.decision_comment_written && self.responsibility_written && self.project_status_updated
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RoutingStateRecord {
-    pub reservation_key: String,
-    pub execution_id: String,
-    pub required_event_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_instance_id: Option<String>,
+    pub decision_comment_node_id: Option<String>,
+    /// Whether the Project status has been observed at the decided status.
     #[serde(default)]
-    pub fencing_epoch: u64,
-    pub policy_id: String,
-    pub policy_type: String,
-    pub policy_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decision: Option<RoutingDecision>,
-    #[serde(default)]
-    pub selected_transition: Option<(String, String)>,
-    #[serde(default)]
-    pub progress: SideEffectProgress,
+    pub status_applied: bool,
+    /// Whether a write outcome is unknown and must be reconciled.
     #[serde(default)]
     pub ambiguous: bool,
-    #[serde(default)]
-    pub failed: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_fencing_epoch: Option<u64>,
+    /// The last error observed for this run, for operator diagnosis.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// When the record was first written.
+    pub created_at: String,
+    /// When the record was last written.
     pub updated_at: String,
 }
 
-impl RoutingStateRecord {
-    pub fn new(candidate: &RoutingCandidate, reservation: &ReservationRecord) -> Self {
+impl RoutingRecord {
+    /// Build the initial (intent) record for a run.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        run_id: &str,
+        event_id: &str,
+        candidate: &RoutingCandidate,
+        content_digest: &str,
+        accepted_completion: AcceptedCompletion,
+        outcome: &str,
+        to_status: &str,
+        decision_event_json: &str,
+    ) -> Self {
+        let now = Utc::now().to_rfc3339();
         Self {
-            reservation_key: reservation.reservation_key.clone(),
-            execution_id: candidate.execution_id.clone(),
-            required_event_type: candidate.required_event_type.clone(),
-            owner_instance_id: reservation.owner_instance_id.clone(),
-            fencing_epoch: reservation.fencing_epoch,
-            policy_id: reservation.policy_id.clone(),
-            policy_type: reservation.policy_type.clone(),
-            policy_version: reservation.policy_version.clone(),
-            decision: None,
-            selected_transition: None,
-            progress: SideEffectProgress::default(),
+            schema_version: ROUTING_RECORD_SCHEMA.to_string(),
+            run_id: run_id.to_string(),
+            event_id: event_id.to_string(),
+            repository: candidate.repository.clone(),
+            subject_number: candidate.subject_number,
+            subject_node_id: candidate.subject_node_id.clone(),
+            project_node_id: candidate.project_node_id.clone(),
+            project_item_node_id: candidate.project_item_node_id.clone(),
+            content_digest: content_digest.to_string(),
+            accepted_completion,
+            outcome: outcome.to_string(),
+            to_status: to_status.to_string(),
+            decision_event_json: decision_event_json.to_string(),
+            decision_publish_attempted: false,
+            decision_comment_node_id: None,
+            status_applied: false,
             ambiguous: false,
-            failed: false,
-            failure_fencing_epoch: None,
             last_error: None,
-            updated_at: Utc::now().to_rfc3339(),
+            created_at: now.clone(),
+            updated_at: now,
         }
     }
 
-    pub fn mark_error(&mut self, error: impl Into<String>, ambiguous: bool) {
-        self.failed = true;
-        self.ambiguous = ambiguous;
-        self.failure_fencing_epoch = None;
-        self.last_error = Some(error.into());
+    /// Whether both side effects are durably recorded.
+    pub fn is_complete(&self) -> bool {
+        self.decision_comment_node_id.is_some() && self.status_applied
+    }
+
+    /// Whether the decision comment is durably published but the final status
+    /// move has not been applied yet.
+    ///
+    /// A run in this state must be finished from the persisted decision, never
+    /// re-derived from live state: the decision is already visible in the issue
+    /// thread, so abandoning it would strand the item.
+    pub fn is_published_but_unapplied(&self) -> bool {
+        self.decision_comment_node_id.is_some() && !self.status_applied
+    }
+
+    /// Whether publication of the decision was *attempted* — successfully or
+    /// with an unknown outcome — while the final status move is still pending.
+    ///
+    /// This is the state that owns the Project item. It is deliberately wider
+    /// than [`Self::is_published_but_unapplied`]: after an ambiguous
+    /// create-comment error the decision may already be visible in the issue
+    /// thread even though no comment node ID was ever observed, so such a run
+    /// must be resumed from its persisted intent rather than re-derived from
+    /// live state (which a later issue-body edit would silently skip).
+    pub fn is_publish_attempted_but_unapplied(&self) -> bool {
+        !self.status_applied
+            && (self.decision_publish_attempted || self.is_published_but_unapplied())
+    }
+
+    /// Reject a record that describes a different subject than the current row.
+    ///
+    /// The `runId` binds the Project Item, the subject, and the body digest, so
+    /// a mismatch here means the state store has been corrupted or a `runId`
+    /// collision occurred; either way, writing again would be unsafe.
+    pub fn ensure_matches(&self, candidate: &RoutingCandidate) -> anyhow::Result<()> {
+        if self.schema_version != ROUTING_RECORD_SCHEMA {
+            anyhow::bail!(
+                "routing record schema '{}' is not '{ROUTING_RECORD_SCHEMA}'",
+                self.schema_version
+            );
+        }
+        if self.repository != candidate.repository
+            || self.subject_number != candidate.subject_number
+            || self.subject_node_id != candidate.subject_node_id
+            || self.project_node_id != candidate.project_node_id
+            || self.project_item_node_id != candidate.project_item_node_id
+        {
+            anyhow::bail!(
+                "routing record for run '{}' describes {}#{} on item '{}', which does not match this row",
+                self.run_id,
+                self.repository,
+                self.subject_number,
+                self.project_item_node_id
+            );
+        }
+        Ok(())
+    }
+
+    /// Reject a decision whose inputs changed since it was recorded.
+    ///
+    /// A run is decided exactly once. If the completion comment the decision
+    /// was derived from has been edited, or a different physical comment now
+    /// claims the completion, the router must not proceed: the recorded
+    /// decision may no longer reflect what the issue thread says.
+    pub fn ensure_decision_inputs_unchanged(
+        &self,
+        observed: &AcceptedCompletion,
+        outcome: &str,
+        to_status: &str,
+    ) -> anyhow::Result<()> {
+        if self.accepted_completion.comment_node_id != observed.comment_node_id {
+            anyhow::bail!(
+                "run '{}' was decided from completion comment '{}' but comment '{}' now claims the completion",
+                self.run_id,
+                self.accepted_completion.comment_node_id,
+                observed.comment_node_id
+            );
+        }
+        if self.accepted_completion.body_hash != observed.body_hash {
+            anyhow::bail!(
+                "completion comment '{}' for run '{}' was edited after it was accepted; refusing to route",
+                self.accepted_completion.comment_node_id,
+                self.run_id
+            );
+        }
+        if self.outcome != outcome || self.to_status != to_status {
+            anyhow::bail!(
+                "run '{}' was decided as '{}' -> '{}' but now derives '{outcome}' -> '{to_status}'",
+                self.run_id,
+                self.outcome,
+                self.to_status
+            );
+        }
+        Ok(())
+    }
+
+    fn touch(&mut self) {
         self.updated_at = Utc::now().to_rfc3339();
     }
 
-    pub fn mark_error_with_epoch(
-        &mut self,
-        error: impl Into<String>,
-        ambiguous: bool,
-        fencing_epoch: u64,
-    ) {
-        self.mark_error(error, ambiguous);
-        self.failure_fencing_epoch = Some(fencing_epoch);
+    /// Record that a decision-comment write is about to be issued.
+    ///
+    /// Persisted **before** the write, so an unobserved outcome still leaves a
+    /// durable "this decision may be published" marker. Diagnostics are left
+    /// untouched: this transition reports an intent, not a result.
+    pub fn mark_decision_publish_attempted(&mut self) {
+        self.decision_publish_attempted = true;
+        self.touch();
     }
 
-    pub fn clear_error(&mut self) {
-        self.failed = false;
+    /// Record the comment that carries the routing decision.
+    pub fn set_decision_comment(&mut self, comment_node_id: impl Into<String>) {
+        self.decision_comment_node_id = Some(comment_node_id.into());
+        self.decision_publish_attempted = true;
         self.ambiguous = false;
-        self.failure_fencing_epoch = None;
         self.last_error = None;
-        self.updated_at = Utc::now().to_rfc3339();
+        self.touch();
     }
 
-    pub fn mark_progress(&mut self, progress: SideEffectProgress) {
-        self.progress = progress;
-        self.updated_at = Utc::now().to_rfc3339();
+    /// Record that the Project status is at the decided status.
+    pub fn set_status_applied(&mut self) {
+        self.status_applied = true;
+        self.ambiguous = false;
+        self.last_error = None;
+        self.touch();
+    }
+
+    /// Record an error, optionally marking the run as ambiguous.
+    pub fn set_error(&mut self, error: impl Into<String>, ambiguous: bool) {
+        self.last_error = Some(error.into());
+        self.ambiguous = ambiguous;
+        self.touch();
     }
 }
 
-pub fn reservation_store_key(reservation_key: &str) -> String {
-    format!("{RESERVATION_PREFIX}{reservation_key}")
-}
-
-pub fn routing_state_store_key(reservation_key: &str) -> String {
-    format!("{ROUTING_STATE_PREFIX}{reservation_key}")
-}
-
+/// A record together with the exact bytes it was loaded from.
 #[derive(Debug, Clone)]
-pub struct PersistedReservationRecord {
-    pub record: ReservationRecord,
+pub struct PersistedRoutingRecord {
+    /// The decoded record.
+    pub record: RoutingRecord,
+    /// The exact bytes in the store, used as the compare-and-swap witness.
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
-pub struct PersistedRoutingStateRecord {
-    pub record: RoutingStateRecord,
-    pub bytes: Vec<u8>,
+/// The state-store key for a run.
+pub fn record_key(run_id: &str) -> String {
+    format!("{ROUTING_RECORD_PREFIX}{run_id}")
 }
 
-pub async fn load_reservation(
-    store: Arc<dyn StateStoreProvider>,
-    store_id: &str,
-    reservation_key: &str,
-) -> anyhow::Result<Option<ReservationRecord>> {
-    Ok(
-        load_reservation_with_bytes(store, store_id, reservation_key)
-            .await?
-            .map(|persisted| persisted.record),
-    )
+fn serialize(record: &RoutingRecord) -> anyhow::Result<Vec<u8>> {
+    serde_json::to_vec(record)
+        .map_err(|error| anyhow::anyhow!("failed to serialize routing record: {error}"))
 }
 
-pub async fn load_reservation_with_bytes(
+/// Load the record for a run, if any.
+pub async fn load_record(
     store: Arc<dyn StateStoreProvider>,
     store_id: &str,
-    reservation_key: &str,
-) -> anyhow::Result<Option<PersistedReservationRecord>> {
-    let key = reservation_store_key(reservation_key);
+    run_id: &str,
+) -> anyhow::Result<Option<PersistedRoutingRecord>> {
+    let key = record_key(run_id);
     let Some(bytes) = store
         .get(store_id, &key)
         .await
-        .map_err(|e| anyhow::anyhow!("state-store get reservation failed: {e}"))?
+        .map_err(|error| anyhow::anyhow!("state-store get routing record failed: {error}"))?
     else {
         return Ok(None);
     };
-    let record = serde_json::from_slice::<ReservationRecord>(&bytes)
-        .map_err(|e| anyhow::anyhow!("failed to deserialize reservation record: {e}"))?;
-    Ok(Some(PersistedReservationRecord { record, bytes }))
+    let record = serde_json::from_slice::<RoutingRecord>(&bytes)
+        .map_err(|error| anyhow::anyhow!("failed to deserialize routing record: {error}"))?;
+    Ok(Some(PersistedRoutingRecord { record, bytes }))
 }
 
-pub async fn save_reservation(
+/// Create the record only if none exists.
+///
+/// Returns the already-persisted record when another writer won the race.
+pub async fn create_record_if_absent(
     store: Arc<dyn StateStoreProvider>,
     store_id: &str,
-    record: &ReservationRecord,
-) -> anyhow::Result<()> {
-    let key = reservation_store_key(&record.reservation_key);
-    let bytes = serde_json::to_vec(record)
-        .map_err(|e| anyhow::anyhow!("failed to serialize reservation record: {e}"))?;
-    store
-        .set(store_id, &key, bytes)
-        .await
-        .map_err(|e| anyhow::anyhow!("state-store set reservation failed: {e}"))?;
-    Ok(())
-}
-
-pub async fn create_reservation_if_absent(
-    store: Arc<dyn StateStoreProvider>,
-    store_id: &str,
-    record: &ReservationRecord,
-) -> anyhow::Result<Option<ReservationRecord>> {
-    let key = reservation_store_key(&record.reservation_key);
-    let bytes = serialize_reservation(record)?;
-    let swapped = store
+    record: &RoutingRecord,
+) -> anyhow::Result<Option<PersistedRoutingRecord>> {
+    let key = record_key(&record.run_id);
+    let bytes = serialize(record)?;
+    let outcome = store
         .compare_and_swap(store_id, &key, None, bytes)
         .await
-        .map_err(|e| anyhow::anyhow!("state-store CAS reservation-create failed: {e}"))?;
-    match swapped {
+        .map_err(|error| anyhow::anyhow!("state-store CAS routing-create failed: {error}"))?;
+    match outcome {
         StateStoreCompareAndSwapResult::Swapped => Ok(None),
         StateStoreCompareAndSwapResult::Mismatch => {
-            let Some(existing) = load_reservation(store, store_id, &record.reservation_key).await?
-            else {
-                anyhow::bail!("state-store CAS reservation-create mismatched but value vanished");
-            };
+            let existing = load_record(store, store_id, &record.run_id)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("routing record vanished after a CAS create mismatch")
+                })?;
             Ok(Some(existing))
         }
     }
 }
 
-pub async fn compare_and_swap_reservation(
+/// Replace the record only if it still holds `expected` bytes.
+pub async fn compare_and_swap_record(
     store: Arc<dyn StateStoreProvider>,
     store_id: &str,
-    reservation_key: &str,
-    expected: Option<&[u8]>,
-    new_record: &ReservationRecord,
-) -> anyhow::Result<bool> {
-    let key = reservation_store_key(reservation_key);
-    let bytes = serialize_reservation(new_record)?;
+    expected: &[u8],
+    record: &RoutingRecord,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let key = record_key(&record.run_id);
+    let bytes = serialize(record)?;
     let outcome = store
-        .compare_and_swap(store_id, &key, expected, bytes)
+        .compare_and_swap(store_id, &key, Some(expected), bytes.clone())
         .await
-        .map_err(|e| anyhow::anyhow!("state-store CAS reservation failed: {e}"))?;
-    Ok(matches!(outcome, StateStoreCompareAndSwapResult::Swapped))
+        .map_err(|error| anyhow::anyhow!("state-store CAS routing-update failed: {error}"))?;
+    match outcome {
+        StateStoreCompareAndSwapResult::Swapped => Ok(Some(bytes)),
+        StateStoreCompareAndSwapResult::Mismatch => Ok(None),
+    }
 }
 
-pub async fn load_routing_state(
-    store: Arc<dyn StateStoreProvider>,
-    store_id: &str,
-    reservation_key: &str,
-) -> anyhow::Result<Option<RoutingStateRecord>> {
-    Ok(
-        load_routing_state_with_bytes(store, store_id, reservation_key)
-            .await?
-            .map(|persisted| persisted.record),
-    )
+/// The run that currently owns a Project item.
+///
+/// Written before the first GitHub write so that a later attempt can find the
+/// run even if the issue body — and therefore a freshly derived `runId` — has
+/// changed in the meantime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OpenRunPointer {
+    /// Pointer schema version.
+    pub schema_version: String,
+    /// The run that owns the item.
+    pub run_id: String,
 }
 
-pub async fn load_routing_state_with_bytes(
+impl OpenRunPointer {
+    /// Build a pointer to `run_id`.
+    pub fn new(run_id: &str) -> Self {
+        Self {
+            schema_version: ROUTING_ITEM_SCHEMA.to_string(),
+            run_id: run_id.to_string(),
+        }
+    }
+}
+
+/// The state-store key for a Project item's open-run pointer.
+pub fn item_key(project_item_node_id: &str) -> String {
+    format!("{ROUTING_ITEM_PREFIX}{project_item_node_id}")
+}
+
+/// Point `project_item_node_id` at `run_id`, replacing any earlier pointer.
+///
+/// Idempotent: writing the same pointer twice is a no-op in effect.
+pub async fn set_open_run(
     store: Arc<dyn StateStoreProvider>,
     store_id: &str,
-    reservation_key: &str,
-) -> anyhow::Result<Option<PersistedRoutingStateRecord>> {
-    let key = routing_state_store_key(reservation_key);
+    project_item_node_id: &str,
+    run_id: &str,
+) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec(&OpenRunPointer::new(run_id))
+        .map_err(|error| anyhow::anyhow!("failed to serialize open-run pointer: {error}"))?;
+    store
+        .set(store_id, &item_key(project_item_node_id), bytes)
+        .await
+        .map_err(|error| anyhow::anyhow!("state-store set open-run pointer failed: {error}"))
+}
+
+/// The run currently pointed at by `project_item_node_id`, if any.
+pub async fn load_open_run(
+    store: Arc<dyn StateStoreProvider>,
+    store_id: &str,
+    project_item_node_id: &str,
+) -> anyhow::Result<Option<String>> {
     let Some(bytes) = store
-        .get(store_id, &key)
+        .get(store_id, &item_key(project_item_node_id))
         .await
-        .map_err(|e| anyhow::anyhow!("state-store get routing-state failed: {e}"))?
+        .map_err(|error| anyhow::anyhow!("state-store get open-run pointer failed: {error}"))?
     else {
         return Ok(None);
     };
-    let record = serde_json::from_slice::<RoutingStateRecord>(&bytes)
-        .map_err(|e| anyhow::anyhow!("failed to deserialize routing-state record: {e}"))?;
-    Ok(Some(PersistedRoutingStateRecord { record, bytes }))
+    let pointer = serde_json::from_slice::<OpenRunPointer>(&bytes)
+        .map_err(|error| anyhow::anyhow!("failed to deserialize open-run pointer: {error}"))?;
+    if pointer.schema_version != ROUTING_ITEM_SCHEMA {
+        anyhow::bail!(
+            "open-run pointer schema '{}' is not '{ROUTING_ITEM_SCHEMA}'",
+            pointer.schema_version
+        );
+    }
+    Ok(Some(pointer.run_id))
 }
 
-pub async fn save_routing_state(
-    store: Arc<dyn StateStoreProvider>,
-    store_id: &str,
-    record: &RoutingStateRecord,
-) -> anyhow::Result<()> {
-    let key = routing_state_store_key(&record.reservation_key);
-    let bytes = serde_json::to_vec(record)
-        .map_err(|e| anyhow::anyhow!("failed to serialize routing-state record: {e}"))?;
-    store
-        .set(store_id, &key, bytes)
-        .await
-        .map_err(|e| anyhow::anyhow!("state-store set routing-state failed: {e}"))?;
-    Ok(())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ROUTABLE_STATUS;
+    use drasi_lib::state_store::MemoryStateStoreProvider;
 
-pub async fn compare_and_swap_routing_state(
-    store: Arc<dyn StateStoreProvider>,
-    store_id: &str,
-    reservation_key: &str,
-    expected: Option<&[u8]>,
-    new_record: &RoutingStateRecord,
-) -> anyhow::Result<bool> {
-    let key = routing_state_store_key(reservation_key);
-    let bytes = serde_json::to_vec(new_record)
-        .map_err(|e| anyhow::anyhow!("failed to serialize routing-state record: {e}"))?;
-    let outcome = store
-        .compare_and_swap(store_id, &key, expected, bytes)
-        .await
-        .map_err(|e| anyhow::anyhow!("state-store CAS routing-state failed: {e}"))?;
-    Ok(matches!(outcome, StateStoreCompareAndSwapResult::Swapped))
-}
+    fn candidate() -> RoutingCandidate {
+        RoutingCandidate {
+            repository: "drasi-project/drasi-core".to_string(),
+            subject_number: 742,
+            subject_node_id: "I_subject".to_string(),
+            project_node_id: "PVT_project".to_string(),
+            project_item_node_id: "PVTI_item".to_string(),
+            project_status: ROUTABLE_STATUS.to_string(),
+            body_digest: format!("sha256:{}", "a".repeat(64)),
+            event_comment_node_id: "IC_completion".to_string(),
+            event_body: "WorkGraphEvent/v1".to_string(),
+            author_database_id: 4021243,
+            author_type: "Bot".to_string(),
+            is_edited: false,
+        }
+    }
 
-pub fn serialize_reservation(record: &ReservationRecord) -> anyhow::Result<Vec<u8>> {
-    serde_json::to_vec(record)
-        .map_err(|e| anyhow::anyhow!("failed to serialize reservation record: {e}"))
-}
+    fn accepted() -> AcceptedCompletion {
+        AcceptedCompletion {
+            comment_node_id: "IC_completion".to_string(),
+            body_hash: comment_body_hash("WorkGraphEvent/v1\n\nsummary\n\n{}"),
+        }
+    }
 
-pub fn deserialize_reservation(bytes: &[u8]) -> anyhow::Result<ReservationRecord> {
-    serde_json::from_slice::<ReservationRecord>(bytes)
-        .map_err(|e| anyhow::anyhow!("failed to deserialize reservation record: {e}"))
+    const DECISION_JSON: &str = r#"{"schemaVersion":"workgraph.event/v1","eventId":"event:abc"}"#;
+
+    fn record() -> RoutingRecord {
+        RoutingRecord::new(
+            "run:abc",
+            "event:abc",
+            &candidate(),
+            "sha256:abc",
+            accepted(),
+            "passed",
+            "AwaitingIssueRiskProfiling",
+            DECISION_JSON,
+        )
+    }
+
+    #[test]
+    fn body_hashes_are_stable_and_sensitive() {
+        assert_eq!(comment_body_hash("a"), comment_body_hash("a"));
+        assert_ne!(comment_body_hash("a"), comment_body_hash("a "));
+        assert!(comment_body_hash("a").starts_with("sha256:"));
+        assert_eq!(comment_body_hash("").len(), "sha256:".len() + 64);
+    }
+
+    #[tokio::test]
+    async fn create_is_idempotent_and_reports_the_existing_record() {
+        let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+        let first = create_record_if_absent(store.clone(), "router", &record())
+            .await
+            .expect("first create");
+        assert!(first.is_none(), "first create wins");
+
+        let second = create_record_if_absent(store.clone(), "router", &record())
+            .await
+            .expect("second create")
+            .expect("existing record is returned");
+        assert_eq!(second.record.run_id, "run:abc");
+        assert!(!second.record.is_complete());
+    }
+
+    #[tokio::test]
+    async fn stale_witnesses_cannot_clobber_newer_progress() {
+        let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+        create_record_if_absent(store.clone(), "router", &record())
+            .await
+            .expect("create");
+        let loaded = load_record(store.clone(), "router", "run:abc")
+            .await
+            .expect("load")
+            .expect("exists");
+
+        let mut advanced = loaded.record.clone();
+        advanced.set_decision_comment("IC_1");
+        let new_bytes = compare_and_swap_record(store.clone(), "router", &loaded.bytes, &advanced)
+            .await
+            .expect("cas")
+            .expect("swap succeeds");
+
+        let mut stale = loaded.record.clone();
+        stale.set_decision_comment("IC_2");
+        assert!(
+            compare_and_swap_record(store.clone(), "router", &loaded.bytes, &stale)
+                .await
+                .expect("cas")
+                .is_none(),
+            "stale witness must not overwrite newer progress"
+        );
+
+        let mut completed = advanced.clone();
+        completed.set_status_applied();
+        assert!(
+            compare_and_swap_record(store.clone(), "router", &new_bytes, &completed)
+                .await
+                .expect("cas")
+                .is_some(),
+            "fresh witness succeeds"
+        );
+        let final_record = load_record(store, "router", "run:abc")
+            .await
+            .expect("load")
+            .expect("exists")
+            .record;
+        assert_eq!(
+            final_record.decision_comment_node_id.as_deref(),
+            Some("IC_1")
+        );
+        assert!(final_record.is_complete());
+    }
+
+    #[test]
+    fn record_identity_is_checked_against_the_row() {
+        let record = record();
+        record.ensure_matches(&candidate()).expect("matching row");
+
+        let mut other = candidate();
+        other.project_item_node_id = "PVTI_other".to_string();
+        assert!(record.ensure_matches(&other).is_err());
+
+        let mut wrong_schema = record.clone();
+        wrong_schema.schema_version = "workgraph.routing-record/v0".to_string();
+        assert!(wrong_schema.ensure_matches(&candidate()).is_err());
+    }
+
+    #[test]
+    fn an_edited_completion_comment_stops_a_resumed_decision() {
+        let record = record();
+        record
+            .ensure_decision_inputs_unchanged(&accepted(), "passed", "AwaitingIssueRiskProfiling")
+            .expect("unchanged inputs");
+
+        let edited = AcceptedCompletion {
+            comment_node_id: "IC_completion".to_string(),
+            body_hash: comment_body_hash("WorkGraphEvent/v1\n\nedited\n\n{}"),
+        };
+        assert!(record
+            .ensure_decision_inputs_unchanged(&edited, "passed", "AwaitingIssueRiskProfiling")
+            .expect_err("edited body")
+            .to_string()
+            .contains("edited after it was accepted"));
+
+        let different_comment = AcceptedCompletion {
+            comment_node_id: "IC_other".to_string(),
+            body_hash: accepted().body_hash,
+        };
+        assert!(record
+            .ensure_decision_inputs_unchanged(
+                &different_comment,
+                "passed",
+                "AwaitingIssueRiskProfiling"
+            )
+            .expect_err("different comment")
+            .to_string()
+            .contains("now claims the completion"));
+
+        assert!(record
+            .ensure_decision_inputs_unchanged(&accepted(), "failed", "NeedsMoreInformation")
+            .expect_err("changed outcome")
+            .to_string()
+            .contains("was decided as"));
+    }
+
+    #[test]
+    fn error_and_progress_transitions_clear_ambiguity() {
+        let mut record = record();
+        record.set_error("transport failure", true);
+        assert!(record.ambiguous);
+        assert!(!record.is_published_but_unapplied());
+        record.set_decision_comment("IC_1");
+        assert!(!record.ambiguous);
+        assert!(record.last_error.is_none());
+        assert!(!record.is_complete());
+        assert!(
+            record.is_published_but_unapplied(),
+            "a published decision that has not moved the status must be resumable"
+        );
+        record.set_status_applied();
+        assert!(record.is_complete());
+        assert!(!record.is_published_but_unapplied());
+    }
+
+    #[test]
+    fn the_intended_decision_event_is_pinned_by_the_record() {
+        assert_eq!(record().decision_event_json, DECISION_JSON);
+    }
+
+    #[test]
+    fn an_attempted_publication_owns_the_item_before_any_comment_id_exists() {
+        let mut record = record();
+        assert!(!record.decision_publish_attempted);
+        assert!(
+            !record.is_publish_attempted_but_unapplied(),
+            "a run that has not reached its write does not own the item"
+        );
+
+        // Written immediately before the create-comment request.
+        record.mark_decision_publish_attempted();
+        assert!(record.decision_publish_attempted);
+        assert!(
+            record.is_publish_attempted_but_unapplied(),
+            "an attempted decision must be resumable even without a comment ID"
+        );
+        assert!(
+            !record.is_published_but_unapplied(),
+            "nothing is published until a comment ID is durable"
+        );
+        assert!(record.decision_comment_node_id.is_none());
+        assert!(!record.is_complete());
+
+        // The unobserved outcome is then recorded as ambiguous: the run still
+        // owns the item, and the diagnostics do not change that.
+        record.set_error("create comment request failed: operation timed out", true);
+        assert!(record.decision_publish_attempted, "attempts are one-way");
+        assert!(record.is_publish_attempted_but_unapplied());
+
+        record.set_decision_comment("IC_1");
+        assert!(record.is_publish_attempted_but_unapplied());
+        assert!(record.is_published_but_unapplied());
+
+        record.set_status_applied();
+        assert!(
+            !record.is_publish_attempted_but_unapplied(),
+            "a finished run no longer owns the item"
+        );
+    }
+
+    #[test]
+    fn marking_an_attempt_keeps_the_diagnostics_of_the_previous_failure() {
+        let mut record = record();
+        record.set_error("transport failure", true);
+        record.mark_decision_publish_attempted();
+        assert!(record.ambiguous, "an attempt does not resolve ambiguity");
+        assert_eq!(record.last_error.as_deref(), Some("transport failure"));
+    }
+
+    #[test]
+    fn an_observed_publication_implies_an_attempt() {
+        let mut record = record();
+        record.set_decision_comment("IC_1");
+        assert!(
+            record.decision_publish_attempted,
+            "a durable comment ID means the write was attempted"
+        );
+    }
+
+    #[test]
+    fn the_attempt_flag_round_trips_and_defaults_safely() {
+        let mut record = record();
+        record.mark_decision_publish_attempted();
+        let bytes = serialize(&record).expect("serialize");
+        let decoded: RoutingRecord = serde_json::from_slice(&bytes).expect("decode");
+        assert_eq!(decoded, record);
+        assert!(decoded.decision_publish_attempted);
+
+        // A record written before this field existed decodes as "not
+        // attempted"; when it names a decision comment it is still resumable,
+        // which is the only post-write state an older writer could reach.
+        let legacy = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": ROUTING_RECORD_SCHEMA,
+            "runId": "run:abc",
+            "eventId": "event:abc",
+            "repository": "drasi-project/drasi-core",
+            "subjectNumber": 742,
+            "subjectNodeId": "I_subject",
+            "projectNodeId": "PVT_project",
+            "projectItemNodeId": "PVTI_item",
+            "contentDigest": "sha256:abc",
+            "acceptedCompletion": {
+                "commentNodeId": "IC_completion",
+                "bodyHash": accepted().body_hash,
+            },
+            "outcome": "passed",
+            "toStatus": "AwaitingIssueRiskProfiling",
+            "decisionEventJson": DECISION_JSON,
+            "decisionCommentNodeId": "IC_1",
+            "statusApplied": false,
+            "ambiguous": false,
+            "createdAt": "2026-08-14T00:00:00Z",
+            "updatedAt": "2026-08-14T00:00:00Z",
+        }))
+        .expect("legacy json");
+        let decoded: RoutingRecord = serde_json::from_slice(&legacy).expect("decode legacy");
+        assert!(!decoded.decision_publish_attempted);
+        assert!(
+            decoded.is_publish_attempted_but_unapplied(),
+            "a legacy published record must still be resumable"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_open_run_pointer_survives_a_changed_run_id() {
+        let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+        assert!(load_open_run(store.clone(), "router", "PVTI_item")
+            .await
+            .expect("load")
+            .is_none());
+
+        set_open_run(store.clone(), "router", "PVTI_item", "run:abc")
+            .await
+            .expect("set pointer");
+        assert_eq!(
+            load_open_run(store.clone(), "router", "PVTI_item")
+                .await
+                .expect("load"),
+            Some("run:abc".to_string())
+        );
+
+        // A later run for the same item replaces the pointer.
+        set_open_run(store.clone(), "router", "PVTI_item", "run:def")
+            .await
+            .expect("replace pointer");
+        assert_eq!(
+            load_open_run(store.clone(), "router", "PVTI_item")
+                .await
+                .expect("load"),
+            Some("run:def".to_string())
+        );
+
+        // Another item is unaffected.
+        assert!(load_open_run(store, "router", "PVTI_other")
+            .await
+            .expect("load")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_pointer_schema_is_rejected() {
+        let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+        store
+            .set(
+                "router",
+                &item_key("PVTI_item"),
+                serde_json::to_vec(&serde_json::json!({
+                    "schemaVersion": "workgraph.routing-item/v0",
+                    "runId": "run:abc"
+                }))
+                .expect("serialize"),
+            )
+            .await
+            .expect("seed");
+        assert!(load_open_run(store, "router", "PVTI_item").await.is_err());
+    }
 }

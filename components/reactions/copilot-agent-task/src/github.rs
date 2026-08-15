@@ -12,46 +12,95 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! GitHub REST/GraphQL client: preflight checks, Agent Task creation,
-//! workgraph comment posting, and the ambiguous-creation reconciliation seam.
+//! A deliberately narrow GitHub client.
+//!
+//! This client exposes exactly the operations the launch flow needs:
+//!
+//! | Operation | Kind | Purpose |
+//! |---|---|---|
+//! | `authenticated_user_id` | read | verify the token's identity at startup |
+//! | `issue_snapshot` | read | authoritative issue state, node ID, and body |
+//! | `project_snapshot` | read | project/item/issue binding and current status |
+//! | `blob_sha_at_path` | read | pin the agent profile to an immutable blob |
+//! | `list_issue_comments` | read | adopt the assignment / a prior ExecutionStarted |
+//! | `create_issue_comment` | write | post one `ExecutionStarted` comment |
+//! | `create_task` | write | create one Copilot coding-agent task |
+//! | `list_recent_tasks` / `reconcile` | read | recover a task after an ambiguous write |
 //!
 //! # API-shape caveat
 //!
-//! The GitHub "Agent Tasks" API (`POST /agents/repos/{owner}/{repo}/tasks`)
-//! referenced by this reaction's requirements is a preview/evolving surface.
-//! This client implements the shape specified in the requirements
+//! The GitHub "Agent Tasks" API (`POST /agents/repos/{owner}/{repo}/tasks`) is
+//! a preview/evolving surface. This client implements the requested shape
 //! (`custom_agent`, `model`, `prompt`, `base_ref`, `create_pull_request`) and
-//! makes the following documented adaptations where the exact wire contract
-//! is not publicly pinned down:
+//! documents these adaptations:
 //!
-//! * **Listing endpoint** (`GET /agents/repos/{owner}/{repo}/tasks`) is
-//!   assumed for the reconciliation seam. Field parsing is lenient (`id` as
-//!   string or number; `url`/`html_url`; `prompt`/`body`) to tolerate minor
-//!   shape differences.
-//! * **"Clearly unsupported model" detection** on HTTP 422 checks the
-//!   response body's `message` (or `error.code`/`error.message`) for
-//!   model-related keywords. If GitHub's real error shape differs, adjust
-//!   [`is_unsupported_model_error`] — the fallback-triggering contract
-//!   (exactly one fallback attempt, only on this condition) is otherwise
-//!   unaffected.
-//! * **Ambiguous vs. permanent vs. transient classification** on
-//!   `create_task`: a transport-level error (no HTTP response received at
-//!   all — timeout, connection reset) is treated as **ambiguous** (the task
-//!   may or may not have been created). Any *received* HTTP response is
-//!   treated as authoritative: 201 is success, the specific 422 is the
-//!   unsupported-model case, other 4xx are permanent failures, 5xx/429 are
-//!   transient. Real-world edge cases (e.g. a proxy that completes the
-//!   server-side request but drops the client's response) are not
-//!   distinguishable from this client's vantage point; this is a documented
-//!   simplification.
+//! * **Listing endpoint** (`GET /agents/repos/{owner}/{repo}/tasks`) is assumed
+//!   for reconciliation; field parsing is lenient (`id` as string or number;
+//!   `url`/`html_url`; `prompt`/`body`).
+//! * **"Clearly unsupported model" detection** on HTTP 422 checks the response
+//!   body for model-related keywords; see [`is_unsupported_model_error`].
+//! * **Ambiguous vs. permanent vs. transient** on `create_task`: a
+//!   transport-level error (no HTTP response — timeout, connection reset) is
+//!   **ambiguous** (the task may or may not exist). Any received HTTP response
+//!   is authoritative: 201 is success, the specific 422 is the
+//!   unsupported-model case, other 4xx are permanent, 5xx/429 are transient.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use drasi_workgraph_common::trust::{
+    author_identity_from_github_user, is_trusted, AuthorIdentity, TrustedAuthor,
+};
 use log::{debug, warn};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::redact::redact_authorization;
+
+const USER_AGENT_VALUE: &str = "drasi-reaction-copilot-agent-task";
+
+/// The Project single-select field this reaction reads the status from.
+const STATUS_FIELD_NAME: &str = "Status";
+
+const PROJECT_SNAPSHOT_QUERY: &str = r#"
+query CopilotAgentTaskProjectSnapshot($projectId: ID!, $projectItemId: ID!, $statusFieldName: String!) {
+  project: node(id: $projectId) {
+    ... on ProjectV2 {
+      id
+      fields(first: 100) {
+        nodes {
+          ... on ProjectV2SingleSelectField {
+            id
+            name
+          }
+        }
+      }
+    }
+  }
+  item: node(id: $projectItemId) {
+    ... on ProjectV2Item {
+      id
+      project {
+        id
+      }
+      content {
+        __typename
+        ... on Issue {
+          id
+          number
+          repository {
+            nameWithOwner
+          }
+        }
+      }
+      fieldValueByName(name: $statusFieldName) {
+        ... on ProjectV2ItemFieldSingleSelectValue {
+          name
+        }
+      }
+    }
+  }
+}
+"#;
 
 /// Static configuration needed to talk to one GitHub (or GHE) instance.
 #[derive(Clone)]
@@ -75,8 +124,77 @@ impl std::fmt::Debug for GitHubConfig {
     }
 }
 
-/// A thin GitHub REST/GraphQL client. Never logs or `Debug`-prints the
-/// token; see module docs and [`crate::redact`].
+/// Authoritative issue state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueSnapshot {
+    /// The issue node ID reported by GitHub.
+    pub node_id: String,
+    /// `open` / `closed`, lowercased by GitHub.
+    pub state: String,
+    /// The authoritative issue body; `None` when GitHub reports `null`.
+    pub body: Option<String>,
+}
+
+/// One issue comment with the metadata that identity decisions rely on.
+///
+/// Authorship is keyed on the numeric database ID (`user.id`) and the actor
+/// type (`user.type`) only. The node ID (`user.node_id`) is carried as audit
+/// data, the login (`user.login`) is display-only, and no GitHub App ID is read
+/// or required. See [`drasi_workgraph_common::trust`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueComment {
+    /// The immutable comment node ID.
+    pub node_id: String,
+    /// The comment body.
+    pub body: String,
+    /// The author's authoritative identity, when GitHub reports both trust
+    /// values; `authorId` and the login ride along as audit/display data.
+    pub author: Option<AuthorIdentity>,
+    /// Creation timestamp.
+    pub created_at: Option<String>,
+    /// Last update timestamp; differs from `created_at` after an edit.
+    pub updated_at: Option<String>,
+}
+
+impl IssueComment {
+    /// Whether GitHub reports the comment as never edited.
+    pub fn is_unedited(&self) -> bool {
+        match (&self.created_at, &self.updated_at) {
+            (Some(created), Some(updated)) => created == updated,
+            _ => false,
+        }
+    }
+
+    /// Whether the author is the configured trusted author (numeric database
+    /// ID + actor type).
+    pub fn is_authored_by(&self, trusted: &TrustedAuthor) -> bool {
+        is_trusted(self.author.as_ref(), trusted)
+    }
+}
+
+/// Raw Project item + status snapshot. The reaction performs every binding and
+/// status comparison, so a mismatch here is a permanent semantic rejection
+/// rather than a transport failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectSnapshot {
+    /// The project node ID the item actually belongs to.
+    pub item_project_node_id: String,
+    /// The item content `__typename` (expected `Issue`).
+    pub content_type: Option<String>,
+    /// The linked issue node ID.
+    pub content_issue_node_id: Option<String>,
+    /// The linked issue number.
+    pub content_number: Option<u64>,
+    /// The linked issue `owner/repo`.
+    pub content_repository: Option<String>,
+    /// The node ID of the project's single-select `Status` field.
+    pub status_field_node_id: Option<String>,
+    /// The item's current `Status` value.
+    pub current_status: Option<String>,
+}
+
+/// A thin GitHub REST/GraphQL client. Never logs or `Debug`-prints the token;
+/// see module docs and [`crate::redact`].
 pub struct GitHubClient {
     http: reqwest::Client,
     config: GitHubConfig,
@@ -111,20 +229,33 @@ impl GitHubClient {
                 "X-GitHub-Api-Version",
                 self.config.agent_tasks_api_version.clone(),
             ),
-            (
-                "User-Agent",
-                "drasi-reaction-copilot-agent-task".to_string(),
-            ),
+            ("User-Agent", USER_AGENT_VALUE.to_string()),
         ]
+    }
+
+    fn rest_get(&self, url: &str) -> reqwest::RequestBuilder {
+        let mut req = self.http.get(url);
+        for (name, value) in self.rest_headers() {
+            req = req.header(name, value);
+        }
+        req
+    }
+
+    fn rest_post(&self, url: &str) -> reqwest::RequestBuilder {
+        let mut req = self.http.post(url);
+        for (name, value) in self.rest_headers() {
+            req = req.header(name, value);
+        }
+        req
     }
 
     pub async fn authenticated_user_id(&self) -> Result<String, ApiError> {
         let url = format!("{}/user", self.config.api_base_url);
-        let mut request = self.http.get(&url);
-        for (name, value) in self.rest_headers() {
-            request = request.header(name, value);
-        }
-        let response = request.send().await.map_err(ApiError::from_transport)?;
+        let response = self
+            .rest_get(&url)
+            .send()
+            .await
+            .map_err(ApiError::from_transport)?;
         let status = response.status();
         let body_text = response.text().await.unwrap_or_default();
         if !status.is_success() {
@@ -144,157 +275,224 @@ impl GitHubClient {
     }
 
     // ---------------------------------------------------------------
-    // Preflight: issue state
+    // Reads (authoritative GitHub state)
     // ---------------------------------------------------------------
 
-    pub async fn get_issue(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<IssueInfo, ApiError> {
+    /// Read the authoritative issue snapshot (state, node ID, body).
+    pub async fn issue_snapshot(&self, repository: &str, number: u64) -> Result<IssueSnapshot> {
         let url = format!(
-            "{}/repos/{owner}/{repo}/issues/{number}",
+            "{}/repos/{repository}/issues/{number}",
             self.config.api_base_url
         );
-        let mut req = self.http.get(&url);
-        for (k, v) in self.rest_headers() {
-            req = req.header(k, v);
+        let response = self
+            .rest_get(&url)
+            .send()
+            .await
+            .context("GitHub issue read failed")?;
+        if !response.status().is_success() {
+            anyhow::bail!("GitHub issue read failed with HTTP {}", response.status());
         }
-        let resp = req.send().await.map_err(ApiError::from_transport)?;
-        let status = resp.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(ApiError::Permanent(format!(
-                "issue #{number} not found in {owner}/{repo}"
-            )));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ApiError::from_status(status, &body));
-        }
-        let body: Value = resp
+        let value: Value = response
             .json()
             .await
-            .map_err(|e| ApiError::Permanent(format!("issue response was not valid JSON: {e}")))?;
-        Ok(IssueInfo {
-            state: body["state"].as_str().unwrap_or_default().to_string(),
-            node_id: body["node_id"].as_str().map(|s| s.to_string()),
+            .context("failed to parse GitHub issue response")?;
+        Ok(IssueSnapshot {
+            node_id: value
+                .get("node_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("issue response missing node_id"))?
+                .to_string(),
+            state: value
+                .get("state")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("issue response missing state"))?
+                .to_string(),
+            body: value.get("body").and_then(|body| match body {
+                Value::String(text) => Some(text.clone()),
+                _ => None,
+            }),
         })
     }
 
-    // ---------------------------------------------------------------
-    // Preflight: Project (v2) item status
-    // ---------------------------------------------------------------
-
-    /// Returns authoritative Project item, Project, and linked Issue state.
-    pub async fn project_item_status(
-        &self,
-        project_item_node_id: &str,
-        field_name: &str,
-    ) -> Result<ProjectItemInfo, ApiError> {
-        let query = r#"
-            query($id: ID!, $field: String!) {
-              node(id: $id) {
-                ... on ProjectV2Item {
-                  fieldValueByName(name: $field) {
-                    ... on ProjectV2ItemFieldSingleSelectValue { name }
-                  }
-                  project {
-                    id
-                    number
-                    owner {
-                      ... on Organization { login }
-                      ... on User { login }
-                    }
-                  }
-                  content {
-                    ... on Issue { id lastEditedAt createdAt }
-                  }
-                }
-              }
-            }
-        "#;
-        let variables = json!({ "id": project_item_node_id, "field": field_name });
-        let data = self.graphql_query(query, variables).await?;
-        let status = data["node"]["fieldValueByName"]["name"]
-            .as_str()
-            .map(|s| s.to_string());
-        let linked_issue_id = data["node"]["content"]["id"]
-            .as_str()
-            .map(|s| s.to_string());
-        let content_version = Self::content_version_from_timestamps(
-            data["node"]["content"]["lastEditedAt"].as_str(),
-            data["node"]["content"]["createdAt"].as_str(),
-        )?;
-        Ok(ProjectItemInfo {
-            status,
-            linked_issue_id,
-            content_version,
-            project_node_id: data["node"]["project"]["id"]
-                .as_str()
-                .map(ToString::to_string),
-            project_owner: data["node"]["project"]["owner"]["login"]
-                .as_str()
-                .map(ToString::to_string),
-            project_number: data["node"]["project"]["number"].as_u64(),
-        })
-    }
-
-    fn content_version_from_timestamps(
-        last_edited_at: Option<&str>,
-        created_at: Option<&str>,
-    ) -> Result<Option<String>, ApiError> {
-        match last_edited_at.or(created_at) {
-            Some(value) => Ok(Some(
-                crate::row::LaunchRow::normalize_rfc3339_instant(value).map_err(|e| {
-                    ApiError::Permanent(format!(
-                        "issue content timestamp was not valid RFC 3339: {e:#}"
-                    ))
-                })?,
-            )),
-            None => Ok(None),
-        }
-    }
-
-    // ---------------------------------------------------------------
-    // Preflight: profile file blob SHA
-    // ---------------------------------------------------------------
-
+    /// Resolve the immutable blob SHA of a file at `git_ref`.
+    ///
+    /// Returns `Ok(None)` when GitHub reports the file does not exist (404) so
+    /// the reaction can treat a missing profile as a permanent rejection rather
+    /// than a transport failure.
     pub async fn blob_sha_at_path(
         &self,
         owner: &str,
         repo: &str,
         path: &str,
         git_ref: &str,
-    ) -> Result<Option<String>, ApiError> {
+    ) -> Result<Option<String>> {
         let url = format!(
-            "{}/repos/{owner}/{repo}/contents/{path}?ref={git_ref}",
+            "{}/repos/{owner}/{repo}/contents/{encoded_path}?ref={encoded_ref}",
             self.config.api_base_url,
-            path = urlencode_path(path),
-            git_ref = urlencode_component(git_ref),
+            encoded_path = urlencode_path(path),
+            encoded_ref = urlencode_component(git_ref),
         );
-        let mut req = self.http.get(&url);
-        for (k, v) in self.rest_headers() {
-            req = req.header(k, v);
-        }
-        let resp = req.send().await.map_err(ApiError::from_transport)?;
-        let status = resp.status();
+        let response = self
+            .rest_get(&url)
+            .send()
+            .await
+            .context("GitHub profile blob read failed")?;
+        let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ApiError::from_status(status, &body));
+            anyhow::bail!("GitHub profile blob read failed with HTTP {status}");
         }
-        let body: Value = resp.json().await.map_err(|e| {
-            ApiError::Permanent(format!("contents response was not valid JSON: {e}"))
-        })?;
-        Ok(body["sha"].as_str().map(|s| s.to_string()))
+        let value: Value = response
+            .json()
+            .await
+            .context("failed to parse GitHub contents response")?;
+        Ok(value
+            .get("sha")
+            .and_then(Value::as_str)
+            .map(ToString::to_string))
+    }
+
+    /// Read the raw Project item snapshot. Every binding/status comparison is
+    /// performed by the reaction; this method only fails on genuine transport
+    /// or GraphQL errors, or when the response is structurally unusable.
+    pub async fn project_snapshot(
+        &self,
+        project_node_id: &str,
+        project_item_node_id: &str,
+    ) -> Result<ProjectSnapshot> {
+        let data = self
+            .graphql(
+                PROJECT_SNAPSHOT_QUERY,
+                json!({
+                    "projectId": project_node_id,
+                    "projectItemId": project_item_node_id,
+                    "statusFieldName": STATUS_FIELD_NAME,
+                }),
+            )
+            .await
+            .context("failed to read project snapshot")?;
+
+        let item_project_node_id = data
+            .pointer("/item/project/id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("project snapshot missing item.project.id"))?
+            .to_string();
+
+        let status_field_node_id = data
+            .pointer("/project/fields/nodes")
+            .and_then(Value::as_array)
+            .and_then(|fields| {
+                fields
+                    .iter()
+                    .find(|field| {
+                        field.get("name").and_then(Value::as_str) == Some(STATUS_FIELD_NAME)
+                    })
+                    .and_then(|field| field.get("id").and_then(Value::as_str))
+                    .map(ToString::to_string)
+            });
+
+        Ok(ProjectSnapshot {
+            item_project_node_id,
+            content_type: data
+                .pointer("/item/content/__typename")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            content_issue_node_id: data
+                .pointer("/item/content/id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            content_number: data.pointer("/item/content/number").and_then(Value::as_u64),
+            content_repository: data
+                .pointer("/item/content/repository/nameWithOwner")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            status_field_node_id,
+            current_status: data
+                .pointer("/item/fieldValueByName/name")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+        })
+    }
+
+    /// List every comment on an issue (paginated REST).
+    pub async fn list_issue_comments(
+        &self,
+        repository: &str,
+        number: u64,
+    ) -> Result<Vec<IssueComment>> {
+        let mut page = 1_u32;
+        let mut all = Vec::new();
+        loop {
+            let url = format!(
+                "{}/repos/{repository}/issues/{number}/comments?per_page=100&page={page}",
+                self.config.api_base_url
+            );
+            let response = self
+                .rest_get(&url)
+                .send()
+                .await
+                .context("GitHub list comments request failed")?;
+            if !response.status().is_success() {
+                anyhow::bail!(
+                    "GitHub list comments failed with HTTP {}",
+                    response.status()
+                );
+            }
+            let values: Vec<Value> = response
+                .json()
+                .await
+                .context("failed to parse list comments response")?;
+            let count = values.len();
+            for value in &values {
+                all.push(parse_comment(value)?);
+            }
+            if count < 100 {
+                break;
+            }
+            page += 1;
+            if page > 100 {
+                anyhow::bail!("GitHub list comments pagination exceeded 100 pages");
+            }
+        }
+        Ok(all)
     }
 
     // ---------------------------------------------------------------
-    // Agent Task creation
+    // Writes
     // ---------------------------------------------------------------
+
+    /// Post one issue comment (REST).
+    pub async fn create_issue_comment(
+        &self,
+        repository: &str,
+        number: u64,
+        body: &str,
+    ) -> Result<IssueComment> {
+        let url = format!(
+            "{}/repos/{repository}/issues/{number}/comments",
+            self.config.api_base_url
+        );
+        let response = self
+            .rest_post(&url)
+            .json(&json!({ "body": body }))
+            .send()
+            .await
+            .context("GitHub create comment request failed")?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "GitHub create comment failed with HTTP {}",
+                response.status()
+            );
+        }
+        parse_comment(
+            &response
+                .json::<Value>()
+                .await
+                .context("failed to parse create comment response")?,
+        )
+    }
 
     pub async fn create_task(
         &self,
@@ -306,11 +504,7 @@ impl GitHubClient {
             "{}/agents/repos/{owner}/{repo}/tasks",
             self.config.api_base_url
         );
-        let mut req = self.http.post(&url).json(request);
-        for (k, v) in self.rest_headers() {
-            req = req.header(k, v);
-        }
-        let resp = match req.send().await {
+        let resp = match self.rest_post(&url).json(request).send().await {
             Ok(r) => r,
             Err(e) => {
                 warn!(
@@ -374,11 +568,11 @@ impl GitHubClient {
             "{}/agents/repos/{owner}/{repo}/tasks",
             self.config.api_base_url
         );
-        let mut req = self.http.get(&url);
-        for (k, v) in self.rest_headers() {
-            req = req.header(k, v);
-        }
-        let resp = req.send().await.map_err(ApiError::from_transport)?;
+        let resp = self
+            .rest_get(&url)
+            .send()
+            .await
+            .map_err(ApiError::from_transport)?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -431,80 +625,35 @@ impl GitHubClient {
         })
     }
 
-    // ---------------------------------------------------------------
-    // Workgraph execution comment (GraphQL addComment)
-    // ---------------------------------------------------------------
-
-    pub async fn post_issue_comment(
-        &self,
-        issue_node_id: &str,
-        body: &str,
-    ) -> Result<(), CommentError> {
-        let mutation = r#"
-            mutation($subjectId: ID!, $body: String!) {
-              addComment(input: { subjectId: $subjectId, body: $body }) {
-                commentEdge { node { id } }
-              }
-            }
-        "#;
-        let variables = json!({ "subjectId": issue_node_id, "body": body });
-        match self.graphql_query(mutation, variables).await {
-            Ok(_) => Ok(()),
-            Err(ApiError::GraphQlErrors(errors)) => Err(CommentError::GraphQlErrors(errors)),
-            Err(ApiError::Permanent(msg)) => Err(CommentError::Permanent(msg)),
-            Err(ApiError::Transient(msg)) => Err(CommentError::Transient(msg)),
-        }
-    }
-
     /// Shared GraphQL POST helper. Per the reaction's contract, an HTTP 200
-    /// response carrying a non-empty top-level `errors` array is treated as
-    /// a **failure**, not a partial success — even though GraphQL's own spec
-    /// allows `data` and `errors` to co-exist.
-    async fn graphql_query(&self, query: &str, variables: Value) -> Result<Value, ApiError> {
-        let mut req = self.http.post(&self.config.graphql_url).json(&json!({
-            "query": query,
-            "variables": variables,
-        }));
-        for (k, v) in self.rest_headers() {
-            req = req.header(k, v);
-        }
-        let resp = req.send().await.map_err(ApiError::from_transport)?;
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
+    /// response carrying a non-empty top-level `errors` array is treated as a
+    /// **failure**, not a partial success.
+    async fn graphql(&self, query: &str, variables: Value) -> Result<Value> {
+        let response = self
+            .rest_post(&self.config.graphql_url)
+            .json(&json!({ "query": query, "variables": variables }))
+            .send()
+            .await
+            .context("GitHub GraphQL request failed")?;
+        let status = response.status();
+        let body: Value = response
+            .json()
+            .await
+            .context("failed to parse GitHub GraphQL response")?;
         if !status.is_success() {
-            return Err(ApiError::from_status(status, &body_text));
+            anyhow::bail!("GitHub GraphQL request failed with HTTP {status}");
         }
-        let body: Value = serde_json::from_str(&body_text).map_err(|e| {
-            ApiError::Permanent(format!("GraphQL response was not valid JSON: {e}"))
-        })?;
-
-        if let Some(errors) = body.get("errors").and_then(|e| e.as_array()) {
-            if !errors.is_empty() {
-                let messages: Vec<String> = errors
-                    .iter()
-                    .map(|e| e["message"].as_str().unwrap_or("<no message>").to_string())
-                    .collect();
-                return Err(ApiError::GraphQlErrors(messages));
-            }
+        if body
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| !errors.is_empty())
+        {
+            anyhow::bail!("GitHub GraphQL response contained errors");
         }
-        Ok(body.get("data").cloned().unwrap_or(Value::Null))
+        body.get("data")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("GitHub GraphQL response missing data"))
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct IssueInfo {
-    pub state: String,
-    pub node_id: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ProjectItemInfo {
-    pub status: Option<String>,
-    pub linked_issue_id: Option<String>,
-    pub content_version: Option<String>,
-    pub project_node_id: Option<String>,
-    pub project_owner: Option<String>,
-    pub project_number: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -527,8 +676,8 @@ pub enum CreateTaskOutcome {
     /// Permanent (non-retryable) rejection — e.g. bad request, auth failure,
     /// unknown repository.
     Permanent(String),
-    /// A definite HTTP error response was received (5xx/429): safe to retry
-    /// the whole attempt later since the server told us it did not succeed.
+    /// A definite HTTP error response was received (5xx/429): safe to retry the
+    /// whole attempt later since the server told us it did not succeed.
     Transient(String),
     /// No HTTP response was received at all: unknown whether the task was
     /// created. Must go through reconciliation before any further action.
@@ -588,29 +737,8 @@ impl std::fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
-#[derive(Debug)]
-pub enum CommentError {
-    Permanent(String),
-    Transient(String),
-    GraphQlErrors(Vec<String>),
-}
-
-impl std::fmt::Display for CommentError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CommentError::Permanent(m) => write!(f, "permanent comment error: {m}"),
-            CommentError::Transient(m) => write!(f, "transient comment error: {m}"),
-            CommentError::GraphQlErrors(errs) => {
-                write!(f, "GraphQL errors posting comment: {}", errs.join("; "))
-            }
-        }
-    }
-}
-
-impl std::error::Error for CommentError {}
-
-/// Extract an `id` field as a string regardless of whether it was encoded as
-/// a JSON string or number.
+/// Extract an `id` field as a string regardless of whether it was encoded as a
+/// JSON string or number.
 fn extract_id(value: &Value) -> Option<String> {
     match value.get("id") {
         Some(Value::String(s)) => Some(s.clone()),
@@ -619,8 +747,8 @@ fn extract_id(value: &Value) -> Option<String> {
     }
 }
 
-/// Detect a "clearly unsupported model" 422 response. See module docs for
-/// the assumption this makes about the error body shape.
+/// Detect a "clearly unsupported model" 422 response. See module docs for the
+/// assumption this makes about the error body shape.
 fn is_unsupported_model_error(body: &Value, raw: &str) -> bool {
     let candidates = [
         body["message"].as_str().unwrap_or_default(),
@@ -663,8 +791,8 @@ fn urlencode_path(path: &str) -> String {
 
 fn urlencode_component(s: &str) -> String {
     // Minimal percent-encoding sufficient for path segments and refs used in
-    // GitHub REST URLs (avoids pulling in a URL-encoding crate for a handful
-    // of characters).
+    // GitHub REST URLs (avoids pulling in a URL-encoding crate for a handful of
+    // characters).
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -687,132 +815,28 @@ fn debug_log_request(method: &str, url: &str, auth_header: &str) {
     );
 }
 
-/// Errors specific to preflight checks: permanent (fail-closed, skip) vs.
-/// transient (retry the whole attempt after restart).
-#[derive(Debug)]
-pub enum PreflightError {
-    Permanent(String),
-    Transient(String),
-}
-
-impl std::fmt::Display for PreflightError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PreflightError::Permanent(m) => write!(f, "preflight failed (permanent): {m}"),
-            PreflightError::Transient(m) => write!(f, "preflight failed (transient): {m}"),
-        }
-    }
-}
-
-impl std::error::Error for PreflightError {}
-
-impl From<ApiError> for PreflightError {
-    fn from(e: ApiError) -> Self {
-        match e {
-            ApiError::Permanent(m) => PreflightError::Permanent(m),
-            ApiError::Transient(m) => PreflightError::Transient(m),
-            ApiError::GraphQlErrors(errs) => PreflightError::Transient(errs.join("; ")),
-        }
-    }
-}
-
-/// Run all preflight checks required before a launch: issue open, issue
-/// content version unchanged, Project status unchanged, and profile file
-/// blob SHA pinned as expected.
-pub async fn run_preflight(
-    client: &GitHubClient,
-    row: &crate::row::LaunchRow,
-) -> Result<(), PreflightError> {
-    let (owner, repo) = row
-        .owner_and_repo()
-        .map_err(|e| PreflightError::Permanent(e.to_string()))?;
-
-    let issue = client.get_issue(owner, repo, row.issue_number).await?;
-    if issue.state != "open" {
-        return Err(PreflightError::Permanent(format!(
-            "issue {}#{} is not open (state={})",
-            row.repository, row.issue_number, issue.state
-        )));
-    }
-    // Cross-check the row's issueNodeId against the issue GitHub actually
-    // resolved for `repository`+`issueNumber`, so a row cannot point its
-    // WorkGraph correlation IDs (and therefore the comment target) at an
-    // issue node ID that doesn't correspond to the repository/number it
-    // also claims.
-    if issue.node_id.as_deref() != Some(row.issue_node_id.as_str()) {
-        return Err(PreflightError::Permanent(format!(
-            "issueNodeId '{}' does not match the node id GitHub returned for {}#{} ({:?})",
-            row.issue_node_id, row.repository, row.issue_number, issue.node_id
-        )));
-    }
-    let project_item = client
-        .project_item_status(&row.project_item_node_id, "Status")
-        .await?;
-    if project_item.status.as_deref() != Some(row.expected_project_status.as_str()) {
-        return Err(PreflightError::Permanent(format!(
-            "project status changed: expected '{}', found {:?}",
-            row.expected_project_status, project_item.status
-        )));
-    }
-    if project_item.project_node_id.as_deref() != Some(row.project_node_id.as_str())
-        || project_item.project_owner.as_deref() != Some(row.project_owner.as_str())
-        || project_item.project_number != Some(row.project_number)
-    {
-        return Err(PreflightError::Permanent(format!(
-            "project identity changed: expected node={} owner={} number={}, found node={:?} owner={:?} number={:?}",
-            row.project_node_id,
-            row.project_owner,
-            row.project_number,
-            project_item.project_node_id,
-            project_item.project_owner,
-            project_item.project_number
-        )));
-    }
-    // Cross-check that the project item is actually linked to this issue —
-    // otherwise `projectItemNodeId` could name an unrelated project item
-    // that merely happens to have a matching `Status` value.
-    if project_item.linked_issue_id.as_deref() != Some(row.issue_node_id.as_str()) {
-        return Err(PreflightError::Permanent(format!(
-            "projectItemNodeId '{}' is not linked to issue '{}' (linked to {:?})",
-            row.project_item_node_id, row.issue_node_id, project_item.linked_issue_id
-        )));
-    }
-    let expected_content_version =
-        crate::row::LaunchRow::parse_rfc3339_instant(&row.issue_content_version)
-            .map_err(|e| PreflightError::Permanent(e.to_string()))?;
-    let live_content_version = project_item
-        .content_version
-        .as_deref()
-        .ok_or_else(|| {
-            PreflightError::Permanent(
-                "project item linked issue did not return a content version".to_string(),
-            )
-        })
-        .and_then(|value| {
-            crate::row::LaunchRow::parse_rfc3339_instant(value)
-                .map_err(|e| PreflightError::Permanent(e.to_string()))
-        })?;
-    if live_content_version != expected_content_version {
-        return Err(PreflightError::Permanent(format!(
-            "issue content version changed: expected {}, found {}",
-            row.issue_content_version, live_content_version
-        )));
-    }
-
-    let (path, expected_sha) = row
-        .profile_path_and_sha()
-        .map_err(|e| PreflightError::Permanent(e.to_string()))?;
-    let live_sha = client
-        .blob_sha_at_path(owner, repo, &path, &row.base_ref)
-        .await?;
-    if live_sha.as_deref() != Some(expected_sha) {
-        return Err(PreflightError::Permanent(format!(
-            "profile '{}' at {} does not match pinned blob SHA {expected_sha} (found {:?})",
-            path, row.base_ref, live_sha
-        )));
-    }
-
-    Ok(())
+fn parse_comment(value: &Value) -> Result<IssueComment> {
+    Ok(IssueComment {
+        node_id: value
+            .get("node_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("comment payload missing node_id"))?
+            .to_string(),
+        body: value
+            .get("body")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        author: author_identity_from_github_user(value.get("user")),
+        created_at: value
+            .get("created_at")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        updated_at: value
+            .get("updated_at")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    })
 }
 
 /// Timestamp helper kept here so `reaction.rs` doesn't need a direct chrono
@@ -824,6 +848,92 @@ pub fn now() -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use drasi_workgraph_common::trust::ActorType;
+
+    fn comment_json() -> Value {
+        json!({
+            "node_id": "IC_node",
+            "body": "hello",
+            "user": {
+                "node_id": "U_kgDOBmvcSA",
+                "id": 4021243,
+                "type": "Bot",
+                "login": "drasi-bot"
+            },
+            "created_at": "2026-08-14T00:00:00Z",
+            "updated_at": "2026-08-14T00:00:00Z"
+        })
+    }
+
+    fn trusted() -> TrustedAuthor {
+        TrustedAuthor::new(4021243, ActorType::Bot)
+    }
+
+    #[test]
+    fn parse_comment_extracts_author_and_timestamps() {
+        let comment = parse_comment(&comment_json()).expect("parse");
+        assert_eq!(comment.node_id, "IC_node");
+        assert_eq!(
+            comment.author,
+            Some(
+                AuthorIdentity::new(4021243, ActorType::Bot)
+                    .with_author_id("U_kgDOBmvcSA")
+                    .with_login("drasi-bot")
+            )
+        );
+        assert!(comment.is_unedited());
+        assert!(comment.is_authored_by(&trusted()));
+        assert!(!comment.is_authored_by(&TrustedAuthor::new(1, ActorType::Bot)));
+        assert!(!comment.is_authored_by(&TrustedAuthor::new(4021243, ActorType::User)));
+    }
+
+    #[test]
+    fn a_renamed_login_does_not_change_trust() {
+        let mut value = comment_json();
+        value["user"]["login"] = json!("someone-else");
+        assert!(parse_comment(&value)
+            .expect("parse")
+            .is_authored_by(&trusted()));
+    }
+
+    #[test]
+    fn edited_comment_is_not_unedited() {
+        let mut value = comment_json();
+        value["updated_at"] = json!("2026-08-15T00:00:00Z");
+        let comment = parse_comment(&value).expect("parse");
+        assert!(!comment.is_unedited());
+    }
+
+    #[test]
+    fn comment_without_both_trust_values_is_never_trusted() {
+        for user in [
+            Value::Null,
+            json!({ "login": "drasi-bot" }),
+            json!({ "node_id": "U_kgDOBmvcSA", "type": "Bot" }),
+            json!({ "node_id": "U_kgDOBmvcSA", "id": 4021243 }),
+            json!({ "node_id": "U_kgDOBmvcSA", "id": 4021243, "type": "Mannequin" }),
+        ] {
+            let mut value = comment_json();
+            value["user"] = user.clone();
+            let comment = parse_comment(&value).expect("parse");
+            assert_eq!(comment.author, None, "unexpected identity for {user}");
+            assert!(!comment.is_authored_by(&trusted()));
+        }
+    }
+
+    #[test]
+    fn a_missing_node_id_on_the_author_does_not_block_trust() {
+        // The node ID is audit data: an author GitHub reports without one is
+        // still fully identified by its database ID and actor type.
+        let mut value = comment_json();
+        value["user"]["node_id"] = Value::Null;
+        let comment = parse_comment(&value).expect("parse");
+        assert_eq!(
+            comment.author,
+            Some(AuthorIdentity::new(4021243, ActorType::Bot).with_login("drasi-bot"))
+        );
+        assert!(comment.is_authored_by(&trusted()));
+    }
 
     #[test]
     fn detects_unsupported_model_message_field() {
@@ -873,23 +983,5 @@ mod tests {
             ApiError::from_status(reqwest::StatusCode::TOO_MANY_REQUESTS, "slow down"),
             ApiError::Transient(_)
         ));
-    }
-
-    #[test]
-    fn content_version_prefers_last_edited_at_and_normalizes_to_utc() {
-        let version = GitHubClient::content_version_from_timestamps(
-            Some("2026-08-13T12:00:00-07:00"),
-            Some("2026-08-01T00:00:00Z"),
-        )
-        .unwrap();
-        assert_eq!(version.as_deref(), Some("2026-08-13T19:00:00Z"));
-    }
-
-    #[test]
-    fn content_version_falls_back_to_created_at() {
-        let version =
-            GitHubClient::content_version_from_timestamps(None, Some("2026-08-01T00:00:00Z"))
-                .unwrap();
-        assert_eq!(version.as_deref(), Some("2026-08-01T00:00:00Z"));
     }
 }

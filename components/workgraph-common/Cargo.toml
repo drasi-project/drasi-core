@@ -13,43 +13,23 @@
 # limitations under the License.
 
 [package]
-name = "drasi-reaction-workgraph-router"
+name = "drasi-workgraph-common"
 version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "WorkGraph router reaction plugin for Drasi"
+description = "Shared WorkGraphEvent/v1 comment grammar, event envelope, and readable ID algorithms for Drasi WorkGraph components"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "reaction", "workgraph", "routing"]
-categories = ["network-programming"]
+keywords = ["drasi", "workgraph", "common"]
+categories = ["data-structures"]
 
 [lints]
 workspace = true
 
-[lib]
-crate-type = ["lib", "cdylib"]
-
 [dependencies]
-drasi-lib.workspace = true
-drasi-plugin-sdk = { workspace = true }
-drasi-workgraph-common = { workspace = true }
-anyhow = "1.0"
-async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
-log = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+hex = "0.4.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "2.0"
-tokio = { version = "1.0", features = ["full"] }
 sha2 = "0.10"
-hex = "0.4.3"
+thiserror = "2.0"
 utoipa = { workspace = true }
-
-[dev-dependencies]
-drasi-source-application = { workspace = true }
-tokio = { version = "1.0", features = ["full", "test-util"] }
-wiremock = "0.6"
-
-[features]
-dynamic-plugin = []

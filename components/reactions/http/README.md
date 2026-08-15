@@ -270,7 +270,7 @@ Builder-only settings (not stored on `HttpReactionConfig`):
 ### `HttpCallSpec`
 
 `HttpCallSpec = TemplateSpec<HttpCallExt>` — a Handlebars body `template` plus an
-`HttpCallExt { url, method, headers }`.
+`HttpCallExt { url, method, headers, fail_on_graphql_errors }`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -278,6 +278,7 @@ Builder-only settings (not stored on `HttpReactionConfig`):
 | `extension.url` | `String` | _empty_ | Handlebars template for the URL. A relative value is appended to `base_url`; an absolute `http(s)://` value is allowed only if its scheme, host, and port match `base_url`. |
 | `extension.method` | `String` | `POST` | HTTP method: `GET`, `POST`, `PUT`, `PATCH`, or `DELETE` (case-insensitive). |
 | `extension.headers` | `HashMap<String, String>` | _empty_ | Additional headers. Values support Handlebars templates. |
+| `extension.fail_on_graphql_errors` | `bool` | `false` | When true, an HTTP 2xx response succeeds only when its bounded body is a top-level JSON object whose `errors` field is absent or an empty array. |
 
 ### `AdaptiveBatchConfig`
 
@@ -306,9 +307,37 @@ when it creates the reaction (the equivalent of `with_queries(...)`).
 | `token` | string \| ConfigValue | `with_token` | Bearer token. |
 | `timeoutMs` | number \| ConfigValue | `with_timeout_ms` | Default `5000`. |
 | `priorityQueueCapacity` | number \| ConfigValue | `with_priority_queue_capacity` | Inbound queue capacity (default `10000`). Declarative-only — a `ReactionBase` parameter, not a field of `HttpReactionConfig`. |
-| `outputTemplates` | object | `with_output_templates` | `defaultTemplate` + `routes`; each entry has `added` / `updated` / `deleted`, each with `template` / `url` / `method` / `headers`. |
+| `outputTemplates` | object | `with_output_templates` | `defaultTemplate` + `routes`; each entry has `added` / `updated` / `deleted`, each with `template` / `url` / `method` / `headers` / `failOnGraphqlErrors`. |
 | `adaptive` | object | `with_adaptive` | `adaptiveMinBatchSize`, `adaptiveMaxBatchSize`, `adaptiveWindowSize`, `adaptiveBatchTimeoutMs`. |
 | `batchEndpoint` | string \| ConfigValue | `with_batch_endpoint` | Required whenever `adaptive` is set. |
+
+`failOnGraphqlErrors` is configured on each request spec, alongside `url`,
+`method`, and `template`:
+
+```yaml
+outputTemplates:
+  routes:
+    graphql-writes:
+      added:
+        url: /graphql
+        method: POST
+        failOnGraphqlErrors: true
+        template: '{"query":"mutation { ... }"}'
+```
+
+With the default `false`, every HTTP 2xx response retains the existing success
+behavior without reading or parsing its body. With `true`, malformed JSON,
+non-object JSON, a non-array `errors` value, or a non-empty `errors` array is a
+retryable delivery failure. Error messages are omitted from logs and errors so
+downstream responses cannot expose credentials. After retries are exhausted,
+the configured recovery policy applies; `strict` does not advance the
+checkpoint.
+
+Adaptive batches preserve this policy for every rendered item. A homogeneous
+batch uses its configured policy for the batch response. If one batch would mix
+`true` and `false` request policies, delivery fails before the HTTP write rather
+than weakening either request's contract; configure all requests that can share
+a batch with the same value.
 
 Single-notification example (per-query REST routing, token from an environment variable):
 
@@ -571,11 +600,12 @@ behaviour is always on and cannot be disabled.
 
 ## Delivery failure handling
 
-The HTTP reaction is fire-and-forget: it does not persist delivery checkpoints or replay
-requests after process failure. Each outbound request is attempted up to three times for
-transient failures (network errors, 408, 409, 425, 429, and 5xx responses) with short
-exponential backoff. Non-retryable HTTP failures are logged as permanent failures and the
-reaction continues processing later events.
+The HTTP reaction persists per-query delivery checkpoints. Each outbound request
+is attempted up to three times for transient failures (network errors, GraphQL
+response failures when enabled, 408, 409, 425, 429, and 5xx responses) with
+short exponential backoff. Under `strict`, exhausted retries fail-stop without
+advancing the checkpoint, so the event replays after restart. Non-retryable
+poison failures are logged, dropped, and checkpointed.
 
 ---
 
