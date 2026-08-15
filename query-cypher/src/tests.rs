@@ -825,3 +825,72 @@ fn contains_relationship_label_no_conflict() {
 
     assert_eq!(query.parts[0].match_clauses.len(), 1);
 }
+
+#[test]
+fn string_literal_decodes_newline_escape() {
+    // Cypher source: WHERE a.name = 'line1\nline2'
+    let query = cypher::query(
+        "MATCH (a) WHERE a.name = 'line1\\nline2' RETURN a",
+        &TEST_CONFIG,
+    )
+    .unwrap();
+
+    assert_eq!(
+        query.parts[0].where_clauses,
+        vec![BinaryExpression::eq(
+            UnaryExpression::expression_property(UnaryExpression::ident("a"), "name".into()),
+            UnaryExpression::literal(Literal::Text("line1\nline2".into()))
+        )]
+    );
+}
+
+#[test]
+fn string_literal_preserves_other_backslash_sequences() {
+    let query = cypher::query(
+        r"MATCH (a) WHERE a.name = 'C:\\path\tail\d+' RETURN a",
+        &TEST_CONFIG,
+    )
+    .unwrap();
+
+    assert_eq!(
+        query.parts[0].where_clauses,
+        vec![BinaryExpression::eq(
+            UnaryExpression::expression_property(UnaryExpression::ident("a"), "name".into()),
+            UnaryExpression::literal(Literal::Text(r"C:\\path\tail\d+".into()))
+        )]
+    );
+}
+
+#[test]
+fn string_literal_preserves_doubled_backslash_before_n() {
+    let query = cypher::query(
+        r"MATCH (a) WHERE a.name = 'line1\\nline2' RETURN a",
+        &TEST_CONFIG,
+    )
+    .unwrap();
+
+    assert_eq!(
+        query.parts[0].where_clauses,
+        vec![BinaryExpression::eq(
+            UnaryExpression::expression_property(UnaryExpression::ident("a"), "name".into()),
+            UnaryExpression::literal(Literal::Text(r"line1\\nline2".into()))
+        )]
+    );
+}
+
+#[test]
+fn string_literal_can_end_with_a_backslash() {
+    let query = cypher::query(
+        "MATCH (a) WHERE a.name = 'trailing\\' RETURN a",
+        &TEST_CONFIG,
+    )
+    .unwrap();
+
+    assert_eq!(
+        query.parts[0].where_clauses,
+        vec![BinaryExpression::eq(
+            UnaryExpression::expression_property(UnaryExpression::ident("a"), "name".into()),
+            UnaryExpression::literal(Literal::Text("trailing\\".into()))
+        )]
+    );
+}

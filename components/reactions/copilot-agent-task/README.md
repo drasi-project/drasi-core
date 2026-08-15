@@ -331,7 +331,7 @@ single-line JSON log to the `workgraph.execution_state` log target. The body mat
   "schema": "workgraph.execution-state/v1",
   "reactionId": "copilot-launcher",
   "executionId": "execution:<uuid>",
-  "runId": "run:<64-hex>",
+  "runId": "run:sha256:<64-hex>",
   "status": "failed",
   "repository": "owner/repo",
   "issueNumber": 123,

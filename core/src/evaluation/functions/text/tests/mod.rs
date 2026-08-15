@@ -18,6 +18,7 @@ mod random_uuid_tests;
 mod replace_tests;
 mod reverse_tests;
 mod right_tests;
+mod sha256_tests;
 mod split_tests;
 mod substring_tests;
 mod to_lower_tests;

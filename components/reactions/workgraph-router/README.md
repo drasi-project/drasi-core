@@ -28,7 +28,7 @@ WorkGraphEvent/v1
 
 WorkGraph routed drasi-project/drasi-core#742 to AwaitingIssueRiskProfiling
 
-{"schemaVersion":"workgraph.event/v1","eventId":"event:…","eventType":"RoutingDecided","runId":"run:…","projectItemNodeId":"PVTI_…","subjectNodeId":"I_…","payload":{"fromStatus":"AwaitingValidation","toStatus":"AwaitingIssueRiskProfiling","nextResponsibilityType":"issue-risk-profiling"}}
+{"schemaVersion":"workgraph.event/v1","eventId":"event:sha256:…","eventType":"RoutingDecided","runId":"run:sha256:…","projectItemNodeId":"PVTI_…","subjectNodeId":"I_…","payload":{"fromStatus":"AwaitingValidation","toStatus":"AwaitingIssueRiskProfiling","nextResponsibilityType":"issue-risk-profiling"}}
 ```
 
 …followed by exactly one `updateProjectV2ItemFieldValue` mutation setting the

@@ -419,8 +419,10 @@ mod tests {
     use super::*;
     use drasi_lib::state_store::MemoryStateStoreProvider;
 
-    const RUN_ID: &str = "run:1111111111111111111111111111111111111111111111111111111111111111";
-    const EVENT_ID: &str = "event:2222222222222222222222222222222222222222222222222222222222222222";
+    const RUN_ID: &str =
+        "run:sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    const EVENT_ID: &str =
+        "event:sha256:2222222222222222222222222222222222222222222222222222222222222222";
 
     fn row() -> LaunchRow {
         LaunchRow {
@@ -527,7 +529,8 @@ mod tests {
 
         // A row whose binding derives a different run can never adopt this
         // record, even when every other field matches.
-        let other_run = "run:3333333333333333333333333333333333333333333333333333333333333333";
+        let other_run =
+            "run:sha256:3333333333333333333333333333333333333333333333333333333333333333";
         assert!(record.ensure_matches(other_run, &row()).is_err());
 
         let mut wrong_schema = record.clone();

@@ -305,13 +305,14 @@ fn build_vectors() -> Value {
         "algorithms": {
             "bodyDigest": "\"sha256:\" + lowerHex(sha256(utf8(body ?? \"\")))",
             "runId": format!(
-                "\"run:\" + lowerHex(sha256(utf8(\"{RUN_ID_DOMAIN}\" + LF + projectItemNodeId + LF + subjectNodeId + LF + bodyDigest)))"
+                "\"run:sha256:\" + lowerHex(sha256(utf8(\"{RUN_ID_DOMAIN}\" + LF + projectItemNodeId + LF + subjectNodeId + LF + bodyDigest)))"
             ),
             "eventId": format!(
-                "\"event:\" + lowerHex(sha256(utf8(\"{EVENT_ID_DOMAIN}\" + LF + runId + LF + eventType)))"
+                "\"event:sha256:\" + lowerHex(sha256(utf8(\"{EVENT_ID_DOMAIN}\" + LF + runId + LF + eventType)))"
             ),
             "notes": [
                 "LF is a single U+000A. bodyDigest is embedded with its 'sha256:' prefix.",
+                "runId is embedded in the eventId preimage with its 'run:sha256:' prefix.",
                 "eventType is the exact token, e.g. 'CompletedIssueValidation'.",
                 "Comment grammar: 'WorkGraphEvent/v1' LF LF summary LF LF json, no fence, no trailing text.",
                 "Parsers must normalize CRLF to LF before applying the grammar.",

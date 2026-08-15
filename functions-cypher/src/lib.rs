@@ -63,6 +63,7 @@ fn register_text_functions(registry: &FunctionRegistry) {
         Function::Scalar(Arc::new(ToStringOrNull {})),
     );
     registry.register_function("randomUUID", Function::Scalar(Arc::new(RandomUUID {})));
+    registry.register_function("sha256", Function::Scalar(Arc::new(Sha256 {})));
 }
 
 fn register_numeric_functions(registry: &FunctionRegistry) {

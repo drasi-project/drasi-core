@@ -11,3 +11,8 @@ workspace = true
 
 [dependencies]
 drasi-core.workspace = true
+
+[dev-dependencies]
+drasi-query-cypher.workspace = true
+serde_json = "1"
+tokio = { version = "1.29.1", features = ["rt", "rt-multi-thread", "macros"] }

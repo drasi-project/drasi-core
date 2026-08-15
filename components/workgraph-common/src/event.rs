@@ -21,9 +21,9 @@
 //! ```json
 //! {
 //!   "schemaVersion": "workgraph.event/v1",
-//!   "eventId": "event:...",
+//!   "eventId": "event:sha256:...",
 //!   "eventType": "ResponsibilityAssigned",
-//!   "runId": "run:...",
+//!   "runId": "run:sha256:...",
 //!   "projectItemNodeId": "PVTI_...",
 //!   "subjectNodeId": "I_...",
 //!   "payload": {}
@@ -177,22 +177,22 @@ prefixed_hex_id!(
 );
 
 prefixed_hex_id!(
-    /// A deterministic run identifier rendered as `run:<64-hex>`.
+    /// A deterministic run identifier rendered as `run:sha256:<64-hex>`.
     ///
     /// See [`crate::ids::run_id`] for the derivation.
     RunId,
     "runId",
-    "run:",
+    "run:sha256:",
     64
 );
 
 prefixed_hex_id!(
-    /// A deterministic event identifier rendered as `event:<64-hex>`.
+    /// A deterministic event identifier rendered as `event:sha256:<64-hex>`.
     ///
     /// See [`crate::ids::event_id`] for the derivation.
     EventId,
     "eventId",
-    "event:",
+    "event:sha256:",
     64
 );
 
@@ -949,7 +949,7 @@ mod tests {
     fn rejects_tampered_event_id() {
         let mut value: serde_json::Value =
             serde_json::from_str(&assigned().to_canonical_json()).expect("valid json");
-        value["eventId"] = serde_json::json!(format!("event:{}", "0".repeat(64)));
+        value["eventId"] = serde_json::json!(format!("event:sha256:{}", "0".repeat(64)));
         let error = WorkGraphEvent::from_value(value).expect_err("event id must be derived");
         assert!(
             matches!(error, EventError::Envelope(ref message) if message.contains("deterministic")),

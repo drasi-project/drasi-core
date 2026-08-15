@@ -61,8 +61,9 @@ const WORKGRAPH_COMMENT_PATTERN: &str = concat!(
 
 const ITEM: &str = "PVTI_lADOABCDEF4AbcDEzgXYZ123";
 const SUBJECT: &str = "I_kwDOABCDEF6ABCDE";
-const RUN_ID: &str = "run:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664";
-const EVENT_ID: &str = "event:11c2c024117ad66fa6bdded5b16d429dd4265f184e2c984b11c59ed695efe3e0";
+const RUN_ID: &str = "run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664";
+const EVENT_ID: &str =
+    "event:sha256:0852afc26f01ca9ce28d446b98d913776fc8dbe88a42cb3fb9b4b1761f5ecb7f";
 
 /// The canonical `ExecutionStarted` document from the shared crate's
 /// cross-language vectors (`components/workgraph-common/vectors`).

@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Write as _;
+
 use crate::evaluation::variable_value::VariableValue;
 use async_trait::async_trait;
 use drasi_query_ast::ast;
+use sha2::{Digest, Sha256 as Sha256Hasher};
 
 use crate::evaluation::functions::ScalarFunction;
 use crate::evaluation::{ExpressionEvaluationContext, FunctionError, FunctionEvaluationError};
@@ -673,5 +676,48 @@ impl ScalarFunction for RandomUUID {
             });
         }
         Ok(VariableValue::String(uuid::Uuid::new_v4().to_string()))
+    }
+}
+
+/// `sha256(text)` — lowercase 64-character hex SHA-256 of the exact UTF-8 bytes
+/// of the argument.
+///
+/// The input is hashed verbatim: no trimming, no case folding, no newline or
+/// Unicode normalization, and the result carries no algorithm prefix. Callers
+/// that need a prefixed form build it with string concatenation.
+#[derive(Debug)]
+pub struct Sha256 {}
+
+#[async_trait]
+impl ScalarFunction for Sha256 {
+    async fn call(
+        &self,
+        _context: &ExpressionEvaluationContext,
+        expression: &ast::FunctionExpression,
+        args: Vec<VariableValue>,
+    ) -> Result<VariableValue, FunctionError> {
+        if args.len() != 1 {
+            return Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgumentCount,
+            });
+        }
+        match &args[0] {
+            VariableValue::String(s) => {
+                let mut hasher = Sha256Hasher::new();
+                hasher.update(s.as_bytes());
+                let digest = hasher.finalize();
+                let mut hex = String::with_capacity(digest.len() * 2);
+                for byte in digest {
+                    let _ = write!(hex, "{byte:02x}");
+                }
+                Ok(VariableValue::String(hex))
+            }
+            VariableValue::Null => Ok(VariableValue::Null),
+            _ => Err(FunctionError {
+                function_name: expression.name.to_string(),
+                error: FunctionEvaluationError::InvalidArgument(0),
+            }),
+        }
     }
 }

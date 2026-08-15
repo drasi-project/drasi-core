@@ -27,21 +27,31 @@
 //! ```text
 //! bodyDigest = "sha256:" || hex(sha256(body ?? ""))
 //!
-//! runId      = "run:"   || hex(sha256(
+//! runId      = "run:sha256:"   || hex(sha256(
 //!                  "workgraph.run/v1"      || LF ||
 //!                  projectItemNodeId       || LF ||
 //!                  subjectNodeId           || LF ||
 //!                  bodyDigest))
 //!
-//! eventId    = "event:" || hex(sha256(
+//! eventId    = "event:sha256:" || hex(sha256(
 //!                  "workgraph.event/v1"    || LF ||
 //!                  runId                   || LF ||
 //!                  eventType))
 //! ```
 //!
 //! `LF` is a single `\n` (0x0A). `bodyDigest` is embedded **with** its
-//! `sha256:` prefix. `eventType` is the exact serialized event-type token
-//! (for example `CompletedIssueValidation`).
+//! `sha256:` prefix, and `runId` is embedded **with** its `run:sha256:`
+//! prefix. `eventType` is the exact serialized event-type token (for example
+//! `CompletedIssueValidation`).
+//!
+//! The textual forms are exactly what a Cypher continuous query builds with the
+//! generic `sha256(text)` scalar and string concatenation:
+//!
+//! ```cypher
+//! runHex  = sha256('workgraph.run/v1\n' + item.nodeId + '\n' + issue.nodeId + '\n' + issue.bodyDigest)
+//! runId   = 'run:sha256:' + runHex
+//! eventId = 'event:sha256:' + sha256('workgraph.event/v1\n' + runId + '\nResponsibilityAssigned')
+//! ```
 //!
 //! `body` is the authoritative issue body as returned by GitHub. A missing
 //! body (`null`) and an empty body both digest as the empty string, which is
@@ -168,10 +178,10 @@ mod tests {
     #[test]
     fn identifiers_use_their_declared_prefixes() {
         let run = run_id(ITEM, SUBJECT, &body_digest(None));
-        assert!(run.as_str().starts_with("run:"));
-        assert_eq!(run.as_str().len(), "run:".len() + 64);
+        assert!(run.as_str().starts_with("run:sha256:"));
+        assert_eq!(run.as_str().len(), "run:sha256:".len() + 64);
         let event = event_id(&run, WorkGraphEventType::RoutingDecided);
-        assert!(event.as_str().starts_with("event:"));
-        assert_eq!(event.as_str().len(), "event:".len() + 64);
+        assert!(event.as_str().starts_with("event:sha256:"));
+        assert_eq!(event.as_str().len(), "event:sha256:".len() + 64);
     }
 }
