@@ -16,8 +16,8 @@
 
 use crate::config::ProjectSpec;
 use crate::graphql::{FetchedRoot, GitHubGraphQLClient, ProjectItemContent, RetryableGraphQLError};
-use crate::mapping::{map_root_delete_from_snapshot, map_root_diff, map_webhook_object_delete};
-use crate::types::{HydratorHealth, RootSnapshot, SnapshotElement, WebhookLocator};
+use crate::mapping::{map_root_current, map_webhook_object_delete, CurrentChangeKind};
+use crate::types::{HydratorHealth, WebhookLocator};
 use crate::webhook::{decode_admission_change, warn_unhealthy_hydrator};
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -32,7 +32,6 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::time::{sleep, Duration};
 
-const ROOT_SNAPSHOT_PREFIX: &str = "root-snapshot:";
 const EFFECTIVE_REPOS_KEY: &str = "effective-repos";
 const NULL_RETRY_PREFIX: &str = "null-retry:";
 pub(crate) const MAX_NULL_HYDRATION_ATTEMPTS: u32 = 3;
@@ -171,12 +170,6 @@ pub(crate) async fn process_admission(
         let effective_from = chrono::Utc::now().timestamp_millis().max(0) as u64;
         let change = map_webhook_object_delete(&params.source_id, &locator, effective_from)?;
         emit_output_changes(params, std::slice::from_ref(&change)).await?;
-        delete_root_snapshot(
-            params.state_store.as_ref(),
-            &params.source_id,
-            &snapshot_key_for_locator(&locator, None),
-        )
-        .await?;
         clear_null_retry(params.state_store.as_ref(), &params.source_id, &delivery_id).await?;
         prune_inbox(params, sequence).await?;
         return Ok(());
@@ -222,15 +215,12 @@ pub(crate) async fn process_admission(
     }
     clear_null_retry(params.state_store.as_ref(), &params.source_id, &delivery_id).await?;
 
-    let root_snapshot_key = snapshot_key_for_locator(&locator, fetched.as_ref());
-    let previous = load_root_snapshot(
-        params.state_store.as_ref(),
-        &params.source_id,
-        &root_snapshot_key,
-    )
-    .await?;
+    let Some(fetched) = fetched else {
+        prune_inbox(params, sequence).await?;
+        return Ok(());
+    };
 
-    if let Some(identity) = project_identity(&locator, fetched.as_ref())? {
+    if let Some(identity) = project_identity(&locator, Some(&fetched))? {
         if !is_project_configured(&params.projects, &identity.owner, identity.number) {
             debug!(
                 "[{}] Skipping delivery {} for unconfigured project owner={} number={}",
@@ -240,23 +230,16 @@ pub(crate) async fn process_admission(
             return Ok(());
         }
     } else if is_project_event(&locator) {
-        if previous.is_none() {
-            debug!(
-                "[{}] Skipping project delivery {} because project identity could not be resolved and no prior snapshot exists",
-                params.source_id, delivery_id
-            );
-            prune_inbox(params, sequence).await?;
-            return Ok(());
-        }
         debug!(
-            "[{}] Project delivery {} has unresolved identity but prior snapshot exists; proceeding with snapshot-based reconciliation",
+            "[{}] Skipping project delivery {} because project identity could not be resolved",
             params.source_id, delivery_id
         );
+        prune_inbox(params, sequence).await?;
+        return Ok(());
     }
 
     if let Some(repo) = fetched
-        .as_ref()
-        .and_then(FetchedRoot::repository_full_name)
+        .repository_full_name()
         .map(|r| r.to_ascii_lowercase())
     {
         if !is_repo_effective(&params.effective_repos, &repo).await {
@@ -279,7 +262,7 @@ pub(crate) async fn process_admission(
         }
     }
 
-    if let Some(FetchedRoot::ProjectItem(item)) = fetched.as_ref() {
+    if let FetchedRoot::ProjectItem(item) = &fetched {
         if let Some(repo_name) = project_item_repo(item) {
             add_effective_repo(
                 params.state_store.as_ref(),
@@ -292,41 +275,13 @@ pub(crate) async fn process_admission(
     }
 
     let effective_from = chrono::Utc::now().timestamp_millis().max(0) as u64;
-
-    let (changes, next_snapshot) = match fetched {
-        Some(root) => {
-            let (changes, mut snapshot) =
-                map_root_diff(&params.source_id, &root, previous.as_ref(), effective_from)?;
-            snapshot.committed_delivery_id = Some(delivery_id.clone());
-            snapshot.committed_sequence = Some(sequence);
-            (changes, Some(snapshot))
-        }
-        None => (
-            map_root_delete_from_snapshot(&params.source_id, previous.as_ref(), effective_from),
-            None,
-        ),
-    };
-
-    if !changes.is_empty() {
-        emit_output_changes(params, &changes).await?;
-    }
-
-    if let Some(snapshot) = next_snapshot {
-        save_root_snapshot(
-            params.state_store.as_ref(),
-            &params.source_id,
-            &root_snapshot_key,
-            &snapshot,
-        )
-        .await?;
+    let change_kind = if is_creation_action(&locator.action) {
+        CurrentChangeKind::Insert
     } else {
-        delete_root_snapshot(
-            params.state_store.as_ref(),
-            &params.source_id,
-            &root_snapshot_key,
-        )
-        .await?;
-    }
+        CurrentChangeKind::Update
+    };
+    let changes = map_root_current(&params.source_id, &fetched, change_kind, effective_from);
+    emit_output_changes(params, &changes).await?;
 
     prune_inbox(params, sequence).await?;
     Ok(())
@@ -406,6 +361,10 @@ fn is_authoritative_absence_action(locator: &WebhookLocator) -> bool {
         "repository" => matches!(action, "archived"),
         _ => false,
     }
+}
+
+fn is_creation_action(action: &str) -> bool {
+    matches!(action, "created" | "opened" | "submitted")
 }
 
 fn is_project_configured(projects: &[ProjectSpec], owner: &str, number: u32) -> bool {
@@ -502,65 +461,6 @@ async fn clear_null_retry(
         .delete(source_id, &key)
         .await
         .with_context(|| format!("state_store.delete({key}) failed"))?;
-    Ok(())
-}
-
-pub fn snapshot_key_for_locator(locator: &WebhookLocator, fetched: Option<&FetchedRoot>) -> String {
-    if let Some(root) = fetched {
-        return format!("{ROOT_SNAPSHOT_PREFIX}{}", root.root_id());
-    }
-
-    if let Some(node_id) = locator.node_id.as_ref() {
-        return format!("{ROOT_SNAPSHOT_PREFIX}{node_id}");
-    }
-    if let Some(project_id) = locator.project_id.as_ref() {
-        return format!("{ROOT_SNAPSHOT_PREFIX}{project_id}");
-    }
-    if let Some(repo) = locator.repository_full_name.as_ref() {
-        return format!("{ROOT_SNAPSHOT_PREFIX}repo:{}", repo.to_ascii_lowercase());
-    }
-    format!("{ROOT_SNAPSHOT_PREFIX}unknown")
-}
-
-pub async fn load_root_snapshot(
-    state_store: &dyn StateStoreProvider,
-    source_id: &str,
-    key: &str,
-) -> Result<Option<RootSnapshot>> {
-    let bytes = state_store
-        .get(source_id, key)
-        .await
-        .map_err(|e| anyhow::anyhow!("state_store.get({key}) failed: {e}"))?;
-    match bytes {
-        Some(data) => Ok(Some(
-            serde_json::from_slice(&data).context("Failed to deserialize root snapshot")?,
-        )),
-        None => Ok(None),
-    }
-}
-
-pub async fn save_root_snapshot(
-    state_store: &dyn StateStoreProvider,
-    source_id: &str,
-    key: &str,
-    snapshot: &RootSnapshot,
-) -> Result<()> {
-    let data = serde_json::to_vec(snapshot).context("Failed to serialize root snapshot")?;
-    state_store
-        .set(source_id, key, data)
-        .await
-        .map_err(|e| anyhow::anyhow!("state_store.set({key}) failed: {e}"))
-}
-
-pub async fn delete_root_snapshot(
-    state_store: &dyn StateStoreProvider,
-    source_id: &str,
-    key: &str,
-) -> Result<()> {
-    state_store
-        .delete(source_id, key)
-        .await
-        .map_err(|e| anyhow::anyhow!("state_store.delete({key}) failed: {e}"))?;
     Ok(())
 }
 

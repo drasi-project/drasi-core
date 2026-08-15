@@ -35,7 +35,8 @@ Flow:
 ## Delivery semantics
 
 - At-least-once/convergent delivery.
-- Crash window between output append and inbox prune can replay a delivery; deterministic authoritative diffing converges state.
+- Crash window between output append and inbox prune can replay a delivery; stable element IDs let Drasi apply repeated authoritative current-state updates convergently.
+- The Source does not persist or retrieve object before-state. Creation actions emit INSERT; other non-deleted actions emit UPDATE from the fetched current state.
 - Non-delete `node: null` hydrations are retried with bounded attempts, then treated as `gone-before-hydration` and FIFO advances.
 - A literal `deleted` webhook action bypasses GraphQL and emits exactly one delete for the identified GitHub object. It does not infer cascade or relation deletes.
 

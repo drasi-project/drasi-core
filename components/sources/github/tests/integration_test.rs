@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+use async_trait::async_trait;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::routing::post;
@@ -8,7 +9,7 @@ use drasi_core::models::{Element, SourceChange};
 use drasi_lib::component_graph::ComponentUpdateSender;
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::context::SourceRuntimeContext;
-use drasi_lib::state_store::StateStoreProvider;
+use drasi_lib::state_store::{StateStoreProvider, StateStoreResult};
 use drasi_lib::wal::{CapacityPolicy, WalProvider};
 use drasi_lib::{DurabilityConfig, Source};
 use drasi_source_github::config::{GitHubSourceConfig, ProjectSpec, WebhookConfig};
@@ -43,6 +44,88 @@ struct MockGitHubState {
     project_item_exists: Arc<AtomicBool>,
     project_item_repo: Arc<RwLock<String>>,
     project_item_status: Arc<RwLock<String>>,
+}
+
+struct RecordingStateStore {
+    inner: Arc<dyn StateStoreProvider>,
+    get_keys: Mutex<Vec<String>>,
+}
+
+impl RecordingStateStore {
+    fn new(inner: Arc<dyn StateStoreProvider>) -> Self {
+        Self {
+            inner,
+            get_keys: Mutex::new(Vec::new()),
+        }
+    }
+
+    async fn clear_get_keys(&self) {
+        self.get_keys.lock().await.clear();
+    }
+
+    async fn get_keys(&self) -> Vec<String> {
+        self.get_keys.lock().await.clone()
+    }
+}
+
+#[async_trait]
+impl StateStoreProvider for RecordingStateStore {
+    async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+        self.get_keys.lock().await.push(key.to_string());
+        self.inner.get(store_id, key).await
+    }
+
+    async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+        self.inner.set(store_id, key, value).await
+    }
+
+    async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+        self.inner.delete(store_id, key).await
+    }
+
+    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+        self.inner.contains_key(store_id, key).await
+    }
+
+    async fn get_many(
+        &self,
+        store_id: &str,
+        keys: &[&str],
+    ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
+        self.inner.get_many(store_id, keys).await
+    }
+
+    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
+        self.inner.set_many(store_id, entries).await
+    }
+
+    async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
+        self.inner.delete_many(store_id, keys).await
+    }
+
+    async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
+        self.inner.clear_store(store_id).await
+    }
+
+    async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
+        self.inner.list_keys(store_id).await
+    }
+
+    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
+        self.inner.store_exists(store_id).await
+    }
+
+    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
+        self.inner.key_count(store_id).await
+    }
+
+    async fn sync(&self) -> StateStoreResult<()> {
+        self.inner.sync().await
+    }
+
+    fn is_durable(&self) -> bool {
+        self.inner.is_durable()
+    }
 }
 
 impl MockGitHubState {
@@ -339,6 +422,7 @@ struct Harness {
     webhook_path: String,
     webhook_secret: String,
     mock: MockGitHubState,
+    state_store: Arc<RecordingStateStore>,
 }
 
 async fn build_harness(max_events: u64) -> Harness {
@@ -380,10 +464,11 @@ async fn build_harness(max_events: u64) -> Harness {
     });
 
     let wal = Arc::new(RedbWalProvider::new(tmp.path().join("wal")));
-    let state_store: Arc<dyn StateStoreProvider> = Arc::new(
+    let durable_state_store: Arc<dyn StateStoreProvider> = Arc::new(
         RedbStateStoreProvider::new(tmp.path().join("state.redb"))
             .expect("create durable redb state store"),
     );
+    let state_store = Arc::new(RecordingStateStore::new(durable_state_store));
 
     let mut source = GitHubSourceBuilder::new(&source_id)
         .with_config(GitHubSourceConfig {
@@ -414,7 +499,7 @@ async fn build_harness(max_events: u64) -> Harness {
     let mut context = SourceRuntimeContext::new(
         "github-int-test",
         source_id.clone(),
-        Some(state_store),
+        Some(state_store.clone()),
         update_tx,
         None,
     );
@@ -434,6 +519,7 @@ async fn build_harness(max_events: u64) -> Harness {
         webhook_path,
         webhook_secret,
         mock,
+        state_store,
     }
 }
 
@@ -471,17 +557,6 @@ fn issue_change_id(change: &SourceChange) -> Option<String> {
             .then(|| metadata.reference.element_id.as_ref().to_string()),
         SourceChange::Future { .. } => None,
     }
-}
-
-fn deleted_project_item_id(change: &SourceChange) -> Option<String> {
-    let SourceChange::Delete { metadata } = change else {
-        return None;
-    };
-    metadata
-        .labels
-        .iter()
-        .any(|label| label.as_ref() == "GitHubProjectItem")
-        .then(|| metadata.reference.element_id.as_ref().to_string())
 }
 
 fn admission_delivery_id(change: &SourceChange) -> Option<String> {
@@ -594,6 +669,90 @@ async fn deleted_webhook_skips_graphql_and_emits_one_delete() {
 
 #[tokio::test]
 #[ignore]
+async fn update_maps_only_fetched_current_state_without_snapshot_lookup() {
+    let mut harness = build_harness(16).await;
+    let client = Client::new();
+    let mut receiver = harness
+        .source
+        .subscribe(subscription_settings(
+            &harness.source_id,
+            "current-update",
+            None,
+            false,
+        ))
+        .await
+        .unwrap()
+        .receiver;
+
+    harness
+        .mock
+        .queue_issue_title("I_2", "Authoritative current title")
+        .await;
+    harness.state_store.clear_get_keys().await;
+    let response = send_webhook(
+        &client,
+        &harness,
+        "delivery-current-update",
+        "issues",
+        json!({"action":"edited","issue":{"node_id":"I_2"},"repository":{"full_name":"acme/repo"}}),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+
+    let mut saw_current_issue = false;
+    for _ in 0..8 {
+        let wrapper = recv_event(&mut receiver, Duration::from_secs(10)).await;
+        let drasi_lib::channels::SourceEvent::Change(SourceChange::Update { element }) =
+            &wrapper.event
+        else {
+            continue;
+        };
+        let Element::Node {
+            metadata,
+            properties,
+        } = element
+        else {
+            continue;
+        };
+        if metadata.reference.element_id.as_ref() != "I_2" {
+            continue;
+        }
+        assert_eq!(
+            properties.get("title"),
+            Some(&drasi_core::models::ElementValue::String(Arc::from(
+                "Authoritative current title"
+            )))
+        );
+        saw_current_issue = true;
+        break;
+    }
+    assert!(saw_current_issue, "expected current-state issue update");
+    assert!(
+        harness
+            .state_store
+            .get_keys()
+            .await
+            .iter()
+            .all(|key| !key.starts_with("root-snapshot:")),
+        "update hydration must not load prior object snapshots"
+    );
+    assert!(
+        harness
+            .state_store
+            .list_keys(&harness.source_id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|key| !key.starts_with("root-snapshot:")),
+        "update hydration must not persist object snapshots"
+    );
+
+    harness.source.stop().await.unwrap();
+    harness.graphql_server.abort();
+}
+
+#[tokio::test]
+#[ignore]
 async fn github_source_minimal_v1_fifo_durability_replay_scope_and_backpressure() {
     let mut harness = build_harness(16).await;
     let client = Client::new();
@@ -658,8 +817,8 @@ async fn github_source_minimal_v1_fifo_durability_replay_scope_and_backpressure(
             &client,
             &harness,
             &format!("delivery-full-{i}"),
-            "issues",
-            json!({"action":"edited","issue":{"node_id":"I_1"},"repository":{"full_name":"acme/repo"}}),
+            "ping",
+            json!({"action":"ping"}),
         )
         .await;
         if response.status() == 503 {
@@ -717,6 +876,10 @@ async fn github_source_minimal_v1_fifo_durability_replay_scope_and_backpressure(
         if !["I_1", "I_2", "I_3"].contains(&issue_id.as_str()) {
             continue;
         }
+        assert!(
+            matches!(change, SourceChange::Insert { .. }),
+            "opened issue must emit INSERT current state"
+        );
         received_issue_order.push(issue_id.clone());
 
         let pos = wrapper
@@ -738,7 +901,7 @@ async fn github_source_minimal_v1_fifo_durability_replay_scope_and_backpressure(
     }
     assert_eq!(received_issue_order, expected_issue_order);
 
-    // Crash duplicate convergence: replayed duplicate delivery converges to no-op.
+    // After retained dedupe expires, current-state delivery is forwarded again.
     let duplicate_after_prune = send_webhook(
         &client,
         &harness,
@@ -748,18 +911,20 @@ async fn github_source_minimal_v1_fifo_durability_replay_scope_and_backpressure(
     )
     .await;
     assert_eq!(duplicate_after_prune.status(), 200);
-    let until = tokio::time::Instant::now() + Duration::from_secs(2);
-    while tokio::time::Instant::now() < until {
-        if let Ok(Ok(arc)) = tokio::time::timeout(Duration::from_millis(200), q1.recv()).await {
-            if let drasi_lib::channels::SourceEvent::Change(change) = &arc.event {
-                assert_ne!(
-                    issue_change_id(change).as_deref(),
-                    Some("I_1"),
-                    "duplicate replay after convergence should not emit additional I_1 diff"
-                );
+    let mut saw_repeated_current_state = false;
+    for _ in 0..8 {
+        let wrapper = recv_event(&mut q1, Duration::from_secs(10)).await;
+        if let drasi_lib::channels::SourceEvent::Change(change) = &wrapper.event {
+            if issue_change_id(change).as_deref() == Some("I_1") {
+                saw_repeated_current_state = true;
+                break;
             }
         }
     }
+    assert!(
+        saw_repeated_current_state,
+        "current state must be forwarded without source-side no-op suppression"
+    );
 
     // Project item hydration can grow scope to acme/new-repo.
     let project_item = send_webhook(
@@ -799,8 +964,10 @@ async fn github_source_minimal_v1_fifo_durability_replay_scope_and_backpressure(
         "project-item-driven scope growth should admit new repository events"
     );
 
-    // Project item delete/archive with unresolved identity must still clean up via prior snapshot.
+    // Archived is not a literal delete: it still hydrates authoritatively and emits no inferred delete.
     harness.mock.set_project_item_exists(false);
+    let graphql_before_archive = harness.mock.graphql_calls.load(Ordering::SeqCst);
+    let output_before_archive = harness.wal.head_sequence(&harness.source_id).await.unwrap();
     let project_item_archived = send_webhook(
         &client,
         &harness,
@@ -810,21 +977,20 @@ async fn github_source_minimal_v1_fifo_durability_replay_scope_and_backpressure(
     )
     .await;
     assert_eq!(project_item_archived.status(), 200);
-
-    let mut saw_project_item_delete = false;
-    for _ in 0..24 {
-        let wrapper = recv_event(&mut q1, Duration::from_secs(10)).await;
-        let drasi_lib::channels::SourceEvent::Change(change) = &wrapper.event else {
-            continue;
-        };
-        if deleted_project_item_id(change).as_deref() == Some("PVTI_1") {
-            saw_project_item_delete = true;
-            break;
-        }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while harness.wal.event_count(&harness.inbox_id).await.unwrap() != 0
+        && tokio::time::Instant::now() < deadline
+    {
+        sleep(Duration::from_millis(25)).await;
     }
     assert!(
-        saw_project_item_delete,
-        "archived project item with prior snapshot should emit deterministic delete cleanup"
+        harness.mock.graphql_calls.load(Ordering::SeqCst) > graphql_before_archive,
+        "archived action must retain authoritative hydration"
+    );
+    assert_eq!(
+        harness.wal.head_sequence(&harness.source_id).await.unwrap(),
+        output_before_archive,
+        "archived null response must not infer a snapshot-derived delete"
     );
 
     // Non-delete null retries should eventually advance FIFO.
