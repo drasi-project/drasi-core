@@ -11,13 +11,16 @@ On bootstrap:
    - repositories discovered from configured `projects` items
 2. Fetch a full reconcile snapshot from GitHub GraphQL (repositories, issues, pull requests, projects, project items).
 3. Map snapshot objects to normalized `SourceChange` events.
-4. Durably persist root snapshots, the reconcile index, and any pending live-subscriber delta.
-5. Dispatch the committed delta to existing subscribers, excluding the query being bootstrapped,
-   then clear its pending marker.
-6. Emit the new query's filtered full bootstrap only after the durable transition completes.
+4. Atomically persist one `ReconcileState` record containing the new generation, index, and
+   optional pending live delta (root snapshots remain separate for root-level diffing).
+5. Dispatch the pending delta to ready live subscribers and atomically clear it only after a
+   complete delivery; leave it durable when none are eligible.
+6. Emit the new query's filtered full bootstrap, mark only that query live-ready, and retry any
+   retained pending delta while still holding the source processing gate.
 
-The source only supports channel dispatch mode. Broadcast mode is rejected because it cannot
-exclude the bootstrapping query from the live reconciliation delta.
+The source only supports channel dispatch mode. Each bootstrapping query is registered not-ready
+at the dispatcher edge. Live events are dropped (never queued) for that query until its complete
+snapshot is emitted; other ready queries continue receiving live deltas.
 
 `BootstrapResult.source_position` is `None` (runtime durability/recovery is handled by webhook admission + source WAL + authoritative hydrator snapshots).
 
@@ -44,5 +47,6 @@ and respects query bootstrap label filters from `BootstrapRequest`.
 - Invalid/missing token or GraphQL request errors fail bootstrap.
 - Project snapshot fetch failures fail bootstrap.
 - State persistence failures prevent both live-delta and full-bootstrap publication.
-- A committed pending live delta is replayed at least once after restart or on a later bootstrap.
-- Event channel closure stops emission early and returns emitted count so far.
+- A pending delta contained in `ReconcileState` is replayed at least once after restart, then
+  cleared. Index equality never infers pending ownership.
+- Event channel closure fails bootstrap and leaves the query not-ready.

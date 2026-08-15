@@ -14,7 +14,9 @@ use crate::mapping::{map_reconcile_snapshot, map_root_diff, node_labels, relatio
 use crate::rate_limit::{classify_retry, exp_backoff};
 use crate::reconciler::{run_reconciler_loop, ReconcilerParams};
 use crate::source::GitHubSourceBuilder;
-use crate::types::{HydratorHealth, RootSnapshot, SnapshotElement, WebhookLocator};
+use crate::types::{
+    HydratorHealth, PendingDelta, ReconcileState, RootSnapshot, SnapshotElement, WebhookLocator,
+};
 use crate::webhook::{
     compact_dedupe_markers, dedupe_key, encode_admission_change, find_delivery_in_wal,
     parse_locator, persist_dedupe_marker, verify_signature,
@@ -559,6 +561,7 @@ async fn later_query_bootstrap_reconciles_live_subscribers_without_losing_full_s
                                     "labels": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] },
                                     "comments": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] }
                                 }
+
                             ]
                         }
                     }
@@ -651,10 +654,10 @@ async fn later_query_bootstrap_reconciles_live_subscribers_without_losing_full_s
         .await
         .expect("existing live receiver");
     let mut bootstrapping_live_rx = base
-        .subscribe_with_bootstrap(
+        .subscribe_with_bootstrap_readiness(
             &SourceSubscriptionSettings {
                 source_id: "github-later-bootstrap".to_string(),
-                enable_bootstrap: false,
+                enable_bootstrap: true,
                 query_id: "later-query".to_string(),
                 nodes: HashSet::new(),
                 relations: HashSet::new(),
@@ -675,7 +678,7 @@ async fn later_query_bootstrap_reconciles_live_subscribers_without_losing_full_s
         config,
         Arc::new(RwLock::new(HashSet::new())),
         Arc::new(tokio::sync::Mutex::new(())),
-        source_base,
+        source_base.clone(),
     );
     let (event_tx, mut bootstrap_rx) = tokio::sync::mpsc::channel(100);
     let result = provider
@@ -748,6 +751,41 @@ async fn later_query_bootstrap_reconciles_live_subscribers_without_losing_full_s
     assert!(bootstrap_ids.contains("I_2"));
     assert!(!bootstrap_ids.contains("PR_1"));
 
+    let post_bootstrap_change = map_reconcile_snapshot(
+        "github-later-bootstrap",
+        &ReconcileSnapshot {
+            issues: HashMap::from([("I_1".to_string(), sample_issue("after-ready"))]),
+            ..ReconcileSnapshot::default()
+        },
+        &HashMap::new(),
+        2,
+    )
+    .0
+    .into_iter()
+    .find(|change| change.get_reference().element_id.as_ref() == "I_1")
+    .expect("post-bootstrap issue change");
+    source_base
+        .get()
+        .expect("source base")
+        .dispatch_source_change(post_bootstrap_change)
+        .await
+        .expect("post-bootstrap dispatch");
+    let post_ready = tokio::time::timeout(Duration::from_secs(1), bootstrapping_live_rx.recv())
+        .await
+        .expect("ready query receives next live event")
+        .expect("post-ready event");
+    assert_eq!(
+        match &post_ready.event {
+            SourceEvent::Change(change) => change.get_reference().element_id.as_ref(),
+            SourceEvent::Control(_) => panic!("expected change"),
+        },
+        "I_1"
+    );
+    tokio::time::timeout(Duration::from_secs(1), live_rx.recv())
+        .await
+        .expect("existing query receives post-ready event")
+        .expect("existing query event");
+
     let persisted =
         crate::hydrator::load_reconcile_index(state_store.as_ref(), "github-later-bootstrap")
             .await
@@ -796,6 +834,75 @@ async fn later_query_bootstrap_reconciles_live_subscribers_without_losing_full_s
     server.abort();
 }
 
+#[tokio::test]
+async fn concurrent_bootstrap_readiness_drops_live_events_per_query_without_backpressure() {
+    let base = test_source_base("bootstrap-readiness");
+    let settings = |query_id: &str| SourceSubscriptionSettings {
+        source_id: "bootstrap-readiness".to_string(),
+        enable_bootstrap: true,
+        query_id: query_id.to_string(),
+        nodes: HashSet::new(),
+        relations: HashSet::new(),
+        resume_from: None,
+        request_position_handle: false,
+    };
+    let mut first_rx = base
+        .subscribe_with_bootstrap_readiness(&settings("query-1"), "github")
+        .await
+        .expect("first bootstrap subscription")
+        .receiver;
+    let mut second_rx = base
+        .subscribe_with_bootstrap_readiness(&settings("query-2"), "github")
+        .await
+        .expect("second bootstrap subscription")
+        .receiver;
+    let mut snapshot = ReconcileSnapshot::default();
+    snapshot
+        .issues
+        .insert("I_1".to_string(), sample_issue("live"));
+    let change = map_reconcile_snapshot("bootstrap-readiness", &snapshot, &HashMap::new(), 1)
+        .0
+        .into_iter()
+        .find(|change| change.get_reference().element_id.as_ref() == "I_1")
+        .expect("issue change");
+
+    base.dispatch_source_change(change.clone())
+        .await
+        .expect("stale dispatch");
+    base.mark_bootstrap_query_ready("query-1").await;
+
+    let drain_first = tokio::spawn(async move {
+        for _ in 0..1_100 {
+            first_rx.recv().await.expect("first query live event");
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        for _ in 0..1_100 {
+            base.dispatch_source_change(change.clone())
+                .await
+                .expect("live dispatch during second bootstrap");
+        }
+    })
+    .await
+    .expect("not-ready second query must not apply backpressure");
+    drain_first.await.expect("drain first query");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), second_rx.recv())
+            .await
+            .is_err(),
+        "second query must not retain stale live events"
+    );
+
+    base.mark_bootstrap_query_ready("query-2").await;
+    base.dispatch_source_change(change)
+        .await
+        .expect("post-ready dispatch");
+    tokio::time::timeout(Duration::from_secs(1), second_rx.recv())
+        .await
+        .expect("ready second query receives next event")
+        .expect("post-ready event");
+}
+
 fn test_source_base(id: &str) -> drasi_lib::sources::base::SourceBase {
     drasi_lib::sources::base::SourceBase::new(drasi_lib::sources::base::SourceBaseParams::new(id))
         .expect("create source base")
@@ -834,7 +941,7 @@ impl StateStoreProvider for FaultyStateStoreProvider {
     async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
         if self.fail_set && store_id == self.fail_store && key == self.fail_key {
             return Err(StateStoreError::StorageError(
-                "injected reconcile-index commit failure".to_string(),
+                "injected reconcile-state commit failure".to_string(),
             ));
         }
         self.inner.set(store_id, key, value).await
@@ -959,7 +1066,7 @@ async fn source_specific_state_store_is_shared_by_runtime_and_bootstrap() {
         .expect("list source state");
     for expected in [
         "effective-repos",
-        "reconcile-index",
+        "reconcile-state",
         "root-snapshot:R_1",
         "root-snapshot:I_1",
     ] {
@@ -1001,7 +1108,7 @@ async fn bootstrap_persistence_failure_does_not_publish_live_delta() {
     let faulty: Arc<dyn StateStoreProvider> = Arc::new(FaultyStateStoreProvider {
         inner: inner.clone(),
         fail_store: "failed-bootstrap".to_string(),
-        fail_key: "reconcile-index".to_string(),
+        fail_key: "reconcile-state".to_string(),
         fail_get: false,
         fail_set: true,
         fail_delete_many: false,
@@ -1052,7 +1159,7 @@ async fn bootstrap_persistence_failure_does_not_publish_live_delta() {
         )
         .await
         .expect_err("reconcile index persistence must fail");
-    assert!(error.to_string().contains("reconcile-index"));
+    assert!(error.to_string().contains("reconcile-state"));
     assert!(
         tokio::time::timeout(Duration::from_millis(20), live_rx.recv())
             .await
@@ -1060,17 +1167,29 @@ async fn bootstrap_persistence_failure_does_not_publish_live_delta() {
         "live delta must not be visible before durable commit"
     );
     assert!(
-        inner
-            .contains_key("failed-bootstrap", "pending-bootstrap-delta")
+        !inner
+            .contains_key("failed-bootstrap", "reconcile-state")
             .await
-            .expect("pending marker"),
-        "prepared marker must remain for recovery"
+            .expect("reconcile state"),
+        "failure before the atomic write must leave no reconcile state"
     );
     server.abort();
 }
 
 #[tokio::test]
-async fn prepared_pending_bootstrap_delta_replays_after_restart_commit() {
+async fn pending_delta_waits_for_ready_bootstrap_subscriber_after_restart() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock server");
+    let addr = listener.local_addr().expect("mock server addr");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            Router::new().route("/graphql", post(bootstrap_snapshot_handler)),
+        )
+        .await;
+    });
+
     let temp = TempDir::new().expect("tempdir");
     let state_store: Arc<dyn StateStoreProvider> = Arc::new(
         RedbStateStoreProvider::new(temp.path().join("pending-replay.redb")).expect("state store"),
@@ -1085,45 +1204,43 @@ async fn prepared_pending_bootstrap_delta_replays_after_restart_commit() {
         .iter()
         .map(|change| change.get_reference().element_id.to_string())
         .collect::<HashSet<_>>();
-    crate::hydrator::save_reconcile_index(state_store.as_ref(), "pending-replay", &next_index)
-        .await
-        .expect("persist completed transition index");
-    crate::bootstrap::save_pending_bootstrap_delta(
+    crate::hydrator::save_reconcile_state(
         state_store.as_ref(),
         "pending-replay",
-        &crate::bootstrap::PendingBootstrapDelta {
-            changes,
-            next_index,
-            excluded_query_id: "bootstrap-query".to_string(),
-            committed: false,
+        &ReconcileState {
+            generation: 1,
+            index: next_index,
+            pending_delta: Some(PendingDelta { changes }),
+            ..ReconcileState::default()
         },
     )
     .await
-    .expect("persist prepared marker");
+    .expect("persist atomic state");
 
-    let base = test_source_base("pending-replay");
+    // The restarted source reaches its first replay point before any query.
+    let base = test_source_base_with_state_store("pending-replay", state_store.clone());
+    assert_eq!(base.eligible_ready_channel_subscriber_count().await, 0);
     assert!(
-        !crate::bootstrap::replay_pending_bootstrap_delta(
-            state_store.as_ref(),
-            "pending-replay",
-            &base,
-            None,
-        )
-        .await
-        .expect("defer replay without subscribers"),
-        "pending delta must remain until a subscriber exists"
+        !crate::hydrator::replay_pending_delta(state_store.as_ref(), "pending-replay", &base)
+            .await
+            .expect("zero-subscriber replay"),
+        "a replay with no eligible subscriber must not report dispatch"
     );
-    assert!(state_store
-        .contains_key("pending-replay", "pending-bootstrap-delta")
-        .await
-        .expect("pending marker"));
+    assert!(
+        crate::hydrator::load_reconcile_state(state_store.as_ref(), "pending-replay")
+            .await
+            .expect("load pending state")
+            .pending_delta
+            .is_some(),
+        "a replay with no subscriber must leave pending durable"
+    );
 
     let mut receiver = base
-        .subscribe_with_bootstrap(
+        .subscribe_with_bootstrap_readiness(
             &SourceSubscriptionSettings {
                 source_id: "pending-replay".to_string(),
-                enable_bootstrap: false,
-                query_id: "existing-query".to_string(),
+                enable_bootstrap: true,
+                query_id: "bootstrap-query".to_string(),
                 nodes: HashSet::new(),
                 relations: HashSet::new(),
                 resume_from: None,
@@ -1132,28 +1249,248 @@ async fn prepared_pending_bootstrap_delta_replays_after_restart_commit() {
             "github",
         )
         .await
-        .expect("subscribe after restart")
+        .expect("bootstrap query subscribes after restart")
         .receiver;
-    assert!(crate::bootstrap::replay_pending_bootstrap_delta(
-        state_store.as_ref(),
-        "pending-replay",
-        &base,
-        None,
-    )
-    .await
-    .expect("replay committed pending delta"));
-    let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+    assert_eq!(
+        base.eligible_ready_channel_subscriber_count().await,
+        0,
+        "a bootstrapping query is not eligible for pending replay"
+    );
+    assert!(
+        !crate::hydrator::replay_pending_delta(state_store.as_ref(), "pending-replay", &base)
+            .await
+            .expect("not-ready replay")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), receiver.recv())
+            .await
+            .is_err(),
+        "pending delta must not precede the full bootstrap snapshot"
+    );
+    assert!(
+        crate::hydrator::load_reconcile_state(state_store.as_ref(), "pending-replay")
+            .await
+            .expect("load gated pending state")
+            .pending_delta
+            .is_some()
+    );
+
+    let source_base = Arc::new(OnceLock::new());
+    assert!(source_base.set(base.clone_shared()).is_ok());
+    let mut config = valid_config_with_port(0);
+    config.graphql_url = format!("http://{addr}/graphql");
+    config.projects.clear();
+    let provider = crate::bootstrap::GitHubBootstrapProvider::new(
+        config,
+        Arc::new(RwLock::new(HashSet::new())),
+        Arc::new(tokio::sync::Mutex::new(())),
+        source_base,
+    );
+    let (event_tx, mut bootstrap_rx) = tokio::sync::mpsc::channel(1);
+    let bootstrap_task = tokio::spawn(async move {
+        provider
+            .bootstrap(
+                BootstrapRequest {
+                    query_id: "bootstrap-query".to_string(),
+                    node_labels: vec![],
+                    relation_labels: vec![],
+                    request_id: "restart-bootstrap".to_string(),
+                },
+                &BootstrapContext::new_minimal(
+                    "test-instance".to_string(),
+                    "pending-replay".to_string(),
+                ),
+                event_tx,
+                None,
+            )
+            .await
+    });
+
+    let first_snapshot_event = tokio::time::timeout(Duration::from_secs(1), bootstrap_rx.recv())
+        .await
+        .expect("first full snapshot timeout")
+        .expect("first full snapshot event");
+    assert_eq!(
+        base.eligible_ready_channel_subscriber_count().await,
+        0,
+        "the query must remain ineligible while its full snapshot is being emitted"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), receiver.recv())
+            .await
+            .is_err(),
+        "pending delta must remain suppressed during full snapshot delivery"
+    );
+    assert!(
+        crate::hydrator::load_reconcile_state(state_store.as_ref(), "pending-replay")
+            .await
+            .expect("load mid-bootstrap state")
+            .pending_delta
+            .is_some()
+    );
+
+    let bootstrap_drain = tokio::spawn(async move {
+        let mut events = vec![first_snapshot_event];
+        while let Some(event) = bootstrap_rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+    let result = bootstrap_task
+        .await
+        .expect("bootstrap task")
+        .expect("bootstrap after source restart");
+    let bootstrap_events = bootstrap_drain.await.expect("bootstrap drain");
+
+    let mut bootstrap_ids = HashSet::new();
+    assert_eq!(bootstrap_events.len(), result.event_count);
+    for event in bootstrap_events {
+        bootstrap_ids.insert(event.change.get_reference().element_id.to_string());
+    }
+    assert!(bootstrap_ids.contains("I_1"));
+    assert_eq!(base.eligible_ready_channel_subscriber_count().await, 1);
+
+    let first = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
         .await
         .expect("replayed event timeout")
         .expect("replayed event");
-    let SourceEvent::Change(change) = &event.event else {
-        panic!("expected replayed source change");
-    };
-    assert!(expected_ids.contains(change.get_reference().element_id.as_ref()));
-    assert!(!state_store
-        .contains_key("pending-replay", "pending-bootstrap-delta")
+    let mut replayed = vec![first];
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(20), receiver.recv()).await
+    {
+        replayed.push(event);
+    }
+    assert!(
+        replayed.iter().any(|event| {
+            matches!(
+                &event.event,
+                SourceEvent::Change(SourceChange::Insert { element })
+                    if element.get_metadata().reference.element_id.as_ref() == "I_1"
+            )
+        }),
+        "the original durable pending insert must survive the bootstrap reconcile transition"
+    );
+    let replayed_ids = replayed
+        .iter()
+        .filter_map(|event| match &event.event {
+            SourceEvent::Change(change) => {
+                Some(change.get_reference().element_id.as_ref().to_string())
+            }
+            SourceEvent::Control(_) => None,
+        })
+        .collect::<HashSet<_>>();
+    assert!(expected_ids.is_subset(&replayed_ids));
+    assert!(
+        crate::hydrator::load_reconcile_state(state_store.as_ref(), "pending-replay")
+            .await
+            .expect("load cleared state")
+            .pending_delta
+            .is_none()
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn dispatch_before_pending_clear_replays_at_least_once() {
+    let state_store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+    let mut snapshot = ReconcileSnapshot::default();
+    snapshot
+        .issues
+        .insert("I_1".to_string(), sample_issue("pending"));
+    let (changes, next_index) =
+        map_reconcile_snapshot("pending-replay", &snapshot, &HashMap::new(), 1);
+    crate::hydrator::save_reconcile_state(
+        state_store.as_ref(),
+        "pending-replay",
+        &ReconcileState {
+            generation: 1,
+            index: next_index,
+            pending_delta: Some(PendingDelta {
+                changes: changes.clone(),
+            }),
+            ..ReconcileState::default()
+        },
+    )
+    .await
+    .expect("persist atomic state");
+
+    let base = test_source_base("pending-replay");
+    let mut receiver = base.create_streaming_receiver().await.expect("receiver");
+    let event_count = changes.len();
+    let wrappers = changes
+        .into_iter()
+        .map(|change| {
+            drasi_lib::channels::SourceEventWrapper::new(
+                "pending-replay".to_string(),
+                SourceEvent::Change(change),
+                chrono::Utc::now(),
+            )
+        })
+        .collect();
+    base.dispatch_events_batch(wrappers)
         .await
-        .expect("pending marker cleared"));
+        .expect("first dispatch before simulated crash");
+    crate::hydrator::replay_pending_delta(state_store.as_ref(), "pending-replay", &base)
+        .await
+        .expect("restart replay");
+
+    let mut counts = HashMap::new();
+    for _ in 0..event_count * 2 {
+        let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("event timeout")
+            .expect("change event");
+        let SourceEvent::Change(change) = &event.event else {
+            panic!("expected change");
+        };
+        *counts
+            .entry(change.get_reference().element_id.to_string())
+            .or_insert(0usize) += 1;
+    }
+    assert!(counts.values().all(|count| *count == 2));
+}
+
+#[tokio::test]
+async fn equal_unrelated_index_never_promotes_an_old_delta() {
+    let state_store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+    let mut snapshot = ReconcileSnapshot::default();
+    snapshot
+        .issues
+        .insert("I_1".to_string(), sample_issue("same"));
+    let (_, index) = map_reconcile_snapshot("no-promotion", &snapshot, &HashMap::new(), 1);
+    crate::hydrator::save_reconcile_state(
+        state_store.as_ref(),
+        "no-promotion",
+        &ReconcileState {
+            generation: 7,
+            index,
+            pending_delta: None,
+            ..ReconcileState::default()
+        },
+    )
+    .await
+    .expect("persist unrelated state");
+    state_store
+        .set(
+            "no-promotion",
+            "pending-bootstrap-delta",
+            br#"{"changes":[],"nextIndex":{},"excludedQueryId":"old","committed":false}"#.to_vec(),
+        )
+        .await
+        .expect("seed obsolete marker");
+
+    let base = test_source_base("no-promotion");
+    let mut receiver = base.create_streaming_receiver().await.expect("receiver");
+    assert!(
+        !crate::hydrator::replay_pending_delta(state_store.as_ref(), "no-promotion", &base)
+            .await
+            .expect("no replay")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), receiver.recv())
+            .await
+            .is_err(),
+        "equal indexes must never infer ownership of an unrelated delta"
+    );
 }
 
 struct RecoverableReadWalProvider {
@@ -3455,6 +3792,7 @@ async fn processing_gate_serializes_reconcile_and_hydrator_delete() {
         source_id: "src".to_string(),
         base: test_source_base("src"),
         state_store: state_store.clone(),
+        wal: wal.clone(),
         api_client: api_client.clone(),
         projects: vec![],
         static_repos: HashSet::from(["acme/repo".to_string()]),
@@ -3839,7 +4177,7 @@ async fn fatal_wal_read_marks_source_error_rejects_admission_and_recovers_after_
 }
 
 #[tokio::test]
-async fn hydrator_null_node_for_non_delete_action_returns_error() {
+async fn unseen_null_is_bounded_then_later_fifo_delivery_processes() {
     async fn handler(Json(_payload): Json<serde_json::Value>) -> Json<serde_json::Value> {
         Json(json!({ "data": { "node": null } }))
     }
@@ -3907,6 +4245,29 @@ async fn hydrator_null_node_for_non_delete_action_returns_error() {
         .expect_err("non-delete null should retry");
     assert!(format!("{err:#}").contains("node=null"));
     assert!(wal.oldest_sequence("src").await.expect("oldest").is_some());
+    process_admission(&params, sequence, &admission)
+        .await
+        .expect_err("second null should still retry");
+    process_admission(&params, sequence, &admission)
+        .await
+        .expect("third null becomes terminal gone-before-hydration");
+    let state = crate::hydrator::load_reconcile_state(state_store.as_ref(), "src")
+        .await
+        .expect("load terminal outcome");
+    assert_eq!(
+        state.terminal_outcomes[&sequence].reason,
+        "gone-before-hydration"
+    );
+
+    let mut later_locator = locator;
+    later_locator.action = "deleted".to_string();
+    let later =
+        encode_admission_change("src", "delivery-after-gone", &later_locator).expect("encode");
+    let later_sequence = wal.append("src", &later).await.expect("append later");
+    process_admission(&params, later_sequence, &later)
+        .await
+        .expect("later delivery advances");
+    assert!(wal.oldest_sequence("src").await.expect("oldest").is_none());
     server.abort();
 }
 
@@ -4892,9 +5253,26 @@ async fn hydrator_replay_without_marker_still_converges_to_latest_state() {
 
 #[tokio::test]
 async fn webhook_only_create_updates_index_and_empty_reconcile_emits_delete() {
-    async fn handler(Json(payload): Json<serde_json::Value>) -> Json<serde_json::Value> {
+    #[derive(Clone, Default)]
+    struct ApiState {
+        deleted: Arc<AtomicBool>,
+    }
+    async fn handler(
+        State(state): State<ApiState>,
+        Json(payload): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
         let query = payload["query"].as_str().unwrap_or_default();
         if query.contains("query($id: ID!)") && query.contains("... on Issue") {
+            if state.deleted.load(Ordering::SeqCst) {
+                return Json(json!({
+                    "data": { "node": null },
+                    "errors": [{
+                        "type": "NOT_FOUND",
+                        "path": ["node"],
+                        "message": "Could not resolve node"
+                    }]
+                }));
+            }
             return Json(json!({
                 "data": {
                     "node": {
@@ -4959,7 +5337,10 @@ async fn webhook_only_create_updates_index_and_empty_reconcile_emits_delete() {
         .await
         .expect("bind mock server");
     let addr = listener.local_addr().expect("local addr");
-    let app = Router::new().route("/graphql", post(handler));
+    let api_state = ApiState::default();
+    let app = Router::new()
+        .route("/graphql", post(handler))
+        .with_state(api_state.clone());
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -5026,10 +5407,21 @@ async fn webhook_only_create_updates_index_and_empty_reconcile_emits_delete() {
         .expect("load webhook-updated index");
     assert!(index.contains_key("I_webhook"));
 
+    let mut stale_locator = locator.clone();
+    stale_locator.action = "edited".to_string();
+    let stale = encode_admission_change("src", "delivery-stale-before-reconcile", &stale_locator)
+        .expect("encode stale admission");
+    let stale_sequence = wal
+        .append("src", &stale)
+        .await
+        .expect("append stale admission");
+    api_state.deleted.store(true, Ordering::SeqCst);
+
     let reconcile_params = ReconcilerParams {
         source_id: "src".to_string(),
         base: reconcile_base,
         state_store: state_store.clone(),
+        wal: wal.clone(),
         api_client,
         projects: vec![],
         static_repos: HashSet::from(["acme/repo".to_string()]),
@@ -5060,6 +5452,29 @@ async fn webhook_only_create_updates_index_and_empty_reconcile_emits_delete() {
         .await
         .expect("load reconciled index");
     assert!(!index.contains_key("I_webhook"));
+    process_admission(&params, stale_sequence, &stale)
+        .await
+        .expect("reconcile absence terminates retained stale admission");
+    let state = crate::hydrator::load_reconcile_state(state_store.as_ref(), "src")
+        .await
+        .expect("load terminal state");
+    assert_eq!(
+        state.terminal_outcomes[&stale_sequence].reason,
+        "reconciled-absence"
+    );
+
+    let mut later_locator = locator;
+    later_locator.action = "deleted".to_string();
+    let later = encode_admission_change("src", "delivery-after-stale", &later_locator)
+        .expect("encode later delivery");
+    let later_sequence = wal
+        .append("src", &later)
+        .await
+        .expect("append later delivery");
+    process_admission(&params, later_sequence, &later)
+        .await
+        .expect("later FIFO delivery processes");
+    assert!(wal.oldest_sequence("src").await.expect("oldest").is_none());
     server.abort();
 }
 
@@ -5114,7 +5529,7 @@ async fn reconcile_index_commit_failure_keeps_webhook_admission_in_wal() {
     let state_store: Arc<dyn StateStoreProvider> = Arc::new(FaultyStateStoreProvider {
         inner,
         fail_store: "src".to_string(),
-        fail_key: "reconcile-index".to_string(),
+        fail_key: "reconcile-state".to_string(),
         fail_get: false,
         fail_set: true,
         fail_delete_many: false,
@@ -5152,7 +5567,7 @@ async fn reconcile_index_commit_failure_keeps_webhook_admission_in_wal() {
     let err = process_admission(&params, sequence, &admission)
         .await
         .expect_err("index commit must fail admission");
-    assert!(format!("{err:#}").contains("reconcile-index"));
+    assert!(format!("{err:#}").contains("reconcile-state"));
     assert_eq!(
         wal.oldest_sequence("src").await.expect("oldest"),
         Some(sequence)
@@ -5239,6 +5654,99 @@ async fn stale_update_before_durable_delete_prunes_only_stale_head() {
     process_admission(&params, delete_sequence, &delete)
         .await
         .expect("authoritative delete");
+    assert!(wal.oldest_sequence("src").await.expect("oldest").is_none());
+    server.abort();
+}
+
+#[tokio::test]
+async fn parent_cascade_absence_terminates_stale_child_admission() {
+    async fn handler(Json(_payload): Json<serde_json::Value>) -> Json<serde_json::Value> {
+        Json(json!({ "data": { "node": null } }))
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock server");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, Router::new().route("/graphql", post(handler))).await;
+    });
+    let temp = TempDir::new().expect("tempdir");
+    let wal = Arc::new(RedbWalProvider::new(temp.path()));
+    wal.register(
+        "src",
+        DurabilityConfig {
+            enabled: true,
+            max_events: 32,
+            capacity_policy: CapacityPolicy::RejectIncoming,
+        }
+        .to_wal_config(),
+    )
+    .await
+    .expect("register wal");
+    let state_store = Arc::new(MemoryStateStoreProvider::new());
+    let mut snapshot = ReconcileSnapshot::default();
+    snapshot
+        .issues
+        .insert("I_1".to_string(), sample_issue("with child"));
+    let (_, prior_index) = map_reconcile_snapshot("src", &snapshot, &HashMap::new(), 1);
+    let mut state = ReconcileState {
+        generation: 1,
+        index: prior_index,
+        ..ReconcileState::default()
+    };
+    crate::hydrator::prepare_reconcile_transition(&mut state, HashMap::new(), Vec::new(), u64::MAX);
+    assert!(
+        state.absences.contains_key("IC_1"),
+        "parent cascade must persist child absence"
+    );
+    crate::hydrator::save_reconcile_state(state_store.as_ref(), "src", &state)
+        .await
+        .expect("save reconciled absence state");
+
+    let params = HydratorParams {
+        source_id: "src".to_string(),
+        base: test_source_base("src"),
+        wal: wal.clone(),
+        state_store: state_store.clone(),
+        api_client: Arc::new(
+            GitHubGraphQLClient::new(format!("http://{addr}/graphql"), "pat".to_string())
+                .expect("client"),
+        ),
+        projects: vec![],
+        effective_repos: Arc::new(RwLock::new(HashSet::from(["acme/repo".to_string()]))),
+        notify: Arc::new(Notify::new()),
+        health: Arc::new(RwLock::new(HydratorHealth::default())),
+        processing_gate: Arc::new(tokio::sync::Mutex::new(())),
+        shutdown: tokio::sync::watch::channel(false).1,
+    };
+    let locator = WebhookLocator {
+        event_type: "issue_comment".to_string(),
+        action: "edited".to_string(),
+        node_id: Some("IC_1".to_string()),
+        repository_full_name: Some("acme/repo".to_string()),
+        parent_issue_id: Some("I_1".to_string()),
+        parent_pull_request_id: None,
+        project_id: None,
+        project_owner: None,
+        project_number: None,
+    };
+    let admission =
+        encode_admission_change("src", "stale-child", &locator).expect("encode stale child");
+    let sequence = wal
+        .append("src", &admission)
+        .await
+        .expect("append stale child");
+    process_admission(&params, sequence, &admission)
+        .await
+        .expect("cascade absence terminates stale child");
+    let state = crate::hydrator::load_reconcile_state(state_store.as_ref(), "src")
+        .await
+        .expect("load terminal outcome");
+    assert_eq!(
+        state.terminal_outcomes[&sequence].reason,
+        "reconciled-absence"
+    );
     assert!(wal.oldest_sequence("src").await.expect("oldest").is_none());
     server.abort();
 }
