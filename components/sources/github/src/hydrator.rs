@@ -16,7 +16,7 @@
 
 use crate::config::ProjectSpec;
 use crate::graphql::{FetchedRoot, GitHubGraphQLClient, ProjectItemContent, RetryableGraphQLError};
-use crate::mapping::{map_root_delete_from_snapshot, map_root_diff};
+use crate::mapping::{map_root_delete_from_snapshot, map_root_diff, map_webhook_object_delete};
 use crate::types::{HydratorHealth, RootSnapshot, SnapshotElement, WebhookLocator};
 use crate::webhook::{decode_admission_change, warn_unhealthy_hydrator};
 use anyhow::{Context, Result};
@@ -26,7 +26,7 @@ use drasi_lib::sources::base::SourceBase;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::wal::WalProvider;
 use log::{debug, info, warn};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, RwLock};
@@ -35,7 +35,6 @@ use tokio::time::{sleep, Duration};
 const ROOT_SNAPSHOT_PREFIX: &str = "root-snapshot:";
 const EFFECTIVE_REPOS_KEY: &str = "effective-repos";
 const NULL_RETRY_PREFIX: &str = "null-retry:";
-const OWNERSHIP_ADJACENCY_KEY: &str = "ownership-adjacency";
 pub(crate) const MAX_NULL_HYDRATION_ATTEMPTS: u32 = 3;
 
 #[derive(Debug)]
@@ -168,6 +167,21 @@ pub(crate) async fn process_admission(
         return Ok(());
     }
 
+    if locator.action == "deleted" {
+        let effective_from = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let change = map_webhook_object_delete(&params.source_id, &locator, effective_from)?;
+        emit_output_changes(params, std::slice::from_ref(&change)).await?;
+        delete_root_snapshot(
+            params.state_store.as_ref(),
+            &params.source_id,
+            &snapshot_key_for_locator(&locator, None),
+        )
+        .await?;
+        clear_null_retry(params.state_store.as_ref(), &params.source_id, &delivery_id).await?;
+        prune_inbox(params, sequence).await?;
+        return Ok(());
+    }
+
     let fetched = params
         .api_client
         .fetch_root_from_locator(&locator)
@@ -186,7 +200,7 @@ pub(crate) async fn process_admission(
             )
         })?;
 
-    if fetched.is_none() && !is_authoritative_delete_action(&locator) {
+    if fetched.is_none() && !is_authoritative_absence_action(&locator) {
         let attempts =
             increment_null_retry(params.state_store.as_ref(), &params.source_id, &delivery_id)
                 .await?;
@@ -278,16 +292,6 @@ pub(crate) async fn process_admission(
     }
 
     let effective_from = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    let mut adjacency =
-        load_ownership_adjacency(params.state_store.as_ref(), &params.source_id).await?;
-    let owning_parents = fetched.as_ref().map(owning_parent_ids).unwrap_or_default();
-    let root_id = fetched
-        .as_ref()
-        .map(|root| root.root_id().to_string())
-        .or_else(|| previous.as_ref().map(|snapshot| snapshot.root_id.clone()))
-        .or_else(|| locator.node_id.clone())
-        .or_else(|| locator.project_id.clone());
-    let mut snapshots_to_delete = Vec::new();
 
     let (changes, next_snapshot) = match fetched {
         Some(root) => {
@@ -297,32 +301,10 @@ pub(crate) async fn process_admission(
             snapshot.committed_sequence = Some(sequence);
             (changes, Some(snapshot))
         }
-        None => {
-            if let Some(snapshot) = previous.as_ref() {
-                snapshots_to_delete.push(snapshot.clone());
-            }
-            if let Some(root_id) = root_id.as_deref() {
-                for child_id in owned_descendants(&adjacency, root_id) {
-                    let child_key = format!("{ROOT_SNAPSHOT_PREFIX}{child_id}");
-                    if let Some(snapshot) = load_root_snapshot(
-                        params.state_store.as_ref(),
-                        &params.source_id,
-                        &child_key,
-                    )
-                    .await?
-                    {
-                        snapshots_to_delete.push(snapshot);
-                    }
-                }
-            }
-            let changes = snapshots_to_delete
-                .iter()
-                .flat_map(|snapshot| {
-                    map_root_delete_from_snapshot(&params.source_id, Some(snapshot), effective_from)
-                })
-                .collect();
-            (changes, None)
-        }
+        None => (
+            map_root_delete_from_snapshot(&params.source_id, previous.as_ref(), effective_from),
+            None,
+        ),
     };
 
     if !changes.is_empty() {
@@ -337,127 +319,17 @@ pub(crate) async fn process_admission(
             &snapshot,
         )
         .await?;
-        if let Some(root_id) = root_id.as_deref() {
-            replace_ownership_edges(&mut adjacency, root_id, &owning_parents);
-            save_ownership_adjacency(params.state_store.as_ref(), &params.source_id, &adjacency)
-                .await?;
-        }
     } else {
-        let deleted_root_ids = snapshots_to_delete
-            .iter()
-            .map(|snapshot| snapshot.root_id.clone())
-            .collect::<BTreeSet<_>>();
-        for deleted_root_id in &deleted_root_ids {
-            delete_root_snapshot(
-                params.state_store.as_ref(),
-                &params.source_id,
-                &format!("{ROOT_SNAPSHOT_PREFIX}{deleted_root_id}"),
-            )
-            .await?;
-        }
-        if let Some(root_id) = root_id.as_deref() {
-            adjacency.remove(root_id);
-        }
-        for children in adjacency.values_mut() {
-            children.retain(|child| !deleted_root_ids.contains(child));
-        }
-        adjacency.retain(|_, children| !children.is_empty());
-        save_ownership_adjacency(params.state_store.as_ref(), &params.source_id, &adjacency)
-            .await?;
+        delete_root_snapshot(
+            params.state_store.as_ref(),
+            &params.source_id,
+            &root_snapshot_key,
+        )
+        .await?;
     }
 
     prune_inbox(params, sequence).await?;
     Ok(())
-}
-
-type OwnershipAdjacency = HashMap<String, BTreeSet<String>>;
-
-fn owning_parent_ids(root: &FetchedRoot) -> Vec<String> {
-    match root {
-        FetchedRoot::IssueComment(comment) => comment
-            .issue
-            .as_ref()
-            .or(comment.pull_request.as_ref())
-            .map(|parent| vec![parent.id.clone()])
-            .unwrap_or_default(),
-        FetchedRoot::PullRequestReview(review) => vec![review.pull_request.id.clone()],
-        FetchedRoot::PullRequestReviewComment(comment) => vec![
-            comment.pull_request_review.id.clone(),
-            comment.pull_request_review.pull_request.id.clone(),
-        ],
-        FetchedRoot::ProjectItem(item) => vec![item.project.id.clone()],
-        _ => Vec::new(),
-    }
-}
-
-fn replace_ownership_edges(
-    adjacency: &mut OwnershipAdjacency,
-    child_id: &str,
-    parent_ids: &[String],
-) {
-    for children in adjacency.values_mut() {
-        children.remove(child_id);
-    }
-    adjacency.retain(|_, children| !children.is_empty());
-    for parent_id in parent_ids {
-        adjacency
-            .entry(parent_id.clone())
-            .or_default()
-            .insert(child_id.to_string());
-    }
-}
-
-fn owned_descendants(adjacency: &OwnershipAdjacency, root_id: &str) -> Vec<String> {
-    let mut pending = adjacency
-        .get(root_id)
-        .into_iter()
-        .flatten()
-        .cloned()
-        .collect::<Vec<_>>();
-    pending.reverse();
-    let mut seen = BTreeSet::new();
-    let mut descendants = Vec::new();
-    while let Some(child) = pending.pop() {
-        if !seen.insert(child.clone()) {
-            continue;
-        }
-        descendants.push(child.clone());
-        if let Some(grandchildren) = adjacency.get(&child) {
-            pending.extend(grandchildren.iter().rev().cloned());
-        }
-    }
-    descendants
-}
-
-async fn load_ownership_adjacency(
-    state_store: &dyn StateStoreProvider,
-    source_id: &str,
-) -> Result<OwnershipAdjacency> {
-    let bytes = state_store
-        .get(source_id, OWNERSHIP_ADJACENCY_KEY)
-        .await
-        .context("Failed loading ownership adjacency")?;
-    bytes
-        .map(|data| {
-            serde_json::from_slice(&data).context("Failed deserializing ownership adjacency")
-        })
-        .transpose()
-        .map(|adjacency| adjacency.unwrap_or_default())
-}
-
-async fn save_ownership_adjacency(
-    state_store: &dyn StateStoreProvider,
-    source_id: &str,
-    adjacency: &OwnershipAdjacency,
-) -> Result<()> {
-    state_store
-        .set(
-            source_id,
-            OWNERSHIP_ADJACENCY_KEY,
-            serde_json::to_vec(adjacency).context("Failed serializing ownership adjacency")?,
-        )
-        .await
-        .context("Failed saving ownership adjacency")
 }
 
 async fn emit_output_changes(
@@ -525,16 +397,13 @@ fn is_project_event(locator: &WebhookLocator) -> bool {
     )
 }
 
-fn is_authoritative_delete_action(locator: &WebhookLocator) -> bool {
+fn is_authoritative_absence_action(locator: &WebhookLocator) -> bool {
     let action = locator.action.as_str();
     match locator.event_type.as_str() {
-        "issues" => matches!(action, "deleted" | "transferred"),
-        "issue_comment" => matches!(action, "deleted"),
-        "pull_request_review_comment" => matches!(action, "deleted"),
+        "issues" => matches!(action, "transferred"),
         "pull_request_review" => matches!(action, "dismissed"),
-        "projects_v2_item" | "project_item" => matches!(action, "deleted" | "archived"),
-        "projects_v2" | "project" => matches!(action, "deleted"),
-        "repository" => matches!(action, "deleted" | "archived"),
+        "projects_v2_item" | "project_item" => matches!(action, "archived"),
+        "repository" => matches!(action, "archived"),
         _ => false,
     }
 }
@@ -734,34 +603,4 @@ pub async fn add_effective_repo(
         save_effective_repos(state_store, source_id, &guard).await?;
     }
     Ok(inserted)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{owned_descendants, replace_ownership_edges, OwnershipAdjacency};
-
-    #[test]
-    fn ownership_adjacency_cascades_without_treating_tracks_as_ownership() {
-        let mut adjacency = OwnershipAdjacency::default();
-        replace_ownership_edges(&mut adjacency, "review-1", &["pull-request-1".to_string()]);
-        replace_ownership_edges(
-            &mut adjacency,
-            "review-comment-1",
-            &["review-1".to_string(), "pull-request-1".to_string()],
-        );
-        replace_ownership_edges(&mut adjacency, "project-item-1", &["project-1".to_string()]);
-
-        assert_eq!(
-            owned_descendants(&adjacency, "pull-request-1"),
-            vec!["review-1", "review-comment-1"]
-        );
-        assert_eq!(
-            owned_descendants(&adjacency, "project-1"),
-            vec!["project-item-1"]
-        );
-        assert!(
-            owned_descendants(&adjacency, "tracked-issue-1").is_empty(),
-            "TRACKS targets must never gain owning adjacency"
-        );
-    }
 }

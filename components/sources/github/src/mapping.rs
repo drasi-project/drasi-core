@@ -19,8 +19,8 @@ use crate::graphql::{
     ProjectItemData, ProjectItemFieldValue, PullRequestData, PullRequestReviewCommentData,
     PullRequestReviewData, RepositoryData,
 };
-use crate::types::{RootSnapshot, SnapshotElement};
-use anyhow::Result;
+use crate::types::{RootSnapshot, SnapshotElement, WebhookLocator};
+use anyhow::{anyhow, Result};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
@@ -109,6 +109,28 @@ pub fn map_root_delete_from_snapshot(
             metadata: element_metadata(source_id, &e.id, &e.labels, effective_from),
         })
         .collect()
+}
+
+pub fn map_webhook_object_delete(
+    source_id: &str,
+    locator: &WebhookLocator,
+    effective_from: u64,
+) -> Result<SourceChange> {
+    if locator.action != "deleted" {
+        return Err(anyhow!("webhook action is not deleted"));
+    }
+    let node_id = locator
+        .node_id
+        .as_deref()
+        .filter(|node_id| !node_id.trim().is_empty())
+        .ok_or_else(|| anyhow!("deleted webhook locator is missing node ID"))?;
+    let label = locator
+        .deleted_node_label()
+        .ok_or_else(|| anyhow!("unsupported deleted event type '{}'", locator.event_type))?;
+
+    Ok(SourceChange::Delete {
+        metadata: element_metadata(source_id, node_id, &[label.to_string()], effective_from),
+    })
 }
 
 fn diff_snapshots(

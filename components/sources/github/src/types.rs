@@ -30,6 +30,22 @@ pub struct WebhookLocator {
     pub project_number: Option<u32>,
 }
 
+impl WebhookLocator {
+    pub fn deleted_node_label(&self) -> Option<&'static str> {
+        match self.event_type.as_str() {
+            "projects_v2" => Some("GitHubProject"),
+            "projects_v2_item" => Some("GitHubProjectItem"),
+            "repository" => Some("GitHubRepository"),
+            "issues" => Some("GitHubIssue"),
+            "pull_request" => Some("GitHubPullRequest"),
+            "issue_comment" => Some("GitHubIssueComment"),
+            "pull_request_review" => Some("GitHubPullRequestReview"),
+            "pull_request_review_comment" => Some("GitHubPullRequestReviewComment"),
+            _ => None,
+        }
+    }
+}
+
 /// Hydrator degradation state used by `/health`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

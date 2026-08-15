@@ -359,7 +359,7 @@ pub(crate) fn parse_locator(event_type: &str, body: &[u8]) -> Result<WebhookLoca
         .and_then(|v| v.as_u64())
         .and_then(|v| u32::try_from(v).ok());
 
-    Ok(WebhookLocator {
+    let locator = WebhookLocator {
         event_type: event_type.to_string(),
         action,
         node_id,
@@ -369,7 +369,26 @@ pub(crate) fn parse_locator(event_type: &str, body: &[u8]) -> Result<WebhookLoca
         project_id,
         project_owner,
         project_number,
-    })
+    };
+    if locator.action == "deleted" {
+        if locator
+            .node_id
+            .as_deref()
+            .is_none_or(|node_id| node_id.trim().is_empty())
+        {
+            return Err(anyhow!(
+                "deleted {} delivery requires an authoritative webhook node ID",
+                locator.event_type
+            ));
+        }
+        if locator.deleted_node_label().is_none() {
+            return Err(anyhow!(
+                "deleted webhook event type '{}' is not supported",
+                locator.event_type
+            ));
+        }
+    }
+    Ok(locator)
 }
 
 pub fn encode_admission_change(

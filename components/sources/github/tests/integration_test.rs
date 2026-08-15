@@ -20,7 +20,7 @@ use reqwest::Client;
 use serde_json::json;
 use sha2::Sha256;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -38,6 +38,7 @@ struct MockIssue {
 #[derive(Clone, Default)]
 struct MockGitHubState {
     issues: Arc<Mutex<HashMap<String, MockIssue>>>,
+    graphql_calls: Arc<AtomicUsize>,
     block_issue_fetch: Arc<AtomicBool>,
     project_item_exists: Arc<AtomicBool>,
     project_item_repo: Arc<RwLock<String>>,
@@ -116,6 +117,7 @@ async fn mock_graphql_handler(
     headers: HeaderMap,
     Json(payload): Json<serde_json::Value>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    state.graphql_calls.fetch_add(1, Ordering::SeqCst);
     assert_eq!(
         headers
             .get("authorization")
@@ -506,6 +508,88 @@ async fn recv_event(
         .expect("timed out waiting for source event")
         .expect("source receiver closed");
     (*arc).clone()
+}
+
+#[tokio::test]
+#[ignore]
+async fn deleted_webhook_skips_graphql_and_emits_one_delete() {
+    let mut harness = build_harness(16).await;
+    let client = Client::new();
+    let mut receiver = harness
+        .source
+        .subscribe(subscription_settings(
+            &harness.source_id,
+            "delete-fast-path",
+            None,
+            false,
+        ))
+        .await
+        .unwrap()
+        .receiver;
+
+    let malformed = send_webhook(
+        &client,
+        &harness,
+        "delivery-delete-malformed",
+        "issues",
+        json!({"action":"deleted","issue":{},"repository":{"full_name":"acme/repo"}}),
+    )
+    .await;
+    assert_eq!(malformed.status(), 400);
+    assert_eq!(harness.wal.event_count(&harness.inbox_id).await.unwrap(), 0);
+
+    let graphql_calls_before = harness.mock.graphql_calls.load(Ordering::SeqCst);
+    let output_head_before = harness.wal.head_sequence(&harness.source_id).await.unwrap();
+    let response = send_webhook(
+        &client,
+        &harness,
+        "delivery-delete",
+        "issues",
+        json!({"action":"deleted","issue":{"node_id":"I_DELETE"},"repository":{"full_name":"acme/repo"}}),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+
+    let wrapper = recv_event(&mut receiver, Duration::from_secs(10)).await;
+    let drasi_lib::channels::SourceEvent::Change(SourceChange::Delete { metadata }) =
+        &wrapper.event
+    else {
+        panic!("expected one object delete");
+    };
+    assert_eq!(metadata.reference.source_id.as_ref(), harness.source_id);
+    assert_eq!(metadata.reference.element_id.as_ref(), "I_DELETE");
+    assert_eq!(
+        metadata
+            .labels
+            .iter()
+            .map(|label| label.as_ref())
+            .collect::<Vec<_>>(),
+        vec!["GitHubIssue"]
+    );
+
+    let output = harness
+        .wal
+        .read_from(&harness.source_id, output_head_before.saturating_add(1))
+        .await
+        .unwrap();
+    assert_eq!(output.len(), 1, "deleted action must append one output");
+    assert!(matches!(output[0].1, SourceChange::Delete { .. }));
+    assert_eq!(
+        harness.mock.graphql_calls.load(Ordering::SeqCst),
+        graphql_calls_before,
+        "deleted action must not call GraphQL"
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while harness.wal.event_count(&harness.inbox_id).await.unwrap() != 0
+        && tokio::time::Instant::now() < deadline
+    {
+        sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(harness.wal.event_count(&harness.inbox_id).await.unwrap(), 0);
+
+    harness.source.stop().await.unwrap();
+    harness.graphql_server.abort();
 }
 
 #[tokio::test]
