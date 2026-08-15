@@ -5,7 +5,9 @@ use crate::graphql::{
     ProjectFieldRef, ProjectIdentityRef, ProjectItemContent, ProjectItemData,
     ProjectItemFieldValue, PullRequestData, RepositoryRef,
 };
-use crate::mapping::{map_root_diff, map_webhook_object_delete, node_labels, relation_labels};
+use crate::mapping::{
+    map_root_current, map_webhook_object_delete, node_labels, relation_labels, CurrentChangeKind,
+};
 use crate::webhook::{parse_locator, verify_signature};
 use drasi_core::models::ElementValue;
 use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
@@ -209,13 +211,12 @@ fn schema_contract_exports_exact_node_and_relation_label_counts() {
 
 #[test]
 fn mapping_contract_preserves_body_digest_status_and_author_fields() {
-    let (issue_changes, _) = map_root_diff(
+    let issue_changes = map_root_current(
         "github-source",
         &FetchedRoot::Issue(sample_issue("Issue A")),
-        None,
+        CurrentChangeKind::Insert,
         1,
-    )
-    .expect("map issue");
+    );
     let issue_insert = issue_changes
         .into_iter()
         .find_map(|change| match change {
@@ -234,13 +235,12 @@ fn mapping_contract_preserves_body_digest_status_and_author_fields() {
     );
     assert!(issue_props.get("performedViaGithubAppId").is_none());
 
-    let (pr_changes, _) = map_root_diff(
+    let pr_changes = map_root_current(
         "github-source",
         &FetchedRoot::PullRequest(sample_pull_request(Some("pr body"))),
-        None,
+        CurrentChangeKind::Insert,
         1,
-    )
-    .expect("map pr");
+    );
     let pr_insert = pr_changes
         .into_iter()
         .find_map(|change| match change {
@@ -258,13 +258,12 @@ fn mapping_contract_preserves_body_digest_status_and_author_fields() {
         Some(sha256_text("pr body"))
     );
 
-    let (comment_changes, _) = map_root_diff(
+    let comment_changes = map_root_current(
         "github-source",
         &FetchedRoot::IssueComment(sample_issue_comment()),
-        None,
+        CurrentChangeKind::Insert,
         1,
-    )
-    .expect("map issue comment");
+    );
     let comment_insert = comment_changes
         .into_iter()
         .find_map(|change| match change {
@@ -292,13 +291,12 @@ fn mapping_contract_preserves_body_digest_status_and_author_fields() {
     );
     assert!(comment_props.get("performedViaGithubAppId").is_none());
 
-    let (project_item_changes, _) = map_root_diff(
+    let project_item_changes = map_root_current(
         "github-source",
         &FetchedRoot::ProjectItem(sample_project_item("In Progress")),
-        None,
+        CurrentChangeKind::Insert,
         1,
-    )
-    .expect("map project item");
+    );
     let project_item_insert = project_item_changes
         .into_iter()
         .find_map(|change| match change {
@@ -339,7 +337,7 @@ fn body_digest_matches_shared_exact_utf8_vector_for_issues_and_pull_requests() {
         FetchedRoot::PullRequest(pull_request.clone()),
     ] {
         let root_id = root.root_id().to_string();
-        let (changes, _) = map_root_diff("github-source", &root, None, 1).expect("map root");
+        let changes = map_root_current("github-source", &root, CurrentChangeKind::Insert, 1);
         let element = changes
             .into_iter()
             .find_map(|change| match change {
@@ -362,13 +360,12 @@ fn body_digest_matches_shared_exact_utf8_vector_for_issues_and_pull_requests() {
     }
 
     pull_request.body = None;
-    let (changes, _) = map_root_diff(
+    let changes = map_root_current(
         "github-source",
         &FetchedRoot::PullRequest(pull_request),
-        None,
+        CurrentChangeKind::Insert,
         1,
-    )
-    .expect("map null-body pull request");
+    );
     let element = changes
         .into_iter()
         .find_map(|change| match change {
@@ -446,41 +443,21 @@ fn deleted_webhook_requires_node_id_and_maps_one_object_delete() {
 }
 
 #[test]
-fn mapping_delete_from_snapshot_is_deterministic() {
-    let (_, snapshot) = map_root_diff(
-        "github-source",
-        &FetchedRoot::Issue(sample_issue("Before Delete")),
-        None,
-        42,
-    )
-    .expect("map issue snapshot");
-    let deletes =
-        crate::mapping::map_root_delete_from_snapshot("github-source", Some(&snapshot), 1000);
-    let ids = deletes
+fn current_state_updates_are_forwarded_without_before_state_comparison() {
+    let root = FetchedRoot::Issue(sample_issue("Current authoritative title"));
+    let first = map_root_current("github-source", &root, CurrentChangeKind::Update, 42);
+    let second = map_root_current("github-source", &root, CurrentChangeKind::Update, 43);
+    assert_eq!(
+        first.len(),
+        second.len(),
+        "identical current state must still be forwarded"
+    );
+    assert!(first
         .into_iter()
-        .filter_map(|change| match change {
-            drasi_core::models::SourceChange::Delete { metadata } => {
-                Some(metadata.reference.element_id.as_ref().to_string())
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let mut sorted_ids = ids.clone();
-    sorted_ids.sort();
-    assert_eq!(ids, sorted_ids, "delete order must be stable by element ID");
-    let replay_ids =
-        crate::mapping::map_root_delete_from_snapshot("github-source", Some(&snapshot), 1000)
-            .into_iter()
-            .filter_map(|change| match change {
-                drasi_core::models::SourceChange::Delete { metadata } => {
-                    Some(metadata.reference.element_id.as_ref().to_string())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-    assert_eq!(ids, replay_ids, "crash replay must preserve delete order");
-    assert!(!ids.is_empty(), "expected delete set from snapshot");
-    assert!(ids.contains(&"I_1".to_string()));
+        .all(|change| matches!(change, drasi_core::models::SourceChange::Update { .. })));
+    assert!(second
+        .into_iter()
+        .all(|change| matches!(change, drasi_core::models::SourceChange::Update { .. })));
 }
 fn prop_string(props: &drasi_core::models::ElementPropertyMap, key: &str) -> Option<String> {
     match props.get(key) {

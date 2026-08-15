@@ -19,7 +19,7 @@ use crate::graphql::{
     ProjectItemData, ProjectItemFieldValue, PullRequestData, PullRequestReviewCommentData,
     PullRequestReviewData, RepositoryData,
 };
-use crate::types::{RootSnapshot, SnapshotElement, WebhookLocator};
+use crate::types::WebhookLocator;
 use anyhow::{anyhow, Result};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
@@ -43,6 +43,22 @@ const REL_REVIEW_OF: &str = "REVIEW_OF";
 const REL_PART_OF_REVIEW: &str = "PART_OF_REVIEW";
 const REL_IN_PROJECT: &str = "IN_PROJECT";
 const REL_TRACKS: &str = "TRACKS";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentChangeKind {
+    Insert,
+    Update,
+}
+
+#[derive(Debug, Clone)]
+struct MappedElement {
+    element_type: String,
+    id: String,
+    labels: Vec<String>,
+    properties: serde_json::Value,
+    in_node_id: Option<String>,
+    out_node_id: Option<String>,
+}
 
 /// Labels exported by this source.
 pub fn node_labels() -> Vec<String> {
@@ -76,28 +92,15 @@ pub fn relation_labels() -> Vec<String> {
     .collect()
 }
 
-/// Build change-set by diffing previous root snapshot with newly fetched root.
-pub fn map_root_diff(
+/// Map one authoritative GitHub response directly to current-state changes.
+pub fn map_root_current(
     source_id: &str,
     root: &FetchedRoot,
-    previous: Option<&RootSnapshot>,
-    effective_from: u64,
-) -> Result<(Vec<SourceChange>, RootSnapshot)> {
-    let next_snapshot = build_snapshot(root);
-    let changes = diff_snapshots(source_id, previous, &next_snapshot, effective_from);
-    Ok((changes, next_snapshot))
-}
-
-/// Build a deletion-only change-set from previously persisted snapshot.
-pub fn map_root_delete_from_snapshot(
-    source_id: &str,
-    previous: Option<&RootSnapshot>,
+    change_kind: CurrentChangeKind,
     effective_from: u64,
 ) -> Vec<SourceChange> {
-    let Some(previous) = previous else {
-        return Vec::new();
-    };
-    let mut elements = previous.elements.values().collect::<Vec<_>>();
+    let elements = build_current_elements(root);
+    let mut elements = elements.values().collect::<Vec<_>>();
     elements.sort_by(|left, right| {
         left.id
             .cmp(&right.id)
@@ -105,8 +108,11 @@ pub fn map_root_delete_from_snapshot(
     });
     elements
         .into_iter()
-        .map(|e| SourceChange::Delete {
-            metadata: element_metadata(source_id, &e.id, &e.labels, effective_from),
+        .filter_map(|element| {
+            mapped_to_element(source_id, element, effective_from).map(|element| match change_kind {
+                CurrentChangeKind::Insert => SourceChange::Insert { element },
+                CurrentChangeKind::Update => SourceChange::Update { element },
+            })
         })
         .collect()
 }
@@ -133,71 +139,9 @@ pub fn map_webhook_object_delete(
     })
 }
 
-fn diff_snapshots(
+fn mapped_to_element(
     source_id: &str,
-    previous: Option<&RootSnapshot>,
-    next: &RootSnapshot,
-    effective_from: u64,
-) -> Vec<SourceChange> {
-    let mut changes = Vec::new();
-    let empty_previous = RootSnapshot {
-        root_id: String::new(),
-        root_kind: String::new(),
-        repository_full_name: None,
-        committed_delivery_id: None,
-        committed_sequence: None,
-        elements: HashMap::new(),
-    };
-    let prev = previous.unwrap_or(&empty_previous);
-
-    for (id, element) in &next.elements {
-        match prev.elements.get(id) {
-            None => {
-                if let Some(insert) = snapshot_to_insert(source_id, element, effective_from) {
-                    changes.push(insert);
-                }
-            }
-            Some(prev_element) if prev_element != element => {
-                if let Some(update) = snapshot_to_update(source_id, element, effective_from) {
-                    changes.push(update);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    for (id, element) in &prev.elements {
-        if !next.elements.contains_key(id) {
-            changes.push(SourceChange::Delete {
-                metadata: element_metadata(source_id, id, &element.labels, effective_from),
-            });
-        }
-    }
-
-    changes
-}
-
-fn snapshot_to_insert(
-    source_id: &str,
-    element: &SnapshotElement,
-    effective_from: u64,
-) -> Option<SourceChange> {
-    snapshot_to_element(source_id, element, effective_from)
-        .map(|el| SourceChange::Insert { element: el })
-}
-
-fn snapshot_to_update(
-    source_id: &str,
-    element: &SnapshotElement,
-    effective_from: u64,
-) -> Option<SourceChange> {
-    snapshot_to_element(source_id, element, effective_from)
-        .map(|el| SourceChange::Update { element: el })
-}
-
-fn snapshot_to_element(
-    source_id: &str,
-    element: &SnapshotElement,
+    element: &MappedElement,
     effective_from: u64,
 ) -> Option<Element> {
     let metadata = element_metadata(source_id, &element.id, &element.labels, effective_from);
@@ -222,35 +166,25 @@ fn snapshot_to_element(
     }
 }
 
-fn build_snapshot(root: &FetchedRoot) -> RootSnapshot {
+fn build_current_elements(root: &FetchedRoot) -> HashMap<String, MappedElement> {
     let mut elements = HashMap::new();
     match root {
-        FetchedRoot::Repository(repository) => build_repository_snapshot(repository, &mut elements),
-        FetchedRoot::Issue(issue) => build_issue_snapshot(issue, &mut elements),
-        FetchedRoot::PullRequest(pr) => build_pull_request_snapshot(pr, &mut elements),
-        FetchedRoot::IssueComment(comment) => build_issue_comment_snapshot(comment, &mut elements),
-        FetchedRoot::PullRequestReview(review) => build_review_snapshot(review, &mut elements),
+        FetchedRoot::Repository(repository) => map_repository(repository, &mut elements),
+        FetchedRoot::Issue(issue) => map_issue(issue, &mut elements),
+        FetchedRoot::PullRequest(pr) => map_pull_request(pr, &mut elements),
+        FetchedRoot::IssueComment(comment) => map_issue_comment(comment, &mut elements),
+        FetchedRoot::PullRequestReview(review) => map_review(review, &mut elements),
         FetchedRoot::PullRequestReviewComment(comment) => {
-            build_review_comment_snapshot(comment, &mut elements)
+            map_review_comment(comment, &mut elements)
         }
-        FetchedRoot::Project(project) => build_project_snapshot(project, &mut elements),
-        FetchedRoot::ProjectItem(item) => build_project_item_snapshot(item, &mut elements),
+        FetchedRoot::Project(project) => map_project(project, &mut elements),
+        FetchedRoot::ProjectItem(item) => map_project_item(item, &mut elements),
     };
 
-    RootSnapshot {
-        root_id: root.root_id().to_string(),
-        root_kind: root.root_kind().to_string(),
-        repository_full_name: root.repository_full_name().map(str::to_string),
-        committed_delivery_id: None,
-        committed_sequence: None,
-        elements,
-    }
+    elements
 }
 
-fn build_repository_snapshot(
-    repository: &RepositoryData,
-    elements: &mut HashMap<String, SnapshotElement>,
-) {
+fn map_repository(repository: &RepositoryData, elements: &mut HashMap<String, MappedElement>) {
     upsert_node(
         elements,
         &repository.id,
@@ -280,7 +214,7 @@ fn build_repository_snapshot(
     );
 }
 
-fn build_issue_snapshot(issue: &IssueData, elements: &mut HashMap<String, SnapshotElement>) {
+fn map_issue(issue: &IssueData, elements: &mut HashMap<String, MappedElement>) {
     upsert_node(
         elements,
         &issue.id,
@@ -337,7 +271,7 @@ fn build_issue_snapshot(issue: &IssueData, elements: &mut HashMap<String, Snapsh
     );
 
     for comment in &issue.comments.nodes {
-        upsert_comment_snapshot_elements(comment, elements);
+        upsert_comment(comment, elements);
         upsert_relation(
             elements,
             REL_COMMENT_ON,
@@ -348,10 +282,7 @@ fn build_issue_snapshot(issue: &IssueData, elements: &mut HashMap<String, Snapsh
     }
 }
 
-fn build_pull_request_snapshot(
-    pr: &PullRequestData,
-    elements: &mut HashMap<String, SnapshotElement>,
-) {
+fn map_pull_request(pr: &PullRequestData, elements: &mut HashMap<String, MappedElement>) {
     upsert_node(
         elements,
         &pr.id,
@@ -412,7 +343,7 @@ fn build_pull_request_snapshot(
     );
 
     for comment in &pr.comments.nodes {
-        upsert_comment_snapshot_elements(comment, elements);
+        upsert_comment(comment, elements);
         upsert_relation(
             elements,
             REL_COMMENT_ON,
@@ -423,7 +354,7 @@ fn build_pull_request_snapshot(
     }
 
     for review in &pr.reviews.nodes {
-        upsert_review_snapshot_elements(review, elements);
+        upsert_review(review, elements);
         upsert_relation(
             elements,
             REL_REVIEW_OF,
@@ -433,7 +364,7 @@ fn build_pull_request_snapshot(
         );
 
         for review_comment in &review.comments.nodes {
-            upsert_review_comment_snapshot_elements(review_comment, elements);
+            upsert_review_comment(review_comment, elements);
             upsert_relation(
                 elements,
                 REL_PART_OF_REVIEW,
@@ -445,11 +376,8 @@ fn build_pull_request_snapshot(
     }
 }
 
-fn build_issue_comment_snapshot(
-    comment: &IssueCommentData,
-    elements: &mut HashMap<String, SnapshotElement>,
-) {
-    upsert_comment_snapshot_elements(comment, elements);
+fn map_issue_comment(comment: &IssueCommentData, elements: &mut HashMap<String, MappedElement>) {
+    upsert_comment(comment, elements);
     if let Some(issue) = &comment.issue {
         upsert_relation(
             elements,
@@ -470,11 +398,8 @@ fn build_issue_comment_snapshot(
     }
 }
 
-fn build_review_snapshot(
-    review: &PullRequestReviewData,
-    elements: &mut HashMap<String, SnapshotElement>,
-) {
-    upsert_review_snapshot_elements(review, elements);
+fn map_review(review: &PullRequestReviewData, elements: &mut HashMap<String, MappedElement>) {
+    upsert_review(review, elements);
     upsert_relation(
         elements,
         REL_REVIEW_OF,
@@ -483,7 +408,7 @@ fn build_review_snapshot(
         serde_json::Value::Object(serde_json::Map::new()),
     );
     for comment in &review.comments.nodes {
-        upsert_review_comment_snapshot_elements(comment, elements);
+        upsert_review_comment(comment, elements);
         upsert_relation(
             elements,
             REL_PART_OF_REVIEW,
@@ -494,11 +419,11 @@ fn build_review_snapshot(
     }
 }
 
-fn build_review_comment_snapshot(
+fn map_review_comment(
     comment: &PullRequestReviewCommentData,
-    elements: &mut HashMap<String, SnapshotElement>,
+    elements: &mut HashMap<String, MappedElement>,
 ) {
-    upsert_review_comment_snapshot_elements(comment, elements);
+    upsert_review_comment(comment, elements);
     upsert_relation(
         elements,
         REL_PART_OF_REVIEW,
@@ -508,7 +433,7 @@ fn build_review_comment_snapshot(
     );
 }
 
-fn build_project_snapshot(project: &ProjectData, elements: &mut HashMap<String, SnapshotElement>) {
+fn map_project(project: &ProjectData, elements: &mut HashMap<String, MappedElement>) {
     upsert_node(
         elements,
         &project.id,
@@ -524,7 +449,7 @@ fn build_project_snapshot(project: &ProjectData, elements: &mut HashMap<String, 
     );
 
     for item in &project.items.nodes {
-        upsert_project_item_snapshot_elements(item, elements);
+        upsert_project_item(item, elements);
         upsert_relation(
             elements,
             REL_IN_PROJECT,
@@ -536,11 +461,8 @@ fn build_project_snapshot(project: &ProjectData, elements: &mut HashMap<String, 
     }
 }
 
-fn build_project_item_snapshot(
-    item: &ProjectItemData,
-    elements: &mut HashMap<String, SnapshotElement>,
-) {
-    upsert_project_item_snapshot_elements(item, elements);
+fn map_project_item(item: &ProjectItemData, elements: &mut HashMap<String, MappedElement>) {
+    upsert_project_item(item, elements);
     upsert_relation(
         elements,
         REL_IN_PROJECT,
@@ -553,7 +475,7 @@ fn build_project_item_snapshot(
 
 fn upsert_project_item_tracks_relation(
     item: &ProjectItemData,
-    elements: &mut HashMap<String, SnapshotElement>,
+    elements: &mut HashMap<String, MappedElement>,
 ) {
     let Some(content) = item.content.as_ref() else {
         return;
@@ -573,10 +495,7 @@ fn upsert_project_item_tracks_relation(
     );
 }
 
-fn upsert_comment_snapshot_elements(
-    comment: &IssueCommentData,
-    elements: &mut HashMap<String, SnapshotElement>,
-) {
+fn upsert_comment(comment: &IssueCommentData, elements: &mut HashMap<String, MappedElement>) {
     upsert_node(
         elements,
         &comment.id,
@@ -615,10 +534,7 @@ fn upsert_comment_snapshot_elements(
     );
 }
 
-fn upsert_review_snapshot_elements(
-    review: &PullRequestReviewData,
-    elements: &mut HashMap<String, SnapshotElement>,
-) {
+fn upsert_review(review: &PullRequestReviewData, elements: &mut HashMap<String, MappedElement>) {
     upsert_node(
         elements,
         &review.id,
@@ -649,9 +565,9 @@ fn upsert_review_snapshot_elements(
     );
 }
 
-fn upsert_review_comment_snapshot_elements(
+fn upsert_review_comment(
     comment: &PullRequestReviewCommentData,
-    elements: &mut HashMap<String, SnapshotElement>,
+    elements: &mut HashMap<String, MappedElement>,
 ) {
     upsert_node(
         elements,
@@ -694,10 +610,7 @@ fn upsert_review_comment_snapshot_elements(
     );
 }
 
-fn upsert_project_item_snapshot_elements(
-    item: &ProjectItemData,
-    elements: &mut HashMap<String, SnapshotElement>,
-) {
+fn upsert_project_item(item: &ProjectItemData, elements: &mut HashMap<String, MappedElement>) {
     let mut values = serde_json::Map::new();
     values.insert("type".to_string(), serde_json::json!(item.item_type));
     values.insert("createdAt".to_string(), serde_json::json!(item.created_at));
@@ -792,14 +705,14 @@ fn upsert_project_item_snapshot_elements(
 }
 
 fn upsert_node(
-    elements: &mut HashMap<String, SnapshotElement>,
+    elements: &mut HashMap<String, MappedElement>,
     id: &str,
     labels: Vec<String>,
     properties: serde_json::Value,
 ) {
     elements.insert(
         id.to_string(),
-        SnapshotElement {
+        MappedElement {
             element_type: "node".to_string(),
             id: id.to_string(),
             labels,
@@ -811,7 +724,7 @@ fn upsert_node(
 }
 
 fn upsert_relation(
-    elements: &mut HashMap<String, SnapshotElement>,
+    elements: &mut HashMap<String, MappedElement>,
     relation_label: &str,
     out_node_id: &str,
     in_node_id: &str,
@@ -820,7 +733,7 @@ fn upsert_relation(
     let id = format!("{relation_label}:{out_node_id}:{in_node_id}");
     elements.insert(
         id.clone(),
-        SnapshotElement {
+        MappedElement {
             element_type: "relation".to_string(),
             id,
             labels: vec![relation_label.to_string()],

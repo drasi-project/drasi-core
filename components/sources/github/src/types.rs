@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Minimal locator parsed from a webhook payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,30 +55,4 @@ pub struct HydratorHealth {
     pub last_error: Option<String>,
     #[serde(default)]
     pub terminal: bool,
-}
-
-/// Serializable element snapshot used for root-level diffing.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RootSnapshot {
-    pub root_id: String,
-    pub root_kind: String,
-    pub repository_full_name: Option<String>,
-    #[serde(default)]
-    pub committed_delivery_id: Option<String>,
-    #[serde(default)]
-    pub committed_sequence: Option<u64>,
-    pub elements: HashMap<String, SnapshotElement>,
-}
-
-/// Serializable element record.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SnapshotElement {
-    pub element_type: String,
-    pub id: String,
-    pub labels: Vec<String>,
-    pub properties: serde_json::Value,
-    pub in_node_id: Option<String>,
-    pub out_node_id: Option<String>,
 }
