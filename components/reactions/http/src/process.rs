@@ -201,6 +201,16 @@ pub(crate) fn render_batch_item(
     }
 }
 
+/// Resolve the GraphQL response policy for one adaptive batch item.
+pub(crate) fn batch_graphql_error_policy(
+    config: &HttpReactionConfig,
+    notification: &DefaultChangeNotification,
+) -> bool {
+    config
+        .get_template_spec(&notification.query_id, notification.operation_type())
+        .is_some_and(|spec| spec.extension.fail_on_graphql_errors)
+}
+
 /// Serialize the default change-notification envelope as a JSON value (the
 /// batch-item fallback shape).
 fn default_item(notification: &DefaultChangeNotification) -> Value {

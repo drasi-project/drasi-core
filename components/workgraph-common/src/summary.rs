@@ -14,7 +14,8 @@
 
 //! Exact human summary lines for WorkGraph comments.
 //!
-//! Summaries are display-only and never parsed for routing, trust, or identity.
+//! Summaries are display-only, but strict parsing requires the exact generated
+//! line so a misleading human label cannot accompany a different event.
 
 use crate::event::{
     NextResponsibilityType, ValidationOutcome, WorkGraphEvent, WorkGraphEventPayload,
@@ -43,7 +44,7 @@ pub fn summary_for(event: &WorkGraphEvent) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::comment::validate_summary;
+    use crate::comment::{parse_comment, render_comment, validate_summary, CommentError};
     use crate::event::{
         AssignedResponsibilityType, CompletedIssueValidationPayload, ExecutionId,
         ExecutionStartedPayload, ProfileRef, ResponsibilityAssignedPayload, RoutingDecidedPayload,
@@ -86,6 +87,14 @@ mod tests {
             ),
             (
                 WorkGraphEventPayload::CompletedIssueValidation(CompletedIssueValidationPayload {
+                    execution_id: execution_id.clone(),
+                    outcome: ValidationOutcome::Passed,
+                    reason_code: ValidationReasonCode::RequiredMarkerPresent,
+                }),
+                "Issue validation passed.",
+            ),
+            (
+                WorkGraphEventPayload::CompletedIssueValidation(CompletedIssueValidationPayload {
                     execution_id,
                     outcome: ValidationOutcome::Failed,
                     reason_code: ValidationReasonCode::RequiredMarkerMissing,
@@ -107,9 +116,28 @@ mod tests {
         ];
 
         for (payload, expected) in cases {
-            let summary = summary_for(&event(payload));
+            let event = event(payload);
+            let summary = summary_for(&event);
             assert_eq!(summary, expected);
             validate_summary(&summary).expect("generated summaries are always renderable");
+
+            let canonical = render_comment(&event, &summary).expect("canonical comment");
+            let misleading = canonical.replacen(&summary, "Misleading event summary.", 1);
+            assert_eq!(
+                parse_comment(&misleading).expect_err("mismatched summary"),
+                CommentError::SummaryMismatch {
+                    expected: summary.clone(),
+                    actual: "Misleading event summary.".to_string(),
+                }
+            );
+            assert_eq!(
+                render_comment(&event, "Misleading event summary.")
+                    .expect_err("renderer rejects mismatch"),
+                CommentError::SummaryMismatch {
+                    expected: summary,
+                    actual: "Misleading event summary.".to_string(),
+                }
+            );
         }
     }
 }

@@ -881,13 +881,207 @@ async fn restart_after_ambiguous_adopts_task_and_posts_one_comment() {
 }
 
 // ---------------------------------------------------------------------
-// 14. A pre-existing ExecutionStarted comment that claims this event ID but
+// 14. A lost task response plus delayed list visibility never causes a second
+//     task write, and mutable precondition drift cannot abandon durable intent.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn delayed_task_visibility_resumes_pinned_intent_after_mutable_drift() {
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let assignment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let digest = body_digest(Some(ISSUE_BODY));
+    let run = run_id(PROJECT_ITEM_NODE_ID, &digest);
+    let execution = execution_id(&run);
+    let started_event_id = event_id(&run, WorkGraphEventType::ExecutionStarted);
+    let row = LaunchRow {
+        repository: REPOSITORY.to_string(),
+        subject_number: SUBJECT_NUMBER,
+        subject_node_id: SUBJECT_NODE_ID.to_string(),
+        project_node_id: PROJECT_NODE_ID.to_string(),
+        project_item_node_id: PROJECT_ITEM_NODE_ID.to_string(),
+        project_status: mock_github::AWAITING_VALIDATION.to_string(),
+        body_digest: digest.as_str().to_string(),
+        event_comment_node_id: assignment.clone(),
+        event_body: assignment_body(ISSUE_BODY),
+        author_database_id: TRUSTED_AUTHOR_DATABASE_ID,
+        author_type: TRUSTED_AUTHOR_TYPE.as_str().to_string(),
+        is_edited: false,
+        requested_model: REQUESTED_MODEL.to_string(),
+        fallback_model: None,
+        base_ref: BASE_REF.to_string(),
+    };
+    github.seed_lost_task(
+        &build_prompt(SUBJECT_NUMBER, execution.as_str()),
+        Duration::from_millis(900),
+    );
+    let mut seeded = ExecutionRecord::new(
+        run.as_str(),
+        started_event_id.as_str(),
+        execution.as_str(),
+        &row,
+        digest.as_str(),
+        &format!("{PROFILE_NAME}@{PROFILE_BLOB_SHA}"),
+    );
+    seeded.set_attempt_model(REQUESTED_MODEL, false);
+    seeded.set_ambiguous("previous task response was lost");
+    create_record_if_absent(store.clone(), REACTION, &seeded)
+        .await
+        .expect("seed ambiguous record");
+
+    // These are all mutable preconditions checked for a new launch. Recovery
+    // must instead use the already-pinned record.
+    github.set_issue_body(Some("edited after task creation\n"));
+    github.set_status("NeedsMoreInformation");
+    github.set_profile_sha(None);
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-task-resume").await;
+    let mut changed = RowSpec::trusted(&assignment);
+    changed.project_status = "NeedsMoreInformation";
+    changed.event_body = "edited assignment projection".to_string();
+    insert_row(&handle, "candidate-2", changed).await;
+
+    assert!(
+        wait_until(|| async { github.create_comment_calls() == 1 }, 5000).await,
+        "recovery never adopted the delayed task"
+    );
+    assert_eq!(
+        github.create_task_calls(),
+        1,
+        "task creation is never retried"
+    );
+    assert_eq!(github.task_count(), 1, "exactly one task exists");
+    assert!(
+        github.list_task_calls() >= 3,
+        "recovery must repeat authoritative reads after a zero match"
+    );
+    assert!(load(&store, ISSUE_BODY)
+        .await
+        .expect("record")
+        .is_complete());
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 15. A lost comment response plus delayed list visibility never causes a
+//     second comment write.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn delayed_comment_visibility_is_reconciled_without_recreation() {
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let assignment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let digest = body_digest(Some(ISSUE_BODY));
+    let run = run_id(PROJECT_ITEM_NODE_ID, &digest);
+    let execution = execution_id(&run);
+    let started_event_id = event_id(&run, WorkGraphEventType::ExecutionStarted);
+    let row = LaunchRow {
+        repository: REPOSITORY.to_string(),
+        subject_number: SUBJECT_NUMBER,
+        subject_node_id: SUBJECT_NODE_ID.to_string(),
+        project_node_id: PROJECT_NODE_ID.to_string(),
+        project_item_node_id: PROJECT_ITEM_NODE_ID.to_string(),
+        project_status: mock_github::AWAITING_VALIDATION.to_string(),
+        body_digest: digest.as_str().to_string(),
+        event_comment_node_id: assignment.clone(),
+        event_body: assignment_body(ISSUE_BODY),
+        author_database_id: TRUSTED_AUTHOR_DATABASE_ID,
+        author_type: TRUSTED_AUTHOR_TYPE.as_str().to_string(),
+        is_edited: false,
+        requested_model: REQUESTED_MODEL.to_string(),
+        fallback_model: None,
+        base_ref: BASE_REF.to_string(),
+    };
+    let task_id = github.seed_task(&build_prompt(SUBJECT_NUMBER, execution.as_str()));
+    github.seed_lost_comment(
+        &execution_started_body(ISSUE_BODY, &task_id),
+        Duration::from_millis(900),
+    );
+    let mut seeded = ExecutionRecord::new(
+        run.as_str(),
+        started_event_id.as_str(),
+        execution.as_str(),
+        &row,
+        digest.as_str(),
+        &format!("{PROFILE_NAME}@{PROFILE_BLOB_SHA}"),
+    );
+    seeded.set_task(
+        REQUESTED_MODEL,
+        false,
+        task_id,
+        Some("https://example.invalid/task".to_string()),
+    );
+    seeded.set_ambiguous("previous comment response was lost");
+    create_record_if_absent(store.clone(), REACTION, &seeded)
+        .await
+        .expect("seed ambiguous record");
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-comment-resume").await;
+    insert_launch_row(&handle, "candidate-2", &assignment).await;
+    assert!(
+        wait_until(
+            || async {
+                load(&store, ISSUE_BODY)
+                    .await
+                    .is_some_and(|record| record.is_complete())
+            },
+            5000
+        )
+        .await,
+        "recovery never adopted the delayed comment"
+    );
+    assert_eq!(github.create_task_calls(), 0, "task remains unique");
+    assert_eq!(
+        github.create_comment_calls(),
+        1,
+        "an ambiguous comment is never recreated"
+    );
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 16. Every trusted assignment claiming the deterministic event ID is
+//     coalesced; a conflicting duplicate fails closed before any write.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn conflicting_trusted_assignment_duplicate_fails_closed() {
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let assignment =
+        github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    github.seed_comment(
+        &assignment_body_with_profile(ISSUE_BODY, PROFILE_NAME, &"a".repeat(40)),
+        &MockAuthor::trusted(),
+        false,
+    );
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (core, handle) =
+        start_core(&server.uri(), store.clone(), "copilot-assignment-conflict").await;
+    insert_launch_row(&handle, "candidate-1", &assignment).await;
+    assert!(
+        wait_for_halt(&core).await,
+        "conflicting trusted assignments must halt"
+    );
+    assert_eq!(github.create_task_calls(), 0);
+    assert_eq!(github.create_comment_calls(), 0);
+    assert!(load(&store, ISSUE_BODY).await.is_none());
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 17. A pre-existing ExecutionStarted comment that claims this event ID but
 //     carries different content is never adopted.
 //
-// `eventId` hashes the run and the event type only — it does not cover the
-// payload — so a lone divergent comment would otherwise be mistaken for this
-// reaction's own completed write and the run would be marked complete against
-// a task it never launched.
+// `eventId` binds the run and event type only, so the payload must be compared.
 // ---------------------------------------------------------------------
 #[tokio::test]
 #[ignore]

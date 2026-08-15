@@ -93,6 +93,8 @@ pub struct ExecutionRecord {
     /// The optional fallback model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_model: Option<String>,
+    /// The git ref pinned before task creation.
+    pub base_ref: String,
     /// The model of the in-flight or confirmed attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_used: Option<String>,
@@ -147,6 +149,7 @@ impl ExecutionRecord {
             profile_ref: profile_ref.to_string(),
             requested_model: row.requested_model.clone(),
             fallback_model: row.fallback_model.clone(),
+            base_ref: row.base_ref.clone(),
             model_used: None,
             used_fallback: false,
             task_id: None,
@@ -180,11 +183,9 @@ impl ExecutionRecord {
 
     /// Reject a record that describes a different subject than the current row.
     ///
-    /// The `runId` binds the Project Item, the subject, and the body digest, so
-    /// a mismatch here means the state store has been corrupted or a `runId`
-    /// collision occurred; either way, writing again would be unsafe. The run is
-    /// passed explicitly because it is *derived* from the row's binding rather
-    /// than carried by the row.
+    /// The `runId` binds the Project Item and body digest. The remaining identity
+    /// fields bind the durable intent to its exact subject and Project context;
+    /// any mismatch is unsafe to resume.
     pub fn ensure_matches(&self, run_id: &str, row: &LaunchRow) -> anyhow::Result<()> {
         if self.schema_version != EXECUTION_RECORD_SCHEMA {
             anyhow::bail!(
@@ -219,6 +220,9 @@ impl ExecutionRecord {
     pub fn set_attempt_model(&mut self, model: impl Into<String>, used_fallback: bool) {
         self.model_used = Some(model.into());
         self.used_fallback = used_fallback;
+        self.status = ExecutionStatus::Reserved;
+        self.ambiguous = false;
+        self.last_error = None;
         self.touch();
     }
 

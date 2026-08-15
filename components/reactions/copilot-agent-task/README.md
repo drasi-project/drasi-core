@@ -156,8 +156,8 @@ RETURN i.repositoryNameWithOwner AS repository, i.number AS subjectNumber,
 | `trustedExecutionAuthorType` | string | `Bot` | `User`, `Bot`, or `Organization` — the other half of the execution trust key |
 | `expectedProjectStatusFieldNodeId` | string | — | **Required, `PVTSSF_` prefix.** The Project single-select status field the item's status must be read from |
 | `requestTimeoutMs` | u64 | `30000` | Per-HTTP-request timeout |
-| `commentApi.maxAttempts` | u32 | `3` | In-process retry attempts for the comment step within one run |
-| `commentApi.retryBackoffMs` | u64 | `500` | Backoff between comment retry attempts |
+| `commentApi.maxAttempts` | u32 | `3` | Authoritative reconciliation reads after an ambiguous task or comment write |
+| `commentApi.retryBackoffMs` | u64 | `500` | Backoff between authoritative reconciliation reads |
 | `strictRecovery` | bool | `true` | Must be `true` — see [Reservation, idempotency, and recovery](#reservation-idempotency-and-recovery) |
 | `priorityQueueCapacity` | u64 | framework default | Optional reaction input queue capacity |
 
@@ -232,10 +232,10 @@ ambiguous failures stop the reaction so the batch replays on restart.
 3. **Verify the Project item** (GraphQL) — the item belongs to `projectNodeId`, its content is
    the expected Issue (node ID + number + repository), its status field node ID equals
    `expectedProjectStatusFieldNodeId`, and its current status is exactly `AwaitingValidation`.
-4. **Confirm the named assignment comment** — list issue comments and locate
-   `eventCommentNodeId` (never "something assignment-shaped"); it must still be authored by the
-   trusted assignment identity, be unedited (`created_at == updated_at`), parse under the strict
-   grammar, and carry canonical event JSON byte-identical to the row's.
+4. **Coalesce every trusted assignment** — the named `eventCommentNodeId` must exist, be
+   unedited, and carry the row's exact canonical event. Every other trusted, unedited comment
+   claiming that deterministic `eventId` is coalesced too: identical duplicates are harmless,
+   while any conflicting body or payload fails closed.
 5. **Pin the profile** — `GET /repos/{owner}/{repo}/contents/.github/agents/{profile}.agent.md?ref={baseRef}`
    where `{profile}` comes from the assignment's `profileRef`; require the returned blob `sha`
    to equal the SHA the `profileRef` pins, and require `{profile}` to be in `allowedProfiles`.
@@ -265,10 +265,10 @@ Reserved -> TaskCreated -> Completed
   comment.
 - **Duplicate delivery** of a `Completed` (or `Failed`) run is skipped entirely.
 - **Crash / restart** between reservation and a confirmed write leaves a `Reserved` or
-  `Ambiguous` record. On the next delivery the reaction
-  [reconciles](#ambiguous-creation-and-reconciliation) against GitHub before doing anything —
-  it never blindly retries task creation, and it re-lists comments before posting so a landed
-  `ExecutionStarted` comment is adopted rather than duplicated.
+  `Ambiguous` record. On the next delivery that deterministic record is loaded before mutable
+  issue, status, profile, or assignment checks. Recovery uses its pinned repository, subject,
+  profile, model, ref, task, and comment intent, then
+  [reconciles](#ambiguous-creation-and-reconciliation) against GitHub.
 - Every record mutation is an exact-bytes compare-and-swap, so a stale in-memory copy can never
   clobber newer progress.
 - The reaction's checkpoint (the query-outbox position) is advanced **only after** a run is
@@ -355,14 +355,16 @@ created. The reaction marks the record `Ambiguous` and, on the next processing p
 (`GET /agents/repos/{owner}/{repo}/tasks`) and searches for **exactly one** whose prompt/body
 contains the run's `executionId`:
 
-- **Zero matches** → create the task; absence from a recent-task listing is not proof it landed,
-  but the reservation + `executionId` correlation makes a second create safe to reconcile later.
+- **Zero matches on a new, never-sent intent** → create the task once.
+- **Zero matches after an ambiguous write** → repeat authoritative reads with backoff, then fail
+  stopped while retaining the record; one zero-match list is never proof of absence and creation
+  is never retried.
 - **Exactly one match** → adopt it (record its task ID/URL) and proceed to the comment step.
 - **More than one match** → fail closed and stop; it never guesses.
 
-The `ExecutionStarted` comment step is itself idempotent across restarts: it re-lists comments
-and adopts a previously landed comment (same trusted-author + unedited + coalesce procedure)
-before posting.
+The `ExecutionStarted` comment step persists ambiguity before sending. A lost response therefore
+enters read-only reconciliation: repeated listings may adopt the exact landed comment, but no
+subsequent attempt can recreate it.
 
 ## Security
 

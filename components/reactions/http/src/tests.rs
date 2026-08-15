@@ -25,7 +25,9 @@ use crate::config::{
     HttpReactionConfig, OperationType, TemplateRouting, TemplateSpec,
 };
 use crate::output::DefaultChangeNotification;
-use crate::process::{build_handlebars, render_batch_item, validate_graphql_response};
+use crate::process::{
+    batch_graphql_error_policy, build_handlebars, render_batch_item, validate_graphql_response,
+};
 use crate::{HttpReaction, HttpReactionBuilder};
 
 // ---------------------------------------------------------------------------
@@ -902,6 +904,30 @@ fn render_batch_item_uses_body_template_when_present() {
     let hb = build_handlebars();
     let item = render_batch_item(&hb, &cfg, &n, "r");
     assert_eq!(item, serde_json::json!({"id": "x", "kind": "templated"}));
+    assert!(!batch_graphql_error_policy(&cfg, &n));
+}
+
+#[test]
+fn adaptive_batch_item_preserves_graphql_error_policy() {
+    let cfg = cfg_with_routes(
+        None,
+        HashMap::from([(
+            "q1".to_string(),
+            HttpQueryConfig {
+                added: Some(TemplateSpec {
+                    template: r#"{"id":"{{after.id}}"}"#.to_string(),
+                    extension: HttpCallExt {
+                        fail_on_graphql_errors: true,
+                        ..Default::default()
+                    },
+                }),
+                ..Default::default()
+            },
+        )]),
+    );
+    let n = add_notification("q1", 1, serde_json::json!({"id": "x"}));
+
+    assert!(batch_graphql_error_policy(&cfg, &n));
 }
 
 #[test]

@@ -638,6 +638,114 @@ async fn graphql_errors_retry_then_fail_stop_under_strict_policy() {
     r.stop().await.unwrap();
 }
 
+#[tokio::test]
+async fn adaptive_graphql_errors_retry_then_fail_stop_under_strict_policy() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/batch"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"partial": true},
+            "errors": [{"message": "token ghp_must_never_be_logged"}]
+        })))
+        .mount(&server)
+        .await;
+    let r = Arc::new(
+        HttpReaction::builder("adaptive-graphql-errors-strict")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_query_template("q1", graphql_template(true))
+            .with_adaptive(AdaptiveBatchConfig {
+                adaptive_min_batch_size: 1,
+                adaptive_max_batch_size: 16,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 50,
+            })
+            .with_batch_endpoint("/batch")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    wait_for_requests(&server, 3, 3000).await;
+    for _ in 0..50 {
+        if matches!(r.status().await, ComponentStatus::Error) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(matches!(r.status().await, ComponentStatus::Error));
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    r.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn adaptive_graphql_policy_defaults_false_and_preserves_2xx_behavior() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/batch"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .mount(&server)
+        .await;
+    let r = Arc::new(
+        HttpReaction::builder("adaptive-graphql-default-false")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_query_template("q1", graphql_template(false))
+            .with_adaptive(AdaptiveBatchConfig {
+                adaptive_min_batch_size: 1,
+                adaptive_max_batch_size: 16,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 50,
+            })
+            .with_batch_endpoint("/batch")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    wait_for_requests(&server, 1, 2000).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(matches!(r.status().await, ComponentStatus::Running));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    r.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn adaptive_batch_rejects_mixed_graphql_error_policies_before_delivery() {
+    let server = mock_server::start().await;
+    let r = Arc::new(
+        HttpReaction::builder("adaptive-graphql-mixed")
+            .with_base_url(server.uri())
+            .with_queries(vec!["q1".to_string(), "q2".to_string()])
+            .with_query_template("q1", graphql_template(true))
+            .with_query_template("q2", graphql_template(false))
+            .with_adaptive(AdaptiveBatchConfig {
+                adaptive_min_batch_size: 2,
+                adaptive_max_batch_size: 16,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 500,
+            })
+            .with_batch_endpoint("/batch")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    enqueue_add(&r, "q2", json!({"id": 2})).await;
+    for _ in 0..50 {
+        if matches!(r.status().await, ComponentStatus::Error) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(matches!(r.status().await, ComponentStatus::Error));
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "mixed policy batches must fail before an HTTP write"
+    );
+    r.stop().await.unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Adaptive mode
 // ---------------------------------------------------------------------------

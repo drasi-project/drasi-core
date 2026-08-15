@@ -45,12 +45,11 @@ pub fn default_request_timeout_ms() -> u64 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CommentApiConfig {
-    /// Number of comment-post attempts within a single processing pass before
-    /// treating the failure as transient and stopping (the next restart
-    /// resumes at the comment step — the task is never recreated).
+    /// Number of authoritative reconciliation reads after an ambiguous task or
+    /// comment write before failing stopped. Ambiguous writes are never retried.
     #[serde(default = "CommentApiConfig::default_max_attempts")]
     pub max_attempts: u32,
-    /// Backoff between in-process retry attempts.
+    /// Backoff between authoritative reconciliation reads.
     #[serde(default = "CommentApiConfig::default_retry_backoff_ms")]
     pub retry_backoff_ms: u64,
 }

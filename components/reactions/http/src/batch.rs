@@ -43,6 +43,7 @@ pub(crate) async fn send_coalesced_batch(
     batch_endpoint: &str,
     token: &Option<String>,
     items: Vec<serde_json::Value>,
+    fail_on_graphql_errors: bool,
     reaction_name: &str,
 ) -> Result<DeliveryOutcome> {
     let total = items.len();
@@ -71,7 +72,7 @@ pub(crate) async fn send_coalesced_batch(
         DeliveryOptions {
             reaction_name,
             description: "batch HTTP request",
-            fail_on_graphql_errors: false,
+            fail_on_graphql_errors,
         },
     )
     .await?;

@@ -215,8 +215,9 @@ mod tests {
         .expect("valid event")
     }
 
-    fn observed(node_id: &str, event: &WorkGraphEvent, summary: &str) -> ObservedComment {
-        let body = crate::comment::render_comment(event, summary).expect("render");
+    fn observed(node_id: &str, event: &WorkGraphEvent) -> ObservedComment {
+        let body =
+            crate::comment::render_comment(event, &summary_for(event)).expect("render canonical");
         ObservedComment {
             comment_node_id: node_id.to_string(),
             comment: parse_comment(&body).expect("parse"),
@@ -227,10 +228,8 @@ mod tests {
     fn identical_duplicates_coalesce_to_the_earliest_comment() {
         let event = completion(ValidationOutcome::Passed);
         let summary = summary_for(&event);
-        let observations = vec![
-            observed("IC_first", &event, &summary),
-            observed("IC_second", &event, &summary),
-        ];
+        let observations = vec![observed("IC_first", &event), observed("IC_second", &event)];
+        assert_eq!(summary, "Issue validation passed.");
         let accepted = coalesce(&observations, &event.event_id)
             .expect("identical duplicates coalesce")
             .expect("one accepted");
@@ -238,16 +237,16 @@ mod tests {
     }
 
     #[test]
-    fn differing_summaries_still_coalesce() {
+    fn misleading_summaries_fail_before_coalescing() {
         let event = completion(ValidationOutcome::Passed);
-        let observations = vec![
-            observed("IC_first", &event, "Issue validation passed."),
-            observed("IC_second", &event, "something else entirely"),
-        ];
-        let accepted = coalesce(&observations, &event.event_id)
-            .expect("summaries are not authoritative")
-            .expect("one accepted");
-        assert_eq!(accepted.comment_node_id, "IC_first");
+        let canonical =
+            crate::comment::render_comment(&event, &summary_for(&event)).expect("render");
+        let misleading =
+            canonical.replacen("Issue validation passed.", "Issue validation failed.", 1);
+        assert!(matches!(
+            parse_comment(&misleading).expect_err("misleading summary rejected"),
+            crate::comment::CommentError::SummaryMismatch { .. }
+        ));
     }
 
     #[test]
@@ -257,8 +256,8 @@ mod tests {
         // Same run, same event type, therefore the same deterministic event ID.
         assert_eq!(passed.event_id, failed.event_id);
         let observations = vec![
-            observed("IC_first", &passed, "passed"),
-            observed("IC_second", &failed, "failed"),
+            observed("IC_first", &passed),
+            observed("IC_second", &failed),
         ];
         let error = coalesce(&observations, &passed.event_id).expect_err("conflict must fail");
         assert_eq!(
@@ -274,7 +273,7 @@ mod tests {
     #[test]
     fn unrelated_events_are_ignored() {
         let event = completion(ValidationOutcome::Passed);
-        let observations = vec![observed("IC_first", &event, "passed")];
+        let observations = vec![observed("IC_first", &event)];
         let other = event_id(&event.run_id, WorkGraphEventType::RoutingDecided);
         assert!(coalesce(&observations, &other)
             .expect("no conflict")
@@ -290,10 +289,10 @@ mod tests {
             .expect("nothing to adopt")
             .is_none());
 
-        // Byte-identical (bar the non-authoritative summary) is adoptable.
+        // Byte-identical canonical comments are adoptable.
         let observations = vec![
-            observed("IC_first", &intended, "Issue validation passed."),
-            observed("IC_second", &intended, "a different summary entirely"),
+            observed("IC_first", &intended),
+            observed("IC_second", &intended),
         ];
         let accepted = adopt_published_event(&observations, &intended)
             .expect("identical duplicates adopt")
@@ -314,7 +313,7 @@ mod tests {
             "the payloads must differ for this test to mean anything"
         );
 
-        let observations = vec![observed("IC_divergent", &divergent, "failed")];
+        let observations = vec![observed("IC_divergent", &divergent)];
         // `coalesce` would happily hand back the single divergent comment...
         assert_eq!(
             coalesce(&observations, &intended.event_id)
@@ -338,8 +337,8 @@ mod tests {
         let intended = completion(ValidationOutcome::Passed);
         let divergent = completion(ValidationOutcome::Failed);
         let observations = vec![
-            observed("IC_first", &intended, "passed"),
-            observed("IC_second", &divergent, "failed"),
+            observed("IC_first", &intended),
+            observed("IC_second", &divergent),
         ];
         assert_eq!(
             adopt_published_event(&observations, &intended).expect_err("conflict fails closed"),
@@ -368,7 +367,7 @@ mod tests {
         .expect("valid event");
         assert_ne!(intended.event_id, other_run.event_id);
 
-        let observations = vec![observed("IC_other", &other_run, "another run")];
+        let observations = vec![observed("IC_other", &other_run)];
         assert!(adopt_published_event(&observations, &intended)
             .expect("unrelated events are ignored")
             .is_none());

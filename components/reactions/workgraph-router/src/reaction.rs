@@ -59,9 +59,14 @@
 //! recorded run/item/subject, and carry exactly the canonical event JSON the
 //! record pinned. Any deviation is a hard halt with zero further side effects —
 //! never a skippable rejection.
+//!
+//! A process-local mutex keyed by Project Item covers the durable claim through
+//! terminal status completion. This is intentionally a single-process,
+//! single-active-instance guarantee; there is no cross-process active-active
+//! exclusion contract.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -85,6 +90,7 @@ use drasi_workgraph_common::{
     summary::summary_for,
 };
 use log::{error, info, warn};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::candidate::RoutingCandidate;
 use crate::config::{WorkgraphRouterReactionConfig, ROUTABLE_STATUS};
@@ -105,6 +111,22 @@ use crate::WorkgraphRouterReactionBuilder;
 #[error("{message}")]
 struct PermanentCandidateError {
     message: String,
+}
+
+type ItemMutex = AsyncMutex<()>;
+
+fn project_item_lock(project_item_node_id: &str) -> Arc<ItemMutex> {
+    static LOCKS: OnceLock<StdMutex<HashMap<String, Weak<ItemMutex>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(lock) = locks.get(project_item_node_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(ItemMutex::new(()));
+    locks.insert(project_item_node_id.to_string(), Arc::downgrade(&lock));
+    lock
 }
 
 impl PermanentCandidateError {
@@ -362,7 +384,20 @@ async fn route(
     candidate
         .validate(config)
         .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
+    let item_lock = project_item_lock(&candidate.project_item_node_id);
+    let _guard = item_lock.lock().await;
+    route_locked(reaction_name, base, config, github, candidate).await
+}
 
+/// Route one already-validated candidate while exclusively owning its Project
+/// item inside this process.
+async fn route_locked(
+    reaction_name: &str,
+    base: &ReactionBase,
+    config: &WorkgraphRouterReactionConfig,
+    github: &GithubClient,
+    candidate: &RoutingCandidate,
+) -> anyhow::Result<()> {
     let store = base
         .state_store()
         .await
@@ -888,13 +923,17 @@ async fn claim_open_run(
     candidate: &RoutingCandidate,
     run_id: &str,
 ) -> anyhow::Result<()> {
-    if let Some(incumbent) = attempted_but_unapplied_run(store.clone(), store_id, candidate).await?
+    if let Some(incumbent_run_id) =
+        load_open_run(store.clone(), store_id, &candidate.project_item_node_id).await?
     {
-        if incumbent.record.run_id != run_id {
+        let incumbent = load_record(store.clone(), store_id, &incumbent_run_id).await?;
+        if incumbent_run_id != run_id
+            && incumbent.is_some_and(|record| !record.record.is_complete())
+        {
             anyhow::bail!(
-                "project item '{}' still owes the decision of run '{}'; refusing to start run '{run_id}'",
+                "project item '{}' is still owned by unfinished run '{}'; refusing to start run '{run_id}'",
                 candidate.project_item_node_id,
-                incumbent.record.run_id
+                incumbent_run_id
             );
         }
     }
@@ -1922,7 +1961,7 @@ mod tests {
             .await
             .expect_err("a different run must not take the item");
         assert!(
-            format!("{error:#}").contains("still owes the decision of run"),
+            format!("{error:#}").contains("is still owned by unfinished run"),
             "{error:#}"
         );
 
@@ -1930,6 +1969,69 @@ mod tests {
         claim_open_run(store, "router", &candidate(), &attempted.run_id)
             .await
             .expect("the owning run keeps the item");
+    }
+
+    #[tokio::test]
+    async fn concurrent_runs_for_one_item_have_one_claim_winner() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use drasi_lib::state_store::MemoryStateStoreProvider;
+        use tokio::sync::Barrier;
+
+        let store: Arc<dyn StateStoreProvider> = Arc::new(MemoryStateStoreProvider::new());
+        let item = "PVTI_concurrentclaim";
+        let mut first_candidate = candidate();
+        first_candidate.project_item_node_id = item.to_string();
+        let second_candidate = first_candidate.clone();
+
+        let mut first_record = intent_record(&decision_event(ValidationOutcome::Passed));
+        first_record.project_item_node_id = item.to_string();
+        first_record.run_id = "run:first".to_string();
+        let mut second_record = first_record.clone();
+        second_record.run_id = "run:second".to_string();
+        create_record_if_absent(store.clone(), "router-concurrent", &first_record)
+            .await
+            .expect("seed first");
+        create_record_if_absent(store.clone(), "router-concurrent", &second_record)
+            .await
+            .expect("seed second");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let winners = Arc::new(AtomicUsize::new(0));
+        let spawn_contender = |candidate: RoutingCandidate, run_id: &'static str| {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            let winners = winners.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                let lock = project_item_lock(&candidate.project_item_node_id);
+                let _guard = lock.lock().await;
+                if claim_open_run(store, "router-concurrent", &candidate, run_id)
+                    .await
+                    .is_ok()
+                {
+                    winners.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+
+        let first = spawn_contender(first_candidate, "run:first");
+        let second = spawn_contender(second_candidate, "run:second");
+        first.await.expect("first contender");
+        second.await.expect("second contender");
+
+        assert_eq!(
+            winners.load(Ordering::SeqCst),
+            1,
+            "only one run may reach the external-write section"
+        );
+        assert!(matches!(
+            load_open_run(store, "router-concurrent", item)
+                .await
+                .expect("load owner")
+                .as_deref(),
+            Some("run:first" | "run:second")
+        ));
     }
 
     #[test]

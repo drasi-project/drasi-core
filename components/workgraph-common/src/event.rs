@@ -892,7 +892,10 @@ impl WorkGraphEvent {
         Ok(())
     }
 
-    /// Serialize to canonical compact JSON with the frozen key order.
+    /// Serialize to canonical two-space-indented JSON with the frozen key order.
+    ///
+    /// This matches JavaScript's `JSON.stringify(event, null, 2)` byte for byte
+    /// and never appends a terminal newline.
     pub fn to_canonical_json(&self) -> String {
         let wire = WireEvent {
             schema_version: SCHEMA_VERSION.to_string(),
@@ -903,14 +906,20 @@ impl WorkGraphEvent {
             subject_node_id: self.subject_node_id.clone(),
             payload: &self.payload,
         };
-        serde_json::to_string(&wire).expect("workgraph event serialization is infallible")
+        serde_json::to_string_pretty(&wire).expect("workgraph event serialization is infallible")
     }
 
     /// Parse and fully validate a canonical JSON document.
     pub fn from_json(json: &str) -> Result<Self, EventError> {
         let value: serde_json::Value = serde_json::from_str(json)
             .map_err(|error| EventError::Envelope(format!("not valid JSON: {error}")))?;
-        Self::from_value(value)
+        let event = Self::from_value(value)?;
+        if json != event.to_canonical_json() {
+            return Err(EventError::Envelope(
+                "JSON must use the canonical two-space-indented representation".to_string(),
+            ));
+        }
+        Ok(event)
     }
 
     /// Parse and fully validate an already-decoded JSON value.
@@ -995,7 +1004,9 @@ mod tests {
             .filter_map(|chunk| chunk.rsplit('"').next())
             .collect();
         assert!(
-            json.starts_with(r#"{"schemaVersion":"workgraph.event/v1","eventId":"event:"#),
+            json.starts_with(
+                "{\n  \"schemaVersion\": \"workgraph.event/v1\",\n  \"eventId\": \"event:"
+            ),
             "unexpected canonical prefix: {json}"
         );
         let envelope_order = [
@@ -1025,12 +1036,14 @@ mod tests {
     fn payload_key_order_is_frozen() {
         let json = assigned().to_canonical_json();
         let payload = json
-            .split_once("\"payload\":")
+            .split_once("\"payload\": ")
             .expect("payload present")
             .1
             .to_string();
         assert!(
-            payload.starts_with(r#"{"responsibilityType":"issue-validation","profileRef":"#),
+            payload.starts_with(
+                "{\n    \"responsibilityType\": \"issue-validation\",\n    \"profileRef\": \""
+            ),
             "unexpected payload order: {payload}"
         );
     }

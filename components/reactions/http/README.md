@@ -333,6 +333,12 @@ downstream responses cannot expose credentials. After retries are exhausted,
 the configured recovery policy applies; `strict` does not advance the
 checkpoint.
 
+Adaptive batches preserve this policy for every rendered item. A homogeneous
+batch uses its configured policy for the batch response. If one batch would mix
+`true` and `false` request policies, delivery fails before the HTTP write rather
+than weakening either request's contract; configure all requests that can share
+a batch with the same value.
+
 Single-notification example (per-query REST routing, token from an environment variable):
 
 ```json

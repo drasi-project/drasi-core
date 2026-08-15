@@ -122,7 +122,7 @@ impl ReactionPluginDescriptor for WorkgraphRouterReactionDescriptor {
     }
 
     fn config_version(&self) -> &str {
-        "1.0.0"
+        "2.0.0"
     }
 
     fn config_schema_name(&self) -> &str {
@@ -267,6 +267,11 @@ mod tests {
             "trustedAuthorDatabaseId": 4021243,
             "trustedAuthorType": "Bot"
         })
+    }
+
+    #[test]
+    fn descriptor_uses_clean_cutover_config_version() {
+        assert_eq!(WorkgraphRouterReactionDescriptor.config_version(), "2.0.0");
     }
 
     #[tokio::test]

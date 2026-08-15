@@ -62,8 +62,8 @@ use drasi_workgraph_common::{
     comment::{parse_comment, render_comment},
     dedup::{adopt_published_event, ObservedComment},
     event::{
-        ExecutionId, ExecutionStartedPayload, ResponsibilityAssignedPayload, RunId, WorkGraphEvent,
-        WorkGraphEventPayload, WorkGraphEventType,
+        ExecutionId, ExecutionStartedPayload, ProfileRef, ResponsibilityAssignedPayload, RunId,
+        Sha256Digest, WorkGraphEvent, WorkGraphEventPayload, WorkGraphEventType,
     },
     ids::{body_digest, event_id},
     status::AWAITING_VALIDATION,
@@ -448,6 +448,32 @@ impl LaunchCtx<'_> {
 
     /// Launch one assigned run, resuming any partially completed prior attempt.
     async fn launch(&self, row: &LaunchRow) -> Result<()> {
+        // 0. Derive the durable identity without consulting mutable issue,
+        //    Project, profile, or comment state. A pre-existing nonterminal
+        //    record owns recovery and must never be abandoned because those live
+        //    preconditions changed after an external write.
+        let digest = Sha256Digest::try_from(row.body_digest.clone())
+            .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
+        let run = RunId::new(&row.project_item_node_id, &digest)
+            .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
+        let execution = execution_id(&run);
+        if let Some(mut persisted) =
+            load_record(self.store.clone(), self.store_id(), run.as_str()).await?
+        {
+            persisted.record.ensure_matches(run.as_str(), row)?;
+            if persisted.record.is_terminal() {
+                info!(
+                    "[{}] run '{run}' for {}#{} is already {:?}; nothing to do",
+                    self.reaction_name,
+                    persisted.record.repository,
+                    persisted.record.subject_number,
+                    persisted.record.status
+                );
+                return Ok(());
+            }
+            return self.resume_persisted(&mut persisted).await;
+        }
+
         // 1. Validate the row against the configured allowlists, then accept the
         //    assignment event it carries: unedited, authored by the trusted
         //    assignment identity, strictly parsed, and bound to this row's item,
@@ -460,8 +486,11 @@ impl LaunchCtx<'_> {
         let assignment = row
             .accept_assignment(self.config)
             .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
-        let run = assignment.run_id.clone();
-        let digest = assignment.body_digest.clone();
+        if assignment.run_id != run || assignment.body_digest != digest {
+            return Err(PermanentCandidateError::new(
+                "assignment identity does not match the row-derived durable run",
+            ));
+        }
         let payload = match &assignment.event.payload {
             WorkGraphEventPayload::ResponsibilityAssigned(payload) => payload.clone(),
             other => {
@@ -544,7 +573,6 @@ impl LaunchCtx<'_> {
         }
 
         // 6. Durable reservation before any external write.
-        let execution = execution_id(&run);
         let started_event_id = event_id(&run, WorkGraphEventType::ExecutionStarted);
         let intent = ExecutionRecord::new(
             run.as_str(),
@@ -567,84 +595,88 @@ impl LaunchCtx<'_> {
                     })?,
             };
 
-        if persisted.record.is_terminal() {
-            info!(
-                "[{}] run '{run}' for {}#{} is already {:?}; nothing to do",
-                self.reaction_name, row.repository, row.subject_number, persisted.record.status
-            );
-            return Ok(());
-        }
+        self.resume_persisted(&mut persisted).await
+    }
 
-        // 7. Reconcile-or-create exactly one agent task.
-        let prompt = build_prompt(row.subject_number, execution.as_str());
+    /// Resume exclusively from pinned durable intent.
+    async fn resume_persisted(&self, persisted: &mut PersistedExecutionRecord) -> Result<()> {
+        let run = RunId::try_from(persisted.record.run_id.clone())?;
+        let execution = ExecutionId::try_from(persisted.record.execution_id.clone())?;
+        let expected_execution = execution_id(&run);
+        if execution != expected_execution {
+            anyhow::bail!("persisted execution ID '{execution}' does not match run '{run}'");
+        }
+        let expected_event_id = event_id(&run, WorkGraphEventType::ExecutionStarted);
+        let persisted_event_id = &persisted.record.event_id;
+        if persisted_event_id != expected_event_id.as_str() {
+            anyhow::bail!(
+                "persisted ExecutionStarted event ID '{persisted_event_id}' does not match run '{run}'"
+            );
+        }
+        let profile_ref = ProfileRef::try_from(persisted.record.profile_ref.clone())?;
+        let profile = profile_ref.profile().to_string();
+        let (owner, repo) = persisted
+            .record
+            .repository
+            .split_once('/')
+            .filter(|(owner, repo)| !owner.is_empty() && !repo.is_empty() && !repo.contains('/'))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "persisted repository '{}' is not 'owner/repo'",
+                    persisted.record.repository
+                )
+            })?;
+        let owner = owner.to_string();
+        let repo = repo.to_string();
+        let prompt = build_prompt(persisted.record.subject_number, execution.as_str());
+
         if !self
-            .provision_task(row, &execution, &profile, &prompt, &mut persisted)
+            .provision_task(&owner, &repo, &execution, &profile, &prompt, persisted)
             .await?
         {
-            // A terminal create-task rejection was recorded; skip the run.
             return Ok(());
         }
-
-        // 8. Post exactly one ExecutionStarted comment (adopting a prior write).
-        self.post_execution_started(row, &run, &execution, &mut persisted)
+        self.post_execution_started(&run, &execution, persisted)
             .await?;
 
         info!(
             "[{}] launched {}#{} as run '{run}' (execution {})",
             self.reaction_name,
-            row.repository,
-            row.subject_number,
+            persisted.record.repository,
+            persisted.record.subject_number,
             execution.as_str()
         );
         Ok(())
     }
 
-    /// Require the row's assignment comment to still be exactly what the row
-    /// delivered.
-    ///
-    /// The comment is located by the row's `eventCommentNodeId` — never by
-    /// scanning for something assignment-shaped — and must still be authored by
-    /// the trusted assignment identity, be unedited, parse under the strict
-    /// grammar, and carry canonical event JSON byte-identical to the row's.
+    /// Require the named assignment and every trusted duplicate of its
+    /// deterministic event ID to agree before any external effect.
     fn verify_assignment_comment(
         &self,
         row: &LaunchRow,
         accepted: &WorkGraphEvent,
         comments: &[IssueComment],
     ) -> Result<()> {
-        let comment = comments
+        let observed = self.observed_comments(comments, &self.config.trusted_assignment_author());
+        let named = observed
             .iter()
-            .find(|comment| comment.node_id == row.event_comment_node_id)
+            .find(|comment| comment.comment_node_id == row.event_comment_node_id)
             .ok_or_else(|| {
                 PermanentCandidateError::new(format!(
-                    "assignment comment '{}' no longer exists on {}#{}",
+                    "assignment comment '{}' is missing, edited, untrusted, or noncanonical on {}#{}",
                     row.event_comment_node_id, row.repository, row.subject_number
                 ))
             })?;
-        if !comment.is_authored_by(&self.config.trusted_assignment_author()) {
-            return Err(PermanentCandidateError::new(format!(
-                "assignment comment '{}' is not authored by the trusted assignment identity",
-                row.event_comment_node_id
-            )));
-        }
-        if !comment.is_unedited() {
-            return Err(PermanentCandidateError::new(format!(
-                "assignment comment '{}' was edited",
-                row.event_comment_node_id
-            )));
-        }
-        let parsed = parse_comment(&comment.body).map_err(|error| {
-            PermanentCandidateError::new(format!(
-                "assignment comment '{}' no longer parses: {error}",
-                row.event_comment_node_id
-            ))
-        })?;
-        if parsed.event.to_canonical_json() != accepted.to_canonical_json() {
-            return Err(PermanentCandidateError::new(format!(
+        if named.comment.event != *accepted {
+            anyhow::bail!(
                 "assignment comment '{}' no longer carries the event the row delivered",
                 row.event_comment_node_id
-            )));
+            );
         }
+
+        adopt_published_event(&observed, accepted)
+            .map_err(|error| anyhow::anyhow!("assignment reconciliation failed: {error}"))?
+            .ok_or_else(|| anyhow::anyhow!("trusted assignment event disappeared"))?;
         Ok(())
     }
 
@@ -711,7 +743,8 @@ impl LaunchCtx<'_> {
     /// `Err` to halt for reconciliation on restart.
     async fn provision_task(
         &self,
-        row: &LaunchRow,
+        owner: &str,
+        repo: &str,
         execution: &ExecutionId,
         profile: &str,
         prompt: &str,
@@ -720,47 +753,59 @@ impl LaunchCtx<'_> {
         if persisted.record.task_confirmed() {
             return Ok(true);
         }
-        // Already proven well formed by `LaunchRow::validate`.
-        let (owner, repo) = row.owner_and_repo()?;
         let execution = execution.as_str();
 
-        // Reconcile first: a task whose prompt/body already carries this
-        // execution ID was created by a prior, ambiguous attempt.
-        match self
-            .github
-            .reconcile(owner, repo, execution)
-            .await
-            .map_err(|error| anyhow::anyhow!("task reconciliation failed: {error}"))?
-        {
-            ReconciliationOutcome::ExactMatch(task) => {
-                let model = persisted
-                    .record
-                    .model_used
-                    .clone()
-                    .unwrap_or_else(|| row.requested_model.clone());
-                let used_fallback = persisted.record.used_fallback;
-                let mut updated = persisted.record.clone();
-                let url = (!task.url.is_empty()).then_some(task.url);
-                updated.set_task(model, used_fallback, task.id, url);
-                self.persist(persisted, updated).await?;
-                info!(
-                    "[{}] adopted existing task for execution {execution}",
-                    self.reaction_name
-                );
-                return Ok(true);
-            }
-            ReconciliationOutcome::Ambiguous(matches) if matches.len() >= 2 => {
-                anyhow::bail!(
-                    "reconciliation found {} tasks correlated to execution {execution}; failing closed",
-                    matches.len()
-                );
-            }
-            ReconciliationOutcome::Ambiguous(_) => {
-                // Zero correlated tasks: safe to create.
+        let attempts = if persisted.record.ambiguous {
+            self.config.comment_api.max_attempts.max(2)
+        } else {
+            1
+        };
+        let backoff = Duration::from_millis(self.config.comment_api.retry_backoff_ms);
+        for attempt in 1..=attempts {
+            match self
+                .github
+                .reconcile(owner, repo, execution)
+                .await
+                .map_err(|error| anyhow::anyhow!("task reconciliation failed: {error}"))?
+            {
+                ReconciliationOutcome::ExactMatch(task) => {
+                    let model = persisted
+                        .record
+                        .model_used
+                        .clone()
+                        .unwrap_or_else(|| persisted.record.requested_model.clone());
+                    let used_fallback = persisted.record.used_fallback;
+                    let mut updated = persisted.record.clone();
+                    let url = (!task.url.is_empty()).then_some(task.url);
+                    updated.set_task(model, used_fallback, task.id, url);
+                    self.persist(persisted, updated).await?;
+                    info!(
+                        "[{}] adopted existing task for execution {execution}",
+                        self.reaction_name
+                    );
+                    return Ok(true);
+                }
+                ReconciliationOutcome::Ambiguous(matches) if matches.len() >= 2 => {
+                    anyhow::bail!(
+                        "reconciliation found {} tasks correlated to execution {execution}; failing closed",
+                        matches.len()
+                    );
+                }
+                ReconciliationOutcome::Ambiguous(_) if persisted.record.ambiguous => {
+                    if attempt < attempts {
+                        tokio::time::sleep(backoff).await;
+                    }
+                }
+                ReconciliationOutcome::Ambiguous(_) => break,
             }
         }
+        if persisted.record.ambiguous {
+            anyhow::bail!(
+                "ambiguous task creation for execution {execution} remains unresolved after {attempts} authoritative reads; refusing to recreate"
+            );
+        }
 
-        self.create_task_with_fallback(row, owner, repo, profile, prompt, persisted)
+        self.create_task_with_fallback(owner, repo, profile, prompt, persisted)
             .await
     }
 
@@ -768,30 +813,30 @@ impl LaunchCtx<'_> {
     /// clearly-unsupported-model 422.
     async fn create_task_with_fallback(
         &self,
-        row: &LaunchRow,
         owner: &str,
         repo: &str,
         profile: &str,
         prompt: &str,
         persisted: &mut PersistedExecutionRecord,
     ) -> Result<bool> {
+        let requested_model = persisted.record.requested_model.clone();
+        let fallback_model = persisted.record.fallback_model.clone();
+        let base_ref = persisted.record.base_ref.clone();
         // Persist the chosen model BEFORE the attempt so a crash mid-flight
         // leaves the in-flight model on record for reconciliation.
-        self.record_attempt_model(persisted, &row.requested_model, false)
+        self.record_attempt_model(persisted, &requested_model, false)
             .await?;
+        self.mark_ambiguous(
+            persisted,
+            format!("task creation outcome pending for model '{requested_model}'"),
+        )
+        .await?;
         match self
-            .create_task(
-                owner,
-                repo,
-                profile,
-                &row.requested_model,
-                &row.base_ref,
-                prompt,
-            )
+            .create_task(owner, repo, profile, &requested_model, &base_ref, prompt)
             .await
         {
             CreateTaskOutcome::Created { id, url } => {
-                self.confirm_task(persisted, &row.requested_model, false, id, url)
+                self.confirm_task(persisted, &requested_model, false, id, url)
                     .await?;
                 Ok(true)
             }
@@ -801,6 +846,8 @@ impl LaunchCtx<'_> {
                 Ok(false)
             }
             CreateTaskOutcome::Transient(message) => {
+                self.record_attempt_model(persisted, &requested_model, false)
+                    .await?;
                 anyhow::bail!("create task failed transiently: {message}")
             }
             CreateTaskOutcome::Ambiguous => {
@@ -809,7 +856,7 @@ impl LaunchCtx<'_> {
                 anyhow::bail!("create task outcome ambiguous; awaiting reconciliation on restart")
             }
             CreateTaskOutcome::UnsupportedModel(message) => {
-                let Some(fallback) = row.fallback_model.clone() else {
+                let Some(fallback) = fallback_model else {
                     self.fail(
                         persisted,
                         format!(
@@ -825,8 +872,13 @@ impl LaunchCtx<'_> {
                 );
                 self.record_attempt_model(persisted, &fallback, true)
                     .await?;
+                self.mark_ambiguous(
+                    persisted,
+                    format!("task creation outcome pending for fallback model '{fallback}'"),
+                )
+                .await?;
                 match self
-                    .create_task(owner, repo, profile, &fallback, &row.base_ref, prompt)
+                    .create_task(owner, repo, profile, &fallback, &base_ref, prompt)
                     .await
                 {
                     CreateTaskOutcome::Created { id, url } => {
@@ -851,6 +903,8 @@ impl LaunchCtx<'_> {
                         Ok(false)
                     }
                     CreateTaskOutcome::Transient(message) => {
+                        self.record_attempt_model(persisted, &fallback, true)
+                            .await?;
                         anyhow::bail!("fallback create task failed transiently: {message}")
                     }
                     CreateTaskOutcome::Ambiguous => {
@@ -884,13 +938,13 @@ impl LaunchCtx<'_> {
         self.github.create_task(owner, repo, &request).await
     }
 
-    /// Post exactly one `ExecutionStarted` comment, adopting one a previous
-    /// attempt may already have written. Retries in-process up to
-    /// `commentApi.maxAttempts`, re-listing each time so a landed-but-unconfirmed
-    /// write is adopted rather than duplicated.
+    /// Post exactly one `ExecutionStarted` comment.
+    ///
+    /// Once a write may have been sent, recovery is read-only: repeated
+    /// authoritative listings may adopt the landed comment, but never recreate
+    /// it after a zero-match read.
     async fn post_execution_started(
         &self,
-        row: &LaunchRow,
         run: &RunId,
         execution: &ExecutionId,
         persisted: &mut PersistedExecutionRecord,
@@ -904,8 +958,8 @@ impl LaunchCtx<'_> {
 
         let event = WorkGraphEvent::new(
             run.clone(),
-            row.project_item_node_id.clone(),
-            row.subject_node_id.clone(),
+            persisted.record.project_item_node_id.clone(),
+            persisted.record.subject_node_id.clone(),
             WorkGraphEventPayload::ExecutionStarted(ExecutionStartedPayload {
                 execution_id: execution.clone(),
                 task_id,
@@ -919,12 +973,13 @@ impl LaunchCtx<'_> {
 
         let max_attempts = self.config.comment_api.max_attempts.max(1);
         let backoff = Duration::from_millis(self.config.comment_api.retry_backoff_ms);
-        let mut last_error: Option<anyhow::Error> = None;
-
         for attempt in 1..=max_attempts {
             let comments = self
                 .github
-                .list_issue_comments(&row.repository, row.subject_number)
+                .list_issue_comments(
+                    &persisted.record.repository,
+                    persisted.record.subject_number,
+                )
                 .await
                 .context("failed to list issue comments before posting ExecutionStarted")?;
             if let Some(adopted) = self.adopt_own_published_comment(&comments, &event)? {
@@ -933,38 +988,46 @@ impl LaunchCtx<'_> {
                 self.persist(persisted, updated).await?;
                 return Ok(());
             }
-
-            match self
-                .github
-                .create_issue_comment(&row.repository, row.subject_number, &body)
-                .await
-            {
-                Ok(comment) => {
-                    let mut updated = persisted.record.clone();
-                    updated.set_comment(comment.node_id);
-                    self.persist(persisted, updated).await?;
-                    return Ok(());
+            if persisted.record.ambiguous {
+                if attempt < max_attempts {
+                    tokio::time::sleep(backoff).await;
                 }
-                Err(error) => {
-                    warn!(
-                        "[{}] ExecutionStarted comment attempt {attempt}/{max_attempts} failed: {error:#}",
-                        self.reaction_name
-                    );
-                    last_error = Some(error);
-                    if attempt < max_attempts {
-                        tokio::time::sleep(backoff).await;
-                    }
-                }
+                continue;
             }
+            break;
         }
 
-        // Every attempt failed and no landed comment was found: the last write
-        // may or may not have taken effect, so mark ambiguous and halt. A
-        // restart re-lists and adopts the comment if it landed.
-        let error = last_error
-            .unwrap_or_else(|| anyhow::anyhow!("ExecutionStarted comment was not posted"));
-        self.mark_ambiguous(persisted, format!("{error:#}")).await?;
-        Err(error).context("failed to post the ExecutionStarted comment")
+        if persisted.record.ambiguous {
+            anyhow::bail!(
+                "ambiguous ExecutionStarted publication remains unresolved after {max_attempts} authoritative reads; refusing to recreate"
+            );
+        }
+
+        // Persist ambiguity before the external write. A crash or lost response
+        // therefore resumes with authoritative reads only.
+        self.mark_ambiguous(
+            persisted,
+            "ExecutionStarted publication outcome pending authoritative reconciliation",
+        )
+        .await?;
+        match self
+            .github
+            .create_issue_comment(
+                &persisted.record.repository,
+                persisted.record.subject_number,
+                &body,
+            )
+            .await
+        {
+            Ok(comment) => {
+                let mut updated = persisted.record.clone();
+                updated.set_comment(comment.node_id);
+                self.persist(persisted, updated).await
+            }
+            Err(error) => Err(error).context(
+                "ExecutionStarted publication outcome is ambiguous; awaiting read-only reconciliation",
+            ),
+        }
     }
 
     /// The trusted, unedited comments authored by `trusted`.

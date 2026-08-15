@@ -22,9 +22,10 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use drasi_workgraph_common::trust::ActorType;
 use serde_json::{json, Value};
@@ -168,6 +169,10 @@ pub struct GithubState {
     list_task_calls: Arc<AtomicUsize>,
     comment_delay: Arc<Mutex<Option<Duration>>>,
     task_delay: Arc<Mutex<Option<Duration>>>,
+    comment_visibility_delay: Arc<Mutex<Option<Duration>>>,
+    task_visibility_delay: Arc<Mutex<Option<Duration>>>,
+    comment_visible_after: Arc<Mutex<HashMap<String, Instant>>>,
+    task_visible_after: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl GithubState {
@@ -189,6 +194,10 @@ impl GithubState {
             list_task_calls: Arc::new(AtomicUsize::new(0)),
             comment_delay: Arc::new(Mutex::new(None)),
             task_delay: Arc::new(Mutex::new(None)),
+            comment_visibility_delay: Arc::new(Mutex::new(None)),
+            task_visibility_delay: Arc::new(Mutex::new(None)),
+            comment_visible_after: Arc::new(Mutex::new(HashMap::new())),
+            task_visible_after: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -247,6 +256,22 @@ impl GithubState {
     /// client times out before it sees the response.
     pub fn set_create_task_delay(&self, delay: Option<Duration>) {
         *self.task_delay.lock().expect("task delay lock") = delay;
+    }
+
+    /// Delay when newly created comments become visible to authoritative lists.
+    pub fn set_comment_visibility_delay(&self, delay: Option<Duration>) {
+        *self
+            .comment_visibility_delay
+            .lock()
+            .expect("comment visibility delay lock") = delay;
+    }
+
+    /// Delay when newly created tasks become visible to authoritative lists.
+    pub fn set_task_visibility_delay(&self, delay: Option<Duration>) {
+        *self
+            .task_visibility_delay
+            .lock()
+            .expect("task visibility delay lock") = delay;
     }
 
     /// Mark a model so that creating a task with it returns a clearly
@@ -311,6 +336,30 @@ impl GithubState {
         }));
         id
     }
+
+    /// Model a task write whose response was lost and whose list visibility is
+    /// delayed, as if it came from a previous process.
+    pub fn seed_lost_task(&self, prompt: &str, visibility_delay: Duration) -> String {
+        self.create_task_calls.fetch_add(1, Ordering::SeqCst);
+        let id = self.seed_task(prompt);
+        self.task_visible_after
+            .lock()
+            .expect("task visibility lock")
+            .insert(id.clone(), Instant::now() + visibility_delay);
+        id
+    }
+
+    /// Model a comment write whose response was lost and whose list visibility
+    /// is delayed, as if it came from a previous process.
+    pub fn seed_lost_comment(&self, body: &str, visibility_delay: Duration) -> String {
+        self.create_comment_calls.fetch_add(1, Ordering::SeqCst);
+        let id = self.seed_comment(body, &MockAuthor::launcher(), false);
+        self.comment_visible_after
+            .lock()
+            .expect("comment visibility lock")
+            .insert(id.clone(), Instant::now() + visibility_delay);
+        id
+    }
 }
 
 fn comment_value(node_id: &str, body: &str, author: &MockAuthor, edited: bool) -> Value {
@@ -356,7 +405,27 @@ struct ListCommentsResponder(GithubState);
 
 impl Respond for ListCommentsResponder {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
-        let comments = self.0.comments.lock().expect("comments lock").clone();
+        let visible_after = self
+            .0
+            .comment_visible_after
+            .lock()
+            .expect("comment visibility lock")
+            .clone();
+        let now = Instant::now();
+        let comments = self
+            .0
+            .comments
+            .lock()
+            .expect("comments lock")
+            .iter()
+            .filter(|comment| {
+                comment["node_id"]
+                    .as_str()
+                    .and_then(|id| visible_after.get(id))
+                    .is_none_or(|visible_at| *visible_at <= now)
+            })
+            .cloned()
+            .collect();
         ResponseTemplate::new(200).set_body_json(Value::Array(comments))
     }
 }
@@ -373,6 +442,18 @@ impl Respond for CreateCommentResponder {
         // Comments this reaction posts are authored by its own identity, not
         // by the account that writes assignments.
         let value = comment_value(&node_id, &body, &MockAuthor::launcher(), false);
+        if let Some(delay) = *self
+            .0
+            .comment_visibility_delay
+            .lock()
+            .expect("comment visibility delay lock")
+        {
+            self.0
+                .comment_visible_after
+                .lock()
+                .expect("comment visibility lock")
+                .insert(node_id.clone(), Instant::now() + delay);
+        }
         self.0
             .comments
             .lock()
@@ -392,7 +473,27 @@ struct ListTasksResponder(GithubState);
 impl Respond for ListTasksResponder {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
         self.0.list_task_calls.fetch_add(1, Ordering::SeqCst);
-        let tasks = self.0.tasks.lock().expect("tasks lock").clone();
+        let visible_after = self
+            .0
+            .task_visible_after
+            .lock()
+            .expect("task visibility lock")
+            .clone();
+        let now = Instant::now();
+        let tasks = self
+            .0
+            .tasks
+            .lock()
+            .expect("tasks lock")
+            .iter()
+            .filter(|task| {
+                task["id"]
+                    .as_str()
+                    .and_then(|id| visible_after.get(id))
+                    .is_none_or(|visible_at| *visible_at <= now)
+            })
+            .cloned()
+            .collect();
         ResponseTemplate::new(200).set_body_json(Value::Array(tasks))
     }
 }
@@ -432,6 +533,18 @@ impl Respond for CreateTaskResponder {
         let index = self.0.task_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let id = format!("task-{index}");
         let html_url = format!("https://github.com/{OWNER}/{REPO}/agents/tasks/{id}");
+        if let Some(delay) = *self
+            .0
+            .task_visibility_delay
+            .lock()
+            .expect("task visibility delay lock")
+        {
+            self.0
+                .task_visible_after
+                .lock()
+                .expect("task visibility lock")
+                .insert(id.clone(), Instant::now() + delay);
+        }
         self.0.tasks.lock().expect("tasks lock").push(json!({
             "id": id,
             "html_url": html_url,

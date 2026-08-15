@@ -156,7 +156,9 @@ reaction posts as must be this identity, so it can adopt its own decision
 comment after an ambiguous write.
 
 Config schema name `reaction.workgraph_router.WorkgraphRouterReactionConfig`,
-config version `1.0.0`. Unknown fields are rejected.
+config version `2.0.0`. This is a clean-cutover schema version matching the
+launcher contract; no `1.x` compatibility alias is provided. Dogfood
+configurations must request `2.0.0`. Unknown fields are rejected.
 
 ### Author trust
 
@@ -206,6 +208,10 @@ let an unrelated later edit to the profile file wedge a completed validation.
 
 - `is_durable() = true`, `needs_snapshot_on_fresh_start() = false`,
   `default_recovery_policy() = Strict`, `checkpoint_ownership() = Reaction`.
+- A process-local mutex keyed by `projectItemNodeId` covers the durable claim,
+  decision publication, and terminal status update. This prototype supports one
+  active reaction process only; it does **not** provide an active-active or
+  cross-process exclusion guarantee.
 - The durable record is keyed by `runId` and written **before** the first GitHub
   write, so a record's existence means "an external effect may already have
   happened" and recovery reconciles rather than retrying blindly.

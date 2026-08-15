@@ -94,6 +94,17 @@ pub enum CommentError {
     /// The JSON object was malformed.
     #[error("event JSON is malformed: {0}")]
     InvalidJson(String),
+    /// The JSON object was valid but not the canonical two-space-indented form.
+    #[error("event JSON must use the canonical two-space-indented representation")]
+    NonCanonicalJson,
+    /// The human summary did not match the event payload.
+    #[error("summary must be '{expected}', got '{actual}'")]
+    SummaryMismatch {
+        /// The only summary accepted for the event.
+        expected: String,
+        /// The summary carried by the comment.
+        actual: String,
+    },
     /// The JSON object was not a valid `workgraph.event/v1` document.
     #[error(transparent)]
     InvalidEvent(#[from] EventError),
@@ -180,6 +191,13 @@ pub fn validate_summary(summary: &str) -> Result<(), CommentError> {
 pub fn render_comment(event: &WorkGraphEvent, summary: &str) -> Result<String, CommentError> {
     validate_summary(summary)?;
     event.validate()?;
+    let expected = crate::summary::summary_for(event);
+    if summary != expected {
+        return Err(CommentError::SummaryMismatch {
+            expected,
+            actual: summary.to_string(),
+        });
+    }
     Ok(format!(
         "{COMMENT_MARKER}\n\n{summary}\n\n{}",
         event.to_canonical_json()
@@ -188,9 +206,7 @@ pub fn render_comment(event: &WorkGraphEvent, summary: &str) -> Result<String, C
 
 /// Strictly parse a comment body into a summary and a validated event.
 pub fn parse_comment(body: &str) -> Result<WorkGraphComment, CommentError> {
-    let normalized = normalize_line_endings(body);
-
-    let Some(after_marker) = normalized.strip_prefix(COMMENT_MARKER) else {
+    let Some(after_marker) = body.strip_prefix(COMMENT_MARKER) else {
         return Err(CommentError::NotWorkGraphEvent);
     };
     // The marker must be a whole line, so `WorkGraphEvent/v1x` is not a
@@ -224,6 +240,16 @@ pub fn parse_comment(body: &str) -> Result<WorkGraphComment, CommentError> {
     })?;
 
     let event = WorkGraphEvent::from_value(value)?;
+    if json != event.to_canonical_json() {
+        return Err(CommentError::NonCanonicalJson);
+    }
+    let expected = crate::summary::summary_for(&event);
+    if summary != expected {
+        return Err(CommentError::SummaryMismatch {
+            expected,
+            actual: summary.to_string(),
+        });
+    }
     Ok(WorkGraphComment {
         summary: summary.to_string(),
         event,
@@ -282,7 +308,7 @@ mod tests {
     fn every_event_type_round_trips() {
         for payload in all_payloads() {
             let event = event(payload);
-            let summary = format!("WorkGraph {} for owner/repo#1", event.event_type());
+            let summary = crate::summary::summary_for(&event);
             let body = render_comment(&event, &summary).expect("render");
             let parsed = parse_comment(&body).expect("parse");
             assert_eq!(parsed.event, event);
@@ -300,18 +326,21 @@ mod tests {
         assert_eq!(lines[1], "");
         assert_eq!(lines[2], "Issue validation started.");
         assert_eq!(lines[3], "");
-        assert!(lines[4].starts_with('{'));
+        assert_eq!(lines[4], "{");
         assert!(body.ends_with('}'));
         assert!(!body.contains("```"));
-        assert_eq!(lines.len(), 5, "JSON must be a single trailing line");
+        assert!(lines.len() > 5, "JSON must be pretty printed");
     }
 
     #[test]
-    fn crlf_bodies_parse() {
+    fn crlf_bodies_are_not_canonical() {
         let event = event(all_payloads().remove(0));
         let body = render_comment(&event, "Issue validation assigned.").expect("render");
         let crlf = body.replace('\n', "\r\n");
-        assert_eq!(parse_comment(&crlf).expect("parse crlf").event, event);
+        assert_eq!(
+            parse_comment(&crlf).expect_err("CRLF is noncanonical"),
+            CommentError::NotWorkGraphEvent
+        );
     }
 
     #[test]
@@ -376,7 +405,43 @@ mod tests {
             parse_comment(&with_summary(" padded ")).expect_err("padded summary"),
             CommentError::UnnormalizedSummary
         );
-        assert!(parse_comment(&with_summary(&"s".repeat(MAX_SUMMARY_CHARS))).is_ok());
+        assert_eq!(
+            parse_comment(&with_summary(&"s".repeat(MAX_SUMMARY_CHARS)))
+                .expect_err("noncanonical summary"),
+            CommentError::SummaryMismatch {
+                expected: "Issue validation assigned.".to_string(),
+                actual: "s".repeat(MAX_SUMMARY_CHARS),
+            }
+        );
+    }
+
+    #[test]
+    fn canonical_json_and_summary_are_required_exactly() {
+        let event = event(all_payloads().remove(2));
+        let canonical_summary = crate::summary::summary_for(&event);
+        let canonical = render_comment(&event, &canonical_summary).expect("canonical body");
+
+        let compact = canonical.replace(
+            &event.to_canonical_json(),
+            &serde_json::to_string(
+                &serde_json::from_str::<serde_json::Value>(&event.to_canonical_json())
+                    .expect("json"),
+            )
+            .expect("compact"),
+        );
+        assert_eq!(
+            parse_comment(&compact).expect_err("compact JSON rejected"),
+            CommentError::NonCanonicalJson
+        );
+
+        let misleading = canonical.replacen(&canonical_summary, "Issue validation failed.", 1);
+        assert_eq!(
+            parse_comment(&misleading).expect_err("misleading summary rejected"),
+            CommentError::SummaryMismatch {
+                expected: canonical_summary,
+                actual: "Issue validation failed.".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -406,11 +471,9 @@ mod tests {
 
     #[test]
     fn summary_length_counts_characters_not_bytes() {
-        let json = event(all_payloads().remove(0)).to_canonical_json();
         let summary = "é".repeat(MAX_SUMMARY_CHARS);
         assert_eq!(summary.len(), MAX_SUMMARY_CHARS * 2);
-        let body = format!("{COMMENT_MARKER}\n\n{summary}\n\n{json}");
-        assert!(parse_comment(&body).is_ok());
+        assert!(validate_summary(&summary).is_ok());
     }
 
     #[test]
@@ -459,18 +522,13 @@ mod tests {
     }
 
     #[test]
-    fn pretty_printed_json_parses_and_canonicalizes() {
+    fn canonical_pretty_json_parses_without_reformatting() {
         let event = event(all_payloads().remove(3));
-        let value: serde_json::Value =
-            serde_json::from_str(&event.to_canonical_json()).expect("value");
-        let pretty = serde_json::to_string_pretty(&value).expect("pretty");
-        let body = format!("{COMMENT_MARKER}\n\nSummary line\n\n{pretty}");
-        let parsed = parse_comment(&body).expect("pretty json parses");
+        let summary = crate::summary::summary_for(&event);
+        let body = render_comment(&event, &summary).expect("render");
+        let parsed = parse_comment(&body).expect("canonical pretty JSON parses");
         assert_eq!(parsed.event, event);
-        assert_eq!(
-            parsed.to_canonical_body(),
-            render_comment(&event, "Summary line").expect("render")
-        );
+        assert_eq!(parsed.to_canonical_body(), body);
     }
 
     #[test]

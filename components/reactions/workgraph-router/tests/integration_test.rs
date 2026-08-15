@@ -429,7 +429,7 @@ async fn passing_validation_routes_directly_to_risk_profiling() {
         "the comment must be the canonical WorkGraphEvent/v1 RoutingDecided body"
     );
     assert!(
-        bodies[3].contains("\"nextResponsibilityType\":\"issue-risk-profiling\""),
+        bodies[3].contains("\"nextResponsibilityType\": \"issue-risk-profiling\""),
         "the next responsibility travels inside the decision payload: {}",
         bodies[3]
     );
@@ -487,7 +487,7 @@ async fn failing_validation_routes_directly_to_needs_more_information() {
         bodies[3],
         expected_decision_body(ISSUE_BODY, ValidationOutcome::Failed)
     );
-    assert!(bodies[3].contains("\"nextResponsibilityType\":\"issue-correction\""));
+    assert!(bodies[3].contains("\"nextResponsibilityType\": \"issue-correction\""));
 
     let record = record(&store, ISSUE_BODY).await.expect("record exists");
     assert_eq!(record.to_status, FAILED_STATUS);
@@ -557,14 +557,14 @@ async fn routing_never_visits_an_intermediate_status() {
     assert_eq!(
         bodies
             .iter()
-            .filter(|body| body.contains("\"eventType\":\"RoutingDecided\""))
+            .filter(|body| body.contains("\"eventType\": \"RoutingDecided\""))
             .count(),
         1,
         "exactly one RoutingDecided comment"
     );
     assert!(
         !bodies.iter().any(
-            |body| body.contains("\"eventType\":\"ResponsibilityAssigned\"")
+            |body| body.contains("\"eventType\": \"ResponsibilityAssigned\"")
                 && body.contains("issue-risk-profiling")
         ),
         "the router must not post a fifth assignment event"

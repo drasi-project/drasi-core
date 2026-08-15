@@ -414,3 +414,26 @@ fn committed_vectors_replay_against_the_implementation() {
         );
     }
 }
+
+#[test]
+fn dogfood_completion_fixture_matches_rust_byte_for_byte() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/completed-validation-passed.json"))
+            .expect("dogfood fixture is valid JSON");
+    let expected = fixture["comment"]["body"]
+        .as_str()
+        .expect("fixture comment body");
+    let event = sample_events()
+        .into_iter()
+        .find(|(name, _)| *name == "completed-issue-validation-passed")
+        .map(|(_, event)| event)
+        .expect("completion event");
+    let rendered = render_comment(&event, &summary_for(&event)).expect("render event");
+
+    assert_eq!(rendered.as_bytes(), expected.as_bytes());
+    assert!(!rendered.ends_with('\n'));
+    assert_eq!(
+        parse_comment(expected).expect("fixture parses").event,
+        event
+    );
+}
