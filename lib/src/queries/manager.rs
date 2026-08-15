@@ -675,6 +675,16 @@ impl DrasiQuery {
         self.subscription_tasks.read().await.len()
     }
 
+    pub async fn processing_task_active(&self) -> bool {
+        self.base.task_handle.read().await.is_some()
+    }
+
+    pub async fn set_status_for_test(&self, status: ComponentStatus) {
+        self.base
+            .set_status(status, Some("test status".to_string()))
+            .await;
+    }
+
     /// Access the checkpoint store (for internal/test use only).
     #[doc(hidden)]
     pub async fn get_checkpoint_store(&self) -> Option<Arc<dyn CheckpointStore>> {
@@ -2349,7 +2359,10 @@ impl Query for DrasiQuery {
         debug_assert!(
             matches!(
                 self.base.status_handle().get_status().await,
-                ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Stopping
+                ComponentStatus::Running
+                    | ComponentStatus::Starting
+                    | ComponentStatus::Stopping
+                    | ComponentStatus::Error
             ),
             "DrasiQuery::stop() called but local handle is not in expected pre-stop state"
         );
@@ -3041,7 +3054,7 @@ impl QueryManager {
         .await
     }
 
-    /// Stop all currently running or starting queries.
+    /// Stop all running, starting, or failed queries.
     ///
     /// # Errors
     /// Returns an error listing any queries that failed to stop.
@@ -3065,7 +3078,9 @@ impl QueryManager {
                     .map(|n| {
                         matches!(
                             n.status,
-                            ComponentStatus::Running | ComponentStatus::Starting
+                            ComponentStatus::Running
+                                | ComponentStatus::Starting
+                                | ComponentStatus::Error
                         )
                     })
                     .unwrap_or(false)

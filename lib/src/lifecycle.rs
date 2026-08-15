@@ -199,7 +199,7 @@ impl LifecycleManager {
             };
             if !matches!(
                 live_status,
-                ComponentStatus::Running | ComponentStatus::Starting
+                ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Error
             ) {
                 continue;
             }
@@ -245,11 +245,93 @@ impl LifecycleManager {
 #[cfg(test)]
 mod tests {
     use crate::channels::ComponentStatus;
+    use crate::channels::SubscriptionResponse;
+    use crate::config::SourceSubscriptionSettings;
+    use crate::context::SourceRuntimeContext;
     use crate::lib_core::DrasiLib;
     use crate::sources::tests::TestMockSource;
+    use crate::sources::Source;
     use crate::sources::COMPONENT_GRAPH_SOURCE_ID;
     use crate::test_helpers::wait_for_component_status;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::Mutex;
+
+    struct ErrorPortSource {
+        id: String,
+        port: u16,
+        stop_called: Arc<AtomicBool>,
+        listener_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+        status_handle: crate::component_graph::ComponentStatusHandle,
+    }
+
+    #[async_trait]
+    impl Source for ErrorPortSource {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn type_name(&self) -> &str {
+            "error-port-test"
+        }
+
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+
+        async fn start(&self) -> Result<()> {
+            let listener = TcpListener::bind(("127.0.0.1", self.port))?;
+            *self.listener_task.lock().await = Some(tokio::spawn(async move {
+                let _listener = listener;
+                std::future::pending::<()>().await;
+            }));
+            self.status_handle
+                .set_status(
+                    ComponentStatus::Error,
+                    Some("injected terminal source failure".to_string()),
+                )
+                .await;
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<()> {
+            self.stop_called.store(true, Ordering::SeqCst);
+            if let Some(handle) = self.listener_task.lock().await.take() {
+                handle.abort();
+                let _ = handle.await;
+            }
+            self.status_handle
+                .set_status(ComponentStatus::Stopped, Some("source stopped".to_string()))
+                .await;
+            Ok(())
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            self.status_handle.get_status().await
+        }
+
+        async fn subscribe(
+            &self,
+            _settings: SourceSubscriptionSettings,
+        ) -> Result<SubscriptionResponse> {
+            Err(anyhow::anyhow!(
+                "test source does not support subscriptions"
+            ))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn initialize(&self, context: SourceRuntimeContext) {
+            self.status_handle.wire(context.update_tx).await;
+        }
+    }
 
     /// Helper: build a DrasiLib with the given sources (not yet started).
     async fn build_with_sources(sources: Vec<TestMockSource>) -> DrasiLib {
@@ -345,6 +427,98 @@ mod tests {
 
         let status = core.get_source_status("idle-src").await.unwrap();
         assert_eq!(status, ComponentStatus::Added);
+    }
+
+    #[tokio::test]
+    async fn stop_all_components_stops_error_source_and_releases_listener() {
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let stop_called = Arc::new(AtomicBool::new(false));
+        let source = ErrorPortSource {
+            id: "error-port-src".to_string(),
+            port,
+            stop_called: stop_called.clone(),
+            listener_task: Arc::new(Mutex::new(None)),
+            status_handle: crate::component_graph::ComponentStatusHandle::new("error-port-src"),
+        };
+        let core = DrasiLib::builder()
+            .with_id("error-stop-test")
+            .with_source(source)
+            .build()
+            .await
+            .unwrap();
+
+        let mut event_rx = core.component_graph.read().await.subscribe();
+        core.start().await.unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "error-port-src",
+            ComponentStatus::Error,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        core.stop().await.unwrap();
+        assert!(stop_called.load(Ordering::SeqCst));
+        let rebound = TcpListener::bind(("127.0.0.1", port))
+            .expect("global stop must release failed source listener");
+        drop(rebound);
+    }
+
+    #[tokio::test]
+    async fn stop_all_components_stops_error_query_and_releases_processing_task() {
+        use crate::builder::Query as QueryBuilder;
+        use crate::queries::manager::{DrasiQuery, Query as QueryRuntime};
+
+        let source = TestMockSource::with_auto_start("error-query-src".to_string(), true).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("error-query-stop-test")
+            .with_source(source)
+            .with_query(
+                QueryBuilder::cypher("error-query")
+                    .query("MATCH (n:Person) RETURN n")
+                    .from_source("error-query-src")
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        let mut event_rx = core.component_graph.read().await.subscribe();
+        core.start().await.unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "error-query",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let query = {
+            let graph = core.component_graph.read().await;
+            graph
+                .get_runtime::<Arc<dyn QueryRuntime>>("error-query")
+                .cloned()
+                .expect("query runtime")
+        };
+        let query = query
+            .as_any()
+            .downcast_ref::<DrasiQuery>()
+            .expect("Drasi query runtime");
+        assert!(query.processing_task_active().await);
+        query.set_status_for_test(ComponentStatus::Error).await;
+        wait_for_component_status(
+            &mut event_rx,
+            "error-query",
+            ComponentStatus::Error,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        core.stop().await.unwrap();
+        assert!(!query.processing_task_active().await);
     }
 
     // ========================================================================

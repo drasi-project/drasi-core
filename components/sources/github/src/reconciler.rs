@@ -14,6 +14,7 @@
 
 //! Periodic reconciler for missed changes and project-derived repo scope updates.
 
+use crate::bootstrap::replay_pending_bootstrap_delta;
 use crate::config::ProjectSpec;
 use crate::graphql::GitHubGraphQLClient;
 use crate::hydrator::{load_reconcile_index, save_effective_repos, save_reconcile_index};
@@ -79,6 +80,13 @@ pub async fn run_reconciler_loop(params: ReconcilerParams) -> Result<()> {
 
 pub(crate) async fn reconcile_once(params: &ReconcilerParams) -> Result<()> {
     let _processing_guard = params.processing_gate.lock().await;
+    replay_pending_bootstrap_delta(
+        params.state_store.as_ref(),
+        &params.source_id,
+        &params.base,
+        None,
+    )
+    .await?;
 
     let mut dynamic_project_repos = HashSet::new();
     for project in &params.projects {

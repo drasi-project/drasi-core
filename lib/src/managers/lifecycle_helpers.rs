@@ -259,7 +259,10 @@ where
             ));
         }
 
-        if matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
+        if matches!(
+            status,
+            ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Error
+        ) {
             g.validate_and_transition(
                 id,
                 ComponentStatus::Stopping,
@@ -484,7 +487,7 @@ where
 
 /// Stop all active components of a given kind (best-effort).
 ///
-/// Components in Running or Starting state are stopped via the provided `stop_fn`.
+/// Components in Running, Starting, or Error state are stopped via the provided `stop_fn`.
 /// Errors are logged but do not prevent stopping other components.
 pub async fn stop_all_components<F, Fut>(
     graph: &Arc<RwLock<ComponentGraph>>,
@@ -511,7 +514,9 @@ where
                 .map(|n| {
                     matches!(
                         n.status,
-                        ComponentStatus::Running | ComponentStatus::Starting
+                        ComponentStatus::Running
+                            | ComponentStatus::Starting
+                            | ComponentStatus::Error
                     )
                 })
                 .unwrap_or(false)

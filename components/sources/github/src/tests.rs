@@ -24,7 +24,10 @@ use axum::http::HeaderMap;
 use axum::routing::post;
 use axum::{Json, Router};
 use drasi_core::models::SourceChange;
-use drasi_lib::channels::{ComponentStatus, DispatchMode};
+use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::channels::{ComponentStatus, DispatchMode, SourceEvent};
+use drasi_lib::config::SourceSubscriptionSettings;
+use drasi_lib::context::SourceRuntimeContext;
 use drasi_lib::state_store::{
     MemoryStateStoreProvider, StateStoreError, StateStoreProvider, StateStoreResult,
 };
@@ -39,7 +42,7 @@ use reqwest::header::{HeaderMap as ReqwestHeaderMap, HeaderValue, AUTHORIZATION}
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -203,9 +206,609 @@ async fn find_available_port() -> u16 {
     listener.local_addr().expect("local addr").port()
 }
 
+async fn bootstrap_snapshot_handler(
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let query = payload["query"].as_str().unwrap_or_default();
+    if query.contains("issues(first: 100") {
+        return Json(json!({
+            "data": {
+                "repository": {
+                    "issues": {
+                        "pageInfo": { "hasNextPage": false, "endCursor": null },
+                        "nodes": [{
+                            "id": "I_1",
+                            "number": 42,
+                            "title": "Bootstrap issue",
+                            "body": "body",
+                            "state": "OPEN",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                            "updatedAt": "2026-01-01T00:00:00Z",
+                            "closedAt": null,
+                            "url": "https://github.com/acme/repo/issues/42",
+                            "author": { "login": "octocat" },
+                            "repository": { "id": "R_1", "nameWithOwner": "acme/repo" },
+                            "assignees": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] },
+                            "labels": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] },
+                            "comments": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] }
+                        }]
+                    }
+                }
+            }
+        }));
+    }
+    if query.contains("pullRequests(first: 100") {
+        return Json(json!({
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "pageInfo": { "hasNextPage": false, "endCursor": null },
+                        "nodes": []
+                    }
+                }
+            }
+        }));
+    }
+    Json(json!({
+        "data": {
+            "repository": {
+                "id": "R_1",
+                "name": "repo",
+                "nameWithOwner": "acme/repo",
+                "owner": { "login": "acme" },
+                "description": null,
+                "url": "https://github.com/acme/repo",
+                "isArchived": false,
+                "isPrivate": false,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-01T00:00:00Z",
+                "defaultBranchRef": { "name": "main" }
+            }
+        }
+    }))
+}
+
+#[tokio::test]
+async fn query_bootstrap_seeds_durable_delete_state_before_initial_reconcile() {
+    #[derive(Clone, Default)]
+    struct ApiState {
+        deleted: Arc<AtomicBool>,
+    }
+
+    async fn handler(
+        State(state): State<ApiState>,
+        Json(payload): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        let query = payload["query"].as_str().unwrap_or_default();
+        if query.contains("query($id: ID!)") {
+            assert!(state.deleted.load(Ordering::SeqCst));
+            return Json(json!({
+                "data": { "node": null },
+                "errors": [{
+                    "type": "NOT_FOUND",
+                    "path": ["node"],
+                    "message": "Could not resolve to a node with the global id"
+                }]
+            }));
+        }
+        if query.contains("issues(first: 100") {
+            return Json(json!({
+                "data": {
+                    "repository": {
+                        "issues": {
+                            "pageInfo": { "hasNextPage": false, "endCursor": null },
+                            "nodes": [{
+                                "id": "I_1",
+                                "number": 42,
+                                "title": "Bootstrapped issue",
+                                "body": "body",
+                                "state": "OPEN",
+                                "createdAt": "2026-01-01T00:00:00Z",
+                                "updatedAt": "2026-01-01T00:00:00Z",
+                                "closedAt": null,
+                                "url": "https://github.com/acme/repo/issues/42",
+                                "author": { "login": "octocat" },
+                                "repository": { "id": "R_1", "nameWithOwner": "acme/repo" },
+                                "assignees": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] },
+                                "labels": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] },
+                                "comments": {
+                                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                                    "nodes": [{
+                                        "id": "IC_1",
+                                        "body": "comment",
+                                        "createdAt": "2026-01-01T00:00:00Z",
+                                        "updatedAt": "2026-01-01T00:00:00Z",
+                                        "url": "https://github.com/acme/repo/issues/42#issuecomment-1",
+                                        "isMinimized": false,
+                                        "author": null,
+                                        "issue": { "id": "I_1" },
+                                        "pullRequest": null,
+                                        "repository": { "id": "R_1", "nameWithOwner": "acme/repo" }
+                                    }]
+                                }
+                            }]
+                        }
+                    }
+                }
+            }));
+        }
+        if query.contains("pullRequests(first: 100") {
+            return Json(json!({
+                "data": {
+                    "repository": {
+                        "pullRequests": {
+                            "pageInfo": { "hasNextPage": false, "endCursor": null },
+                            "nodes": []
+                        }
+                    }
+                }
+            }));
+        }
+        Json(json!({
+            "data": {
+                "repository": {
+                    "id": "R_1",
+                    "name": "repo",
+                    "nameWithOwner": "acme/repo",
+                    "owner": { "login": "acme" },
+                    "description": null,
+                    "url": "https://github.com/acme/repo",
+                    "isArchived": false,
+                    "isPrivate": false,
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-01T00:00:00Z",
+                    "defaultBranchRef": { "name": "main" }
+                }
+            }
+        }))
+    }
+
+    let api_state = ApiState::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock server");
+    let addr = listener.local_addr().expect("mock server addr");
+    let app = Router::new()
+        .route("/graphql", post(handler))
+        .with_state(api_state.clone());
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let temp = TempDir::new().expect("tempdir");
+    let state_path = temp.path().join("bootstrap-state.redb");
+    let state_store: Arc<dyn StateStoreProvider> =
+        Arc::new(RedbStateStoreProvider::new(&state_path).expect("bootstrap state store"));
+    let effective_repos = Arc::new(RwLock::new(HashSet::new()));
+    let processing_gate = Arc::new(tokio::sync::Mutex::new(()));
+    let source_base = Arc::new(OnceLock::new());
+    assert!(
+        source_base
+            .set(test_source_base_with_state_store(
+                "github-bootstrap",
+                state_store.clone()
+            ))
+            .is_ok(),
+        "set bootstrap dispatcher"
+    );
+    let mut config = valid_config_with_port(0);
+    config.graphql_url = format!("http://{addr}/graphql");
+    config.projects.clear();
+    config.skip_initial_bootstrap = true;
+    let provider = crate::bootstrap::GitHubBootstrapProvider::new(
+        config,
+        effective_repos,
+        processing_gate,
+        source_base,
+    );
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
+    let result = provider
+        .bootstrap(
+            BootstrapRequest {
+                query_id: "query-bootstrap".to_string(),
+                node_labels: vec![],
+                relation_labels: vec![],
+                request_id: "request-1".to_string(),
+            },
+            &BootstrapContext::new_minimal(
+                "bootstrap-test".to_string(),
+                "github-bootstrap".to_string(),
+            ),
+            event_tx,
+            None,
+        )
+        .await
+        .expect("query-triggered bootstrap");
+    assert!(result.event_count > 0);
+    let first_event = event_rx.recv().await.expect("bootstrap event");
+    assert_eq!(first_event.source_id, "github-bootstrap");
+    assert!(
+        crate::hydrator::load_reconcile_index(state_store.as_ref(), "github-bootstrap")
+            .await
+            .expect("state must be committed before event is observable")
+            .contains_key("I_1")
+    );
+
+    drop(provider);
+    drop(state_store);
+    let restarted_state: Arc<dyn StateStoreProvider> =
+        Arc::new(RedbStateStoreProvider::new(&state_path).expect("reopen durable state"));
+    let restarted_index =
+        crate::hydrator::load_reconcile_index(restarted_state.as_ref(), "github-bootstrap")
+            .await
+            .expect("load bootstrapped state after restart");
+    assert!(restarted_index.contains_key("IC_1"));
+    assert!(restarted_index.contains_key("COMMENT_ON:IC_1:I_1"));
+
+    api_state.deleted.store(true, Ordering::SeqCst);
+    let wal = Arc::new(RedbWalProvider::new(temp.path().join("bootstrap-wal")));
+    wal.register(
+        "github-bootstrap",
+        DurabilityConfig {
+            enabled: true,
+            max_events: 32,
+            capacity_policy: CapacityPolicy::RejectIncoming,
+        }
+        .to_wal_config(),
+    )
+    .await
+    .expect("register WAL");
+    let base = test_source_base("github-bootstrap");
+    let mut receiver = base
+        .create_streaming_receiver()
+        .await
+        .expect("create event receiver");
+    let params = HydratorParams {
+        source_id: "github-bootstrap".to_string(),
+        base,
+        wal: wal.clone(),
+        state_store: restarted_state.clone(),
+        api_client: Arc::new(
+            GitHubGraphQLClient::new(format!("http://{addr}/graphql"), "pat".to_string())
+                .expect("client"),
+        ),
+        projects: vec![],
+        effective_repos: Arc::new(RwLock::new(HashSet::from(["acme/repo".to_string()]))),
+        notify: Arc::new(Notify::new()),
+        health: Arc::new(RwLock::new(HydratorHealth::default())),
+        processing_gate: Arc::new(tokio::sync::Mutex::new(())),
+        shutdown: tokio::sync::watch::channel(false).1,
+    };
+    let locator = WebhookLocator {
+        event_type: "issues".to_string(),
+        action: "deleted".to_string(),
+        node_id: Some("I_1".to_string()),
+        repository_full_name: Some("acme/repo".to_string()),
+        parent_issue_id: None,
+        parent_pull_request_id: None,
+        project_id: None,
+        project_owner: None,
+        project_number: None,
+    };
+    let admission =
+        encode_admission_change("github-bootstrap", "delete-before-reconcile", &locator)
+            .expect("encode deletion");
+    let sequence = wal
+        .append("github-bootstrap", &admission)
+        .await
+        .expect("append deletion");
+    process_admission(&params, sequence, &admission)
+        .await
+        .expect("delete from bootstrapped durable state");
+
+    let mut deleted = HashSet::new();
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(20), receiver.recv()).await
+    {
+        if let drasi_lib::channels::SourceEvent::Change(SourceChange::Delete { metadata }) =
+            &event.event
+        {
+            deleted.insert(metadata.reference.element_id.as_ref().to_string());
+        }
+    }
+    for expected in [
+        "I_1",
+        "IC_1",
+        "COMMENT_ON:IC_1:I_1",
+        "IN_REPOSITORY:I_1:R_1",
+    ] {
+        assert!(deleted.contains(expected), "missing delete for {expected}");
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn later_query_bootstrap_reconciles_live_subscribers_without_losing_full_snapshot() {
+    async fn handler(Json(payload): Json<serde_json::Value>) -> Json<serde_json::Value> {
+        let query = payload["query"].as_str().unwrap_or_default();
+        if query.contains("issues(first: 100") {
+            return Json(json!({
+                "data": {
+                    "repository": {
+                        "issues": {
+                            "pageInfo": { "hasNextPage": false, "endCursor": null },
+                            "nodes": [
+                                {
+                                    "id": "I_1",
+                                    "number": 42,
+                                    "title": "changed",
+                                    "body": "body",
+                                    "state": "OPEN",
+                                    "createdAt": "2026-01-01T00:00:00Z",
+                                    "updatedAt": "2026-01-02T00:00:00Z",
+                                    "closedAt": null,
+                                    "url": "https://github.com/acme/repo/issues/42",
+                                    "author": { "login": "octocat" },
+                                    "repository": { "id": "R_1", "nameWithOwner": "acme/repo" },
+                                    "assignees": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] },
+                                    "labels": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] },
+                                    "comments": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] }
+                                },
+                                {
+                                    "id": "I_2",
+                                    "number": 43,
+                                    "title": "added",
+                                    "body": null,
+                                    "state": "OPEN",
+                                    "createdAt": "2026-01-02T00:00:00Z",
+                                    "updatedAt": "2026-01-02T00:00:00Z",
+                                    "closedAt": null,
+                                    "url": "https://github.com/acme/repo/issues/43",
+                                    "author": null,
+                                    "repository": { "id": "R_1", "nameWithOwner": "acme/repo" },
+                                    "assignees": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] },
+                                    "labels": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] },
+                                    "comments": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [] }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }));
+        }
+        if query.contains("pullRequests(first: 100") {
+            return Json(json!({
+                "data": {
+                    "repository": {
+                        "pullRequests": {
+                            "pageInfo": { "hasNextPage": false, "endCursor": null },
+                            "nodes": []
+                        }
+                    }
+                }
+            }));
+        }
+        Json(json!({
+            "data": {
+                "repository": {
+                    "id": "R_1",
+                    "name": "repo",
+                    "nameWithOwner": "acme/repo",
+                    "owner": { "login": "acme" },
+                    "description": null,
+                    "url": "https://github.com/acme/repo",
+                    "isArchived": false,
+                    "isPrivate": false,
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-01T00:00:00Z",
+                    "defaultBranchRef": { "name": "main" }
+                }
+            }
+        }))
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock server");
+    let addr = listener.local_addr().expect("mock server addr");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, Router::new().route("/graphql", post(handler))).await;
+    });
+
+    let temp = TempDir::new().expect("tempdir");
+    let state_store: Arc<dyn StateStoreProvider> = Arc::new(
+        RedbStateStoreProvider::new(temp.path().join("later-bootstrap.redb")).expect("state store"),
+    );
+    let mut previous_snapshot = ReconcileSnapshot::default();
+    previous_snapshot
+        .issues
+        .insert("I_1".to_string(), sample_issue("old"));
+    previous_snapshot.pull_requests.insert(
+        "PR_1".to_string(),
+        sample_pull_request(Some("deleted".to_string())),
+    );
+    let (_, previous_pr_root) = map_root_diff(
+        "github-later-bootstrap",
+        &FetchedRoot::PullRequest(previous_snapshot.pull_requests["PR_1"].clone()),
+        None,
+        1,
+    )
+    .expect("map prior pull request root");
+    save_root_snapshot(
+        state_store.as_ref(),
+        "github-later-bootstrap",
+        "root-snapshot:PR_1",
+        &previous_pr_root,
+    )
+    .await
+    .expect("seed prior pull request root");
+    let (_, previous_index) = map_reconcile_snapshot(
+        "github-later-bootstrap",
+        &previous_snapshot,
+        &HashMap::new(),
+        1,
+    );
+    crate::hydrator::save_reconcile_index(
+        state_store.as_ref(),
+        "github-later-bootstrap",
+        &previous_index,
+    )
+    .await
+    .expect("seed reconcile index");
+
+    let base = test_source_base_with_state_store("github-later-bootstrap", state_store.clone());
+    let mut live_rx = base
+        .create_streaming_receiver()
+        .await
+        .expect("existing live receiver");
+    let mut bootstrapping_live_rx = base
+        .subscribe_with_bootstrap(
+            &SourceSubscriptionSettings {
+                source_id: "github-later-bootstrap".to_string(),
+                enable_bootstrap: false,
+                query_id: "later-query".to_string(),
+                nodes: HashSet::new(),
+                relations: HashSet::new(),
+                resume_from: None,
+                request_position_handle: false,
+            },
+            "github",
+        )
+        .await
+        .expect("bootstrapping query live receiver")
+        .receiver;
+    let source_base = Arc::new(OnceLock::new());
+    assert!(source_base.set(base).is_ok());
+    let mut config = valid_config_with_port(0);
+    config.graphql_url = format!("http://{addr}/graphql");
+    config.projects.clear();
+    let provider = crate::bootstrap::GitHubBootstrapProvider::new(
+        config,
+        Arc::new(RwLock::new(HashSet::new())),
+        Arc::new(tokio::sync::Mutex::new(())),
+        source_base,
+    );
+    let (event_tx, mut bootstrap_rx) = tokio::sync::mpsc::channel(100);
+    let result = provider
+        .bootstrap(
+            BootstrapRequest {
+                query_id: "later-query".to_string(),
+                node_labels: vec![],
+                relation_labels: vec![],
+                request_id: "later-request".to_string(),
+            },
+            &BootstrapContext::new_minimal(
+                "bootstrap-test".to_string(),
+                "github-later-bootstrap".to_string(),
+            ),
+            event_tx,
+            None,
+        )
+        .await
+        .expect("later bootstrap");
+
+    let mut live_changes = HashMap::new();
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(20), live_rx.recv()).await
+    {
+        let SourceEvent::Change(change) = &event.event else {
+            continue;
+        };
+        let (kind, id) = match change {
+            SourceChange::Insert { element } => (
+                "insert",
+                element.get_metadata().reference.element_id.as_ref(),
+            ),
+            SourceChange::Update { element } => (
+                "update",
+                element.get_metadata().reference.element_id.as_ref(),
+            ),
+            SourceChange::Delete { metadata } => ("delete", metadata.reference.element_id.as_ref()),
+            SourceChange::Future { .. } => continue,
+        };
+        live_changes.insert(id.to_string(), kind);
+    }
+    assert_eq!(live_changes.get("I_1"), Some(&"update"));
+    assert_eq!(live_changes.get("I_2"), Some(&"insert"));
+    assert_eq!(live_changes.get("PR_1"), Some(&"delete"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), bootstrapping_live_rx.recv())
+            .await
+            .is_err(),
+        "bootstrapping query must not receive its reconciliation delta"
+    );
+
+    let mut bootstrap_ids = HashSet::new();
+    for _ in 0..result.event_count {
+        let event = bootstrap_rx.recv().await.expect("full bootstrap event");
+        assert!(
+            !matches!(event.change, SourceChange::Delete { .. }),
+            "full bootstrap must not contain reconcile deletions"
+        );
+        let id = match event.change {
+            SourceChange::Insert { element } | SourceChange::Update { element } => element
+                .get_metadata()
+                .reference
+                .element_id
+                .as_ref()
+                .to_string(),
+            SourceChange::Delete { .. } | SourceChange::Future { .. } => unreachable!(),
+        };
+        bootstrap_ids.insert(id);
+    }
+    assert!(bootstrap_ids.contains("I_1"));
+    assert!(bootstrap_ids.contains("I_2"));
+    assert!(!bootstrap_ids.contains("PR_1"));
+
+    let persisted =
+        crate::hydrator::load_reconcile_index(state_store.as_ref(), "github-later-bootstrap")
+            .await
+            .expect("load updated index");
+    assert!(persisted.contains_key("I_1"));
+    assert!(persisted.contains_key("I_2"));
+    assert!(!persisted.contains_key("PR_1"));
+    assert!(
+        load_root_snapshot(
+            state_store.as_ref(),
+            "github-later-bootstrap",
+            "root-snapshot:PR_1"
+        )
+        .await
+        .expect("load deleted root snapshot")
+        .expect("deleted root tombstone")
+        .elements
+        .is_empty(),
+        "deleted root snapshot must be persisted as a tombstone"
+    );
+
+    let (repeat_tx, _repeat_rx) = tokio::sync::mpsc::channel(100);
+    provider
+        .bootstrap(
+            BootstrapRequest {
+                query_id: "another-query".to_string(),
+                node_labels: vec![],
+                relation_labels: vec![],
+                request_id: "repeat-request".to_string(),
+            },
+            &BootstrapContext::new_minimal(
+                "bootstrap-test".to_string(),
+                "github-later-bootstrap".to_string(),
+            ),
+            repeat_tx,
+            None,
+        )
+        .await
+        .expect("unchanged later bootstrap");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), live_rx.recv())
+            .await
+            .is_err(),
+        "unchanged snapshot must not produce a live delta"
+    );
+    server.abort();
+}
+
 fn test_source_base(id: &str) -> drasi_lib::sources::base::SourceBase {
     drasi_lib::sources::base::SourceBase::new(drasi_lib::sources::base::SourceBaseParams::new(id))
         .expect("create source base")
+}
+
+fn test_source_base_with_state_store(
+    id: &str,
+    state_store: Arc<dyn StateStoreProvider>,
+) -> drasi_lib::sources::base::SourceBase {
+    drasi_lib::sources::base::SourceBase::new(
+        drasi_lib::sources::base::SourceBaseParams::new(id).with_state_store(state_store),
+    )
+    .expect("create source base")
 }
 
 struct FaultyStateStoreProvider {
@@ -289,6 +892,268 @@ impl StateStoreProvider for FaultyStateStoreProvider {
     fn is_durable(&self) -> bool {
         self.inner.is_durable()
     }
+}
+
+#[tokio::test]
+async fn source_specific_state_store_is_shared_by_runtime_and_bootstrap() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock server");
+    let addr = listener.local_addr().expect("mock server addr");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            Router::new().route("/graphql", post(bootstrap_snapshot_handler)),
+        )
+        .await;
+    });
+
+    let temp = TempDir::new().expect("tempdir");
+    let source_store: Arc<dyn StateStoreProvider> = Arc::new(
+        RedbStateStoreProvider::new(temp.path().join("source-state.redb")).expect("source store"),
+    );
+    let context_store: Arc<dyn StateStoreProvider> = Arc::new(
+        RedbStateStoreProvider::new(temp.path().join("context-state.redb")).expect("context store"),
+    );
+    let mut config = valid_config_with_port(0);
+    config.graphql_url = format!("http://{addr}/graphql");
+    config.projects.clear();
+    let source = GitHubSourceBuilder::new("store-precedence")
+        .with_config(config)
+        .with_state_store(source_store.clone())
+        .build()
+        .expect("build source");
+    let (update_tx, _update_rx) = tokio::sync::mpsc::channel(8);
+    source
+        .initialize(SourceRuntimeContext::new(
+            "test-instance",
+            "store-precedence",
+            Some(context_store.clone()),
+            update_tx,
+            None,
+        ))
+        .await;
+
+    let response = source
+        .subscribe(SourceSubscriptionSettings {
+            source_id: "store-precedence".to_string(),
+            enable_bootstrap: true,
+            query_id: "bootstrap-query".to_string(),
+            nodes: HashSet::new(),
+            relations: HashSet::new(),
+            resume_from: None,
+            request_position_handle: false,
+        })
+        .await
+        .expect("subscribe");
+    response
+        .bootstrap_result_receiver
+        .expect("bootstrap result receiver")
+        .await
+        .expect("bootstrap task result")
+        .expect("bootstrap succeeds");
+
+    let source_keys = source_store
+        .list_keys("store-precedence")
+        .await
+        .expect("list source state");
+    for expected in [
+        "effective-repos",
+        "reconcile-index",
+        "root-snapshot:R_1",
+        "root-snapshot:I_1",
+    ] {
+        assert!(
+            source_keys.iter().any(|key| key == expected),
+            "source-specific store missing {expected}: {source_keys:?}"
+        );
+    }
+    assert_eq!(
+        context_store
+            .key_count("store-precedence")
+            .await
+            .expect("context state count"),
+        0,
+        "context fallback must remain unused"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn bootstrap_persistence_failure_does_not_publish_live_delta() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock server");
+    let addr = listener.local_addr().expect("mock server addr");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            Router::new().route("/graphql", post(bootstrap_snapshot_handler)),
+        )
+        .await;
+    });
+
+    let temp = TempDir::new().expect("tempdir");
+    let inner: Arc<dyn StateStoreProvider> = Arc::new(
+        RedbStateStoreProvider::new(temp.path().join("failed-bootstrap.redb"))
+            .expect("state store"),
+    );
+    let faulty: Arc<dyn StateStoreProvider> = Arc::new(FaultyStateStoreProvider {
+        inner: inner.clone(),
+        fail_store: "failed-bootstrap".to_string(),
+        fail_key: "reconcile-index".to_string(),
+        fail_get: false,
+        fail_set: true,
+        fail_delete_many: false,
+    });
+    let base = test_source_base_with_state_store("failed-bootstrap", faulty);
+    let mut live_rx = base
+        .subscribe_with_bootstrap(
+            &SourceSubscriptionSettings {
+                source_id: "failed-bootstrap".to_string(),
+                enable_bootstrap: false,
+                query_id: "existing-query".to_string(),
+                nodes: HashSet::new(),
+                relations: HashSet::new(),
+                resume_from: None,
+                request_position_handle: false,
+            },
+            "github",
+        )
+        .await
+        .expect("existing subscription")
+        .receiver;
+    let source_base = Arc::new(OnceLock::new());
+    assert!(source_base.set(base).is_ok());
+    let mut config = valid_config_with_port(0);
+    config.graphql_url = format!("http://{addr}/graphql");
+    config.projects.clear();
+    let provider = crate::bootstrap::GitHubBootstrapProvider::new(
+        config,
+        Arc::new(RwLock::new(HashSet::new())),
+        Arc::new(tokio::sync::Mutex::new(())),
+        source_base,
+    );
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(100);
+    let error = provider
+        .bootstrap(
+            BootstrapRequest {
+                query_id: "bootstrap-query".to_string(),
+                node_labels: vec![],
+                relation_labels: vec![],
+                request_id: "failed-request".to_string(),
+            },
+            &BootstrapContext::new_minimal(
+                "test-instance".to_string(),
+                "failed-bootstrap".to_string(),
+            ),
+            event_tx,
+            None,
+        )
+        .await
+        .expect_err("reconcile index persistence must fail");
+    assert!(error.to_string().contains("reconcile-index"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), live_rx.recv())
+            .await
+            .is_err(),
+        "live delta must not be visible before durable commit"
+    );
+    assert!(
+        inner
+            .contains_key("failed-bootstrap", "pending-bootstrap-delta")
+            .await
+            .expect("pending marker"),
+        "prepared marker must remain for recovery"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn prepared_pending_bootstrap_delta_replays_after_restart_commit() {
+    let temp = TempDir::new().expect("tempdir");
+    let state_store: Arc<dyn StateStoreProvider> = Arc::new(
+        RedbStateStoreProvider::new(temp.path().join("pending-replay.redb")).expect("state store"),
+    );
+    let mut snapshot = ReconcileSnapshot::default();
+    snapshot
+        .issues
+        .insert("I_1".to_string(), sample_issue("pending"));
+    let (changes, next_index) =
+        map_reconcile_snapshot("pending-replay", &snapshot, &HashMap::new(), 1);
+    let expected_ids = changes
+        .iter()
+        .map(|change| change.get_reference().element_id.to_string())
+        .collect::<HashSet<_>>();
+    crate::hydrator::save_reconcile_index(state_store.as_ref(), "pending-replay", &next_index)
+        .await
+        .expect("persist completed transition index");
+    crate::bootstrap::save_pending_bootstrap_delta(
+        state_store.as_ref(),
+        "pending-replay",
+        &crate::bootstrap::PendingBootstrapDelta {
+            changes,
+            next_index,
+            excluded_query_id: "bootstrap-query".to_string(),
+            committed: false,
+        },
+    )
+    .await
+    .expect("persist prepared marker");
+
+    let base = test_source_base("pending-replay");
+    assert!(
+        !crate::bootstrap::replay_pending_bootstrap_delta(
+            state_store.as_ref(),
+            "pending-replay",
+            &base,
+            None,
+        )
+        .await
+        .expect("defer replay without subscribers"),
+        "pending delta must remain until a subscriber exists"
+    );
+    assert!(state_store
+        .contains_key("pending-replay", "pending-bootstrap-delta")
+        .await
+        .expect("pending marker"));
+
+    let mut receiver = base
+        .subscribe_with_bootstrap(
+            &SourceSubscriptionSettings {
+                source_id: "pending-replay".to_string(),
+                enable_bootstrap: false,
+                query_id: "existing-query".to_string(),
+                nodes: HashSet::new(),
+                relations: HashSet::new(),
+                resume_from: None,
+                request_position_handle: false,
+            },
+            "github",
+        )
+        .await
+        .expect("subscribe after restart")
+        .receiver;
+    assert!(crate::bootstrap::replay_pending_bootstrap_delta(
+        state_store.as_ref(),
+        "pending-replay",
+        &base,
+        None,
+    )
+    .await
+    .expect("replay committed pending delta"));
+    let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("replayed event timeout")
+        .expect("replayed event");
+    let SourceEvent::Change(change) = &event.event else {
+        panic!("expected replayed source change");
+    };
+    assert!(expected_ids.contains(change.get_reference().element_id.as_ref()));
+    assert!(!state_store
+        .contains_key("pending-replay", "pending-bootstrap-delta")
+        .await
+        .expect("pending marker cleared"));
 }
 
 struct RecoverableReadWalProvider {
@@ -1037,13 +1902,18 @@ async fn descriptor_properties_preserve_secret_references_without_resolved_value
 }
 
 #[test]
-fn dispatch_mode_reports_builder_configuration() {
-    let source = GitHubSourceBuilder::new("github-broadcast")
+fn broadcast_dispatch_mode_is_rejected() {
+    let result = GitHubSourceBuilder::new("github-broadcast")
         .with_config(valid_config_with_port(0))
         .with_dispatch_mode(DispatchMode::Broadcast)
-        .build()
-        .expect("build source");
-    assert_eq!(source.dispatch_mode(), DispatchMode::Broadcast);
+        .build();
+    let error = match result {
+        Ok(_) => panic!("broadcast mode must be rejected"),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("only supports DispatchMode::Channel"));
 }
 
 #[test]
@@ -2919,6 +3789,24 @@ async fn fatal_wal_read_marks_source_error_rejects_admission_and_recovers_after_
         .expect("count WAL after rejected request");
     assert_eq!(retained_after, retained_before);
 
+    let direct_restart = core
+        .start_source(source_id)
+        .await
+        .expect_err("direct start from Error must require an explicit stop");
+    assert!(format!("{direct_restart:#}").contains("call stop first"));
+    let rejected_after_start = send_delivery(webhook_port, "must-not-ack-after-start").await;
+    assert_eq!(
+        rejected_after_start.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        inner_wal
+            .event_count(source_id)
+            .await
+            .expect("count WAL after direct start"),
+        retained_before
+    );
+
     core.stop_source(source_id)
         .await
         .expect("stop failed source");
@@ -3322,20 +4210,67 @@ async fn hydrator_delete_uses_reconcile_index_when_root_snapshot_missing() {
 }
 
 #[tokio::test]
-async fn archived_project_item_deletes_from_durable_adjacency_without_hydration() {
-    async fn hung_handler(State(calls): State<Arc<AtomicUsize>>) -> Json<serde_json::Value> {
-        calls.fetch_add(1, Ordering::SeqCst);
-        std::future::pending::<Json<serde_json::Value>>().await
+async fn archived_project_item_replay_uses_authoritative_current_state() {
+    #[derive(Clone, Default)]
+    struct ArchiveApiState {
+        calls: Arc<AtomicUsize>,
+        phase: Arc<AtomicUsize>,
     }
 
-    let graphql_calls = Arc::new(AtomicUsize::new(0));
+    async fn archive_handler(
+        State(state): State<ArchiveApiState>,
+        Json(_payload): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        state.calls.fetch_add(1, Ordering::SeqCst);
+        match state.phase.load(Ordering::SeqCst) {
+            0 => Json(json!({ "data": { "node": null } })),
+            1 => Json(json!({
+                "data": {
+                    "node": {
+                        "__typename": "ProjectV2Item",
+                        "id": "PVTI_1",
+                        "type": "ISSUE",
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "updatedAt": "2026-02-01T00:00:00Z",
+                        "project": {
+                            "id": "PVT_1",
+                            "number": 1,
+                            "owner": { "login": "acme" }
+                        },
+                        "content": {
+                            "__typename": "Issue",
+                            "id": "I_1",
+                            "number": 42,
+                            "title": "Restored issue",
+                            "state": "OPEN",
+                            "repository": { "id": "R_1", "nameWithOwner": "acme/repo" }
+                        },
+                        "fieldValues": {
+                            "pageInfo": { "hasNextPage": false, "endCursor": null },
+                            "nodes": []
+                        }
+                    }
+                }
+            })),
+            _ => Json(json!({
+                "data": { "node": null },
+                "errors": [{
+                    "type": "FORBIDDEN",
+                    "path": ["node"],
+                    "message": "Resource not accessible by integration"
+                }]
+            })),
+        }
+    }
+
+    let api_state = ArchiveApiState::default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind hung GraphQL endpoint");
+        .expect("bind GraphQL endpoint");
     let addr = listener.local_addr().expect("local addr");
     let app = Router::new()
-        .route("/graphql", post(hung_handler))
-        .with_state(graphql_calls.clone());
+        .route("/graphql", post(archive_handler))
+        .with_state(api_state.clone());
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -3453,12 +4388,12 @@ async fn archived_project_item_deletes_from_durable_adjacency_without_hydration(
     let sequence = wal.append("src", &admission).await.expect("append");
 
     tokio::time::timeout(
-        Duration::from_millis(250),
+        Duration::from_secs(2),
         process_admission(&params, sequence, &admission),
     )
     .await
-    .expect("archived item deletion must not wait on GraphQL")
-    .expect("archived item is an immediate authoritative removal");
+    .expect("authoritative archive lookup must complete")
+    .expect("null archived item is an authoritative removal");
 
     let updated = crate::hydrator::load_reconcile_index(state_store.as_ref(), "src")
         .await
@@ -3467,7 +4402,7 @@ async fn archived_project_item_deletes_from_durable_adjacency_without_hydration(
     assert!(!updated.contains_key("IN_PROJECT:PVTI_1:PVT_1"));
     assert!(!updated.contains_key("TRACKS:PVTI_1:I_1"));
     assert!(updated.contains_key("I_1"));
-    assert_eq!(graphql_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(api_state.calls.load(Ordering::SeqCst), 1);
     assert!(wal.oldest_sequence("src").await.expect("oldest").is_none());
 
     let mut delete_counts = HashMap::new();
@@ -3487,6 +4422,68 @@ async fn archived_project_item_deletes_from_durable_adjacency_without_hydration(
     assert!(!delete_counts.contains_key("PVT_1"));
     assert!(!delete_counts.contains_key("I_1"));
     assert!(delete_counts.values().all(|count| *count == 1));
+
+    // A restore is authoritatively visible and re-seeds the item after the
+    // archive admission and dedupe state have been pruned/compacted.
+    api_state.phase.store(1, Ordering::SeqCst);
+    let restored_locator = WebhookLocator {
+        action: "edited".to_string(),
+        ..locator.clone()
+    };
+    let restored_admission =
+        encode_admission_change("src", "delivery-project-restored", &restored_locator)
+            .expect("encode restore");
+    let restored_sequence = wal
+        .append("src", &restored_admission)
+        .await
+        .expect("append restore");
+    process_admission(&params, restored_sequence, &restored_admission)
+        .await
+        .expect("restore current project item");
+
+    // Redeliver the old archive after pruning. The current item wins, so the
+    // stale archive must preserve/update it rather than deleting by signed ID.
+    let replay_sequence = wal.append("src", &admission).await.expect("replay archive");
+    process_admission(&params, replay_sequence, &admission)
+        .await
+        .expect("stale archived redelivery must converge to current item");
+    let restored_index = crate::hydrator::load_reconcile_index(state_store.as_ref(), "src")
+        .await
+        .expect("load restored index");
+    assert!(restored_index.contains_key("PVTI_1"));
+    assert!(restored_index.contains_key("IN_PROJECT:PVTI_1:PVT_1"));
+    assert!(restored_index.contains_key("TRACKS:PVTI_1:I_1"));
+    assert!(wal.oldest_sequence("src").await.expect("oldest").is_none());
+
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(20), receiver.recv()).await
+    {
+        if let drasi_lib::channels::SourceEvent::Change(SourceChange::Delete { metadata }) =
+            &event.event
+        {
+            panic!(
+                "restore/stale archive unexpectedly deleted {}",
+                metadata.reference.element_id
+            );
+        }
+    }
+
+    // API unavailability is retryable and leaves the poison head durable.
+    api_state.phase.store(2, Ordering::SeqCst);
+    let unavailable_admission =
+        encode_admission_change("src", "delivery-project-unavailable", &locator)
+            .expect("encode unavailable archive");
+    let unavailable_sequence = wal
+        .append("src", &unavailable_admission)
+        .await
+        .expect("append unavailable archive");
+    let err = process_admission(&params, unavailable_sequence, &unavailable_admission)
+        .await
+        .expect_err("API unavailable archive must retry");
+    assert!(format!("{err:#}").contains("Resource not accessible"));
+    assert_eq!(
+        wal.oldest_sequence("src").await.expect("poison head"),
+        Some(unavailable_sequence)
+    );
     server.abort();
 }
 

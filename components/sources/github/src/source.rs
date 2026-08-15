@@ -14,7 +14,7 @@
 
 //! Authorized GitHub source implementation.
 
-use crate::bootstrap::GitHubBootstrapProvider;
+use crate::bootstrap::{replay_pending_bootstrap_delta, GitHubBootstrapProvider};
 use crate::config::GitHubSourceConfig;
 use crate::graphql::GitHubGraphQLClient;
 use crate::hydrator::{
@@ -36,7 +36,7 @@ use drasi_lib::wal::WalProvider;
 use drasi_lib::Source;
 use log::{error, info, warn};
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
@@ -94,8 +94,15 @@ impl Source for GitHubSource {
     }
 
     async fn start(&self) -> Result<()> {
-        if self.base.get_status().await == ComponentStatus::Running {
-            return Ok(());
+        match self.base.get_status().await {
+            ComponentStatus::Running => return Ok(()),
+            ComponentStatus::Error => {
+                return Err(anyhow!(
+                    "GitHub source '{}' is in Error; call stop first before starting it",
+                    self.base.id
+                ));
+            }
+            _ => {}
         }
 
         self.base
@@ -327,9 +334,26 @@ impl Source for GitHubSource {
         &self,
         settings: SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        self.base
+        let starts_bootstrap = settings.enable_bootstrap && settings.resume_from.is_none();
+        let response = self
+            .base
             .subscribe_with_bootstrap(&settings, "github")
-            .await
+            .await?;
+
+        // The spawned bootstrap task owns the processing gate and replays pending
+        // deltas while excluding this query. Waiting on that gate here could
+        // deadlock if a large bootstrap fills its channel before this response is
+        // returned to the query manager.
+        if starts_bootstrap {
+            return Ok(response);
+        }
+
+        let _processing_guard = self.processing_gate.lock().await;
+        if let Some(state_store) = self.base.state_store().await {
+            replay_pending_bootstrap_delta(state_store.as_ref(), &self.base.id, &self.base, None)
+                .await?;
+        }
+        Ok(response)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -409,7 +433,15 @@ impl GitHubSourceBuilder {
 
     pub fn build(self) -> Result<GitHubSource> {
         self.config.validate()?;
+        if self.dispatch_mode == DispatchMode::Broadcast {
+            return Err(anyhow!(
+                "GitHub source only supports DispatchMode::Channel because bootstrap reconciliation must exclude the bootstrapping query"
+            ));
+        }
 
+        let effective_repos = Arc::new(RwLock::new(HashSet::new()));
+        let processing_gate = Arc::new(Mutex::new(()));
+        let bootstrap_source_base = Arc::new(OnceLock::new());
         let mut params = SourceBaseParams::new(&self.id)
             .with_dispatch_mode(self.dispatch_mode)
             .with_auto_start(self.auto_start);
@@ -417,8 +449,12 @@ impl GitHubSourceBuilder {
         if let Some(provider) = self.bootstrap_provider {
             params = params.with_bootstrap_provider(provider);
         } else {
-            params =
-                params.with_bootstrap_provider(GitHubBootstrapProvider::new(self.config.clone()));
+            params = params.with_bootstrap_provider(GitHubBootstrapProvider::new(
+                self.config.clone(),
+                effective_repos.clone(),
+                processing_gate.clone(),
+                bootstrap_source_base.clone(),
+            ));
         }
 
         if let Some(state_store) = self.state_store {
@@ -426,16 +462,19 @@ impl GitHubSourceBuilder {
         }
 
         let base = SourceBase::new(params)?;
+        bootstrap_source_base
+            .set(base.clone_shared())
+            .map_err(|_| anyhow!("GitHub bootstrap dispatcher initialized more than once"))?;
         Ok(GitHubSource {
             base,
             config: self.config,
             wal: Arc::new(RwLock::new(None)),
-            effective_repos: Arc::new(RwLock::new(HashSet::new())),
+            effective_repos,
             task_handles: Arc::new(RwLock::new(Vec::new())),
             shutdown_tx: Arc::new(RwLock::new(None)),
             hydrator_notify: Arc::new(Notify::new()),
             hydrator_health: Arc::new(RwLock::new(HydratorHealth::default())),
-            processing_gate: Arc::new(Mutex::new(())),
+            processing_gate,
         })
     }
 }

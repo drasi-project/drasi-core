@@ -236,6 +236,8 @@ pub struct SourceBase {
     ///
     /// Only populated in Channel dispatch mode (Broadcast cannot filter per-subscriber).
     subscriber_resume_positions: Arc<RwLock<HashMap<usize, Bytes>>>,
+    /// Query owning each channel dispatcher, keyed by dispatcher index.
+    subscriber_query_ids: Arc<RwLock<HashMap<usize, String>>>,
     /// Optional position comparator for per-subscriber replay filtering.
     ///
     /// Set by sources that support replay. Without a comparator, position
@@ -360,6 +362,7 @@ impl SourceBase {
             raw_config: None,
             subscriber_notify: Arc::new(Notify::new()),
             subscriber_resume_positions: Arc::new(RwLock::new(HashMap::new())),
+            subscriber_query_ids: Arc::new(RwLock::new(HashMap::new())),
             position_comparator: Arc::new(RwLock::new(None)),
             sequence_position_map: Arc::new(RwLock::new(BTreeMap::new())),
             bootstrap_boundary: Arc::new(tokio::sync::watch::channel(None).0),
@@ -654,6 +657,7 @@ impl SourceBase {
             raw_config: self.raw_config.clone(),
             subscriber_notify: self.subscriber_notify.clone(),
             subscriber_resume_positions: self.subscriber_resume_positions.clone(),
+            subscriber_query_ids: self.subscriber_query_ids.clone(),
             position_comparator: self.position_comparator.clone(),
             sequence_position_map: self.sequence_position_map.clone(),
             bootstrap_boundary: self.bootstrap_boundary.clone(),
@@ -701,12 +705,21 @@ impl SourceBase {
     pub async fn create_streaming_receiver(
         &self,
     ) -> Result<Box<dyn ChangeReceiver<SourceEventWrapper>>> {
-        let receiver: Box<dyn ChangeReceiver<SourceEventWrapper>> = match self.dispatch_mode {
+        Ok(self.create_streaming_receiver_with_index().await?.0)
+    }
+
+    async fn create_streaming_receiver_with_index(
+        &self,
+    ) -> Result<(Box<dyn ChangeReceiver<SourceEventWrapper>>, Option<usize>)> {
+        let (receiver, dispatcher_idx): (
+            Box<dyn ChangeReceiver<SourceEventWrapper>>,
+            Option<usize>,
+        ) = match self.dispatch_mode {
             DispatchMode::Broadcast => {
                 // For broadcast mode, use the single dispatcher
                 let dispatchers = self.dispatchers.read().await;
                 if let Some(dispatcher) = dispatchers.first() {
-                    dispatcher.create_receiver().await?
+                    (dispatcher.create_receiver().await?, None)
                 } else {
                     return Err(anyhow::anyhow!("No broadcast dispatcher available"));
                 }
@@ -720,9 +733,10 @@ impl SourceBase {
 
                 // Add the new dispatcher to our list
                 let mut dispatchers = self.dispatchers.write().await;
+                let dispatcher_idx = dispatchers.len();
                 dispatchers.push(Box::new(dispatcher));
 
-                receiver
+                (receiver, Some(dispatcher_idx))
             }
         };
 
@@ -731,7 +745,7 @@ impl SourceBase {
         // avoiding a race between the dispatchers check and the await.
         self.subscriber_notify.notify_one();
 
-        Ok(receiver)
+        Ok((receiver, dispatcher_idx))
     }
 
     /// Wait until at least one subscriber has registered.
@@ -750,8 +764,18 @@ impl SourceBase {
             if !dispatchers.is_empty() {
                 return;
             }
+
             drop(dispatchers);
             self.subscriber_notify.notified().await;
+        }
+    }
+
+    /// Return the number of dedicated channel subscribers currently registered.
+    pub async fn channel_subscriber_count(&self) -> usize {
+        if self.dispatch_mode == DispatchMode::Channel {
+            self.dispatchers.read().await.len()
+        } else {
+            0
         }
     }
 
@@ -852,16 +876,16 @@ impl SourceBase {
         }
 
         // Create streaming receiver using helper method
-        let receiver = self.create_streaming_receiver().await?;
+        let (receiver, dispatcher_idx) = self.create_streaming_receiver_with_index().await?;
 
         // Register per-subscriber position filter for replay dedup.
-        // In Channel mode, the new dispatcher is the last entry in the vec.
         // In Broadcast mode, per-subscriber filtering is not supported.
-        if self.dispatch_mode == DispatchMode::Channel {
+        if let Some(dispatcher_idx) = dispatcher_idx {
+            self.subscriber_query_ids
+                .write()
+                .await
+                .insert(dispatcher_idx, settings.query_id.clone());
             if let Some(ref resume_pos) = settings.resume_from {
-                let dispatchers = self.dispatchers.read().await;
-                let dispatcher_idx = dispatchers.len().saturating_sub(1);
-                drop(dispatchers);
                 self.subscriber_resume_positions
                     .write()
                     .await
@@ -1366,6 +1390,27 @@ impl SourceBase {
     /// [`dispatch_event()`](Self::dispatch_event) per-event when the source
     /// processes multiple rows per poll cycle.
     pub async fn dispatch_events_batch(&self, events: Vec<SourceEventWrapper>) -> Result<()> {
+        self.dispatch_events_batch_internal(events, None).await
+    }
+
+    /// Dispatch a batch to every channel subscriber except the named queries.
+    ///
+    /// Broadcast mode cannot target individual receivers, so the exclusion is
+    /// only applied in channel mode.
+    pub async fn dispatch_events_batch_excluding_queries(
+        &self,
+        events: Vec<SourceEventWrapper>,
+        query_ids: &[&str],
+    ) -> Result<()> {
+        self.dispatch_events_batch_internal(events, Some(query_ids))
+            .await
+    }
+
+    async fn dispatch_events_batch_internal(
+        &self,
+        events: Vec<SourceEventWrapper>,
+        excluded_query_ids: Option<&[&str]>,
+    ) -> Result<()> {
         if events.is_empty() {
             return Ok(());
         }
@@ -1377,6 +1422,7 @@ impl SourceBase {
         let mut last_dispatch_ts = self.dispatch_order.lock().await;
         let dispatchers = self.dispatchers.read().await;
         let comparator = self.position_comparator.read().await;
+        let subscriber_query_ids = self.subscriber_query_ids.read().await;
 
         for mut wrapper in events {
             if let Some(ref pos) = wrapper.source_position {
@@ -1419,6 +1465,14 @@ impl SourceBase {
             let mut hwm_updates: Vec<(usize, Bytes)> = Vec::new();
 
             for (idx, dispatcher) in dispatchers.iter().enumerate() {
+                if excluded_query_ids.is_some_and(|query_ids| {
+                    subscriber_query_ids.get(&idx).is_some_and(|subscriber_id| {
+                        query_ids.iter().any(|query_id| subscriber_id == query_id)
+                    })
+                }) {
+                    continue;
+                }
+
                 // Check per-subscriber position high-water mark
                 if let Some(ref cmp) = *comparator {
                     let resume_positions = self.subscriber_resume_positions.read().await;
@@ -1471,6 +1525,7 @@ impl SourceBase {
 
         drop(comparator);
         drop(dispatchers);
+        drop(subscriber_query_ids);
 
         Ok(())
     }
@@ -1643,6 +1698,7 @@ impl SourceBase {
             let mut dispatchers = self.dispatchers.write().await;
             dispatchers.clear();
             self.subscriber_resume_positions.write().await.clear();
+            self.subscriber_query_ids.write().await.clear();
         }
     }
 

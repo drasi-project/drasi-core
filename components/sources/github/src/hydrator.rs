@@ -205,21 +205,17 @@ pub(crate) async fn process_admission(
         })?;
         return Ok(());
     }
-    let fetched = if is_immediate_authoritative_removal(&locator) {
-        None
-    } else {
-        params
-            .api_client
-            .fetch_root_from_locator(&locator)
-            .await
-            .map_err(RetryableHydrationError)
-            .with_context(|| {
-                format!(
-                    "Failed to hydrate locator event={} action={} node_id={:?}",
-                    locator.event_type, locator.action, locator.node_id
-                )
-            })?
-    };
+    let fetched = params
+        .api_client
+        .fetch_root_from_locator(&locator)
+        .await
+        .map_err(RetryableHydrationError)
+        .with_context(|| {
+            format!(
+                "Failed to hydrate locator event={} action={} node_id={:?}",
+                locator.event_type, locator.action, locator.node_id
+            )
+        })?;
     if fetched.is_none() && !is_authoritative_delete_action(&locator) {
         if has_later_authoritative_delete(params, sequence, &locator).await? {
             debug!(
@@ -254,7 +250,7 @@ pub(crate) async fn process_admission(
 
     let mut reconcile_index_cache: Option<HashMap<String, SnapshotElement>> = None;
     if is_project_event(&locator) {
-        if is_immediate_authoritative_removal(&locator) {
+        if fetched.is_none() && is_authoritative_delete_action(&locator) {
             let reconcile_index =
                 load_reconcile_index(params.state_store.as_ref(), &params.source_id).await?;
             if !is_durable_project_item_removal(&locator, previous.as_ref(), &reconcile_index) {
@@ -866,13 +862,6 @@ fn is_authoritative_delete_action(locator: &WebhookLocator) -> bool {
         "repository" => matches!(action, "deleted" | "archived"),
         _ => false,
     }
-}
-
-fn is_immediate_authoritative_removal(locator: &WebhookLocator) -> bool {
-    matches!(
-        (locator.event_type.as_str(), locator.action.as_str()),
-        ("projects_v2_item" | "project_item", "archived")
-    )
 }
 
 pub fn snapshot_key_for_locator(locator: &WebhookLocator, fetched: Option<&FetchedRoot>) -> String {

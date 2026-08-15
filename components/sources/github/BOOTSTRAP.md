@@ -11,7 +11,13 @@ On bootstrap:
    - repositories discovered from configured `projects` items
 2. Fetch a full reconcile snapshot from GitHub GraphQL (repositories, issues, pull requests, projects, project items).
 3. Map snapshot objects to normalized `SourceChange` events.
-4. Emit filtered bootstrap events according to requested node/relation labels.
+4. Durably persist root snapshots, the reconcile index, and any pending live-subscriber delta.
+5. Dispatch the committed delta to existing subscribers, excluding the query being bootstrapped,
+   then clear its pending marker.
+6. Emit the new query's filtered full bootstrap only after the durable transition completes.
+
+The source only supports channel dispatch mode. Broadcast mode is rejected because it cannot
+exclude the bootstrapping query from the live reconciliation delta.
 
 `BootstrapResult.source_position` is `None` (runtime durability/recovery is handled by webhook admission + source WAL + authoritative hydrator snapshots).
 
@@ -37,4 +43,6 @@ and respects query bootstrap label filters from `BootstrapRequest`.
 
 - Invalid/missing token or GraphQL request errors fail bootstrap.
 - Project snapshot fetch failures fail bootstrap.
+- State persistence failures prevent both live-delta and full-bootstrap publication.
+- A committed pending live delta is replayed at least once after restart or on a later bootstrap.
 - Event channel closure stops emission early and returns emitted count so far.
