@@ -34,17 +34,12 @@ pub struct GitHubSourceConfigDto {
     #[serde(default)]
     pub projects: Vec<ProjectSpecDto>,
     pub webhook: WebhookConfigDto,
-    #[serde(default = "default_reconcile_interval")]
-    #[schema(value_type = ConfigValueU64)]
-    pub reconcile_interval_secs: ConfigValueU64,
     #[serde(default)]
     #[schema(value_type = DurabilityConfigSchema)]
     pub durability: drasi_lib::DurabilityConfig,
     #[serde(default = "default_graphql_url")]
     #[schema(value_type = ConfigValueString)]
     pub graphql_url: ConfigValueString,
-    #[serde(default)]
-    pub skip_initial_bootstrap: bool,
 }
 
 impl fmt::Debug for GitHubSourceConfigDto {
@@ -54,16 +49,10 @@ impl fmt::Debug for GitHubSourceConfigDto {
             .field("repositories", &self.repositories)
             .field("projects", &self.projects)
             .field("webhook", &self.webhook)
-            .field("reconcile_interval_secs", &self.reconcile_interval_secs)
             .field("durability", &self.durability)
             .field("graphql_url", &self.graphql_url)
-            .field("skip_initial_bootstrap", &self.skip_initial_bootstrap)
             .finish()
     }
-}
-
-fn default_reconcile_interval() -> ConfigValueU64 {
-    ConfigValue::Static(300)
 }
 
 fn default_graphql_url() -> ConfigValueString {
@@ -220,10 +209,8 @@ impl SourcePluginDescriptor for GitHubSourceDescriptor {
                 secret: mapper.resolve_string(&dto.webhook.secret).await?,
                 body_limit_bytes: mapper.resolve_typed(&dto.webhook.body_limit_bytes).await?,
             },
-            reconcile_interval_secs: mapper.resolve_typed(&dto.reconcile_interval_secs).await?,
             durability: dto.durability.clone(),
             graphql_url: mapper.resolve_string(&dto.graphql_url).await?,
-            skip_initial_bootstrap: dto.skip_initial_bootstrap,
         };
 
         config.validate()?;

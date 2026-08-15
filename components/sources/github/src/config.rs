@@ -41,10 +41,6 @@ fn default_graphql_url() -> String {
     "https://api.github.com/graphql".to_string()
 }
 
-fn default_reconcile_interval() -> u64 {
-    300
-}
-
 /// GitHub project selector.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -101,18 +97,12 @@ pub struct GitHubSourceConfig {
     pub projects: Vec<ProjectSpec>,
     /// Webhook listener options.
     pub webhook: WebhookConfig,
-    /// Reconcile interval in seconds.
-    #[serde(default = "default_reconcile_interval")]
-    pub reconcile_interval_secs: u64,
     /// WAL durability settings (must be enabled for this source).
     #[serde(default)]
     pub durability: DurabilityConfig,
     /// GraphQL endpoint.
     #[serde(default = "default_graphql_url")]
     pub graphql_url: String,
-    /// Skip initial bootstrap/reconcile pass.
-    #[serde(default)]
-    pub skip_initial_bootstrap: bool,
 }
 
 impl fmt::Debug for GitHubSourceConfig {
@@ -122,10 +112,8 @@ impl fmt::Debug for GitHubSourceConfig {
             .field("repositories", &self.repositories)
             .field("projects", &self.projects)
             .field("webhook", &self.webhook)
-            .field("reconcile_interval_secs", &self.reconcile_interval_secs)
             .field("durability", &self.durability)
             .field("graphql_url", &self.graphql_url)
-            .field("skip_initial_bootstrap", &self.skip_initial_bootstrap)
             .finish()
     }
 }
@@ -143,13 +131,11 @@ impl Default for GitHubSourceConfig {
                 secret: String::new(),
                 body_limit_bytes: default_body_limit(),
             },
-            reconcile_interval_secs: default_reconcile_interval(),
             durability: DurabilityConfig {
                 enabled: true,
                 ..DurabilityConfig::default()
             },
             graphql_url: default_graphql_url(),
-            skip_initial_bootstrap: false,
         }
     }
 }
@@ -176,10 +162,6 @@ impl GitHubSourceConfig {
 
         if self.webhook.body_limit_bytes == 0 {
             return Err(anyhow!("webhook.body_limit_bytes must be > 0"));
-        }
-
-        if self.reconcile_interval_secs == 0 {
-            return Err(anyhow!("reconcile_interval_secs must be > 0"));
         }
 
         if self.projects.iter().any(|p| p.owner.trim().is_empty()) {

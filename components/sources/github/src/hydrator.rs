@@ -12,32 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Sequential hydrator/committer loop for admitted webhook deliveries.
+//! Strictly-sequential hydrator for inbox admissions.
 
 use crate::config::ProjectSpec;
-use crate::graphql::{FetchedRoot, GitHubGraphQLClient};
+use crate::graphql::{FetchedRoot, GitHubGraphQLClient, ProjectItemContent, RetryableGraphQLError};
 use crate::mapping::{map_root_delete_from_snapshot, map_root_diff};
-use crate::types::{
-    AbsenceObservation, HydrationTerminalOutcome, HydratorHealth, PendingDelta, ReconcileState,
-    RootSnapshot, SnapshotElement, WebhookLocator,
-};
-use crate::webhook::{compact_dedupe_markers, decode_admission_change, warn_unhealthy_hydrator};
+use crate::types::{HydratorHealth, RootSnapshot, SnapshotElement, WebhookLocator};
+use crate::webhook::{decode_admission_change, warn_unhealthy_hydrator};
 use anyhow::{Context, Result};
-use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
+use bytes::Bytes;
 use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
 use drasi_lib::sources::base::SourceBase;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::wal::WalProvider;
 use log::{debug, info, warn};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::time::{sleep, Duration};
 
 const ROOT_SNAPSHOT_PREFIX: &str = "root-snapshot:";
-pub(crate) const RECONCILE_STATE_KEY: &str = "reconcile-state";
 const EFFECTIVE_REPOS_KEY: &str = "effective-repos";
+const NULL_RETRY_PREFIX: &str = "null-retry:";
+const OWNERSHIP_ADJACENCY_KEY: &str = "ownership-adjacency";
 pub(crate) const MAX_NULL_HYDRATION_ATTEMPTS: u32 = 3;
 
 #[derive(Debug)]
@@ -53,15 +51,17 @@ impl std::error::Error for RetryableHydrationError {}
 
 pub struct HydratorParams {
     pub source_id: String,
+    pub inbox_source_id: String,
+    pub output_source_id: String,
     pub base: SourceBase,
     pub wal: Arc<dyn WalProvider>,
     pub state_store: Arc<dyn StateStoreProvider>,
     pub api_client: Arc<GitHubGraphQLClient>,
     pub projects: Vec<ProjectSpec>,
     pub effective_repos: Arc<RwLock<HashSet<String>>>,
+    pub output_gate: Arc<Mutex<()>>,
     pub notify: Arc<Notify>,
     pub health: Arc<RwLock<HydratorHealth>>,
-    pub processing_gate: Arc<Mutex<()>>,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -77,9 +77,9 @@ pub async fn run_hydrator_loop(params: HydratorParams) -> Result<()> {
 
         let maybe_oldest = params
             .wal
-            .oldest_sequence(&params.source_id)
+            .oldest_sequence(&params.inbox_source_id)
             .await
-            .context("WAL oldest_sequence failed")?;
+            .context("Inbox WAL oldest_sequence failed")?;
 
         let Some(oldest) = maybe_oldest else {
             tokio::select! {
@@ -95,9 +95,9 @@ pub async fn run_hydrator_loop(params: HydratorParams) -> Result<()> {
 
         let entries = params
             .wal
-            .read_from(&params.source_id, oldest)
+            .read_from(&params.inbox_source_id, oldest)
             .await
-            .context("WAL read_from failed")?;
+            .context("Inbox WAL read_from failed")?;
 
         let Some((sequence, admission)) = entries.into_iter().next() else {
             params.notify.notified().await;
@@ -151,7 +151,7 @@ pub(crate) async fn process_admission(
     admission: &drasi_core::models::SourceChange,
 ) -> Result<()> {
     let (delivery_id, locator) = decode_admission_change(admission)
-        .with_context(|| format!("Failed to decode admission at sequence {sequence}"))?;
+        .with_context(|| format!("Failed to decode inbox admission at sequence {sequence}"))?;
     debug!(
         "[{}] Processing delivery {} seq={} event={} action={} node_id={:?}",
         params.source_id,
@@ -163,150 +163,42 @@ pub(crate) async fn process_admission(
     );
 
     if !is_supported_event_type(&locator.event_type) {
-        debug!(
-            "[{}] Skipping unsupported event type '{}' for delivery {}",
-            params.source_id, locator.event_type, delivery_id
-        );
-        prune_and_compact(params, sequence)
-            .await
-            .context("Failed to prune unsupported delivery from WAL")?;
+        prune_inbox(params, sequence).await?;
+        clear_null_retry(params.state_store.as_ref(), &params.source_id, &delivery_id).await?;
         return Ok(());
     }
 
-    let _processing_guard = params.processing_gate.lock().await;
-    replay_pending_delta(params.state_store.as_ref(), &params.source_id, &params.base).await?;
-
-    if let Some(repo) = locator.repository_full_name.as_ref() {
-        if !is_repo_effective(&params.effective_repos, repo).await {
-            debug!(
-                "[{}] Skipping delivery {} for non-effective repo {}",
-                params.source_id, delivery_id, repo
-            );
-            prune_and_compact(params, sequence)
-                .await
-                .context("Failed to prune skipped delivery from WAL")?;
-            return Ok(());
-        }
-    }
-
-    let root_snapshot_key = snapshot_key_for_locator(&locator, None);
-    let previous = load_root_snapshot(
-        params.state_store.as_ref(),
-        &params.source_id,
-        &root_snapshot_key,
-    )
-    .await?;
-    if previous
-        .as_ref()
-        .and_then(|snapshot| snapshot.committed_delivery_id.as_deref())
-        == Some(delivery_id.as_str())
-    {
-        debug!(
-            "[{}] Delivery {} already committed after locator hydration, pruning WAL",
-            params.source_id, delivery_id
-        );
-        prune_and_compact(params, sequence).await.with_context(|| {
-            format!("Failed to prune already-committed delivery {delivery_id} from WAL")
-        })?;
-        return Ok(());
-    }
-    let mut reconcile_state =
-        load_reconcile_state(params.state_store.as_ref(), &params.source_id).await?;
-    if reconcile_state.terminal_outcomes.contains_key(&sequence) {
-        prune_and_compact(params, sequence)
-            .await
-            .with_context(|| format!("Failed pruning terminal delivery {delivery_id}"))?;
-        return Ok(());
-    }
     let fetched = params
         .api_client
         .fetch_root_from_locator(&locator)
         .await
-        .map_err(RetryableHydrationError)
+        .map_err(|err| {
+            if err.downcast_ref::<RetryableGraphQLError>().is_some() {
+                RetryableHydrationError(err).into()
+            } else {
+                err
+            }
+        })
         .with_context(|| {
             format!(
                 "Failed to hydrate locator event={} action={} node_id={:?}",
                 locator.event_type, locator.action, locator.node_id
             )
         })?;
+
     if fetched.is_none() && !is_authoritative_delete_action(&locator) {
-        if absence_covers(&reconcile_state, &locator, sequence) {
-            record_terminal_outcome(
-                &mut reconcile_state,
-                sequence,
-                &delivery_id,
-                &locator,
-                "reconciled-absence",
-                0,
-            );
-            save_reconcile_state(
-                params.state_store.as_ref(),
-                &params.source_id,
-                &reconcile_state,
-            )
-            .await?;
-            prune_and_compact(params, sequence).await.with_context(|| {
-                format!("Failed to prune reconciled absent delivery {delivery_id} from WAL")
-            })?;
-            return Ok(());
-        }
-        if has_later_authoritative_delete(params, sequence, &locator).await? {
-            debug!(
-                "[{}] Treating absent stale delivery {} as converged because a later authoritative delete is durable",
+        let attempts =
+            increment_null_retry(params.state_store.as_ref(), &params.source_id, &delivery_id)
+                .await?;
+        if attempts >= MAX_NULL_HYDRATION_ATTEMPTS {
+            warn!(
+                "[{}] Delivery {} reached null-hydration retry bound ({MAX_NULL_HYDRATION_ATTEMPTS}); advancing FIFO",
                 params.source_id, delivery_id
             );
-            record_terminal_outcome(
-                &mut reconcile_state,
-                sequence,
-                &delivery_id,
-                &locator,
-                "queued-authoritative-delete",
-                0,
-            );
-            save_reconcile_state(
-                params.state_store.as_ref(),
-                &params.source_id,
-                &reconcile_state,
-            )
-            .await?;
-            prune_and_compact(params, sequence).await.with_context(|| {
-                format!("Failed to prune stale delivery {delivery_id} from WAL")
-            })?;
+            clear_null_retry(params.state_store.as_ref(), &params.source_id, &delivery_id).await?;
+            prune_inbox(params, sequence).await?;
             return Ok(());
         }
-
-        let attempts = reconcile_state
-            .null_retry_counts
-            .entry(sequence)
-            .and_modify(|attempts| *attempts = attempts.saturating_add(1))
-            .or_insert(1);
-        let attempts = *attempts;
-        if attempts >= MAX_NULL_HYDRATION_ATTEMPTS {
-            record_terminal_outcome(
-                &mut reconcile_state,
-                sequence,
-                &delivery_id,
-                &locator,
-                "gone-before-hydration",
-                attempts,
-            );
-            save_reconcile_state(
-                params.state_store.as_ref(),
-                &params.source_id,
-                &reconcile_state,
-            )
-            .await?;
-            prune_and_compact(params, sequence).await.with_context(|| {
-                format!("Failed to prune gone-before-hydration delivery {delivery_id} from WAL")
-            })?;
-            return Ok(());
-        }
-        save_reconcile_state(
-            params.state_store.as_ref(),
-            &params.source_id,
-            &reconcile_state,
-        )
-        .await?;
         return Err(RetryableHydrationError(anyhow::anyhow!(
             "GraphQL returned node=null for non-delete action '{}' (event '{}'); transient attempt {attempts}/{MAX_NULL_HYDRATION_ATTEMPTS}",
             locator.action,
@@ -314,73 +206,8 @@ pub(crate) async fn process_admission(
         ))
         .into());
     }
-    reconcile_state.null_retry_counts.remove(&sequence);
+    clear_null_retry(params.state_store.as_ref(), &params.source_id, &delivery_id).await?;
 
-    if let Some(authoritative_repo) = fetched.as_ref().and_then(FetchedRoot::repository_full_name) {
-        if !is_repo_effective(&params.effective_repos, authoritative_repo).await {
-            debug!(
-                "[{}] Skipping delivery {} because authoritative repository {} is outside effective scope",
-                params.source_id, delivery_id, authoritative_repo
-            );
-            prune_and_compact(params, sequence)
-                .await
-                .context("Failed to prune authoritative out-of-scope delivery from WAL")?;
-            return Ok(());
-        }
-    }
-
-    let mut reconcile_index_cache: Option<HashMap<String, SnapshotElement>> = None;
-    if is_project_event(&locator) {
-        if fetched.is_none() && is_authoritative_delete_action(&locator) {
-            let reconcile_index =
-                load_reconcile_index(params.state_store.as_ref(), &params.source_id).await?;
-            if !is_durable_project_item_removal(&locator, previous.as_ref(), &reconcile_index) {
-                debug!(
-                    "[{}] Skipping delivery {} because archived project item {:?} has no matching durable state",
-                    params.source_id, delivery_id, locator.node_id
-                );
-                prune_and_compact(params, sequence)
-                    .await
-                    .context("Failed to prune unknown archived project item delivery from WAL")?;
-                return Ok(());
-            }
-            reconcile_index_cache = Some(reconcile_index);
-        } else {
-            let identity = resolve_project_identity(
-                params,
-                &locator,
-                fetched.as_ref(),
-                &mut reconcile_index_cache,
-            )
-            .await?;
-            let Some(identity) = identity else {
-                debug!(
-                "[{}] Skipping delivery {} because authoritative project identity could not be resolved",
-                params.source_id, delivery_id
-            );
-                prune_and_compact(params, sequence)
-                    .await
-                    .context("Failed to prune skipped project delivery from WAL")?;
-                return Ok(());
-            };
-            if !is_project_configured(&params.projects, &identity.owner, identity.number) {
-                debug!(
-                    "[{}] Skipping delivery {} for unconfigured project id={} owner={} number={}",
-                    params.source_id,
-                    delivery_id,
-                    identity.project_id,
-                    identity.owner,
-                    identity.number
-                );
-                prune_and_compact(params, sequence)
-                    .await
-                    .context("Failed to prune skipped project delivery from WAL")?;
-                return Ok(());
-            }
-        }
-    }
-
-    let effective_from = chrono::Utc::now().timestamp_millis().max(0) as u64;
     let root_snapshot_key = snapshot_key_for_locator(&locator, fetched.as_ref());
     let previous = load_root_snapshot(
         params.state_store.as_ref(),
@@ -389,259 +216,292 @@ pub(crate) async fn process_admission(
     )
     .await?;
 
-    if let Some(root) = fetched {
-        let (changes, mut next_snapshot) =
-            map_root_diff(&params.source_id, &root, previous.as_ref(), effective_from)?;
-        debug!(
-            "[{}] Hydrated root {} ({}) produced {} change(s)",
-            params.source_id,
-            root.root_id(),
-            root.root_kind(),
-            changes.len()
-        );
-        synchronize_reconcile_index(
-            &mut reconcile_state.index,
-            previous.as_ref(),
-            &next_snapshot,
-        );
-        reconcile_state.generation = reconcile_state.generation.saturating_add(1);
-        clear_present_absences(&mut reconcile_state, &next_snapshot);
-        reconcile_state.pending_delta = (!changes.is_empty()).then_some(PendingDelta { changes });
-        save_reconcile_state(
-            params.state_store.as_ref(),
-            &params.source_id,
-            &reconcile_state,
-        )
-        .await?;
-        replay_pending_delta(params.state_store.as_ref(), &params.source_id, &params.base).await?;
-
-        next_snapshot.committed_delivery_id = Some(delivery_id.clone());
-        next_snapshot.committed_sequence = Some(sequence);
-        save_root_snapshot(
-            params.state_store.as_ref(),
-            &params.source_id,
-            &root_snapshot_key,
-            &next_snapshot,
-        )
-        .await?;
-    } else {
-        if let Some(index) = reconcile_index_cache.take() {
-            reconcile_state.index = index;
-        }
-
-        let (changes, deleted_ids) = map_delete_from_durable_state(
-            &params.source_id,
-            &locator,
-            previous.as_ref(),
-            &reconcile_state.index,
-            effective_from,
-        );
-
-        debug!(
-            "[{}] Locator {:?} resolved to delete with {} change(s)",
-            params.source_id,
-            locator.node_id,
-            changes.len()
-        );
-        reconcile_state.generation = reconcile_state.generation.saturating_add(1);
-        for id in &deleted_ids {
-            reconcile_state.index.remove(id);
-            reconcile_state.absences.insert(
-                id.clone(),
-                AbsenceObservation {
-                    generation: reconcile_state.generation,
-                    wal_coverage_sequence: sequence,
-                },
+    if let Some(identity) = project_identity(&locator, fetched.as_ref())? {
+        if !is_project_configured(&params.projects, &identity.owner, identity.number) {
+            debug!(
+                "[{}] Skipping delivery {} for unconfigured project owner={} number={}",
+                params.source_id, delivery_id, identity.owner, identity.number
             );
+            prune_inbox(params, sequence).await?;
+            return Ok(());
         }
-        if let Some(key) = absence_key_for_locator(&locator) {
-            reconcile_state.absences.insert(
-                key,
-                AbsenceObservation {
-                    generation: reconcile_state.generation,
-                    wal_coverage_sequence: sequence,
-                },
+    } else if is_project_event(&locator) {
+        if previous.is_none() {
+            debug!(
+                "[{}] Skipping project delivery {} because project identity could not be resolved and no prior snapshot exists",
+                params.source_id, delivery_id
             );
+            prune_inbox(params, sequence).await?;
+            return Ok(());
         }
-        reconcile_state.pending_delta = (!changes.is_empty()).then_some(PendingDelta { changes });
-        save_reconcile_state(
-            params.state_store.as_ref(),
-            &params.source_id,
-            &reconcile_state,
-        )
-        .await?;
-        replay_pending_delta(params.state_store.as_ref(), &params.source_id, &params.base).await?;
-
-        let tombstone = RootSnapshot {
-            root_id: locator
-                .node_id
-                .clone()
-                .or(locator.project_id.clone())
-                .or(locator.repository_full_name.clone())
-                .unwrap_or_else(|| "unknown".to_string()),
-            root_kind: "Deleted".to_string(),
-            repository_full_name: locator.repository_full_name.clone(),
-            elements: HashMap::new(),
-            committed_delivery_id: Some(delivery_id.clone()),
-            committed_sequence: Some(sequence),
-        };
-        save_root_snapshot(
-            params.state_store.as_ref(),
-            &params.source_id,
-            &root_snapshot_key,
-            &tombstone,
-        )
-        .await?;
+        debug!(
+            "[{}] Project delivery {} has unresolved identity but prior snapshot exists; proceeding with snapshot-based reconciliation",
+            params.source_id, delivery_id
+        );
     }
 
-    prune_and_compact(params, sequence)
-        .await
-        .with_context(|| format!("Failed to prune WAL admission for delivery {delivery_id}"))?;
+    if let Some(repo) = fetched
+        .as_ref()
+        .and_then(FetchedRoot::repository_full_name)
+        .map(|r| r.to_ascii_lowercase())
+    {
+        if !is_repo_effective(&params.effective_repos, &repo).await {
+            debug!(
+                "[{}] Skipping delivery {} because authoritative repository {} is outside scope",
+                params.source_id, delivery_id, repo
+            );
+            prune_inbox(params, sequence).await?;
+            return Ok(());
+        }
+    } else if let Some(repo) = locator.repository_full_name.as_ref() {
+        let repo = repo.to_ascii_lowercase();
+        if !is_project_event(&locator) && !is_repo_effective(&params.effective_repos, &repo).await {
+            debug!(
+                "[{}] Skipping delivery {} for non-scoped repository {}",
+                params.source_id, delivery_id, repo
+            );
+            prune_inbox(params, sequence).await?;
+            return Ok(());
+        }
+    }
 
+    if let Some(FetchedRoot::ProjectItem(item)) = fetched.as_ref() {
+        if let Some(repo_name) = project_item_repo(item) {
+            add_effective_repo(
+                params.state_store.as_ref(),
+                &params.source_id,
+                &params.effective_repos,
+                &repo_name,
+            )
+            .await?;
+        }
+    }
+
+    let effective_from = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let mut adjacency =
+        load_ownership_adjacency(params.state_store.as_ref(), &params.source_id).await?;
+    let owning_parents = fetched.as_ref().map(owning_parent_ids).unwrap_or_default();
+    let root_id = fetched
+        .as_ref()
+        .map(|root| root.root_id().to_string())
+        .or_else(|| previous.as_ref().map(|snapshot| snapshot.root_id.clone()))
+        .or_else(|| locator.node_id.clone())
+        .or_else(|| locator.project_id.clone());
+    let mut snapshots_to_delete = Vec::new();
+
+    let (changes, next_snapshot) = match fetched {
+        Some(root) => {
+            let (changes, mut snapshot) =
+                map_root_diff(&params.source_id, &root, previous.as_ref(), effective_from)?;
+            snapshot.committed_delivery_id = Some(delivery_id.clone());
+            snapshot.committed_sequence = Some(sequence);
+            (changes, Some(snapshot))
+        }
+        None => {
+            if let Some(snapshot) = previous.as_ref() {
+                snapshots_to_delete.push(snapshot.clone());
+            }
+            if let Some(root_id) = root_id.as_deref() {
+                for child_id in owned_descendants(&adjacency, root_id) {
+                    let child_key = format!("{ROOT_SNAPSHOT_PREFIX}{child_id}");
+                    if let Some(snapshot) = load_root_snapshot(
+                        params.state_store.as_ref(),
+                        &params.source_id,
+                        &child_key,
+                    )
+                    .await?
+                    {
+                        snapshots_to_delete.push(snapshot);
+                    }
+                }
+            }
+            let changes = snapshots_to_delete
+                .iter()
+                .flat_map(|snapshot| {
+                    map_root_delete_from_snapshot(&params.source_id, Some(snapshot), effective_from)
+                })
+                .collect();
+            (changes, None)
+        }
+    };
+
+    if !changes.is_empty() {
+        emit_output_changes(params, &changes).await?;
+    }
+
+    if let Some(snapshot) = next_snapshot {
+        save_root_snapshot(
+            params.state_store.as_ref(),
+            &params.source_id,
+            &root_snapshot_key,
+            &snapshot,
+        )
+        .await?;
+        if let Some(root_id) = root_id.as_deref() {
+            replace_ownership_edges(&mut adjacency, root_id, &owning_parents);
+            save_ownership_adjacency(params.state_store.as_ref(), &params.source_id, &adjacency)
+                .await?;
+        }
+    } else {
+        let deleted_root_ids = snapshots_to_delete
+            .iter()
+            .map(|snapshot| snapshot.root_id.clone())
+            .collect::<BTreeSet<_>>();
+        for deleted_root_id in &deleted_root_ids {
+            delete_root_snapshot(
+                params.state_store.as_ref(),
+                &params.source_id,
+                &format!("{ROOT_SNAPSHOT_PREFIX}{deleted_root_id}"),
+            )
+            .await?;
+        }
+        if let Some(root_id) = root_id.as_deref() {
+            adjacency.remove(root_id);
+        }
+        for children in adjacency.values_mut() {
+            children.retain(|child| !deleted_root_ids.contains(child));
+        }
+        adjacency.retain(|_, children| !children.is_empty());
+        save_ownership_adjacency(params.state_store.as_ref(), &params.source_id, &adjacency)
+            .await?;
+    }
+
+    prune_inbox(params, sequence).await?;
     Ok(())
 }
 
-async fn prune_and_compact(params: &HydratorParams, sequence: u64) -> Result<()> {
-    const DEDUPE_COMPACTION_INTERVAL: u64 = 128;
+type OwnershipAdjacency = HashMap<String, BTreeSet<String>>;
 
-    let _health_guard = params.health.write().await;
-    params.wal.prune_up_to(&params.source_id, sequence).await?;
-    let wal_is_empty = params
-        .wal
-        .oldest_sequence(&params.source_id)
-        .await?
-        .is_none();
-    if wal_is_empty || sequence.is_multiple_of(DEDUPE_COMPACTION_INTERVAL) {
-        compact_dedupe_markers(
-            params.state_store.as_ref(),
-            params.wal.as_ref(),
-            &params.source_id,
-        )
-        .await?;
+fn owning_parent_ids(root: &FetchedRoot) -> Vec<String> {
+    match root {
+        FetchedRoot::IssueComment(comment) => comment
+            .issue
+            .as_ref()
+            .or(comment.pull_request.as_ref())
+            .map(|parent| vec![parent.id.clone()])
+            .unwrap_or_default(),
+        FetchedRoot::PullRequestReview(review) => vec![review.pull_request.id.clone()],
+        FetchedRoot::PullRequestReviewComment(comment) => vec![
+            comment.pull_request_review.id.clone(),
+            comment.pull_request_review.pull_request.id.clone(),
+        ],
+        FetchedRoot::ProjectItem(item) => vec![item.project.id.clone()],
+        _ => Vec::new(),
     }
+}
+
+fn replace_ownership_edges(
+    adjacency: &mut OwnershipAdjacency,
+    child_id: &str,
+    parent_ids: &[String],
+) {
+    for children in adjacency.values_mut() {
+        children.remove(child_id);
+    }
+    adjacency.retain(|_, children| !children.is_empty());
+    for parent_id in parent_ids {
+        adjacency
+            .entry(parent_id.clone())
+            .or_default()
+            .insert(child_id.to_string());
+    }
+}
+
+fn owned_descendants(adjacency: &OwnershipAdjacency, root_id: &str) -> Vec<String> {
+    let mut pending = adjacency
+        .get(root_id)
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    pending.reverse();
+    let mut seen = BTreeSet::new();
+    let mut descendants = Vec::new();
+    while let Some(child) = pending.pop() {
+        if !seen.insert(child.clone()) {
+            continue;
+        }
+        descendants.push(child.clone());
+        if let Some(grandchildren) = adjacency.get(&child) {
+            pending.extend(grandchildren.iter().rev().cloned());
+        }
+    }
+    descendants
+}
+
+async fn load_ownership_adjacency(
+    state_store: &dyn StateStoreProvider,
+    source_id: &str,
+) -> Result<OwnershipAdjacency> {
+    let bytes = state_store
+        .get(source_id, OWNERSHIP_ADJACENCY_KEY)
+        .await
+        .context("Failed loading ownership adjacency")?;
+    bytes
+        .map(|data| {
+            serde_json::from_slice(&data).context("Failed deserializing ownership adjacency")
+        })
+        .transpose()
+        .map(|adjacency| adjacency.unwrap_or_default())
+}
+
+async fn save_ownership_adjacency(
+    state_store: &dyn StateStoreProvider,
+    source_id: &str,
+    adjacency: &OwnershipAdjacency,
+) -> Result<()> {
+    state_store
+        .set(
+            source_id,
+            OWNERSHIP_ADJACENCY_KEY,
+            serde_json::to_vec(adjacency).context("Failed serializing ownership adjacency")?,
+        )
+        .await
+        .context("Failed saving ownership adjacency")
+}
+
+async fn emit_output_changes(
+    params: &HydratorParams,
+    changes: &[drasi_core::models::SourceChange],
+) -> Result<()> {
+    for change in changes {
+        let _output_guard = params.output_gate.lock().await;
+        let output_seq = params
+            .wal
+            .append(&params.output_source_id, change)
+            .await
+            .context("Failed appending normalized change to output WAL")?;
+        let mut wrapper = SourceEventWrapper::new(
+            params.source_id.clone(),
+            SourceEvent::Change(change.clone()),
+            chrono::Utc::now(),
+        );
+        wrapper.sequence = Some(output_seq);
+        wrapper.source_position = Some(Bytes::from(output_seq.to_be_bytes().to_vec()));
+        if let Err(err) = params.base.dispatch_event(wrapper).await {
+            warn!(
+                "[{}] Live dispatch failed after durable output append (seq={}): {:#}",
+                params.source_id, output_seq, err
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn prune_inbox(params: &HydratorParams, sequence: u64) -> Result<()> {
+    params
+        .wal
+        .prune_up_to(&params.inbox_source_id, sequence)
+        .await
+        .with_context(|| format!("Failed pruning inbox WAL through sequence {sequence}"))?;
     Ok(())
 }
 
 async fn is_repo_effective(effective_repos: &Arc<RwLock<HashSet<String>>>, repo: &str) -> bool {
-    let repo = repo.to_ascii_lowercase();
-    effective_repos.read().await.contains(&repo)
-}
-
-async fn has_later_authoritative_delete(
-    params: &HydratorParams,
-    sequence: u64,
-    locator: &WebhookLocator,
-) -> Result<bool> {
-    let entries = params
-        .wal
-        .read_from(&params.source_id, sequence.saturating_add(1))
+    effective_repos
+        .read()
         .await
-        .context("Failed to inspect later WAL admissions")?;
-
-    Ok(entries.into_iter().any(|(later_sequence, change)| {
-        if later_sequence <= sequence {
-            return false;
-        }
-        let Ok((_, later_locator)) = decode_admission_change(&change) else {
-            return false;
-        };
-        is_authoritative_delete_action(&later_locator)
-            && locators_identify_same_root(locator, &later_locator)
-    }))
-}
-
-fn locators_identify_same_root(left: &WebhookLocator, right: &WebhookLocator) -> bool {
-    if left.event_type != right.event_type {
-        return false;
-    }
-    match (
-        left.node_id.as_deref(),
-        right.node_id.as_deref(),
-        left.project_id.as_deref(),
-        right.project_id.as_deref(),
-        left.repository_full_name.as_deref(),
-        right.repository_full_name.as_deref(),
-    ) {
-        (Some(left), Some(right), _, _, _, _) => left == right,
-        (_, _, Some(left), Some(right), _, _) => left == right,
-        (_, _, _, _, Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
-        _ => false,
-    }
-}
-
-fn synchronize_reconcile_index(
-    reconcile_index: &mut HashMap<String, SnapshotElement>,
-    previous: Option<&RootSnapshot>,
-    next: &RootSnapshot,
-) {
-    if let Some(previous) = previous {
-        for id in previous.elements.keys() {
-            if !next.elements.contains_key(id) {
-                reconcile_index.remove(id);
-            }
-        }
-    }
-    for (id, element) in &next.elements {
-        reconcile_index.insert(id.clone(), element.clone());
-    }
-}
-
-fn clear_present_absences(state: &mut ReconcileState, snapshot: &RootSnapshot) {
-    for id in snapshot.elements.keys() {
-        state.absences.remove(id);
-    }
-    if let Some(repo) = snapshot.repository_full_name.as_ref() {
-        state
-            .absences
-            .remove(&format!("repo:{}", repo.to_ascii_lowercase()));
-    }
-}
-
-fn absence_key_for_locator(locator: &WebhookLocator) -> Option<String> {
-    locator
-        .node_id
-        .clone()
-        .or_else(|| locator.project_id.clone())
-        .or_else(|| {
-            locator
-                .repository_full_name
-                .as_ref()
-                .map(|repo| format!("repo:{}", repo.to_ascii_lowercase()))
-        })
-}
-
-fn absence_covers(state: &ReconcileState, locator: &WebhookLocator, sequence: u64) -> bool {
-    absence_key_for_locator(locator)
-        .and_then(|key| state.absences.get(&key))
-        .is_some_and(|observation| observation.wal_coverage_sequence >= sequence)
-}
-
-fn record_terminal_outcome(
-    state: &mut ReconcileState,
-    sequence: u64,
-    delivery_id: &str,
-    locator: &WebhookLocator,
-    reason: &str,
-    attempts: u32,
-) {
-    state.null_retry_counts.remove(&sequence);
-    state.terminal_outcomes.insert(
-        sequence,
-        HydrationTerminalOutcome {
-            delivery_id: delivery_id.to_string(),
-            root_id: absence_key_for_locator(locator),
-            reason: reason.to_string(),
-            attempts,
-            generation: state.generation,
-        },
-    );
-}
-
-fn is_project_event(locator: &WebhookLocator) -> bool {
-    matches!(
-        locator.event_type.as_str(),
-        "projects_v2" | "projects_v2_item"
-    )
+        .contains(&repo.to_ascii_lowercase())
 }
 
 fn is_supported_event_type(event_type: &str) -> bool {
@@ -658,328 +518,11 @@ fn is_supported_event_type(event_type: &str) -> bool {
     )
 }
 
-fn is_project_configured(projects: &[ProjectSpec], owner: &str, number: u32) -> bool {
-    projects
-        .iter()
-        .any(|project| project.owner.eq_ignore_ascii_case(owner) && project.number == number)
-}
-
-#[derive(Debug, Clone)]
-struct ProjectIdentity {
-    project_id: String,
-    owner: String,
-    number: u32,
-}
-
-async fn resolve_project_identity(
-    params: &HydratorParams,
-    locator: &WebhookLocator,
-    fetched: Option<&FetchedRoot>,
-    reconcile_index_cache: &mut Option<HashMap<String, SnapshotElement>>,
-) -> Result<Option<ProjectIdentity>> {
-    if let Some(identity) = project_identity_from_fetched(fetched)? {
-        return Ok(Some(identity));
-    }
-
-    let project_id_hint = locator
-        .project_id
-        .as_deref()
-        .or_else(|| {
-            (locator.event_type == "projects_v2")
-                .then_some(locator.node_id.as_deref())
-                .flatten()
-        })
-        .map(str::to_string);
-
-    if let Some(project_id) = project_id_hint {
-        if reconcile_index_cache.is_none() {
-            *reconcile_index_cache =
-                Some(load_reconcile_index(params.state_store.as_ref(), &params.source_id).await?);
-        }
-        if let Some(index) = reconcile_index_cache.as_ref() {
-            if let Some(identity) = project_identity_from_reconcile_index(index, &project_id) {
-                return Ok(Some(identity));
-            }
-        }
-
-        if let Some(project) = params.api_client.fetch_project(&project_id).await? {
-            let number = u32::try_from(project.number)
-                .context("Project number does not fit in u32 while resolving project scope")?;
-            return Ok(Some(ProjectIdentity {
-                project_id: project.id,
-                owner: project.owner.login,
-                number,
-            }));
-        }
-    }
-
-    Ok(None)
-}
-
-fn project_identity_from_fetched(fetched: Option<&FetchedRoot>) -> Result<Option<ProjectIdentity>> {
-    let Some(root) = fetched else {
-        return Ok(None);
-    };
-
-    match root {
-        FetchedRoot::Project(project) => {
-            let number = u32::try_from(project.number)
-                .context("Project number does not fit in u32 while resolving project scope")?;
-            Ok(Some(ProjectIdentity {
-                project_id: project.id.clone(),
-                owner: project.owner.login.clone(),
-                number,
-            }))
-        }
-        FetchedRoot::ProjectItem(item) => {
-            let number = u32::try_from(item.project.number).context(
-                "Project item parent number does not fit in u32 while resolving project scope",
-            )?;
-            Ok(Some(ProjectIdentity {
-                project_id: item.project.id.clone(),
-                owner: item.project.owner.login.clone(),
-                number,
-            }))
-        }
-        _ => Ok(None),
-    }
-}
-
-fn project_identity_from_reconcile_index(
-    index: &HashMap<String, SnapshotElement>,
-    project_id: &str,
-) -> Option<ProjectIdentity> {
-    let project = index.get(project_id)?;
-    if project.element_type != "node"
-        || !project.labels.iter().any(|label| label == "GitHubProject")
-    {
-        return None;
-    }
-    let owner = project.properties.get("owner")?.as_str()?.to_string();
-    let number = project
-        .properties
-        .get("number")
-        .and_then(|v| v.as_u64().and_then(|n| u32::try_from(n).ok()))
-        .or_else(|| {
-            project
-                .properties
-                .get("number")
-                .and_then(|v| v.as_i64().and_then(|n| u32::try_from(n).ok()))
-        })?;
-    Some(ProjectIdentity {
-        project_id: project.id.clone(),
-        owner,
-        number,
-    })
-}
-
-fn is_durable_project_item_removal(
-    locator: &WebhookLocator,
-    previous: Option<&RootSnapshot>,
-    reconcile_index: &HashMap<String, SnapshotElement>,
-) -> bool {
-    let Some(item_id) = locator.node_id.as_deref() else {
-        return false;
-    };
-
-    let snapshot_has_item = previous.is_some_and(|snapshot| {
-        snapshot.root_id == item_id
-            && snapshot.elements.get(item_id).is_some_and(|element| {
-                element.element_type == "node"
-                    && element
-                        .labels
-                        .iter()
-                        .any(|label| label == "GitHubProjectItem")
-            })
-    });
-    let index_has_item = reconcile_index.get(item_id).is_some_and(|element| {
-        element.element_type == "node"
-            && element
-                .labels
-                .iter()
-                .any(|label| label == "GitHubProjectItem")
-    });
-    if !snapshot_has_item && !index_has_item {
-        return false;
-    }
-
-    let mut stored_project_ids = HashSet::new();
-    for element in previous
-        .into_iter()
-        .flat_map(|snapshot| snapshot.elements.values())
-        .chain(reconcile_index.values())
-    {
-        if element.element_type == "relation"
-            && element.labels.iter().any(|label| label == "IN_PROJECT")
-            && element.out_node_id.as_deref() == Some(item_id)
-        {
-            if let Some(project_id) = element.in_node_id.as_ref() {
-                stored_project_ids.insert(project_id.as_str());
-            }
-        }
-    }
-
-    match locator.project_id.as_deref() {
-        Some(project_id) if stored_project_ids.is_empty() => !project_id.is_empty(),
-        Some(project_id) => stored_project_ids.contains(project_id),
-        None => !stored_project_ids.is_empty(),
-    }
-}
-
-fn resolve_delete_root_id(
-    locator: &WebhookLocator,
-    reconcile_index: &HashMap<String, SnapshotElement>,
-) -> Option<String> {
-    if let Some(id) = locator.node_id.as_ref() {
-        return Some(id.clone());
-    }
-    if let Some(id) = locator.project_id.as_ref() {
-        return Some(id.clone());
-    }
-    if locator.event_type == "repository" {
-        let repo = locator
-            .repository_full_name
-            .as_deref()?
-            .to_ascii_lowercase();
-        if let Some((id, _)) = reconcile_index.iter().find(|(_, element)| {
-            element.element_type == "node"
-                && element
-                    .labels
-                    .iter()
-                    .any(|label| label == "GitHubRepository")
-                && element
-                    .properties
-                    .get("nameWithOwner")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|name| name.eq_ignore_ascii_case(&repo))
-        }) {
-            return Some(id.clone());
-        }
-    }
-    None
-}
-
-fn map_delete_from_durable_state(
-    source_id: &str,
-    locator: &WebhookLocator,
-    previous: Option<&RootSnapshot>,
-    reconcile_index: &HashMap<String, SnapshotElement>,
-    effective_from: u64,
-) -> (Vec<SourceChange>, HashSet<String>) {
-    let mut changes = map_root_delete_from_snapshot(source_id, previous, effective_from);
-    let mut deleted_ids = deleted_element_ids(&changes);
-    let root_id = previous
-        .map(|snapshot| snapshot.root_id.clone())
-        .or_else(|| resolve_delete_root_id(locator, reconcile_index));
-
-    if let Some(root_id) = root_id {
-        let (adjacency_changes, adjacency_ids) =
-            map_delete_from_reconcile_index(source_id, &root_id, reconcile_index, effective_from);
-        for change in adjacency_changes {
-            let Some(element_id) = deleted_element_id(&change) else {
-                continue;
-            };
-            if deleted_ids.insert(element_id) {
-                changes.push(change);
-            }
-        }
-        deleted_ids.extend(adjacency_ids);
-    }
-
-    (changes, deleted_ids)
-}
-
-fn map_delete_from_reconcile_index(
-    source_id: &str,
-    root_id: &str,
-    reconcile_index: &HashMap<String, SnapshotElement>,
-    effective_from: u64,
-) -> (Vec<SourceChange>, HashSet<String>) {
-    let mut relations_by_in: HashMap<&str, Vec<&SnapshotElement>> = HashMap::new();
-    let mut relations_by_out: HashMap<&str, Vec<&SnapshotElement>> = HashMap::new();
-    for element in reconcile_index.values() {
-        if element.element_type != "relation" {
-            continue;
-        }
-        if let Some(in_id) = element.in_node_id.as_deref() {
-            relations_by_in.entry(in_id).or_default().push(element);
-        }
-        if let Some(out_id) = element.out_node_id.as_deref() {
-            relations_by_out.entry(out_id).or_default().push(element);
-        }
-    }
-
-    let mut queue = VecDeque::from([root_id.to_string()]);
-    let mut visited_nodes = HashSet::new();
-    let mut included_ids = HashSet::new();
-
-    while let Some(node_id) = queue.pop_front() {
-        if !visited_nodes.insert(node_id.clone()) {
-            continue;
-        }
-
-        if let Some(node) = reconcile_index.get(&node_id) {
-            if node.element_type == "node" {
-                included_ids.insert(node.id.clone());
-            }
-        }
-
-        if let Some(rels) = relations_by_out.get(node_id.as_str()) {
-            for rel in rels {
-                included_ids.insert(rel.id.clone());
-            }
-        }
-
-        if let Some(rels) = relations_by_in.get(node_id.as_str()) {
-            for rel in rels {
-                included_ids.insert(rel.id.clone());
-                // TRACKS links an independently owned project item to its content.
-                if rel.labels.iter().any(|label| label == "TRACKS") {
-                    continue;
-                }
-                if let Some(child_id) = rel.out_node_id.as_ref() {
-                    if !visited_nodes.contains(child_id) {
-                        queue.push_back(child_id.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    let mut delete_ids: Vec<String> = included_ids.iter().cloned().collect();
-    delete_ids.sort();
-    let mut changes = Vec::with_capacity(delete_ids.len());
-    for id in &delete_ids {
-        if let Some(element) = reconcile_index.get(id) {
-            changes.push(SourceChange::Delete {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new(source_id, &element.id),
-                    labels: element
-                        .labels
-                        .iter()
-                        .map(|label| Arc::<str>::from(label.as_str()))
-                        .collect::<Vec<_>>()
-                        .into(),
-                    effective_from,
-                },
-            });
-        }
-    }
-
-    (changes, included_ids)
-}
-
-fn deleted_element_ids(changes: &[SourceChange]) -> HashSet<String> {
-    changes.iter().filter_map(deleted_element_id).collect()
-}
-
-fn deleted_element_id(change: &SourceChange) -> Option<String> {
-    match change {
-        SourceChange::Delete { metadata } => {
-            Some(metadata.reference.element_id.as_ref().to_string())
-        }
-        _ => None,
-    }
+fn is_project_event(locator: &WebhookLocator) -> bool {
+    matches!(
+        locator.event_type.as_str(),
+        "projects_v2" | "projects_v2_item"
+    )
 }
 
 fn is_authoritative_delete_action(locator: &WebhookLocator) -> bool {
@@ -994,6 +537,103 @@ fn is_authoritative_delete_action(locator: &WebhookLocator) -> bool {
         "repository" => matches!(action, "deleted" | "archived"),
         _ => false,
     }
+}
+
+fn is_project_configured(projects: &[ProjectSpec], owner: &str, number: u32) -> bool {
+    projects
+        .iter()
+        .any(|project| project.owner.eq_ignore_ascii_case(owner) && project.number == number)
+}
+
+#[derive(Debug, Clone)]
+struct ProjectIdentity {
+    owner: String,
+    number: u32,
+}
+
+fn project_identity(
+    locator: &WebhookLocator,
+    fetched: Option<&FetchedRoot>,
+) -> Result<Option<ProjectIdentity>> {
+    if let Some(root) = fetched {
+        match root {
+            FetchedRoot::Project(project) => {
+                let number =
+                    u32::try_from(project.number).context("Project number does not fit in u32")?;
+                return Ok(Some(ProjectIdentity {
+                    owner: project.owner.login.clone(),
+                    number,
+                }));
+            }
+            FetchedRoot::ProjectItem(item) => {
+                let number = u32::try_from(item.project.number)
+                    .context("Project item parent number does not fit in u32")?;
+                return Ok(Some(ProjectIdentity {
+                    owner: item.project.owner.login.clone(),
+                    number,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    if let (Some(owner), Some(number)) = (locator.project_owner.as_ref(), locator.project_number) {
+        return Ok(Some(ProjectIdentity {
+            owner: owner.clone(),
+            number,
+        }));
+    }
+    Ok(None)
+}
+
+fn project_item_repo(item: &crate::graphql::ProjectItemData) -> Option<String> {
+    let content = item.content.as_ref()?;
+    match content {
+        ProjectItemContent::Issue { repository, .. }
+        | ProjectItemContent::PullRequest { repository, .. } => {
+            Some(repository.name_with_owner.to_ascii_lowercase())
+        }
+        ProjectItemContent::DraftIssue { .. } => None,
+    }
+}
+
+async fn increment_null_retry(
+    state_store: &dyn StateStoreProvider,
+    source_id: &str,
+    delivery_id: &str,
+) -> Result<u32> {
+    let key = format!("{NULL_RETRY_PREFIX}{delivery_id}");
+    let current = state_store
+        .get(source_id, &key)
+        .await
+        .with_context(|| format!("state_store.get({key}) failed"))?
+        .map(|data| serde_json::from_slice::<u32>(&data))
+        .transpose()
+        .with_context(|| format!("Failed to parse retry counter for key {key}"))?
+        .unwrap_or(0);
+    let next = current.saturating_add(1);
+    state_store
+        .set(
+            source_id,
+            &key,
+            serde_json::to_vec(&next).context("Failed to serialize retry counter")?,
+        )
+        .await
+        .with_context(|| format!("state_store.set({key}) failed"))?;
+    Ok(next)
+}
+
+async fn clear_null_retry(
+    state_store: &dyn StateStoreProvider,
+    source_id: &str,
+    delivery_id: &str,
+) -> Result<()> {
+    let key = format!("{NULL_RETRY_PREFIX}{delivery_id}");
+    state_store
+        .delete(source_id, &key)
+        .await
+        .with_context(|| format!("state_store.delete({key}) failed"))?;
+    Ok(())
 }
 
 pub fn snapshot_key_for_locator(locator: &WebhookLocator, fetched: Option<&FetchedRoot>) -> String {
@@ -1055,148 +695,6 @@ pub async fn delete_root_snapshot(
     Ok(())
 }
 
-pub async fn load_reconcile_state(
-    state_store: &dyn StateStoreProvider,
-    source_id: &str,
-) -> Result<ReconcileState> {
-    let bytes = state_store
-        .get(source_id, RECONCILE_STATE_KEY)
-        .await
-        .map_err(|e| anyhow::anyhow!("state_store.get({RECONCILE_STATE_KEY}) failed: {e}"))?;
-    match bytes {
-        Some(data) => serde_json::from_slice::<ReconcileState>(&data)
-            .context("Failed to parse reconcile state"),
-        None => Ok(ReconcileState::default()),
-    }
-}
-
-pub async fn save_reconcile_state(
-    state_store: &dyn StateStoreProvider,
-    source_id: &str,
-    state: &ReconcileState,
-) -> Result<()> {
-    let payload = serde_json::to_vec(state).context("Failed to serialize reconcile state")?;
-    state_store
-        .set(source_id, RECONCILE_STATE_KEY, payload)
-        .await
-        .map_err(|e| anyhow::anyhow!("state_store.set({RECONCILE_STATE_KEY}) failed: {e}"))
-}
-
-pub async fn load_reconcile_index(
-    state_store: &dyn StateStoreProvider,
-    source_id: &str,
-) -> Result<HashMap<String, SnapshotElement>> {
-    Ok(load_reconcile_state(state_store, source_id).await?.index)
-}
-
-pub async fn save_reconcile_index(
-    state_store: &dyn StateStoreProvider,
-    source_id: &str,
-    index: &HashMap<String, SnapshotElement>,
-) -> Result<()> {
-    let mut state = load_reconcile_state(state_store, source_id).await?;
-    state.generation = state.generation.saturating_add(1);
-    state.index = index.clone();
-    save_reconcile_state(state_store, source_id, &state).await
-}
-
-pub(crate) fn prepare_reconcile_transition(
-    state: &mut ReconcileState,
-    next_index: HashMap<String, SnapshotElement>,
-    changes: Vec<SourceChange>,
-    wal_coverage_sequence: u64,
-) {
-    let generation = state.generation.saturating_add(1);
-    for (id, previous) in &state.index {
-        if previous.element_type != "node" || next_index.contains_key(id) {
-            continue;
-        }
-        let observation = AbsenceObservation {
-            generation,
-            wal_coverage_sequence,
-        };
-        state.absences.insert(id.clone(), observation.clone());
-        if previous
-            .labels
-            .iter()
-            .any(|label| label == "GitHubRepository")
-        {
-            if let Some(repo) = previous
-                .properties
-                .get("nameWithOwner")
-                .and_then(serde_json::Value::as_str)
-            {
-                state
-                    .absences
-                    .insert(format!("repo:{}", repo.to_ascii_lowercase()), observation);
-            }
-        }
-    }
-    for (id, current) in &next_index {
-        state.absences.remove(id);
-        if current
-            .labels
-            .iter()
-            .any(|label| label == "GitHubRepository")
-        {
-            if let Some(repo) = current
-                .properties
-                .get("nameWithOwner")
-                .and_then(serde_json::Value::as_str)
-            {
-                state
-                    .absences
-                    .remove(&format!("repo:{}", repo.to_ascii_lowercase()));
-            }
-        }
-    }
-    state.generation = generation;
-    state.index = next_index;
-    let mut pending_changes = state
-        .pending_delta
-        .take()
-        .map(|pending| pending.changes)
-        .unwrap_or_default();
-    pending_changes.extend(changes);
-    state.pending_delta = (!pending_changes.is_empty()).then_some(PendingDelta {
-        changes: pending_changes,
-    });
-}
-
-pub(crate) async fn replay_pending_delta(
-    state_store: &dyn StateStoreProvider,
-    source_id: &str,
-    source_base: &SourceBase,
-) -> Result<bool> {
-    let mut state = load_reconcile_state(state_store, source_id).await?;
-    let Some(pending) = state.pending_delta.clone() else {
-        return Ok(false);
-    };
-    let events = pending
-        .changes
-        .into_iter()
-        .map(|change| {
-            SourceEventWrapper::new(
-                source_id.to_string(),
-                SourceEvent::Change(change),
-                chrono::Utc::now(),
-            )
-        })
-        .collect();
-    let dispatched_subscribers = source_base
-        .dispatch_events_batch_to_eligible_ready_channel_subscribers(events)
-        .await
-        .context("Failed dispatching pending reconciliation changes")?;
-    if dispatched_subscribers == 0 {
-        return Ok(false);
-    }
-    state.pending_delta = None;
-    save_reconcile_state(state_store, source_id, &state)
-        .await
-        .context("Failed clearing pending reconciliation delta")?;
-    Ok(true)
-}
-
 pub async fn load_effective_repos(
     state_store: &dyn StateStoreProvider,
     source_id: &str,
@@ -1222,4 +720,48 @@ pub async fn save_effective_repos(
         .set(source_id, EFFECTIVE_REPOS_KEY, payload)
         .await
         .map_err(|e| anyhow::anyhow!("state_store.set({EFFECTIVE_REPOS_KEY}) failed: {e}"))
+}
+
+pub async fn add_effective_repo(
+    state_store: &dyn StateStoreProvider,
+    source_id: &str,
+    effective_repos: &Arc<RwLock<HashSet<String>>>,
+    repo: &str,
+) -> Result<bool> {
+    let mut guard = effective_repos.write().await;
+    let inserted = guard.insert(repo.to_ascii_lowercase());
+    if inserted {
+        save_effective_repos(state_store, source_id, &guard).await?;
+    }
+    Ok(inserted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{owned_descendants, replace_ownership_edges, OwnershipAdjacency};
+
+    #[test]
+    fn ownership_adjacency_cascades_without_treating_tracks_as_ownership() {
+        let mut adjacency = OwnershipAdjacency::default();
+        replace_ownership_edges(&mut adjacency, "review-1", &["pull-request-1".to_string()]);
+        replace_ownership_edges(
+            &mut adjacency,
+            "review-comment-1",
+            &["review-1".to_string(), "pull-request-1".to_string()],
+        );
+        replace_ownership_edges(&mut adjacency, "project-item-1", &["project-1".to_string()]);
+
+        assert_eq!(
+            owned_descendants(&adjacency, "pull-request-1"),
+            vec!["review-1", "review-comment-1"]
+        );
+        assert_eq!(
+            owned_descendants(&adjacency, "project-1"),
+            vec!["project-item-1"]
+        );
+        assert!(
+            owned_descendants(&adjacency, "tracked-issue-1").is_empty(),
+            "TRACKS targets must never gain owning adjacency"
+        );
+    }
 }

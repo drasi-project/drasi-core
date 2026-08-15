@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Signed webhook listener and durable admission pipeline.
+//! Signed webhook listener and durable inbox admission pipeline.
 
 use crate::types::{HydratorHealth, WebhookLocator};
 use anyhow::{anyhow, Context, Result};
@@ -25,11 +25,9 @@ use axum::{Json, Router};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
-use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::wal::{WalError, WalProvider};
 use hmac::{Hmac, Mac};
 use log::{debug, error, warn};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Sha256;
 use std::net::SocketAddr;
@@ -41,27 +39,17 @@ use tokio::sync::{Mutex, Notify, RwLock};
 type HmacSha256 = Hmac<Sha256>;
 
 const DELIVERY_LABEL: &str = "__GitHubDelivery";
-const DEDUPE_KEY_PREFIX: &str = "dedupe:";
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DedupeMarker {
-    delivery_id: String,
-    admitted_sequence: u64,
-    event_type: String,
-    action: String,
-}
 
 #[derive(Clone)]
 pub struct WebhookServerParams {
     pub source_id: String,
+    pub inbox_source_id: String,
     pub host: String,
     pub port: u16,
     pub path: String,
     pub body_limit_bytes: usize,
     pub secret: String,
     pub wal: Arc<dyn WalProvider>,
-    pub state_store: Arc<dyn StateStoreProvider>,
     pub hydrator_notify: Arc<Notify>,
     pub hydrator_health: Arc<RwLock<HydratorHealth>>,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
@@ -70,13 +58,13 @@ pub struct WebhookServerParams {
 #[derive(Clone)]
 struct WebhookState {
     source_id: String,
+    inbox_source_id: String,
     path: String,
     secret: Vec<u8>,
     wal: Arc<dyn WalProvider>,
-    state_store: Arc<dyn StateStoreProvider>,
     hydrator_notify: Arc<Notify>,
     hydrator_health: Arc<RwLock<HydratorHealth>>,
-    admission_gate: Arc<Mutex<()>>,
+    ingress_gate: Arc<Mutex<()>>,
 }
 
 pub async fn run_webhook_server(params: WebhookServerParams) -> Result<()> {
@@ -100,13 +88,13 @@ pub async fn serve_webhook_listener(
 ) -> Result<()> {
     let state = Arc::new(WebhookState {
         source_id: params.source_id.clone(),
+        inbox_source_id: params.inbox_source_id,
         path: params.path.clone(),
         secret: params.secret.into_bytes(),
         wal: params.wal,
-        state_store: params.state_store,
         hydrator_notify: params.hydrator_notify,
         hydrator_health: params.hydrator_health,
-        admission_gate: Arc::new(Mutex::new(())),
+        ingress_gate: Arc::new(Mutex::new(())),
     });
 
     let router = Router::new()
@@ -144,11 +132,6 @@ async fn webhook_handler(
             Json(json!({ "error": msg })),
         )
             .into_response(),
-        Err(DeliveryError::Internal(msg)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": msg })),
-        )
-            .into_response(),
     }
 }
 
@@ -166,6 +149,7 @@ async fn health_handler(State(state): State<Arc<WebhookState>>) -> impl IntoResp
         Json(json!({
             "status": status,
             "sourceId": state.source_id,
+            "path": state.path,
             "hydrator": health
         })),
     )
@@ -176,7 +160,6 @@ pub(crate) enum DeliveryError {
     Unauthorized(String),
     BadRequest(String),
     ServiceUnavailable(String),
-    Internal(String),
 }
 
 async fn handle_delivery(
@@ -197,178 +180,76 @@ async fn handle_delivery(
 
     let locator = parse_locator(event_type, &body)
         .map_err(|e| DeliveryError::BadRequest(format!("Invalid webhook payload: {e}")))?;
-    debug!(
-        "[{}] Admitting delivery {} event={} action={} node_id={:?}",
-        state.source_id, delivery_id, locator.event_type, locator.action, locator.node_id
-    );
     let admission_change = encode_admission_change(&state.source_id, delivery_id, &locator)
-        .map_err(|e| DeliveryError::Internal(format!("Failed to encode delivery: {e}")))?;
+        .map_err(|e| {
+            DeliveryError::ServiceUnavailable(format!("Failed to encode delivery: {e}"))
+        })?;
 
-    let _guard = state.admission_gate.lock().await;
-    let _health_guard = state.hydrator_health.write().await;
-    if _health_guard.terminal {
-        return Err(DeliveryError::ServiceUnavailable(
-            "Hydrator is unavailable; retry after the source is restarted".to_string(),
-        ));
-    }
-    let dedupe_key = format!("{DEDUPE_KEY_PREFIX}{delivery_id}");
-    let is_duplicate = state
-        .state_store
-        .contains_key(&state.source_id, &dedupe_key)
-        .await
-        .map_err(|e| DeliveryError::Internal(format!("State store read failed: {e}")))?;
-    if is_duplicate {
-        debug!(
-            "[{}] Duplicate webhook delivery ignored: {}",
-            state.source_id, delivery_id
-        );
-        return Ok(StatusCode::OK);
+    let _guard = state.ingress_gate.lock().await;
+    {
+        let health = state.hydrator_health.read().await;
+        if health.terminal {
+            return Err(DeliveryError::ServiceUnavailable(
+                "Hydrator is unavailable; stop then restart the source".to_string(),
+            ));
+        }
     }
 
     if let Some(existing_sequence) =
-        find_delivery_in_wal(state.wal.as_ref(), &state.source_id, delivery_id)
+        find_delivery_in_wal(state.wal.as_ref(), &state.inbox_source_id, delivery_id)
             .await
-            .map_err(|e| DeliveryError::Internal(format!("WAL dedupe scan failed: {e}")))?
+            .map_err(|e| {
+                error!(
+                    "[{}] Failed scanning inbox WAL for duplicate delivery {}: {e:#}",
+                    state.source_id, delivery_id
+                );
+                DeliveryError::ServiceUnavailable("Inbox dedupe check failed".to_string())
+            })?
     {
-        persist_dedupe_marker(
-            state.state_store.as_ref(),
-            &state.source_id,
-            &dedupe_key,
-            delivery_id,
-            existing_sequence,
-            &locator.event_type,
-            &locator.action,
-        )
-        .await?;
-        state.hydrator_notify.notify_one();
         debug!(
-            "[{}] Recovered dedupe marker from WAL for delivery {}",
-            state.source_id, delivery_id
+            "[{}] Duplicate webhook delivery ignored: {} (already in inbox at seq {})",
+            state.source_id, delivery_id, existing_sequence
         );
         return Ok(StatusCode::OK);
     }
 
-    match state.wal.append(&state.source_id, &admission_change).await {
+    match state
+        .wal
+        .append(&state.inbox_source_id, &admission_change)
+        .await
+    {
         Ok(seq) => {
-            persist_dedupe_marker(
-                state.state_store.as_ref(),
-                &state.source_id,
-                &dedupe_key,
-                delivery_id,
-                seq,
-                &locator.event_type,
-                &locator.action,
-            )
-            .await?;
+            debug!(
+                "[{}] Admitted delivery {} to inbox WAL at seq {}",
+                state.source_id, delivery_id, seq
+            );
             state.hydrator_notify.notify_one();
             Ok(StatusCode::OK)
         }
-        Err(WalError::CapacityExhausted { .. }) => Err(DeliveryError::ServiceUnavailable(
-            "WAL capacity exhausted; retry later".to_string(),
+        Err(WalError::CapacityExhausted(_)) => Err(DeliveryError::ServiceUnavailable(
+            "Inbox WAL capacity exhausted; retry later".to_string(),
         )),
         Err(e) => {
             error!(
-                "[{}] Failed to append webhook delivery {} to WAL: {}",
+                "[{}] Failed to append delivery {} to inbox WAL: {}",
                 state.source_id, delivery_id, e
             );
-            Err(DeliveryError::Internal(
-                "Admission WAL append failed".to_string(),
+            Err(DeliveryError::ServiceUnavailable(
+                "Inbox WAL append failed".to_string(),
             ))
         }
     }
 }
 
-pub(crate) async fn persist_dedupe_marker(
-    state_store: &dyn StateStoreProvider,
-    source_id: &str,
-    dedupe_key: &str,
-    delivery_id: &str,
-    admitted_sequence: u64,
-    event_type: &str,
-    action: &str,
-) -> Result<(), DeliveryError> {
-    let dedupe_value = DedupeMarker {
-        delivery_id: delivery_id.to_string(),
-        admitted_sequence,
-        event_type: event_type.to_string(),
-        action: action.to_string(),
-    };
-    state_store
-        .set(
-            source_id,
-            dedupe_key,
-            serde_json::to_vec(&dedupe_value)
-                .map_err(|e| DeliveryError::Internal(format!("serialize dedupe value: {e}")))?,
-        )
-        .await
-        .map_err(|e| DeliveryError::Internal(format!("State store write failed: {e}")))?;
-    Ok(())
-}
-
-pub(crate) async fn compact_dedupe_markers(
-    state_store: &dyn StateStoreProvider,
-    wal: &dyn WalProvider,
-    source_id: &str,
-) -> Result<()> {
-    let oldest = wal
-        .oldest_sequence(source_id)
-        .await
-        .context("Failed to find oldest WAL sequence during dedupe compaction")?;
-    let head = if oldest.is_none() {
-        Some(
-            wal.head_sequence(source_id)
-                .await
-                .context("Failed to find WAL head during dedupe compaction")?,
-        )
-    } else {
-        None
-    };
-
-    let keys = state_store
-        .list_keys(source_id)
-        .await
-        .context("Failed to list dedupe markers")?;
-    let mut obsolete = Vec::new();
-    for key in keys
-        .into_iter()
-        .filter(|key| key.starts_with(DEDUPE_KEY_PREFIX))
-    {
-        let Some(value) = state_store
-            .get(source_id, &key)
-            .await
-            .with_context(|| format!("Failed to read dedupe marker '{key}'"))?
-        else {
-            continue;
-        };
-        let marker: DedupeMarker = serde_json::from_slice(&value)
-            .with_context(|| format!("Failed to deserialize dedupe marker '{key}'"))?;
-        let is_obsolete = oldest
-            .map(|oldest| marker.admitted_sequence < oldest)
-            .unwrap_or_else(|| head.is_some_and(|head| marker.admitted_sequence <= head));
-        if is_obsolete {
-            obsolete.push(key);
-        }
-    }
-
-    if !obsolete.is_empty() {
-        let key_refs: Vec<&str> = obsolete.iter().map(String::as_str).collect();
-        state_store
-            .delete_many(source_id, &key_refs)
-            .await
-            .context("Failed to delete obsolete dedupe markers")?;
-    }
-    Ok(())
-}
-
 pub(crate) async fn find_delivery_in_wal(
     wal: &dyn WalProvider,
-    source_id: &str,
+    wal_id: &str,
     delivery_id: &str,
 ) -> Result<Option<u64>> {
-    let Some(oldest) = wal.oldest_sequence(source_id).await? else {
+    let Some(oldest) = wal.oldest_sequence(wal_id).await? else {
         return Ok(None);
     };
-    let entries = wal.read_from(source_id, oldest).await?;
+    let entries = wal.read_from(wal_id, oldest).await?;
     for (sequence, change) in entries {
         if let Ok((existing_delivery_id, _)) = decode_admission_change(&change) {
             if existing_delivery_id == delivery_id {
@@ -562,10 +443,6 @@ pub fn decode_admission_change(change: &SourceChange) -> Result<(String, Webhook
     };
     let locator: WebhookLocator = serde_json::from_str(&locator_json)?;
     Ok((delivery_id, locator))
-}
-
-pub fn dedupe_key(delivery_id: &str) -> String {
-    format!("{DEDUPE_KEY_PREFIX}{delivery_id}")
 }
 
 pub fn delivery_label() -> &'static str {

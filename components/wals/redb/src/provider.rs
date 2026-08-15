@@ -67,15 +67,51 @@ impl RedbWalProvider {
         }
     }
 
+    fn source_file_stem(source_id: &str) -> String {
+        // Bijective encoding to avoid file-path aliasing across distinct source IDs.
+        // Example: "a:b" and "a_3a_b" must map to different files.
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let bytes = source_id.as_bytes();
+        let mut stem = String::with_capacity("srcid-".len() + bytes.len() * 2);
+        stem.push_str("srcid-");
+        for byte in bytes {
+            stem.push(HEX[(byte >> 4) as usize] as char);
+            stem.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        stem
+    }
+
     fn wal_path(&self, source_id: &str) -> PathBuf {
+        self.root_dir
+            .join(format!("{}.redb", Self::source_file_stem(source_id)))
+    }
+
+    fn legacy_wal_path(&self, source_id: &str) -> PathBuf {
         self.root_dir.join(format!("{source_id}.redb"))
+    }
+
+    fn resolve_wal_path(&self, source_id: &str) -> PathBuf {
+        let encoded = self.wal_path(source_id);
+        if encoded.exists() {
+            return encoded;
+        }
+        let legacy = self.legacy_wal_path(source_id);
+        if legacy.exists() {
+            log::warn!(
+                "Using legacy WAL path for source '{}': {}",
+                source_id,
+                legacy.display()
+            );
+            return legacy;
+        }
+        encoded
     }
 
     /// Validate that `source_id` is safe to use as a filename segment.
     ///
     /// Rejects empty strings, path separators (`/`, `\`), parent-directory
     /// tokens (`..`), hidden-file leading dots, NUL bytes, and any character
-    /// outside the conservative set `[A-Za-z0-9_-]`. File-backed providers
+    /// outside the conservative set `[A-Za-z0-9_:-]`. File-backed providers
     /// concatenate `source_id` into on-disk paths, so accepting arbitrary
     /// strings here would let callers write or delete files outside
     /// `root_dir` via a hostile or typo'd id.
@@ -93,11 +129,11 @@ impl RedbWalProvider {
             ));
         }
         for ch in source_id.chars() {
-            if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+            if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == ':') {
                 return Err(WalError::InvalidSourceId(
                     source_id.to_string(),
                     format!(
-                        "source_id may contain only ASCII alphanumerics, '_', or '-' (found '{ch}')"
+                        "source_id may contain only ASCII alphanumerics, '_', '-', or ':' (found '{ch}')"
                     ),
                 ));
             }
@@ -146,7 +182,7 @@ impl WalProvider for RedbWalProvider {
             .await
             .map_err(|e| WalError::StorageError(format!("Failed to create WAL root dir: {e}")))?;
 
-        let path = self.wal_path(source_id);
+        let path = self.resolve_wal_path(source_id);
         let (db, counter_value) = open_or_create_db(path.clone()).await?;
 
         let state = Arc::new(SourceWalState {
@@ -465,15 +501,27 @@ impl WalProvider for RedbWalProvider {
         let removed = self.states.write().await.remove(source_id);
 
         // Best-effort file deletion — whether or not the source was registered.
-        let path = match &removed {
-            Some(state) => state.path.clone(),
-            None => self.wal_path(source_id),
-        };
+        let mut paths = Vec::new();
+        match &removed {
+            Some(state) => paths.push(state.path.clone()),
+            None => {
+                paths.push(self.wal_path(source_id));
+                let legacy = self.legacy_wal_path(source_id);
+                if legacy != paths[0] {
+                    paths.push(legacy);
+                }
+            }
+        }
 
-        if path.exists() {
-            tokio::fs::remove_file(&path)
-                .await
-                .map_err(|e| WalError::StorageError(format!("Failed to delete WAL file: {e}")))?;
+        for path in paths {
+            if path.exists() {
+                tokio::fs::remove_file(&path).await.map_err(|e| {
+                    WalError::StorageError(format!(
+                        "Failed to delete WAL file {}: {e}",
+                        path.display()
+                    ))
+                })?;
+            }
         }
         Ok(())
     }

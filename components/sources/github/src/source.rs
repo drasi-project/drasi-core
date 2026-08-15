@@ -14,38 +14,38 @@
 
 //! Authorized GitHub source implementation.
 
-use crate::bootstrap::GitHubBootstrapProvider;
 use crate::config::GitHubSourceConfig;
 use crate::graphql::GitHubGraphQLClient;
 use crate::hydrator::{
-    load_effective_repos, replay_pending_delta, run_hydrator_loop, save_effective_repos,
-    HydratorParams,
+    load_effective_repos, run_hydrator_loop, save_effective_repos, HydratorParams,
 };
-use crate::mapping::{node_labels, relation_labels};
-use crate::reconciler::{run_reconciler_loop, ReconcilerParams};
+use crate::mapping::{node_labels, relation_labels, repositories_from_project_items};
 use crate::types::HydratorHealth;
-use crate::webhook::{compact_dedupe_markers, serve_webhook_listener, WebhookServerParams};
+use crate::webhook::{serve_webhook_listener, WebhookServerParams};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use bytes::Bytes;
 use drasi_lib::channels::{ComponentStatus, DispatchMode, SubscriptionResponse};
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::context::SourceRuntimeContext;
 use drasi_lib::schema::{NodeSchema, RelationSchema, SourceSchema};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+use drasi_lib::sources::{ByteLexPositionComparator, SourceError};
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::wal::WalProvider;
 use drasi_lib::Source;
 use log::{error, info, warn};
 use std::collections::HashSet;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration, Instant};
 
 const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const OUTPUT_PRUNE_TICK: Duration = Duration::from_secs(1);
 
-/// GitHub webhook source with authoritative hydrator/reconciler.
+/// GitHub webhook source with durable inbox/outbox WAL partitions.
 pub struct GitHubSource {
     pub(crate) base: SourceBase,
     config: GitHubSourceConfig,
@@ -55,7 +55,13 @@ pub struct GitHubSource {
     shutdown_tx: Arc<RwLock<Option<tokio::sync::watch::Sender<bool>>>>,
     hydrator_notify: Arc<Notify>,
     hydrator_health: Arc<RwLock<HydratorHealth>>,
-    processing_gate: Arc<Mutex<()>>,
+    output_gate: Arc<Mutex<()>>,
+}
+
+impl GitHubSource {
+    fn inbox_wal_id(&self) -> String {
+        format!("{}::inbox", self.base.id)
+    }
 }
 
 #[async_trait]
@@ -78,10 +84,6 @@ impl Source for GitHubSource {
 
     fn dispatch_mode(&self) -> DispatchMode {
         self.base.get_dispatch_mode()
-    }
-
-    fn supports_replay(&self) -> bool {
-        false
     }
 
     fn describe_schema(&self) -> Option<SourceSchema> {
@@ -113,6 +115,10 @@ impl Source for GitHubSource {
             )
             .await;
 
+        self.base
+            .set_position_comparator(ByteLexPositionComparator)
+            .await;
+
         let context = self
             .base
             .context()
@@ -121,7 +127,7 @@ impl Source for GitHubSource {
         let wal = context
             .wal_provider
             .clone()
-            .ok_or_else(|| anyhow!("Durability enabled but no WAL provider configured"))?;
+            .ok_or_else(|| anyhow!("GitHub source requires a WAL provider"))?;
         let state_store = self
             .base
             .state_store()
@@ -144,11 +150,19 @@ impl Source for GitHubSource {
             .await
             .map_err(|e| {
                 anyhow!(
-                    "Failed to register WAL for source '{}': {}",
+                    "Failed to register output WAL for source '{}': {}",
                     self.base.id,
                     e
                 )
             })?;
+        let inbox_wal_id = self.inbox_wal_id();
+        wal.register(&inbox_wal_id, wal_config).await.map_err(|e| {
+            anyhow!(
+                "Failed to register inbox WAL for source '{}': {}",
+                self.base.id,
+                e
+            )
+        })?;
         *self.wal.write().await = Some(wal.clone());
 
         let api_client = Arc::new(
@@ -156,27 +170,30 @@ impl Source for GitHubSource {
                 .context("Failed to initialize GitHub API client")?,
         );
 
-        let mut effective = self.config.static_repository_set()?;
-        let saved_repos = load_effective_repos(state_store.as_ref(), &self.base.id)
+        let mut effective = load_effective_repos(state_store.as_ref(), &self.base.id)
             .await
             .context("Failed to load persisted effective repositories")?;
-        if !saved_repos.is_empty() {
-            effective = saved_repos;
-        }
-        for repo in &self.config.repositories {
-            effective.insert(repo.to_ascii_lowercase());
+        effective.extend(self.config.static_repository_set()?);
+        for project in &self.config.projects {
+            let project_items =
+                api_client
+                    .fetch_project_items(project)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed fetching project items for owner={} number={}",
+                            project.owner, project.number
+                        )
+                    })?;
+            effective.extend(repositories_from_project_items(&project_items));
         }
         save_effective_repos(state_store.as_ref(), &self.base.id, &effective).await?;
-        *self.effective_repos.write().await = effective.clone();
+        *self.effective_repos.write().await = effective;
         *self.hydrator_health.write().await = HydratorHealth::default();
-        compact_dedupe_markers(state_store.as_ref(), wal.as_ref(), &self.base.id)
-            .await
-            .context("Failed to compact delivery dedupe markers during startup")?;
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         *self.shutdown_tx.write().await = Some(shutdown_tx);
 
-        // Bind listener before any bootstrap/reconcile work.
         let bind_addr = format!("{}:{}", self.config.webhook.host, self.config.webhook.port);
         let listener = TcpListener::bind(&bind_addr)
             .await
@@ -185,42 +202,56 @@ impl Source for GitHubSource {
 
         let webhook_params = WebhookServerParams {
             source_id: self.base.id.clone(),
+            inbox_source_id: inbox_wal_id.clone(),
             host: self.config.webhook.host.clone(),
             port: self.config.webhook.port,
             path: self.config.webhook.path.clone(),
             body_limit_bytes: self.config.webhook.body_limit_bytes,
             secret: self.config.webhook.secret.clone(),
             wal: wal.clone(),
-            state_store: state_store.clone(),
             hydrator_notify: self.hydrator_notify.clone(),
             hydrator_health: self.hydrator_health.clone(),
             shutdown: shutdown_rx.clone(),
         };
+        let webhook_health = self.hydrator_health.clone();
+        let webhook_base = self.base.clone_shared();
+        let webhook_source_id = self.base.id.clone();
         let webhook_handle = tokio::spawn(async move {
             if let Err(err) = serve_webhook_listener(listener, webhook_params).await {
-                error!("GitHub webhook listener failed: {err:#}");
+                {
+                    let mut health = webhook_health.write().await;
+                    health.terminal = true;
+                    health.next_retry_secs = None;
+                    health.last_error = Some(format!("{err:#}"));
+                }
+                webhook_base
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(
+                            "GitHub webhook listener terminated; source restart required"
+                                .to_string(),
+                        ),
+                    )
+                    .await;
+                error!("[{webhook_source_id}] GitHub webhook listener failed terminally: {err:#}");
             }
         });
 
         let hydrator_params = HydratorParams {
             source_id: self.base.id.clone(),
+            inbox_source_id: inbox_wal_id,
+            output_source_id: self.base.id.clone(),
             base: self.base.clone_shared(),
             wal: wal.clone(),
             state_store: state_store.clone(),
             api_client: api_client.clone(),
             projects: self.config.projects.clone(),
             effective_repos: self.effective_repos.clone(),
+            output_gate: self.output_gate.clone(),
             notify: self.hydrator_notify.clone(),
             health: self.hydrator_health.clone(),
-            processing_gate: self.processing_gate.clone(),
             shutdown: shutdown_rx.clone(),
         };
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some("GitHub source running".to_string()),
-            )
-            .await;
         let hydrator_failure_health = self.hydrator_health.clone();
         let hydrator_failure_base = self.base.clone_shared();
         let hydrator_failure_source_id = self.base.id.clone();
@@ -245,23 +276,28 @@ impl Source for GitHubSource {
             }
         });
 
-        let reconciler_params = ReconcilerParams {
-            source_id: self.base.id.clone(),
-            base: self.base.clone_shared(),
-            state_store,
-            wal,
-            api_client,
-            projects: self.config.projects.clone(),
-            static_repos: self.config.static_repository_set().unwrap_or_default(),
-            effective_repos: self.effective_repos.clone(),
-            interval_secs: self.config.reconcile_interval_secs,
-            run_initial_pass: !self.config.skip_initial_bootstrap,
-            processing_gate: self.processing_gate.clone(),
-            shutdown: shutdown_rx,
-        };
-        let reconciler_handle = tokio::spawn(async move {
-            if let Err(err) = run_reconciler_loop(reconciler_params).await {
-                error!("GitHub reconciler task failed: {err:#}");
+        let prune_wal = wal.clone();
+        let prune_source_id = self.base.id.clone();
+        let prune_base = self.base.clone_shared();
+        let mut prune_shutdown = shutdown_rx.clone();
+        let output_prune_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(OUTPUT_PRUNE_TICK);
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if let Some(confirmed) = prune_base.compute_confirmed_position().await {
+                            if let Err(err) = prune_wal.prune_up_to(&prune_source_id, confirmed).await {
+                                warn!("[{prune_source_id}] Failed pruning output WAL at confirmed seq {confirmed}: {err}");
+                            }
+                        }
+                    }
+                    changed = prune_shutdown.changed() => {
+                        if changed.is_err() || *prune_shutdown.borrow() {
+                            break;
+                        }
+                    }
+                }
             }
         });
 
@@ -269,9 +305,15 @@ impl Source for GitHubSource {
             let mut handles = self.task_handles.write().await;
             handles.push(webhook_handle);
             handles.push(hydrator_handle);
-            handles.push(reconciler_handle);
+            handles.push(output_prune_handle);
         }
 
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("GitHub source running".to_string()),
+            )
+            .await;
         info!("[{}] GitHub source started", self.base.id);
         Ok(())
     }
@@ -336,25 +378,37 @@ impl Source for GitHubSource {
         &self,
         settings: SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        let starts_bootstrap = settings.enable_bootstrap && settings.resume_from.is_none();
-        let response = self
-            .base
-            .subscribe_with_bootstrap_readiness(&settings, "github")
-            .await?;
+        let _output_guard = self.output_gate.lock().await;
+        let wal_guard = self.wal.read().await;
+        let wal = wal_guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow!("GitHub source WAL is not initialized"))?;
+        drop(wal_guard);
 
-        // The spawned bootstrap task owns the processing gate and replays pending
-        // deltas only after this query's full snapshot makes it ready. Waiting on that gate here could
-        // deadlock if a large bootstrap fills its channel before this response is
-        // returned to the query manager.
-        if starts_bootstrap {
-            return Ok(response);
+        if let Some(resume_from) = &settings.resume_from {
+            let resume_seq = decode_position_u64(resume_from)?;
+            if let Some(oldest) = wal.oldest_sequence(&self.base.id).await? {
+                if resume_seq.saturating_add(1) < oldest {
+                    return Err(SourceError::PositionUnavailable {
+                        source_id: self.base.id.clone(),
+                        requested: resume_from.clone(),
+                        earliest_available: Some(Bytes::from(oldest.to_be_bytes().to_vec())),
+                    }
+                    .into());
+                }
+            }
+            return self
+                .base
+                .subscribe_with_replay(&settings, wal.as_ref(), resume_seq, "github")
+                .await;
         }
 
-        let _processing_guard = self.processing_gate.lock().await;
-        if let Some(state_store) = self.base.state_store().await {
-            replay_pending_delta(state_store.as_ref(), &self.base.id, &self.base).await?;
-        }
-        Ok(response)
+        let oldest = wal.oldest_sequence(&self.base.id).await?;
+        let resume_seq = oldest.map(|seq| seq.saturating_sub(1)).unwrap_or(0);
+        self.base
+            .subscribe_with_replay(&settings, wal.as_ref(), resume_seq, "github")
+            .await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -376,10 +430,25 @@ impl Source for GitHubSource {
         if let Some(wal) = self.wal.read().await.clone() {
             wal.delete_wal(&self.base.id)
                 .await
-                .context("Failed to delete source WAL data during deprovision")?;
+                .context("Failed to delete output WAL data during deprovision")?;
+            wal.delete_wal(&self.inbox_wal_id())
+                .await
+                .context("Failed to delete inbox WAL data during deprovision")?;
         }
         self.base.deprovision_common().await
     }
+}
+
+fn decode_position_u64(position: &Bytes) -> Result<u64> {
+    if position.len() != 8 {
+        return Err(anyhow!(
+            "Invalid resume_from position: expected 8-byte big-endian u64, got {} byte(s)",
+            position.len()
+        ));
+    }
+    Ok(u64::from_be_bytes(position.as_ref().try_into().map_err(
+        |_| anyhow!("Failed to decode resume_from bytes as u64"),
+    )?))
 }
 
 /// Builder for [`GitHubSource`].
@@ -388,7 +457,6 @@ pub struct GitHubSourceBuilder {
     config: GitHubSourceConfig,
     auto_start: bool,
     dispatch_mode: DispatchMode,
-    bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
     state_store: Option<Arc<dyn StateStoreProvider>>,
 }
 
@@ -399,7 +467,6 @@ impl GitHubSourceBuilder {
             config: GitHubSourceConfig::default(),
             auto_start: true,
             dispatch_mode: DispatchMode::Channel,
-            bootstrap_provider: None,
             state_store: None,
         }
     }
@@ -419,14 +486,6 @@ impl GitHubSourceBuilder {
         self
     }
 
-    pub fn with_bootstrap_provider(
-        mut self,
-        provider: impl drasi_lib::bootstrap::BootstrapProvider + 'static,
-    ) -> Self {
-        self.bootstrap_provider = Some(Box::new(provider));
-        self
-    }
-
     pub fn with_state_store(mut self, state_store: Arc<dyn StateStoreProvider>) -> Self {
         self.state_store = Some(state_store);
         self
@@ -436,46 +495,28 @@ impl GitHubSourceBuilder {
         self.config.validate()?;
         if self.dispatch_mode == DispatchMode::Broadcast {
             return Err(anyhow!(
-                "GitHub source only supports DispatchMode::Channel because bootstrap reconciliation requires per-query readiness"
+                "GitHub source only supports DispatchMode::Channel for deterministic replay"
             ));
         }
 
-        let effective_repos = Arc::new(RwLock::new(HashSet::new()));
-        let processing_gate = Arc::new(Mutex::new(()));
-        let bootstrap_source_base = Arc::new(OnceLock::new());
         let mut params = SourceBaseParams::new(&self.id)
             .with_dispatch_mode(self.dispatch_mode)
             .with_auto_start(self.auto_start);
-
-        if let Some(provider) = self.bootstrap_provider {
-            params = params.with_bootstrap_provider(provider);
-        } else {
-            params = params.with_bootstrap_provider(GitHubBootstrapProvider::new(
-                self.config.clone(),
-                effective_repos.clone(),
-                processing_gate.clone(),
-                bootstrap_source_base.clone(),
-            ));
-        }
-
         if let Some(state_store) = self.state_store {
             params = params.with_state_store(state_store);
         }
 
         let base = SourceBase::new(params)?;
-        bootstrap_source_base
-            .set(base.clone_shared())
-            .map_err(|_| anyhow!("GitHub bootstrap dispatcher initialized more than once"))?;
         Ok(GitHubSource {
             base,
             config: self.config,
             wal: Arc::new(RwLock::new(None)),
-            effective_repos,
+            effective_repos: Arc::new(RwLock::new(HashSet::new())),
             task_handles: Arc::new(RwLock::new(Vec::new())),
             shutdown_tx: Arc::new(RwLock::new(None)),
             hydrator_notify: Arc::new(Notify::new()),
             hydrator_health: Arc::new(RwLock::new(HydratorHealth::default())),
-            processing_gate,
+            output_gate: Arc::new(Mutex::new(())),
         })
     }
 }
