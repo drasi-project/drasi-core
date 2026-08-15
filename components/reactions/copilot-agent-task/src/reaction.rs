@@ -12,20 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The Copilot Agent Task reaction: subscribes to a single launch query and,
-//! for every `Add` row, validates it, runs preflight checks, durably
-//! reserves the attempt, launches a GitHub Copilot coding-agent task, and
-//! posts a `workgraph.execution/v1` issue comment.
+//! The Copilot Agent Task reaction.
 //!
-//! `Update` and `Delete` diffs (and `Aggregation`/`Noop`) are never acted on
-//! — this reaction only launches on rows newly added to the query's result
-//! set.
+//! The launch query only *nominates* a run. For each newly `Add`ed row the
+//! reaction re-reads everything it trusts from GitHub before any write:
+//!
+//! 1. validate the row against the configured allowlists;
+//! 2. read the authoritative issue and derive the body digest and `runId`
+//!    (a body edited since the assignment aborts the launch with no effect);
+//! 3. verify the Project item binding and that its status is
+//!    `AwaitingValidation`;
+//! 4. read the single trusted, unedited `ResponsibilityAssigned` assignment
+//!    comment (authored by `trustedAssignmentAuthorDatabaseId` +
+//!    `trustedAssignmentAuthorType`) and require its content digest to match;
+//! 5. pin the agent profile to the exact blob the assignment named;
+//! 6. durably reserve the run **before** any external write;
+//! 7. reconcile-or-create exactly one agent task (with one fallback-model
+//!    retry on a clearly-unsupported-model 422); and
+//! 8. post exactly one `ExecutionStarted` WorkGraphEvent/v1 comment, adopting
+//!    one a previous attempt may already have written only when its canonical
+//!    event JSON is byte-identical to the event this reaction intends to post.
+//!
+//! Each side effect is reconciled and persisted with an exact-bytes
+//! compare-and-swap before the next, so a crash at any point resumes without
+//! duplicating an external effect. `Update`/`Delete`/`Aggregation`/`Noop`
+//! diffs are never acted on.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use log::{error, info, warn};
 
@@ -33,26 +50,55 @@ use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::reactions::common::CheckpointState;
+use drasi_lib::reactions::ManagerCheckpointOwnership;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::Reaction;
+use drasi_workgraph_common::{
+    comment::{parse_comment, render_comment},
+    dedup::{adopt_published_event, coalesce, ObservedComment},
+    event::{
+        ExecutionStartedPayload, ResponsibilityAssignedPayload, WorkGraphEvent,
+        WorkGraphEventPayload, WorkGraphEventType,
+    },
+    ids::{body_digest, event_id, run_id},
+    status::AWAITING_VALIDATION,
+    summary::{summary_for, SubjectRef},
+};
 
 use crate::config::CopilotAgentTaskReactionConfig;
 use crate::github::{
-    CreateTaskOutcome, CreateTaskRequest, GitHubClient, GitHubConfig, PreflightError,
+    CreateTaskOutcome, CreateTaskRequest, GitHubClient, GitHubConfig, IssueComment,
     ReconciliationOutcome,
 };
-use crate::ids::{execution_id, expected_event_id};
-use crate::prompt::{build_prompt, WorkGraphExecutionCommentV1};
-use crate::row::{validate_row, LaunchRow};
-use crate::state::{reserve_or_resume, save, ExecutionRecord, ExecutionStatus, ReservationOutcome};
+use crate::ids::execution_id;
+use crate::prompt::build_prompt;
+use crate::row::LaunchRow;
+use crate::state::{
+    compare_and_swap_record, create_record_if_absent, load_record, ExecutionRecord,
+    PersistedExecutionRecord, WorkGraphExecutionStateV1,
+};
 use crate::CopilotAgentTaskReactionBuilder;
 
-/// The single launch-attempt number this reaction version always uses.
-/// Reserved as an explicit field in [`crate::state::ExecutionRecord`] (rather
-/// than hardcoding `1` at every call site) so a future version can extend to
-/// multi-attempt retries without a storage-format migration.
-pub const ATTEMPT: u32 = 1;
+/// A row that can never succeed, no matter how often it is retried.
+///
+/// Permanent rejections are logged and skipped; they have no external effect,
+/// so unlike transient failures they do not need a durable tombstone to stay
+/// consistent across replays.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct PermanentCandidateError {
+    message: String,
+}
+
+impl PermanentCandidateError {
+    #[allow(clippy::new_ret_no_self)]
+    fn new(message: impl Into<String>) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            message: message.into(),
+        })
+    }
+}
 
 pub struct CopilotAgentTaskReaction {
     pub(crate) base: ReactionBase,
@@ -89,9 +135,6 @@ impl CopilotAgentTaskReaction {
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
         }
-        // Always Strict: see `default_recovery_policy` below and
-        // `CopilotAgentTaskReactionConfig::strict_recovery`.
-        params = params.with_recovery_policy(ReactionRecoveryPolicy::Strict);
         Self {
             base: ReactionBase::new(params),
             config,
@@ -215,19 +258,22 @@ impl Reaction for CopilotAgentTaskReaction {
             .await;
 
         let shutdown_rx = self.base.create_shutdown_channel().await;
-        let reaction_name = self.base.id.clone();
-        let checkpoint_state = CheckpointState::load(&self.base).await;
         let base = self.base.clone_shared();
         let config = self.config.clone();
+        let reaction_name = self.base.id.clone();
 
-        let handle = tokio::spawn(run_loop(
-            reaction_name,
-            base,
-            config,
-            Arc::new(client),
-            shutdown_rx,
-            checkpoint_state,
-        ));
+        let handle = tokio::spawn(async move {
+            let mut checkpoint_state = CheckpointState::load(&base).await;
+            run_processing_loop(
+                &reaction_name,
+                base,
+                config,
+                Arc::new(client),
+                &mut checkpoint_state,
+                shutdown_rx,
+            )
+            .await;
+        });
 
         self.base.set_processing_task(handle).await;
         self.base
@@ -247,7 +293,7 @@ impl Reaction for CopilotAgentTaskReaction {
         self.base.get_status().await
     }
 
-    async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) -> Result<()> {
+    async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
         self.base.enqueue_query_result(result).await
     }
 
@@ -256,556 +302,758 @@ impl Reaction for CopilotAgentTaskReaction {
         true
     }
 
-    /// A trigger reaction: launching on the entire historical result set on
-    /// a fresh start would fire duplicate task creation for already-handled
-    /// rows. Only new `Add` rows observed after the reaction starts matter.
+    /// A trigger reaction: launching on the entire historical result set on a
+    /// fresh start would fire duplicate task creation for already-handled rows.
     fn needs_snapshot_on_fresh_start(&self) -> bool {
         false
     }
 
-    /// Always Strict: an ambiguous or failed launch must stop the pipeline
-    /// for reconciliation rather than silently skip or reset. See
-    /// `CopilotAgentTaskReactionConfig::strict_recovery`.
+    /// Always Strict: an ambiguous or failed launch must stop the pipeline for
+    /// reconciliation rather than silently skip or reset.
     fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
         ReactionRecoveryPolicy::Strict
     }
+
+    fn checkpoint_ownership(&self) -> ManagerCheckpointOwnership {
+        ManagerCheckpointOwnership::Reaction
+    }
 }
 
-/// The reaction's processing loop: dequeue `QueryResult`s, process each
-/// `Add` diff, and advance the checkpoint only once every diff in the batch
-/// has been durably handled (launched, permanently rejected, or already
-/// done).
-async fn run_loop(
-    reaction_name: String,
+async fn run_processing_loop(
+    reaction_name: &str,
     base: ReactionBase,
     config: CopilotAgentTaskReactionConfig,
-    client: Arc<GitHubClient>,
+    github: Arc<GitHubClient>,
+    checkpoint_state: &mut CheckpointState,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-    mut checkpoints: CheckpointState,
 ) {
-    let status_handle = base.status_handle();
-
     loop {
-        let query_result_arc = tokio::select! {
+        let event = tokio::select! {
             biased;
             _ = &mut shutdown_rx => {
                 info!("[{reaction_name}] Received shutdown signal, exiting processing loop");
                 break;
             }
-            result = base.priority_queue.dequeue() => result,
-        };
-        let query_result: &QueryResult = query_result_arc.as_ref();
-
-        if query_result.results.is_empty() {
-            continue;
-        }
-
-        let query_id = &query_result.query_id;
-        let seq = query_result.sequence;
-        let store = base.state_store().await;
-        let Some(store) = store else {
-            // start() already requires a store; this should be unreachable,
-            // but fail safe rather than panic if it somehow disappears.
-            error!("[{reaction_name}] State store unavailable mid-run; stopping");
-            status_handle
-                .set_status(
-                    ComponentStatus::Error,
-                    Some("State store unavailable".to_string()),
-                )
-                .await;
-            return;
+            event = base.priority_queue.dequeue() => event,
         };
 
-        let mut transient_failure: Option<String> = None;
-        for diff in &query_result.results {
-            let ResultDiff::Add { data, .. } = diff else {
-                continue;
-            };
-            match process_add_row(
-                &reaction_name,
-                &base,
-                &config,
-                &client,
-                store.as_ref(),
-                data,
-            )
-            .await
-            {
-                Ok(()) => {}
-                Err(reason) => {
-                    error!(
-                        "[{reaction_name}] Transient failure processing row from query '{query_id}' (seq {seq}): {reason}"
-                    );
-                    transient_failure = Some(reason);
-                    break;
-                }
-            }
-        }
-
-        if let Some(reason) = transient_failure {
-            warn!(
-                "[{reaction_name}] Stopping per Strict recovery policy after transient failure on query '{query_id}' (seq {seq}); this batch will replay from the outbox on restart"
+        if let Err(error) =
+            process_query_result(reaction_name, &base, &config, &github, &event).await
+        {
+            error!(
+                "[{reaction_name}] launch failed for query '{}' sequence {}: {error:#}",
+                event.query_id, event.sequence
             );
-            status_handle
-                .set_status(
-                    ComponentStatus::Error,
-                    Some(format!(
-                        "Transient failure on query '{query_id}' (seq {seq}): {reason}"
-                    )),
-                )
-                .await;
+            base.set_status(
+                ComponentStatus::Error,
+                Some(format!("Copilot Agent Task failed: {error:#}")),
+            )
+            .await;
+            // Strict recovery: stop without advancing the checkpoint so the
+            // batch replays from the outbox after operator intervention.
             return;
         }
 
-        if let Err(e) = checkpoints.advance(&base, query_id, seq).await {
-            error!("[{reaction_name}] Failed to write checkpoint for query '{query_id}' (seq {seq}): {e}");
-            status_handle
-                .set_status(
-                    ComponentStatus::Error,
-                    Some(format!(
-                        "Checkpoint write failed for query '{query_id}' (seq {seq}): {e}"
-                    )),
-                )
-                .await;
+        if let Err(error) = checkpoint_state
+            .advance(&base, &event.query_id, event.sequence)
+            .await
+        {
+            error!(
+                "[{reaction_name}] checkpoint update failed at sequence {}: {error:#}",
+                event.sequence
+            );
+            base.set_status(
+                ComponentStatus::Error,
+                Some(format!("Copilot Agent Task checkpoint failure: {error:#}")),
+            )
+            .await;
             return;
         }
     }
 
     info!("[{reaction_name}] Copilot Agent Task processing loop stopped");
-    status_handle
-        .set_status(
-            ComponentStatus::Stopped,
-            Some("Copilot Agent Task reaction processing task stopped".to_string()),
-        )
-        .await;
 }
 
-/// Process one `Add` row end to end. Returns `Ok(())` when the row is fully
-/// handled — launched, already done, or **permanently** rejected (validation
-/// or preflight failure, recorded and skipped) — and `Err(reason)` only for
-/// a **transient** condition, which must stop the batch (and therefore the
-/// checkpoint advance) so it is retried after restart.
-async fn process_add_row(
+async fn process_query_result(
     reaction_name: &str,
     base: &ReactionBase,
     config: &CopilotAgentTaskReactionConfig,
-    client: &GitHubClient,
-    store: &dyn StateStoreProvider,
-    data: &serde_json::Value,
-) -> Result<(), String> {
-    let store_id = &base.id;
-
-    let row = match LaunchRow::from_json(data) {
-        Ok(row) => row,
-        Err(e) => {
-            warn!("[{reaction_name}] Skipping malformed launch row: {e:#}");
-            return Ok(());
-        }
-    };
-
-    let exec_id = execution_id(store_id, &row.route_id, &row.responsibility_id, ATTEMPT);
-    let event_id = expected_event_id(&exec_id, &row.required_event_type);
-
-    let reservation = reserve_or_resume(
+    github: &GitHubClient,
+    result: &QueryResult,
+) -> Result<()> {
+    let store = base.state_store().await.ok_or_else(|| {
+        anyhow::anyhow!("a durable state store is required for the Copilot Agent Task reaction")
+    })?;
+    let ctx = LaunchCtx {
+        reaction_name,
+        base,
+        config,
+        github,
         store,
-        store_id,
-        &row.route_id,
-        &row.responsibility_id,
-        ATTEMPT,
-        &exec_id,
-        &event_id,
-        &row.required_event_type,
-        &row.repository,
-        row.issue_number,
-        &row.issue_node_id,
-        &row.agent_profile,
-        &row.profile_ref,
-        &row.requested_model,
-        row.fallback_model.as_deref(),
-    )
-    .await
-    .map_err(|e| format!("failed to reserve execution state: {e:#}"))?;
-
-    let mut record = match reservation {
-        ReservationOutcome::AlreadyDone(_) => {
-            info!(
-                "[{reaction_name}] Row for route={} responsibility={} already fully processed (duplicate delivery) — skipping",
-                row.route_id, row.responsibility_id
-            );
-            return Ok(());
-        }
-        ReservationOutcome::PermanentlyFailed(_) => {
-            info!(
-                "[{reaction_name}] Row for route={} responsibility={} previously permanently failed — skipping",
-                row.route_id, row.responsibility_id
-            );
-            return Ok(());
-        }
-        ReservationOutcome::New(r) => r,
-        ReservationOutcome::ResumeCommentOnly(r) => {
-            return resume_comment_only(reaction_name, config, client, store, store_id, &row, r)
-                .await;
-        }
-        ReservationOutcome::NeedsReconciliation(r) => {
-            return reconcile_and_resume(reaction_name, config, client, store, store_id, &row, r)
-                .await;
-        }
     };
 
-    // Current configuration is relevant only to a new or merely Reserved
-    // attempt. An authoritative prior state must be resumed or skipped before
-    // mutable allowlists are consulted, otherwise config narrowing could
-    // corrupt a completed execution on duplicate delivery.
-    if let Err(e) = validate_row(
-        &row,
-        &config.allowed_repositories,
-        &config.allowed_profiles,
-        &config.allowed_models,
-    ) {
-        warn!(
-            "[{reaction_name}] Rejecting new/reserved row for {} issue #{} (route={}, responsibility={}): {e}",
-            row.repository, row.issue_number, row.route_id, row.responsibility_id
-        );
-        record.status = ExecutionStatus::Failed;
-        record.last_error = Some(e.to_string());
-        record.touch();
-        save(store, store_id, &record)
-            .await
-            .map_err(|error| format!("failed to persist validation failure: {error:#}"))?;
-        return Ok(());
-    }
-
-    // ---- Preflight ----
-    match crate::github::run_preflight(client, &row).await {
-        Ok(()) => {}
-        Err(PreflightError::Permanent(reason)) => {
-            warn!(
-                "[{reaction_name}] Preflight rejected row for {} issue #{}: {reason}",
-                row.repository, row.issue_number
-            );
-            record.status = ExecutionStatus::Failed;
-            record.last_error = Some(reason);
-            record.touch();
-            let _ = save(store, store_id, &record).await;
-            return Ok(());
-        }
-        Err(PreflightError::Transient(reason)) => {
-            return Err(format!("preflight transient failure: {reason}"));
-        }
-    }
-
-    // ---- Mark Starting (durable, before the external call) ----
-    record.status = ExecutionStatus::Starting;
-    record.touch();
-    save(store, store_id, &record)
-        .await
-        .map_err(|e| format!("failed to persist Starting state: {e:#}"))?;
-
-    launch_and_comment(reaction_name, config, client, store, store_id, &row, record).await
-}
-
-/// Resume a launch attempt that crashed (or was ambiguous) between
-/// reservation and confirmed task creation: run reconciliation before doing
-/// anything else. Never blindly retries creation.
-async fn reconcile_and_resume(
-    reaction_name: &str,
-    config: &CopilotAgentTaskReactionConfig,
-    client: &GitHubClient,
-    store: &dyn StateStoreProvider,
-    store_id: &str,
-    row: &LaunchRow,
-    mut record: ExecutionRecord,
-) -> Result<(), String> {
-    let (owner, repo) = record
-        .repository
-        .split_once('/')
-        .ok_or_else(|| "cannot reconcile: durable repository is not 'owner/repo'".to_string())?;
-
-    info!(
-        "[{reaction_name}] Reconciling ambiguous/interrupted launch for route={} responsibility={} (executionId={})",
-        row.route_id, row.responsibility_id, record.execution_id
-    );
-
-    let outcome = client
-        .reconcile(owner, repo, &record.execution_id)
-        .await
-        .map_err(|e| format!("reconciliation lookup failed: {e}"))?;
-
-    match outcome {
-        ReconciliationOutcome::ExactMatch(task) => {
-            info!(
-                "[{reaction_name}] Reconciliation adopted existing task {} for executionId={}",
-                task.id, record.execution_id
-            );
-            record.status = ExecutionStatus::Started;
-            record.task_id = Some(task.id);
-            record.task_url = Some(task.url);
-            // These may already be set from a prior attempt that recorded
-            // the model/fallback choice before the outcome became ambiguous
-            // (see the `Ambiguous` arm of `launch_and_comment`); only fill
-            // them in if genuinely absent, and never guess a request time
-            // that was never observed — `now()` is the best available
-            // approximation for an adopted, previously-unconfirmed task.
-            record
-                .model_used
-                .get_or_insert_with(|| record.requested_model.clone());
-            record.request_time.get_or_insert_with(crate::github::now);
-            record.touch();
-            save(store, store_id, &record)
-                .await
-                .map_err(|e| format!("failed to persist adopted task: {e:#}"))?;
-            post_comment_and_finish(reaction_name, config, client, store, store_id, record).await
-        }
-        ReconciliationOutcome::Ambiguous(matches) => {
-            warn!(
-                "[{reaction_name}] Reconciliation found {} candidate tasks for executionId={} — staying Ambiguous, will not guess",
-                matches.len(),
-                record.execution_id
-            );
-            record.status = ExecutionStatus::Ambiguous;
-            record.last_error = Some(format!(
-                "{} candidate tasks matched executionId; manual reconciliation required",
-                matches.len()
-            ));
-            record.touch();
-            let _ = save(store, store_id, &record).await;
-            Err(format!(
-                "launch for route={} responsibility={} remains ambiguous ({} candidates)",
-                row.route_id,
-                row.responsibility_id,
-                matches.len()
-            ))
-        }
-    }
-}
-
-/// Resume an attempt whose task was already confirmed created but whose
-/// comment was not yet recorded as posted.
-async fn resume_comment_only(
-    reaction_name: &str,
-    config: &CopilotAgentTaskReactionConfig,
-    client: &GitHubClient,
-    store: &dyn StateStoreProvider,
-    store_id: &str,
-    row: &LaunchRow,
-    record: ExecutionRecord,
-) -> Result<(), String> {
-    info!(
-        "[{reaction_name}] Resuming comment-only step for route={} responsibility={} (task already created: {:?})",
-        row.route_id, row.responsibility_id, record.task_id
-    );
-    post_comment_and_finish(reaction_name, config, client, store, store_id, record).await
-}
-
-/// Call `create_task` (with the single permitted fallback-model retry),
-/// persist the outcome, and — on success — post the workgraph execution
-/// comment.
-async fn launch_and_comment(
-    reaction_name: &str,
-    config: &CopilotAgentTaskReactionConfig,
-    client: &GitHubClient,
-    store: &dyn StateStoreProvider,
-    store_id: &str,
-    row: &LaunchRow,
-    mut record: ExecutionRecord,
-) -> Result<(), String> {
-    let (owner, repo) = row
-        .owner_and_repo()
-        .map_err(|e| format!("cannot launch: {e:#}"))?;
-
-    let prompt = build_prompt(row, &record.execution_id, &record.expected_event_id);
-    info!(
-        "[{reaction_name}] Launching task for {}#{} (route={}, responsibility={}, executionId={})",
-        row.repository, row.issue_number, row.route_id, row.responsibility_id, record.execution_id
-    );
-
-    let request_time = crate::github::now();
-    let mut model_used = row.requested_model.clone();
-    let mut used_fallback = false;
-    record.model_used = Some(model_used.clone());
-    record.used_fallback = false;
-    record.request_time = Some(request_time);
-    record.touch();
-    save(store, store_id, &record)
-        .await
-        .map_err(|e| format!("failed to persist requested model before create_task: {e:#}"))?;
-
-    let request = CreateTaskRequest {
-        custom_agent: row.agent_profile.clone(),
-        model: model_used.clone(),
-        prompt: prompt.clone(),
-        base_ref: row.base_ref.clone(),
-        create_pull_request: false,
-    };
-    let mut outcome = client.create_task(owner, repo, &request).await;
-
-    if let CreateTaskOutcome::UnsupportedModel(reason) = &outcome {
-        if let Some(fallback) = row
-            .fallback_model
-            .as_deref()
-            .filter(|f| !f.is_empty() && *f != row.requested_model)
-        {
-            warn!(
-                "[{reaction_name}] Requested model '{}' unsupported ({reason}) — falling back to '{fallback}' exactly once",
-                row.requested_model
-            );
-            model_used = fallback.to_string();
-            used_fallback = true;
-            record.model_used = Some(model_used.clone());
-            record.used_fallback = true;
-            record.touch();
-            save(store, store_id, &record).await.map_err(|e| {
-                format!("failed to persist fallback model before create_task: {e:#}")
-            })?;
-            let fallback_request = CreateTaskRequest {
-                custom_agent: row.agent_profile.clone(),
-                model: model_used.clone(),
-                prompt: prompt.clone(),
-                base_ref: row.base_ref.clone(),
-                create_pull_request: false,
-            };
-            outcome = client.create_task(owner, repo, &fallback_request).await;
-        } else {
-            info!(
-                "[{reaction_name}] Requested model '{}' unsupported and no usable fallback configured — permanent failure",
-                row.requested_model
-            );
-        }
-    }
-
-    match outcome {
-        CreateTaskOutcome::Created { id, url } => {
-            info!(
-                "[{reaction_name}] Task created: id={id} url={url} model={model_used} fallbackUsed={used_fallback}"
-            );
-            record.status = ExecutionStatus::Started;
-            record.model_used = Some(model_used);
-            record.used_fallback = used_fallback;
-            record.task_id = Some(id);
-            record.task_url = Some(url);
-            record.last_error = None;
-            record.touch();
-            save(store, store_id, &record)
-                .await
-                .map_err(|e| format!("failed to persist Started state: {e:#}"))?;
-            post_comment_and_finish(reaction_name, config, client, store, store_id, record).await
-        }
-        CreateTaskOutcome::UnsupportedModel(reason) => {
-            record.status = ExecutionStatus::Failed;
-            record.last_error = Some(format!("unsupported model (no usable fallback): {reason}"));
-            record.touch();
-            let _ = save(store, store_id, &record).await;
-            Ok(())
-        }
-        CreateTaskOutcome::Permanent(reason) => {
-            warn!("[{reaction_name}] create_task permanently failed: {reason}");
-            record.status = ExecutionStatus::Failed;
-            record.last_error = Some(reason);
-            record.touch();
-            let _ = save(store, store_id, &record).await;
-            Ok(())
-        }
-        CreateTaskOutcome::Transient(reason) => {
-            record.last_error = Some(reason.clone());
-            record.touch();
-            let _ = save(store, store_id, &record).await;
-            Err(format!("create_task transient failure: {reason}"))
-        }
-        CreateTaskOutcome::Ambiguous => {
-            warn!(
-                "[{reaction_name}] create_task outcome ambiguous for route={} responsibility={} (model={model_used}, usedFallback={used_fallback}) — marking Ambiguous, will reconcile before any retry",
-                row.route_id, row.responsibility_id
-            );
-            record.status = ExecutionStatus::Ambiguous;
-            record.last_error = Some("create_task transport error; outcome unknown".to_string());
-            record.touch();
-            let _ = save(store, store_id, &record).await;
-            Err("create_task outcome ambiguous; requires reconciliation".to_string())
-        }
-    }
-}
-
-/// Post the single `workgraph.execution/v1` comment (if not already posted)
-/// and mark the record fully done. This is the last step
-/// before the checkpoint is allowed to advance — "checkpoint only after
-/// durable task/execution state and comment recorded".
-async fn post_comment_and_finish(
-    reaction_name: &str,
-    config: &CopilotAgentTaskReactionConfig,
-    client: &GitHubClient,
-    store: &dyn StateStoreProvider,
-    store_id: &str,
-    mut record: ExecutionRecord,
-) -> Result<(), String> {
-    if record.comment_posted {
-        return Ok(());
-    }
-
-    let (task_id, task_url, model_used, request_time) = match (
-        &record.task_id,
-        &record.task_url,
-        &record.model_used,
-        &record.request_time,
-    ) {
-        (Some(id), Some(url), Some(model), Some(t)) => (id.clone(), url.clone(), model.clone(), *t),
-        _ => {
-            return Err(
-                "cannot post workgraph execution comment: task details missing from record"
-                    .to_string(),
-            )
-        }
-    };
-
-    let envelope = WorkGraphExecutionCommentV1::new(
-        &record,
-        &record.execution_id,
-        &record.expected_event_id,
-        &task_id,
-        &task_url,
-        &model_used,
-        &request_time,
-    );
-    let body = envelope.to_comment_body();
-
-    let mut attempt = 0u32;
-    loop {
-        attempt += 1;
-        match client
-            .post_issue_comment(&record.issue_node_id, &body)
-            .await
-        {
-            Ok(()) => {
-                info!(
-                    "[{reaction_name}] Posted workgraph.execution/v1 comment on issue {} (executionId={})",
-                    record.issue_node_id, record.execution_id
-                );
-                record.comment_posted = true;
-                record.last_error = None;
-                record.touch();
-                return save(store, store_id, &record)
-                    .await
-                    .map_err(|e| format!("failed to persist comment_posted state: {e:#}"));
-            }
-            Err(e) => {
-                warn!(
-                    "[{reaction_name}] Attempt {attempt}/{} to post workgraph comment failed: {e}",
-                    config.comment_api.max_attempts
-                );
-                record.last_error = Some(e.to_string());
-                record.touch();
-                let _ = save(store, store_id, &record).await;
-                if attempt >= config.comment_api.max_attempts {
-                    // GraphQL errors (including HTTP 200 + errors) are
-                    // treated as failure per the reaction's contract; the
-                    // task itself is never recreated, only the comment step
-                    // is retried on the next start.
-                    return Err(format!(
-                        "failed to post workgraph execution comment after {attempt} attempt(s): {e}"
-                    ));
+    for diff in &result.results {
+        match diff {
+            ResultDiff::Add { data, .. } => {
+                let row: LaunchRow = match LaunchRow::from_json(data) {
+                    Ok(row) => row,
+                    Err(error) => {
+                        warn!(
+                            "[{reaction_name}] skipping malformed launch row on query '{}': {error:#}",
+                            result.query_id
+                        );
+                        continue;
+                    }
+                };
+                match ctx.launch(&row).await {
+                    Ok(()) => {}
+                    Err(error) if error.downcast_ref::<PermanentCandidateError>().is_some() => {
+                        warn!(
+                            "[{reaction_name}] rejecting launch row for {}#{}: {error}",
+                            row.repository, row.subject_number
+                        );
+                    }
+                    Err(error) => return Err(error),
                 }
-                tokio::time::sleep(Duration::from_millis(config.comment_api.retry_backoff_ms))
-                    .await;
+            }
+            ResultDiff::Update { .. } | ResultDiff::Delete { .. } => {
+                info!(
+                    "[{reaction_name}] ignoring non-added diff for query '{}'",
+                    result.query_id
+                );
+            }
+            ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+        }
+    }
+    Ok(())
+}
+
+/// The invariant context shared by every step of one launch batch.
+struct LaunchCtx<'a> {
+    reaction_name: &'a str,
+    base: &'a ReactionBase,
+    config: &'a CopilotAgentTaskReactionConfig,
+    github: &'a GitHubClient,
+    store: Arc<dyn StateStoreProvider>,
+}
+
+impl LaunchCtx<'_> {
+    fn store_id(&self) -> &str {
+        &self.base.id
+    }
+
+    /// Launch one nominated run, resuming any partially completed prior attempt.
+    async fn launch(&self, row: &LaunchRow) -> Result<()> {
+        // 1. Validate the row against the configured allowlists.
+        row.validate(self.config)
+            .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
+        let (owner, repo) = row
+            .owner_and_repo()
+            .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
+
+        // 2. Authoritative issue read: the body digest — and therefore the run
+        //    identity — must come from GitHub, never from the query row.
+        let issue = self
+            .github
+            .issue_snapshot(&row.repository, row.subject_number)
+            .await
+            .context("failed to read the authoritative issue")?;
+        if !issue.state.eq_ignore_ascii_case("open") {
+            return Err(PermanentCandidateError::new(format!(
+                "{}#{} is '{}', not open",
+                row.repository, row.subject_number, issue.state
+            )));
+        }
+        if issue.node_id != row.subject_node_id {
+            return Err(PermanentCandidateError::new(format!(
+                "{}#{} resolves to node '{}', not the row's '{}'",
+                row.repository, row.subject_number, issue.node_id, row.subject_node_id
+            )));
+        }
+
+        // 3. Bind the run to the current body. A body edited since the
+        //    assignment yields a different `runId` and aborts with no effect.
+        let digest = body_digest(issue.body.as_deref());
+        let run = run_id(&row.project_item_node_id, &row.subject_node_id, &digest);
+        if run.as_str() != row.run_id {
+            return Err(PermanentCandidateError::new(format!(
+                "issue body changed since the assignment: row runId '{}' but current body derives '{}'",
+                row.run_id,
+                run.as_str()
+            )));
+        }
+
+        // 4. Verify the Project item binding and status.
+        self.verify_project(row).await?;
+
+        // 5. Adopt the trusted assignment and require its digest to match.
+        let assignment_event_id = event_id(&run, WorkGraphEventType::ResponsibilityAssigned);
+        let comments = self
+            .github
+            .list_issue_comments(&row.repository, row.subject_number)
+            .await
+            .context("failed to list issue comments")?;
+        let assignment = self
+            .read_trusted_comment(
+                &comments,
+                &self.config.trusted_assignment_author(),
+                &assignment_event_id,
+            )
+            .context("assignment reconciliation failed")?
+            .ok_or_else(|| {
+                PermanentCandidateError::new(
+                    "no trusted, unedited ResponsibilityAssigned assignment comment was found",
+                )
+            })?;
+        let payload = match &assignment.comment.event.payload {
+            WorkGraphEventPayload::ResponsibilityAssigned(payload) => payload.clone(),
+            other => {
+                return Err(PermanentCandidateError::new(format!(
+                    "assignment comment carries a {:?} payload, not ResponsibilityAssigned",
+                    other.event_type()
+                )));
+            }
+        };
+        if payload.content_digest != digest {
+            return Err(PermanentCandidateError::new(
+                "assignment content digest does not match the current issue body",
+            ));
+        }
+
+        // 6. Pin the profile to the exact blob the assignment named.
+        let profile = payload.profile_ref.profile().to_string();
+        if !self.config.allowed_profiles.iter().any(|p| p == &profile) {
+            return Err(PermanentCandidateError::new(format!(
+                "assignment profile '{profile}' is not in allowedProfiles"
+            )));
+        }
+        let path = format!(".github/agents/{profile}.agent.md");
+        let live_sha = self
+            .github
+            .blob_sha_at_path(owner, repo, &path, &row.base_ref)
+            .await
+            .context("failed to pin the agent profile blob")?;
+        match live_sha.as_deref() {
+            Some(sha) if sha == payload.profile_ref.blob_sha() => {}
+            other => {
+                return Err(PermanentCandidateError::new(format!(
+                    "profile '{profile}' blob SHA {other:?} does not match the assignment's pin '{}'",
+                    payload.profile_ref.blob_sha()
+                )));
             }
         }
+
+        // 7. Durable reservation before any external write.
+        let execution = execution_id(&row.run_id);
+        let started_event_id = event_id(&run, WorkGraphEventType::ExecutionStarted);
+        let intent = ExecutionRecord::new(
+            run.as_str(),
+            started_event_id.as_str(),
+            execution.as_str(),
+            row,
+            digest.as_str(),
+            payload.profile_ref.as_str(),
+        );
+        let mut persisted =
+            match create_record_if_absent(self.store.clone(), self.store_id(), &intent).await? {
+                Some(existing) => {
+                    existing.record.ensure_matches(row)?;
+                    existing
+                }
+                None => load_record(self.store.clone(), self.store_id(), run.as_str())
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("execution record vanished immediately after create")
+                    })?,
+            };
+
+        if persisted.record.is_terminal() {
+            info!(
+                "[{}] run '{run}' for {}#{} is already {:?}; nothing to do",
+                self.reaction_name, row.repository, row.subject_number, persisted.record.status
+            );
+            return Ok(());
+        }
+
+        // 8. Reconcile-or-create exactly one agent task.
+        let prompt = build_prompt(row.subject_number, execution.as_str());
+        if !self
+            .provision_task(row, owner, repo, &profile, &prompt, &mut persisted)
+            .await?
+        {
+            // A terminal create-task rejection was recorded; skip the run.
+            return Ok(());
+        }
+
+        // 9. Post exactly one ExecutionStarted comment (adopting a prior write).
+        self.post_execution_started(row, &run, &execution, &mut persisted)
+            .await?;
+
+        info!(
+            "[{}] launched {}#{} as run '{run}' (execution {})",
+            self.reaction_name,
+            row.repository,
+            row.subject_number,
+            execution.as_str()
+        );
+        Ok(())
+    }
+
+    /// Verify the Project item binding and that its status is
+    /// `AwaitingValidation`. Every mismatch is a permanent semantic rejection.
+    async fn verify_project(&self, row: &LaunchRow) -> Result<()> {
+        let snapshot = self
+            .github
+            .project_snapshot(&row.project_node_id, &row.project_item_node_id)
+            .await
+            .context("failed to read the project snapshot")?;
+        if snapshot.item_project_node_id != row.project_node_id {
+            return Err(PermanentCandidateError::new(format!(
+                "project item '{}' belongs to project '{}', not the row's '{}'",
+                row.project_item_node_id, snapshot.item_project_node_id, row.project_node_id
+            )));
+        }
+        if snapshot.content_type.as_deref() != Some("Issue") {
+            return Err(PermanentCandidateError::new(format!(
+                "project item content type {:?} is not Issue",
+                snapshot.content_type
+            )));
+        }
+        if snapshot.content_issue_node_id.as_deref() != Some(row.subject_node_id.as_str()) {
+            return Err(PermanentCandidateError::new(format!(
+                "project item is linked to issue {:?}, not the row's '{}'",
+                snapshot.content_issue_node_id, row.subject_node_id
+            )));
+        }
+        if snapshot.content_number != Some(row.subject_number) {
+            return Err(PermanentCandidateError::new(format!(
+                "project item issue number {:?} does not match the row's {}",
+                snapshot.content_number, row.subject_number
+            )));
+        }
+        if snapshot.content_repository.as_deref() != Some(row.repository.as_str()) {
+            return Err(PermanentCandidateError::new(format!(
+                "project item repository {:?} does not match the row's '{}'",
+                snapshot.content_repository, row.repository
+            )));
+        }
+        if snapshot.status_field_node_id.as_deref()
+            != Some(self.config.expected_project_status_field_node_id.as_str())
+        {
+            return Err(PermanentCandidateError::new(format!(
+                "project status field {:?} does not match expected '{}'",
+                snapshot.status_field_node_id, self.config.expected_project_status_field_node_id
+            )));
+        }
+        if snapshot.current_status.as_deref() != Some(AWAITING_VALIDATION) {
+            return Err(PermanentCandidateError::new(format!(
+                "project item status {:?} is not '{AWAITING_VALIDATION}'",
+                snapshot.current_status
+            )));
+        }
+        Ok(())
+    }
+
+    /// Reconcile-or-create exactly one agent task.
+    ///
+    /// Returns `Ok(true)` when a task is confirmed (created or adopted) and
+    /// `Ok(false)` when a terminal create-task rejection was durably recorded
+    /// (the run is permanently skipped). Transient/ambiguous outcomes return
+    /// `Err` to halt for reconciliation on restart.
+    async fn provision_task(
+        &self,
+        row: &LaunchRow,
+        owner: &str,
+        repo: &str,
+        profile: &str,
+        prompt: &str,
+        persisted: &mut PersistedExecutionRecord,
+    ) -> Result<bool> {
+        if persisted.record.task_confirmed() {
+            return Ok(true);
+        }
+        let execution = execution_id(&row.run_id);
+        let execution = execution.as_str();
+
+        // Reconcile first: a task whose prompt/body already carries this
+        // execution ID was created by a prior, ambiguous attempt.
+        match self
+            .github
+            .reconcile(owner, repo, execution)
+            .await
+            .map_err(|error| anyhow::anyhow!("task reconciliation failed: {error}"))?
+        {
+            ReconciliationOutcome::ExactMatch(task) => {
+                let model = persisted
+                    .record
+                    .model_used
+                    .clone()
+                    .unwrap_or_else(|| row.requested_model.clone());
+                let used_fallback = persisted.record.used_fallback;
+                let mut updated = persisted.record.clone();
+                let url = (!task.url.is_empty()).then_some(task.url);
+                updated.set_task(model, used_fallback, task.id, url);
+                self.persist(persisted, updated).await?;
+                info!(
+                    "[{}] adopted existing task for execution {execution}",
+                    self.reaction_name
+                );
+                return Ok(true);
+            }
+            ReconciliationOutcome::Ambiguous(matches) if matches.len() >= 2 => {
+                anyhow::bail!(
+                    "reconciliation found {} tasks correlated to execution {execution}; failing closed",
+                    matches.len()
+                );
+            }
+            ReconciliationOutcome::Ambiguous(_) => {
+                // Zero correlated tasks: safe to create.
+            }
+        }
+
+        self.create_task_with_fallback(row, owner, repo, profile, prompt, persisted)
+            .await
+    }
+
+    /// Create the task, retrying exactly once with the fallback model on a
+    /// clearly-unsupported-model 422.
+    async fn create_task_with_fallback(
+        &self,
+        row: &LaunchRow,
+        owner: &str,
+        repo: &str,
+        profile: &str,
+        prompt: &str,
+        persisted: &mut PersistedExecutionRecord,
+    ) -> Result<bool> {
+        // Persist the chosen model BEFORE the attempt so a crash mid-flight
+        // leaves the in-flight model on record for reconciliation.
+        self.record_attempt_model(persisted, &row.requested_model, false)
+            .await?;
+        match self
+            .create_task(
+                owner,
+                repo,
+                profile,
+                &row.requested_model,
+                &row.base_ref,
+                prompt,
+            )
+            .await
+        {
+            CreateTaskOutcome::Created { id, url } => {
+                self.confirm_task(persisted, &row.requested_model, false, id, url)
+                    .await?;
+                Ok(true)
+            }
+            CreateTaskOutcome::Permanent(message) => {
+                self.fail(persisted, format!("create task rejected: {message}"))
+                    .await?;
+                Ok(false)
+            }
+            CreateTaskOutcome::Transient(message) => {
+                anyhow::bail!("create task failed transiently: {message}")
+            }
+            CreateTaskOutcome::Ambiguous => {
+                self.mark_ambiguous(persisted, "create task outcome ambiguous (transport error)")
+                    .await?;
+                anyhow::bail!("create task outcome ambiguous; awaiting reconciliation on restart")
+            }
+            CreateTaskOutcome::UnsupportedModel(message) => {
+                let Some(fallback) = row.fallback_model.clone() else {
+                    self.fail(
+                        persisted,
+                        format!(
+                            "requested model unsupported and no fallback configured: {message}"
+                        ),
+                    )
+                    .await?;
+                    return Ok(false);
+                };
+                warn!(
+                    "[{}] requested model unsupported; retrying once with the fallback model",
+                    self.reaction_name
+                );
+                self.record_attempt_model(persisted, &fallback, true)
+                    .await?;
+                match self
+                    .create_task(owner, repo, profile, &fallback, &row.base_ref, prompt)
+                    .await
+                {
+                    CreateTaskOutcome::Created { id, url } => {
+                        self.confirm_task(persisted, &fallback, true, id, url)
+                            .await?;
+                        Ok(true)
+                    }
+                    CreateTaskOutcome::UnsupportedModel(message) => {
+                        self.fail(
+                            persisted,
+                            format!("fallback model also unsupported: {message}"),
+                        )
+                        .await?;
+                        Ok(false)
+                    }
+                    CreateTaskOutcome::Permanent(message) => {
+                        self.fail(
+                            persisted,
+                            format!("fallback create task rejected: {message}"),
+                        )
+                        .await?;
+                        Ok(false)
+                    }
+                    CreateTaskOutcome::Transient(message) => {
+                        anyhow::bail!("fallback create task failed transiently: {message}")
+                    }
+                    CreateTaskOutcome::Ambiguous => {
+                        self.mark_ambiguous(persisted, "fallback create task outcome ambiguous")
+                            .await?;
+                        anyhow::bail!(
+                            "fallback create task ambiguous; awaiting reconciliation on restart"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    async fn create_task(
+        &self,
+        owner: &str,
+        repo: &str,
+        profile: &str,
+        model: &str,
+        base_ref: &str,
+        prompt: &str,
+    ) -> CreateTaskOutcome {
+        let request = CreateTaskRequest {
+            custom_agent: profile.to_string(),
+            model: model.to_string(),
+            prompt: prompt.to_string(),
+            base_ref: base_ref.to_string(),
+            create_pull_request: false,
+        };
+        self.github.create_task(owner, repo, &request).await
+    }
+
+    /// Post exactly one `ExecutionStarted` comment, adopting one a previous
+    /// attempt may already have written. Retries in-process up to
+    /// `commentApi.maxAttempts`, re-listing each time so a landed-but-unconfirmed
+    /// write is adopted rather than duplicated.
+    async fn post_execution_started(
+        &self,
+        row: &LaunchRow,
+        run: &drasi_workgraph_common::event::RunId,
+        execution: &drasi_workgraph_common::event::ExecutionId,
+        persisted: &mut PersistedExecutionRecord,
+    ) -> Result<()> {
+        if persisted.record.is_complete() {
+            return Ok(());
+        }
+        let task_id = persisted.record.task_id.clone().ok_or_else(|| {
+            anyhow::anyhow!("cannot post ExecutionStarted before the task is confirmed")
+        })?;
+
+        let event = WorkGraphEvent::new(
+            run.clone(),
+            row.project_item_node_id.clone(),
+            row.subject_node_id.clone(),
+            WorkGraphEventPayload::ExecutionStarted(ExecutionStartedPayload {
+                execution_id: execution.clone(),
+                task_id,
+            }),
+        )
+        .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
+        let summary = summary_for(
+            &event,
+            SubjectRef {
+                repository: &row.repository,
+                number: row.subject_number,
+            },
+        );
+        let body = render_comment(&event, &summary).map_err(|error| {
+            anyhow::anyhow!("failed to render the ExecutionStarted comment: {error}")
+        })?;
+
+        let max_attempts = self.config.comment_api.max_attempts.max(1);
+        let backoff = Duration::from_millis(self.config.comment_api.retry_backoff_ms);
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 1..=max_attempts {
+            let comments = self
+                .github
+                .list_issue_comments(&row.repository, row.subject_number)
+                .await
+                .context("failed to list issue comments before posting ExecutionStarted")?;
+            if let Some(adopted) = self.adopt_own_published_comment(&comments, &event)? {
+                let mut updated = persisted.record.clone();
+                updated.set_comment(adopted.comment_node_id);
+                self.persist(persisted, updated).await?;
+                return Ok(());
+            }
+
+            match self
+                .github
+                .create_issue_comment(&row.repository, row.subject_number, &body)
+                .await
+            {
+                Ok(comment) => {
+                    let mut updated = persisted.record.clone();
+                    updated.set_comment(comment.node_id);
+                    self.persist(persisted, updated).await?;
+                    return Ok(());
+                }
+                Err(error) => {
+                    warn!(
+                        "[{}] ExecutionStarted comment attempt {attempt}/{max_attempts} failed: {error:#}",
+                        self.reaction_name
+                    );
+                    last_error = Some(error);
+                    if attempt < max_attempts {
+                        tokio::time::sleep(backoff).await;
+                    }
+                }
+            }
+        }
+
+        // Every attempt failed and no landed comment was found: the last write
+        // may or may not have taken effect, so mark ambiguous and halt. A
+        // restart re-lists and adopts the comment if it landed.
+        let error = last_error
+            .unwrap_or_else(|| anyhow::anyhow!("ExecutionStarted comment was not posted"));
+        self.mark_ambiguous(persisted, format!("{error:#}")).await?;
+        Err(error).context("failed to post the ExecutionStarted comment")
+    }
+
+    /// The trusted, unedited comments authored by `trusted`.
+    fn observed_comments(
+        &self,
+        comments: &[IssueComment],
+        trusted: &drasi_workgraph_common::trust::TrustedAuthor,
+    ) -> Vec<ObservedComment> {
+        comments
+            .iter()
+            .filter(|comment| comment.is_authored_by(trusted))
+            .filter(|comment| comment.is_unedited())
+            .filter_map(|comment| {
+                parse_comment(&comment.body)
+                    .ok()
+                    .map(|parsed| ObservedComment {
+                        comment_node_id: comment.node_id.clone(),
+                        comment: parsed,
+                    })
+            })
+            .collect()
+    }
+
+    /// Read **another** component's event: coalesce the trusted, unedited
+    /// comments carrying `wanted_event_id`.
+    ///
+    /// Byte-identical duplicates collapse to the earliest; conflicting content
+    /// for one event ID fails closed (propagated as a hard error).
+    fn read_trusted_comment(
+        &self,
+        comments: &[IssueComment],
+        trusted: &drasi_workgraph_common::trust::TrustedAuthor,
+        wanted_event_id: &drasi_workgraph_common::event::EventId,
+    ) -> Result<Option<ObservedComment>> {
+        let observed = self.observed_comments(comments, trusted);
+        let accepted = coalesce(&observed, wanted_event_id)
+            .map_err(|error| anyhow::anyhow!("comment reconciliation failed: {error}"))?;
+        Ok(accepted.cloned())
+    }
+
+    /// Adopt **this** reaction's own already-published `intended` event.
+    ///
+    /// The deterministic `eventId` does not cover the payload, so adoption
+    /// requires canonical event JSON — envelope *and* payload — byte-identical
+    /// to `intended`. A single divergent comment claiming that event ID, or two
+    /// that disagree, fails closed as a hard error rather than being adopted.
+    fn adopt_own_published_comment(
+        &self,
+        comments: &[IssueComment],
+        intended: &WorkGraphEvent,
+    ) -> Result<Option<ObservedComment>> {
+        let observed = self.observed_comments(comments, &self.config.trusted_execution_author());
+        let accepted = adopt_published_event(&observed, intended)
+            .map_err(|error| anyhow::anyhow!("comment reconciliation failed: {error}"))?;
+        Ok(accepted.cloned())
+    }
+
+    async fn record_attempt_model(
+        &self,
+        persisted: &mut PersistedExecutionRecord,
+        model: &str,
+        used_fallback: bool,
+    ) -> Result<()> {
+        let mut updated = persisted.record.clone();
+        updated.set_attempt_model(model, used_fallback);
+        self.persist(persisted, updated).await
+    }
+
+    async fn confirm_task(
+        &self,
+        persisted: &mut PersistedExecutionRecord,
+        model: &str,
+        used_fallback: bool,
+        task_id: String,
+        task_url: String,
+    ) -> Result<()> {
+        let mut updated = persisted.record.clone();
+        let url = (!task_url.is_empty()).then_some(task_url);
+        updated.set_task(model, used_fallback, task_id, url);
+        self.persist(persisted, updated).await
+    }
+
+    async fn fail(
+        &self,
+        persisted: &mut PersistedExecutionRecord,
+        message: impl Into<String>,
+    ) -> Result<()> {
+        let message = message.into();
+        warn!("[{}] {message}", self.reaction_name);
+        let mut updated = persisted.record.clone();
+        updated.set_failed(message);
+        self.persist(persisted, updated).await
+    }
+
+    async fn mark_ambiguous(
+        &self,
+        persisted: &mut PersistedExecutionRecord,
+        message: impl Into<String>,
+    ) -> Result<()> {
+        let mut updated = persisted.record.clone();
+        updated.set_ambiguous(message);
+        self.persist(persisted, updated).await
+    }
+
+    /// Compare-and-swap `next` into the store, refreshing the in-memory witness
+    /// and emitting the structured execution-state log for terminal/ambiguous
+    /// transitions.
+    async fn persist(
+        &self,
+        persisted: &mut PersistedExecutionRecord,
+        next: ExecutionRecord,
+    ) -> Result<()> {
+        let Some(bytes) =
+            compare_and_swap_record(self.store.clone(), self.store_id(), &persisted.bytes, &next)
+                .await?
+        else {
+            anyhow::bail!(
+                "execution record for run '{}' changed underneath this writer",
+                next.run_id
+            );
+        };
+        persisted.record = next;
+        persisted.bytes = bytes;
+        if let Some(log) =
+            WorkGraphExecutionStateV1::from_record(self.reaction_name, &persisted.record)
+        {
+            warn!(
+                target: "workgraph.execution_state",
+                "{}",
+                serde_json::to_string(&log).unwrap_or_default()
+            );
+        }
+        Ok(())
     }
 }

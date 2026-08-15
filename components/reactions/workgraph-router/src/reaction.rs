@@ -12,7 +12,46 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashMap};
+//! The routing reaction.
+//!
+//! For one nominated Project Item + Issue row it:
+//!
+//! 1. re-reads the authoritative issue and derives the body digest and `runId`;
+//! 2. verifies the Project item binding and that the item is still at
+//!    `AwaitingValidation`;
+//! 3. reads the trusted, unedited WorkGraph comments on the issue and requires
+//!    a coherent `ResponsibilityAssigned` → `ExecutionStarted` →
+//!    `CompletedIssueValidation` chain for that exact run;
+//! 4. writes a durable intent record — pinning the accepted completion comment,
+//!    its body hash, and the canonical JSON of the decision it will publish —
+//!    **before** touching GitHub;
+//! 5. posts exactly one `RoutingDecided` comment (adopting one a previous
+//!    attempt may already have written, but only when that comment is
+//!    byte-identical to the intended decision); and
+//! 6. sets the Project status **directly** to the final destination.
+//!
+//! There is no intermediate `AwaitingRouting` status, no fifth assignment
+//! event, and no separate routing reservation: the next responsibility travels
+//! inside the `RoutingDecided` payload, and the deterministic `eventId` is the
+//! reservation.
+//!
+//! # Before and after publication
+//!
+//! Steps 1–3 are the *pre-publication* guard: nothing is written until the
+//! current issue body still derives this run, the chain is coherent, and the
+//! completion the decision came from is unchanged.
+//!
+//! Once the decision comment is durably recorded as published (or adopted),
+//! that guard is over. The remaining status move is finished **from the
+//! persisted record** — see [`resume_published_decision`] — because a decision
+//! that is already visible in the issue thread must not be stranded merely
+//! because the issue body or the completion input changed afterwards. What is
+//! still reconciled is the published decision comment itself: it must exist, be
+//! trusted, be unedited, stay bound to the recorded run/item/subject, and carry
+//! exactly the canonical event JSON the record pinned. Any deviation is a hard
+//! halt with zero further side effects — never a skippable rejection.
+
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -23,174 +62,58 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::reactions::common::CheckpointState;
 use drasi_lib::reactions::ManagerCheckpointOwnership;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
-use drasi_lib::state_store::{StateStoreCompareAndSwapResult, StateStoreProvider};
+use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::Reaction;
+use drasi_workgraph_common::{
+    comment::{parse_comment, render_comment},
+    dedup::{adopt_published_event, coalesce, ObservedComment},
+    event::{
+        CompletedIssueValidationPayload, EventId, ExecutionId, ResponsibilityAssignedPayload,
+        RoutingDecidedPayload, WorkGraphEvent, WorkGraphEventPayload, WorkGraphEventType,
+    },
+    ids::{body_digest, event_id, run_id},
+    summary::{summary_for, SubjectRef},
+};
 use log::{error, info, warn};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use uuid::Uuid;
 
 use crate::candidate::RoutingCandidate;
-use crate::config::{WorkgraphRouterReactionConfig, ROUTE_QUERY_ID};
-use crate::decision::RoutingDecision;
-use crate::github_client::{GithubClient, UpdateStatusOutcome};
-use crate::reconciliation::reconcile_progress;
-use crate::rules::{PolicyMode, RoutingPolicyEngine, RulesV1PolicyEngine};
+use crate::config::{WorkgraphRouterReactionConfig, ROUTABLE_STATUS};
+use crate::github_client::{GithubClient, IssueComment, ProjectItemRef, UpdateStatusOutcome};
 use crate::state::{
-    compare_and_swap_routing_state, create_reservation_if_absent, load_reservation_with_bytes,
-    load_routing_state_with_bytes, reservation_store_key, routing_state_store_key,
-    serialize_reservation, PersistedReservationRecord, ReservationRecord, RoutingStateRecord,
-    SideEffectProgress,
+    comment_body_hash, compare_and_swap_record, create_record_if_absent, load_open_run,
+    load_record, set_open_run, AcceptedCompletion, PersistedRoutingRecord, RoutingRecord,
 };
-use crate::validation::validate_candidate;
 use crate::WorkgraphRouterReactionBuilder;
 
-#[cfg(test)]
-use crate::state::save_routing_state;
-
-#[derive(Debug, thiserror::Error)]
-#[error("{message}")]
-struct ReservationFencedError {
-    message: String,
-}
-
+/// A row that can never succeed, no matter how often it is retried.
+///
+/// Permanent rejections are logged and skipped; they have no external effect,
+/// so unlike transient failures they do not need a durable tombstone to stay
+/// consistent across replays. A run whose validation has simply not completed
+/// yet is also "permanent" for *this* row: the next result diff re-nominates it.
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 struct PermanentCandidateError {
-    reason_code: &'static str,
     message: String,
-    owned_reservation: Option<OwnedReservation>,
 }
 
 impl PermanentCandidateError {
-    fn new(reason_code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            reason_code,
+    #[allow(clippy::new_ret_no_self)]
+    fn new(message: impl Into<String>) -> anyhow::Error {
+        anyhow::Error::new(Self {
             message: message.into(),
-            owned_reservation: None,
-        }
-    }
-
-    fn with_reservation(mut self, reservation: &OwnedReservation) -> Self {
-        self.owned_reservation = Some(reservation.clone());
-        self
+        })
     }
 }
 
-#[derive(Debug, Clone)]
-struct OwnedReservation {
-    record: ReservationRecord,
-    persisted_bytes: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-struct OwnedRoutingState {
-    persisted_bytes: Option<Vec<u8>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct QueryResultProcessingOutcome {
-    has_unresolved_nonterminal: bool,
-}
-
-const TERMINAL_REJECTION_SCHEMA: &str = "workgraph.router-rejection/v1";
-const TERMINAL_REJECTION_PREFIX: &str = "workgraph-router/rejections/";
-const TERMINAL_REJECTION_NAMESPACE: Uuid = Uuid::from_bytes([
-    0x59, 0xc5, 0xd2, 0x5b, 0x7f, 0x94, 0x4d, 0x6d, 0x9b, 0x48, 0x42, 0x91, 0xf0, 0x6b, 0xa7, 0x35,
-]);
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TerminalRejectionRecord {
-    schema_version: String,
-    query_id: String,
-    sequence: u64,
-    row_signature: u64,
-    row_fingerprint: String,
-    reason_code: String,
-    message: String,
-    policy_id: String,
-    policy_type: String,
-    policy_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    reservation_key: Option<String>,
-    finalized: bool,
-    rejected_at: String,
-}
-
-#[derive(Debug, Clone)]
-struct SequenceCheckpointBarrier {
-    unresolved_sequences: BTreeSet<u64>,
-    completed_sequences: BTreeSet<u64>,
-}
-
-impl SequenceCheckpointBarrier {
-    fn new() -> Self {
-        Self {
-            unresolved_sequences: BTreeSet::new(),
-            completed_sequences: BTreeSet::new(),
-        }
-    }
-
-    fn mark_completed(&mut self, sequence: u64) {
-        self.unresolved_sequences.remove(&sequence);
-        self.completed_sequences.insert(sequence);
-    }
-
-    fn mark_unresolved(&mut self, sequence: u64) {
-        self.unresolved_sequences.insert(sequence);
-        self.completed_sequences.remove(&sequence);
-    }
-
-    fn has_unresolved_before(&self, sequence: u64) -> bool {
-        self.unresolved_sequences
-            .iter()
-            .next()
-            .is_some_and(|blocked| *blocked < sequence)
-    }
-
-    async fn advance_ready(
-        &mut self,
-        base: &ReactionBase,
-        checkpoint_state: &mut CheckpointState,
-        query_id: &str,
-    ) -> anyhow::Result<()> {
-        while let Some(next_sequence) = self.completed_sequences.iter().next().copied() {
-            if self
-                .unresolved_sequences
-                .iter()
-                .next()
-                .is_some_and(|blocked| *blocked < next_sequence)
-            {
-                break;
-            }
-            self.completed_sequences.remove(&next_sequence);
-            checkpoint_state
-                .advance(base, query_id, next_sequence)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to advance checkpoint for query '{query_id}' to {next_sequence}"
-                    )
-                })?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PreflightStatus {
-    Source,
-    Destination,
-}
-
+/// The WorkGraph router reaction.
 pub struct WorkgraphRouterReaction {
     pub(crate) base: ReactionBase,
     pub(crate) config: WorkgraphRouterReactionConfig,
-    runner_instance_id: String,
 }
 
 impl WorkgraphRouterReaction {
+    /// Start building a reaction.
     pub fn builder(id: impl Into<String>) -> WorkgraphRouterReactionBuilder {
         WorkgraphRouterReactionBuilder::new(id)
     }
@@ -201,24 +124,14 @@ impl WorkgraphRouterReaction {
         config: WorkgraphRouterReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
-        recovery_policy: Option<ReactionRecoveryPolicy>,
     ) -> Self {
-        let runner_instance_id = format!(
-            "{id}:{}:{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        );
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
         }
-        if let Some(policy) = recovery_policy {
-            params = params.with_recovery_policy(policy);
-        }
         Self {
             base: ReactionBase::new(params),
             config,
-            runner_instance_id,
         }
     }
 }
@@ -252,7 +165,7 @@ impl Reaction for WorkgraphRouterReaction {
     async fn start(&self) -> anyhow::Result<()> {
         log_component_start("WorkGraph Router Reaction", &self.base.id);
         self.config
-            .validate(&self.base.queries, None)
+            .validate(&self.base.queries)
             .context("invalid workgraph-router config")?;
 
         self.base
@@ -264,10 +177,9 @@ impl Reaction for WorkgraphRouterReaction {
 
         let github = GithubClient::from_config(&self.config)?;
         let shutdown_rx = self.base.create_shutdown_channel().await;
-        let reaction_name = self.base.id.clone();
         let base = self.base.clone_shared();
         let config = self.config.clone();
-        let runner_instance_id = self.runner_instance_id.clone();
+        let reaction_name = self.base.id.clone();
 
         let handle = tokio::spawn(async move {
             let mut checkpoint_state = CheckpointState::load(&base).await;
@@ -276,7 +188,6 @@ impl Reaction for WorkgraphRouterReaction {
                 base,
                 config,
                 github,
-                &runner_instance_id,
                 &mut checkpoint_state,
                 shutdown_rx,
             )
@@ -327,12 +238,9 @@ async fn run_processing_loop(
     base: ReactionBase,
     config: WorkgraphRouterReactionConfig,
     github: GithubClient,
-    runner_instance_id: &str,
     checkpoint_state: &mut CheckpointState,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let mut checkpoint_barrier = SequenceCheckpointBarrier::new();
-
     loop {
         let event = tokio::select! {
             biased;
@@ -340,100 +248,30 @@ async fn run_processing_loop(
             event = base.priority_queue.dequeue() => event,
         };
 
-        if event.query_id != ROUTE_QUERY_ID {
-            warn!(
-                "[{}] received result for unexpected query '{}'; expected '{}'",
-                reaction_name, event.query_id, ROUTE_QUERY_ID
-            );
-            continue;
-        }
-        if checkpoint_barrier.has_unresolved_before(event.sequence) {
-            info!(
-                "[{}] deferring query '{}' sequence {} because earlier unresolved sequence exists",
-                reaction_name, event.query_id, event.sequence
-            );
-            let requeued = base.priority_queue.enqueue(event.clone()).await;
-            if !requeued {
-                let message = format!(
-                    "failed to requeue deferred query result {}:{}",
-                    event.query_id, event.sequence
-                );
-                error!("[{reaction_name}] {message}");
-                base.set_status(ComponentStatus::Error, Some(message)).await;
-                return;
-            }
-            tokio::time::sleep(unresolved_retry_delay(&config)).await;
-            continue;
-        }
-
-        let processing = match process_query_result(
-            reaction_name,
-            &base,
-            &config,
-            &github,
-            runner_instance_id,
-            &event,
-        )
-        .await
+        if let Err(error) =
+            process_query_result(reaction_name, &base, &config, &github, &event).await
         {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                error!(
-                    "[{}] processing failed for query '{}' sequence {}: {error:#}",
-                    reaction_name, event.query_id, event.sequence
-                );
-                base.set_status(
-                    ComponentStatus::Error,
-                    Some(format!("Workgraph-router failed: {error:#}")),
-                )
-                .await;
-                if config.strict_recovery {
-                    return;
-                }
-                checkpoint_barrier.mark_unresolved(event.sequence);
-                let requeued = base.priority_queue.enqueue(event.clone()).await;
-                if !requeued {
-                    let message = format!(
-                        "failed to requeue failed query result {}:{}",
-                        event.query_id, event.sequence
-                    );
-                    error!("[{reaction_name}] {message}");
-                    base.set_status(ComponentStatus::Error, Some(message)).await;
-                    return;
-                }
-                tokio::time::sleep(unresolved_retry_delay(&config)).await;
-                continue;
-            }
-        };
-
-        if processing.has_unresolved_nonterminal {
-            checkpoint_barrier.mark_unresolved(event.sequence);
-            info!(
-                "[{}] query '{}' sequence {} has unresolved fenced candidates; requeuing before checkpoint advance",
-                reaction_name, event.query_id, event.sequence
+            error!(
+                "[{reaction_name}] routing failed for query '{}' sequence {}: {error:#}",
+                event.query_id, event.sequence
             );
-            let requeued = base.priority_queue.enqueue(event.clone()).await;
-            if !requeued {
-                let message = format!(
-                    "failed to requeue unresolved query result {}:{}",
-                    event.query_id, event.sequence
-                );
-                error!("[{reaction_name}] {message}");
-                base.set_status(ComponentStatus::Error, Some(message)).await;
-                return;
-            }
-            tokio::time::sleep(unresolved_retry_delay(&config)).await;
-            continue;
+            base.set_status(
+                ComponentStatus::Error,
+                Some(format!("Workgraph-router failed: {error:#}")),
+            )
+            .await;
+            // Strict recovery: stop without advancing the checkpoint so the
+            // batch replays from the outbox after operator intervention.
+            return;
         }
 
-        checkpoint_barrier.mark_completed(event.sequence);
-        if let Err(error) = checkpoint_barrier
-            .advance_ready(&base, checkpoint_state, &event.query_id)
+        if let Err(error) = checkpoint_state
+            .advance(&base, &event.query_id, event.sequence)
             .await
         {
             error!(
-                "[{}] checkpoint update failed while evaluating sequence {}: {error:#}",
-                reaction_name, event.sequence
+                "[{reaction_name}] checkpoint update failed at sequence {}: {error:#}",
+                event.sequence
             );
             base.set_status(
                 ComponentStatus::Error,
@@ -450,2679 +288,1193 @@ async fn process_query_result(
     base: &ReactionBase,
     config: &WorkgraphRouterReactionConfig,
     github: &GithubClient,
-    runner_instance_id: &str,
     result: &QueryResult,
-) -> anyhow::Result<QueryResultProcessingOutcome> {
-    let mut has_unresolved_nonterminal = false;
+) -> anyhow::Result<()> {
     for diff in &result.results {
         match diff {
-            ResultDiff::Add {
-                data,
-                row_signature,
-            } => {
-                if let Some(rejection) =
-                    load_terminal_rejection(base, result, *row_signature, data).await?
-                {
-                    if rejection.finalized {
-                        info!(
-                            "[{reaction_name}] finalized terminal rejection already recorded for query '{}' sequence {} row {}; skipping replay",
-                            result.query_id, result.sequence, row_signature
-                        );
-                        continue;
-                    }
-
-                    let candidate: RoutingCandidate = serde_json::from_value(data.clone())
-                        .context(
-                            "pending terminal rejection no longer contains a valid candidate",
-                        )?;
-                    if let Err(error) = complete_pending_terminal_rejection(
-                        base,
-                        config,
-                        runner_instance_id,
-                        &candidate,
-                        &rejection,
-                    )
-                    .await
-                    {
-                        if error.downcast_ref::<ReservationFencedError>().is_some() {
-                            has_unresolved_nonterminal = true;
-                            info!(
-                                "[{reaction_name}] terminal rejection tombstone for query '{}' sequence {} row {} remains fenced (will retry): {}",
-                                result.query_id, result.sequence, row_signature, error
-                            );
-                            continue;
-                        }
-                        return Err(error);
-                    }
-                    finalize_terminal_rejection(base, result, *row_signature, data).await?;
-                    continue;
-                }
+            ResultDiff::Add { data, .. } => {
                 let candidate: RoutingCandidate = match serde_json::from_value(data.clone()) {
                     Ok(candidate) => candidate,
                     Err(error) => {
-                        persist_terminal_rejection(
-                            reaction_name,
-                            base,
-                            config,
-                            result,
-                            *row_signature,
-                            data,
-                            "invalid-row-shape",
-                            &format!(
-                                "failed to deserialize added row into RoutingCandidate: {error}"
-                            ),
-                            None,
-                        )
-                        .await?;
-                        continue;
-                    }
-                };
-                if let Err(error) = process_candidate(
-                    reaction_name,
-                    base,
-                    config,
-                    github,
-                    runner_instance_id,
-                    &candidate,
-                )
-                .await
-                {
-                    if let Some(permanent) = error.downcast_ref::<PermanentCandidateError>() {
-                        let reservation_key = permanent
-                            .owned_reservation
-                            .as_ref()
-                            .map(|owned| owned.record.reservation_key.as_str());
-                        let rejection = persist_terminal_rejection(
-                            reaction_name,
-                            base,
-                            config,
-                            result,
-                            *row_signature,
-                            data,
-                            permanent.reason_code,
-                            &permanent.message,
-                            reservation_key,
-                        )
-                        .await?;
-                        if !rejection.finalized {
-                            let mut owned_reservation = permanent
-                                .owned_reservation
-                                .clone()
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!(
-                                        "pending terminal rejection is missing reservation ownership"
-                                    )
-                                })?;
-                            let store = base.state_store().await.ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "durable state store is required for workgraph-router"
-                                )
-                            })?;
-                            complete_reservation(
-                                store,
-                                &base.id,
-                                config,
-                                runner_instance_id,
-                                &mut owned_reservation,
-                                &format!("terminal-rejection:{}", rejection.row_fingerprint),
-                            )
-                            .await
-                            .context("failed to complete terminally rejected reservation")?;
-                            finalize_terminal_rejection(base, result, *row_signature, data).await?;
-                        }
-                        continue;
-                    }
-                    if error.downcast_ref::<ReservationFencedError>().is_some() {
-                        has_unresolved_nonterminal = true;
-                        info!(
-                            "[{}] reservation fenced for query '{}' sequence {} candidate '{}' (will retry): {}",
-                            reaction_name,
-                            result.query_id,
-                            result.sequence,
-                            candidate.reservation_key(),
-                            error
+                        warn!(
+                            "[{reaction_name}] skipping malformed routing row on query '{}': {error}",
+                            result.query_id
                         );
                         continue;
                     }
-                    return Err(error);
+                };
+                match route(reaction_name, base, config, github, &candidate).await {
+                    Ok(()) => {}
+                    Err(error) if error.downcast_ref::<PermanentCandidateError>().is_some() => {
+                        warn!(
+                            "[{reaction_name}] not routing {}#{}: {error}",
+                            candidate.repository, candidate.subject_number
+                        );
+                    }
+                    Err(error) => return Err(error),
                 }
             }
             ResultDiff::Update { .. } | ResultDiff::Delete { .. } => {
                 info!(
-                    "[{}] ignoring non-added diff for query '{}'",
-                    reaction_name, result.query_id
+                    "[{reaction_name}] ignoring non-added diff for query '{}'",
+                    result.query_id
                 );
             }
             ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
         }
     }
-    Ok(QueryResultProcessingOutcome {
-        has_unresolved_nonterminal,
-    })
+    Ok(())
 }
 
-fn terminal_rejection_store_key(
-    query_id: &str,
-    sequence: u64,
-    row_signature: u64,
-    row_fingerprint: &str,
-) -> String {
-    format!("{TERMINAL_REJECTION_PREFIX}{query_id}/{sequence}/{row_signature}/{row_fingerprint}")
+/// The trusted event chain for one run, read from the issue thread.
+///
+/// The assignment is validated inside [`trusted_chain`] (profile and body
+/// digest) but is not carried here: nothing downstream needs it, and an unused
+/// field would invite a later reader to route on it.
+#[derive(Debug)]
+struct TrustedChain {
+    /// The execution both the start and the completion agree on.
+    execution_id: ExecutionId,
+    /// The accepted completion payload the decision derives from.
+    completion: CompletedIssueValidationPayload,
+    /// The physical comment that carried [`Self::completion`].
+    accepted_completion: AcceptedCompletion,
 }
 
-fn terminal_rejection_fingerprint(data: &Value) -> anyhow::Result<String> {
-    let bytes = serde_json::to_vec(data).context("failed to serialize rejected row fingerprint")?;
-    Ok(Uuid::new_v5(&TERMINAL_REJECTION_NAMESPACE, &bytes).to_string())
-}
-
-async fn load_terminal_rejection(
+/// Route one candidate, resuming any partially completed prior attempt.
+async fn route(
+    reaction_name: &str,
     base: &ReactionBase,
-    result: &QueryResult,
-    row_signature: u64,
-    data: &Value,
-) -> anyhow::Result<Option<TerminalRejectionRecord>> {
+    config: &WorkgraphRouterReactionConfig,
+    github: &GithubClient,
+    candidate: &RoutingCandidate,
+) -> anyhow::Result<()> {
+    candidate
+        .validate(config)
+        .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
+
     let store = base
         .state_store()
         .await
-        .ok_or_else(|| anyhow::anyhow!("durable state store is required for workgraph-router"))?;
-    let row_fingerprint = terminal_rejection_fingerprint(data)?;
-    let key = terminal_rejection_store_key(
-        &result.query_id,
-        result.sequence,
-        row_signature,
-        &row_fingerprint,
-    );
-    let Some(existing) = store
-        .get(&base.id, &key)
+        .ok_or_else(|| anyhow::anyhow!("a durable state store is required for workgraph-router"))?;
+
+    // 0. A decision that is already published owns this item. Finish it from
+    //    durable state before looking at anything live: re-deriving the chain
+    //    (or a new run from a changed issue body) would strand a decision the
+    //    issue thread already shows.
+    if let Some(persisted) = published_but_unapplied_run(store.clone(), &base.id, candidate).await?
+    {
+        return resume_published_decision(
+            reaction_name,
+            base,
+            config,
+            github,
+            candidate,
+            store,
+            persisted,
+        )
+        .await;
+    }
+
+    // 1. Authoritative issue read. The body digest — and therefore the run
+    //    identity — must come from GitHub, never from the query row.
+    let issue = github
+        .issue_snapshot(&candidate.repository, candidate.subject_number)
         .await
-        .map_err(|error| anyhow::anyhow!("failed to read terminal rejection: {error}"))?
+        .context("failed to read the authoritative issue")?;
+    if issue.node_id != candidate.subject_node_id {
+        return Err(PermanentCandidateError::new(format!(
+            "{}#{} resolves to node '{}', not the row's '{}'",
+            candidate.repository,
+            candidate.subject_number,
+            issue.node_id,
+            candidate.subject_node_id
+        )));
+    }
+
+    let digest = body_digest(issue.body.as_deref());
+    let run = run_id(
+        &candidate.project_item_node_id,
+        &candidate.subject_node_id,
+        &digest,
+    );
+
+    // 2. Verify the Project binding and that the item is still routable. The
+    //    decided destinations are tolerated so a resumed run can finish.
+    let item = ProjectItemRef {
+        project_node_id: &candidate.project_node_id,
+        project_item_node_id: &candidate.project_item_node_id,
+        subject_node_id: &candidate.subject_node_id,
+        repository: &candidate.repository,
+        subject_number: candidate.subject_number,
+    };
+    let snapshot = github
+        .project_snapshot(item)
+        .await
+        .context("failed to verify the project item binding")?;
+    // Only the routable status may start (or re-derive) a decision. An item
+    // already at a decided status is finished exclusively by
+    // [`resume_published_decision`], from durable state — never by re-deriving.
+    if snapshot.current_status != ROUTABLE_STATUS {
+        return Err(PermanentCandidateError::new(format!(
+            "project item '{}' status is '{}' (expected '{ROUTABLE_STATUS}')",
+            candidate.project_item_node_id, snapshot.current_status
+        )));
+    }
+
+    // 3. Read the trusted chain for this exact run.
+    let comments = github
+        .list_issue_comments(&candidate.repository, candidate.subject_number)
+        .await
+        .context("failed to list issue comments")?;
+    let chain = trusted_chain(config, candidate, &run, &digest, &comments)?;
+
+    let decision = RoutingDecidedPayload::for_outcome(chain.completion.outcome);
+    let event = WorkGraphEvent::new(
+        run.clone(),
+        candidate.project_item_node_id.clone(),
+        candidate.subject_node_id.clone(),
+        WorkGraphEventPayload::RoutingDecided(decision.clone()),
+    )
+    .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
+    let summary = summary_for(
+        &event,
+        SubjectRef {
+            repository: &candidate.repository,
+            number: candidate.subject_number,
+        },
+    );
+    let body = render_comment(&event, &summary)
+        .map_err(|error| anyhow::anyhow!("failed to render the routing comment: {error}"))?;
+
+    // 4. Durable intent before any external effect.
+    let intent = RoutingRecord::new(
+        run.as_str(),
+        event.event_id.as_str(),
+        candidate,
+        digest.as_str(),
+        chain.accepted_completion.clone(),
+        chain.completion.outcome.as_str(),
+        decision.to_status.as_str(),
+        &event.to_canonical_json(),
+    );
+    let mut persisted = match create_record_if_absent(store.clone(), &base.id, &intent).await? {
+        Some(existing) => {
+            existing.record.ensure_matches(candidate)?;
+            // A run is decided exactly once: refuse to continue if the
+            // completion the decision was derived from has changed.
+            existing.record.ensure_decision_inputs_unchanged(
+                &chain.accepted_completion,
+                chain.completion.outcome.as_str(),
+                decision.to_status.as_str(),
+            )?;
+            existing
+        }
+        None => load_record(store.clone(), &base.id, run.as_str())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("routing record vanished immediately after create"))?,
+    };
+
+    if persisted.record.is_complete() {
+        info!(
+            "[{reaction_name}] run '{run}' for {}#{} is already routed to '{}'; nothing to do",
+            candidate.repository, candidate.subject_number, persisted.record.to_status
+        );
+        return Ok(());
+    }
+
+    // 4b. Point the item at this run *before* the first external effect, so a
+    //     later attempt can find this decision even if the issue body (and with
+    //     it a freshly derived `runId`) changes after publication.
+    claim_open_run(store.clone(), &base.id, candidate, run.as_str()).await?;
+
+    // 5. Exactly one decision comment, adopting an earlier write if present.
+    //    `published_in_this_pass` carries the physical comment this pass saw, so
+    //    step 6 can verify it without another round trip.
+    let mut published_in_this_pass: Option<IssueComment> = None;
+    if persisted.record.decision_comment_node_id.is_none() {
+        // Re-read immediately before writing: a decision comment that landed
+        // after the chain was read must be adopted, not duplicated. Adoption
+        // requires canonical event JSON byte-identical to `event`; a divergent
+        // comment claiming this event ID fails closed.
+        let latest = github
+            .list_issue_comments(&candidate.repository, candidate.subject_number)
+            .await
+            .context("failed to list issue comments before posting the decision")?;
+        let adopted = adopt_own_published_comment(config, &latest, &event)
+            .context("routing-decision reconciliation failed")?;
+        let (comment_node_id, published) = match adopted {
+            Some(observation) => {
+                info!(
+                    "[{reaction_name}] adopted existing routing comment '{}' for run '{run}'",
+                    observation.comment_node_id
+                );
+                let physical = latest
+                    .iter()
+                    .find(|comment| comment.node_id == observation.comment_node_id)
+                    .cloned();
+                (observation.comment_node_id, physical)
+            }
+            None => {
+                match github
+                    .create_issue_comment(&candidate.repository, candidate.subject_number, &body)
+                    .await
+                {
+                    Ok(comment) => (comment.node_id.clone(), Some(comment)),
+                    Err(error) => {
+                        // The write may or may not have landed; mark the run
+                        // ambiguous so the next attempt reconciles instead of
+                        // blindly posting again.
+                        let mut ambiguous = persisted.record.clone();
+                        ambiguous.set_error(format!("{error:#}"), true);
+                        persist(store.clone(), &base.id, &mut persisted, ambiguous).await?;
+                        return Err(error).context("failed to post the routing comment");
+                    }
+                }
+            }
+        };
+        let mut updated = persisted.record.clone();
+        updated.set_decision_comment(comment_node_id);
+        persist(store.clone(), &base.id, &mut persisted, updated).await?;
+        published_in_this_pass = published;
+    }
+
+    // 6. Move directly to the final status — through the *same* verified finish
+    //    a resumed run uses, so a status can never move for a decision comment
+    //    that was not checked in this pass.
+    finish_published_decision(
+        reaction_name,
+        base,
+        github,
+        config,
+        store,
+        &mut persisted,
+        published_in_this_pass,
+    )
+    .await?;
+
+    info!(
+        "[{reaction_name}] routed {}#{} to '{}' (next responsibility '{}') as run '{run}' from execution '{}'",
+        candidate.repository,
+        candidate.subject_number,
+        decision.to_status.as_str(),
+        decision.next_responsibility_type.as_str(),
+        chain.execution_id
+    );
+    Ok(())
+}
+
+/// Whether a status is one of the two destinations a routing decision may set.
+fn is_decided_status(status: &str) -> bool {
+    status == drasi_workgraph_common::status::AWAITING_ISSUE_RISK_PROFILING
+        || status == drasi_workgraph_common::status::NEEDS_MORE_INFORMATION
+}
+
+/// The run that owns `candidate`'s Project item when its decision is published
+/// but its final status move has not been applied yet.
+///
+/// Returns `None` when the item has no open run, when that run is still
+/// pre-publication (so the normal derivation path applies), or when it is
+/// already complete.
+async fn published_but_unapplied_run(
+    store: Arc<dyn StateStoreProvider>,
+    store_id: &str,
+    candidate: &RoutingCandidate,
+) -> anyhow::Result<Option<PersistedRoutingRecord>> {
+    let Some(run_id) = load_open_run(store.clone(), store_id, &candidate.project_item_node_id)
+        .await
+        .context("failed to read the open run for the project item")?
     else {
         return Ok(None);
     };
-    let existing: TerminalRejectionRecord = serde_json::from_slice(&existing)
-        .context("failed to deserialize existing terminal rejection record")?;
-    validate_terminal_rejection_identity(&existing, result, row_signature, &row_fingerprint, &key)?;
-    Ok(Some(existing))
-}
-
-fn validate_terminal_rejection_identity(
-    record: &TerminalRejectionRecord,
-    result: &QueryResult,
-    row_signature: u64,
-    row_fingerprint: &str,
-    key: &str,
-) -> anyhow::Result<()> {
-    if record.schema_version != TERMINAL_REJECTION_SCHEMA
-        || record.query_id != result.query_id
-        || record.sequence != result.sequence
-        || record.row_signature != row_signature
-        || record.row_fingerprint != row_fingerprint
-    {
-        anyhow::bail!("terminal rejection key collision or conflicting replay for '{key}'");
-    }
-    Ok(())
-}
-
-async fn complete_pending_terminal_rejection(
-    base: &ReactionBase,
-    config: &WorkgraphRouterReactionConfig,
-    runner_instance_id: &str,
-    candidate: &RoutingCandidate,
-    rejection: &TerminalRejectionRecord,
-) -> anyhow::Result<()> {
-    let expected_reservation_key = rejection.reservation_key.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("pending terminal rejection is missing its reservation key")
-    })?;
-    if candidate.reservation_key() != expected_reservation_key {
-        anyhow::bail!(
-            "pending terminal rejection reservation '{}' does not match candidate '{}'",
-            expected_reservation_key,
-            candidate.reservation_key()
-        );
-    }
-
-    let store = base
-        .state_store()
+    let Some(persisted) = load_record(store, store_id, &run_id)
         .await
-        .ok_or_else(|| anyhow::anyhow!("durable state store is required for workgraph-router"))?;
-    let (reservation, mut owned_reservation, _, _) = reserve_or_resume(
-        store.clone(),
-        &base.id,
-        config,
-        candidate,
-        runner_instance_id,
-    )
-    .await?;
-    if reservation.reservation_key != expected_reservation_key {
-        anyhow::bail!(
-            "loaded reservation '{}' does not match pending terminal rejection '{}'",
-            reservation.reservation_key,
-            expected_reservation_key
-        );
-    }
-    if reservation.completed {
-        return Ok(());
-    }
-
-    let mut owned_reservation = owned_reservation
-        .take()
-        .ok_or_else(|| ReservationFencedError {
-            message: format!(
-                "terminal rejection reservation '{}' is fenced by owner '{}' epoch {}",
-                reservation.reservation_key,
-                reservation
-                    .owner_instance_id
-                    .as_deref()
-                    .unwrap_or("unknown"),
-                reservation.fencing_epoch
-            ),
-        })?;
-    complete_reservation(
-        store,
-        &base.id,
-        config,
-        runner_instance_id,
-        &mut owned_reservation,
-        &format!("terminal-rejection:{}", rejection.row_fingerprint),
-    )
-    .await
-}
-
-async fn finalize_terminal_rejection(
-    base: &ReactionBase,
-    result: &QueryResult,
-    row_signature: u64,
-    data: &Value,
-) -> anyhow::Result<()> {
-    let store = base
-        .state_store()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("durable state store is required for workgraph-router"))?;
-    let row_fingerprint = terminal_rejection_fingerprint(data)?;
-    let key = terminal_rejection_store_key(
-        &result.query_id,
-        result.sequence,
-        row_signature,
-        &row_fingerprint,
-    );
-
-    loop {
-        let existing_bytes = store
-            .get(&base.id, &key)
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to load terminal rejection: {error}"))?
-            .ok_or_else(|| anyhow::anyhow!("terminal rejection '{key}' is missing"))?;
-        let mut record: TerminalRejectionRecord = serde_json::from_slice(&existing_bytes)
-            .context("failed to deserialize terminal rejection before finalization")?;
-        validate_terminal_rejection_identity(
-            &record,
-            result,
-            row_signature,
-            &row_fingerprint,
-            &key,
-        )?;
-        if record.finalized {
-            return Ok(());
-        }
-
-        let reservation_key = record.reservation_key.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("pending terminal rejection is missing its reservation key")
-        })?;
-        let reservation = load_reservation_with_bytes(store.clone(), &base.id, reservation_key)
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!("terminal rejection reservation '{reservation_key}' is missing")
-            })?
-            .record;
-        let expected_decision_id = format!("terminal-rejection:{row_fingerprint}");
-        if !reservation.completed
-            || reservation.decision_id.as_deref() != Some(expected_decision_id.as_str())
-        {
-            anyhow::bail!(
-                "terminal rejection reservation '{reservation_key}' is not durably tombstoned"
-            );
-        }
-
-        record.finalized = true;
-        let finalized_bytes = serde_json::to_vec(&record)
-            .context("failed to serialize finalized terminal rejection")?;
-        match store
-            .compare_and_swap(
-                &base.id,
-                &key,
-                Some(existing_bytes.as_slice()),
-                finalized_bytes,
-            )
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to finalize terminal rejection: {error}"))?
-        {
-            StateStoreCompareAndSwapResult::Swapped => return Ok(()),
-            StateStoreCompareAndSwapResult::Mismatch => continue,
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn persist_terminal_rejection(
-    reaction_name: &str,
-    base: &ReactionBase,
-    config: &WorkgraphRouterReactionConfig,
-    result: &QueryResult,
-    row_signature: u64,
-    data: &Value,
-    reason_code: &str,
-    message: &str,
-    reservation_key: Option<&str>,
-) -> anyhow::Result<TerminalRejectionRecord> {
-    let store = base
-        .state_store()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("durable state store is required for workgraph-router"))?;
-    let row_fingerprint = terminal_rejection_fingerprint(data)?;
-    let key = terminal_rejection_store_key(
-        &result.query_id,
-        result.sequence,
-        row_signature,
-        &row_fingerprint,
-    );
-    let record = TerminalRejectionRecord {
-        schema_version: TERMINAL_REJECTION_SCHEMA.to_string(),
-        query_id: result.query_id.clone(),
-        sequence: result.sequence,
-        row_signature,
-        row_fingerprint: row_fingerprint.clone(),
-        reason_code: reason_code.to_string(),
-        message: message.chars().take(2_000).collect(),
-        policy_id: config.policy_id.clone(),
-        policy_type: config.policy_type.clone(),
-        policy_version: config.policy_version.clone(),
-        reservation_key: reservation_key.map(ToString::to_string),
-        finalized: reservation_key.is_none(),
-        rejected_at: chrono::Utc::now().to_rfc3339(),
+        .context("failed to load the open run's routing record")?
+    else {
+        return Ok(None);
     };
-    let bytes =
-        serde_json::to_vec(&record).context("failed to serialize terminal rejection record")?;
-
-    match store
-        .compare_and_swap(&base.id, &key, None, bytes)
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to persist terminal rejection: {error}"))?
-    {
-        StateStoreCompareAndSwapResult::Swapped => {
-            warn!(
-                "[{reaction_name}] terminally rejected query '{}' sequence {} row {} ({reason_code}): {}",
-                result.query_id,
-                result.sequence,
-                row_signature,
-                record.message
-            );
-            Ok(record)
-        }
-        StateStoreCompareAndSwapResult::Mismatch => {
-            let existing = store
-                .get(&base.id, &key)
-                .await
-                .map_err(|error| {
-                    anyhow::anyhow!(
-                        "failed to reload terminal rejection after CAS mismatch: {error}"
-                    )
-                })?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "terminal rejection CAS mismatched but record '{key}' disappeared"
-                    )
-                })?;
-            let existing: TerminalRejectionRecord = serde_json::from_slice(&existing)
-                .context("failed to deserialize existing terminal rejection record")?;
-            validate_terminal_rejection_identity(
-                &existing,
-                result,
-                row_signature,
-                &row_fingerprint,
-                &key,
-            )?;
-            if existing.reservation_key.as_deref() != reservation_key {
-                anyhow::bail!(
-                    "terminal rejection reservation identity changed for query '{}' sequence {} row {}",
-                    result.query_id,
-                    result.sequence,
-                    row_signature
-                );
-            }
-            Ok(existing)
-        }
-    }
+    Ok(persisted
+        .record
+        .is_published_but_unapplied()
+        .then_some(persisted))
 }
 
-async fn process_candidate(
+/// Finish a run whose decision comment is already published.
+///
+/// Nothing is re-derived from live state: the destination status comes from the
+/// persisted record, so a run cannot be stranded by an issue body or completion
+/// comment that changed after publication. What *is* re-verified is the
+/// published decision comment itself — it must still exist, be authored by the
+/// trusted author, be unedited, name the recorded run, item, subject, and event
+/// ID, and carry exactly the canonical event JSON the record pinned.
+///
+/// Every failure here is a **hard error**, never a [`PermanentCandidateError`]:
+/// the reaction stops with zero further side effects rather than skipping a row
+/// whose decision is already visible in the issue thread.
+async fn resume_published_decision(
     reaction_name: &str,
     base: &ReactionBase,
     config: &WorkgraphRouterReactionConfig,
     github: &GithubClient,
-    runner_instance_id: &str,
     candidate: &RoutingCandidate,
+    store: Arc<dyn StateStoreProvider>,
+    mut persisted: PersistedRoutingRecord,
 ) -> anyhow::Result<()> {
-    let store = base
-        .state_store()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("durable state store is required for workgraph-router"))?;
-    let (reservation, mut owned_reservation, mut state, mut owned_state) = reserve_or_resume(
-        store.clone(),
-        &base.id,
+    persisted
+        .record
+        .ensure_matches(candidate)
+        .context("the published decision does not belong to this row")?;
+    let run_id = persisted.record.run_id.clone();
+    let to_status = persisted.record.to_status.clone();
+
+    // Nothing observed in this pass, so the published comment is re-read.
+    finish_published_decision(
+        reaction_name,
+        base,
+        github,
         config,
-        candidate,
-        runner_instance_id,
-    )
-    .await?;
-
-    if reservation.completed {
-        info!(
-            "[{}] reservation '{}' already completed; skipping",
-            reaction_name, reservation.reservation_key
-        );
-        return Ok(());
-    }
-
-    let mut owned_reservation = if let Some(owned) = owned_reservation.take() {
-        owned
-    } else {
-        return Err(ReservationFencedError {
-            message: format!(
-                "reservation '{}' is fenced by owner '{}' epoch {} and is not complete",
-                reservation.reservation_key,
-                reservation
-                    .owner_instance_id
-                    .as_deref()
-                    .unwrap_or("unknown"),
-                reservation.fencing_epoch
-            ),
-        }
-        .into());
-    };
-
-    if let Err(error) = validate_candidate(candidate, config) {
-        let has_routing_history = state.decision.is_some()
-            || state.selected_transition.is_some()
-            || state.progress != SideEffectProgress::default()
-            || state.ambiguous
-            || state.failed;
-        if has_routing_history {
-            return Err(error).context(
-                "row validation failed for an execution with existing routing history; refusing terminal rejection",
-            );
-        }
-        return Err(PermanentCandidateError::new(
-            "candidate-validation-failed",
-            format!("row validation failed: {error:#}"),
-        )
-        .with_reservation(&owned_reservation)
-        .into());
-    }
-
-    let reservation_policy_mismatch = reservation.policy_id != config.policy_id
-        || reservation.policy_type != config.policy_type
-        || reservation.policy_version != config.policy_version;
-
-    let (decision, decision_is_new) = if let Some(decision) = state.decision.clone() {
-        if reservation_policy_mismatch {
-            info!(
-                "[{}] resuming reservation '{}' with persisted decision '{}' bound to policy {}@{}",
-                reaction_name,
-                reservation.reservation_key,
-                decision.decision_id,
-                decision.policy_id,
-                decision.policy_version
-            );
-        }
-        (decision, false)
-    } else {
-        if reservation_policy_mismatch {
-            anyhow::bail!(
-                "reservation '{}' is bound to policy {}@{} but has no persisted decision to resume",
-                reservation.reservation_key,
-                reservation.policy_id,
-                reservation.policy_version
-            );
-        }
-        let mode = PolicyMode::try_from(config.policy_type.as_str())
-            .context("unable to resolve policyType for routing evaluation")?;
-        let engine: Box<dyn RoutingPolicyEngine> = match mode {
-            PolicyMode::RulesV1 => Box::<RulesV1PolicyEngine>::default(),
-            PolicyMode::Linear | PolicyMode::Llm => {
-                anyhow::bail!(
-                    "policyType '{}' is declared but not implemented; only rules_v1 is supported",
-                    config.policy_type
-                )
-            }
-        };
-        let outcome = engine.evaluate(candidate).map_err(|error| {
-            PermanentCandidateError::new(
-                "policy-evaluation-failed",
-                format!("rules evaluation rejected candidate: {error:#}"),
-            )
-            .with_reservation(&owned_reservation)
-        })?;
-        let decision =
-            RoutingDecision::from_policy(config, candidate, outcome).map_err(|error| {
-                PermanentCandidateError::new(
-                    "policy-output-rejected",
-                    format!("policy output failed allowlist validation: {error:#}"),
-                )
-                .with_reservation(&owned_reservation)
-            })?;
-        state.selected_transition =
-            Some((decision.from_status.clone(), decision.to_status.clone()));
-        state.decision = Some(decision.clone());
-        (decision, true)
-    };
-
-    if !config.allows_transition(&decision.from_status, &decision.to_status) {
-        let message = format!(
-            "selected transition {} -> {} is not allowlisted",
-            decision.from_status, decision.to_status
-        );
-        if decision_is_new {
-            return Err(
-                PermanentCandidateError::new("transition-not-allowlisted", message)
-                    .with_reservation(&owned_reservation)
-                    .into(),
-            );
-        }
-        anyhow::bail!(message);
-    }
-
-    if let Err(error) = decision.validate_allowlists(config) {
-        if decision_is_new {
-            return Err(PermanentCandidateError::new(
-                "policy-output-rejected",
-                format!("decision allowlist validation failed before side effects: {error:#}"),
-            )
-            .with_reservation(&owned_reservation)
-            .into());
-        }
-        return Err(error).context("decision allowlist validation failed before side effects");
-    }
-
-    if decision_is_new {
-        persist_state_with_ownership(
-            store.clone(),
-            &base.id,
-            config,
-            runner_instance_id,
-            &mut owned_reservation,
-            &mut owned_state,
-            &state,
-            "failed to persist routing decision state",
-        )
-        .await?;
-    }
-
-    let mut progress =
-        reconcile_progress(github, candidate, &decision, config, state.progress.clone())
-            .await
-            .context("failed to reconcile existing side effects")?;
-    state.mark_progress(progress.clone());
-
-    if !progress.decision_comment_written {
-        renew_reservation_ownership(
-            store.clone(),
-            &base.id,
-            config,
-            runner_instance_id,
-            &mut owned_reservation,
-            "decision comment side effect",
-        )
-        .await?;
-        match run_github_preflight(github, candidate, &decision).await {
-            Ok(PreflightStatus::Source) => {}
-            Ok(PreflightStatus::Destination) => {
-                progress = reconcile_progress(
-                    github,
-                    candidate,
-                    &decision,
-                    config,
-                    progress.clone(),
-                )
-                .await
-                .context(
-                    "failed to reconcile when destination status observed before decision comment",
-                )?;
-                if !progress.is_complete() {
-                    anyhow::bail!(
-                        "project item {} already at destination '{}' before decision comment but side effects are incomplete",
-                        candidate.project_item_id,
-                        decision.to_status
-                    );
-                }
-            }
-            Err(error) => {
-                state.mark_error_with_epoch(
-                    format!("github preflight failed: {error:#}"),
-                    false,
-                    owned_reservation.record.fencing_epoch,
-                );
-                persist_state_with_ownership(
-                    store.clone(),
-                    &base.id,
-                    config,
-                    runner_instance_id,
-                    &mut owned_reservation,
-                    &mut owned_state,
-                    &state,
-                    "failed to persist preflight failure state",
-                )
-                .await?;
-                return Err(error);
-            }
-        }
-
-        if !progress.decision_comment_written {
-            renew_reservation_ownership(
-                store.clone(),
-                &base.id,
-                config,
-                runner_instance_id,
-                &mut owned_reservation,
-                "decision comment write",
-            )
-            .await?;
-            let decision_body = decision.decision_comment(candidate)?;
-            if let Err(error) = github
-                .create_issue_comment(
-                    &candidate.subject_repo,
-                    candidate.subject_issue_number,
-                    &decision_body,
-                )
-                .await
-            {
-                state.mark_error_with_epoch(
-                    format!("decision comment write failed: {error:#}"),
-                    true,
-                    owned_reservation.record.fencing_epoch,
-                );
-                persist_state_with_ownership(
-                    store.clone(),
-                    &base.id,
-                    config,
-                    runner_instance_id,
-                    &mut owned_reservation,
-                    &mut owned_state,
-                    &state,
-                    "failed to persist ambiguous decision-comment error",
-                )
-                .await?;
-                progress =
-                    reconcile_progress(github, candidate, &decision, config, progress.clone())
-                        .await
-                        .context("failed to reconcile after decision comment error")?;
-                if !progress.decision_comment_written {
-                    anyhow::bail!("decision comment write failed and could not be reconciled");
-                }
-            }
-            progress.decision_comment_written = true;
-        }
-        state.mark_progress(progress.clone());
-        persist_state_with_ownership(
-            store.clone(),
-            &base.id,
-            config,
-            runner_instance_id,
-            &mut owned_reservation,
-            &mut owned_state,
-            &state,
-            "failed to persist decision comment progress",
-        )
-        .await?;
-    }
-
-    if !progress.responsibility_written {
-        renew_reservation_ownership(
-            store.clone(),
-            &base.id,
-            config,
-            runner_instance_id,
-            &mut owned_reservation,
-            "responsibility comment side effect",
-        )
-        .await?;
-        match run_github_preflight(github, candidate, &decision).await {
-            Ok(PreflightStatus::Source) => {}
-            Ok(PreflightStatus::Destination) => {
-                progress = reconcile_progress(github, candidate, &decision, config, progress.clone())
-                    .await
-                    .context("failed to reconcile when destination status observed before responsibility comment")?;
-                if !progress.is_complete() {
-                    anyhow::bail!(
-                        "project item {} already at destination '{}' before responsibility comment but side effects are incomplete",
-                        candidate.project_item_id,
-                        decision.to_status
-                    );
-                }
-            }
-            Err(error) => {
-                state.mark_error_with_epoch(
-                    format!("github preflight failed: {error:#}"),
-                    false,
-                    owned_reservation.record.fencing_epoch,
-                );
-                persist_state_with_ownership(
-                    store.clone(),
-                    &base.id,
-                    config,
-                    runner_instance_id,
-                    &mut owned_reservation,
-                    &mut owned_state,
-                    &state,
-                    "failed to persist preflight failure state",
-                )
-                .await?;
-                return Err(error);
-            }
-        }
-
-        if !progress.responsibility_written {
-            renew_reservation_ownership(
-                store.clone(),
-                &base.id,
-                config,
-                runner_instance_id,
-                &mut owned_reservation,
-                "responsibility comment write",
-            )
-            .await?;
-            let responsibility_body = decision.responsibility_comment(candidate)?;
-            if let Err(error) = github
-                .create_issue_comment(
-                    &candidate.subject_repo,
-                    candidate.subject_issue_number,
-                    &responsibility_body,
-                )
-                .await
-            {
-                state.mark_error_with_epoch(
-                    format!("responsibility write failed: {error:#}"),
-                    true,
-                    owned_reservation.record.fencing_epoch,
-                );
-                persist_state_with_ownership(
-                    store.clone(),
-                    &base.id,
-                    config,
-                    runner_instance_id,
-                    &mut owned_reservation,
-                    &mut owned_state,
-                    &state,
-                    "failed to persist ambiguous responsibility error",
-                )
-                .await?;
-                progress =
-                    reconcile_progress(github, candidate, &decision, config, progress.clone())
-                        .await
-                        .context("failed to reconcile after responsibility write error")?;
-                if !progress.responsibility_written {
-                    anyhow::bail!("responsibility write failed and could not be reconciled");
-                }
-            }
-            progress.responsibility_written = true;
-        }
-        state.mark_progress(progress.clone());
-        persist_state_with_ownership(
-            store.clone(),
-            &base.id,
-            config,
-            runner_instance_id,
-            &mut owned_reservation,
-            &mut owned_state,
-            &state,
-            "failed to persist responsibility progress",
-        )
-        .await?;
-    }
-
-    if !progress.project_status_updated {
-        renew_reservation_ownership(
-            store.clone(),
-            &base.id,
-            config,
-            runner_instance_id,
-            &mut owned_reservation,
-            "project status side effect",
-        )
-        .await?;
-        match run_github_preflight(github, candidate, &decision).await {
-            Ok(PreflightStatus::Source) => {
-                renew_reservation_ownership(
-                    store.clone(),
-                    &base.id,
-                    config,
-                    runner_instance_id,
-                    &mut owned_reservation,
-                    "project status write",
-                )
-                .await?;
-                match github
-                    .update_project_status(
-                        &candidate.project_id,
-                        &candidate.project_item_id,
-                        &decision.from_status,
-                        &decision.to_status,
-                        &candidate.subject_repo,
-                        candidate.subject_issue_number,
-                    )
-                    .await
-                {
-                    Ok(
-                        UpdateStatusOutcome::Applied | UpdateStatusOutcome::AlreadyAtDestination,
-                    ) => {}
-                    Err(error) => {
-                        state.mark_error_with_epoch(
-                            format!("project status update failed: {error:#}"),
-                            true,
-                            owned_reservation.record.fencing_epoch,
-                        );
-                        persist_state_with_ownership(
-                            store.clone(),
-                            &base.id,
-                            config,
-                            runner_instance_id,
-                            &mut owned_reservation,
-                            &mut owned_state,
-                            &state,
-                            "failed to persist ambiguous project-status error",
-                        )
-                        .await?;
-                        progress = reconcile_progress(
-                            github,
-                            candidate,
-                            &decision,
-                            config,
-                            progress.clone(),
-                        )
-                        .await
-                        .context("failed to reconcile after project status error")?;
-                        if !progress.project_status_updated {
-                            anyhow::bail!(
-                                "project status update failed and could not be reconciled"
-                            );
-                        }
-                    }
-                }
-            }
-            Ok(PreflightStatus::Destination) => {
-                progress =
-                    reconcile_progress(github, candidate, &decision, config, progress.clone())
-                        .await
-                        .context(
-                            "failed to reconcile when destination status observed before mutation",
-                        )?;
-                if !progress.is_complete() {
-                    anyhow::bail!(
-                        "project item {} status already '{}' but comments are incomplete; refusing to overwrite",
-                        candidate.project_item_id,
-                        decision.to_status
-                    );
-                }
-                progress.project_status_updated = true;
-            }
-            Err(error) => {
-                state.mark_error_with_epoch(
-                    format!("github preflight failed: {error:#}"),
-                    false,
-                    owned_reservation.record.fencing_epoch,
-                );
-                persist_state_with_ownership(
-                    store.clone(),
-                    &base.id,
-                    config,
-                    runner_instance_id,
-                    &mut owned_reservation,
-                    &mut owned_state,
-                    &state,
-                    "failed to persist preflight failure state",
-                )
-                .await?;
-                return Err(error);
-            }
-        }
-        progress.project_status_updated = true;
-        state.mark_progress(progress.clone());
-        persist_state_with_ownership(
-            store.clone(),
-            &base.id,
-            config,
-            runner_instance_id,
-            &mut owned_reservation,
-            &mut owned_state,
-            &state,
-            "failed to persist project-status progress",
-        )
-        .await?;
-    }
-
-    state.clear_error();
-    state.mark_progress(SideEffectProgress {
-        decision_comment_written: true,
-        responsibility_written: true,
-        project_status_updated: true,
-    });
-    persist_state_with_ownership(
-        store.clone(),
-        &base.id,
-        config,
-        runner_instance_id,
-        &mut owned_reservation,
-        &mut owned_state,
-        &state,
-        "failed to persist completed routing state",
-    )
-    .await?;
-    complete_reservation(
         store,
-        &base.id,
-        config,
-        runner_instance_id,
-        &mut owned_reservation,
-        &decision.decision_id,
+        &mut persisted,
+        None,
     )
     .await?;
 
+    info!(
+        "[{reaction_name}] completed the published decision for {}#{}: run '{run_id}' -> '{to_status}'",
+        persisted.record.repository, persisted.record.subject_number
+    );
     Ok(())
 }
 
-async fn reserve_or_resume(
+/// Apply the final status move for a run whose decision comment is durable.
+///
+/// This is the **only** path that moves a Project item, so a status can never
+/// move for a decision comment that was not verified first. The destination is
+/// the persisted `to_status` — never a freshly derived one.
+///
+/// `observed` is the physical decision comment this pass already saw (adopted
+/// or just created); when it is `None`, or does not match the recorded comment,
+/// the comments are re-read from GitHub. Verification failures are hard errors.
+async fn finish_published_decision(
+    reaction_name: &str,
+    base: &ReactionBase,
+    github: &GithubClient,
+    config: &WorkgraphRouterReactionConfig,
+    store: Arc<dyn StateStoreProvider>,
+    persisted: &mut PersistedRoutingRecord,
+    observed: Option<IssueComment>,
+) -> anyhow::Result<()> {
+    if persisted.record.status_applied {
+        return Ok(());
+    }
+    let comment_node_id = persisted
+        .record
+        .decision_comment_node_id
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("a published run must name its decision comment"))?;
+
+    let comments = match observed {
+        Some(comment) if comment.node_id == comment_node_id => vec![comment],
+        _ => github
+            .list_issue_comments(
+                &persisted.record.repository,
+                persisted.record.subject_number,
+            )
+            .await
+            .context("failed to list issue comments to reconcile the published decision")?,
+    };
+    verify_published_decision(config, &persisted.record, &comment_node_id, &comments)?;
+    // The routing table is fixed by the event contract: a record that names any
+    // other destination is corrupt and must never move an item.
+    if !is_decided_status(&persisted.record.to_status) {
+        anyhow::bail!(
+            "routing record for run '{}' names destination '{}', which is not a routing decision",
+            persisted.record.run_id,
+            persisted.record.to_status
+        );
+    }
+
+    let item = ProjectItemRef {
+        project_node_id: &persisted.record.project_node_id,
+        project_item_node_id: &persisted.record.project_item_node_id,
+        subject_node_id: &persisted.record.subject_node_id,
+        repository: &persisted.record.repository,
+        subject_number: persisted.record.subject_number,
+    };
+    let outcome = match github
+        .update_project_status(item, ROUTABLE_STATUS, &persisted.record.to_status)
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let mut ambiguous = persisted.record.clone();
+            ambiguous.set_error(format!("{error:#}"), true);
+            persist(store.clone(), &base.id, persisted, ambiguous).await?;
+            return Err(error).context("failed to apply the routing decision");
+        }
+    };
+    if outcome == UpdateStatusOutcome::AlreadyAtDestination {
+        info!(
+            "[{reaction_name}] project item '{}' was already at '{}'",
+            persisted.record.project_item_node_id, persisted.record.to_status
+        );
+    }
+    let mut updated = persisted.record.clone();
+    updated.set_status_applied();
+    persist(store, &base.id, persisted, updated).await
+}
+
+/// Point the Project item at `run_id` before this run's first external effect.
+///
+/// Refuses to take the item from a *different* run whose decision is already
+/// published but not applied: that run's decision is visible in the issue
+/// thread and must be finished, not abandoned. In the sequential processing
+/// loop this cannot normally happen (such a run is resumed at step 0), so it is
+/// a fail-closed guard against a concurrent writer, not a routine branch.
+async fn claim_open_run(
     store: Arc<dyn StateStoreProvider>,
     store_id: &str,
+    candidate: &RoutingCandidate,
+    run_id: &str,
+) -> anyhow::Result<()> {
+    if let Some(incumbent) = published_but_unapplied_run(store.clone(), store_id, candidate).await?
+    {
+        if incumbent.record.run_id != run_id {
+            anyhow::bail!(
+                "project item '{}' still owes the published decision of run '{}'; refusing to start run '{run_id}'",
+                candidate.project_item_node_id,
+                incumbent.record.run_id
+            );
+        }
+    }
+    set_open_run(store, store_id, &candidate.project_item_node_id, run_id)
+        .await
+        .context("failed to record the open run for the project item")
+}
+
+/// Require the published decision comment to still be exactly what was decided.
+fn verify_published_decision(
+    config: &WorkgraphRouterReactionConfig,
+    record: &RoutingRecord,
+    comment_node_id: &str,
+    comments: &[IssueComment],
+) -> anyhow::Result<()> {
+    let comment = comments
+        .iter()
+        .find(|comment| comment.node_id == comment_node_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "published decision comment '{comment_node_id}' for run '{}' no longer exists; \
+                 refusing to complete the status move",
+                record.run_id
+            )
+        })?;
+    if !comment.is_authored_by(&config.trusted_author()) {
+        anyhow::bail!(
+            "published decision comment '{comment_node_id}' for run '{}' is no longer authored by the trusted author",
+            record.run_id
+        );
+    }
+    if !comment.is_unedited() {
+        anyhow::bail!(
+            "published decision comment '{comment_node_id}' for run '{}' was edited; refusing to complete the status move",
+            record.run_id
+        );
+    }
+    let parsed = parse_comment(&comment.body).map_err(|error| {
+        anyhow::anyhow!(
+            "published decision comment '{comment_node_id}' for run '{}' no longer parses: {error}",
+            record.run_id
+        )
+    })?;
+    if parsed.event.run_id.as_str() != record.run_id
+        || parsed.event.event_id.as_str() != record.event_id
+        || parsed.event.project_item_node_id != record.project_item_node_id
+        || parsed.event.subject_node_id != record.subject_node_id
+    {
+        anyhow::bail!(
+            "published decision comment '{comment_node_id}' no longer binds run '{}', item '{}', and subject '{}'",
+            record.run_id,
+            record.project_item_node_id,
+            record.subject_node_id
+        );
+    }
+    if parsed.event.to_canonical_json() != record.decision_event_json {
+        anyhow::bail!(
+            "published decision comment '{comment_node_id}' for run '{}' no longer carries the decided event; refusing to complete the status move",
+            record.run_id
+        );
+    }
+    Ok(())
+}
+
+/// Require a complete, coherent, trusted event chain for one run.
+///
+/// Every step is verified against the *current* authoritative state:
+///
+/// * only comments authored by the configured trusted author (numeric database
+///   ID + actor type) and reported unedited
+///   are considered at all;
+/// * the assignment must name the expected profile and must bind to the current
+///   issue-body digest;
+/// * an `ExecutionStarted` must exist, and the completion must carry the same
+///   `executionId`; and
+/// * exactly one completion is accepted — byte-identical duplicates coalesce
+///   and contradictory ones fail closed.
+fn trusted_chain(
     config: &WorkgraphRouterReactionConfig,
     candidate: &RoutingCandidate,
-    runner_instance_id: &str,
-) -> anyhow::Result<(
-    ReservationRecord,
-    Option<OwnedReservation>,
-    RoutingStateRecord,
-    OwnedRoutingState,
-)> {
-    let reservation_key = candidate.reservation_key();
-    loop {
-        let persisted = if let Some(existing) =
-            load_reservation_with_bytes(store.clone(), store_id, &reservation_key).await?
-        {
-            existing
-        } else {
-            let created = ReservationRecord {
-                reservation_key: reservation_key.clone(),
-                execution_id: candidate.execution_id.clone(),
-                required_event_type: candidate.required_event_type.clone(),
-                owner_instance_id: Some(runner_instance_id.to_string()),
-                fencing_epoch: 1,
-                lease_expires_at_unix_secs: reservation_lease_deadline(config),
-                policy_id: config.policy_id.clone(),
-                policy_type: config.policy_type.clone(),
-                policy_version: config.policy_version.clone(),
-                decision_id: None,
-                created_at: chrono::Utc::now().to_rfc3339(),
-                completed: false,
-            };
-            match create_reservation_if_absent(store.clone(), store_id, &created).await? {
-                Some(_) => continue,
-                None => PersistedReservationRecord {
-                    bytes: serialize_reservation(&created)?,
-                    record: created,
-                },
-            }
-        };
+    run: &drasi_workgraph_common::event::RunId,
+    digest: &drasi_workgraph_common::event::Sha256Digest,
+    comments: &[IssueComment],
+) -> anyhow::Result<TrustedChain> {
+    let assignment_id = event_id(run, WorkGraphEventType::ResponsibilityAssigned);
+    let started_id = event_id(run, WorkGraphEventType::ExecutionStarted);
+    let completed_id = event_id(run, WorkGraphEventType::CompletedIssueValidation);
 
-        let (mut state, mut state_bytes) = if let Some(existing_state) =
-            load_routing_state_with_bytes(store.clone(), store_id, &reservation_key).await?
-        {
-            (existing_state.record, Some(existing_state.bytes))
-        } else {
-            (RoutingStateRecord::new(candidate, &persisted.record), None)
-        };
-
-        if persisted.record.owner_instance_id.as_deref() == Some(runner_instance_id) {
-            let mut owned = OwnedReservation {
-                record: persisted.record.clone(),
-                persisted_bytes: persisted.bytes.clone(),
-            };
-            renew_reservation_ownership(
-                store.clone(),
-                store_id,
-                config,
-                runner_instance_id,
-                &mut owned,
-                "refresh reservation ownership",
+    let assignment = accept_trusted_comment(config, comments, &assignment_id)
+        .context("assignment reconciliation failed")?
+        .ok_or_else(|| {
+            PermanentCandidateError::new(
+                "no trusted, unedited ResponsibilityAssigned comment exists for this run",
             )
-            .await?;
-            if state_bytes.is_none() {
-                state.owner_instance_id = owned.record.owner_instance_id.clone();
-                state.fencing_epoch = owned.record.fencing_epoch;
-                let initialized = compare_and_swap_routing_state(
-                    store.clone(),
-                    store_id,
-                    &reservation_key,
-                    None,
-                    &state,
-                )
-                .await
-                .context("failed to initialize routing state for owned reservation")?;
-                if initialized {
-                    state_bytes = Some(
-                        serde_json::to_vec(&state)
-                            .context("failed to serialize initialized routing state")?,
-                    );
-                } else if let Some(existing_state) =
-                    load_routing_state_with_bytes(store.clone(), store_id, &reservation_key).await?
-                {
-                    state = existing_state.record;
-                    state_bytes = Some(existing_state.bytes);
-                } else {
-                    anyhow::bail!(
-                        "routing state initialize CAS mismatched but state '{reservation_key}' is missing"
-                    );
-                }
-            }
-            return Ok((
-                owned.record.clone(),
-                Some(owned),
-                state,
-                OwnedRoutingState {
-                    persisted_bytes: state_bytes,
-                },
-            ));
+        })?;
+    let assignment_payload = match &assignment.comment.event.payload {
+        WorkGraphEventPayload::ResponsibilityAssigned(payload) => payload.clone(),
+        other => {
+            return Err(PermanentCandidateError::new(format!(
+                "assignment comment carries a {} payload",
+                other.event_type()
+            )))
         }
-
-        let failed_takeover_ready =
-            state.failed && state.failure_fencing_epoch == Some(persisted.record.fencing_epoch);
-        if !persisted.record.completed
-            && (failed_takeover_ready || reservation_lease_expired(&persisted.record))
-        {
-            let mut takeover = persisted.record.clone();
-            takeover.owner_instance_id = Some(runner_instance_id.to_string());
-            takeover.fencing_epoch = takeover.fencing_epoch.max(1).saturating_add(1);
-            takeover.lease_expires_at_unix_secs = reservation_lease_deadline(config);
-            let key = reservation_store_key(&reservation_key);
-            let new_bytes = serialize_reservation(&takeover)?;
-            let swapped = store
-                .compare_and_swap(
-                    store_id,
-                    &key,
-                    Some(persisted.bytes.as_slice()),
-                    new_bytes.clone(),
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("state-store CAS reservation takeover failed: {e}"))?;
-            if matches!(swapped, StateStoreCompareAndSwapResult::Swapped) {
-                info!(
-                    "[{}] took over reservation '{}' at epoch {}",
-                    store_id, reservation_key, takeover.fencing_epoch
-                );
-                if state_bytes.is_none() {
-                    state.owner_instance_id = takeover.owner_instance_id.clone();
-                    state.fencing_epoch = takeover.fencing_epoch;
-                    let initialized = compare_and_swap_routing_state(
-                        store.clone(),
-                        store_id,
-                        &reservation_key,
-                        None,
-                        &state,
-                    )
-                    .await
-                    .context("failed to initialize routing state during takeover")?;
-                    if initialized {
-                        state_bytes = Some(
-                            serde_json::to_vec(&state)
-                                .context("failed to serialize initialized routing state")?,
-                        );
-                    } else if let Some(existing_state) =
-                        load_routing_state_with_bytes(store.clone(), store_id, &reservation_key)
-                            .await?
-                    {
-                        state = existing_state.record;
-                        state_bytes = Some(existing_state.bytes);
-                    } else {
-                        anyhow::bail!(
-                            "routing state initialize CAS mismatched but state '{reservation_key}' is missing"
-                        );
-                    }
-                }
-                let owned = OwnedReservation {
-                    record: takeover.clone(),
-                    persisted_bytes: new_bytes,
-                };
-                return Ok((
-                    takeover,
-                    Some(owned),
-                    state,
-                    OwnedRoutingState {
-                        persisted_bytes: state_bytes,
-                    },
-                ));
-            }
-            continue;
-        }
-
-        return Ok((
-            persisted.record,
-            None,
-            state,
-            OwnedRoutingState {
-                persisted_bytes: state_bytes,
-            },
+    };
+    ensure_binding(candidate, &assignment.comment.event)?;
+    if assignment_payload.profile_ref.profile() != config.expected_profile {
+        return Err(PermanentCandidateError::new(format!(
+            "assignment profile '{}' is not '{}'",
+            assignment_payload.profile_ref.profile(),
+            config.expected_profile
+        )));
+    }
+    if &assignment_payload.content_digest != digest {
+        return Err(PermanentCandidateError::new(
+            "assignment content digest does not match the current issue body",
         ));
     }
-}
 
-async fn run_github_preflight(
-    github: &GithubClient,
-    candidate: &RoutingCandidate,
-    decision: &RoutingDecision,
-) -> anyhow::Result<PreflightStatus> {
-    if !github
-        .issue_is_open(&candidate.subject_repo, candidate.subject_issue_number)
-        .await
-        .context("GitHub issue state preflight failed")?
-    {
-        anyhow::bail!(
-            "subject issue {}/{} is not open",
-            candidate.subject_repo,
-            candidate.subject_issue_number
-        );
-    }
-    github
-        .validate_issue_snapshot(
-            &candidate.subject_node_id,
-            &candidate.subject_repo,
-            candidate.subject_issue_number,
-            &candidate.content_version,
-        )
-        .await
-        .context("GitHub issue preflight failed")?;
-    let current_status = github
-        .current_project_status(
-            &candidate.project_id,
-            &candidate.project_item_id,
-            &candidate.subject_repo,
-            candidate.subject_issue_number,
-        )
-        .await
-        .context("GitHub project-status preflight failed")?;
-    if current_status == decision.from_status {
-        return Ok(PreflightStatus::Source);
-    }
-    if current_status == decision.to_status {
-        return Ok(PreflightStatus::Destination);
-    }
-    {
-        anyhow::bail!(
-            "project item {} status is '{}' (expected '{}' or '{}')",
-            candidate.project_item_id,
-            current_status,
-            decision.from_status,
-            decision.to_status
-        );
-    }
-}
-
-fn reservation_lease_deadline(config: &WorkgraphRouterReactionConfig) -> i64 {
-    let lease_secs = i64::try_from(config.reservation_lease_secs).unwrap_or(i64::MAX);
-    chrono::Utc::now().timestamp().saturating_add(lease_secs)
-}
-
-fn reservation_lease_expired(reservation: &ReservationRecord) -> bool {
-    reservation.lease_expires_at_unix_secs <= chrono::Utc::now().timestamp()
-}
-
-fn unresolved_retry_delay(config: &WorkgraphRouterReactionConfig) -> std::time::Duration {
-    let lease_millis = config.reservation_lease_secs.saturating_mul(250);
-    let bounded = lease_millis.clamp(100, 2_000);
-    std::time::Duration::from_millis(bounded)
-}
-
-async fn renew_reservation_ownership(
-    store: Arc<dyn StateStoreProvider>,
-    store_id: &str,
-    config: &WorkgraphRouterReactionConfig,
-    runner_instance_id: &str,
-    owned: &mut OwnedReservation,
-    action: &str,
-) -> anyhow::Result<()> {
-    if owned.record.owner_instance_id.as_deref() != Some(runner_instance_id) {
-        return Err(ReservationFencedError {
-            message: format!(
-                "reservation '{}' ownership changed before {} (owner='{}' epoch={})",
-                owned.record.reservation_key,
-                action,
-                owned
-                    .record
-                    .owner_instance_id
-                    .as_deref()
-                    .unwrap_or("unknown"),
-                owned.record.fencing_epoch
-            ),
+    let started = accept_trusted_comment(config, comments, &started_id)
+        .context("execution-start reconciliation failed")?
+        .ok_or_else(|| {
+            PermanentCandidateError::new(
+                "no trusted, unedited ExecutionStarted comment exists for this run",
+            )
+        })?;
+    let started_payload = match &started.comment.event.payload {
+        WorkGraphEventPayload::ExecutionStarted(payload) => payload.clone(),
+        other => {
+            return Err(PermanentCandidateError::new(format!(
+                "start comment carries a {} payload",
+                other.event_type()
+            )))
         }
-        .into());
-    }
-
-    let key = reservation_store_key(&owned.record.reservation_key);
-    let mut renewed = owned.record.clone();
-    renewed.fencing_epoch = renewed.fencing_epoch.max(1);
-    renewed.lease_expires_at_unix_secs = reservation_lease_deadline(config);
-    let renewed_bytes = serialize_reservation(&renewed)?;
-    let swapped = store
-        .compare_and_swap(
-            store_id,
-            &key,
-            Some(owned.persisted_bytes.as_slice()),
-            renewed_bytes.clone(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("state-store CAS ownership renewal failed: {e}"))?;
-    if matches!(swapped, StateStoreCompareAndSwapResult::Swapped) {
-        owned.record = renewed;
-        owned.persisted_bytes = renewed_bytes;
-        return Ok(());
-    }
-
-    let current =
-        load_reservation_with_bytes(store, store_id, &owned.record.reservation_key).await?;
-    let details = if let Some(current) = current {
-        format!(
-            "current owner='{}' epoch={} completed={}",
-            current
-                .record
-                .owner_instance_id
-                .as_deref()
-                .unwrap_or("unknown"),
-            current.record.fencing_epoch,
-            current.record.completed
-        )
-    } else {
-        "reservation removed".to_string()
     };
-    Err(ReservationFencedError {
-        message: format!(
-            "reservation '{}' fenced before {} ({details})",
-            owned.record.reservation_key, action
-        ),
+    ensure_binding(candidate, &started.comment.event)?;
+
+    let completion = accept_trusted_comment(config, comments, &completed_id)
+        .context("completion reconciliation failed")?
+        .ok_or_else(|| {
+            PermanentCandidateError::new(
+                "no trusted, unedited CompletedIssueValidation comment exists for this run yet",
+            )
+        })?;
+    let completion_payload = match &completion.comment.event.payload {
+        WorkGraphEventPayload::CompletedIssueValidation(payload) => payload.clone(),
+        other => {
+            return Err(PermanentCandidateError::new(format!(
+                "completion comment carries a {} payload",
+                other.event_type()
+            )))
+        }
+    };
+    ensure_binding(candidate, &completion.comment.event)?;
+    if completion_payload.execution_id != started_payload.execution_id {
+        return Err(PermanentCandidateError::new(format!(
+            "completion reports execution '{}' but the started execution is '{}'",
+            completion_payload.execution_id, started_payload.execution_id
+        )));
     }
-    .into())
+
+    // Hash the *exact* body GitHub reports for the accepted comment, not a
+    // re-render of it: the record must be able to detect any later change to
+    // that physical comment, including one GitHub does not flag as an edit.
+    let accepted_body = comments
+        .iter()
+        .find(|comment| comment.node_id == completion.comment_node_id)
+        .map(|comment| comment.body.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "accepted completion comment '{}' vanished from the listing",
+                completion.comment_node_id
+            )
+        })?;
+
+    Ok(TrustedChain {
+        execution_id: started_payload.execution_id,
+        accepted_completion: AcceptedCompletion {
+            comment_node_id: completion.comment_node_id.clone(),
+            body_hash: comment_body_hash(accepted_body),
+        },
+        completion: completion_payload,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn persist_state_with_ownership(
+/// Require an event to name the same Project Item and subject as the row.
+///
+/// The `runId` already binds both (and the body digest), so a mismatch cannot
+/// normally reach here; checking anyway keeps the binding explicit rather than
+/// implied by a hash.
+fn ensure_binding(candidate: &RoutingCandidate, event: &WorkGraphEvent) -> anyhow::Result<()> {
+    if event.project_item_node_id != candidate.project_item_node_id {
+        return Err(PermanentCandidateError::new(format!(
+            "event names project item '{}', not the row's '{}'",
+            event.project_item_node_id, candidate.project_item_node_id
+        )));
+    }
+    if event.subject_node_id != candidate.subject_node_id {
+        return Err(PermanentCandidateError::new(format!(
+            "event names subject '{}', not the row's '{}'",
+            event.subject_node_id, candidate.subject_node_id
+        )));
+    }
+    Ok(())
+}
+
+/// Coalesce the trusted, unedited comments carrying `wanted_event_id`.
+///
+/// This is how the router reads events **other components** wrote:
+/// byte-identical duplicates collapse to the earliest physical comment, and
+/// conflicting content for one event ID fails closed.
+fn accept_trusted_comment(
+    config: &WorkgraphRouterReactionConfig,
+    comments: &[IssueComment],
+    wanted_event_id: &EventId,
+) -> anyhow::Result<Option<ObservedComment>> {
+    let observed = observed_comments(config, comments);
+    let accepted = coalesce(&observed, wanted_event_id)
+        .map_err(|error| anyhow::anyhow!("comment reconciliation failed: {error}"))?;
+    Ok(accepted.cloned())
+}
+
+/// Adopt a decision comment this reaction already published.
+///
+/// Unlike [`accept_trusted_comment`], adoption requires canonical event JSON —
+/// envelope *and* payload — byte-identical to `intended`, because the
+/// deterministic `eventId` covers only the run and the event type. A single
+/// divergent comment claiming that event ID, or two that disagree, fails closed
+/// rather than being adopted as this reaction's own write.
+fn adopt_own_published_comment(
+    config: &WorkgraphRouterReactionConfig,
+    comments: &[IssueComment],
+    intended: &WorkGraphEvent,
+) -> anyhow::Result<Option<ObservedComment>> {
+    let observed = observed_comments(config, comments);
+    let accepted = adopt_published_event(&observed, intended)
+        .map_err(|error| anyhow::anyhow!("comment reconciliation failed: {error}"))?;
+    Ok(accepted.cloned())
+}
+
+/// The trusted, unedited, parseable WorkGraph comments on an issue.
+fn observed_comments(
+    config: &WorkgraphRouterReactionConfig,
+    comments: &[IssueComment],
+) -> Vec<ObservedComment> {
+    let trusted = config.trusted_author();
+    comments
+        .iter()
+        .filter(|comment| comment.is_authored_by(&trusted))
+        .filter(|comment| comment.is_unedited())
+        .filter_map(|comment| {
+            parse_comment(&comment.body)
+                .ok()
+                .map(|parsed| ObservedComment {
+                    comment_node_id: comment.node_id.clone(),
+                    comment: parsed,
+                })
+        })
+        .collect()
+}
+
+/// Compare-and-swap `next` into the store, refreshing the in-memory witness.
+async fn persist(
     store: Arc<dyn StateStoreProvider>,
     store_id: &str,
-    config: &WorkgraphRouterReactionConfig,
-    runner_instance_id: &str,
-    owned: &mut OwnedReservation,
-    routing_state: &mut OwnedRoutingState,
-    state: &RoutingStateRecord,
-    error_context: &str,
+    persisted: &mut PersistedRoutingRecord,
+    next: RoutingRecord,
 ) -> anyhow::Result<()> {
-    renew_reservation_ownership(
-        store.clone(),
-        store_id,
-        config,
-        runner_instance_id,
-        owned,
-        "state update",
-    )
-    .await?;
-
-    let mut next_state = state.clone();
-    next_state.owner_instance_id = owned.record.owner_instance_id.clone();
-    next_state.fencing_epoch = owned.record.fencing_epoch;
-    let next_state_bytes =
-        serde_json::to_vec(&next_state).context("failed to serialize routing state")?;
-
-    let swapped = compare_and_swap_routing_state(
-        store.clone(),
-        store_id,
-        &next_state.reservation_key,
-        routing_state.persisted_bytes.as_deref(),
-        &next_state,
-    )
-    .await
-    .with_context(|| error_context.to_string())?;
-    if swapped {
-        routing_state.persisted_bytes = Some(next_state_bytes);
-        return Ok(());
-    }
-
-    let current = load_routing_state_with_bytes(store, store_id, &next_state.reservation_key)
-        .await
-        .with_context(|| error_context.to_string())
-        .context("failed to reload routing state after CAS mismatch")?;
-    if let Some(current) = current {
-        if current.record.fencing_epoch > owned.record.fencing_epoch
-            || current.record.owner_instance_id.as_deref() != Some(runner_instance_id)
-        {
-            return Err(ReservationFencedError {
-                message: format!(
-                    "routing state '{}' fenced before state update (owner='{}' epoch={})",
-                    routing_state_store_key(&next_state.reservation_key),
-                    current
-                        .record
-                        .owner_instance_id
-                        .as_deref()
-                        .unwrap_or("unknown"),
-                    current.record.fencing_epoch
-                ),
-            }
-            .into());
-        }
+    let Some(bytes) = compare_and_swap_record(store, store_id, &persisted.bytes, &next).await?
+    else {
         anyhow::bail!(
-            "{}: routing-state CAS mismatch for owner '{}' epoch {}",
-            error_context,
-            current
-                .record
-                .owner_instance_id
-                .as_deref()
-                .unwrap_or("unknown"),
-            current.record.fencing_epoch
+            "routing record for run '{}' changed underneath this writer",
+            next.run_id
         );
-    }
-    anyhow::bail!(
-        "{}: routing-state CAS mismatch and record '{}' is missing",
-        error_context,
-        routing_state_store_key(&next_state.reservation_key)
-    )
-}
-
-async fn complete_reservation(
-    store: Arc<dyn StateStoreProvider>,
-    store_id: &str,
-    config: &WorkgraphRouterReactionConfig,
-    runner_instance_id: &str,
-    owned: &mut OwnedReservation,
-    decision_id: &str,
-) -> anyhow::Result<()> {
-    renew_reservation_ownership(
-        store.clone(),
-        store_id,
-        config,
-        runner_instance_id,
-        owned,
-        "reservation completion",
-    )
-    .await?;
-
-    let key = reservation_store_key(&owned.record.reservation_key);
-    let mut completed = owned.record.clone();
-    completed.decision_id = Some(decision_id.to_string());
-    completed.completed = true;
-    completed.lease_expires_at_unix_secs = reservation_lease_deadline(config);
-    let completed_bytes = serialize_reservation(&completed)?;
-    let swapped = store
-        .compare_and_swap(
-            store_id,
-            &key,
-            Some(owned.persisted_bytes.as_slice()),
-            completed_bytes.clone(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("state-store CAS reservation completion failed: {e}"))?;
-    if !matches!(swapped, StateStoreCompareAndSwapResult::Swapped) {
-        return Err(ReservationFencedError {
-            message: format!(
-                "reservation '{}' fenced before completion",
-                owned.record.reservation_key
-            ),
-        }
-        .into());
-    }
-    owned.record = completed;
-    owned.persisted_bytes = completed_bytes;
+    };
+    persisted.record = next;
+    persisted.bytes = bytes;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use drasi_lib::state_store::{MemoryStateStoreProvider, StateStoreResult};
+    use drasi_workgraph_common::event::{
+        AssignedResponsibilityType, ExecutionStartedPayload, ProfileRef, RoutingToStatus,
+        ValidationOutcome, ValidationReasonCode,
+    };
+    use drasi_workgraph_common::trust::{ActorType, AuthorIdentity};
 
-    struct DurableMemoryStateStore {
-        inner: MemoryStateStoreProvider,
-    }
+    const ITEM: &str = "PVTI_item";
+    const SUBJECT: &str = "I_kwDOABCDEF6ABCDE";
+    const BLOB: &str = "0123456789abcdef0123456789abcdef01234567";
+    const BODY: &str = "Please validate. workgraph:validate";
 
-    impl DurableMemoryStateStore {
-        fn new() -> Self {
-            Self {
-                inner: MemoryStateStoreProvider::new(),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl StateStoreProvider for DurableMemoryStateStore {
-        async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
-            self.inner.get(store_id, key).await
-        }
-
-        async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
-            self.inner.set(store_id, key, value).await
-        }
-
-        async fn compare_and_swap(
-            &self,
-            store_id: &str,
-            key: &str,
-            expected: Option<&[u8]>,
-            new_value: Vec<u8>,
-        ) -> StateStoreResult<StateStoreCompareAndSwapResult> {
-            self.inner
-                .compare_and_swap(store_id, key, expected, new_value)
-                .await
-        }
-
-        async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
-            self.inner.delete(store_id, key).await
-        }
-
-        async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
-            self.inner.contains_key(store_id, key).await
-        }
-
-        async fn get_many(
-            &self,
-            store_id: &str,
-            keys: &[&str],
-        ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
-            self.inner.get_many(store_id, keys).await
-        }
-
-        async fn set_many(
-            &self,
-            store_id: &str,
-            entries: &[(&str, &[u8])],
-        ) -> StateStoreResult<()> {
-            self.inner.set_many(store_id, entries).await
-        }
-
-        async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
-            self.inner.delete_many(store_id, keys).await
-        }
-
-        async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
-            self.inner.clear_store(store_id).await
-        }
-
-        async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
-            self.inner.list_keys(store_id).await
-        }
-
-        async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
-            self.inner.store_exists(store_id).await
-        }
-
-        async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
-            self.inner.key_count(store_id).await
-        }
-
-        fn is_durable(&self) -> bool {
-            true
-        }
-    }
-
-    fn sample_config() -> WorkgraphRouterReactionConfig {
+    fn config() -> WorkgraphRouterReactionConfig {
         WorkgraphRouterReactionConfig {
-            policy_id: "policy-1".to_string(),
-            policy_type: "rules_v1".to_string(),
-            policy_version: "1.0.0".to_string(),
+            allowed_repositories: vec!["drasi-project/drasi-core".to_string()],
             allowed_projects: vec!["PVT_project".to_string()],
-            allowed_repos: vec!["drasi-project/drasi-core".to_string()],
-            allowed_event_types: vec!["CompletedIssueValidation".to_string()],
-            allowed_status_transitions: vec![
-                crate::config::StatusTransition {
-                    from: "AwaitingRouting".to_string(),
-                    to: "AwaitingIssueRiskProfiling".to_string(),
-                },
-                crate::config::StatusTransition {
-                    from: "AwaitingRouting".to_string(),
-                    to: "NeedsMoreInformation".to_string(),
-                },
-            ],
-            allowed_responsibility_types: vec![
-                "issue-validation".to_string(),
-                "issue-risk-profiling".to_string(),
-                "issue-correction".to_string(),
-            ],
-            allowed_actors: vec!["bot-user".to_string(), "submitter-user".to_string()],
-            trusted_routing_authors: vec!["router-user".to_string()],
-            trusted_launcher_authors: vec!["launcher-user".to_string()],
-            trusted_agent_authors: vec!["agent-user".to_string()],
-            trusted_router_authors: vec!["router-user".to_string()],
-            trusted_routing_user_ids: vec![1001],
-            trusted_launcher_user_ids: vec![1001],
-            trusted_agent_user_ids: vec![1001],
-            trusted_router_user_ids: vec![1001],
-            trusted_router_author_node_ids: vec!["MDQ6VXNlcjE=".to_string()],
             expected_project_status_field_node_id: "PVTSSF_status".to_string(),
-            timeout_secs: 5,
-            reservation_lease_secs: 15,
+            trusted_author_database_id: 4021243,
+            trusted_author_type: ActorType::Bot,
             ..WorkgraphRouterReactionConfig::default()
         }
     }
 
-    fn sample_candidate() -> RoutingCandidate {
+    fn candidate() -> RoutingCandidate {
         RoutingCandidate {
-            execution_id: "exec-1".to_string(),
-            required_event_type: "CompletedIssueValidation".to_string(),
-            event_id: "event-1".to_string(),
-            event_type: "CompletedIssueValidation".to_string(),
-            outcome: "passed".to_string(),
-            reason_code: "required-marker-present".to_string(),
-            event_node_id: "workgraph-event:IC_event".to_string(),
-            subject_repo: "drasi-project/drasi-core".to_string(),
-            subject_issue_number: 42,
-            subject_node_id: "I_issue".to_string(),
-            project_id: "PVT_project".to_string(),
-            project_item_id: "PVTI_item".to_string(),
-            project_status: "AwaitingRouting".to_string(),
-            route_id: "route-1".to_string(),
-            route_expected_event_id: "event-1".to_string(),
-            route_expected_event_type: "CompletedIssueValidation".to_string(),
-            route_expected_subject_repo: "drasi-project/drasi-core".to_string(),
-            route_expected_subject_issue_number: 42,
-            route_content_version: "sha256:abc".to_string(),
-            route_content_profile: "phase2".to_string(),
-            responsibility_id: "resp-1".to_string(),
-            responsibility_type: "issue-validation".to_string(),
-            responsibility_actor: "bot-user".to_string(),
-            submitter_actor: "submitter-user".to_string(),
-            launcher_author: "launcher-user".to_string(),
-            launcher_author_id: 1001,
-            agent_author: "agent-user".to_string(),
-            agent_author_id: 1001,
-            router_author: "router-user".to_string(),
-            router_author_id: 1001,
-            routing_author: "router-user".to_string(),
-            routing_author_id: 1001,
-            observed_authors: vec![
-                "router-user".to_string(),
-                "launcher-user".to_string(),
-                "agent-user".to_string(),
-            ],
-            observed_author_ids: vec![1001, 1001, 1001],
-            comment_id: 1,
-            comment_author: "agent-user".to_string(),
-            comment_body: "{\"ok\":true}".to_string(),
-            comment_edited: false,
-            comment_created_at: Some("2026-01-01T00:00:00Z".to_string()),
-            comment_updated_at: Some("2026-01-01T00:00:00Z".to_string()),
-            comment_provenance_event_id: "event-1".to_string(),
-            comment_provenance_event_type: "CompletedIssueValidation".to_string(),
-            content_version: "sha256:abc".to_string(),
-            content_profile: "phase2".to_string(),
-            policy_id: "policy-1".to_string(),
-            policy_type: "rules_v1".to_string(),
-            policy_version: "1.0.0".to_string(),
+            repository: "drasi-project/drasi-core".to_string(),
+            subject_number: 742,
+            subject_node_id: SUBJECT.to_string(),
+            project_node_id: "PVT_project".to_string(),
+            project_item_node_id: ITEM.to_string(),
+            project_status: ROUTABLE_STATUS.to_string(),
         }
     }
 
-    fn make_reaction(id: &str, config: &WorkgraphRouterReactionConfig) -> WorkgraphRouterReaction {
-        WorkgraphRouterReaction::builder(id)
-            .with_query(ROUTE_QUERY_ID)
-            .with_config(config.clone())
-            .build()
-            .expect("reaction build")
+    fn trusted_identity() -> AuthorIdentity {
+        AuthorIdentity::new(4021243, ActorType::Bot)
+            .with_author_id("U_trusted")
+            .with_login("workgraph-bot")
     }
 
-    async fn seed_completed_candidate_state(
-        store: Arc<dyn StateStoreProvider>,
-        store_id: &str,
-        config: &WorkgraphRouterReactionConfig,
-        candidate: &RoutingCandidate,
-    ) {
-        let reservation = ReservationRecord {
-            reservation_key: candidate.reservation_key(),
-            execution_id: candidate.execution_id.clone(),
-            required_event_type: candidate.required_event_type.clone(),
-            owner_instance_id: Some("completed-owner".to_string()),
-            fencing_epoch: 1,
-            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
-            policy_id: config.policy_id.clone(),
-            policy_type: config.policy_type.clone(),
-            policy_version: config.policy_version.clone(),
-            decision_id: Some("done".to_string()),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            completed: true,
-        };
-        crate::state::save_reservation(store.clone(), store_id, &reservation)
-            .await
-            .expect("seed completed reservation");
-        let mut state = RoutingStateRecord::new(candidate, &reservation);
-        state.mark_progress(SideEffectProgress {
-            decision_comment_written: true,
-            responsibility_written: true,
-            project_status_updated: true,
-        });
-        save_routing_state(store, store_id, &state)
-            .await
-            .expect("seed completed state");
-    }
-
-    async fn initialize_reaction_for_test(
-        reaction: &WorkgraphRouterReaction,
-        store: Arc<dyn StateStoreProvider>,
-    ) {
-        let (graph, _rx) =
-            drasi_lib::component_graph::ComponentGraph::new("wg-router-reaction-test");
-        let context = drasi_lib::context::ReactionRuntimeContext::new(
-            "wg-router-reaction-test",
-            reaction.id(),
-            Some(store),
-            graph.update_sender(),
-            None,
+    fn comment(node_id: &str, event: &WorkGraphEvent, identity: AuthorIdentity) -> IssueComment {
+        let summary = summary_for(
+            event,
+            SubjectRef {
+                repository: "drasi-project/drasi-core",
+                number: 742,
+            },
         );
-        reaction.initialize(context).await;
+        IssueComment {
+            node_id: node_id.to_string(),
+            body: render_comment(event, &summary).expect("render"),
+            author: Some(identity),
+            created_at: Some("2026-08-14T00:00:00Z".to_string()),
+            updated_at: Some("2026-08-14T00:00:00Z".to_string()),
+        }
     }
 
-    #[tokio::test]
-    async fn simultaneous_initial_claim_allows_single_owner() {
-        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-        let config = sample_config();
-        let candidate = sample_candidate();
-        let reaction_a = make_reaction("router-a", &config);
-        let reaction_b = make_reaction("router-b", &config);
+    fn run() -> drasi_workgraph_common::event::RunId {
+        run_id(ITEM, SUBJECT, &body_digest(Some(BODY)))
+    }
 
-        let (a, b) = tokio::join!(
-            reserve_or_resume(
-                store.clone(),
-                "test-store",
-                &config,
-                &candidate,
-                &reaction_a.runner_instance_id
+    fn assignment_event() -> WorkGraphEvent {
+        WorkGraphEvent::new(
+            run(),
+            ITEM,
+            SUBJECT,
+            WorkGraphEventPayload::ResponsibilityAssigned(ResponsibilityAssignedPayload {
+                responsibility_type: AssignedResponsibilityType::IssueValidation,
+                profile_ref: ProfileRef::new("issue-validator", BLOB).expect("profile"),
+                content_digest: body_digest(Some(BODY)),
+            }),
+        )
+        .expect("event")
+    }
+
+    fn started_event() -> WorkGraphEvent {
+        WorkGraphEvent::new(
+            run(),
+            ITEM,
+            SUBJECT,
+            WorkGraphEventPayload::ExecutionStarted(ExecutionStartedPayload {
+                execution_id: ExecutionId::from_suffix("exec-1").expect("execution"),
+                task_id: "task-1".to_string(),
+            }),
+        )
+        .expect("event")
+    }
+
+    fn completion_event(outcome: ValidationOutcome, execution: &str) -> WorkGraphEvent {
+        let reason = match outcome {
+            ValidationOutcome::Passed => ValidationReasonCode::RequiredMarkerPresent,
+            ValidationOutcome::Failed => ValidationReasonCode::RequiredMarkerMissing,
+        };
+        WorkGraphEvent::new(
+            run(),
+            ITEM,
+            SUBJECT,
+            WorkGraphEventPayload::CompletedIssueValidation(CompletedIssueValidationPayload {
+                execution_id: ExecutionId::from_suffix(execution).expect("execution"),
+                outcome,
+                reason_code: reason,
+            }),
+        )
+        .expect("event")
+    }
+
+    fn full_chain(outcome: ValidationOutcome) -> Vec<IssueComment> {
+        vec![
+            comment("IC_assign", &assignment_event(), trusted_identity()),
+            comment("IC_start", &started_event(), trusted_identity()),
+            comment(
+                "IC_complete",
+                &completion_event(outcome, "exec-1"),
+                trusted_identity(),
             ),
-            reserve_or_resume(
-                store.clone(),
-                "test-store",
-                &config,
-                &candidate,
-                &reaction_b.runner_instance_id
-            )
-        );
-
-        let (_, owner_a, _, _) = a.expect("reserve a");
-        let (_, owner_b, _, _) = b.expect("reserve b");
-        assert_ne!(owner_a.is_some(), owner_b.is_some());
+        ]
     }
 
-    #[tokio::test]
-    async fn concurrent_failed_takeover_is_single_winner_and_epoch_bumps_once() {
-        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-        let config = sample_config();
-        let candidate = sample_candidate();
-        let reservation_key = candidate.reservation_key();
-        let seeded = ReservationRecord {
-            reservation_key: reservation_key.clone(),
-            execution_id: candidate.execution_id.clone(),
-            required_event_type: candidate.required_event_type.clone(),
-            owner_instance_id: Some("legacy-owner".to_string()),
-            fencing_epoch: 10,
-            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() - 30,
-            policy_id: config.policy_id.clone(),
-            policy_type: config.policy_type.clone(),
-            policy_version: config.policy_version.clone(),
-            decision_id: None,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            completed: false,
-        };
-        crate::state::save_reservation(store.clone(), "test-store", &seeded)
-            .await
-            .expect("seed reservation");
-        let mut seeded_state = RoutingStateRecord::new(&candidate, &seeded);
-        seeded_state.mark_error("seeded failure", true);
-        save_routing_state(store.clone(), "test-store", &seeded_state)
-            .await
-            .expect("seed state");
-
-        let reaction_a = make_reaction("router-a", &config);
-        let reaction_b = make_reaction("router-b", &config);
-        let (a, b) = tokio::join!(
-            reserve_or_resume(
-                store.clone(),
-                "test-store",
-                &config,
-                &candidate,
-                &reaction_a.runner_instance_id
-            ),
-            reserve_or_resume(
-                store.clone(),
-                "test-store",
-                &config,
-                &candidate,
-                &reaction_b.runner_instance_id
-            )
-        );
-        let (_, owner_a, _, _) = a.expect("reserve a");
-        let (_, owner_b, _, _) = b.expect("reserve b");
-        assert_ne!(owner_a.is_some(), owner_b.is_some());
-
-        let persisted = load_reservation_with_bytes(store, "test-store", &reservation_key)
-            .await
-            .expect("load reservation")
-            .expect("reservation exists");
-        assert_eq!(persisted.record.fencing_epoch, 11);
+    fn chain_for(comments: &[IssueComment]) -> anyhow::Result<TrustedChain> {
+        trusted_chain(
+            &config(),
+            &candidate(),
+            &run(),
+            &body_digest(Some(BODY)),
+            comments,
+        )
     }
 
-    #[tokio::test]
-    async fn stale_owner_is_fenced_after_takeover() {
-        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-        let config = sample_config();
-        let candidate = sample_candidate();
-        let reaction_a = make_reaction("router-a", &config);
-        let reaction_b = make_reaction("router-b", &config);
-
-        let (_, owner_a, mut state_a, _) = reserve_or_resume(
-            store.clone(),
-            "test-store",
-            &config,
-            &candidate,
-            &reaction_a.runner_instance_id,
-        )
-        .await
-        .expect("owner a reserve");
-        let mut owner_a = owner_a.expect("owner a owns reservation");
-
-        state_a.mark_error("seeded failure", true);
-        save_routing_state(store.clone(), "test-store", &state_a)
-            .await
-            .expect("seed failure state");
-        owner_a.record.lease_expires_at_unix_secs = chrono::Utc::now().timestamp() - 30;
-        crate::state::save_reservation(store.clone(), "test-store", &owner_a.record)
-            .await
-            .expect("expire owner a lease");
-        owner_a.persisted_bytes =
-            serialize_reservation(&owner_a.record).expect("serialize owner a");
-
-        let (_, owner_b, _, _) = reserve_or_resume(
-            store.clone(),
-            "test-store",
-            &config,
-            &candidate,
-            &reaction_b.runner_instance_id,
-        )
-        .await
-        .expect("owner b takeover");
-        assert!(owner_b.is_some());
-
-        let err = renew_reservation_ownership(
-            store,
-            "test-store",
-            &config,
-            &reaction_a.runner_instance_id,
-            &mut owner_a,
-            "stale owner check",
-        )
-        .await
-        .expect_err("stale owner must be fenced");
-        assert!(err.downcast_ref::<ReservationFencedError>().is_some());
+    #[test]
+    fn a_complete_trusted_chain_yields_the_completion() {
+        let chain = chain_for(&full_chain(ValidationOutcome::Passed)).expect("chain");
+        assert_eq!(chain.completion.outcome, ValidationOutcome::Passed);
+        assert_eq!(chain.execution_id.as_str(), "execution:exec-1");
+        assert_eq!(chain.accepted_completion.comment_node_id, "IC_complete");
+        assert!(chain.accepted_completion.body_hash.starts_with("sha256:"));
     }
 
-    #[tokio::test]
-    async fn expired_dead_owner_reservation_is_reclaimed_with_epoch_increment() {
-        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-        let config = sample_config();
-        let candidate = sample_candidate();
-        let reservation_key = candidate.reservation_key();
-        let seeded = ReservationRecord {
-            reservation_key: reservation_key.clone(),
-            execution_id: candidate.execution_id.clone(),
-            required_event_type: candidate.required_event_type.clone(),
-            owner_instance_id: Some("dead-owner".to_string()),
-            fencing_epoch: 7,
-            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() - 30,
-            policy_id: config.policy_id.clone(),
-            policy_type: config.policy_type.clone(),
-            policy_version: config.policy_version.clone(),
-            decision_id: Some("persisted-decision".to_string()),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            completed: false,
-        };
-        crate::state::save_reservation(store.clone(), "test-store", &seeded)
-            .await
-            .expect("seed reservation");
-        let mut seeded_state = RoutingStateRecord::new(&candidate, &seeded);
-        seeded_state.progress = SideEffectProgress {
-            decision_comment_written: true,
-            responsibility_written: false,
-            project_status_updated: false,
-        };
-        save_routing_state(store.clone(), "test-store", &seeded_state)
-            .await
-            .expect("seed state");
-
-        let reaction = make_reaction("router-live", &config);
-        let (reservation, owner, state, _) = reserve_or_resume(
-            store.clone(),
-            "test-store",
-            &config,
-            &candidate,
-            &reaction.runner_instance_id,
-        )
-        .await
-        .expect("reclaim expired reservation");
-
-        assert!(owner.is_some());
-        assert_eq!(reservation.fencing_epoch, 8);
-        assert!(state.progress.decision_comment_written);
-        assert!(!state.progress.responsibility_written);
-    }
-
-    #[tokio::test]
-    async fn multi_row_fenced_candidate_does_not_prevent_terminal_rejection() {
-        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-        let config = sample_config();
-        let reaction = make_reaction("router-multi-row", &config);
-        initialize_reaction_for_test(&reaction, store.clone()).await;
-
-        let mut fenced_candidate = sample_candidate();
-        fenced_candidate.execution_id = "exec-fenced".to_string();
-        let fenced_reservation = ReservationRecord {
-            reservation_key: fenced_candidate.reservation_key(),
-            execution_id: fenced_candidate.execution_id.clone(),
-            required_event_type: fenced_candidate.required_event_type.clone(),
-            owner_instance_id: Some("other-owner".to_string()),
-            fencing_epoch: 1,
-            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
-            policy_id: config.policy_id.clone(),
-            policy_type: config.policy_type.clone(),
-            policy_version: config.policy_version.clone(),
-            decision_id: None,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            completed: false,
-        };
-        crate::state::save_reservation(store.clone(), "router-multi-row", &fenced_reservation)
-            .await
-            .expect("seed fenced reservation");
-
-        let mut invalid_candidate = sample_candidate();
-        invalid_candidate.execution_id = "exec-invalid".to_string();
-        invalid_candidate.comment_edited = true;
-
-        let result = QueryResult::new(
-            ROUTE_QUERY_ID.to_string(),
-            1,
-            chrono::Utc::now(),
-            vec![
-                ResultDiff::Add {
-                    data: serde_json::to_value(&fenced_candidate).expect("fenced candidate json"),
-                    row_signature: 1,
-                },
-                ResultDiff::Add {
-                    data: serde_json::to_value(&invalid_candidate).expect("invalid candidate json"),
-                    row_signature: 2,
-                },
-            ],
-            HashMap::new(),
-        );
-
-        let github = GithubClient::from_config(&config).expect("github client");
-        let outcome = process_query_result(
-            "router-multi-row",
-            &reaction.base,
-            &config,
-            &github,
-            &reaction.runner_instance_id,
-            &result,
-        )
-        .await
-        .expect("terminal rejection should not fail the query result");
-        assert!(
-            outcome.has_unresolved_nonterminal,
-            "the fenced candidate must remain unresolved"
-        );
-        let rejected_data =
-            serde_json::to_value(&invalid_candidate).expect("invalid candidate json");
-        let fingerprint =
-            terminal_rejection_fingerprint(&rejected_data).expect("rejection fingerprint");
-        let rejection_key =
-            terminal_rejection_store_key(ROUTE_QUERY_ID, result.sequence, 2, &fingerprint);
-        let rejection = store
-            .get("router-multi-row", &rejection_key)
-            .await
-            .expect("read terminal rejection")
-            .expect("invalid candidate must be durably rejected");
-        let rejection: TerminalRejectionRecord =
-            serde_json::from_slice(&rejection).expect("valid rejection record");
-        assert_eq!(rejection.reason_code, "candidate-validation-failed");
-        assert!(rejection.finalized);
+    #[test]
+    fn routing_maps_outcomes_to_the_two_final_statuses() {
+        let passed = chain_for(&full_chain(ValidationOutcome::Passed)).expect("chain");
+        let decision = RoutingDecidedPayload::for_outcome(passed.completion.outcome);
         assert_eq!(
-            rejection.reservation_key.as_deref(),
-            Some("exec-invalid:CompletedIssueValidation")
+            decision.to_status,
+            RoutingToStatus::AwaitingIssueRiskProfiling
         );
-        let reservation = crate::state::load_reservation(
-            store,
-            "router-multi-row",
-            "exec-invalid:CompletedIssueValidation",
-        )
-        .await
-        .expect("load invalid-candidate reservation")
-        .expect("invalid candidate must retain a reservation tombstone");
-        assert!(reservation.completed);
+
+        let failed = chain_for(&full_chain(ValidationOutcome::Failed)).expect("chain");
+        let decision = RoutingDecidedPayload::for_outcome(failed.completion.outcome);
+        assert_eq!(decision.to_status, RoutingToStatus::NeedsMoreInformation);
     }
 
-    #[tokio::test]
-    async fn validation_drift_cannot_terminalize_existing_routing_state() {
-        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-        let mut runtime_config = sample_config();
-        runtime_config.trusted_agent_user_ids = vec![9999];
-        let reaction = make_reaction("router-validation-drift", &runtime_config);
-        initialize_reaction_for_test(&reaction, store.clone()).await;
+    #[test]
+    fn each_link_of_the_chain_is_required() {
+        for missing in ["IC_assign", "IC_start", "IC_complete"] {
+            let comments: Vec<IssueComment> = full_chain(ValidationOutcome::Passed)
+                .into_iter()
+                .filter(|comment| comment.node_id != missing)
+                .collect();
+            let error = chain_for(&comments).expect_err("incomplete chain");
+            assert!(
+                error.downcast_ref::<PermanentCandidateError>().is_some(),
+                "missing '{missing}' must be a permanent rejection: {error}"
+            );
+        }
+    }
 
-        let candidate = sample_candidate();
-        let reservation = ReservationRecord {
-            reservation_key: candidate.reservation_key(),
-            execution_id: candidate.execution_id.clone(),
-            required_event_type: candidate.required_event_type.clone(),
-            owner_instance_id: Some(reaction.runner_instance_id.clone()),
-            fencing_epoch: 1,
-            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
-            policy_id: runtime_config.policy_id.clone(),
-            policy_type: runtime_config.policy_type.clone(),
-            policy_version: runtime_config.policy_version.clone(),
-            decision_id: Some("persisted-decision".to_string()),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            completed: false,
-        };
-        crate::state::save_reservation(store.clone(), "router-validation-drift", &reservation)
-            .await
-            .expect("seed reservation");
-        let mut state = RoutingStateRecord::new(&candidate, &reservation);
-        state.progress.decision_comment_written = true;
-        save_routing_state(store.clone(), "router-validation-drift", &state)
-            .await
-            .expect("seed partial routing state");
-
-        let result = QueryResult::new(
-            ROUTE_QUERY_ID.to_string(),
-            1,
-            chrono::Utc::now(),
-            vec![ResultDiff::Add {
-                data: serde_json::to_value(&candidate).expect("candidate json"),
-                row_signature: 1,
-            }],
-            HashMap::new(),
+    #[test]
+    fn untrusted_and_edited_comments_are_invisible() {
+        let untrusted = AuthorIdentity::new(66, ActorType::User).with_author_id("U_mallory");
+        let mut comments = full_chain(ValidationOutcome::Passed);
+        comments[2] = comment(
+            "IC_complete",
+            &completion_event(ValidationOutcome::Passed, "exec-1"),
+            untrusted,
         );
-        let github = GithubClient::from_config(&runtime_config).expect("github client");
-        let error = process_query_result(
-            "router-validation-drift",
-            &reaction.base,
-            &runtime_config,
-            &github,
-            &reaction.runner_instance_id,
-            &result,
-        )
-        .await
-        .expect_err("validation drift over partial state must remain nonterminal");
-
         assert!(
-            format!("{error:#}").contains("refusing terminal rejection"),
-            "unexpected error: {error:#}"
+            chain_for(&comments).is_err(),
+            "untrusted completion ignored"
         );
-        assert_eq!(
-            store
-                .list_keys("router-validation-drift")
-                .await
-                .expect("list state")
-                .iter()
-                .filter(|key| key.starts_with(TERMINAL_REJECTION_PREFIX))
-                .count(),
-            0,
-            "partial routing state must never gain a terminal rejection marker"
+
+        // The trusted numeric database ID under the wrong actor type is not
+        // the trusted author.
+        let wrong_type = AuthorIdentity::new(4021243, ActorType::User).with_author_id("U_trusted");
+        let mut comments = full_chain(ValidationOutcome::Passed);
+        comments[2] = comment(
+            "IC_complete",
+            &completion_event(ValidationOutcome::Passed, "exec-1"),
+            wrong_type,
         );
+        assert!(chain_for(&comments).is_err(), "wrong actor type ignored");
+
+        // An edited completion is ignored entirely.
+        let mut comments = full_chain(ValidationOutcome::Passed);
+        comments[2].updated_at = Some("2026-08-14T01:00:00Z".to_string());
+        assert!(chain_for(&comments).is_err(), "edited completion ignored");
     }
 
-    #[tokio::test]
-    async fn persisted_decision_must_still_pass_output_allowlists() {
-        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-        let mut runtime_config = sample_config();
-        runtime_config.allowed_responsibility_types = vec!["issue-validation".to_string()];
-        runtime_config.allowed_actors = vec!["bot-user".to_string(), "submitter-user".to_string()];
-        let reaction = make_reaction("router-persisted-allowlist", &runtime_config);
-        initialize_reaction_for_test(&reaction, store.clone()).await;
+    #[test]
+    fn a_renamed_login_and_a_missing_node_id_do_not_break_the_chain() {
+        let renamed = AuthorIdentity::new(4021243, ActorType::Bot)
+            .with_author_id("U_trusted")
+            .with_login("renamed-since-then");
+        let mut comments = full_chain(ValidationOutcome::Passed);
+        comments[2] = comment(
+            "IC_complete",
+            &completion_event(ValidationOutcome::Passed, "exec-1"),
+            renamed,
+        );
+        chain_for(&comments).expect("logins are display-only");
 
-        let candidate = sample_candidate();
-        let mut reservation = ReservationRecord {
-            reservation_key: candidate.reservation_key(),
-            execution_id: candidate.execution_id.clone(),
-            required_event_type: candidate.required_event_type.clone(),
-            owner_instance_id: Some(reaction.runner_instance_id.clone()),
-            fencing_epoch: 1,
-            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
-            policy_id: runtime_config.policy_id.clone(),
-            policy_type: runtime_config.policy_type.clone(),
-            policy_version: runtime_config.policy_version.clone(),
-            decision_id: None,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            completed: false,
-        };
-        let decision = RoutingDecision::from_policy(
-            &sample_config(),
-            &candidate,
-            RulesV1PolicyEngine
-                .evaluate(&candidate)
-                .expect("rules evaluation"),
+        // The node ID is audit data: an author reported without one is still
+        // the trusted author.
+        let no_node_id = AuthorIdentity::new(4021243, ActorType::Bot);
+        let mut comments = full_chain(ValidationOutcome::Passed);
+        comments[2] = comment(
+            "IC_complete",
+            &completion_event(ValidationOutcome::Passed, "exec-1"),
+            no_node_id,
+        );
+        chain_for(&comments).expect("node IDs are audit data");
+    }
+
+    #[test]
+    fn a_completion_from_another_execution_is_rejected() {
+        let mut comments = full_chain(ValidationOutcome::Passed);
+        comments[2] = comment(
+            "IC_complete",
+            &completion_event(ValidationOutcome::Passed, "exec-other"),
+            trusted_identity(),
+        );
+        assert!(chain_for(&comments)
+            .expect_err("execution mismatch")
+            .to_string()
+            .contains("execution"));
+    }
+
+    #[test]
+    fn a_stale_body_digest_breaks_the_run_binding() {
+        // The assignment for a *different* body digest has a different runId
+        // and therefore a different eventId: the chain simply does not exist.
+        let other_digest = body_digest(Some("a different body"));
+        let error = trusted_chain(
+            &config(),
+            &candidate(),
+            &run(),
+            &other_digest,
+            &full_chain(ValidationOutcome::Passed),
         )
-        .expect("decision");
-        reservation.decision_id = Some(decision.decision_id.clone());
-        crate::state::save_reservation(store.clone(), "router-persisted-allowlist", &reservation)
-            .await
-            .expect("seed reservation");
+        .expect_err("digest mismatch");
+        assert!(error.to_string().contains("content digest"), "{error}");
+    }
 
-        let mut state = RoutingStateRecord::new(&candidate, &reservation);
-        state.decision = Some(decision);
-        state.selected_transition = Some((
-            "AwaitingRouting".to_string(),
-            "AwaitingIssueRiskProfiling".to_string(),
+    #[test]
+    fn a_foreign_profile_is_not_routed() {
+        let mut config = config();
+        config.expected_profile = "issue-risk-profiler".to_string();
+        let error = trusted_chain(
+            &config,
+            &candidate(),
+            &run(),
+            &body_digest(Some(BODY)),
+            &full_chain(ValidationOutcome::Passed),
+        )
+        .expect_err("foreign profile");
+        assert!(error.to_string().contains("profile"), "{error}");
+    }
+
+    #[test]
+    fn identical_duplicate_completions_coalesce_and_conflicts_fail_closed() {
+        let mut comments = full_chain(ValidationOutcome::Passed);
+        comments.push(comment(
+            "IC_complete_dup",
+            &completion_event(ValidationOutcome::Passed, "exec-1"),
+            trusted_identity(),
         ));
-        save_routing_state(store, "router-persisted-allowlist", &state)
-            .await
-            .expect("seed state");
-
-        let github = GithubClient::from_config(&runtime_config).expect("github client");
-        let err = process_candidate(
-            "router-persisted-allowlist",
-            &reaction.base,
-            &runtime_config,
-            &github,
-            &reaction.runner_instance_id,
-            &candidate,
-        )
-        .await
-        .expect_err("persisted decision should be blocked by output allowlist validation");
-        assert!(
-            err.to_string()
-                .contains("decision allowlist validation failed before side effects"),
-            "unexpected error: {err:#}"
+        let chain = chain_for(&comments).expect("duplicates coalesce");
+        assert_eq!(
+            chain.accepted_completion.comment_node_id, "IC_complete",
+            "the earliest physical comment is accepted"
         );
-    }
 
-    #[tokio::test]
-    async fn persisted_old_policy_decision_with_disallowed_transition_fails_without_checkpoint() {
-        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-        let mut runtime_config = sample_config();
-        runtime_config.policy_version = "2.0.0".to_string();
-        runtime_config.allowed_status_transitions = vec![crate::config::StatusTransition {
-            from: "AwaitingRouting".to_string(),
-            to: "NeedsMoreInformation".to_string(),
-        }];
-
-        let reaction = make_reaction("router-persisted-transition", &runtime_config);
-        initialize_reaction_for_test(&reaction, store.clone()).await;
-
-        let candidate = sample_candidate();
-        let mut reservation = ReservationRecord {
-            reservation_key: candidate.reservation_key(),
-            execution_id: candidate.execution_id.clone(),
-            required_event_type: candidate.required_event_type.clone(),
-            owner_instance_id: Some(reaction.runner_instance_id.clone()),
-            fencing_epoch: 1,
-            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
-            policy_id: runtime_config.policy_id.clone(),
-            policy_type: runtime_config.policy_type.clone(),
-            policy_version: "1.0.0".to_string(),
-            decision_id: None,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            completed: false,
-        };
-
-        let persisted_decision = RoutingDecision::from_policy(
-            &sample_config(),
-            &candidate,
-            RulesV1PolicyEngine
-                .evaluate(&candidate)
-                .expect("rules evaluation"),
-        )
-        .expect("persisted decision");
-        reservation.decision_id = Some(persisted_decision.decision_id.clone());
-        crate::state::save_reservation(store.clone(), "router-persisted-transition", &reservation)
-            .await
-            .expect("seed reservation");
-
-        let mut state = RoutingStateRecord::new(&candidate, &reservation);
-        state.decision = Some(persisted_decision);
-        state.selected_transition = Some((
-            "AwaitingRouting".to_string(),
-            "AwaitingIssueRiskProfiling".to_string(),
+        let mut comments = full_chain(ValidationOutcome::Passed);
+        comments.push(comment(
+            "IC_complete_conflict",
+            &completion_event(ValidationOutcome::Failed, "exec-1"),
+            trusted_identity(),
         ));
-        save_routing_state(store, "router-persisted-transition", &state)
-            .await
-            .expect("seed routing state");
-
-        reaction.start().await.expect("reaction start");
-        reaction
-            .enqueue_query_result(QueryResult::new(
-                ROUTE_QUERY_ID.to_string(),
-                1,
-                chrono::Utc::now(),
-                vec![ResultDiff::Add {
-                    data: serde_json::to_value(&candidate).expect("candidate row"),
-                    row_signature: 1,
-                }],
-                HashMap::new(),
-            ))
-            .await
-            .expect("enqueue candidate");
-
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        assert_eq!(
-            reaction.status().await,
-            ComponentStatus::Error,
-            "reaction should fail-safe when persisted transition is no longer allowlisted"
-        );
-
-        let checkpoint = reaction
-            .base
-            .read_checkpoint(ROUTE_QUERY_ID)
-            .await
-            .expect("read checkpoint")
-            .map(|cp| cp.sequence)
-            .unwrap_or(0);
-        assert_eq!(
-            checkpoint, 0,
-            "checkpoint must not advance when persisted decision transition is rejected"
-        );
-
-        reaction.stop().await.expect("reaction stop");
-    }
-
-    #[tokio::test]
-    async fn unresolved_result_does_not_advance_checkpoint_past_later_sequence() {
-        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-        let config = sample_config();
-        let reaction = make_reaction("router-checkpoint-gap", &config);
-        initialize_reaction_for_test(&reaction, store.clone()).await;
-
-        let mut fenced_candidate = sample_candidate();
-        fenced_candidate.execution_id = "exec-gap-fenced".to_string();
-        let fenced_reservation = ReservationRecord {
-            reservation_key: fenced_candidate.reservation_key(),
-            execution_id: fenced_candidate.execution_id.clone(),
-            required_event_type: fenced_candidate.required_event_type.clone(),
-            owner_instance_id: Some("active-owner".to_string()),
-            fencing_epoch: 1,
-            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
-            policy_id: config.policy_id.clone(),
-            policy_type: config.policy_type.clone(),
-            policy_version: config.policy_version.clone(),
-            decision_id: None,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            completed: false,
-        };
-        crate::state::save_reservation(store.clone(), "router-checkpoint-gap", &fenced_reservation)
-            .await
-            .expect("seed fenced reservation");
-
-        let mut completed_candidate = sample_candidate();
-        completed_candidate.execution_id = "exec-gap-complete".to_string();
-        let completed_reservation = ReservationRecord {
-            reservation_key: completed_candidate.reservation_key(),
-            execution_id: completed_candidate.execution_id.clone(),
-            required_event_type: completed_candidate.required_event_type.clone(),
-            owner_instance_id: Some("completed-owner".to_string()),
-            fencing_epoch: 2,
-            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
-            policy_id: config.policy_id.clone(),
-            policy_type: config.policy_type.clone(),
-            policy_version: config.policy_version.clone(),
-            decision_id: Some("done".to_string()),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            completed: true,
-        };
-        crate::state::save_reservation(
-            store.clone(),
-            "router-checkpoint-gap",
-            &completed_reservation,
-        )
-        .await
-        .expect("seed completed reservation");
-        let mut completed_state =
-            RoutingStateRecord::new(&completed_candidate, &completed_reservation);
-        completed_state.mark_progress(SideEffectProgress {
-            decision_comment_written: true,
-            responsibility_written: true,
-            project_status_updated: true,
-        });
-        save_routing_state(store.clone(), "router-checkpoint-gap", &completed_state)
-            .await
-            .expect("seed completed state");
-
-        reaction.start().await.expect("reaction start");
-        reaction
-            .enqueue_query_result(QueryResult::new(
-                ROUTE_QUERY_ID.to_string(),
-                1,
-                chrono::Utc::now(),
-                vec![ResultDiff::Add {
-                    data: serde_json::to_value(&fenced_candidate).expect("fenced row json"),
-                    row_signature: 1,
-                }],
-                HashMap::new(),
-            ))
-            .await
-            .expect("enqueue unresolved row");
-        reaction
-            .enqueue_query_result(QueryResult::new(
-                ROUTE_QUERY_ID.to_string(),
-                2,
-                chrono::Utc::now() + chrono::Duration::milliseconds(1),
-                vec![ResultDiff::Add {
-                    data: serde_json::to_value(&completed_candidate).expect("completed row json"),
-                    row_signature: 2,
-                }],
-                HashMap::new(),
-            ))
-            .await
-            .expect("enqueue later row");
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        reaction.stop().await.expect("reaction stop");
-
-        let checkpoint = reaction
-            .base
-            .read_checkpoint(ROUTE_QUERY_ID)
-            .await
-            .expect("read checkpoint");
-        let sequence = checkpoint.map(|cp| cp.sequence).unwrap_or(0);
+        let error = chain_for(&comments).expect_err("conflict must fail closed");
         assert!(
-            sequence < 2,
-            "checkpoint advanced past unresolved sequence: got {sequence}"
+            error.downcast_ref::<PermanentCandidateError>().is_none(),
+            "a contradiction must halt the reaction, not skip the row: {error:#}"
         );
+        assert!(format!("{error:#}").contains("conflicting"), "{error:#}");
     }
 
-    #[tokio::test]
-    async fn terminally_rejected_sequence_does_not_block_later_checkpoint() {
-        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-        let mut config = sample_config();
-        config.strict_recovery = false;
-        let reaction = make_reaction("router-nonstrict-failure-gap", &config);
-        initialize_reaction_for_test(&reaction, store.clone()).await;
-
-        let mut failed_candidate = sample_candidate();
-        failed_candidate.execution_id = "exec-failure-gap".to_string();
-        failed_candidate.comment_edited = true;
-
-        let mut completed_candidate = sample_candidate();
-        completed_candidate.execution_id = "exec-nonstrict-complete".to_string();
-        seed_completed_candidate_state(
-            store.clone(),
-            "router-nonstrict-failure-gap",
-            &config,
-            &completed_candidate,
+    #[test]
+    fn a_misbound_event_is_rejected() {
+        let mut row = candidate();
+        row.project_item_node_id = "PVTI_other".to_string();
+        // The row's item no longer matches the events' item, so the run derived
+        // for that row cannot find its chain at all.
+        let error = trusted_chain(
+            &config(),
+            &row,
+            &run(),
+            &body_digest(Some(BODY)),
+            &full_chain(ValidationOutcome::Passed),
         )
-        .await;
-
-        reaction.start().await.expect("reaction start");
-        reaction
-            .enqueue_query_result(QueryResult::new(
-                ROUTE_QUERY_ID.to_string(),
-                1,
-                chrono::Utc::now(),
-                vec![ResultDiff::Add {
-                    data: serde_json::to_value(&failed_candidate).expect("failed row json"),
-                    row_signature: 1,
-                }],
-                HashMap::new(),
-            ))
-            .await
-            .expect("enqueue failed row");
-        reaction
-            .enqueue_query_result(QueryResult::new(
-                ROUTE_QUERY_ID.to_string(),
-                2,
-                chrono::Utc::now() + chrono::Duration::milliseconds(1),
-                vec![ResultDiff::Add {
-                    data: serde_json::to_value(&completed_candidate).expect("completed row json"),
-                    row_signature: 2,
-                }],
-                HashMap::new(),
-            ))
-            .await
-            .expect("enqueue completed row");
-        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-        reaction.stop().await.expect("reaction stop");
-
-        let checkpoint = reaction
-            .base
-            .read_checkpoint(ROUTE_QUERY_ID)
-            .await
-            .expect("read checkpoint");
-        let sequence = checkpoint.map(|cp| cp.sequence).unwrap_or(0);
-        assert_eq!(
-            sequence, 2,
-            "terminal rejection must not poison checkpoint advancement"
-        );
+        .expect_err("misbound row");
+        assert!(error.to_string().contains("project item"), "{error}");
     }
 
-    #[tokio::test]
-    async fn nonstrict_unresolved_sequence_is_recoverable_before_checkpoint_advances() {
-        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-        let mut config = sample_config();
-        config.strict_recovery = false;
-        let reaction = make_reaction("router-nonstrict-recoverable", &config);
-        initialize_reaction_for_test(&reaction, store.clone()).await;
+    #[test]
+    fn decided_statuses_are_the_only_destinations_this_reaction_may_set() {
+        assert!(is_decided_status("AwaitingIssueRiskProfiling"));
+        assert!(is_decided_status("NeedsMoreInformation"));
+        assert!(!is_decided_status("AwaitingRouting"));
+        assert!(!is_decided_status(ROUTABLE_STATUS));
+        assert!(!is_decided_status("Done"));
+    }
 
-        let mut fenced_candidate = sample_candidate();
-        fenced_candidate.execution_id = "exec-nonstrict-fenced".to_string();
-        let fenced_reservation = ReservationRecord {
-            reservation_key: fenced_candidate.reservation_key(),
-            execution_id: fenced_candidate.execution_id.clone(),
-            required_event_type: fenced_candidate.required_event_type.clone(),
-            owner_instance_id: Some("other-owner".to_string()),
-            fencing_epoch: 1,
-            lease_expires_at_unix_secs: chrono::Utc::now().timestamp() + 300,
-            policy_id: config.policy_id.clone(),
-            policy_type: config.policy_type.clone(),
-            policy_version: config.policy_version.clone(),
-            decision_id: None,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            completed: false,
-        };
-        crate::state::save_reservation(
-            store.clone(),
-            "router-nonstrict-recoverable",
-            &fenced_reservation,
+    fn decision_event(outcome: ValidationOutcome) -> WorkGraphEvent {
+        WorkGraphEvent::new(
+            run(),
+            ITEM,
+            SUBJECT,
+            WorkGraphEventPayload::RoutingDecided(RoutingDecidedPayload::for_outcome(outcome)),
         )
-        .await
-        .expect("seed fenced reservation");
+        .expect("event")
+    }
 
-        let mut completed_candidate = sample_candidate();
-        completed_candidate.execution_id = "exec-nonstrict-complete-2".to_string();
-        seed_completed_candidate_state(
-            store.clone(),
-            "router-nonstrict-recoverable",
-            &config,
-            &completed_candidate,
+    fn published_record(event: &WorkGraphEvent, comment_node_id: &str) -> RoutingRecord {
+        let mut record = RoutingRecord::new(
+            run().as_str(),
+            event.event_id.as_str(),
+            &candidate(),
+            body_digest(Some(BODY)).as_str(),
+            AcceptedCompletion {
+                comment_node_id: "IC_complete".to_string(),
+                body_hash: comment_body_hash("body"),
+            },
+            "passed",
+            RoutingToStatus::AwaitingIssueRiskProfiling.as_str(),
+            &event.to_canonical_json(),
+        );
+        record.set_decision_comment(comment_node_id);
+        record
+    }
+
+    #[test]
+    fn a_published_decision_is_verified_against_the_persisted_decision() {
+        let event = decision_event(ValidationOutcome::Passed);
+        let record = published_record(&event, "IC_decision");
+        let published = comment("IC_decision", &event, trusted_identity());
+        verify_published_decision(
+            &config(),
+            &record,
+            "IC_decision",
+            std::slice::from_ref(&published),
         )
-        .await;
+        .expect("an unchanged published decision verifies");
 
-        reaction.start().await.expect("reaction start");
-        reaction
-            .enqueue_query_result(QueryResult::new(
-                ROUTE_QUERY_ID.to_string(),
-                1,
-                chrono::Utc::now(),
-                vec![ResultDiff::Add {
-                    data: serde_json::to_value(&fenced_candidate).expect("fenced row json"),
-                    row_signature: 1,
-                }],
-                HashMap::new(),
-            ))
-            .await
-            .expect("enqueue fenced row");
-        reaction
-            .enqueue_query_result(QueryResult::new(
-                ROUTE_QUERY_ID.to_string(),
-                2,
-                chrono::Utc::now() + chrono::Duration::milliseconds(1),
-                vec![ResultDiff::Add {
-                    data: serde_json::to_value(&completed_candidate).expect("completed row json"),
-                    row_signature: 2,
-                }],
-                HashMap::new(),
-            ))
-            .await
-            .expect("enqueue completed row");
-        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-        reaction.stop().await.expect("reaction stop");
+        // Deleted.
+        let error = verify_published_decision(&config(), &record, "IC_decision", &[])
+            .expect_err("a deleted decision comment must halt");
+        assert!(error.to_string().contains("no longer exists"), "{error}");
 
-        let first_checkpoint = reaction
-            .base
-            .read_checkpoint(ROUTE_QUERY_ID)
-            .await
-            .expect("read first checkpoint")
-            .map(|cp| cp.sequence)
-            .unwrap_or(0);
+        // Edited.
+        let mut edited = published.clone();
+        edited.updated_at = Some("2026-08-14T02:00:00Z".to_string());
+        let error = verify_published_decision(&config(), &record, "IC_decision", &[edited])
+            .expect_err("an edited decision comment must halt");
+        assert!(error.to_string().contains("was edited"), "{error}");
+
+        // Authored by somebody else.
+        let untrusted = comment(
+            "IC_decision",
+            &event,
+            AuthorIdentity::new(66, ActorType::User).with_author_id("U_mallory"),
+        );
+        let error = verify_published_decision(&config(), &record, "IC_decision", &[untrusted])
+            .expect_err("an untrusted decision comment must halt");
+        assert!(error.to_string().contains("trusted author"), "{error}");
+
+        // Same event ID, different payload: the eventId does not cover it.
+        let divergent = decision_event(ValidationOutcome::Failed);
+        assert_eq!(divergent.event_id, event.event_id);
+        let swapped = comment("IC_decision", &divergent, trusted_identity());
+        let error = verify_published_decision(&config(), &record, "IC_decision", &[swapped])
+            .expect_err("a divergent decision comment must halt");
         assert!(
-            first_checkpoint < 2,
-            "checkpoint advanced past unresolved sequence before recovery: got {first_checkpoint}"
+            error
+                .to_string()
+                .contains("no longer carries the decided event"),
+            "{error}"
         );
 
-        seed_completed_candidate_state(
-            store.clone(),
-            "router-nonstrict-recoverable",
-            &config,
-            &fenced_candidate,
+        // A comment that no longer parses at all.
+        let mut unparseable = published.clone();
+        unparseable.body = "WorkGraphEvent/v1\n\nstill official\n\nnot json".to_string();
+        let error = verify_published_decision(&config(), &record, "IC_decision", &[unparseable])
+            .expect_err("an unparseable decision comment must halt");
+        assert!(error.to_string().contains("no longer parses"), "{error}");
+
+        // A comment carrying a different run entirely.
+        let other_run = WorkGraphEvent::new(
+            run_id(ITEM, SUBJECT, &body_digest(Some("another body"))),
+            ITEM,
+            SUBJECT,
+            WorkGraphEventPayload::RoutingDecided(RoutingDecidedPayload::for_outcome(
+                ValidationOutcome::Passed,
+            )),
         )
-        .await;
-
-        let resumed_reaction = make_reaction("router-nonstrict-recoverable", &config);
-        initialize_reaction_for_test(&resumed_reaction, store).await;
-        resumed_reaction
-            .start()
-            .await
-            .expect("resumed reaction start");
-        resumed_reaction
-            .enqueue_query_result(QueryResult::new(
-                ROUTE_QUERY_ID.to_string(),
-                1,
-                chrono::Utc::now(),
-                vec![ResultDiff::Add {
-                    data: serde_json::to_value(&fenced_candidate).expect("fenced row json"),
-                    row_signature: 1,
-                }],
-                HashMap::new(),
-            ))
-            .await
-            .expect("enqueue recovered fenced row");
-        resumed_reaction
-            .enqueue_query_result(QueryResult::new(
-                ROUTE_QUERY_ID.to_string(),
-                2,
-                chrono::Utc::now() + chrono::Duration::milliseconds(1),
-                vec![ResultDiff::Add {
-                    data: serde_json::to_value(&completed_candidate).expect("completed row json"),
-                    row_signature: 2,
-                }],
-                HashMap::new(),
-            ))
-            .await
-            .expect("enqueue completed row");
-        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-        resumed_reaction
-            .stop()
-            .await
-            .expect("resumed reaction stop");
-
-        let recovered_checkpoint = resumed_reaction
-            .base
-            .read_checkpoint(ROUTE_QUERY_ID)
-            .await
-            .expect("read recovered checkpoint")
-            .map(|cp| cp.sequence)
-            .unwrap_or(0);
-        assert!(
-            recovered_checkpoint >= 2,
-            "checkpoint did not advance after unresolved sequence became recoverable: got {recovered_checkpoint}"
-        );
+        .expect("event");
+        let rebound = comment("IC_decision", &other_run, trusted_identity());
+        let error = verify_published_decision(&config(), &record, "IC_decision", &[rebound])
+            .expect_err("a re-bound decision comment must halt");
+        assert!(error.to_string().contains("no longer binds run"), "{error}");
     }
 
-    #[tokio::test]
-    async fn stale_owner_routing_state_cas_rejected_after_takeover() {
-        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-        let config = sample_config();
-        let candidate = sample_candidate();
-        let reaction_a = make_reaction("router-state-a", &config);
-        let reaction_b = make_reaction("router-state-b", &config);
+    #[test]
+    fn adoption_of_a_divergent_decision_fails_closed() {
+        let intended = decision_event(ValidationOutcome::Passed);
+        let divergent = decision_event(ValidationOutcome::Failed);
+        let comments = vec![comment("IC_divergent", &divergent, trusted_identity())];
 
-        let (_, owner_a, mut state_a, mut owned_state_a) = reserve_or_resume(
-            store.clone(),
-            "router-state-store",
-            &config,
-            &candidate,
-            &reaction_a.runner_instance_id,
-        )
-        .await
-        .expect("owner a reserve");
-        let mut owner_a = owner_a.expect("owner a");
-
-        state_a.mark_progress(SideEffectProgress {
-            decision_comment_written: true,
-            responsibility_written: false,
-            project_status_updated: false,
-        });
-        persist_state_with_ownership(
-            store.clone(),
-            "router-state-store",
-            &config,
-            &reaction_a.runner_instance_id,
-            &mut owner_a,
-            &mut owned_state_a,
-            &state_a,
-            "persist owner a state",
-        )
-        .await
-        .expect("persist owner a");
-        let stale_bytes = owned_state_a
-            .persisted_bytes
-            .clone()
-            .expect("owner a persisted state bytes");
-
-        owner_a.record.lease_expires_at_unix_secs = chrono::Utc::now().timestamp() - 1;
-        crate::state::save_reservation(store.clone(), "router-state-store", &owner_a.record)
-            .await
-            .expect("expire owner a lease");
-        owner_a.persisted_bytes =
-            serialize_reservation(&owner_a.record).expect("serialize owner a");
-
-        let (_, owner_b, mut state_b, mut owned_state_b) = reserve_or_resume(
-            store.clone(),
-            "router-state-store",
-            &config,
-            &candidate,
-            &reaction_b.runner_instance_id,
-        )
-        .await
-        .expect("owner b takeover");
-        let mut owner_b = owner_b.expect("owner b");
-        state_b.mark_progress(SideEffectProgress {
-            decision_comment_written: true,
-            responsibility_written: true,
-            project_status_updated: true,
-        });
-        persist_state_with_ownership(
-            store.clone(),
-            "router-state-store",
-            &config,
-            &reaction_b.runner_instance_id,
-            &mut owner_b,
-            &mut owned_state_b,
-            &state_b,
-            "persist owner b state",
-        )
-        .await
-        .expect("persist owner b");
-
-        let swapped = compare_and_swap_routing_state(
-            store.clone(),
-            "router-state-store",
-            &candidate.reservation_key(),
-            Some(stale_bytes.as_slice()),
-            &state_a,
-        )
-        .await
-        .expect("stale routing-state CAS");
-        assert!(!swapped, "stale owner bytes must not overwrite newer state");
-
-        let stale_err = persist_state_with_ownership(
-            store,
-            "router-state-store",
-            &config,
-            &reaction_a.runner_instance_id,
-            &mut owner_a,
-            &mut owned_state_a,
-            &state_a,
-            "stale owner persist attempt",
-        )
-        .await
-        .expect_err("stale owner must be fenced");
-        assert!(stale_err.downcast_ref::<ReservationFencedError>().is_some());
-    }
-
-    #[tokio::test]
-    async fn interleaved_state_writes_preserve_newer_progress() {
-        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-        let config = sample_config();
-        let candidate = sample_candidate();
-        let reaction_a = make_reaction("router-interleave-a", &config);
-        let reaction_b = make_reaction("router-interleave-b", &config);
-
-        let (_, owner_a, mut state_a, mut owned_state_a) = reserve_or_resume(
-            store.clone(),
-            "router-interleave-store",
-            &config,
-            &candidate,
-            &reaction_a.runner_instance_id,
-        )
-        .await
-        .expect("owner a reserve");
-        let mut owner_a = owner_a.expect("owner a");
-        state_a.mark_progress(SideEffectProgress {
-            decision_comment_written: true,
-            responsibility_written: false,
-            project_status_updated: false,
-        });
-        persist_state_with_ownership(
-            store.clone(),
-            "router-interleave-store",
-            &config,
-            &reaction_a.runner_instance_id,
-            &mut owner_a,
-            &mut owned_state_a,
-            &state_a,
-            "persist owner a interleave state",
-        )
-        .await
-        .expect("persist owner a");
-        owner_a.record.lease_expires_at_unix_secs = chrono::Utc::now().timestamp() - 1;
-        crate::state::save_reservation(store.clone(), "router-interleave-store", &owner_a.record)
-            .await
-            .expect("expire owner a");
-        owner_a.persisted_bytes =
-            serialize_reservation(&owner_a.record).expect("serialize owner a");
-
-        let (_, owner_b, mut state_b, mut owned_state_b) = reserve_or_resume(
-            store.clone(),
-            "router-interleave-store",
-            &config,
-            &candidate,
-            &reaction_b.runner_instance_id,
-        )
-        .await
-        .expect("owner b takeover");
-        let mut owner_b = owner_b.expect("owner b");
-        state_b.mark_progress(SideEffectProgress {
-            decision_comment_written: true,
-            responsibility_written: true,
-            project_status_updated: true,
-        });
-        persist_state_with_ownership(
-            store.clone(),
-            "router-interleave-store",
-            &config,
-            &reaction_b.runner_instance_id,
-            &mut owner_b,
-            &mut owned_state_b,
-            &state_b,
-            "persist owner b interleave state",
-        )
-        .await
-        .expect("persist owner b");
-
-        let current = load_routing_state_with_bytes(
-            store.clone(),
-            "router-interleave-store",
-            &candidate.reservation_key(),
-        )
-        .await
-        .expect("load current state")
-        .expect("state present");
+        // Reading by event ID alone would hand back the divergent comment...
         assert_eq!(
-            current.record.owner_instance_id.as_deref(),
-            owner_b.record.owner_instance_id.as_deref()
+            accept_trusted_comment(&config(), &comments, &intended.event_id)
+                .expect("no conflict among one comment")
+                .expect("one observation")
+                .comment_node_id,
+            "IC_divergent"
         );
-        assert_eq!(current.record.fencing_epoch, owner_b.record.fencing_epoch);
-        assert!(current.record.progress.project_status_updated);
+        // ...but adopting it as our own published decision must fail closed.
+        let error = adopt_own_published_comment(&config(), &comments, &intended)
+            .expect_err("divergent adoption must fail");
+        assert!(
+            format!("{error:#}").contains("differs from the event"),
+            "{error:#}"
+        );
+
+        // The intended decision itself is adoptable.
+        let ours = vec![comment("IC_ours", &intended, trusted_identity())];
+        assert_eq!(
+            adopt_own_published_comment(&config(), &ours, &intended)
+                .expect("adoptable")
+                .expect("one observation")
+                .comment_node_id,
+            "IC_ours"
+        );
     }
 }

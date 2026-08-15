@@ -20,6 +20,8 @@ use drasi_lib::reactions::Reaction;
 use drasi_plugin_sdk::prelude::*;
 use utoipa::OpenApi;
 
+use drasi_workgraph_common::trust::ActorType;
+
 use crate::config::{CommentApiConfig, CopilotAgentTaskReactionConfig};
 use crate::CopilotAgentTaskReactionBuilder;
 
@@ -67,6 +69,33 @@ pub struct CopilotAgentTaskReactionConfigDto {
     pub allowed_profiles: Vec<String>,
     pub allowed_models: Vec<String>,
 
+    /// Numeric GitHub database ID of the identity whose
+    /// `ResponsibilityAssigned` comments are trusted (admission's identity).
+    /// Together with `trustedAssignmentAuthorType` this is the whole trust key:
+    /// no node ID and no GitHub App attribution is configured or accepted.
+    #[schema(value_type = ConfigValueU64)]
+    pub trusted_assignment_author_database_id: ConfigValue<u64>,
+
+    /// Actor type of the identity whose `ResponsibilityAssigned` comments are
+    /// trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_assignment_author_type: Option<ActorType>,
+
+    /// Numeric GitHub database ID of the identity **this** reaction posts as,
+    /// used only to adopt its own `ExecutionStarted` comment after an ambiguous
+    /// write. It must name the account `token` authenticates as.
+    #[schema(value_type = ConfigValueU64)]
+    pub trusted_execution_author_database_id: ConfigValue<u64>,
+
+    /// Actor type of the identity this reaction posts as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_execution_author_type: Option<ActorType>,
+
+    /// The node ID of the Project's single-select `Status` field
+    /// (`PVTSSF_…`), pinned so a renamed/rebuilt field is rejected.
+    #[schema(value_type = ConfigValueString)]
+    pub expected_project_status_field_node_id: ConfigValue<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueU64>)]
     pub request_timeout_ms: Option<ConfigValue<u64>>,
@@ -94,6 +123,17 @@ impl From<&CopilotAgentTaskReactionConfig> for CopilotAgentTaskReactionConfigDto
             allowed_repositories: c.allowed_repositories.clone(),
             allowed_profiles: c.allowed_profiles.clone(),
             allowed_models: c.allowed_models.clone(),
+            trusted_assignment_author_database_id: ConfigValue::Static(
+                c.trusted_assignment_author_database_id,
+            ),
+            trusted_assignment_author_type: Some(c.trusted_assignment_author_type),
+            trusted_execution_author_database_id: ConfigValue::Static(
+                c.trusted_execution_author_database_id,
+            ),
+            trusted_execution_author_type: Some(c.trusted_execution_author_type),
+            expected_project_status_field_node_id: ConfigValue::Static(
+                c.expected_project_status_field_node_id.clone(),
+            ),
             request_timeout_ms: Some(ConfigValue::Static(c.request_timeout_ms)),
             comment_api: Some(CommentApiConfigDto {
                 max_attempts: Some(ConfigValue::Static(c.comment_api.max_attempts as u64)),
@@ -130,6 +170,7 @@ async fn map_comment_api(
 #[openapi(components(schemas(
     CopilotAgentTaskReactionConfigDto,
     CommentApiConfigDto,
+    ActorType,
     ConfigValueStringSchema,
     ConfigValueU64Schema,
     ConfigValueBoolSchema,
@@ -146,7 +187,7 @@ impl ReactionPluginDescriptor for CopilotAgentTaskReactionDescriptor {
     }
 
     fn config_version(&self) -> &str {
-        "1.1.0"
+        "2.0.0"
     }
 
     fn config_schema_name(&self) -> &str {
@@ -158,7 +199,7 @@ impl ReactionPluginDescriptor for CopilotAgentTaskReactionDescriptor {
     }
 
     fn display_description(&self) -> &str {
-        "Launches GitHub Copilot coding-agent tasks from WorkGraph routing decisions, with allowlisted repositories/profiles/models, GitHub-state preflight checks, durable reservation, and a workgraph.execution/v1 issue comment."
+        "Launches a GitHub Copilot coding-agent task for a nominated WorkGraph run: re-reads the trusted issue, project item, and assignment from GitHub, pins the exact agent-profile blob, durably reserves and creates or adopts exactly one task, and posts exactly one shared ExecutionStarted WorkGraphEvent/v1 issue comment."
     }
 
     fn display_icon(&self) -> &str {
@@ -197,6 +238,21 @@ impl ReactionPluginDescriptor for CopilotAgentTaskReactionDescriptor {
         .field("allowedRepositories", |f| f.group("Allowlists").order(10))
         .field("allowedProfiles", |f| f.group("Allowlists").order(11))
         .field("allowedModels", |f| f.group("Allowlists").order(12))
+        .field("trustedAssignmentAuthorDatabaseId", |f| {
+            f.group("Allowlists").order(13).placeholder("4021243")
+        })
+        .field("trustedAssignmentAuthorType", |f| {
+            f.group("Allowlists").order(14)
+        })
+        .field("trustedExecutionAuthorDatabaseId", |f| {
+            f.group("Allowlists").order(15).placeholder("90210")
+        })
+        .field("trustedExecutionAuthorType", |f| {
+            f.group("Allowlists").order(16)
+        })
+        .field("expectedProjectStatusFieldNodeId", |f| {
+            f.group("Project").order(15).placeholder("PVTSSF_...")
+        })
         .field("requestTimeoutMs", |f| {
             f.group("Advanced").order(20).placeholder("30000")
         })
@@ -238,6 +294,27 @@ impl ReactionPluginDescriptor for CopilotAgentTaskReactionDescriptor {
         builder = builder.with_allowed_repositories(dto.allowed_repositories.clone());
         builder = builder.with_allowed_profiles(dto.allowed_profiles.clone());
         builder = builder.with_allowed_models(dto.allowed_models.clone());
+        builder = builder.with_trusted_assignment_author_database_id(
+            mapper
+                .resolve_typed(&dto.trusted_assignment_author_database_id)
+                .await?,
+        );
+        if let Some(actor_type) = dto.trusted_assignment_author_type {
+            builder = builder.with_trusted_assignment_author_type(actor_type);
+        }
+        builder = builder.with_trusted_execution_author_database_id(
+            mapper
+                .resolve_typed(&dto.trusted_execution_author_database_id)
+                .await?,
+        );
+        if let Some(actor_type) = dto.trusted_execution_author_type {
+            builder = builder.with_trusted_execution_author_type(actor_type);
+        }
+        builder = builder.with_expected_project_status_field_node_id(
+            mapper
+                .resolve_string(&dto.expected_project_status_field_node_id)
+                .await?,
+        );
         if let Some(ref v) = dto.request_timeout_ms {
             builder = builder.with_request_timeout_ms(mapper.resolve_typed(v).await?);
         }
@@ -271,6 +348,11 @@ mod tests {
             "allowedRepositories": ["drasi-project/drasi-core"],
             "allowedProfiles": ["issue-validator"],
             "allowedModels": ["gpt-5"],
+            "trustedAssignmentAuthorDatabaseId": 4021243,
+            "trustedAssignmentAuthorType": "Bot",
+            "trustedExecutionAuthorDatabaseId": 90210,
+            "trustedExecutionAuthorType": "Bot",
+            "expectedProjectStatusFieldNodeId": "PVTSSF_status",
         });
         let reaction = CopilotAgentTaskReactionDescriptor
             .create_reaction("id", vec!["q1".to_string()], &cfg, true)
@@ -290,7 +372,12 @@ mod tests {
                 ["expectedGithubUserId"]
                 .is_object()
         );
-        for referenced_schema in ["ConfigValueString", "ConfigValueU64", "ConfigValueBool"] {
+        for referenced_schema in [
+            "ConfigValueString",
+            "ConfigValueU64",
+            "ConfigValueBool",
+            "workgraph.ActorType",
+        ] {
             assert!(
                 schemas[referenced_schema].is_object(),
                 "schema reference {referenced_schema} must resolve"
@@ -305,6 +392,11 @@ mod tests {
             "allowedRepositories": [],
             "allowedProfiles": [],
             "allowedModels": [],
+            "trustedAssignmentAuthorDatabaseId": 4021243,
+            "trustedAssignmentAuthorType": "Bot",
+            "trustedExecutionAuthorDatabaseId": 90210,
+            "trustedExecutionAuthorType": "Bot",
+            "expectedProjectStatusFieldNodeId": "PVTSSF_status",
         });
         let result = CopilotAgentTaskReactionDescriptor
             .create_reaction("id", vec!["q1".to_string()], &cfg, true)
@@ -319,6 +411,11 @@ mod tests {
             "allowedRepositories": ["drasi-project/drasi-core"],
             "allowedProfiles": ["issue-validator"],
             "allowedModels": ["gpt-5"],
+            "trustedAssignmentAuthorDatabaseId": 4021243,
+            "trustedAssignmentAuthorType": "Bot",
+            "trustedExecutionAuthorDatabaseId": 90210,
+            "trustedExecutionAuthorType": "Bot",
+            "expectedProjectStatusFieldNodeId": "PVTSSF_status",
             "strictRecovery": false,
         });
         let result = CopilotAgentTaskReactionDescriptor

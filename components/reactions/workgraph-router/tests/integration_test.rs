@@ -12,1866 +12,1333 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! End-to-end tests for the WorkGraph router reaction.
+//!
+//! This is a **protocol-target** reaction: it calls GitHub's REST and GraphQL
+//! APIs directly, so a stateful local `wiremock` server stands in for GitHub and
+//! a durable in-memory state store stands in for the persistent store. Restart
+//! is modelled by building a second reaction over the same state store and the
+//! same GitHub state, which is exactly what the durability contract promises.
+//!
+//! Run with:
+//! `cargo test -p drasi-reaction-workgraph-router --test integration_test -- --ignored --nocapture`
+
+mod durable_memory_store;
+mod mock_github;
+
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
-use drasi_lib::channels::{QueryResult, ResultDiff};
-use drasi_lib::component_graph::ComponentGraph;
-use drasi_lib::state_store::{
-    StateStoreCompareAndSwapResult, StateStoreCreateIfAbsentResult, StateStoreProvider,
-    StateStoreResult,
-};
-use drasi_lib::{Reaction, ReactionRuntimeContext};
-use drasi_reaction_workgraph_router::candidate::RoutingCandidate;
-use drasi_reaction_workgraph_router::config::{
-    StatusTransition, WorkgraphRouterReactionConfig, ROUTE_QUERY_ID,
-};
-use drasi_reaction_workgraph_router::decision::RoutingDecision;
-use drasi_reaction_workgraph_router::rules::{RoutingPolicyEngine, RulesV1PolicyEngine};
+use drasi_lib::channels::ComponentStatus;
+use drasi_lib::state_store::StateStoreProvider;
+use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_workgraph_router::state::{
-    load_reservation, save_reservation, save_routing_state, ReservationRecord, RoutingStateRecord,
-    SideEffectProgress,
+    comment_body_hash, create_record_if_absent, load_record, set_open_run, AcceptedCompletion,
+    RoutingRecord,
 };
-use drasi_reaction_workgraph_router::WorkgraphRouterReaction;
-use serde_json::{json, Value};
-use wiremock::matchers::{body_string_contains, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use drasi_reaction_workgraph_router::{RoutingCandidate, WorkgraphRouterReaction};
+use drasi_source_application::{
+    ApplicationSource, ApplicationSourceConfig, ApplicationSourceHandle, PropertyMapBuilder,
+};
+use drasi_workgraph_common::{
+    comment::render_comment,
+    event::{
+        AssignedResponsibilityType, CompletedIssueValidationPayload, ExecutionId,
+        ExecutionStartedPayload, ProfileRef, ResponsibilityAssignedPayload, RoutingDecidedPayload,
+        ValidationOutcome, ValidationReasonCode, WorkGraphEvent, WorkGraphEventPayload,
+    },
+    ids::{body_digest, run_id},
+    summary::{summary_for, SubjectRef},
+};
+use durable_memory_store::DurableMemoryStateStoreProvider;
+use mock_github::{
+    GithubState, MockAuthor, FAILED_STATUS, PASSED_STATUS, PROJECT_ITEM_NODE_ID, PROJECT_NODE_ID,
+    REPOSITORY, ROUTABLE_STATUS, STATUS_FIELD_NODE_ID, SUBJECT_NUMBER, TRUSTED_AUTHOR_DATABASE_ID,
+    TRUSTED_AUTHOR_TYPE,
+};
+use wiremock::MockServer;
 
-const TEST_REACTION_ID: &str = "workgraph-router-test";
+const SOURCE: &str = "router-source";
+const QUERY: &str = "route-workgraph-items";
+const REACTION: &str = "workgraph-router";
+const SUBJECT_NODE_ID: &str = "I_kwDOABCDEF6ABCDE";
+const ISSUE_BODY: &str = "Please validate this issue.\n\nworkgraph:validate\n";
+const PROFILE_BLOB_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+const EXECUTION_SUFFIX: &str = "2f1c9e11-4a9d-4b66-a30d-1b8e7721fa4c";
+const TOKEN_ENV: &str = "WORKGRAPH_ROUTER_TEST_TOKEN";
+const WARMUP: Duration = Duration::from_millis(150);
 
-struct DurableMemoryStateStore {
-    inner: drasi_lib::MemoryStateStoreProvider,
+fn make_source() -> (ApplicationSource, ApplicationSourceHandle) {
+    let config = ApplicationSourceConfig {
+        properties: HashMap::new(),
+        durability: None,
+    };
+    ApplicationSource::new(SOURCE, config).expect("create application source")
 }
 
-impl DurableMemoryStateStore {
-    fn new() -> Self {
-        Self {
-            inner: drasi_lib::MemoryStateStoreProvider::new(),
-        }
-    }
+fn query_text() -> &'static str {
+    "MATCH (r:RoutingCandidate) RETURN \
+     r.repository AS repository, r.subjectNumber AS subjectNumber, \
+     r.subjectNodeId AS subjectNodeId, r.projectNodeId AS projectNodeId, \
+     r.projectItemNodeId AS projectItemNodeId, r.projectStatus AS projectStatus"
 }
 
-#[async_trait::async_trait]
-impl StateStoreProvider for DurableMemoryStateStore {
-    async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
-        self.inner.get(store_id, key).await
-    }
-
-    async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
-        self.inner.set(store_id, key, value).await
-    }
-
-    async fn create_if_absent(
-        &self,
-        store_id: &str,
-        key: &str,
-        value: Vec<u8>,
-    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
-        self.inner.create_if_absent(store_id, key, value).await
-    }
-
-    async fn compare_and_swap(
-        &self,
-        store_id: &str,
-        key: &str,
-        expected: Option<&[u8]>,
-        new_value: Vec<u8>,
-    ) -> StateStoreResult<StateStoreCompareAndSwapResult> {
-        self.inner
-            .compare_and_swap(store_id, key, expected, new_value)
-            .await
-    }
-
-    async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
-        self.inner.delete(store_id, key).await
-    }
-
-    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
-        self.inner.contains_key(store_id, key).await
-    }
-
-    async fn get_many(
-        &self,
-        store_id: &str,
-        keys: &[&str],
-    ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
-        self.inner.get_many(store_id, keys).await
-    }
-
-    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
-        self.inner.set_many(store_id, entries).await
-    }
-
-    async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
-        self.inner.delete_many(store_id, keys).await
-    }
-
-    async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
-        self.inner.clear_store(store_id).await
-    }
-
-    async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
-        self.inner.list_keys(store_id).await
-    }
-
-    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
-        self.inner.store_exists(store_id).await
-    }
-
-    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
-        self.inner.key_count(store_id).await
-    }
-
-    fn is_durable(&self) -> bool {
-        true
-    }
-}
-
-fn sample_candidate() -> RoutingCandidate {
-    RoutingCandidate {
-        execution_id: "exec-1".to_string(),
-        required_event_type: "CompletedIssueValidation".to_string(),
-        event_id: "event-1".to_string(),
-        event_type: "CompletedIssueValidation".to_string(),
-        outcome: "passed".to_string(),
-        reason_code: "required-marker-present".to_string(),
-        event_node_id: "workgraph-event:IC_event".to_string(),
-        subject_repo: "drasi-project/drasi-core".to_string(),
-        subject_issue_number: 42,
-        subject_node_id: "I_issue".to_string(),
-        project_id: "PVT_project".to_string(),
-        project_item_id: "PVTI_item".to_string(),
-        project_status: "AwaitingRouting".to_string(),
-        route_id: "route-1".to_string(),
-        route_expected_event_id: "event-1".to_string(),
-        route_expected_event_type: "CompletedIssueValidation".to_string(),
-        route_expected_subject_repo: "drasi-project/drasi-core".to_string(),
-        route_expected_subject_issue_number: 42,
-        route_content_version: "2026-01-01T00:00:00Z".to_string(),
-        route_content_profile: "phase2".to_string(),
-        responsibility_id: "resp-1".to_string(),
-        responsibility_type: "issue-validation".to_string(),
-        responsibility_actor: "bot-user".to_string(),
-        submitter_actor: "submitter-user".to_string(),
-        launcher_author: "launcher-user".to_string(),
-        launcher_author_id: 1001,
-        agent_author: "agent-user".to_string(),
-        agent_author_id: 1001,
-        router_author: "router-user".to_string(),
-        router_author_id: 1001,
-        routing_author: "router-user".to_string(),
-        routing_author_id: 1001,
-        observed_authors: vec![
-            "router-user".to_string(),
-            "launcher-user".to_string(),
-            "agent-user".to_string(),
-        ],
-        observed_author_ids: vec![1001, 1001, 1001],
-        comment_id: 1000,
-        comment_author: "agent-user".to_string(),
-        comment_body: "{\"source\":\"validated\"}".to_string(),
-        comment_edited: false,
-        comment_created_at: Some("2026-01-01T00:00:00Z".to_string()),
-        comment_updated_at: Some("2026-01-01T00:00:00Z".to_string()),
-        comment_provenance_event_id: "event-1".to_string(),
-        comment_provenance_event_type: "CompletedIssueValidation".to_string(),
-        content_version: "2026-01-01T00:00:00Z".to_string(),
-        content_profile: "phase2".to_string(),
-        policy_id: "policy-1".to_string(),
-        policy_type: "rules_v1".to_string(),
-        policy_version: "1.0.0".to_string(),
-    }
-}
-
-fn status_snapshot_response(status: &str) -> Value {
-    status_snapshot_response_for_item(
-        status,
-        "Issue",
-        "drasi-project/drasi-core",
-        Some(42),
-        "PVT_project",
-        "PVTI_item",
-    )
-}
-
-fn issue_snapshot_response() -> Value {
-    json!({
-        "data": {
-            "issue": {
-                "id": "I_issue",
-                "number": 42,
-                "state": "OPEN",
-                "createdAt": "2026-01-01T00:00:00Z",
-                "lastEditedAt": null,
-                "repository": {
-                    "nameWithOwner": "drasi-project/drasi-core"
-                }
-            }
-        }
-    })
-}
-
-fn status_snapshot_response_for_item(
-    status: &str,
-    content_type: &str,
-    repo_name_with_owner: &str,
-    issue_number: Option<u64>,
-    project_id: &str,
-    item_id: &str,
-) -> Value {
-    json!({
-        "data": {
-            "project": {
-                "id": project_id,
-                "fields": {
-                    "nodes": [
-                        {
-                            "id": "PVTSSF_status",
-                            "name": "Status",
-                            "options": [
-                                {"id":"PVTSSO_awaiting_routing","name":"AwaitingRouting"},
-                                {"id":"PVTSSO_awaiting_risk","name":"AwaitingIssueRiskProfiling"},
-                                {"id":"PVTSSO_needs_more_information","name":"NeedsMoreInformation"},
-                                {"id":"PVTSSO_done","name":"Done"}
-                            ]
-                        }
-                    ]
-                }
-            },
-            "item": {
-                "id": item_id,
-                "project": {"id": project_id},
-                "content": {
-                    "__typename": content_type,
-                    "number": issue_number,
-                    "repository": {
-                        "nameWithOwner": repo_name_with_owner,
-                        "owner": {
-                            "login": repo_name_with_owner.split('/').next().unwrap_or("drasi-project")
-                        },
-                        "name": repo_name_with_owner.split('/').nth(1).unwrap_or("drasi-core")
-                    }
-                },
-                "fieldValueByName": {
-                    "name": status,
-                    "optionId": "PVTSSO_current"
-                }
-            }
-        }
-    })
-}
-
-fn status_update_response() -> Value {
-    json!({
-        "data": {
-            "updateProjectV2ItemFieldValue": {
-                "projectV2Item": { "id": "PVTI_item" }
-            }
-        }
-    })
-}
-
-fn base_reaction(server: &MockServer, policy_version: &str) -> WorkgraphRouterReaction {
-    base_reaction_with_timeouts(server, policy_version, 5, 15)
-}
-
-fn base_reaction_with_timeouts(
-    server: &MockServer,
-    policy_version: &str,
-    timeout_secs: u64,
-    reservation_lease_secs: u64,
-) -> WorkgraphRouterReaction {
-    WorkgraphRouterReaction::builder(TEST_REACTION_ID)
-        .with_query(ROUTE_QUERY_ID)
-        .with_policy_id("policy-1")
-        .with_policy_type("rules_v1")
-        .with_policy_version(policy_version)
-        .with_allowed_projects(vec!["PVT_project".to_string()])
-        .with_allowed_repos(vec!["drasi-project/drasi-core".to_string()])
-        .with_allowed_event_types(vec!["CompletedIssueValidation".to_string()])
-        .with_allowed_status_transitions(vec![
-            StatusTransition {
-                from: "AwaitingRouting".to_string(),
-                to: "AwaitingIssueRiskProfiling".to_string(),
-            },
-            StatusTransition {
-                from: "AwaitingRouting".to_string(),
-                to: "NeedsMoreInformation".to_string(),
-            },
-        ])
-        .with_allowed_responsibility_types(vec![
-            "issue-validation".to_string(),
-            "issue-risk-profiling".to_string(),
-            "issue-correction".to_string(),
-        ])
-        .with_allowed_actors(vec!["bot-user".to_string(), "submitter-user".to_string()])
-        .with_trusted_routing_authors(vec!["router-user".to_string()])
-        .with_trusted_launcher_authors(vec!["launcher-user".to_string()])
-        .with_trusted_agent_authors(vec!["agent-user".to_string()])
-        .with_trusted_router_authors(vec!["router-user".to_string()])
-        .with_trusted_routing_user_ids(vec![1001])
-        .with_trusted_launcher_user_ids(vec![1001])
-        .with_trusted_agent_user_ids(vec![1001])
-        .with_trusted_router_user_ids(vec![1001])
-        .with_trusted_router_author_node_ids(vec!["MDQ6VXNlcjE=".to_string()])
-        .with_expected_project_status_field_node_id("PVTSSF_status")
-        .with_github_rest_url(server.uri())
-        .with_github_graphql_url(format!("{}/graphql", server.uri()))
-        .with_github_token_env("WG_ROUTER_TEST_TOKEN")
-        .with_timeout_secs(timeout_secs)
-        .with_reservation_lease_secs(reservation_lease_secs)
-        .with_strict_recovery(true)
+fn build_reaction(server_uri: &str, query: &str) -> WorkgraphRouterReaction {
+    WorkgraphRouterReaction::builder(REACTION)
+        .with_query(query)
+        .with_github_rest_url(server_uri.to_string())
+        .with_github_graphql_url(format!("{server_uri}/graphql"))
+        .with_github_token_env(TOKEN_ENV)
+        .with_allowed_repositories(vec![REPOSITORY.to_string()])
+        .with_allowed_projects(vec![PROJECT_NODE_ID.to_string()])
+        .with_expected_project_status_field_node_id(STATUS_FIELD_NODE_ID)
+        .with_trusted_author_database_id(TRUSTED_AUTHOR_DATABASE_ID)
+        .with_trusted_author_type(TRUSTED_AUTHOR_TYPE)
+        .with_timeout_secs(1)
         .build()
-        .expect("reaction should build")
+        .expect("reaction builds")
 }
 
-fn policy_identity_config(policy_version: &str) -> WorkgraphRouterReactionConfig {
-    WorkgraphRouterReactionConfig {
-        policy_id: "policy-1".to_string(),
-        policy_type: "rules_v1".to_string(),
-        policy_version: policy_version.to_string(),
-        ..WorkgraphRouterReactionConfig::default()
-    }
-}
-
-async fn seed_failed_reservation_state(
+async fn start_core(
+    server_uri: &str,
     store: Arc<dyn StateStoreProvider>,
-    candidate: &RoutingCandidate,
-    policy_version: &str,
-) {
-    let reservation = ReservationRecord {
-        reservation_key: candidate.reservation_key(),
-        execution_id: candidate.execution_id.clone(),
-        required_event_type: candidate.required_event_type.clone(),
-        owner_instance_id: Some("legacy-runner".to_string()),
-        fencing_epoch: 1,
-        lease_expires_at_unix_secs: 0,
-        policy_id: "policy-1".to_string(),
-        policy_type: "rules_v1".to_string(),
-        policy_version: policy_version.to_string(),
-        decision_id: None,
-        created_at: "2026-01-01T00:00:00Z".to_string(),
-        completed: false,
-    };
-    let outcome = RulesV1PolicyEngine
-        .evaluate(candidate)
-        .expect("rules evaluation");
-    let decision =
-        RoutingDecision::from_policy(&policy_identity_config(policy_version), candidate, outcome)
-            .expect("decision");
-
-    let mut state = RoutingStateRecord::new(candidate, &reservation);
-    state.decision = Some(decision.clone());
-    state.selected_transition = Some((decision.from_status.clone(), decision.to_status.clone()));
-    state.progress = SideEffectProgress {
-        decision_comment_written: true,
-        responsibility_written: true,
-        project_status_updated: false,
-    };
-    state.mark_error("simulated interrupted status update", true);
-
-    save_reservation(store.clone(), TEST_REACTION_ID, &reservation)
-        .await
-        .expect("seed reservation");
-    save_routing_state(store, TEST_REACTION_ID, &state)
-        .await
-        .expect("seed routing state");
+    core_id: &str,
+) -> (Arc<DrasiLib>, ApplicationSourceHandle) {
+    start_core_with_query(server_uri, store, core_id, QUERY).await
 }
 
-async fn initialize_reaction(
-    reaction: &WorkgraphRouterReaction,
-    state_store: Arc<dyn StateStoreProvider>,
-) {
-    let (graph, _rx) = ComponentGraph::new("wg-router-integration");
-    let context = ReactionRuntimeContext::new(
-        "wg-router-integration",
-        reaction.id(),
-        Some(state_store),
-        graph.update_sender(),
-        None,
+/// Start a core whose reaction subscribes to `query_id`.
+///
+/// A second core over the same durable store models a restart of the *router*:
+/// its routing records and open-run pointers survive, while the in-process
+/// query outbox does not. The query is renamed for that second core because the
+/// framework's own reaction checkpoint is keyed by query ID, and a fresh
+/// in-memory outbox for an already-checkpointed query is a gap that strict
+/// recovery (correctly) refuses. Nothing under test here depends on that
+/// framework checkpoint — the durable routing state is what must carry the
+/// decision across the restart.
+async fn start_core_with_query(
+    server_uri: &str,
+    store: Arc<dyn StateStoreProvider>,
+    core_id: &str,
+    query_id: &str,
+) -> (Arc<DrasiLib>, ApplicationSourceHandle) {
+    let (source, handle) = make_source();
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id(core_id)
+            .with_source(source)
+            .with_query(
+                Query::cypher(query_id)
+                    .query(query_text())
+                    .from_source(SOURCE)
+                    .with_outbox_capacity(100)
+                    .auto_start(true)
+                    .build(),
+            )
+            .with_reaction(build_reaction(server_uri, query_id))
+            .with_state_store_provider(store)
+            .build()
+            .await
+            .expect("build core"),
     );
-    reaction.initialize(context).await;
+    core.start().await.expect("start core");
+    tokio::time::sleep(WARMUP).await;
+    (core, handle)
 }
 
-async fn enqueue_add(
-    reaction: &WorkgraphRouterReaction,
-    candidate: &RoutingCandidate,
-    sequence: u64,
-) {
-    let result = QueryResult::new(
-        ROUTE_QUERY_ID.to_string(),
-        sequence,
-        Utc::now(),
-        vec![ResultDiff::Add {
-            data: serde_json::to_value(candidate).expect("candidate json"),
-            row_signature: 1,
-        }],
-        HashMap::new(),
-    );
-    reaction
-        .enqueue_query_result(result)
+async fn insert_candidate(handle: &ApplicationSourceHandle, node_id: &str, status: &str) {
+    let properties = PropertyMapBuilder::new()
+        .with_string("repository", REPOSITORY)
+        .with_integer("subjectNumber", SUBJECT_NUMBER as i64)
+        .with_string("subjectNodeId", SUBJECT_NODE_ID)
+        .with_string("projectNodeId", PROJECT_NODE_ID)
+        .with_string("projectItemNodeId", PROJECT_ITEM_NODE_ID)
+        .with_string("projectStatus", status)
+        .build();
+    handle
+        .send_node_insert(node_id, vec!["RoutingCandidate"], properties)
         .await
-        .expect("enqueue add");
+        .expect("send node insert");
 }
 
-async fn enqueue_terminal_rejections_then_valid(reaction: &WorkgraphRouterReaction, sequence: u64) {
-    let mut invalid_candidate = sample_candidate();
-    invalid_candidate.execution_id = "exec-invalid".to_string();
-    invalid_candidate.outcome = "unknown".to_string();
-
-    let result = QueryResult::new(
-        ROUTE_QUERY_ID.to_string(),
-        sequence,
-        Utc::now(),
-        vec![
-            ResultDiff::Add {
-                data: json!({"unexpected": "shape"}),
-                row_signature: 0,
-            },
-            ResultDiff::Add {
-                data: serde_json::to_value(&invalid_candidate).expect("invalid candidate json"),
-                row_signature: 0,
-            },
-            ResultDiff::Add {
-                data: serde_json::to_value(sample_candidate()).expect("valid candidate json"),
-                row_signature: 103,
-            },
-        ],
-        HashMap::new(),
-    );
-    reaction
-        .enqueue_query_result(result)
-        .await
-        .expect("enqueue mixed terminal and valid rows");
-}
-
-async fn enqueue_update(reaction: &WorkgraphRouterReaction, sequence: u64) {
-    let result = QueryResult::new(
-        ROUTE_QUERY_ID.to_string(),
-        sequence,
-        Utc::now(),
-        vec![ResultDiff::Update {
-            data: json!({"id": "a"}),
-            before: json!({"id": "a"}),
-            after: json!({"id": "a", "name": "new"}),
-            grouping_keys: None,
-            row_signature: 2,
-        }],
-        HashMap::new(),
-    );
-    reaction
-        .enqueue_query_result(result)
-        .await
-        .expect("enqueue update");
-}
-
-async fn enqueue_delete(reaction: &WorkgraphRouterReaction, sequence: u64) {
-    let result = QueryResult::new(
-        ROUTE_QUERY_ID.to_string(),
-        sequence,
-        Utc::now(),
-        vec![ResultDiff::Delete {
-            data: json!({"id":"a"}),
-            row_signature: 3,
-        }],
-        HashMap::new(),
-    );
-    reaction
-        .enqueue_query_result(result)
-        .await
-        .expect("enqueue delete");
-}
-
-async fn wait_for_count<F>(server: &MockServer, mut selector: F, expected: usize)
+async fn wait_until<F, Fut>(mut condition: F, max_ms: u64) -> bool
 where
-    F: FnMut(&wiremock::Request) -> bool,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
 {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_millis(max_ms);
     loop {
-        let requests = server.received_requests().await.unwrap_or_default();
-        let count = requests.iter().filter(|req| selector(req)).count();
-        if count >= expected {
-            return;
+        if condition().await {
+            return true;
         }
         if std::time::Instant::now() >= deadline {
-            panic!("timed out waiting for {expected} matching request(s); observed {count}");
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-fn comment_type_from_request(req: &wiremock::Request) -> Option<String> {
-    if req.method.as_str() != "POST" || !req.url.path().ends_with("/comments") {
-        return None;
-    }
-    let outer: Value = serde_json::from_slice(&req.body).ok()?;
-    let body = outer.get("body")?.as_str()?;
-    let inner: Value = serde_json::from_str(body).ok()?;
-    inner
-        .get("type")
-        .or_else(|| inner.get("schemaVersion"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-}
-
-fn is_project_status_mutation(req: &wiremock::Request) -> bool {
-    if req.method.as_str() != "POST" || req.url.path() != "/graphql" {
-        return false;
-    }
-    std::str::from_utf8(&req.body)
-        .map(|body| {
-            body.contains("WorkgraphRouterUpdateProjectV2Status")
-                || body.contains("updateProjectV2ItemFieldValue")
-        })
-        .unwrap_or(false)
-}
-
-async fn mount_common_success_mocks(server: &MockServer, preflight_status: &str) {
-    let issue = json!({"id": 42, "state":"open"});
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(issue))
-        .mount(server)
-        .await;
-
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-        .mount(server)
-        .await;
-
-    let preflight = status_snapshot_response(preflight_status);
-    mount_issue_snapshot_mock(server).await;
-
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(preflight))
-        .mount(server)
-        .await;
-
-    let mutation = status_update_response();
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(mutation))
-        .mount(server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-            "id": 11,
-            "body": "ok",
-            "user": {"login": "router-user", "node_id": "MDQ6VXNlcjE=", "id": 1001},
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z"
-        })))
-        .mount(server)
-        .await;
-}
-
-async fn mount_issue_snapshot_mock(server: &MockServer) {
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterIssueSnapshot"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(issue_snapshot_response()))
-        .mount(server)
-        .await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn pass_routes_to_risk_profiling_and_applies_side_effects() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-pass");
-    let server = MockServer::start().await;
-    mount_common_success_mocks(&server, "AwaitingRouting").await;
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-    enqueue_add(&reaction, &sample_candidate(), 1).await;
-    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
-    wait_for_count(&server, is_project_status_mutation, 1).await;
-    reaction.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let comment_types: Vec<String> = requests
-        .iter()
-        .filter_map(comment_type_from_request)
-        .collect();
-    assert!(comment_types
-        .iter()
-        .any(|t| t == "workgraph.routing-decision/v1"));
-    assert!(comment_types
-        .iter()
-        .any(|t| t == "workgraph.routing-responsibility/v1"));
-}
-
-#[tokio::test]
-#[ignore]
-async fn failed_validation_routes_to_issue_correction() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-fail");
-    let server = MockServer::start().await;
-    mount_common_success_mocks(&server, "AwaitingRouting").await;
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-
-    let mut candidate = sample_candidate();
-    candidate.outcome = "failed".to_string();
-    candidate.reason_code = "required-marker-missing".to_string();
-    enqueue_add(&reaction, &candidate, 1).await;
-    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
-    reaction.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let bodies: Vec<String> = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments"))
-        .filter_map(|req| {
-            serde_json::from_slice::<Value>(&req.body)
-                .ok()
-                .and_then(|outer| {
-                    outer
-                        .get("body")
-                        .and_then(Value::as_str)
-                        .map(ToString::to_string)
-                })
-        })
-        .collect();
-    assert!(bodies
-        .iter()
-        .any(|body| body.contains("NeedsMoreInformation")));
-    assert!(bodies.iter().any(|body| body.contains("issue-correction")));
-}
-
-#[tokio::test]
-#[ignore]
-async fn duplicate_rows_do_not_duplicate_comments() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-dup");
-    let server = MockServer::start().await;
-    mount_common_success_mocks(&server, "AwaitingRouting").await;
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-
-    let candidate = sample_candidate();
-    enqueue_add(&reaction, &candidate, 1).await;
-    enqueue_add(&reaction, &candidate, 2).await;
-    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    reaction.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let comments = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .count();
-    assert_eq!(
-        comments, 2,
-        "duplicate execution should not create extra comments"
-    );
-}
-
-#[tokio::test]
-#[ignore]
-async fn terminal_rejections_do_not_poison_later_rows_or_replay() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-terminal-rejection");
-    let server = MockServer::start().await;
-    mount_common_success_mocks(&server, "AwaitingRouting").await;
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-
-    let first = base_reaction(&server, "1.0.0");
-    initialize_reaction(&first, Arc::clone(&store)).await;
-    first.start().await.expect("first reaction start");
-    enqueue_terminal_rejections_then_valid(&first, 1).await;
-    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
-    wait_for_count(&server, is_project_status_mutation, 1).await;
-    first.stop().await.expect("first reaction stop");
-
-    let keys = store
-        .list_keys(TEST_REACTION_ID)
-        .await
-        .expect("list first-run state");
-    assert_eq!(
-        keys.iter()
-            .filter(|key| key.starts_with("workgraph-router/rejections/"))
-            .count(),
-        2,
-        "malformed and invalid rows must each have one durable rejection"
-    );
-    let mut rejected_reservation = load_reservation(
-        Arc::clone(&store),
-        TEST_REACTION_ID,
-        "exec-invalid:CompletedIssueValidation",
-    )
-    .await
-    .expect("load rejected reservation")
-    .expect("post-reservation rejection must retain a reservation tombstone");
-    assert!(
-        rejected_reservation.completed
-            && rejected_reservation
-                .decision_id
-                .as_deref()
-                .is_some_and(|id| id.starts_with("terminal-rejection:")),
-        "post-reservation rejection must durably complete its reservation"
-    );
-
-    let mut pending_rejection_key = None;
-    for key in keys
-        .iter()
-        .filter(|key| key.starts_with("workgraph-router/rejections/"))
-    {
-        let bytes = store
-            .get(TEST_REACTION_ID, key)
-            .await
-            .expect("read rejection record")
-            .expect("rejection record exists");
-        let mut record: Value =
-            serde_json::from_slice(&bytes).expect("valid rejection record json");
-        if record.get("reservationKey").is_some() {
-            record["finalized"] = json!(false);
-            store
-                .set(
-                    TEST_REACTION_ID,
-                    key,
-                    serde_json::to_vec(&record).expect("serialize pending rejection"),
-                )
-                .await
-                .expect("restore pending rejection");
-            pending_rejection_key = Some(key.clone());
-            break;
-        }
-    }
-    let pending_rejection_key =
-        pending_rejection_key.expect("post-reservation rejection record exists");
-    rejected_reservation.completed = false;
-    rejected_reservation.decision_id = None;
-    rejected_reservation.owner_instance_id = Some("crashed-runner".to_string());
-    rejected_reservation.lease_expires_at_unix_secs = Utc::now().timestamp() - 1;
-    save_reservation(Arc::clone(&store), TEST_REACTION_ID, &rejected_reservation)
-        .await
-        .expect("restore pre-tombstone reservation");
-
-    assert!(
-        store
-            .delete(TEST_REACTION_ID, &format!("checkpoint:{ROUTE_QUERY_ID}"))
-            .await
-            .expect("delete first-run checkpoint"),
-        "first run must advance the checkpoint"
-    );
-
-    let replay = base_reaction(&server, "1.0.0");
-    initialize_reaction(&replay, Arc::clone(&store)).await;
-    replay.start().await.expect("replay reaction start");
-    enqueue_terminal_rejections_then_valid(&replay, 1).await;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    replay.stop().await.expect("replay reaction stop");
-
-    assert!(
-        store
-            .contains_key(TEST_REACTION_ID, &format!("checkpoint:{ROUTE_QUERY_ID}"))
-            .await
-            .expect("read replay checkpoint"),
-        "replay must advance the checkpoint past terminal rows"
-    );
-    let finalized_rejection: Value = serde_json::from_slice(
-        &store
-            .get(TEST_REACTION_ID, &pending_rejection_key)
-            .await
-            .expect("read replayed rejection")
-            .expect("replayed rejection exists"),
-    )
-    .expect("valid replayed rejection json");
-    assert_eq!(
-        finalized_rejection
-            .get("finalized")
-            .and_then(Value::as_bool),
-        Some(true),
-        "replay must finalize a rejection only after restoring its tombstone"
-    );
-    let replayed_reservation = load_reservation(
-        Arc::clone(&store),
-        TEST_REACTION_ID,
-        "exec-invalid:CompletedIssueValidation",
-    )
-    .await
-    .expect("load replayed reservation")
-    .expect("replayed reservation exists");
-    assert!(
-        replayed_reservation.completed,
-        "replay must complete a pending terminal reservation"
-    );
-    let replay_keys = store
-        .list_keys(TEST_REACTION_ID)
-        .await
-        .expect("list replay state");
-    assert_eq!(
-        replay_keys
-            .iter()
-            .filter(|key| key.starts_with("workgraph-router/rejections/"))
-            .count(),
-        2,
-        "replay must reuse terminal rejection records"
-    );
-
-    let requests = server.received_requests().await.expect("requests");
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|req| {
-                req.method.as_str() == "POST" && req.url.path().ends_with("/comments")
-            })
-            .count(),
-        2,
-        "the later valid row must write each comment exactly once"
-    );
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|req| is_project_status_mutation(req))
-            .count(),
-        1,
-        "the later valid row must update status exactly once"
-    );
-}
-
-#[tokio::test]
-#[ignore]
-async fn concurrent_replicas_share_reservation_and_emit_side_effects_once() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-concurrent");
-    let server = MockServer::start().await;
-    mount_common_success_mocks(&server, "AwaitingRouting").await;
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction_a = base_reaction(&server, "1.0.0");
-    let reaction_b = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction_a, Arc::clone(&store)).await;
-    initialize_reaction(&reaction_b, Arc::clone(&store)).await;
-    reaction_a.start().await.expect("reaction A start");
-    reaction_b.start().await.expect("reaction B start");
-
-    let candidate = sample_candidate();
-    tokio::join!(
-        enqueue_add(&reaction_a, &candidate, 1),
-        enqueue_add(&reaction_b, &candidate, 1)
-    );
-
-    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
-    wait_for_count(&server, is_project_status_mutation, 1).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    reaction_a.stop().await.expect("reaction A stop");
-    reaction_b.stop().await.expect("reaction B stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let comment_posts = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .count();
-    let status_updates = requests
-        .iter()
-        .filter(|req| is_project_status_mutation(req))
-        .count();
-    assert_eq!(
-        comment_posts, 2,
-        "concurrent replicas must emit exactly one decision/responsibility comment pair"
-    );
-    assert_eq!(
-        status_updates, 1,
-        "concurrent replicas must emit exactly one project status mutation"
-    );
-}
-
-#[tokio::test]
-#[ignore]
-async fn newer_policy_version_cannot_reroute_existing_reservation() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-policy");
-    let server = MockServer::start().await;
-    mount_common_success_mocks(&server, "AwaitingRouting").await;
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let candidate = sample_candidate();
-
-    let reaction_v1 = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction_v1, Arc::clone(&store)).await;
-    reaction_v1.start().await.expect("reaction start");
-    enqueue_add(&reaction_v1, &candidate, 1).await;
-    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
-    reaction_v1.stop().await.expect("reaction stop");
-
-    let reaction_v2 = base_reaction(&server, "1.1.0");
-    initialize_reaction(&reaction_v2, Arc::clone(&store)).await;
-    reaction_v2.start().await.expect("reaction start");
-    enqueue_add(&reaction_v2, &candidate, 2).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    reaction_v2.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let comments = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .count();
-    assert_eq!(
-        comments, 2,
-        "policy version change must not reroute completion"
-    );
-}
-
-#[tokio::test]
-#[ignore]
-async fn retry_with_closed_issue_fails_preflight_and_emits_no_side_effects() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-closed-retry");
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"closed"})))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(status_snapshot_response("AwaitingRouting")),
-        )
-        .mount(&server)
-        .await;
-
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let candidate = sample_candidate();
-    seed_failed_reservation_state(Arc::clone(&store), &candidate, "1.0.0").await;
-
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-    enqueue_add(&reaction, &candidate, 1).await;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    reaction.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let comment_posts = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .count();
-    let status_updates = requests
-        .iter()
-        .filter(|req| is_project_status_mutation(req))
-        .count();
-    assert_eq!(
-        comment_posts, 0,
-        "retry preflight failure must not write comments"
-    );
-    assert_eq!(
-        status_updates, 0,
-        "retry preflight failure must not overwrite project status"
-    );
-}
-
-#[tokio::test]
-#[ignore]
-async fn retry_with_competing_status_fails_preflight_and_does_not_overwrite() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-competing-status");
-    let server = MockServer::start().await;
-    mount_issue_snapshot_mock(&server).await;
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(status_snapshot_response("InProgress")),
-        )
-        .mount(&server)
-        .await;
-
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let candidate = sample_candidate();
-    seed_failed_reservation_state(Arc::clone(&store), &candidate, "1.0.0").await;
-
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-    enqueue_add(&reaction, &candidate, 1).await;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    reaction.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let comment_posts = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .count();
-    let status_updates = requests
-        .iter()
-        .filter(|req| is_project_status_mutation(req))
-        .count();
-    assert_eq!(comment_posts, 0, "competing status must block side effects");
-    assert_eq!(
-        status_updates, 0,
-        "competing status must not be overwritten by retry"
-    );
-}
-
-#[tokio::test]
-#[ignore]
-async fn status_change_between_comment_writes_aborts_second_comment_and_mutation() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-preflight-race-status");
-    let server = MockServer::start().await;
-    mount_issue_snapshot_mock(&server).await;
-
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-        .mount(&server)
-        .await;
-
-    let status_calls = Arc::new(AtomicUsize::new(0));
-    let status_counter = Arc::clone(&status_calls);
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
-        .respond_with(move |_req: &wiremock::Request| {
-            let call = status_counter.fetch_add(1, Ordering::SeqCst);
-            let status = if call < 2 {
-                "AwaitingRouting"
-            } else {
-                "InProgress"
-            };
-            ResponseTemplate::new(200).set_body_json(status_snapshot_response(status))
-        })
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(status_update_response()))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-            "id": 200,
-            "body": "ok",
-            "user": {"login":"router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
-            "created_at":"2026-01-01T00:00:00Z",
-            "updated_at":"2026-01-01T00:00:00Z"
-        })))
-        .mount(&server)
-        .await;
-
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-    enqueue_add(&reaction, &sample_candidate(), 1).await;
-    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 1).await;
-    tokio::time::sleep(Duration::from_millis(350)).await;
-    reaction.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let comment_posts = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .count();
-    let status_updates = requests
-        .iter()
-        .filter(|req| is_project_status_mutation(req))
-        .count();
-    assert_eq!(
-        comment_posts, 1,
-        "second comment must be blocked by status race"
-    );
-    assert_eq!(status_updates, 0, "status mutation must not run after race");
-}
-
-#[tokio::test]
-#[ignore]
-async fn issue_closes_before_status_mutation_aborts_without_overwrite() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-preflight-race-issue");
-    let server = MockServer::start().await;
-    mount_issue_snapshot_mock(&server).await;
-
-    let issue_calls = Arc::new(AtomicUsize::new(0));
-    let issue_counter = Arc::clone(&issue_calls);
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42"))
-        .respond_with(move |_req: &wiremock::Request| {
-            let call = issue_counter.fetch_add(1, Ordering::SeqCst);
-            let state = if call < 2 { "open" } else { "closed" };
-            ResponseTemplate::new(200).set_body_json(json!({ "state": state }))
-        })
-        .mount(&server)
-        .await;
-
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(status_snapshot_response("AwaitingRouting")),
-        )
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(status_update_response()))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-            "id": 201,
-            "body": "ok",
-            "user": {"login":"router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
-            "created_at":"2026-01-01T00:00:00Z",
-            "updated_at":"2026-01-01T00:00:00Z"
-        })))
-        .mount(&server)
-        .await;
-
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-    enqueue_add(&reaction, &sample_candidate(), 1).await;
-    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
-    tokio::time::sleep(Duration::from_millis(350)).await;
-    reaction.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let comment_posts = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .count();
-    let status_updates = requests
-        .iter()
-        .filter(|req| is_project_status_mutation(req))
-        .count();
-    assert_eq!(
-        comment_posts, 2,
-        "comments should happen before issue closes"
-    );
-    assert_eq!(
-        status_updates, 0,
-        "closed issue before mutation must block project status overwrite"
-    );
-}
-
-#[tokio::test]
-#[ignore]
-async fn status_race_between_preflight_and_mutation_rejects_update() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-status-race-pre-mutation");
-    let server = MockServer::start().await;
-    mount_issue_snapshot_mock(&server).await;
-
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-        .mount(&server)
-        .await;
-
-    let snapshot_calls = Arc::new(AtomicUsize::new(0));
-    let snapshot_counter = Arc::clone(&snapshot_calls);
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
-        .respond_with(move |_req: &wiremock::Request| {
-            let call = snapshot_counter.fetch_add(1, Ordering::SeqCst);
-            let status = if call < 4 {
-                "AwaitingRouting"
-            } else {
-                "InProgress"
-            };
-            ResponseTemplate::new(200).set_body_json(status_snapshot_response(status))
-        })
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(status_update_response()))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-            "id": 202,
-            "body": "ok",
-            "user": {"login":"router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
-            "created_at":"2026-01-01T00:00:00Z",
-            "updated_at":"2026-01-01T00:00:00Z"
-        })))
-        .mount(&server)
-        .await;
-
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-    enqueue_add(&reaction, &sample_candidate(), 1).await;
-    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
-    tokio::time::sleep(Duration::from_millis(350)).await;
-    reaction.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let status_updates = requests
-        .iter()
-        .filter(|req| is_project_status_mutation(req))
-        .count();
-    assert_eq!(
-        status_updates, 0,
-        "status race between preflight and mutation must abort without mutation"
-    );
-}
-
-#[tokio::test]
-#[ignore]
-async fn already_at_destination_snapshot_skips_mutation() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-status-already-destination");
-    let server = MockServer::start().await;
-    mount_issue_snapshot_mock(&server).await;
-
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-        .mount(&server)
-        .await;
-
-    let snapshot_calls = Arc::new(AtomicUsize::new(0));
-    let snapshot_counter = Arc::clone(&snapshot_calls);
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
-        .respond_with(move |_req: &wiremock::Request| {
-            let call = snapshot_counter.fetch_add(1, Ordering::SeqCst);
-            let status = if call < 4 {
-                "AwaitingRouting"
-            } else {
-                "AwaitingIssueRiskProfiling"
-            };
-            ResponseTemplate::new(200).set_body_json(status_snapshot_response(status))
-        })
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(status_update_response()))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-            "id": 203,
-            "body": "ok",
-            "user": {"login":"router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
-            "created_at":"2026-01-01T00:00:00Z",
-            "updated_at":"2026-01-01T00:00:00Z"
-        })))
-        .mount(&server)
-        .await;
-
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-    enqueue_add(&reaction, &sample_candidate(), 1).await;
-    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
-    tokio::time::sleep(Duration::from_millis(350)).await;
-    reaction.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let status_updates = requests
-        .iter()
-        .filter(|req| is_project_status_mutation(req))
-        .count();
-    assert_eq!(
-        status_updates, 0,
-        "already-at-destination snapshot must not send mutation"
-    );
-}
-
-#[tokio::test]
-#[ignore]
-async fn mismatched_project_item_issue_rejects_before_side_effects() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-mismatch-item-issue");
-    let server = MockServer::start().await;
-    mount_issue_snapshot_mock(&server).await;
-
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(status_snapshot_response_for_item(
-                "AwaitingRouting",
-                "Issue",
-                "drasi-project/drasi-core",
-                Some(99),
-                "PVT_project",
-                "PVTI_item",
-            )),
-        )
-        .mount(&server)
-        .await;
-
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-    enqueue_add(&reaction, &sample_candidate(), 1).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    reaction.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let comment_posts = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .count();
-    let status_updates = requests
-        .iter()
-        .filter(|req| is_project_status_mutation(req))
-        .count();
-    assert_eq!(comment_posts, 0);
-    assert_eq!(status_updates, 0);
-}
-
-#[tokio::test]
-#[ignore]
-async fn mismatched_project_item_repo_rejects_before_side_effects() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-mismatch-item-repo");
-    let server = MockServer::start().await;
-    mount_issue_snapshot_mock(&server).await;
-
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(status_snapshot_response_for_item(
-                "AwaitingRouting",
-                "Issue",
-                "drasi-project/other-repo",
-                Some(42),
-                "PVT_project",
-                "PVTI_item",
-            )),
-        )
-        .mount(&server)
-        .await;
-
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-    enqueue_add(&reaction, &sample_candidate(), 1).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    reaction.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let comment_posts = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .count();
-    let status_updates = requests
-        .iter()
-        .filter(|req| is_project_status_mutation(req))
-        .count();
-    assert_eq!(comment_posts, 0);
-    assert_eq!(status_updates, 0);
-}
-
-#[tokio::test]
-#[ignore]
-async fn stale_owner_with_delayed_preflight_cannot_emit_duplicate_side_effects() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-delayed-lease-fence");
-    let server = MockServer::start().await;
-    mount_issue_snapshot_mock(&server).await;
-
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-        .mount(&server)
-        .await;
-
-    let snapshot_calls = Arc::new(AtomicUsize::new(0));
-    let snapshot_counter = Arc::clone(&snapshot_calls);
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
-        .respond_with(move |_req: &wiremock::Request| {
-            let call = snapshot_counter.fetch_add(1, Ordering::SeqCst);
-            if call == 0 {
-                std::thread::sleep(Duration::from_millis(800));
-            }
-            ResponseTemplate::new(200).set_body_json(status_snapshot_response("AwaitingRouting"))
-        })
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(status_update_response()))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-            "id": 204,
-            "body": "ok",
-            "user": {"login":"router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
-            "created_at":"2026-01-01T00:00:00Z",
-            "updated_at":"2026-01-01T00:00:00Z"
-        })))
-        .mount(&server)
-        .await;
-
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction_a = base_reaction_with_timeouts(&server, "1.0.0", 1, 3);
-    let reaction_b = base_reaction_with_timeouts(&server, "1.0.0", 1, 3);
-    initialize_reaction(&reaction_a, Arc::clone(&store)).await;
-    initialize_reaction(&reaction_b, Arc::clone(&store)).await;
-    reaction_a.start().await.expect("reaction a start");
-    reaction_b.start().await.expect("reaction b start");
-
-    let candidate = sample_candidate();
-    enqueue_add(&reaction_a, &candidate, 1).await;
-
-    for _ in 0..40 {
-        if load_reservation(
-            Arc::clone(&store),
-            TEST_REACTION_ID,
-            &candidate.reservation_key(),
-        )
-        .await
-        .expect("load reservation")
-        .is_some()
-        {
-            break;
+            return false;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
 
-    if let Some(mut reservation) = load_reservation(
-        Arc::clone(&store),
-        TEST_REACTION_ID,
-        &candidate.reservation_key(),
+fn event_for(body: &str, payload: WorkGraphEventPayload) -> WorkGraphEvent {
+    WorkGraphEvent::new(
+        run_id(
+            PROJECT_ITEM_NODE_ID,
+            SUBJECT_NODE_ID,
+            &body_digest(Some(body)),
+        ),
+        PROJECT_ITEM_NODE_ID,
+        SUBJECT_NODE_ID,
+        payload,
+    )
+    .expect("event")
+}
+
+fn body_for(event: &WorkGraphEvent) -> String {
+    let summary = summary_for(
+        event,
+        SubjectRef {
+            repository: REPOSITORY,
+            number: SUBJECT_NUMBER,
+        },
+    );
+    render_comment(event, &summary).expect("render")
+}
+
+fn assignment_body(body: &str) -> String {
+    body_for(&event_for(
+        body,
+        WorkGraphEventPayload::ResponsibilityAssigned(ResponsibilityAssignedPayload {
+            responsibility_type: AssignedResponsibilityType::IssueValidation,
+            profile_ref: ProfileRef::new("issue-validator", PROFILE_BLOB_SHA).expect("profile"),
+            content_digest: body_digest(Some(body)),
+        }),
+    ))
+}
+
+fn started_body(body: &str) -> String {
+    body_for(&event_for(
+        body,
+        WorkGraphEventPayload::ExecutionStarted(ExecutionStartedPayload {
+            execution_id: ExecutionId::from_suffix(EXECUTION_SUFFIX).expect("execution"),
+            task_id: "agent-task-1234".to_string(),
+        }),
+    ))
+}
+
+fn completion_body(body: &str, outcome: ValidationOutcome, execution_suffix: &str) -> String {
+    let reason = match outcome {
+        ValidationOutcome::Passed => ValidationReasonCode::RequiredMarkerPresent,
+        ValidationOutcome::Failed => ValidationReasonCode::RequiredMarkerMissing,
+    };
+    body_for(&event_for(
+        body,
+        WorkGraphEventPayload::CompletedIssueValidation(CompletedIssueValidationPayload {
+            execution_id: ExecutionId::from_suffix(execution_suffix).expect("execution"),
+            outcome,
+            reason_code: reason,
+        }),
+    ))
+}
+
+/// The exact `RoutingDecided` comment the reaction must produce.
+fn expected_decision_body(body: &str, outcome: ValidationOutcome) -> String {
+    body_for(&event_for(
+        body,
+        WorkGraphEventPayload::RoutingDecided(RoutingDecidedPayload::for_outcome(outcome)),
+    ))
+}
+
+/// Seed the trusted assignment + start + completion chain for one outcome.
+fn seed_chain(github: &GithubState, body: &str, outcome: ValidationOutcome) -> String {
+    github.seed_comment(&assignment_body(body), &MockAuthor::trusted(), false);
+    github.seed_comment(&started_body(body), &MockAuthor::trusted(), false);
+    github.seed_comment(
+        &completion_body(body, outcome, EXECUTION_SUFFIX),
+        &MockAuthor::trusted(),
+        false,
+    )
+}
+
+fn expected_run_id(body: &str) -> String {
+    run_id(
+        PROJECT_ITEM_NODE_ID,
+        SUBJECT_NODE_ID,
+        &body_digest(Some(body)),
+    )
+    .as_str()
+    .to_string()
+}
+
+async fn record(store: &Arc<dyn StateStoreProvider>, body: &str) -> Option<RoutingRecord> {
+    load_record(store.clone(), REACTION, &expected_run_id(body))
+        .await
+        .expect("load record")
+        .map(|persisted| persisted.record)
+}
+
+fn candidate() -> RoutingCandidate {
+    RoutingCandidate {
+        repository: REPOSITORY.to_string(),
+        subject_number: SUBJECT_NUMBER,
+        subject_node_id: SUBJECT_NODE_ID.to_string(),
+        project_node_id: PROJECT_NODE_ID.to_string(),
+        project_item_node_id: PROJECT_ITEM_NODE_ID.to_string(),
+        project_status: ROUTABLE_STATUS.to_string(),
+    }
+}
+
+/// The reaction's lifecycle status, as the core reports it.
+///
+/// A hard halt (fail-closed) drives the reaction to `Error`; a permanent,
+/// skippable rejection leaves it `Running`. Tests that require a halt assert on
+/// this rather than only on the absence of side effects, which would also hold
+/// if the row had simply not been processed yet.
+async fn reaction_status(core: &Arc<DrasiLib>) -> ComponentStatus {
+    core.snapshot_configuration()
+        .await
+        .expect("configuration snapshot")
+        .reactions
+        .iter()
+        .find(|reaction| reaction.id == REACTION)
+        .expect("the reaction is in the snapshot")
+        .status
+}
+
+/// Wait for the reaction to fail closed.
+async fn wait_for_halt(core: &Arc<DrasiLib>) -> bool {
+    wait_until(
+        || async { reaction_status(core).await == ComponentStatus::Error },
+        5000,
     )
     .await
-    .expect("load reservation after enqueue")
-    {
-        reservation.lease_expires_at_unix_secs = Utc::now().timestamp() - 1;
-        save_reservation(Arc::clone(&store), TEST_REACTION_ID, &reservation)
-            .await
-            .expect("force lease expiry");
+}
+
+fn set_token() {
+    std::env::set_var(TOKEN_ENV, "ghp_test_token_do_not_log");
+}
+
+// ---------------------------------------------------------------------
+// 1. A passing validation routes straight to AwaitingIssueRiskProfiling.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore] // Run with: cargo test -- --ignored
+async fn passing_validation_routes_directly_to_risk_profiling() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-passed").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+
+    assert!(
+        wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
+        "project item was never routed; status is '{}'",
+        github.status()
+    );
+
+    assert_eq!(github.create_comment_calls(), 1, "exactly one comment");
+    let bodies = github.comment_bodies();
+    assert_eq!(bodies.len(), 4, "three seeded comments plus one decision");
+    assert_eq!(
+        bodies[3],
+        expected_decision_body(ISSUE_BODY, ValidationOutcome::Passed),
+        "the comment must be the canonical WorkGraphEvent/v1 RoutingDecided body"
+    );
+    assert!(
+        bodies[3].contains("\"nextResponsibilityType\":\"issue-risk-profiling\""),
+        "the next responsibility travels inside the decision payload: {}",
+        bodies[3]
+    );
+    assert_eq!(github.status_mutations(), 1, "exactly one status mutation");
+
+    let record = record(&store, ISSUE_BODY).await.expect("record exists");
+    assert!(record.is_complete());
+    assert_eq!(record.to_status, PASSED_STATUS);
+    assert_eq!(record.outcome, "passed");
+    assert_eq!(
+        record.decision_comment_node_id.as_deref(),
+        Some("IC_created4")
+    );
+    assert_eq!(
+        record.accepted_completion.comment_node_id, completion_node_id,
+        "the record must pin the physical completion comment it decided from"
+    );
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 2. A failing validation routes straight to NeedsMoreInformation.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn failing_validation_routes_directly_to_needs_more_information() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Failed);
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-failed").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+
+    assert!(
+        wait_until(|| async { github.status() == FAILED_STATUS }, 5000).await,
+        "project item was never routed; status is '{}'",
+        github.status()
+    );
+
+    let bodies = github.comment_bodies();
+    assert_eq!(
+        bodies[3],
+        expected_decision_body(ISSUE_BODY, ValidationOutcome::Failed)
+    );
+    assert!(bodies[3].contains("\"nextResponsibilityType\":\"issue-correction\""));
+
+    let record = record(&store, ISSUE_BODY).await.expect("record exists");
+    assert_eq!(record.to_status, FAILED_STATUS);
+    assert_eq!(record.outcome, "failed");
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 3. The item never passes through an intermediate routing status.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn routing_never_visits_an_intermediate_status() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-direct").await;
+
+    // Sample the status continuously while routing happens.
+    let observed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sampler_state = github.clone();
+    let sampler_out = observed.clone();
+    let sampler = tokio::spawn(async move {
+        for _ in 0..400 {
+            let status = sampler_state.status();
+            {
+                let mut seen = sampler_out.lock().expect("sample lock");
+                if seen.last().map(String::as_str) != Some(status.as_str()) {
+                    seen.push(status);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    assert!(
+        wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
+        "project item was never routed"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    sampler.abort();
+
+    let seen = observed.lock().expect("sample lock").clone();
+    assert_eq!(
+        seen,
+        vec![ROUTABLE_STATUS.to_string(), PASSED_STATUS.to_string()],
+        "the item must move directly from '{ROUTABLE_STATUS}' to '{PASSED_STATUS}'"
+    );
+    assert!(
+        !seen.iter().any(|status| status == "AwaitingRouting"),
+        "AwaitingRouting must not exist"
+    );
+    assert_eq!(
+        github.status_mutations(),
+        1,
+        "one decision means one status mutation"
+    );
+
+    // Exactly one WorkGraph event was written, and it is the decision.
+    let bodies = github.comment_bodies();
+    assert_eq!(bodies.len(), 4);
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|body| body.contains("\"eventType\":\"RoutingDecided\""))
+            .count(),
+        1,
+        "exactly one RoutingDecided comment"
+    );
+    assert!(
+        !bodies.iter().any(
+            |body| body.contains("\"eventType\":\"ResponsibilityAssigned\"")
+                && body.contains("issue-risk-profiling")
+        ),
+        "the router must not post a fifth assignment event"
+    );
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 4. Duplicate delivery of the same row must not write twice.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn duplicate_delivery_routes_exactly_once() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-duplicate").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    assert!(
+        wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
+        "first delivery never routed"
+    );
+
+    // The same logical row arrives again under a different node ID.
+    insert_candidate(&handle, "candidate-2", ROUTABLE_STATUS).await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    assert_eq!(
+        github.create_comment_calls(),
+        1,
+        "the second delivery must not post a second decision"
+    );
+    assert_eq!(github.status_mutations(), 1, "one status mutation only");
+    assert_eq!(github.status(), PASSED_STATUS);
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 5. An edited issue body has zero side effects.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn a_body_edited_since_validation_yields_zero_side_effects() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    // The whole chain was written for the original body...
+    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+    // ...but the issue has been edited since.
+    github.set_issue_body(Some("Completely rewritten body."));
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-edited-body").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    assert_eq!(
+        github.create_comment_calls(),
+        0,
+        "a stale run must never post a decision"
+    );
+    assert_eq!(github.status_mutations(), 0, "status must not move");
+    assert_eq!(github.status(), ROUTABLE_STATUS);
+    assert!(
+        record(&store, ISSUE_BODY).await.is_none(),
+        "no record for the old run"
+    );
+    assert!(
+        record(&store, "Completely rewritten body.").await.is_none(),
+        "no record for the new run either"
+    );
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 6. Only trusted, unedited comments can drive a decision.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn untrusted_and_edited_completions_are_never_routed() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    github.seed_comment(&started_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+
+    let completion = completion_body(ISSUE_BODY, ValidationOutcome::Passed, EXECUTION_SUFFIX);
+    // A completely different account...
+    github.seed_comment(&completion, &MockAuthor::untrusted(), false);
+    // ...the trusted numeric database ID under the wrong actor type...
+    github.seed_comment(&completion, &MockAuthor::wrong_actor_type(), false);
+    // ...and the trusted account, but edited afterwards.
+    github.seed_comment(&completion, &MockAuthor::trusted(), true);
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-untrusted").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    assert_eq!(
+        github.create_comment_calls(),
+        0,
+        "no decision may be posted"
+    );
+    assert_eq!(github.status_mutations(), 0, "status must not move");
+    assert!(record(&store, ISSUE_BODY).await.is_none(), "no record");
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 7. A renamed login is still the same trusted identity.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn a_renamed_login_still_routes() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    github.seed_comment(&started_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    github.seed_comment(
+        &completion_body(ISSUE_BODY, ValidationOutcome::Passed, EXECUTION_SUFFIX),
+        // Same node ID, database ID, and actor type; different login.
+        &MockAuthor::trusted_renamed(),
+        false,
+    );
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-renamed").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+
+    assert!(
+        wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
+        "a renamed login must not break routing"
+    );
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 8. Without a completion (or without a start) nothing happens.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn an_incomplete_chain_yields_zero_side_effects() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    // Assignment and start, but validation has not reported yet.
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    github.seed_comment(&started_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-incomplete").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    assert_eq!(github.create_comment_calls(), 0);
+    assert_eq!(github.status_mutations(), 0);
+    assert_eq!(github.status(), ROUTABLE_STATUS);
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 9. A completion from a different execution is rejected.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn a_completion_from_another_execution_is_rejected() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    github.seed_comment(&started_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    github.seed_comment(
+        &completion_body(
+            ISSUE_BODY,
+            ValidationOutcome::Passed,
+            "11111111-2222-3333-4444-555555555555",
+        ),
+        &MockAuthor::trusted(),
+        false,
+    );
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-exec-mismatch").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    assert_eq!(github.create_comment_calls(), 0);
+    assert_eq!(github.status_mutations(), 0);
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 10. Two trusted completions claiming one event ID fail closed.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn conflicting_duplicate_completions_fail_closed() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    github.seed_comment(&started_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    // Same run and event type — therefore the same deterministic event ID —
+    // but contradictory outcomes.
+    github.seed_comment(
+        &completion_body(ISSUE_BODY, ValidationOutcome::Passed, EXECUTION_SUFFIX),
+        &MockAuthor::trusted(),
+        false,
+    );
+    github.seed_comment(
+        &completion_body(ISSUE_BODY, ValidationOutcome::Failed, EXECUTION_SUFFIX),
+        &MockAuthor::trusted(),
+        false,
+    );
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-conflict").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    assert_eq!(
+        github.create_comment_calls(),
+        0,
+        "a contradiction must never be resolved by writing"
+    );
+    assert_eq!(github.status_mutations(), 0, "status must not move");
+    assert!(record(&store, ISSUE_BODY).await.is_none(), "no record");
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 11. Byte-identical duplicate completions coalesce to one decision.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn identical_duplicate_completions_coalesce() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    github.seed_comment(&started_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let first = github.seed_comment(
+        &completion_body(ISSUE_BODY, ValidationOutcome::Passed, EXECUTION_SUFFIX),
+        &MockAuthor::trusted(),
+        false,
+    );
+    // The reporter retried and the same event landed twice, with a different
+    // (non-authoritative) summary line.
+    let duplicate = format!(
+        "WorkGraphEvent/v1\n\nA differently worded summary\n\n{}",
+        completion_body(ISSUE_BODY, ValidationOutcome::Passed, EXECUTION_SUFFIX)
+            .split("\n\n")
+            .nth(2)
+            .expect("json section")
+    );
+    github.seed_comment(&duplicate, &MockAuthor::trusted(), false);
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-duplicates").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+
+    assert!(
+        wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
+        "identical duplicates must coalesce, not block"
+    );
+    assert_eq!(github.create_comment_calls(), 1, "one decision only");
+
+    let record = record(&store, ISSUE_BODY).await.expect("record exists");
+    assert_eq!(
+        record.accepted_completion.comment_node_id, first,
+        "the earliest physical completion is the accepted one"
+    );
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 12. A restart after an ambiguous write adopts the existing comment.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn restart_after_ambiguous_write_adopts_the_existing_comment() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+
+    // The write the previous process could not confirm did in fact land.
+    let decision_node_id = github.seed_comment(
+        &expected_decision_body(ISSUE_BODY, ValidationOutcome::Passed),
+        &MockAuthor::trusted(),
+        false,
+    );
+
+    // ...and the previous process left an ambiguous intent record behind.
+    let decision = RoutingDecidedPayload::for_outcome(ValidationOutcome::Passed);
+    let event = event_for(
+        ISSUE_BODY,
+        WorkGraphEventPayload::RoutingDecided(decision.clone()),
+    );
+    let mut seeded = RoutingRecord::new(
+        &expected_run_id(ISSUE_BODY),
+        event.event_id.as_str(),
+        &candidate(),
+        body_digest(Some(ISSUE_BODY)).as_str(),
+        AcceptedCompletion {
+            comment_node_id: completion_node_id,
+            body_hash: comment_body_hash(&completion_body(
+                ISSUE_BODY,
+                ValidationOutcome::Passed,
+                EXECUTION_SUFFIX,
+            )),
+        },
+        "passed",
+        PASSED_STATUS,
+        &event.to_canonical_json(),
+    );
+    seeded.set_error("create comment request failed: operation timed out", true);
+    create_record_if_absent(store.clone(), REACTION, &seeded)
+        .await
+        .expect("seed ambiguous record");
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-restart").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+
+    assert!(
+        wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
+        "restart never completed the routing"
+    );
+    assert_eq!(
+        github.create_comment_calls(),
+        0,
+        "the existing decision comment must be adopted, not re-posted"
+    );
+    assert_eq!(github.comment_bodies().len(), 4, "no duplicate comment");
+
+    let record = record(&store, ISSUE_BODY).await.expect("record exists");
+    assert!(record.is_complete());
+    assert!(!record.ambiguous);
+    assert_eq!(
+        record.decision_comment_node_id.as_deref(),
+        Some(decision_node_id.as_str())
+    );
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 13. A completion edited after acceptance stops a resumed decision.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn a_completion_edited_after_acceptance_halts_the_resumed_run() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+
+    // A previous attempt accepted the completion and recorded its body hash,
+    // but had not yet posted the decision.
+    let decision = RoutingDecidedPayload::for_outcome(ValidationOutcome::Passed);
+    let event = event_for(
+        ISSUE_BODY,
+        WorkGraphEventPayload::RoutingDecided(decision.clone()),
+    );
+    let seeded = RoutingRecord::new(
+        &expected_run_id(ISSUE_BODY),
+        event.event_id.as_str(),
+        &candidate(),
+        body_digest(Some(ISSUE_BODY)).as_str(),
+        AcceptedCompletion {
+            comment_node_id: completion_node_id.clone(),
+            body_hash: comment_body_hash("a completely different accepted body"),
+        },
+        "passed",
+        PASSED_STATUS,
+        &event.to_canonical_json(),
+    );
+    create_record_if_absent(store.clone(), REACTION, &seeded)
+        .await
+        .expect("seed record");
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-edited-completion").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    assert_eq!(
+        github.create_comment_calls(),
+        0,
+        "an edited completion must never be routed"
+    );
+    assert_eq!(github.status_mutations(), 0, "status must not move");
+    assert_eq!(github.status(), ROUTABLE_STATUS);
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 14. Stale and mis-bound rows have zero side effects.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn stale_and_misbound_rows_have_zero_side_effects() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-stale").await;
+
+    // A row claiming a status the item does not hold.
+    insert_candidate(&handle, "candidate-stale-status", "Triage").await;
+    // A row whose subject node does not match what GitHub reports.
+    github.set_issue_node_id("I_somethingelse");
+    insert_candidate(&handle, "candidate-misbound", ROUTABLE_STATUS).await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    assert_eq!(github.create_comment_calls(), 0, "no comment may be posted");
+    assert_eq!(github.status_mutations(), 0, "status must not move");
+    assert_eq!(github.status(), ROUTABLE_STATUS);
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 15. An ambiguous comment write is persisted before the status moves.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn ambiguous_comment_write_is_persisted_and_halts_before_status() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+
+    // The server accepts the comment but the client times out waiting.
+    github.set_create_comment_delay(Some(Duration::from_millis(2500)));
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-ambiguous").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+
+    assert!(
+        wait_until(
+            || async {
+                record(&store, ISSUE_BODY)
+                    .await
+                    .is_some_and(|record| record.ambiguous)
+            },
+            8000
+        )
+        .await,
+        "the ambiguous write must be persisted"
+    );
+
+    let record = record(&store, ISSUE_BODY).await.expect("record exists");
+    assert!(record.ambiguous, "ambiguity must be durable");
+    assert!(record.last_error.is_some(), "the error must be recorded");
+    assert!(record.decision_comment_node_id.is_none());
+    assert!(!record.status_applied);
+    assert_eq!(
+        github.status(),
+        ROUTABLE_STATUS,
+        "the status must not move while the comment outcome is unknown"
+    );
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 16. A silently rewritten completion is not routed on a fresh run.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn a_rewritten_completion_body_is_not_routed() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+
+    // The comment text no longer parses as the completion it claimed to be.
+    github.silently_rewrite_comment(
+        &completion_node_id,
+        "WorkGraphEvent/v1\n\nstill looks official\n\nnot json at all",
+    );
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-rewritten").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    assert_eq!(github.create_comment_calls(), 0);
+    assert_eq!(github.status_mutations(), 0);
+    assert_eq!(github.status(), ROUTABLE_STATUS);
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 17. A completion whose body changed only in its non-authoritative summary
+//     still halts a resumed decision.
+//
+// GitHub does not flag this as an edit (`updated_at` is untouched), and the
+// event JSON is byte-identical, so neither the edit check nor duplicate
+// coalescing would notice it. Only the persisted hash of the exact accepted
+// body does.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn a_silently_resummarised_completion_halts_the_resumed_run() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+    let accepted_body = completion_body(ISSUE_BODY, ValidationOutcome::Passed, EXECUTION_SUFFIX);
+
+    // A previous attempt accepted that exact body and recorded its hash.
+    let event = event_for(
+        ISSUE_BODY,
+        WorkGraphEventPayload::RoutingDecided(RoutingDecidedPayload::for_outcome(
+            ValidationOutcome::Passed,
+        )),
+    );
+    let seeded = RoutingRecord::new(
+        &expected_run_id(ISSUE_BODY),
+        event.event_id.as_str(),
+        &candidate(),
+        body_digest(Some(ISSUE_BODY)).as_str(),
+        AcceptedCompletion {
+            comment_node_id: completion_node_id.clone(),
+            body_hash: comment_body_hash(&accepted_body),
+        },
+        "passed",
+        PASSED_STATUS,
+        &event.to_canonical_json(),
+    );
+    create_record_if_absent(store.clone(), REACTION, &seeded)
+        .await
+        .expect("seed record");
+
+    // Same event JSON, different summary line, no edit reported by GitHub.
+    let mut sections = accepted_body.splitn(3, "\n\n");
+    let marker = sections.next().expect("marker");
+    let _original_summary = sections.next().expect("summary");
+    let json = sections.next().expect("json");
+    github.silently_rewrite_comment(
+        &completion_node_id,
+        &format!("{marker}\n\nQuietly reworded summary\n\n{json}"),
+    );
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-resummarised").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    assert_eq!(
+        github.create_comment_calls(),
+        0,
+        "a completion body that changed since acceptance must not be routed"
+    );
+    assert_eq!(github.status_mutations(), 0, "status must not move");
+    assert_eq!(github.status(), ROUTABLE_STATUS);
+
+    let record = record(&store, ISSUE_BODY).await.expect("record exists");
+    assert!(
+        record.decision_comment_node_id.is_none(),
+        "no decision may be recorded"
+    );
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 18. A single pre-existing RoutingDecided comment that claims this run's
+//     event ID but carries a different decision is never adopted.
+//
+// `eventId` hashes the run and the event type only — it does not cover the
+// payload — so a lone divergent decision would otherwise be adopted and the
+// item moved to a status this run never decided.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn a_divergent_preexisting_decision_is_never_adopted() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+
+    // Trusted, unedited, and carrying the exact event ID this run will decide —
+    // but the opposite decision.
+    let intended = expected_decision_body(ISSUE_BODY, ValidationOutcome::Passed);
+    let divergent = expected_decision_body(ISSUE_BODY, ValidationOutcome::Failed);
+    assert_ne!(intended, divergent, "the payloads must differ");
+    github.seed_comment(&divergent, &MockAuthor::trusted(), false);
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "router-divergent").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+
+    assert!(
+        wait_for_halt(&core).await,
+        "a divergent published decision must fail closed, not be skipped; \
+         the reaction is still {:?}",
+        reaction_status(&core).await
+    );
+    assert_eq!(
+        github.create_comment_calls(),
+        0,
+        "a divergent published decision must halt, not be re-posted"
+    );
+    assert_eq!(
+        github.comment_bodies().len(),
+        4,
+        "no further comment may be written"
+    );
+    assert_eq!(github.status_mutations(), 0, "no status mutation at all");
+    assert_eq!(
+        github.status(),
+        ROUTABLE_STATUS,
+        "the status must not drift after a failed adoption"
+    );
+
+    let record = record(&store, ISSUE_BODY).await.expect("intent is durable");
+    assert!(
+        record.decision_comment_node_id.is_none(),
+        "the divergent comment must never be recorded as ours"
+    );
+    assert!(!record.status_applied, "the status step must not run");
+
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 19. A status update that fails after the decision is published is finished
+//     from durable state on replay — even though the issue body changed in
+//     the meantime — and is applied exactly once.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn a_status_failure_after_publication_is_finished_from_durable_state() {
+    set_token();
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+    seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
+
+    // The decision comment lands, then the status mutation fails transiently.
+    github.fail_next_status_mutations(1);
+
+    let (first, handle) = start_core(&server.uri(), store.clone(), "router-poststatus-1").await;
+    insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
+    assert!(
+        wait_until(
+            || async {
+                record(&store, ISSUE_BODY)
+                    .await
+                    .is_some_and(|record| record.ambiguous)
+            },
+            8000
+        )
+        .await,
+        "the failed status write must be persisted as ambiguous"
+    );
+    let published = record(&store, ISSUE_BODY).await.expect("record exists");
+    assert_eq!(
+        github.create_comment_calls(),
+        1,
+        "the decision was published"
+    );
+    assert!(
+        published.decision_comment_node_id.is_some(),
+        "publication must be durable before the status move"
+    );
+    assert!(!published.status_applied);
+    assert_eq!(github.status(), ROUTABLE_STATUS, "the status did not move");
+    first.stop().await.expect("stop first core");
+
+    // The issue body is edited before the replay: a fresh derivation would now
+    // produce a different runId with no chain at all, which must NOT strand the
+    // decision that is already visible in the thread.
+    github.set_issue_body(Some("Rewritten while the router was down.\n"));
+
+    let (second, handle) = start_core_with_query(
+        &server.uri(),
+        store.clone(),
+        "router-poststatus-2",
+        "route-workgraph-items-after-restart",
+    )
+    .await;
+    insert_candidate(&handle, "candidate-replay", ROUTABLE_STATUS).await;
+
+    assert!(
+        wait_until(|| async { github.status() == PASSED_STATUS }, 5000).await,
+        "the replay never applied the persisted decision; status is '{}'",
+        github.status()
+    );
+    assert_eq!(
+        github.create_comment_calls(),
+        1,
+        "the replay must not publish a second decision"
+    );
+    assert_eq!(
+        github.status_mutations(),
+        1,
+        "the persisted status move must be applied exactly once"
+    );
+
+    let finished = record(&store, ISSUE_BODY).await.expect("record exists");
+    assert!(finished.is_complete());
+    assert!(!finished.ambiguous);
+    assert_eq!(finished.to_status, PASSED_STATUS);
+    assert_eq!(
+        finished.decision_comment_node_id, published.decision_comment_node_id,
+        "the replay must finish the decision it published, not a new one"
+    );
+
+    // Delivering the row yet again is a no-op: the run is complete. Wait for
+    // the reaction to actually read GitHub again, so "no further writes" is a
+    // statement about a processed row and not about an unprocessed one.
+    let reads_before = github.issue_reads();
+    insert_candidate(&handle, "candidate-replay-2", ROUTABLE_STATUS).await;
+    assert!(
+        wait_until(|| async { github.issue_reads() > reads_before }, 5000).await,
+        "the repeated delivery was never processed"
+    );
+    assert_eq!(github.status_mutations(), 1, "still exactly once");
+    assert_eq!(github.create_comment_calls(), 1, "still one comment");
+    assert_eq!(
+        reaction_status(&second).await,
+        ComponentStatus::Running,
+        "a completed run must not wedge the reaction"
+    );
+
+    second.stop().await.expect("stop second core");
+}
+
+// ---------------------------------------------------------------------
+// 20. A published decision comment that is edited, deleted, or replaced by a
+//     different event halts the resumed run with zero side effects.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn a_tampered_published_decision_halts_the_resumed_run() {
+    #[derive(Clone, Copy)]
+    enum Tamper {
+        Edited,
+        Deleted,
+        Divergent,
     }
 
-    enqueue_add(&reaction_b, &candidate, 1).await;
-    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
-    wait_for_count(&server, is_project_status_mutation, 1).await;
-    tokio::time::sleep(Duration::from_millis(450)).await;
-    reaction_a.stop().await.expect("reaction a stop");
-    reaction_b.stop().await.expect("reaction b stop");
+    async fn run_case(case: Tamper, core_id: &str) {
+        set_token();
+        let server = MockServer::start().await;
+        let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+        let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+        let completion_node_id = seed_chain(&github, ISSUE_BODY, ValidationOutcome::Passed);
 
-    let requests = server.received_requests().await.expect("requests");
-    let comment_posts = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .count();
-    let status_updates = requests
-        .iter()
-        .filter(|req| is_project_status_mutation(req))
-        .count();
-    assert_eq!(
-        comment_posts, 2,
-        "stale owner must not emit duplicate decision/responsibility comments"
-    );
-    assert_eq!(
-        status_updates, 1,
-        "stale owner must not duplicate status mutation"
-    );
-}
-
-#[tokio::test]
-#[ignore]
-async fn interrupted_old_policy_reservation_resumes_with_persisted_decision_contract() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-old-policy-resume");
-    let server = MockServer::start().await;
-    mount_common_success_mocks(&server, "AwaitingRouting").await;
-
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let candidate = sample_candidate();
-    let mut failed_outcome_candidate = candidate.clone();
-    failed_outcome_candidate.outcome = "failed".to_string();
-    failed_outcome_candidate.reason_code = "required-marker-missing".to_string();
-    let old_decision = RoutingDecision::from_policy(
-        &policy_identity_config("1.0.0"),
-        &failed_outcome_candidate,
-        RulesV1PolicyEngine
-            .evaluate(&failed_outcome_candidate)
-            .expect("rules evaluation"),
-    )
-    .expect("old decision");
-
-    let reservation = ReservationRecord {
-        reservation_key: candidate.reservation_key(),
-        execution_id: candidate.execution_id.clone(),
-        required_event_type: candidate.required_event_type.clone(),
-        owner_instance_id: Some("legacy-runner".to_string()),
-        fencing_epoch: 1,
-        lease_expires_at_unix_secs: 0,
-        policy_id: "policy-1".to_string(),
-        policy_type: "rules_v1".to_string(),
-        policy_version: "1.0.0".to_string(),
-        decision_id: Some(old_decision.decision_id.clone()),
-        created_at: "2026-01-01T00:00:00Z".to_string(),
-        completed: false,
-    };
-    let mut state = RoutingStateRecord::new(&candidate, &reservation);
-    state.decision = Some(old_decision.clone());
-    state.selected_transition = Some((
-        old_decision.from_status.clone(),
-        old_decision.to_status.clone(),
-    ));
-    state.mark_error("simulated interruption", true);
-    save_reservation(Arc::clone(&store), TEST_REACTION_ID, &reservation)
-        .await
-        .expect("seed reservation");
-    save_routing_state(Arc::clone(&store), TEST_REACTION_ID, &state)
-        .await
-        .expect("seed state");
-
-    let retry = base_reaction(&server, "2.0.0");
-    initialize_reaction(&retry, Arc::clone(&store)).await;
-    retry.start().await.expect("retry start");
-    let mut current_policy_candidate = candidate.clone();
-    current_policy_candidate.policy_version = "2.0.0".to_string();
-    enqueue_add(&retry, &current_policy_candidate, 2).await;
-    wait_for_count(&server, |req| req.url.path().ends_with("/comments"), 2).await;
-    wait_for_count(&server, is_project_status_mutation, 1).await;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    retry.stop().await.expect("retry stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let decision_payloads: Vec<Value> = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .filter_map(|req| {
-            let outer: Value = serde_json::from_slice(&req.body).ok()?;
-            let body = outer.get("body")?.as_str()?;
-            let inner: Value = serde_json::from_str(body).ok()?;
-            if inner.get("schemaVersion").and_then(Value::as_str)
-                == Some("workgraph.routing-decision/v1")
-            {
-                Some(inner)
-            } else {
-                None
-            }
-        })
-        .collect();
-    assert_eq!(decision_payloads.len(), 1);
-    let payload = &decision_payloads[0];
-    assert_eq!(
-        payload.get("policyVersion").and_then(Value::as_str),
-        Some("1.0.0"),
-        "retry must resume with persisted policy contract, not current config policy version"
-    );
-    assert_eq!(
-        payload.get("toStatus").and_then(Value::as_str),
-        Some("NeedsMoreInformation"),
-        "retry must use persisted decision transition"
-    );
-}
-
-#[tokio::test]
-#[ignore]
-async fn untrusted_inputs_are_rejected_without_side_effects() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-untrusted");
-    let server = MockServer::start().await;
-    mount_common_success_mocks(&server, "AwaitingRouting").await;
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-
-    let mut candidate = sample_candidate();
-    candidate.comment_author = "forged-author".to_string();
-    enqueue_add(&reaction, &candidate, 1).await;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    reaction.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let side_effects = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .count();
-    assert_eq!(
-        side_effects, 0,
-        "untrusted input must be rejected before writes"
-    );
-}
-
-#[tokio::test]
-#[ignore]
-async fn stale_content_and_wrong_status_are_rejected() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-status");
-    let server = MockServer::start().await;
-    mount_common_success_mocks(&server, "Done").await;
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-
-    let mut candidate = sample_candidate();
-    candidate.content_version = "sha256:stale".to_string();
-    enqueue_add(&reaction, &candidate, 1).await;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    reaction.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let comments = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .count();
-    assert_eq!(comments, 0);
-}
-
-#[tokio::test]
-#[ignore]
-async fn graphql_200_errors_are_treated_as_failures() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-graphql");
-    let server = MockServer::start().await;
-    mount_issue_snapshot_mock(&server).await;
-
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "errors":[{"message":"boom"}],
-            "data": null
-        })))
-        .mount(&server)
-        .await;
-
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-    enqueue_add(&reaction, &sample_candidate(), 1).await;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    reaction.stop().await.expect("reaction stop");
-
-    let requests = server.received_requests().await.expect("requests");
-    let comments = requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .count();
-    assert_eq!(comments, 0);
-}
-
-#[tokio::test]
-#[ignore]
-async fn partial_side_effect_recovery_reconciles_trusted_comments() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-recovery");
-    let first = MockServer::start().await;
-    mount_issue_snapshot_mock(&first).await;
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
-        .mount(&first)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-        .mount(&first)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(status_snapshot_response("AwaitingRouting")),
-        )
-        .mount(&first)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-            "id": 101,
-            "body": "ok",
-            "user": {"login":"router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
-            "created_at":"2026-01-01T00:00:00Z",
-            "updated_at":"2026-01-01T00:00:00Z"
-        })))
-        .mount(&first)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
-        .respond_with(ResponseTemplate::new(500).set_body_string("status update failed"))
-        .mount(&first)
-        .await;
-
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let candidate = sample_candidate();
-    let reaction = base_reaction(&first, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("start first");
-    enqueue_add(&reaction, &candidate, 1).await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    reaction.stop().await.expect("stop first");
-
-    let outcome = RulesV1PolicyEngine
-        .evaluate(&candidate)
-        .expect("rules evaluation");
-    let decision = RoutingDecision::from_policy(
-        &WorkgraphRouterReactionConfig {
-            policy_id: "policy-1".to_string(),
-            policy_type: "rules_v1".to_string(),
-            policy_version: "1.0.0".to_string(),
-            ..WorkgraphRouterReactionConfig::default()
-        },
-        &candidate,
-        outcome,
-    )
-    .expect("decision");
-    let decision_comment = decision
-        .decision_comment(&candidate)
-        .expect("decision body");
-    let responsibility_comment = decision
-        .responsibility_comment(&candidate)
-        .expect("responsibility body");
-
-    let second = MockServer::start().await;
-    mount_issue_snapshot_mock(&second).await;
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"open"})))
-        .mount(&second)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            {
-                "id": 1,
-                "body": decision_comment,
-                "user": {"login": "router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
-                "created_at":"2026-01-01T00:00:00Z",
-                "updated_at":"2026-01-01T00:00:00Z"
+        // A previous attempt published the decision and recorded it, but had
+        // not applied the status yet.
+        let decision_node_id = github.seed_comment(
+            &expected_decision_body(ISSUE_BODY, ValidationOutcome::Passed),
+            &MockAuthor::trusted(),
+            false,
+        );
+        let event = event_for(
+            ISSUE_BODY,
+            WorkGraphEventPayload::RoutingDecided(RoutingDecidedPayload::for_outcome(
+                ValidationOutcome::Passed,
+            )),
+        );
+        let mut seeded = RoutingRecord::new(
+            &expected_run_id(ISSUE_BODY),
+            event.event_id.as_str(),
+            &candidate(),
+            body_digest(Some(ISSUE_BODY)).as_str(),
+            AcceptedCompletion {
+                comment_node_id: completion_node_id,
+                body_hash: comment_body_hash(&completion_body(
+                    ISSUE_BODY,
+                    ValidationOutcome::Passed,
+                    EXECUTION_SUFFIX,
+                )),
             },
-            {
-                "id": 2,
-                "body": responsibility_comment,
-                "user": {"login": "router-user", "node_id":"MDQ6VXNlcjE=", "id": 1001},
-                "created_at":"2026-01-01T00:00:00Z",
-                "updated_at":"2026-01-01T00:00:00Z"
-            }
-        ])))
-        .mount(&second)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterProjectStatusSnapshot"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(status_snapshot_response("AwaitingRouting")),
+            "passed",
+            PASSED_STATUS,
+            &event.to_canonical_json(),
+        );
+        seeded.set_decision_comment(decision_node_id.clone());
+        create_record_if_absent(store.clone(), REACTION, &seeded)
+            .await
+            .expect("seed published record");
+        set_open_run(
+            store.clone(),
+            REACTION,
+            PROJECT_ITEM_NODE_ID,
+            &expected_run_id(ISSUE_BODY),
         )
-        .mount(&second)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("WorkgraphRouterUpdateProjectV2Status"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(status_update_response()))
-        .mount(&second)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/repos/drasi-project/drasi-core/issues/42/comments"))
-        .respond_with(ResponseTemplate::new(500))
-        .mount(&second)
-        .await;
+        .await
+        .expect("seed open-run pointer");
 
-    let retry = base_reaction(&second, "1.0.0");
-    initialize_reaction(&retry, Arc::clone(&store)).await;
-    retry.start().await.expect("start retry");
-    enqueue_add(&retry, &candidate, 2).await;
-    wait_for_count(&second, is_project_status_mutation, 1).await;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    retry.stop().await.expect("stop retry");
+        // ...and then somebody tampered with the published decision.
+        match case {
+            Tamper::Edited => github.mark_comment_edited(&decision_node_id),
+            Tamper::Deleted => github.delete_comment(&decision_node_id),
+            Tamper::Divergent => github.silently_rewrite_comment(
+                &decision_node_id,
+                &expected_decision_body(ISSUE_BODY, ValidationOutcome::Failed),
+            ),
+        }
 
-    let retry_requests = second.received_requests().await.expect("requests");
-    let comment_posts = retry_requests
-        .iter()
-        .filter(|req| req.url.path().ends_with("/comments") && req.method.as_str() == "POST")
-        .count();
-    assert_eq!(
-        comment_posts, 0,
-        "reconciliation should prevent duplicate comment writes"
-    );
-}
+        let (core, handle) = start_core(&server.uri(), store.clone(), core_id).await;
+        insert_candidate(&handle, "candidate-1", ROUTABLE_STATUS).await;
 
-#[tokio::test]
-#[ignore]
-async fn update_and_delete_results_are_ignored() {
-    std::env::set_var("WG_ROUTER_TEST_TOKEN", "token-ignore");
-    let server = MockServer::start().await;
-    mount_common_success_mocks(&server, "AwaitingRouting").await;
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
-    let reaction = base_reaction(&server, "1.0.0");
-    initialize_reaction(&reaction, Arc::clone(&store)).await;
-    reaction.start().await.expect("reaction start");
-    enqueue_update(&reaction, 1).await;
-    enqueue_delete(&reaction, 2).await;
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    reaction.stop().await.expect("reaction stop");
+        assert!(
+            wait_for_halt(&core).await,
+            "a tampered published decision must fail closed, not be skipped; \
+             the reaction is still {:?}",
+            reaction_status(&core).await
+        );
+        assert_eq!(
+            github.status_mutations(),
+            0,
+            "a tampered decision must never be completed"
+        );
+        assert_eq!(github.status(), ROUTABLE_STATUS, "status must not move");
+        assert_eq!(
+            github.create_comment_calls(),
+            0,
+            "no comment may be written either"
+        );
 
-    let requests = server.received_requests().await.expect("requests");
-    assert!(
-        requests.is_empty(),
-        "updated/deleted rows must not trigger routing side effects"
-    );
+        let record = record(&store, ISSUE_BODY).await.expect("record exists");
+        assert!(!record.status_applied, "the status step must not run");
+        assert_eq!(
+            record.decision_comment_node_id.as_deref(),
+            Some(decision_node_id.as_str()),
+            "the record must still point at the published decision"
+        );
+
+        core.stop().await.expect("stop core");
+    }
+
+    run_case(Tamper::Edited, "router-tampered-edited").await;
+    run_case(Tamper::Deleted, "router-tampered-deleted").await;
+    run_case(Tamper::Divergent, "router-tampered-divergent").await;
 }

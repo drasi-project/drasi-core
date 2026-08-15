@@ -25,7 +25,10 @@
 //! is satisfied. Hence this thin delegating wrapper, test-only.
 
 use async_trait::async_trait;
-use drasi_lib::state_store::{MemoryStateStoreProvider, StateStoreProvider, StateStoreResult};
+use drasi_lib::state_store::{
+    MemoryStateStoreProvider, StateStoreCompareAndSwapResult, StateStoreCreateIfAbsentResult,
+    StateStoreProvider, StateStoreResult,
+};
 use std::collections::HashMap;
 
 pub struct DurableMemoryStateStoreProvider {
@@ -54,6 +57,29 @@ impl StateStoreProvider for DurableMemoryStateStoreProvider {
 
     async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
         self.inner.set(store_id, key, value).await
+    }
+
+    /// Forwarded so the reaction's intent-before-side-effect reservation really
+    /// is created atomically; the trait default reports CAS as unsupported.
+    async fn create_if_absent(
+        &self,
+        store_id: &str,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<StateStoreCreateIfAbsentResult> {
+        self.inner.create_if_absent(store_id, key, value).await
+    }
+
+    async fn compare_and_swap(
+        &self,
+        store_id: &str,
+        key: &str,
+        expected: Option<&[u8]>,
+        new_value: Vec<u8>,
+    ) -> StateStoreResult<StateStoreCompareAndSwapResult> {
+        self.inner
+            .compare_and_swap(store_id, key, expected, new_value)
+            .await
     }
 
     async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {

@@ -13,12 +13,13 @@ lint:
 	cargo clippy -p drasi-reaction-copilot-agent-task --all-targets -- -D warnings
 	cargo fmt -p drasi-reaction-copilot-agent-task -- --check
 
-# Verify schema/*.schema.json is in sync with src/prompt.rs.
+# Verify schema/workgraph-execution-state-v1.schema.json is in sync with
+# src/state.rs (the durable execution-state telemetry schema).
 schema:
 	cargo test -p drasi-reaction-copilot-agent-task --test output_schema
 
-# Regenerate schema/*.schema.json from src/prompt.rs. Run this any time
-# WorkGraphEvent/v1 or workgraph.execution/v1 changes.
+# Regenerate schema/workgraph-execution-state-v1.schema.json from src/state.rs.
+# Run this any time the WorkGraphExecutionStateV1 log envelope changes.
 update-schema:
 	DRASI_UPDATE_SCHEMA=1 cargo test -p drasi-reaction-copilot-agent-task --test output_schema -- --nocapture
 

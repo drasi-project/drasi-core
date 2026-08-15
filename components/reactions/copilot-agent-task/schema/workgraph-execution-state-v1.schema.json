@@ -4,10 +4,6 @@
   "additionalProperties": false,
   "description": "Structured log emitted after a failed or ambiguous Copilot Agent Task execution state is durably persisted.",
   "properties": {
-    "attempt": {
-      "minimum": 1,
-      "type": "integer"
-    },
     "errorPresent": {
       "type": "boolean"
     },
@@ -27,10 +23,7 @@
     "repository": {
       "type": "string"
     },
-    "responsibilityId": {
-      "type": "string"
-    },
-    "routeId": {
+    "runId": {
       "type": "string"
     },
     "schema": {
@@ -47,9 +40,7 @@
     "schema",
     "reactionId",
     "executionId",
-    "routeId",
-    "responsibilityId",
-    "attempt",
+    "runId",
     "status",
     "repository",
     "issueNumber",

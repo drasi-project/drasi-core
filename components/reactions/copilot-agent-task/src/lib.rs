@@ -17,17 +17,18 @@
 //! Copilot Agent Task reaction plugin for Drasi.
 //!
 //! Subscribes to a single WorkGraph "launch query" and, for every row newly
-//! **added** to its result set, launches a GitHub Copilot coding-agent task
-//! (`POST /agents/repos/{owner}/{repo}/tasks`) and posts a single, pure-JSON
-//! `workgraph.execution/v1` issue comment recording the launch. See the
-//! crate `README.md` for the full field/config contract, the exact
-//! preflight and idempotency model, and integration caveats.
+//! **added** to its result set, re-reads everything it trusts from GitHub,
+//! reserves the run durably, creates or adopts exactly one GitHub Copilot
+//! coding-agent task (`POST /agents/repos/{owner}/{repo}/tasks`), and posts
+//! exactly one shared `ExecutionStarted` `WorkGraphEvent/v1` issue comment. See
+//! the crate `README.md` for the full row/config/comment contract, the exact
+//! trust and idempotency model, and integration caveats.
 //!
 //! ## Quick start
 //!
 //! ```
 //! # fn main() -> anyhow::Result<()> {
-//! use drasi_reaction_copilot_agent_task::CopilotAgentTaskReaction;
+//! use drasi_reaction_copilot_agent_task::{ActorType, CopilotAgentTaskReaction};
 //!
 //! let reaction = CopilotAgentTaskReaction::builder("copilot-launcher")
 //!     .with_query("launch-query")
@@ -35,11 +36,18 @@
 //!     .with_allowed_repositories(vec!["my-org/my-repo".to_string()])
 //!     .with_allowed_profiles(vec!["issue-validator".to_string()])
 //!     .with_allowed_models(vec!["gpt-5".to_string(), "gpt-4".to_string()])
+//!     .with_trusted_assignment_author_database_id(4021243)
+//!     .with_trusted_assignment_author_type(ActorType::Bot)
+//!     .with_trusted_execution_author_database_id(90210)
+//!     .with_trusted_execution_author_type(ActorType::Bot)
+//!     .with_expected_project_status_field_node_id("PVTSSF_example")
 //!     .build()?;
 //! # let _ = reaction;
 //! # Ok(())
 //! # }
 //! ```
+
+pub use drasi_workgraph_common::trust::{ActorType, TrustedAuthor};
 
 pub mod config;
 pub mod descriptor;
@@ -122,6 +130,41 @@ impl CopilotAgentTaskReactionBuilder {
 
     pub fn with_allowed_models(mut self, models: Vec<String>) -> Self {
         self.config.allowed_models = models;
+        self
+    }
+
+    /// Numeric GitHub database ID of the identity whose
+    /// `ResponsibilityAssigned` comments are trusted (admission's identity).
+    pub fn with_trusted_assignment_author_database_id(mut self, database_id: u64) -> Self {
+        self.config.trusted_assignment_author_database_id = database_id;
+        self
+    }
+
+    /// Actor type of the identity whose `ResponsibilityAssigned` comments are
+    /// trusted.
+    pub fn with_trusted_assignment_author_type(mut self, actor_type: ActorType) -> Self {
+        self.config.trusted_assignment_author_type = actor_type;
+        self
+    }
+
+    /// Numeric GitHub database ID of the identity this reaction posts as, used
+    /// to adopt its own `ExecutionStarted` comment after an ambiguous write.
+    pub fn with_trusted_execution_author_database_id(mut self, database_id: u64) -> Self {
+        self.config.trusted_execution_author_database_id = database_id;
+        self
+    }
+
+    /// Actor type of the identity this reaction posts as.
+    pub fn with_trusted_execution_author_type(mut self, actor_type: ActorType) -> Self {
+        self.config.trusted_execution_author_type = actor_type;
+        self
+    }
+
+    pub fn with_expected_project_status_field_node_id(
+        mut self,
+        field_node_id: impl Into<String>,
+    ) -> Self {
+        self.config.expected_project_status_field_node_id = field_node_id.into();
         self
     }
 

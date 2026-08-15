@@ -14,13 +14,14 @@
 
 //! End-to-end tests for the Copilot Agent Task reaction.
 //!
-//! This is a **protocol-target** reaction: it calls the GitHub REST +
-//! GraphQL APIs directly. A local `wiremock` server stands in for GitHub
-//! (no Docker required, no live GitHub calls), and a `MemoryStateStoreProvider`
-//! stands in for durable state so recovery/duplicate-delivery scenarios can
-//! be driven deterministically.
+//! This is a **protocol-target** reaction: it calls GitHub's REST and GraphQL
+//! APIs directly, so a stateful local `wiremock` server stands in for GitHub and
+//! a durable in-memory state store stands in for the persistent store. A restart
+//! is modelled by building a second core over the same state store and the same
+//! GitHub state, which is exactly what the durability contract promises.
 //!
-//! Run with: `cargo test -p drasi-reaction-copilot-agent-task --test integration_test -- --ignored --nocapture`
+//! Run with:
+//! `cargo test -p drasi-reaction-copilot-agent-task --test integration_test -- --ignored --nocapture`
 
 mod durable_memory_store;
 mod mock_github;
@@ -31,30 +32,48 @@ use std::time::Duration;
 
 use drasi_lib::channels::ComponentStatus;
 use drasi_lib::state_store::StateStoreProvider;
-use drasi_lib::{DrasiLib, Query, Reaction};
-use drasi_reaction_copilot_agent_task::config::CommentApiConfig;
-use drasi_reaction_copilot_agent_task::ids::{execution_id, expected_event_id};
-use drasi_reaction_copilot_agent_task::state::{load, save, ExecutionRecord, ExecutionStatus};
+use drasi_lib::{DrasiLib, Query};
+use drasi_reaction_copilot_agent_task::github::{GitHubClient, GitHubConfig};
+use drasi_reaction_copilot_agent_task::ids::execution_id;
+use drasi_reaction_copilot_agent_task::prompt::build_prompt;
+use drasi_reaction_copilot_agent_task::row::LaunchRow;
+use drasi_reaction_copilot_agent_task::state::{
+    create_record_if_absent, load_record, ExecutionRecord, ExecutionStatus,
+};
 use drasi_reaction_copilot_agent_task::CopilotAgentTaskReaction;
-use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
+use drasi_source_application::{
+    ApplicationSource, ApplicationSourceConfig, ApplicationSourceHandle, PropertyMapBuilder,
+};
+use drasi_workgraph_common::comment::render_comment;
+use drasi_workgraph_common::event::{
+    AssignedResponsibilityType, ExecutionStartedPayload, ProfileRef, ResponsibilityAssignedPayload,
+    WorkGraphEvent, WorkGraphEventPayload, WorkGraphEventType,
+};
+use drasi_workgraph_common::ids::{body_digest, event_id, run_id};
+use drasi_workgraph_common::summary::{summary_for, SubjectRef};
 use durable_memory_store::DurableMemoryStateStoreProvider;
-use serde_json::json;
-use wiremock::MockServer;
+use mock_github::{
+    GithubState, MockAuthor, ISSUE_NODE_ID, ISSUE_NUMBER, LAUNCHER_AUTHOR_DATABASE_ID,
+    LAUNCHER_AUTHOR_TYPE, PROFILE_BLOB_SHA, PROFILE_NAME, PROJECT_ITEM_NODE_ID, PROJECT_NODE_ID,
+    REPOSITORY, STATUS_FIELD_NODE_ID, TRUSTED_AUTHOR_DATABASE_ID, TRUSTED_AUTHOR_TYPE,
+};
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const SOURCE: &str = "launch-source";
-const QUERY: &str = "launch-query";
-const REACTION: &str = "copilot-launcher";
-const OWNER: &str = "drasi-project";
-const REPO: &str = "drasi-core";
-const REPOSITORY: &str = "drasi-project/drasi-core";
-const CONTENT_VERSION: &str = "2026-08-13T19:00:00.000Z";
-const PROFILE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+const SOURCE: &str = "copilot-source";
+const QUERY: &str = "launch-workgraph-tasks";
+const REACTION: &str = "copilot-agent-task";
+const SUBJECT_NODE_ID: &str = ISSUE_NODE_ID;
+const SUBJECT_NUMBER: u64 = ISSUE_NUMBER;
+const ISSUE_BODY: &str = "Please validate this issue.\n\nworkgraph:validate\n";
+const REQUESTED_MODEL: &str = "gpt-5.6-sol";
+const FALLBACK_MODEL: &str = "gpt-5.4";
+const BASE_REF: &str = "main";
+const TEST_TOKEN: &str = "ghp_test_token_do_not_log";
+const FIRST_TASK_ID: &str = "task-1";
 const WARMUP: Duration = Duration::from_millis(150);
 
-fn make_source() -> (
-    ApplicationSource,
-    drasi_source_application::ApplicationSourceHandle,
-) {
+fn make_source() -> (ApplicationSource, ApplicationSourceHandle) {
     let config = ApplicationSourceConfig {
         properties: HashMap::new(),
         durability: None,
@@ -62,1403 +81,854 @@ fn make_source() -> (
     ApplicationSource::new(SOURCE, config).expect("create application source")
 }
 
-fn launch_query_str() -> &'static str {
-    "MATCH (r:LaunchRequest) RETURN \
-     r.repository AS repository, r.issueNumber AS issueNumber, r.issueUrl AS issueUrl, \
-     r.issueNodeId AS issueNodeId, r.projectItemNodeId AS projectItemNodeId, \
-     r.projectNodeId AS projectNodeId, \
-     r.projectOwner AS projectOwner, r.projectNumber AS projectNumber, \
-     r.subjectType AS subjectType, \
-     r.actorType AS actorType, r.actorId AS actorId, \
-     r.routeId AS routeId, r.responsibilityId AS responsibilityId, \
-     r.issueContentVersion AS issueContentVersion, r.agentProfile AS agentProfile, \
-     r.profileRef AS profileRef, r.requestedModel AS requestedModel, \
-     r.fallbackModel AS fallbackModel, r.requiredEventType AS requiredEventType, \
-     r.baseRef AS baseRef, r.expectedProjectStatus AS expectedProjectStatus"
+fn query_text() -> &'static str {
+    "MATCH (r:LaunchCandidate) RETURN \
+     r.repository AS repository, r.subjectNumber AS subjectNumber, \
+     r.subjectNodeId AS subjectNodeId, r.projectNodeId AS projectNodeId, \
+     r.projectItemNodeId AS projectItemNodeId, r.runId AS runId, \
+     r.requestedModel AS requestedModel, r.fallbackModel AS fallbackModel, \
+     r.baseRef AS baseRef"
 }
 
 fn build_reaction(server_uri: &str) -> CopilotAgentTaskReaction {
-    build_reaction_with_timeout(server_uri, 30_000)
-}
-
-fn build_reaction_with_expected_user_id(
-    server_uri: &str,
-    expected_user_id: &str,
-) -> CopilotAgentTaskReaction {
     CopilotAgentTaskReaction::builder(REACTION)
         .with_query(QUERY)
         .with_github_api_base_url(server_uri.to_string())
         .with_github_graphql_url(format!("{server_uri}/graphql"))
-        .with_token("ghp_test_token_do_not_log")
-        .with_expected_github_user_id(expected_user_id)
+        .with_token(TEST_TOKEN)
         .with_allowed_repositories(vec![REPOSITORY.to_string()])
-        .with_allowed_profiles(vec!["issue-validator".to_string()])
-        .with_allowed_models(vec!["gpt-5".to_string(), "gpt-4".to_string()])
-        .with_comment_api(CommentApiConfig {
-            max_attempts: 2,
-            retry_backoff_ms: 10,
-        })
+        .with_allowed_profiles(vec![PROFILE_NAME.to_string()])
+        .with_allowed_models(vec![
+            REQUESTED_MODEL.to_string(),
+            FALLBACK_MODEL.to_string(),
+        ])
+        .with_trusted_assignment_author_database_id(TRUSTED_AUTHOR_DATABASE_ID)
+        .with_trusted_assignment_author_type(TRUSTED_AUTHOR_TYPE)
+        .with_trusted_execution_author_database_id(LAUNCHER_AUTHOR_DATABASE_ID)
+        .with_trusted_execution_author_type(LAUNCHER_AUTHOR_TYPE)
+        .with_expected_project_status_field_node_id(STATUS_FIELD_NODE_ID)
+        .with_request_timeout_ms(500)
         .build()
         .expect("reaction builds")
 }
 
-fn build_reaction_with_timeout(
+async fn start_core(
     server_uri: &str,
-    request_timeout_ms: u64,
-) -> CopilotAgentTaskReaction {
-    CopilotAgentTaskReaction::builder(REACTION)
-        .with_query(QUERY)
-        .with_github_api_base_url(server_uri.to_string())
-        .with_github_graphql_url(format!("{server_uri}/graphql"))
-        .with_token("ghp_test_token_do_not_log")
-        .with_allowed_repositories(vec![REPOSITORY.to_string()])
-        .with_allowed_profiles(vec!["issue-validator".to_string()])
-        .with_allowed_models(vec!["gpt-5".to_string(), "gpt-4".to_string()])
-        .with_request_timeout_ms(request_timeout_ms)
-        .with_comment_api(CommentApiConfig {
-            max_attempts: 2,
-            retry_backoff_ms: 10,
-        })
-        .build()
-        .expect("reaction builds")
+    store: Arc<dyn StateStoreProvider>,
+    core_id: &str,
+) -> (Arc<DrasiLib>, ApplicationSourceHandle) {
+    let (source, handle) = make_source();
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id(core_id)
+            .with_source(source)
+            .with_query(
+                Query::cypher(QUERY)
+                    .query(query_text())
+                    .from_source(SOURCE)
+                    .with_outbox_capacity(100)
+                    .auto_start(true)
+                    .build(),
+            )
+            .with_reaction(build_reaction(server_uri))
+            .with_state_store_provider(store)
+            .build()
+            .await
+            .expect("build core"),
+    );
+    core.start().await.expect("start core");
+    tokio::time::sleep(WARMUP).await;
+    (core, handle)
 }
 
-/// Insert one launch row into the source. `issue_content_version` must be the
-/// normalized `lastEditedAt ?? createdAt` RFC 3339 instant.
-#[allow(clippy::too_many_arguments)]
-async fn insert_row(
-    handle: &drasi_source_application::ApplicationSourceHandle,
+async fn insert_launch_row(
+    handle: &ApplicationSourceHandle,
     node_id: &str,
-    route_id: &str,
-    responsibility_id: &str,
-    issue_number: i64,
-    requested_model: &str,
-    fallback_model: Option<&str>,
-    repository: &str,
-    issue_content_version: &str,
-    expected_project_status: &str,
+    run_id_value: &str,
+    fallback: Option<&str>,
 ) {
     let mut builder = PropertyMapBuilder::new()
-        .with_string("repository", repository)
-        .with_integer("issueNumber", issue_number)
-        .with_string(
-            "issueUrl",
-            format!("https://github.com/{repository}/issues/{issue_number}"),
-        )
-        .with_string("issueNodeId", format!("I_{node_id}"))
-        .with_string("projectItemNodeId", format!("PVTI_{node_id}"))
-        .with_string("projectNodeId", "PVT_workgraph")
-        .with_string("projectOwner", OWNER)
-        .with_integer("projectNumber", 3)
-        .with_string("subjectType", "Issue")
-        .with_string("actorType", "Agent")
-        .with_string("actorId", "issue-validator")
-        .with_string("routeId", route_id)
-        .with_string("responsibilityId", responsibility_id)
-        .with_string("issueContentVersion", issue_content_version)
-        .with_string("agentProfile", "issue-validator")
-        .with_string("profileRef", format!("issue-validator@{PROFILE_SHA}"))
-        .with_string("requestedModel", requested_model)
-        .with_string("requiredEventType", "CompletedIssueValidation")
-        .with_string("baseRef", "main")
-        .with_string("expectedProjectStatus", expected_project_status);
-    if let Some(fb) = fallback_model {
-        builder = builder.with_string("fallbackModel", fb);
+        .with_string("repository", REPOSITORY)
+        .with_integer("subjectNumber", SUBJECT_NUMBER as i64)
+        .with_string("subjectNodeId", SUBJECT_NODE_ID)
+        .with_string("projectNodeId", PROJECT_NODE_ID)
+        .with_string("projectItemNodeId", PROJECT_ITEM_NODE_ID)
+        .with_string("runId", run_id_value)
+        .with_string("requestedModel", REQUESTED_MODEL)
+        .with_string("baseRef", BASE_REF);
+    if let Some(fallback) = fallback {
+        builder = builder.with_string("fallbackModel", fallback);
     }
-    let props = builder.build();
     handle
-        .send_node_insert(node_id, vec!["LaunchRequest"], props)
+        .send_node_insert(node_id, vec!["LaunchCandidate"], builder.build())
         .await
         .expect("send node insert");
 }
 
-async fn wait_until<F, Fut>(mut cond: F, max_ms: u64)
+async fn wait_until<F, Fut>(mut condition: F, max_ms: u64) -> bool
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
     let deadline = std::time::Instant::now() + Duration::from_millis(max_ms);
     loop {
-        if cond().await {
-            return;
+        if condition().await {
+            return true;
         }
         if std::time::Instant::now() >= deadline {
-            panic!("timed out after {max_ms}ms waiting for condition");
+            return false;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
-async fn mount_happy_path_preflight(server: &MockServer, issue_number: u64, node_id: &str) {
-    let issue_node_id = format!("I_{node_id}");
-    mock_github::mount_issue(server, OWNER, REPO, issue_number, "open", &issue_node_id).await;
-    mock_github::mount_contents(server, OWNER, REPO, PROFILE_SHA).await;
-    mock_github::mount_project_status(server, "AwaitingValidation", &issue_node_id).await;
+/// The deterministic run ID the reaction derives for `body`.
+fn run_id_for(body: &str) -> String {
+    run_id(
+        PROJECT_ITEM_NODE_ID,
+        SUBJECT_NODE_ID,
+        &body_digest(Some(body)),
+    )
+    .as_str()
+    .to_string()
+}
+
+/// The stable execution ID for the run derived from `body`.
+fn execution_for(body: &str) -> String {
+    execution_id(&run_id_for(body)).as_str().to_string()
+}
+
+/// A trusted `ResponsibilityAssigned` comment body that pins `profile@sha`.
+fn assignment_body_with_profile(body: &str, profile: &str, sha: &str) -> String {
+    let digest = body_digest(Some(body));
+    let event = WorkGraphEvent::new(
+        run_id(PROJECT_ITEM_NODE_ID, SUBJECT_NODE_ID, &digest),
+        PROJECT_ITEM_NODE_ID,
+        SUBJECT_NODE_ID,
+        WorkGraphEventPayload::ResponsibilityAssigned(ResponsibilityAssignedPayload {
+            responsibility_type: AssignedResponsibilityType::IssueValidation,
+            profile_ref: ProfileRef::new(profile, sha).expect("profile ref"),
+            content_digest: digest,
+        }),
+    )
+    .expect("assignment event");
+    let summary = summary_for(
+        &event,
+        SubjectRef {
+            repository: REPOSITORY,
+            number: SUBJECT_NUMBER,
+        },
+    );
+    render_comment(&event, &summary).expect("render assignment")
+}
+
+/// The canonical trusted assignment for the sample issue.
+fn assignment_body(body: &str) -> String {
+    assignment_body_with_profile(body, PROFILE_NAME, PROFILE_BLOB_SHA)
+}
+
+/// The exact `ExecutionStarted` comment body the reaction must produce for
+/// `body` once `task_id` is created — computed independently of the reaction.
+fn execution_started_body(body: &str, task_id: &str) -> String {
+    let digest = body_digest(Some(body));
+    let run = run_id(PROJECT_ITEM_NODE_ID, SUBJECT_NODE_ID, &digest);
+    let execution = execution_id(run.as_str());
+    let event = WorkGraphEvent::new(
+        run,
+        PROJECT_ITEM_NODE_ID,
+        SUBJECT_NODE_ID,
+        WorkGraphEventPayload::ExecutionStarted(ExecutionStartedPayload {
+            execution_id: execution,
+            task_id: task_id.to_string(),
+        }),
+    )
+    .expect("execution started event");
+    let summary = summary_for(
+        &event,
+        SubjectRef {
+            repository: REPOSITORY,
+            number: SUBJECT_NUMBER,
+        },
+    );
+    render_comment(&event, &summary).expect("render execution started")
+}
+
+async fn load(store: &Arc<dyn StateStoreProvider>, body: &str) -> Option<ExecutionRecord> {
+    load_record(store.clone(), REACTION, &run_id_for(body))
+        .await
+        .expect("load execution record")
+        .map(|persisted| persisted.record)
+}
+
+/// The reaction's lifecycle status, as the core reports it.
+///
+/// A hard halt (fail-closed) drives the reaction to `Error`; a permanent,
+/// skippable rejection leaves it `Running`. Tests that require a halt assert on
+/// this rather than only on the absence of side effects, which would also hold
+/// if the row had simply not been processed yet.
+async fn reaction_status(core: &Arc<DrasiLib>) -> ComponentStatus {
+    core.snapshot_configuration()
+        .await
+        .expect("configuration snapshot")
+        .reactions
+        .iter()
+        .find(|reaction| reaction.id == REACTION)
+        .expect("the reaction is in the snapshot")
+        .status
+}
+
+/// Wait for the reaction to fail closed.
+async fn wait_for_halt(core: &Arc<DrasiLib>) -> bool {
+    wait_until(
+        || async { reaction_status(core).await == ComponentStatus::Error },
+        5000,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------
-// 1. Success: full happy path launches a task and posts one comment.
+// 1. Happy path: exactly one task and one canonical ExecutionStarted comment.
 // ---------------------------------------------------------------------
 #[tokio::test]
 #[ignore] // Run with: cargo test -- --ignored
-async fn success_launches_task_and_posts_one_comment() {
+async fn happy_path_creates_one_task_and_one_execution_started_comment() {
     let server = MockServer::start().await;
-    mock_github::mount_authenticated_user(&server, 4_021_243).await;
-    mount_happy_path_preflight(&server, 1, "issue-1").await;
-    mock_github::mount_create_task_success(
-        &server,
-        OWNER,
-        REPO,
-        "task-1",
-        "https://github.com/tasks/1",
-    )
-    .await;
-    mock_github::mount_add_comment_success(&server).await;
-
-    let (source, handle) = make_source();
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    let reaction = build_reaction_with_expected_user_id(&server.uri(), "4021243");
 
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_id("success-core")
-            .with_source(source)
-            .with_query(
-                Query::cypher(QUERY)
-                    .query(launch_query_str())
-                    .from_source(SOURCE)
-                    .with_outbox_capacity(100)
-                    .auto_start(true)
-                    .build(),
-            )
-            .with_reaction(reaction)
-            .with_state_store_provider(store.clone())
-            .build()
-            .await
-            .expect("build core"),
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-happy").await;
+    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+
+    assert!(
+        wait_until(|| async { github.create_comment_calls() == 1 }, 5000).await,
+        "the ExecutionStarted comment was never posted"
     );
-    core.start().await.expect("start core");
-    tokio::time::sleep(WARMUP).await;
 
-    let version = CONTENT_VERSION.to_string();
-    insert_row(
-        &handle,
-        "issue-1",
-        "route-1",
-        "resp-1",
+    assert_eq!(github.create_task_calls(), 1, "exactly one task creation");
+    assert_eq!(github.task_count(), 1, "exactly one task recorded");
+    assert_eq!(
+        github.create_comment_calls(),
         1,
-        "gpt-5",
-        Some("gpt-4"),
-        REPOSITORY,
-        &version,
-        "AwaitingValidation",
-    )
-    .await;
+        "exactly one comment write"
+    );
 
-    wait_until(
-        || async { mock_github::count_create_task_requests(&server, OWNER, REPO).await == 1 },
-        5000,
-    )
-    .await;
-    wait_until(
-        || async { mock_github::count_add_comment_requests(&server).await == 1 },
-        5000,
-    )
-    .await;
+    // The reaction's comment must be byte-identical to an independently rendered
+    // canonical ExecutionStarted event.
+    let bodies = github.comment_bodies();
+    assert_eq!(bodies.len(), 2, "seeded assignment plus the new comment");
+    assert_eq!(
+        bodies[1],
+        execution_started_body(ISSUE_BODY, FIRST_TASK_ID),
+        "the posted comment must be the canonical WorkGraphEvent/v1 body"
+    );
 
-    let exec_id = execution_id(REACTION, "route-1", "resp-1", 1);
-    let event_id = expected_event_id(&exec_id, "CompletedIssueValidation");
-    let record = load(store.as_ref(), REACTION, "route-1", "resp-1", 1)
-        .await
-        .expect("load ok")
-        .expect("record exists");
-    assert_eq!(record.execution_id, exec_id);
-    assert_eq!(record.expected_event_id, event_id);
-    assert_eq!(record.status, ExecutionStatus::Started);
-    assert!(record.comment_posted);
-    assert_eq!(record.task_id.as_deref(), Some("task-1"));
-    assert_eq!(record.model_used.as_deref(), Some("gpt-5"));
-    assert!(!record.used_fallback);
-    let requests = mock_github::create_task_request_bodies(&server, OWNER, REPO).await;
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0]["custom_agent"], "issue-validator");
-    assert_eq!(requests[0]["model"], "gpt-5");
-    assert_eq!(requests[0]["base_ref"], "main");
-    assert_eq!(requests[0]["create_pull_request"], false);
-    let prompt = requests[0]["prompt"].as_str().expect("prompt is a string");
-    assert!(prompt.contains(&event_id));
-    for field in [
-        "projectItemNodeId",
-        "subjectNodeId",
-        "subjectNumber",
+    // The reporter prompt must carry only subjectNumber and executionId.
+    let prompts = github.task_prompts();
+    assert_eq!(prompts.len(), 1);
+    let prompt = &prompts[0];
+    assert!(
+        prompt.contains(&SUBJECT_NUMBER.to_string()),
+        "carries the number"
+    );
+    assert!(
+        prompt.contains(&execution_for(ISSUE_BODY)),
+        "carries the execution id"
+    );
+    for forbidden in [
+        PROJECT_ITEM_NODE_ID,
+        PROJECT_NODE_ID,
+        SUBJECT_NODE_ID,
+        "run:",
         "routeId",
         "responsibilityId",
-        "executionId",
-        "expectedEventId",
-        "contentVersion",
         "profileRef",
+        "AwaitingRouting",
     ] {
         assert!(
-            prompt.contains(&format!("\"{field}\"")),
-            "prompt target missing {field}"
+            !prompt.contains(forbidden),
+            "prompt must not carry the value '{forbidden}'"
         );
     }
-    let target_json = prompt
-        .split("```json\n")
-        .nth(1)
-        .and_then(|block| block.split("\n```").next())
-        .expect("prompt contains a fenced target");
-    let target: serde_json::Value =
-        serde_json::from_str(target_json).expect("target is valid JSON");
-    let target_fields: std::collections::BTreeSet<&str> = target
-        .as_object()
-        .expect("target is an object")
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(
-        target_fields,
-        std::collections::BTreeSet::from([
-            "projectItemNodeId",
-            "subjectNodeId",
-            "subjectNumber",
-            "routeId",
-            "responsibilityId",
-            "executionId",
-            "expectedEventId",
-            "contentVersion",
-            "profileRef",
-        ])
-    );
-    assert!(prompt.contains("`workgraph/report_completion` exactly once"));
-    let comments = mock_github::add_comment_bodies(&server).await;
-    assert_eq!(comments.len(), 1);
-    let comment = &comments[0];
-    let actual_fields: std::collections::BTreeSet<&str> = comment
-        .as_object()
-        .expect("execution comment is an object")
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(
-        actual_fields,
-        std::collections::BTreeSet::from([
-            "schemaVersion",
-            "messageType",
-            "routeId",
-            "responsibilityId",
-            "executionId",
-            "expectedEventId",
-            "requiredEventType",
-            "taskId",
-            "taskUrl",
-            "agentProfile",
-            "profileRef",
-            "requestedModel",
-            "actualModel",
-            "state",
-            "startedAt",
-        ])
-    );
-    assert_eq!(comment["schemaVersion"], "workgraph.execution/v1");
-    assert_eq!(comment["messageType"], "execution");
-    assert_eq!(comment["executionId"], exec_id);
-    assert_eq!(comment["expectedEventId"], event_id);
-    assert_eq!(comment["requestedModel"], "gpt-5");
-    assert_eq!(comment["actualModel"], "gpt-5");
-    assert_eq!(comment["state"], "started");
+
+    let record = load(&store, ISSUE_BODY).await.expect("record exists");
+    assert!(record.is_complete());
+    assert_eq!(record.task_id.as_deref(), Some(FIRST_TASK_ID));
+    assert_eq!(record.model_used.as_deref(), Some(REQUESTED_MODEL));
+    assert!(!record.used_fallback);
+    assert!(record.comment_node_id.is_some());
 
     core.stop().await.expect("stop core");
 }
 
+// ---------------------------------------------------------------------
+// 2. Duplicate delivery of the same row must not write twice.
+// ---------------------------------------------------------------------
 #[tokio::test]
 #[ignore]
-async fn startup_rejects_untrusted_numeric_github_identity() {
+async fn duplicate_delivery_creates_one_task_and_one_comment() {
     let server = MockServer::start().await;
-    mock_github::mount_authenticated_user(&server, 99).await;
-    let (source, _handle) = make_source();
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    let reaction = CopilotAgentTaskReaction::builder(REACTION)
-        .with_query(QUERY)
-        .with_github_api_base_url(server.uri())
-        .with_github_graphql_url(format!("{}/graphql", server.uri()))
-        .with_token("ghp_test_token_do_not_log")
-        .with_expected_github_user_id("4021243")
-        .with_allowed_repositories(vec![REPOSITORY.to_string()])
-        .with_allowed_profiles(vec!["issue-validator".to_string()])
-        .with_allowed_models(vec!["gpt-5".to_string()])
-        .build()
-        .expect("reaction builds");
-    let core = DrasiLib::builder()
-        .with_id("identity-mismatch-core")
-        .with_source(source)
-        .with_query(
-            Query::cypher(QUERY)
-                .query(launch_query_str())
-                .from_source(SOURCE)
-                .with_outbox_capacity(100)
-                .auto_start(true)
-                .build(),
-        )
-        .with_reaction(reaction)
-        .with_state_store_provider(store)
-        .build()
-        .await
-        .expect("build core");
 
-    let error = core.start().await.expect_err("identity mismatch must fail");
-    assert!(format!("{error:#}").contains("expected 4021243, authenticated as 99"));
-    assert_eq!(
-        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
-        0
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-duplicate").await;
+    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    assert!(
+        wait_until(|| async { github.create_comment_calls() == 1 }, 5000).await,
+        "the first launch never completed"
     );
-    assert_eq!(mock_github::count_add_comment_requests(&server).await, 0);
+
+    // A second, distinct row for the same run identity: the durable record must
+    // suppress every side effect.
+    insert_launch_row(&handle, "candidate-2", &run_id_for(ISSUE_BODY), None).await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    assert_eq!(github.create_task_calls(), 1, "no second task");
+    assert_eq!(github.create_comment_calls(), 1, "no second comment");
+    assert_eq!(github.task_count(), 1);
+    core.stop().await.expect("stop core");
 }
 
 // ---------------------------------------------------------------------
-// 2. Validation: disallowed repository never launches.
+// 3. A current body whose digest no longer matches runId: zero side effects.
 // ---------------------------------------------------------------------
 #[tokio::test]
 #[ignore]
-async fn validation_rejects_disallowed_repository_and_never_launches() {
+async fn stale_body_digest_yields_zero_side_effects() {
+    const EDITED: &str = "This issue body was edited after the assignment.\n";
     let server = MockServer::start().await;
-    // No preflight or create-task mocks are mounted for the disallowed repo:
-    // if the reaction incorrectly attempted to launch, the request would go
-    // unmatched and the assertions below would fail.
-
-    let (source, handle) = make_source();
+    // GitHub now serves an edited body, but the row still nominates the run
+    // derived from the original body.
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(EDITED)).await;
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    let reaction = build_reaction(&server.uri());
 
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_id("validation-core")
-            .with_source(source)
-            .with_query(
-                Query::cypher(QUERY)
-                    .query(launch_query_str())
-                    .from_source(SOURCE)
-                    .with_outbox_capacity(100)
-                    .auto_start(true)
-                    .build(),
-            )
-            .with_reaction(reaction)
-            .with_state_store_provider(store.clone())
-            .build()
-            .await
-            .expect("build core"),
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-stale").await;
+    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    assert_eq!(github.create_task_calls(), 0, "no task on a stale digest");
+    assert_eq!(
+        github.create_comment_calls(),
+        0,
+        "no comment on a stale digest"
     );
-    core.start().await.expect("start core");
-    tokio::time::sleep(WARMUP).await;
+    assert!(
+        load(&store, ISSUE_BODY).await.is_none(),
+        "no durable record may be created before the digest is bound"
+    );
+    core.stop().await.expect("stop core");
+}
 
-    insert_row(
+// ---------------------------------------------------------------------
+// 4. No trusted assignment comment at all: zero side effects.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn missing_assignment_yields_zero_side_effects() {
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-noassign").await;
+    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    assert_eq!(github.create_task_calls(), 0);
+    assert_eq!(github.create_comment_calls(), 0);
+    assert!(load(&store, ISSUE_BODY).await.is_none());
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 5. An assignment authored by an untrusted user ID is never adopted.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn untrusted_author_assignment_is_ignored() {
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    github.seed_comment(
+        &assignment_body(ISSUE_BODY),
+        &MockAuthor::untrusted(),
+        false,
+    );
+    // The trusted numeric database ID under the wrong actor type is not the
+    // trusted author either.
+    github.seed_comment(
+        &assignment_body(ISSUE_BODY),
+        &MockAuthor::wrong_actor_type(),
+        false,
+    );
+    // Neither is this reaction's own identity: it may not write its own
+    // assignment.
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::launcher(), false);
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-untrusted").await;
+    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    assert_eq!(github.create_task_calls(), 0);
+    assert_eq!(github.create_comment_calls(), 0);
+    assert!(load(&store, ISSUE_BODY).await.is_none());
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 6. An edited trusted assignment is never adopted.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn edited_assignment_is_ignored() {
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), true);
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-edited").await;
+    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    assert_eq!(github.create_task_calls(), 0);
+    assert_eq!(github.create_comment_calls(), 0);
+    assert!(load(&store, ISSUE_BODY).await.is_none());
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 7. Two trusted comments claiming one assignment event ID fail closed.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn conflicting_assignments_fail_closed() {
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    // Same run and event type — therefore the same deterministic event ID — but
+    // contradictory profile pins.
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    github.seed_comment(
+        &assignment_body_with_profile(ISSUE_BODY, PROFILE_NAME, &"a".repeat(40)),
+        &MockAuthor::trusted(),
+        false,
+    );
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-conflict").await;
+    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
+
+    assert_eq!(
+        github.create_task_calls(),
+        0,
+        "a contradiction must never be resolved by launching"
+    );
+    assert_eq!(
+        github.create_comment_calls(),
+        0,
+        "no comment on a contradiction"
+    );
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 8. Profile blob SHA drift versus the assignment's pin: zero side effects.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn profile_blob_sha_drift_yields_zero_side_effects() {
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    // The live profile blob moved on since the assignment pinned it.
+    github.set_profile_sha(Some(&"b".repeat(40)));
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-drift").await;
+    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    assert_eq!(github.create_task_calls(), 0);
+    assert_eq!(github.create_comment_calls(), 0);
+    assert!(load(&store, ISSUE_BODY).await.is_none());
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 9. A Project status other than AwaitingValidation: zero side effects.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn wrong_project_status_yields_zero_side_effects() {
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    github.set_status("AwaitingIssueRiskProfiling");
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-status").await;
+    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    assert_eq!(github.create_task_calls(), 0);
+    assert_eq!(github.create_comment_calls(), 0);
+    assert!(load(&store, ISSUE_BODY).await.is_none());
+
+    // The reaction stays healthy: restoring the status lets a good row succeed.
+    github.set_status(mock_github::AWAITING_VALIDATION);
+    insert_launch_row(&handle, "candidate-good", &run_id_for(ISSUE_BODY), None).await;
+    assert!(
+        wait_until(|| async { github.create_comment_calls() == 1 }, 5000).await,
+        "a permanent rejection must not wedge the reaction"
+    );
+    assert_eq!(github.create_task_calls(), 1);
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 10. Exactly-once model fallback on a clearly-unsupported-model 422.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn exactly_once_model_fallback_on_unsupported_model() {
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    github.add_unsupported_model(REQUESTED_MODEL);
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-fallback").await;
+    insert_launch_row(
         &handle,
-        "issue-2",
-        "route-2",
-        "resp-2",
+        "candidate-1",
+        &run_id_for(ISSUE_BODY),
+        Some(FALLBACK_MODEL),
+    )
+    .await;
+
+    assert!(
+        wait_until(|| async { github.create_comment_calls() == 1 }, 5000).await,
+        "the fallback launch never completed"
+    );
+    assert_eq!(
+        github.create_task_calls(),
         2,
-        "gpt-5",
-        None,
-        "other-org/other-repo",
-        "any-version",
-        "AwaitingValidation",
-    )
-    .await;
-
-    wait_until(
-        || async {
-            async {
-                load(store.as_ref(), REACTION, "route-2", "resp-2", 1)
-                    .await
-                    .unwrap()
-                    .is_some()
-            }
-            .await
-        },
-        5000,
-    )
-    .await;
-
-    let record = load(store.as_ref(), REACTION, "route-2", "resp-2", 1)
-        .await
-        .expect("load ok")
-        .expect("failed record persisted");
-    assert_eq!(record.status, ExecutionStatus::Failed);
-    assert!(record
-        .last_error
-        .unwrap()
-        .contains("not in the allowed-repositories list"));
-    assert_eq!(
-        mock_github::count_create_task_requests(&server, "other-org", "other-repo").await,
-        0
+        "the requested model is tried once, then the fallback exactly once"
     );
+    assert_eq!(github.task_count(), 1, "only the fallback task is recorded");
 
-    core.stop().await.expect("stop core");
-}
-
-// ---------------------------------------------------------------------
-// 3. Fallback: unsupported requested model triggers exactly one fallback.
-// ---------------------------------------------------------------------
-#[tokio::test]
-#[ignore]
-async fn fallback_used_exactly_once_on_unsupported_model() {
-    let server = MockServer::start().await;
-    mount_happy_path_preflight(&server, 3, "issue-3").await;
-    mock_github::mount_create_task_unsupported_model(
-        &server,
-        OWNER,
-        REPO,
-        "gpt-5",
-        "task-fb",
-        "https://github.com/tasks/fb",
-    )
-    .await;
-    mock_github::mount_add_comment_success(&server).await;
-
-    let (source, handle) = make_source();
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    let reaction = build_reaction(&server.uri());
-
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_id("fallback-core")
-            .with_source(source)
-            .with_query(
-                Query::cypher(QUERY)
-                    .query(launch_query_str())
-                    .from_source(SOURCE)
-                    .with_outbox_capacity(100)
-                    .auto_start(true)
-                    .build(),
-            )
-            .with_reaction(reaction)
-            .with_state_store_provider(store.clone())
-            .build()
-            .await
-            .expect("build core"),
-    );
-    core.start().await.expect("start core");
-    tokio::time::sleep(WARMUP).await;
-
-    let version = CONTENT_VERSION.to_string();
-    insert_row(
-        &handle,
-        "issue-3",
-        "route-3",
-        "resp-3",
-        3,
-        "gpt-5",
-        Some("gpt-4"),
-        REPOSITORY,
-        &version,
-        "AwaitingValidation",
-    )
-    .await;
-
-    wait_until(
-        || async { mock_github::count_create_task_requests(&server, OWNER, REPO).await == 2 },
-        5000,
-    )
-    .await;
-    wait_until(
-        || async { mock_github::count_add_comment_requests(&server).await == 1 },
-        5000,
-    )
-    .await;
-
-    let record = load(store.as_ref(), REACTION, "route-3", "resp-3", 1)
-        .await
-        .expect("load ok")
-        .expect("record exists");
-    assert_eq!(record.status, ExecutionStatus::Started);
+    let record = load(&store, ISSUE_BODY).await.expect("record exists");
+    assert!(record.is_complete());
     assert!(record.used_fallback);
-    assert_eq!(record.model_used.as_deref(), Some("gpt-4"));
-    assert_eq!(record.task_id.as_deref(), Some("task-fb"));
-    let comments = mock_github::add_comment_bodies(&server).await;
-    assert_eq!(comments.len(), 1);
-    assert_eq!(comments[0]["requestedModel"], "gpt-5");
-    assert_eq!(comments[0]["actualModel"], "gpt-4");
-
-    core.stop().await.expect("stop core");
-}
-
-#[tokio::test]
-#[ignore]
-async fn fallback_model_is_durable_before_ambiguous_transport_outcome() {
-    let server = MockServer::start().await;
-    mount_happy_path_preflight(&server, 30, "issue-30").await;
-    mock_github::mount_fallback_transport_timeout(&server, OWNER, REPO, "gpt-5", "gpt-4").await;
-
-    let (source, handle) = make_source();
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    let reaction = build_reaction_with_timeout(&server.uri(), 25);
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_id("fallback-timeout-core")
-            .with_source(source)
-            .with_query(
-                Query::cypher(QUERY)
-                    .query(launch_query_str())
-                    .from_source(SOURCE)
-                    .with_outbox_capacity(100)
-                    .auto_start(true)
-                    .build(),
-            )
-            .with_reaction(reaction)
-            .with_state_store_provider(store.clone())
-            .build()
-            .await
-            .expect("build core"),
-    );
-    core.start().await.expect("start core");
-    tokio::time::sleep(WARMUP).await;
-
-    insert_row(
-        &handle,
-        "issue-30",
-        "route-30",
-        "resp-30",
-        30,
-        "gpt-5",
-        Some("gpt-4"),
-        REPOSITORY,
-        CONTENT_VERSION,
-        "AwaitingValidation",
-    )
-    .await;
-
-    wait_until(
-        || async {
-            load(store.as_ref(), REACTION, "route-30", "resp-30", 1)
-                .await
-                .unwrap()
-                .is_some_and(|record| record.status == ExecutionStatus::Ambiguous)
-        },
-        5000,
-    )
-    .await;
-    let record = load(store.as_ref(), REACTION, "route-30", "resp-30", 1)
-        .await
-        .expect("load state")
-        .expect("execution exists");
-    assert_eq!(record.model_used.as_deref(), Some("gpt-4"));
-    assert!(record.used_fallback);
-    assert!(record.request_time.is_some());
-    assert_eq!(
-        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
-        2
-    );
-
+    assert_eq!(record.model_used.as_deref(), Some(FALLBACK_MODEL));
     core.stop().await.expect("stop core");
 }
 
 // ---------------------------------------------------------------------
-// 4. No fallback: a non-model-related 422 never triggers a fallback retry.
+// 11. An unrelated 422 is never retried with the fallback model.
 // ---------------------------------------------------------------------
 #[tokio::test]
 #[ignore]
 async fn no_fallback_on_unrelated_422() {
     let server = MockServer::start().await;
-    mount_happy_path_preflight(&server, 4, "issue-4").await;
-    mock_github::mount_create_task_permanent_422(
-        &server,
-        OWNER,
-        REPO,
-        "Validation failed: base_ref does not exist",
-    )
-    .await;
-
-    let (source, handle) = make_source();
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    let reaction = build_reaction(&server.uri());
-
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_id("no-fallback-core")
-            .with_source(source)
-            .with_query(
-                Query::cypher(QUERY)
-                    .query(launch_query_str())
-                    .from_source(SOURCE)
-                    .with_outbox_capacity(100)
-                    .auto_start(true)
-                    .build(),
-            )
-            .with_reaction(reaction)
-            .with_state_store_provider(store.clone())
-            .build()
-            .await
-            .expect("build core"),
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    github.force_task_status(
+        422,
+        serde_json::json!({ "message": "Validation failed: base_ref does not exist" }),
     );
-    core.start().await.expect("start core");
-    tokio::time::sleep(WARMUP).await;
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
-    let version = CONTENT_VERSION.to_string();
-    insert_row(
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-unrelated").await;
+    insert_launch_row(
         &handle,
-        "issue-4",
-        "route-4",
-        "resp-4",
-        4,
-        "gpt-5",
-        Some("gpt-4"),
-        REPOSITORY,
-        &version,
-        "AwaitingValidation",
+        "candidate-1",
+        &run_id_for(ISSUE_BODY),
+        Some(FALLBACK_MODEL),
     )
     .await;
 
-    wait_until(
-        || async {
-            async {
-                load(store.as_ref(), REACTION, "route-4", "resp-4", 1)
+    assert!(
+        wait_until(
+            || async {
+                load(&store, ISSUE_BODY)
                     .await
-                    .unwrap()
-                    .map(|r| r.status == ExecutionStatus::Failed)
-                    .unwrap_or(false)
-            }
-            .await
-        },
-        5000,
-    )
-    .await;
-
-    // Exactly one create-task call: no fallback retry was attempted.
-    assert_eq!(
-        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
-        1
+                    .is_some_and(|record| record.status == ExecutionStatus::Failed)
+            },
+            5000
+        )
+        .await,
+        "an unrelated 422 must be recorded as a permanent failure"
     );
-    let record = load(store.as_ref(), REACTION, "route-4", "resp-4", 1)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!record.used_fallback);
-
-    core.stop().await.expect("stop core");
-}
-
-// ---------------------------------------------------------------------
-// 5. Duplicate delivery: the same (routeId, responsibilityId) delivered
-//    twice (e.g. a duplicate upstream emission) only launches once.
-// ---------------------------------------------------------------------
-#[tokio::test]
-#[ignore]
-async fn duplicate_delivery_launches_only_once() {
-    let server = MockServer::start().await;
-    mount_happy_path_preflight(&server, 5, "issue-5a").await;
-    mock_github::mount_create_task_success(
-        &server,
-        OWNER,
-        REPO,
-        "task-dup",
-        "https://github.com/tasks/dup",
-    )
-    .await;
-    mock_github::mount_add_comment_success(&server).await;
-
-    let (source, handle) = make_source();
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    let reaction = build_reaction(&server.uri());
-
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_id("dup-core")
-            .with_source(source)
-            .with_query(
-                Query::cypher(QUERY)
-                    .query(launch_query_str())
-                    .from_source(SOURCE)
-                    .with_outbox_capacity(100)
-                    .auto_start(true)
-                    .build(),
-            )
-            .with_reaction(reaction)
-            .with_state_store_provider(store.clone())
-            .build()
-            .await
-            .expect("build core"),
-    );
-    core.start().await.expect("start core");
-    tokio::time::sleep(WARMUP).await;
-
-    let version = CONTENT_VERSION.to_string();
-    insert_row(
-        &handle,
-        "issue-5a",
-        "route-5",
-        "resp-5",
-        5,
-        "gpt-5",
-        None,
-        REPOSITORY,
-        &version,
-        "AwaitingValidation",
-    )
-    .await;
-    wait_until(
-        || async { mock_github::count_create_task_requests(&server, OWNER, REPO).await == 1 },
-        5000,
-    )
-    .await;
-    wait_until(
-        || async { mock_github::count_add_comment_requests(&server).await == 1 },
-        5000,
-    )
-    .await;
-
-    // Same routeId/responsibilityId delivered again under a different node
-    // id (simulating a duplicate upstream emission at a new sequence).
-    insert_row(
-        &handle,
-        "issue-5b",
-        "route-5",
-        "resp-5",
-        5,
-        "gpt-5",
-        None,
-        REPOSITORY,
-        &version,
-        "AwaitingValidation",
-    )
-    .await;
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-
     assert_eq!(
-        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
+        github.create_task_calls(),
         1,
-        "duplicate delivery must not create a second task"
+        "an unrelated 422 must not trigger the fallback model"
     );
     assert_eq!(
-        mock_github::count_add_comment_requests(&server).await,
-        1,
-        "duplicate delivery must not post a second comment"
-    );
-
-    core.stop().await.expect("stop core");
-}
-
-#[tokio::test]
-#[ignore]
-async fn completed_duplicate_survives_all_allowlist_narrowing() {
-    let server = MockServer::start().await;
-    let (source, handle) = make_source();
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-
-    let exec_id = execution_id(REACTION, "route-narrowed", "resp-narrowed", 1);
-    let mut completed = ExecutionRecord::new_reserved(
-        "route-narrowed",
-        "resp-narrowed",
-        1,
-        &exec_id,
-        "evt-narrowed",
-        "CompletedIssueValidation",
-        REPOSITORY,
-        55,
-        "I_issue-narrowed",
-        "issue-validator",
-        &format!("issue-validator@{PROFILE_SHA}"),
-        "gpt-5",
-        None,
-    );
-    completed.status = ExecutionStatus::Started;
-    completed.model_used = Some("gpt-5".to_string());
-    completed.task_id = Some("task-preserved".to_string());
-    completed.task_url = Some("https://github.com/tasks/preserved".to_string());
-    completed.request_time = Some(chrono::Utc::now());
-    completed.comment_posted = true;
-    save(store.as_ref(), REACTION, &completed)
-        .await
-        .expect("seed completed execution");
-
-    let reaction = CopilotAgentTaskReaction::builder(REACTION)
-        .with_query(QUERY)
-        .with_github_api_base_url(server.uri())
-        .with_github_graphql_url(format!("{}/graphql", server.uri()))
-        .with_token("ghp_test_token_do_not_log")
-        .with_allowed_repositories(vec!["other-org/other-repo".to_string()])
-        .with_allowed_profiles(vec!["other-profile".to_string()])
-        .with_allowed_models(vec!["other-model".to_string()])
-        .build()
-        .expect("narrowed reaction builds");
-
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_id("narrowed-duplicate-core")
-            .with_source(source)
-            .with_query(
-                Query::cypher(QUERY)
-                    .query(launch_query_str())
-                    .from_source(SOURCE)
-                    .with_outbox_capacity(100)
-                    .auto_start(true)
-                    .build(),
-            )
-            .with_reaction(reaction)
-            .with_state_store_provider(store.clone())
-            .build()
-            .await
-            .expect("build core"),
-    );
-    core.start().await.expect("start core");
-    tokio::time::sleep(WARMUP).await;
-
-    insert_row(
-        &handle,
-        "issue-narrowed",
-        "route-narrowed",
-        "resp-narrowed",
-        55,
-        "gpt-5",
-        None,
-        REPOSITORY,
-        CONTENT_VERSION,
-        "AwaitingValidation",
-    )
-    .await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    let preserved = load(
-        store.as_ref(),
-        REACTION,
-        "route-narrowed",
-        "resp-narrowed",
-        1,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(preserved.status, ExecutionStatus::Started);
-    assert!(preserved.comment_posted);
-    assert_eq!(preserved.task_id.as_deref(), Some("task-preserved"));
-    assert_eq!(
-        preserved.task_url.as_deref(),
-        Some("https://github.com/tasks/preserved")
-    );
-    assert_eq!(
-        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
-        0
-    );
-    assert_eq!(mock_github::count_add_comment_requests(&server).await, 0);
-
-    core.stop().await.expect("stop core");
-}
-
-// ---------------------------------------------------------------------
-// 6. Crash/recovery boundary: a record left in `Starting` (simulating a
-//    crash between reservation and confirmed task creation) is reconciled
-//    — not blindly retried — the next time the row is processed.
-// ---------------------------------------------------------------------
-#[tokio::test]
-#[ignore]
-async fn crash_recovery_adopts_exactly_one_existing_task() {
-    let server = MockServer::start().await;
-    mount_happy_path_preflight(&server, 6, "issue-6").await;
-    let exec_id = execution_id(REACTION, "route-6", "resp-6", 1);
-    mock_github::mount_list_tasks(
-        &server,
-        OWNER,
-        REPO,
-        vec![json!({
-            "id": "task-recovered",
-            "html_url": "https://github.com/tasks/rec",
-            "prompt": format!("...{exec_id}...")
-        })],
-    )
-    .await;
-    mock_github::mount_add_comment_success(&server).await;
-
-    let (source, handle) = make_source();
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-
-    // Pre-seed a `Starting` record — simulating a crash right after the
-    // durable reservation was marked Starting but before task creation was
-    // confirmed, and before the checkpoint advanced (so this row will be
-    // redelivered on "restart").
-    let mut record = ExecutionRecord::new_reserved(
-        "route-6",
-        "resp-6",
-        1,
-        &exec_id,
-        "evt-issue-6",
-        "CompletedIssueValidation",
-        REPOSITORY,
-        6,
-        "I_issue-6",
-        "issue-validator",
-        &format!("issue-validator@{PROFILE_SHA}"),
-        "gpt-5",
-        None,
-    );
-    record.status = ExecutionStatus::Starting;
-    save(store.as_ref(), REACTION, &record)
-        .await
-        .expect("seed Starting record");
-
-    let reaction = build_reaction(&server.uri());
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_id("crash-recovery-core")
-            .with_source(source)
-            .with_query(
-                Query::cypher(QUERY)
-                    .query(launch_query_str())
-                    .from_source(SOURCE)
-                    .with_outbox_capacity(100)
-                    .auto_start(true)
-                    .build(),
-            )
-            .with_reaction(reaction)
-            .with_state_store_provider(store.clone())
-            .build()
-            .await
-            .expect("build core"),
-    );
-    core.start().await.expect("start core");
-    tokio::time::sleep(WARMUP).await;
-
-    let version = CONTENT_VERSION.to_string();
-    insert_row(
-        &handle,
-        "issue-6",
-        "route-6",
-        "resp-6",
-        6,
-        "gpt-5",
-        None,
-        REPOSITORY,
-        &version,
-        "AwaitingValidation",
-    )
-    .await;
-
-    wait_until(
-        || async { mock_github::count_add_comment_requests(&server).await == 1 },
-        5000,
-    )
-    .await;
-
-    let record = load(store.as_ref(), REACTION, "route-6", "resp-6", 1)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(record.status, ExecutionStatus::Started);
-    assert_eq!(record.task_id.as_deref(), Some("task-recovered"));
-    assert_eq!(
-        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
+        github.create_comment_calls(),
         0,
-        "recovery must adopt the correlated task without creating another"
+        "a failed task posts no comment"
     );
-
     core.stop().await.expect("stop core");
 }
 
 // ---------------------------------------------------------------------
-// 7. Ambiguous reconciliation: no correlated task is visible in the recent
-//    listing. Absence is not proof that creation failed, so the reaction
-//    stays Ambiguous and never launches a duplicate.
+// 12. An ambiguous task creation is persisted and posts no comment.
 // ---------------------------------------------------------------------
 #[tokio::test]
 #[ignore]
-async fn ambiguous_reconciliation_with_no_match_never_retries() {
+async fn ambiguous_task_creation_persists_and_posts_no_comment() {
     let server = MockServer::start().await;
-    mount_happy_path_preflight(&server, 7, "issue-7").await;
-
-    let (source, handle) = make_source();
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
     let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
 
-    let exec_id = execution_id(REACTION, "route-7", "resp-7", 1);
-    mock_github::mount_list_tasks(&server, OWNER, REPO, vec![]).await;
+    // The server records the task but the response never arrives inside the
+    // client timeout, so the create outcome is ambiguous.
+    github.set_create_task_delay(Some(Duration::from_millis(1500)));
 
-    let mut record = ExecutionRecord::new_reserved(
-        "route-7",
-        "resp-7",
-        1,
-        &exec_id,
-        "evt-issue-7",
-        "CompletedIssueValidation",
-        REPOSITORY,
-        7,
-        "I_issue-7",
-        "issue-validator",
-        &format!("issue-validator@{PROFILE_SHA}"),
-        "gpt-5",
-        None,
-    );
-    record.status = ExecutionStatus::Starting;
-    save(store.as_ref(), REACTION, &record)
-        .await
-        .expect("seed Starting record");
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-ambiguous").await;
+    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
 
-    let reaction = build_reaction(&server.uri());
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_id("ambiguous-core")
-            .with_source(source)
-            .with_query(
-                Query::cypher(QUERY)
-                    .query(launch_query_str())
-                    .from_source(SOURCE)
-                    .with_outbox_capacity(100)
-                    .auto_start(true)
-                    .build(),
-            )
-            .with_reaction(reaction)
-            .with_state_store_provider(store.clone())
-            .build()
-            .await
-            .expect("build core"),
-    );
-    core.start().await.expect("start core");
-    tokio::time::sleep(WARMUP).await;
-
-    let version = CONTENT_VERSION.to_string();
-    insert_row(
-        &handle,
-        "issue-7",
-        "route-7",
-        "resp-7",
-        7,
-        "gpt-5",
-        None,
-        REPOSITORY,
-        &version,
-        "AwaitingValidation",
-    )
-    .await;
-
-    wait_until(
-        || async {
-            async {
-                load(store.as_ref(), REACTION, "route-7", "resp-7", 1)
+    assert!(
+        wait_until(
+            || async {
+                load(&store, ISSUE_BODY)
                     .await
-                    .unwrap()
-                    .map(|r| r.status == ExecutionStatus::Ambiguous)
-                    .unwrap_or(false)
-            }
-            .await
-        },
-        5000,
-    )
-    .await;
-
-    // Never blindly retried creation.
-    assert_eq!(
-        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
-        0
+                    .is_some_and(|record| record.status == ExecutionStatus::Ambiguous)
+            },
+            5000
+        )
+        .await,
+        "the ambiguous outcome was not persisted"
     );
-    // Confirm reconciliation actually ran (not just that status ended up
-    // Ambiguous by some other path): the specific "candidate tasks matched"
-    // wording only comes from the `ReconciliationOutcome::Ambiguous` arm in
-    // `reconcile_and_resume`.
-    let record = load(store.as_ref(), REACTION, "route-7", "resp-7", 1)
+    let record = load(&store, ISSUE_BODY).await.expect("record exists");
+    assert!(record.ambiguous);
+    assert!(
+        record.task_id.is_none(),
+        "an unconfirmed task is not durable"
+    );
+    assert_eq!(github.create_task_calls(), 1);
+    assert_eq!(github.task_count(), 1, "the task did land on the server");
+    assert_eq!(
+        github.create_comment_calls(),
+        0,
+        "no comment while unconfirmed"
+    );
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 13. A restart after that ambiguity adopts the single correlated task and
+//     posts exactly one comment.
+//
+// A restart is modelled the way the durability contract defines it: the durable
+// record and GitHub survive, the in-process query outbox does not. That is
+// reproduced here by pre-seeding the ambiguous record and the landed task, then
+// starting a single fresh core.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn restart_after_ambiguous_adopts_task_and_posts_one_comment() {
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    // The write the previous process could not confirm did in fact land: a task
+    // whose prompt carries this run's execution ID exists on the server.
+    let digest = body_digest(Some(ISSUE_BODY));
+    let run = run_id(PROJECT_ITEM_NODE_ID, SUBJECT_NODE_ID, &digest);
+    let execution = execution_id(run.as_str());
+    let started_event_id = event_id(&run, WorkGraphEventType::ExecutionStarted);
+    let seeded_task_id = github.seed_task(&build_prompt(SUBJECT_NUMBER, execution.as_str()));
+
+    // ...and the previous process left an ambiguous intent record behind.
+    let row = LaunchRow {
+        repository: REPOSITORY.to_string(),
+        subject_number: SUBJECT_NUMBER,
+        subject_node_id: SUBJECT_NODE_ID.to_string(),
+        project_node_id: PROJECT_NODE_ID.to_string(),
+        project_item_node_id: PROJECT_ITEM_NODE_ID.to_string(),
+        run_id: run.as_str().to_string(),
+        requested_model: REQUESTED_MODEL.to_string(),
+        fallback_model: None,
+        base_ref: BASE_REF.to_string(),
+    };
+    let mut seeded = ExecutionRecord::new(
+        run.as_str(),
+        started_event_id.as_str(),
+        execution.as_str(),
+        &row,
+        digest.as_str(),
+        &format!("{PROFILE_NAME}@{PROFILE_BLOB_SHA}"),
+    );
+    seeded.set_attempt_model(REQUESTED_MODEL, false);
+    seeded.set_ambiguous("create task outcome ambiguous (transport error)");
+    create_record_if_absent(store.clone(), REACTION, &seeded)
         .await
-        .unwrap()
-        .unwrap();
+        .expect("seed ambiguous record");
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-restart").await;
+    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+
     assert!(
-        record
-            .last_error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("0 candidate tasks matched executionId"),
-        "expected reconciliation's ambiguous-match error, got {:?}",
-        record.last_error
+        wait_until(|| async { github.create_comment_calls() == 1 }, 5000).await,
+        "the restart never adopted the task and posted the comment"
     );
-    // The reaction stopped for manual/automatic intervention (Strict policy).
-    wait_until(
-        || async {
-            async {
-                matches!(
-                    core.get_reaction_status(REACTION).await,
-                    Ok(ComponentStatus::Error)
-                )
-            }
-            .await
-        },
-        5000,
-    )
-    .await;
-
-    core.stop().await.expect("stop core");
-}
-
-// ---------------------------------------------------------------------
-// 8. GraphQL errors: an HTTP 200 response carrying `errors` is treated as
-//    a failure, both for the Project-status preflight query and for the
-//    `addComment` mutation.
-// ---------------------------------------------------------------------
-#[tokio::test]
-#[ignore]
-async fn graphql_errors_on_project_status_are_treated_as_failure() {
-    let server = MockServer::start().await;
-    mock_github::mount_issue(&server, OWNER, REPO, 8, "open", "I_issue-8").await;
-    mock_github::mount_contents(&server, OWNER, REPO, PROFILE_SHA).await;
-    mock_github::mount_project_status_graphql_error(&server, "Something went wrong").await;
-
-    let (source, handle) = make_source();
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    let reaction = build_reaction(&server.uri());
-
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_id("graphql-error-core")
-            .with_source(source)
-            .with_query(
-                Query::cypher(QUERY)
-                    .query(launch_query_str())
-                    .from_source(SOURCE)
-                    .with_outbox_capacity(100)
-                    .auto_start(true)
-                    .build(),
-            )
-            .with_reaction(reaction)
-            .with_state_store_provider(store.clone())
-            .build()
-            .await
-            .expect("build core"),
-    );
-    core.start().await.expect("start core");
-    tokio::time::sleep(WARMUP).await;
-
-    let version = CONTENT_VERSION.to_string();
-    insert_row(
-        &handle,
-        "issue-8",
-        "route-8",
-        "resp-8",
-        8,
-        "gpt-5",
-        None,
-        REPOSITORY,
-        &version,
-        "AwaitingValidation",
-    )
-    .await;
-
-    // Treated as a transient preflight failure: the reaction stops (Strict)
-    // without creating a task, rather than proceeding past the GraphQL error.
-    wait_until(
-        || async {
-            async {
-                matches!(
-                    core.get_reaction_status(REACTION).await,
-                    Ok(ComponentStatus::Error)
-                )
-            }
-            .await
-        },
-        5000,
-    )
-    .await;
     assert_eq!(
-        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
-        0
+        github.create_task_calls(),
+        0,
+        "the existing task must be adopted, not re-created"
     );
+    assert_eq!(github.task_count(), 1, "no duplicate task");
+
+    let record = load(&store, ISSUE_BODY).await.expect("record exists");
+    assert!(record.is_complete());
+    assert!(!record.ambiguous);
+    assert_eq!(record.task_id.as_deref(), Some(seeded_task_id.as_str()));
+
+    // The adopted-task comment is still the canonical body for that task.
+    let bodies = github.comment_bodies();
+    assert_eq!(
+        bodies.last().map(String::as_str),
+        Some(execution_started_body(ISSUE_BODY, &seeded_task_id).as_str())
+    );
+    core.stop().await.expect("stop core");
+}
+
+// ---------------------------------------------------------------------
+// 14. A pre-existing ExecutionStarted comment that claims this event ID but
+//     carries different content is never adopted.
+//
+// `eventId` hashes the run and the event type only — it does not cover the
+// payload — so a lone divergent comment would otherwise be mistaken for this
+// reaction's own completed write and the run would be marked complete against
+// a task it never launched.
+// ---------------------------------------------------------------------
+#[tokio::test]
+#[ignore]
+async fn a_divergent_preexisting_execution_started_is_never_adopted() {
+    let server = MockServer::start().await;
+    let github = mock_github::mount(&server, SUBJECT_NODE_ID, Some(ISSUE_BODY)).await;
+    github.seed_comment(&assignment_body(ISSUE_BODY), &MockAuthor::trusted(), false);
+    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    // The task for this execution already exists, so it is adopted and the run
+    // reaches the comment step with no task write.
+    let digest = body_digest(Some(ISSUE_BODY));
+    let run = run_id(PROJECT_ITEM_NODE_ID, SUBJECT_NODE_ID, &digest);
+    let execution = execution_id(run.as_str());
+    let seeded_task_id = github.seed_task(&build_prompt(SUBJECT_NUMBER, execution.as_str()));
+
+    // A trusted, unedited comment written by *this* reaction's identity that
+    // carries the intended ExecutionStarted event ID but names another task.
+    let divergent = WorkGraphEvent::new(
+        run.clone(),
+        PROJECT_ITEM_NODE_ID,
+        SUBJECT_NODE_ID,
+        WorkGraphEventPayload::ExecutionStarted(ExecutionStartedPayload {
+            execution_id: execution.clone(),
+            task_id: "task-somebody-elses".to_string(),
+        }),
+    )
+    .expect("event");
+    let divergent_body = render_comment(
+        &divergent,
+        &summary_for(
+            &divergent,
+            SubjectRef {
+                repository: REPOSITORY,
+                number: SUBJECT_NUMBER,
+            },
+        ),
+    )
+    .expect("render");
+    assert_ne!(
+        divergent_body,
+        execution_started_body(ISSUE_BODY, &seeded_task_id),
+        "the payloads must differ"
+    );
+    github.seed_comment(&divergent_body, &MockAuthor::launcher(), false);
+
+    let (core, handle) = start_core(&server.uri(), store.clone(), "copilot-divergent").await;
+    insert_launch_row(&handle, "candidate-1", &run_id_for(ISSUE_BODY), None).await;
+
+    assert!(
+        wait_for_halt(&core).await,
+        "a divergent published event must fail closed, not be skipped; \
+         the reaction is still {:?}",
+        reaction_status(&core).await
+    );
+    assert_eq!(
+        github.create_comment_calls(),
+        0,
+        "a divergent published event must halt, not be re-posted"
+    );
+    assert_eq!(github.create_task_calls(), 0, "the task was adopted");
+    assert_eq!(github.task_count(), 1, "no second task may be created");
+    assert_eq!(
+        github.comment_bodies().len(),
+        2,
+        "no further comment may be written"
+    );
+
+    let record = load(&store, ISSUE_BODY).await.expect("intent is durable");
+    assert!(
+        record.comment_node_id.is_none(),
+        "the divergent comment must never be recorded as ours"
+    );
+    assert!(!record.is_complete(), "the run must not be marked complete");
 
     core.stop().await.expect("stop core");
 }
 
+// ---------------------------------------------------------------------
+// 15. The token is sent to GitHub but redacted in Debug output.
+// ---------------------------------------------------------------------
 #[tokio::test]
 #[ignore]
-async fn graphql_errors_on_add_comment_are_treated_as_failure() {
+async fn token_is_sent_to_github_but_redacted_in_debug() {
     let server = MockServer::start().await;
-    mount_happy_path_preflight(&server, 9, "issue-9").await;
-    mock_github::mount_create_task_success(
-        &server,
-        OWNER,
-        REPO,
-        "task-9",
-        "https://github.com/tasks/9",
-    )
-    .await;
-    mock_github::mount_add_comment_graphql_error(&server, "subjectId is not commentable").await;
+    Mock::given(method("GET"))
+        .and(path("/user"))
+        .and(header("authorization", format!("Bearer {TEST_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": LAUNCHER_AUTHOR_DATABASE_ID,
+            "login": "launcher"
+        })))
+        .mount(&server)
+        .await;
 
-    let (source, handle) = make_source();
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    let reaction = build_reaction(&server.uri());
+    let client = GitHubClient::new(GitHubConfig {
+        api_base_url: server.uri(),
+        graphql_url: format!("{}/graphql", server.uri()),
+        agent_tasks_api_version: "2026-03-10".to_string(),
+        token: TEST_TOKEN.to_string(),
+        request_timeout_ms: 2000,
+    })
+    .expect("client builds");
 
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_id("comment-graphql-error-core")
-            .with_source(source)
-            .with_query(
-                Query::cypher(QUERY)
-                    .query(launch_query_str())
-                    .from_source(SOURCE)
-                    .with_outbox_capacity(100)
-                    .auto_start(true)
-                    .build(),
-            )
-            .with_reaction(reaction)
-            .with_state_store_provider(store.clone())
-            .build()
-            .await
-            .expect("build core"),
-    );
-    core.start().await.expect("start core");
-    tokio::time::sleep(WARMUP).await;
-
-    let version = CONTENT_VERSION.to_string();
-    insert_row(
-        &handle,
-        "issue-9",
-        "route-9",
-        "resp-9",
-        9,
-        "gpt-5",
-        None,
-        REPOSITORY,
-        &version,
-        "AwaitingValidation",
-    )
-    .await;
-
-    // The task IS created (recorded Started) but the comment failure stops
-    // the reaction before comment_posted is set — the task is never
-    // recreated on any subsequent attempt.
-    wait_until(
-        || async {
-            async {
-                load(store.as_ref(), REACTION, "route-9", "resp-9", 1)
-                    .await
-                    .unwrap()
-                    .map(|r| r.task_id.is_some())
-                    .unwrap_or(false)
-            }
-            .await
-        },
-        5000,
-    )
-    .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let record = load(store.as_ref(), REACTION, "route-9", "resp-9", 1)
+    // The `/user` route only answers when the Bearer token is actually sent.
+    let id = client
+        .authenticated_user_id()
         .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(record.status, ExecutionStatus::Started);
-    assert!(
-        !record.comment_posted,
-        "comment must not be marked posted on GraphQL error"
-    );
-    assert_eq!(
-        mock_github::count_create_task_requests(&server, OWNER, REPO).await,
-        1
-    );
+        .expect("token must be sent so the request is authorized");
+    assert_eq!(id, LAUNCHER_AUTHOR_DATABASE_ID.to_string());
 
-    core.stop().await.expect("stop core");
+    let debug = format!("{client:?}");
+    assert!(
+        !debug.contains(TEST_TOKEN),
+        "Debug output must not leak the token"
+    );
+    assert!(
+        debug.contains("[REDACTED]"),
+        "Debug output must mark the token as redacted"
+    );
 }
 
-// ---------------------------------------------------------------------
-// 9. Secret redaction: the reaction sends the correct bearer token to
-//    GitHub (proving auth actually works) while never exposing it via
-//    `Debug`. Full redaction-logic coverage lives in `config.rs` /
-//    `redact.rs` unit tests; this asserts the wiring end to end.
-// ---------------------------------------------------------------------
-#[tokio::test]
-#[ignore]
-async fn token_is_sent_to_github_but_never_exposed_via_debug() {
-    let server = MockServer::start().await;
-    mount_happy_path_preflight(&server, 10, "issue-10").await;
-    mock_github::mount_create_task_success(
-        &server,
-        OWNER,
-        REPO,
-        "task-10",
-        "https://github.com/tasks/10",
-    )
-    .await;
-    mock_github::mount_add_comment_success(&server).await;
-
-    let (source, handle) = make_source();
-    let store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStoreProvider::new());
-    let reaction = build_reaction(&server.uri());
-
-    // `properties()` is the framework's config-persistence hook and is
-    // *intentionally* lossless (it must include secrets so the reaction can
-    // be recreated identically on restart — see `Reaction::properties()`
-    // docs). It is not a log-safe or display surface. Redaction instead
-    // applies to `Debug`/log output, covered by
-    // `CopilotAgentTaskReactionConfig`'s and `GitHubClient`'s `Debug` impls
-    // (unit-tested in `config.rs` / `github.rs`); this test additionally
-    // confirms the token still reaches GitHub correctly (below).
-    assert_eq!(
-        reaction.properties().get("token"),
-        Some(&serde_json::Value::String(
-            "ghp_test_token_do_not_log".to_string()
-        )),
-        "properties() must retain the token for lossless config persistence"
-    );
-
-    // `Debug`/log-safe surfaces, in contrast, must redact it.
-    let github_config_debug = format!(
-        "{:?}",
-        drasi_reaction_copilot_agent_task::github::GitHubConfig {
-            api_base_url: server.uri(),
-            graphql_url: format!("{}/graphql", server.uri()),
-            agent_tasks_api_version: drasi_reaction_copilot_agent_task::AGENT_TASKS_API_VERSION
-                .to_string(),
-            token: "ghp_test_token_do_not_log".to_string(),
-            request_timeout_ms: 1000,
-        }
-    );
-    assert!(!github_config_debug.contains("ghp_test_token_do_not_log"));
-    assert!(github_config_debug.contains("[REDACTED]"));
-
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_id("redaction-core")
-            .with_source(source)
-            .with_query(
-                Query::cypher(QUERY)
-                    .query(launch_query_str())
-                    .from_source(SOURCE)
-                    .with_outbox_capacity(100)
-                    .auto_start(true)
-                    .build(),
-            )
-            .with_reaction(reaction)
-            .with_state_store_provider(store.clone())
-            .build()
-            .await
-            .expect("build core"),
-    );
-    core.start().await.expect("start core");
-    tokio::time::sleep(WARMUP).await;
-
-    let version = CONTENT_VERSION.to_string();
-    insert_row(
-        &handle,
-        "issue-10",
-        "route-10",
-        "resp-10",
-        10,
-        "gpt-5",
-        None,
-        REPOSITORY,
-        &version,
-        "AwaitingValidation",
-    )
-    .await;
-
-    wait_until(
-        || async { mock_github::count_create_task_requests(&server, OWNER, REPO).await == 1 },
-        5000,
-    )
-    .await;
-
-    // The mock server actually received the bearer token (auth wiring
-    // works) even though it never appears in any Debug/log-safe output.
-    let received = server.received_requests().await.unwrap_or_default();
-    let saw_bearer = received.iter().any(|r| {
-        r.headers
-            .get("Authorization")
-            .map(|v| v.to_str().unwrap_or_default() == "Bearer ghp_test_token_do_not_log")
-            .unwrap_or(false)
-    });
-    assert!(
-        saw_bearer,
-        "expected at least one request with the bearer token"
-    );
-
-    core.stop().await.expect("stop core");
-}
+/// Keep the shared-state type referenced even when a test subset is filtered out.
+#[allow(dead_code)]
+fn _assert_state_type(_: &GithubState) {}

@@ -12,14 +12,534 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Shared wiremock helpers standing in for the GitHub REST + GraphQL API.
+//! A small stateful GitHub stand-in for Copilot Agent Task integration tests.
+//!
+//! It models the parts of GitHub the reaction actually depends on: an issue
+//! with an authoritative body, a pinned agent-profile blob, an append-only
+//! comment list, a Project item with a single-select status, and the agent-task
+//! list/create endpoints. Statefulness is what lets the tests exercise task
+//! adoption after an ambiguous write and comment idempotency across restarts.
 
+#![allow(dead_code)]
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use drasi_workgraph_common::trust::ActorType;
 use serde_json::{json, Value};
 use wiremock::matchers::{body_string_contains, method, path, path_regex};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
+pub const OWNER: &str = "drasi-project";
+pub const REPO: &str = "drasi-core";
+pub const REPOSITORY: &str = "drasi-project/drasi-core";
+pub const PROJECT_NODE_ID: &str = "PVT_project";
+pub const PROJECT_ITEM_NODE_ID: &str = "PVTI_item";
+pub const STATUS_FIELD_NODE_ID: &str = "PVTSSF_status";
+pub const AWAITING_VALIDATION: &str = "AwaitingValidation";
+pub const PROFILE_NAME: &str = "issue-validator";
+pub const PROFILE_BLOB_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+pub const ISSUE_NODE_ID: &str = "I_issue";
+pub const ISSUE_NUMBER: u64 = 742;
+/// One comment author as GitHub reports it.
+///
+/// Trust compares the numeric database ID and the actor type only. The node ID
+/// is audit data (GitHub may even omit it) and the login is display-only, so
+/// both deliberately vary between fixtures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockAuthor {
+    pub node_id: Option<String>,
+    pub database_id: u64,
+    pub actor_type: ActorType,
+    pub login: String,
+}
+
+impl MockAuthor {
+    fn new(node_id: Option<&str>, database_id: u64, actor_type: ActorType, login: &str) -> Self {
+        Self {
+            node_id: node_id.map(ToString::to_string),
+            database_id,
+            actor_type,
+            login: login.to_string(),
+        }
+    }
+
+    /// The identity the reaction is configured to trust.
+    pub fn trusted() -> Self {
+        Self::new(
+            Some(TRUSTED_AUTHOR_NODE_ID),
+            TRUSTED_AUTHOR_DATABASE_ID,
+            ActorType::Bot,
+            "workgraph-bot",
+        )
+    }
+
+    /// A completely different account.
+    pub fn untrusted() -> Self {
+        Self::new(Some("U_kgDOintruder"), 66, ActorType::User, "mallory")
+    }
+
+    /// The trusted account with the audit-only node ID absent: still trusted,
+    /// because the node ID never participates in a trust decision.
+    pub fn trusted_without_node_id() -> Self {
+        Self::new(
+            None,
+            TRUSTED_AUTHOR_DATABASE_ID,
+            ActorType::Bot,
+            "workgraph-bot",
+        )
+    }
+
+    /// The trusted numeric database ID under the wrong actor type.
+    pub fn wrong_actor_type() -> Self {
+        Self::new(
+            Some(TRUSTED_AUTHOR_NODE_ID),
+            TRUSTED_AUTHOR_DATABASE_ID,
+            ActorType::User,
+            "workgraph-bot",
+        )
+    }
+
+    /// The trusted identity under a renamed login (trust must be unaffected).
+    pub fn trusted_renamed() -> Self {
+        Self::new(
+            Some(TRUSTED_AUTHOR_NODE_ID),
+            TRUSTED_AUTHOR_DATABASE_ID,
+            ActorType::Bot,
+            "renamed-since",
+        )
+    }
+
+    /// The identity this reaction itself posts under, which is a *different*
+    /// account from the one that writes assignments.
+    pub fn launcher() -> Self {
+        Self::new(
+            Some(LAUNCHER_AUTHOR_NODE_ID),
+            LAUNCHER_AUTHOR_DATABASE_ID,
+            ActorType::Bot,
+            "workgraph-launcher",
+        )
+    }
+
+    fn to_user_json(&self) -> Value {
+        let mut user = json!({
+            "id": self.database_id,
+            "type": self.actor_type.as_str(),
+            "login": self.login,
+        });
+        if let Some(node_id) = &self.node_id {
+            user["node_id"] = json!(node_id);
+        }
+        user
+    }
+}
+
+/// The audit-only node ID of the trusted account.
+pub const TRUSTED_AUTHOR_NODE_ID: &str = "U_kgDOworkgraph";
+/// One half of the trust key: the trusted account's numeric database ID.
+pub const TRUSTED_AUTHOR_DATABASE_ID: u64 = 4_021_243;
+/// The other half of the trust key.
+pub const TRUSTED_AUTHOR_TYPE: ActorType = ActorType::Bot;
+
+/// The audit-only node ID of the account this reaction posts under.
+pub const LAUNCHER_AUTHOR_NODE_ID: &str = "U_kgDOlauncher";
+/// The numeric database ID of the account this reaction posts under.
+pub const LAUNCHER_AUTHOR_DATABASE_ID: u64 = 90_210;
+/// The actor type of the account this reaction posts under.
+pub const LAUNCHER_AUTHOR_TYPE: ActorType = ActorType::Bot;
+
+/// Shared mutable GitHub state.
+#[derive(Clone)]
+pub struct GithubState {
+    pub comments: Arc<Mutex<Vec<Value>>>,
+    pub tasks: Arc<Mutex<Vec<Value>>>,
+    pub status: Arc<Mutex<String>>,
+    pub issue_body: Arc<Mutex<Option<String>>>,
+    pub issue_state: Arc<Mutex<String>>,
+    pub issue_node_id: Arc<Mutex<String>>,
+    pub profile_sha: Arc<Mutex<Option<String>>>,
+    pub unsupported_models: Arc<Mutex<Vec<String>>>,
+    pub forced_task_status: Arc<Mutex<Option<(u16, Value)>>>,
+    comment_seq: Arc<AtomicUsize>,
+    task_seq: Arc<AtomicUsize>,
+    create_comment_calls: Arc<AtomicUsize>,
+    create_task_calls: Arc<AtomicUsize>,
+    list_task_calls: Arc<AtomicUsize>,
+    comment_delay: Arc<Mutex<Option<Duration>>>,
+    task_delay: Arc<Mutex<Option<Duration>>>,
+}
+
+impl GithubState {
+    fn new(issue_node_id: &str, body: Option<&str>) -> Self {
+        Self {
+            comments: Arc::new(Mutex::new(Vec::new())),
+            tasks: Arc::new(Mutex::new(Vec::new())),
+            status: Arc::new(Mutex::new(AWAITING_VALIDATION.to_string())),
+            issue_body: Arc::new(Mutex::new(body.map(ToString::to_string))),
+            issue_state: Arc::new(Mutex::new("open".to_string())),
+            issue_node_id: Arc::new(Mutex::new(issue_node_id.to_string())),
+            profile_sha: Arc::new(Mutex::new(Some(PROFILE_BLOB_SHA.to_string()))),
+            unsupported_models: Arc::new(Mutex::new(Vec::new())),
+            forced_task_status: Arc::new(Mutex::new(None)),
+            comment_seq: Arc::new(AtomicUsize::new(0)),
+            task_seq: Arc::new(AtomicUsize::new(0)),
+            create_comment_calls: Arc::new(AtomicUsize::new(0)),
+            create_task_calls: Arc::new(AtomicUsize::new(0)),
+            list_task_calls: Arc::new(AtomicUsize::new(0)),
+            comment_delay: Arc::new(Mutex::new(None)),
+            task_delay: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Number of `POST .../comments` calls that reached the server.
+    pub fn create_comment_calls(&self) -> usize {
+        self.create_comment_calls.load(Ordering::SeqCst)
+    }
+
+    /// Number of `POST .../tasks` calls that reached the server.
+    pub fn create_task_calls(&self) -> usize {
+        self.create_task_calls.load(Ordering::SeqCst)
+    }
+
+    /// Number of `GET .../tasks` calls that reached the server.
+    pub fn list_task_calls(&self) -> usize {
+        self.list_task_calls.load(Ordering::SeqCst)
+    }
+
+    /// Current Project status.
+    pub fn status(&self) -> String {
+        self.status.lock().expect("status lock").clone()
+    }
+
+    /// Number of agent tasks recorded (created or seeded).
+    pub fn task_count(&self) -> usize {
+        self.tasks.lock().expect("tasks lock").len()
+    }
+
+    /// Every task prompt currently recorded.
+    pub fn task_prompts(&self) -> Vec<String> {
+        self.tasks
+            .lock()
+            .expect("tasks lock")
+            .iter()
+            .map(|task| task["prompt"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// Every comment body currently on the issue.
+    pub fn comment_bodies(&self) -> Vec<String> {
+        self.comments
+            .lock()
+            .expect("comments lock")
+            .iter()
+            .map(|comment| comment["body"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// Delay the create-comment *response* while still recording the write.
+    pub fn set_create_comment_delay(&self, delay: Option<Duration>) {
+        *self.comment_delay.lock().expect("delay lock") = delay;
+    }
+
+    /// Delay the create-task *response* while still recording the task. This is
+    /// how an ambiguous write is simulated: the server accepts the task but the
+    /// client times out before it sees the response.
+    pub fn set_create_task_delay(&self, delay: Option<Duration>) {
+        *self.task_delay.lock().expect("task delay lock") = delay;
+    }
+
+    /// Mark a model so that creating a task with it returns a clearly
+    /// "unsupported model" 422.
+    pub fn add_unsupported_model(&self, model: &str) {
+        self.unsupported_models
+            .lock()
+            .expect("model lock")
+            .push(model.to_string());
+    }
+
+    /// Force the next create-task calls to return a specific status + JSON body
+    /// regardless of model (used to exercise unrelated 4xx/5xx handling).
+    pub fn force_task_status(&self, status: u16, body: Value) {
+        *self.forced_task_status.lock().expect("forced lock") = Some((status, body));
+    }
+
+    /// Replace the authoritative issue body.
+    pub fn set_issue_body(&self, body: Option<&str>) {
+        *self.issue_body.lock().expect("body lock") = body.map(ToString::to_string);
+    }
+
+    /// Replace the issue state (`open` / `closed`).
+    pub fn set_issue_state(&self, state: &str) {
+        *self.issue_state.lock().expect("state lock") = state.to_string();
+    }
+
+    /// Replace the issue node ID reported by GitHub.
+    pub fn set_issue_node_id(&self, node_id: &str) {
+        *self.issue_node_id.lock().expect("node lock") = node_id.to_string();
+    }
+
+    /// Replace the Project status.
+    pub fn set_status(&self, status: &str) {
+        *self.status.lock().expect("status lock") = status.to_string();
+    }
+
+    /// Replace the profile blob SHA (`None` => the file 404s).
+    pub fn set_profile_sha(&self, sha: Option<&str>) {
+        *self.profile_sha.lock().expect("profile lock") = sha.map(ToString::to_string);
+    }
+
+    /// Seed a pre-existing comment authored by `user_id`.
+    pub fn seed_comment(&self, body: &str, author: &MockAuthor, edited: bool) -> String {
+        let index = self.comment_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let node_id = format!("IC_seed{index}");
+        self.comments
+            .lock()
+            .expect("comments lock")
+            .push(comment_value(&node_id, body, author, edited));
+        node_id
+    }
+
+    /// Seed a pre-existing agent task whose prompt is `prompt`.
+    pub fn seed_task(&self, prompt: &str) -> String {
+        let index = self.task_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let id = format!("task-seed-{index}");
+        self.tasks.lock().expect("tasks lock").push(json!({
+            "id": id,
+            "html_url": format!("https://github.com/{OWNER}/{REPO}/agents/tasks/{id}"),
+            "prompt": prompt,
+        }));
+        id
+    }
+}
+
+fn comment_value(node_id: &str, body: &str, author: &MockAuthor, edited: bool) -> Value {
+    json!({
+        "id": 1,
+        "node_id": node_id,
+        "body": body,
+        "user": author.to_user_json(),
+        "created_at": "2026-08-14T00:00:00Z",
+        "updated_at": if edited { "2026-08-14T01:00:00Z" } else { "2026-08-14T00:00:00Z" },
+    })
+}
+
+struct IssueResponder(GithubState);
+
+impl Respond for IssueResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let body = self.0.issue_body.lock().expect("body lock").clone();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "node_id": *self.0.issue_node_id.lock().expect("node lock"),
+            "state": *self.0.issue_state.lock().expect("state lock"),
+            "number": ISSUE_NUMBER,
+            "body": body,
+        }))
+    }
+}
+
+struct ContentsResponder(GithubState);
+
+impl Respond for ContentsResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        match self.0.profile_sha.lock().expect("profile lock").clone() {
+            Some(sha) => ResponseTemplate::new(200).set_body_json(json!({
+                "sha": sha,
+                "path": format!(".github/agents/{PROFILE_NAME}.agent.md"),
+            })),
+            None => ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })),
+        }
+    }
+}
+
+struct ListCommentsResponder(GithubState);
+
+impl Respond for ListCommentsResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let comments = self.0.comments.lock().expect("comments lock").clone();
+        ResponseTemplate::new(200).set_body_json(Value::Array(comments))
+    }
+}
+
+struct CreateCommentResponder(GithubState);
+
+impl Respond for CreateCommentResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        self.0.create_comment_calls.fetch_add(1, Ordering::SeqCst);
+        let payload: Value = serde_json::from_slice(&request.body).expect("comment body is JSON");
+        let body = payload["body"].as_str().unwrap_or_default().to_string();
+        let index = self.0.comment_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let node_id = format!("IC_created{index}");
+        // Comments this reaction posts are authored by its own identity, not
+        // by the account that writes assignments.
+        let value = comment_value(&node_id, &body, &MockAuthor::launcher(), false);
+        self.0
+            .comments
+            .lock()
+            .expect("comments lock")
+            .push(value.clone());
+
+        let response = ResponseTemplate::new(201).set_body_json(value);
+        match *self.0.comment_delay.lock().expect("delay lock") {
+            Some(delay) => response.set_delay(delay),
+            None => response,
+        }
+    }
+}
+
+struct ListTasksResponder(GithubState);
+
+impl Respond for ListTasksResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        self.0.list_task_calls.fetch_add(1, Ordering::SeqCst);
+        let tasks = self.0.tasks.lock().expect("tasks lock").clone();
+        ResponseTemplate::new(200).set_body_json(Value::Array(tasks))
+    }
+}
+
+struct CreateTaskResponder(GithubState);
+
+impl Respond for CreateTaskResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        self.0.create_task_calls.fetch_add(1, Ordering::SeqCst);
+        let payload: Value = serde_json::from_slice(&request.body).expect("task body is JSON");
+        let model = payload["model"].as_str().unwrap_or_default().to_string();
+        let prompt = payload["prompt"].as_str().unwrap_or_default().to_string();
+
+        if let Some((status, body)) = self
+            .0
+            .forced_task_status
+            .lock()
+            .expect("forced lock")
+            .clone()
+        {
+            return ResponseTemplate::new(status).set_body_json(body);
+        }
+
+        if self
+            .0
+            .unsupported_models
+            .lock()
+            .expect("model lock")
+            .iter()
+            .any(|m| m == &model)
+        {
+            return ResponseTemplate::new(422).set_body_json(json!({
+                "message": format!("The model {model} is not supported for this operation."),
+            }));
+        }
+
+        let index = self.0.task_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let id = format!("task-{index}");
+        let html_url = format!("https://github.com/{OWNER}/{REPO}/agents/tasks/{id}");
+        self.0.tasks.lock().expect("tasks lock").push(json!({
+            "id": id,
+            "html_url": html_url,
+            "prompt": prompt,
+        }));
+
+        let response = ResponseTemplate::new(201).set_body_json(json!({
+            "id": id,
+            "html_url": html_url,
+        }));
+        match *self.0.task_delay.lock().expect("task delay lock") {
+            Some(delay) => response.set_delay(delay),
+            None => response,
+        }
+    }
+}
+
+struct ProjectSnapshotResponder(GithubState);
+
+impl Respond for ProjectSnapshotResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let status = self.0.status.lock().expect("status lock").clone();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "project": {
+                    "id": PROJECT_NODE_ID,
+                    "fields": {
+                        "nodes": [
+                            { "id": STATUS_FIELD_NODE_ID, "name": "Status" }
+                        ]
+                    }
+                },
+                "item": {
+                    "id": PROJECT_ITEM_NODE_ID,
+                    "project": { "id": PROJECT_NODE_ID },
+                    "content": {
+                        "__typename": "Issue",
+                        "id": *self.0.issue_node_id.lock().expect("node lock"),
+                        "number": ISSUE_NUMBER,
+                        "repository": { "nameWithOwner": REPOSITORY }
+                    },
+                    "fieldValueByName": { "name": status }
+                }
+            }
+        }))
+    }
+}
+
+/// Mount every endpoint the Copilot Agent Task reaction uses and return the
+/// shared state so tests can seed inputs and assert on recorded writes.
+pub async fn mount(
+    server: &MockServer,
+    issue_node_id: &str,
+    issue_body: Option<&str>,
+) -> GithubState {
+    let state = GithubState::new(issue_node_id, issue_body);
+
+    Mock::given(method("GET"))
+        .and(path(format!("/repos/{OWNER}/{REPO}/issues/{ISSUE_NUMBER}")))
+        .respond_with(IssueResponder(state.clone()))
+        .mount(server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/repos/[^/]+/[^/]+/contents/.*$"))
+        .respond_with(ContentsResponder(state.clone()))
+        .mount(server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/repos/{OWNER}/{REPO}/issues/{ISSUE_NUMBER}/comments"
+        )))
+        .respond_with(ListCommentsResponder(state.clone()))
+        .mount(server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/repos/{OWNER}/{REPO}/issues/{ISSUE_NUMBER}/comments"
+        )))
+        .respond_with(CreateCommentResponder(state.clone()))
+        .mount(server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/agents/repos/{OWNER}/{REPO}/tasks")))
+        .respond_with(ListTasksResponder(state.clone()))
+        .mount(server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path(format!("/agents/repos/{OWNER}/{REPO}/tasks")))
+        .respond_with(CreateTaskResponder(state.clone()))
+        .mount(server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("CopilotAgentTaskProjectSnapshot"))
+        .respond_with(ProjectSnapshotResponder(state.clone()))
+        .mount(server)
+        .await;
+
+    state
+}
+
+/// Mount a `GET /user` responder so the token-owner guard can resolve.
 pub async fn mount_authenticated_user(server: &MockServer, user_id: u64) {
     Mock::given(method("GET"))
         .and(path("/user"))
@@ -29,270 +549,4 @@ pub async fn mount_authenticated_user(server: &MockServer, user_id: u64) {
         })))
         .mount(server)
         .await;
-}
-
-/// Mount a successful `GET /repos/{owner}/{repo}/issues/{n}` responder.
-/// `node_id` is the GraphQL node ID GitHub would report for this issue —
-/// callers must pass the same value used as the launch row's `issueNodeId`
-/// for the preflight cross-check to pass.
-pub async fn mount_issue(
-    server: &MockServer,
-    owner: &str,
-    repo: &str,
-    number: u64,
-    state: &str,
-    node_id: &str,
-) {
-    Mock::given(method("GET"))
-        .and(path(format!("/repos/{owner}/{repo}/issues/{number}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "state": state,
-            "node_id": node_id,
-        })))
-        .mount(server)
-        .await;
-}
-
-/// Mount a `GET /repos/{owner}/{repo}/contents/{path}` responder returning a blob SHA.
-pub async fn mount_contents(server: &MockServer, owner: &str, repo: &str, sha: &str) {
-    Mock::given(method("GET"))
-        .and(path_regex(format!("^/repos/{owner}/{repo}/contents/.*$")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "sha": sha })))
-        .mount(server)
-        .await;
-}
-
-/// Mount the Project (v2) item status GraphQL query responder. `linked_issue_node_id`
-/// is the issue node ID the project item is linked to (`content { ... on Issue { id } }`)
-/// — must match the launch row's `issueNodeId` for the preflight cross-check to pass.
-pub async fn mount_project_status(server: &MockServer, status: &str, linked_issue_node_id: &str) {
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("fieldValueByName"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {
-                "node": {
-                    "fieldValueByName": { "name": status },
-                    "project": {
-                        "id": "PVT_workgraph",
-                        "number": 3,
-                        "owner": { "login": "drasi-project" }
-                    },
-                    "content": {
-                        "id": linked_issue_node_id,
-                        "lastEditedAt": "2026-08-13T19:00:00Z",
-                        "createdAt": "2026-08-01T00:00:00Z"
-                    }
-                }
-            }
-        })))
-        .mount(server)
-        .await;
-}
-
-/// Mount the Project (v2) item status GraphQL query responder returning
-/// top-level GraphQL `errors` (HTTP 200) — must be treated as a failure.
-pub async fn mount_project_status_graphql_error(server: &MockServer, message: &str) {
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("fieldValueByName"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "errors": [{ "message": message }]
-        })))
-        .mount(server)
-        .await;
-}
-
-/// Mount the `addComment` GraphQL mutation responder (success).
-pub async fn mount_add_comment_success(server: &MockServer) {
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("addComment"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": { "addComment": { "commentEdge": { "node": { "id": "IC_kwDOtest" } } } }
-        })))
-        .mount(server)
-        .await;
-}
-
-/// Mount the `addComment` GraphQL mutation responder returning top-level
-/// GraphQL `errors` (HTTP 200) — must be treated as a failure.
-pub async fn mount_add_comment_graphql_error(server: &MockServer, message: &str) {
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .and(body_string_contains("addComment"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "errors": [{ "message": message }]
-        })))
-        .mount(server)
-        .await;
-}
-
-/// Mount the create-task responder returning HTTP 201 with the given id/url.
-pub async fn mount_create_task_success(
-    server: &MockServer,
-    owner: &str,
-    repo: &str,
-    task_id: &str,
-    task_url: &str,
-) {
-    Mock::given(method("POST"))
-        .and(path(format!("/agents/repos/{owner}/{repo}/tasks")))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-            "id": task_id,
-            "html_url": task_url,
-        })))
-        .mount(server)
-        .await;
-}
-
-/// Mount a create-task responder that returns 422 for a specific `model`
-/// value (an "unsupported model" response) and 201 for anything else.
-pub async fn mount_create_task_unsupported_model(
-    server: &MockServer,
-    owner: &str,
-    repo: &str,
-    unsupported_model: &str,
-    task_id: &str,
-    task_url: &str,
-) {
-    Mock::given(method("POST"))
-        .and(path(format!("/agents/repos/{owner}/{repo}/tasks")))
-        .and(body_string_contains(format!("\"model\":\"{unsupported_model}\"")))
-        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
-            "message": format!("The model '{unsupported_model}' is not supported for this operation."),
-        })))
-        .mount(server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path(format!("/agents/repos/{owner}/{repo}/tasks")))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-            "id": task_id,
-            "html_url": task_url,
-        })))
-        .mount(server)
-        .await;
-}
-
-/// Return unsupported-model for the requested model, then delay the fallback
-/// response long enough for a short-timeout client to enter Ambiguous.
-pub async fn mount_fallback_transport_timeout(
-    server: &MockServer,
-    owner: &str,
-    repo: &str,
-    requested_model: &str,
-    fallback_model: &str,
-) {
-    let endpoint = format!("/agents/repos/{owner}/{repo}/tasks");
-    Mock::given(method("POST"))
-        .and(path(endpoint.clone()))
-        .and(body_string_contains(format!(
-            "\"model\":\"{requested_model}\""
-        )))
-        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
-            "message": format!("The model '{requested_model}' is not supported for this operation."),
-        })))
-        .mount(server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path(endpoint))
-        .and(body_string_contains(format!(
-            "\"model\":\"{fallback_model}\""
-        )))
-        .respond_with(
-            ResponseTemplate::new(201)
-                .set_delay(Duration::from_millis(250))
-                .set_body_json(json!({
-                    "id": "task-late",
-                    "html_url": "https://github.com/tasks/late",
-                })),
-        )
-        .mount(server)
-        .await;
-}
-
-/// Mount a create-task responder that always returns a permanent (non-model)
-/// 422 validation error.
-pub async fn mount_create_task_permanent_422(
-    server: &MockServer,
-    owner: &str,
-    repo: &str,
-    message: &str,
-) {
-    Mock::given(method("POST"))
-        .and(path(format!("/agents/repos/{owner}/{repo}/tasks")))
-        .respond_with(ResponseTemplate::new(422).set_body_json(json!({ "message": message })))
-        .mount(server)
-        .await;
-}
-
-/// Mount the task-listing responder used by the reconciliation seam.
-pub async fn mount_list_tasks(server: &MockServer, owner: &str, repo: &str, tasks: Vec<Value>) {
-    Mock::given(method("GET"))
-        .and(path(format!("/agents/repos/{owner}/{repo}/tasks")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(Value::Array(tasks)))
-        .mount(server)
-        .await;
-}
-
-/// Count how many `POST .../tasks` (create-task) requests the server has
-/// received so far (excludes the `GET` listing endpoint).
-pub async fn count_create_task_requests(server: &MockServer, owner: &str, repo: &str) -> usize {
-    let expected_path = format!("/agents/repos/{owner}/{repo}/tasks");
-    server
-        .received_requests()
-        .await
-        .unwrap_or_default()
-        .iter()
-        .filter(|r| r.method.as_str() == "POST" && r.url.path() == expected_path)
-        .count()
-}
-
-pub async fn create_task_request_bodies(
-    server: &MockServer,
-    owner: &str,
-    repo: &str,
-) -> Vec<Value> {
-    let expected_path = format!("/agents/repos/{owner}/{repo}/tasks");
-    server
-        .received_requests()
-        .await
-        .unwrap_or_default()
-        .iter()
-        .filter(|r| r.method.as_str() == "POST" && r.url.path() == expected_path)
-        .map(|r| serde_json::from_slice(&r.body).expect("create-task request must be JSON"))
-        .collect()
-}
-
-/// Count how many `addComment` GraphQL mutations were sent.
-pub async fn count_add_comment_requests(server: &MockServer) -> usize {
-    server
-        .received_requests()
-        .await
-        .unwrap_or_default()
-        .iter()
-        .filter(|r| {
-            r.url.path() == "/graphql" && String::from_utf8_lossy(&r.body).contains("addComment")
-        })
-        .count()
-}
-
-/// Return the pure-JSON issue comment bodies carried by `addComment`.
-pub async fn add_comment_bodies(server: &MockServer) -> Vec<Value> {
-    server
-        .received_requests()
-        .await
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|request| {
-            if request.url.path() != "/graphql"
-                || !String::from_utf8_lossy(&request.body).contains("addComment")
-            {
-                return None;
-            }
-            let request_json: Value = serde_json::from_slice(&request.body).ok()?;
-            let body = request_json["variables"]["body"].as_str()?;
-            serde_json::from_str(body).ok()
-        })
-        .collect()
 }

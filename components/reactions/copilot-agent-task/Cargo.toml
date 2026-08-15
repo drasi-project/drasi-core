@@ -35,6 +35,7 @@ crate-type = ["lib", "cdylib"]
 # intentionally uncompliant for now so the in-repo reaction can build against
 # local drasi-core/drasi-lib changes while it lives in this workspace.
 drasi-lib.workspace = true
+drasi-workgraph-common = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
