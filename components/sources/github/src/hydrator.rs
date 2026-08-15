@@ -17,7 +17,10 @@
 use crate::config::ProjectSpec;
 use crate::graphql::{FetchedRoot, GitHubGraphQLClient};
 use crate::mapping::{map_root_delete_from_snapshot, map_root_diff};
-use crate::types::{HydratorHealth, RootSnapshot, SnapshotElement, WebhookLocator};
+use crate::types::{
+    AbsenceObservation, HydrationTerminalOutcome, HydratorHealth, PendingDelta, ReconcileState,
+    RootSnapshot, SnapshotElement, WebhookLocator,
+};
 use crate::webhook::{compact_dedupe_markers, decode_admission_change, warn_unhealthy_hydrator};
 use anyhow::{Context, Result};
 use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
@@ -33,8 +36,9 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::time::{sleep, Duration};
 
 const ROOT_SNAPSHOT_PREFIX: &str = "root-snapshot:";
-const RECONCILE_INDEX_KEY: &str = "reconcile-index";
+pub(crate) const RECONCILE_STATE_KEY: &str = "reconcile-state";
 const EFFECTIVE_REPOS_KEY: &str = "effective-repos";
+pub(crate) const MAX_NULL_HYDRATION_ATTEMPTS: u32 = 3;
 
 #[derive(Debug)]
 struct RetryableHydrationError(anyhow::Error);
@@ -170,6 +174,7 @@ pub(crate) async fn process_admission(
     }
 
     let _processing_guard = params.processing_gate.lock().await;
+    replay_pending_delta(params.state_store.as_ref(), &params.source_id, &params.base).await?;
 
     if let Some(repo) = locator.repository_full_name.as_ref() {
         if !is_repo_effective(&params.effective_repos, repo).await {
@@ -205,6 +210,14 @@ pub(crate) async fn process_admission(
         })?;
         return Ok(());
     }
+    let mut reconcile_state =
+        load_reconcile_state(params.state_store.as_ref(), &params.source_id).await?;
+    if reconcile_state.terminal_outcomes.contains_key(&sequence) {
+        prune_and_compact(params, sequence)
+            .await
+            .with_context(|| format!("Failed pruning terminal delivery {delivery_id}"))?;
+        return Ok(());
+    }
     let fetched = params
         .api_client
         .fetch_root_from_locator(&locator)
@@ -217,23 +230,91 @@ pub(crate) async fn process_admission(
             )
         })?;
     if fetched.is_none() && !is_authoritative_delete_action(&locator) {
+        if absence_covers(&reconcile_state, &locator, sequence) {
+            record_terminal_outcome(
+                &mut reconcile_state,
+                sequence,
+                &delivery_id,
+                &locator,
+                "reconciled-absence",
+                0,
+            );
+            save_reconcile_state(
+                params.state_store.as_ref(),
+                &params.source_id,
+                &reconcile_state,
+            )
+            .await?;
+            prune_and_compact(params, sequence).await.with_context(|| {
+                format!("Failed to prune reconciled absent delivery {delivery_id} from WAL")
+            })?;
+            return Ok(());
+        }
         if has_later_authoritative_delete(params, sequence, &locator).await? {
             debug!(
                 "[{}] Treating absent stale delivery {} as converged because a later authoritative delete is durable",
                 params.source_id, delivery_id
             );
+            record_terminal_outcome(
+                &mut reconcile_state,
+                sequence,
+                &delivery_id,
+                &locator,
+                "queued-authoritative-delete",
+                0,
+            );
+            save_reconcile_state(
+                params.state_store.as_ref(),
+                &params.source_id,
+                &reconcile_state,
+            )
+            .await?;
             prune_and_compact(params, sequence).await.with_context(|| {
                 format!("Failed to prune stale delivery {delivery_id} from WAL")
             })?;
             return Ok(());
         }
+
+        let attempts = reconcile_state
+            .null_retry_counts
+            .entry(sequence)
+            .and_modify(|attempts| *attempts = attempts.saturating_add(1))
+            .or_insert(1);
+        let attempts = *attempts;
+        if attempts >= MAX_NULL_HYDRATION_ATTEMPTS {
+            record_terminal_outcome(
+                &mut reconcile_state,
+                sequence,
+                &delivery_id,
+                &locator,
+                "gone-before-hydration",
+                attempts,
+            );
+            save_reconcile_state(
+                params.state_store.as_ref(),
+                &params.source_id,
+                &reconcile_state,
+            )
+            .await?;
+            prune_and_compact(params, sequence).await.with_context(|| {
+                format!("Failed to prune gone-before-hydration delivery {delivery_id} from WAL")
+            })?;
+            return Ok(());
+        }
+        save_reconcile_state(
+            params.state_store.as_ref(),
+            &params.source_id,
+            &reconcile_state,
+        )
+        .await?;
         return Err(RetryableHydrationError(anyhow::anyhow!(
-            "GraphQL returned node=null for non-delete action '{}' (event '{}'); treating as transient",
+            "GraphQL returned node=null for non-delete action '{}' (event '{}'); transient attempt {attempts}/{MAX_NULL_HYDRATION_ATTEMPTS}",
             locator.action,
             locator.event_type
         ))
         .into());
     }
+    reconcile_state.null_retry_counts.remove(&sequence);
 
     if let Some(authoritative_repo) = fetched.as_ref().and_then(FetchedRoot::repository_full_name) {
         if !is_repo_effective(&params.effective_repos, authoritative_repo).await {
@@ -318,17 +399,21 @@ pub(crate) async fn process_admission(
             root.root_kind(),
             changes.len()
         );
-        dispatch_changes(&params.base, &params.source_id, changes).await?;
-
-        let mut reconcile_index =
-            load_reconcile_index(params.state_store.as_ref(), &params.source_id).await?;
-        synchronize_reconcile_index(&mut reconcile_index, previous.as_ref(), &next_snapshot);
-        save_reconcile_index(
+        synchronize_reconcile_index(
+            &mut reconcile_state.index,
+            previous.as_ref(),
+            &next_snapshot,
+        );
+        reconcile_state.generation = reconcile_state.generation.saturating_add(1);
+        clear_present_absences(&mut reconcile_state, &next_snapshot);
+        reconcile_state.pending_delta = (!changes.is_empty()).then_some(PendingDelta { changes });
+        save_reconcile_state(
             params.state_store.as_ref(),
             &params.source_id,
-            &reconcile_index,
+            &reconcile_state,
         )
         .await?;
+        replay_pending_delta(params.state_store.as_ref(), &params.source_id, &params.base).await?;
 
         next_snapshot.committed_delivery_id = Some(delivery_id.clone());
         next_snapshot.committed_sequence = Some(sequence);
@@ -340,16 +425,15 @@ pub(crate) async fn process_admission(
         )
         .await?;
     } else {
-        let mut reconcile_index = match reconcile_index_cache.take() {
-            Some(index) => index,
-            None => load_reconcile_index(params.state_store.as_ref(), &params.source_id).await?,
-        };
+        if let Some(index) = reconcile_index_cache.take() {
+            reconcile_state.index = index;
+        }
 
         let (changes, deleted_ids) = map_delete_from_durable_state(
             &params.source_id,
             &locator,
             previous.as_ref(),
-            &reconcile_index,
+            &reconcile_state.index,
             effective_from,
         );
 
@@ -359,19 +443,34 @@ pub(crate) async fn process_admission(
             locator.node_id,
             changes.len()
         );
-        dispatch_changes(&params.base, &params.source_id, changes).await?;
-
-        if !deleted_ids.is_empty() {
-            for id in &deleted_ids {
-                reconcile_index.remove(id);
-            }
-            save_reconcile_index(
-                params.state_store.as_ref(),
-                &params.source_id,
-                &reconcile_index,
-            )
-            .await?;
+        reconcile_state.generation = reconcile_state.generation.saturating_add(1);
+        for id in &deleted_ids {
+            reconcile_state.index.remove(id);
+            reconcile_state.absences.insert(
+                id.clone(),
+                AbsenceObservation {
+                    generation: reconcile_state.generation,
+                    wal_coverage_sequence: sequence,
+                },
+            );
         }
+        if let Some(key) = absence_key_for_locator(&locator) {
+            reconcile_state.absences.insert(
+                key,
+                AbsenceObservation {
+                    generation: reconcile_state.generation,
+                    wal_coverage_sequence: sequence,
+                },
+            );
+        }
+        reconcile_state.pending_delta = (!changes.is_empty()).then_some(PendingDelta { changes });
+        save_reconcile_state(
+            params.state_store.as_ref(),
+            &params.source_id,
+            &reconcile_state,
+        )
+        .await?;
+        replay_pending_delta(params.state_store.as_ref(), &params.source_id, &params.base).await?;
 
         let tombstone = RootSnapshot {
             root_id: locator
@@ -419,24 +518,6 @@ async fn prune_and_compact(params: &HydratorParams, sequence: u64) -> Result<()>
             &params.source_id,
         )
         .await?;
-    }
-    Ok(())
-}
-
-async fn dispatch_changes(
-    base: &SourceBase,
-    source_id: &str,
-    changes: Vec<drasi_core::models::SourceChange>,
-) -> Result<()> {
-    for change in changes {
-        let wrapper = SourceEventWrapper::new(
-            source_id.to_string(),
-            SourceEvent::Change(change),
-            chrono::Utc::now(),
-        );
-        base.dispatch_event(wrapper)
-            .await
-            .context("Failed to dispatch hydrated SourceChange")?;
     }
     Ok(())
 }
@@ -503,6 +584,57 @@ fn synchronize_reconcile_index(
     for (id, element) in &next.elements {
         reconcile_index.insert(id.clone(), element.clone());
     }
+}
+
+fn clear_present_absences(state: &mut ReconcileState, snapshot: &RootSnapshot) {
+    for id in snapshot.elements.keys() {
+        state.absences.remove(id);
+    }
+    if let Some(repo) = snapshot.repository_full_name.as_ref() {
+        state
+            .absences
+            .remove(&format!("repo:{}", repo.to_ascii_lowercase()));
+    }
+}
+
+fn absence_key_for_locator(locator: &WebhookLocator) -> Option<String> {
+    locator
+        .node_id
+        .clone()
+        .or_else(|| locator.project_id.clone())
+        .or_else(|| {
+            locator
+                .repository_full_name
+                .as_ref()
+                .map(|repo| format!("repo:{}", repo.to_ascii_lowercase()))
+        })
+}
+
+fn absence_covers(state: &ReconcileState, locator: &WebhookLocator, sequence: u64) -> bool {
+    absence_key_for_locator(locator)
+        .and_then(|key| state.absences.get(&key))
+        .is_some_and(|observation| observation.wal_coverage_sequence >= sequence)
+}
+
+fn record_terminal_outcome(
+    state: &mut ReconcileState,
+    sequence: u64,
+    delivery_id: &str,
+    locator: &WebhookLocator,
+    reason: &str,
+    attempts: u32,
+) {
+    state.null_retry_counts.remove(&sequence);
+    state.terminal_outcomes.insert(
+        sequence,
+        HydrationTerminalOutcome {
+            delivery_id: delivery_id.to_string(),
+            root_id: absence_key_for_locator(locator),
+            reason: reason.to_string(),
+            attempts,
+            generation: state.generation,
+        },
+    );
 }
 
 fn is_project_event(locator: &WebhookLocator) -> bool {
@@ -923,21 +1055,38 @@ pub async fn delete_root_snapshot(
     Ok(())
 }
 
+pub async fn load_reconcile_state(
+    state_store: &dyn StateStoreProvider,
+    source_id: &str,
+) -> Result<ReconcileState> {
+    let bytes = state_store
+        .get(source_id, RECONCILE_STATE_KEY)
+        .await
+        .map_err(|e| anyhow::anyhow!("state_store.get({RECONCILE_STATE_KEY}) failed: {e}"))?;
+    match bytes {
+        Some(data) => serde_json::from_slice::<ReconcileState>(&data)
+            .context("Failed to parse reconcile state"),
+        None => Ok(ReconcileState::default()),
+    }
+}
+
+pub async fn save_reconcile_state(
+    state_store: &dyn StateStoreProvider,
+    source_id: &str,
+    state: &ReconcileState,
+) -> Result<()> {
+    let payload = serde_json::to_vec(state).context("Failed to serialize reconcile state")?;
+    state_store
+        .set(source_id, RECONCILE_STATE_KEY, payload)
+        .await
+        .map_err(|e| anyhow::anyhow!("state_store.set({RECONCILE_STATE_KEY}) failed: {e}"))
+}
+
 pub async fn load_reconcile_index(
     state_store: &dyn StateStoreProvider,
     source_id: &str,
 ) -> Result<HashMap<String, SnapshotElement>> {
-    let bytes = state_store
-        .get(source_id, RECONCILE_INDEX_KEY)
-        .await
-        .map_err(|e| anyhow::anyhow!("state_store.get({RECONCILE_INDEX_KEY}) failed: {e}"))?;
-    match bytes {
-        Some(data) => Ok(
-            serde_json::from_slice::<HashMap<String, SnapshotElement>>(&data)
-                .context("Failed to parse reconcile index")?,
-        ),
-        None => Ok(HashMap::new()),
-    }
+    Ok(load_reconcile_state(state_store, source_id).await?.index)
 }
 
 pub async fn save_reconcile_index(
@@ -945,11 +1094,107 @@ pub async fn save_reconcile_index(
     source_id: &str,
     index: &HashMap<String, SnapshotElement>,
 ) -> Result<()> {
-    let payload = serde_json::to_vec(index).context("Failed to serialize reconcile index")?;
-    state_store
-        .set(source_id, RECONCILE_INDEX_KEY, payload)
+    let mut state = load_reconcile_state(state_store, source_id).await?;
+    state.generation = state.generation.saturating_add(1);
+    state.index = index.clone();
+    save_reconcile_state(state_store, source_id, &state).await
+}
+
+pub(crate) fn prepare_reconcile_transition(
+    state: &mut ReconcileState,
+    next_index: HashMap<String, SnapshotElement>,
+    changes: Vec<SourceChange>,
+    wal_coverage_sequence: u64,
+) {
+    let generation = state.generation.saturating_add(1);
+    for (id, previous) in &state.index {
+        if previous.element_type != "node" || next_index.contains_key(id) {
+            continue;
+        }
+        let observation = AbsenceObservation {
+            generation,
+            wal_coverage_sequence,
+        };
+        state.absences.insert(id.clone(), observation.clone());
+        if previous
+            .labels
+            .iter()
+            .any(|label| label == "GitHubRepository")
+        {
+            if let Some(repo) = previous
+                .properties
+                .get("nameWithOwner")
+                .and_then(serde_json::Value::as_str)
+            {
+                state
+                    .absences
+                    .insert(format!("repo:{}", repo.to_ascii_lowercase()), observation);
+            }
+        }
+    }
+    for (id, current) in &next_index {
+        state.absences.remove(id);
+        if current
+            .labels
+            .iter()
+            .any(|label| label == "GitHubRepository")
+        {
+            if let Some(repo) = current
+                .properties
+                .get("nameWithOwner")
+                .and_then(serde_json::Value::as_str)
+            {
+                state
+                    .absences
+                    .remove(&format!("repo:{}", repo.to_ascii_lowercase()));
+            }
+        }
+    }
+    state.generation = generation;
+    state.index = next_index;
+    let mut pending_changes = state
+        .pending_delta
+        .take()
+        .map(|pending| pending.changes)
+        .unwrap_or_default();
+    pending_changes.extend(changes);
+    state.pending_delta = (!pending_changes.is_empty()).then_some(PendingDelta {
+        changes: pending_changes,
+    });
+}
+
+pub(crate) async fn replay_pending_delta(
+    state_store: &dyn StateStoreProvider,
+    source_id: &str,
+    source_base: &SourceBase,
+) -> Result<bool> {
+    let mut state = load_reconcile_state(state_store, source_id).await?;
+    let Some(pending) = state.pending_delta.clone() else {
+        return Ok(false);
+    };
+    let events = pending
+        .changes
+        .into_iter()
+        .map(|change| {
+            SourceEventWrapper::new(
+                source_id.to_string(),
+                SourceEvent::Change(change),
+                chrono::Utc::now(),
+            )
+        })
+        .collect();
+    let dispatched_subscribers = source_base
+        .dispatch_events_batch_to_eligible_ready_channel_subscribers(events)
         .await
-        .map_err(|e| anyhow::anyhow!("state_store.set({RECONCILE_INDEX_KEY}) failed: {e}"))
+        .context("Failed dispatching pending reconciliation changes")?;
+    if dispatched_subscribers == 0 {
+        return Ok(false);
+    }
+    state.pending_delta = None;
+    save_reconcile_state(state_store, source_id, &state)
+        .await
+        .context("Failed clearing pending reconciliation delta")?;
+    Ok(true)
 }
 
 pub async fn load_effective_repos(

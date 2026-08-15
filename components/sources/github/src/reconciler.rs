@@ -14,15 +14,17 @@
 
 //! Periodic reconciler for missed changes and project-derived repo scope updates.
 
-use crate::bootstrap::replay_pending_bootstrap_delta;
 use crate::config::ProjectSpec;
 use crate::graphql::GitHubGraphQLClient;
-use crate::hydrator::{load_reconcile_index, save_effective_repos, save_reconcile_index};
+use crate::hydrator::{
+    load_reconcile_state, prepare_reconcile_transition, replay_pending_delta, save_effective_repos,
+    save_reconcile_state,
+};
 use crate::mapping::{map_reconcile_snapshot, repositories_from_project_items};
 use anyhow::{Context, Result};
-use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
 use drasi_lib::sources::base::SourceBase;
 use drasi_lib::state_store::StateStoreProvider;
+use drasi_lib::wal::WalProvider;
 use log::{debug, info, warn};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -33,6 +35,7 @@ pub struct ReconcilerParams {
     pub source_id: String,
     pub base: SourceBase,
     pub state_store: Arc<dyn StateStoreProvider>,
+    pub wal: Arc<dyn WalProvider>,
     pub api_client: Arc<GitHubGraphQLClient>,
     pub projects: Vec<ProjectSpec>,
     pub static_repos: HashSet<String>,
@@ -80,13 +83,12 @@ pub async fn run_reconciler_loop(params: ReconcilerParams) -> Result<()> {
 
 pub(crate) async fn reconcile_once(params: &ReconcilerParams) -> Result<()> {
     let _processing_guard = params.processing_gate.lock().await;
-    replay_pending_bootstrap_delta(
-        params.state_store.as_ref(),
-        &params.source_id,
-        &params.base,
-        None,
-    )
-    .await?;
+    replay_pending_delta(params.state_store.as_ref(), &params.source_id, &params.base).await?;
+    let wal_coverage_sequence = params
+        .wal
+        .head_sequence(&params.source_id)
+        .await
+        .context("Failed reading WAL head for reconcile coverage")?;
 
     let mut dynamic_project_repos = HashSet::new();
     for project in &params.projects {
@@ -132,8 +134,9 @@ pub(crate) async fn reconcile_once(params: &ReconcilerParams) -> Result<()> {
         .await
         .context("Failed fetching full reconcile snapshot")?;
 
-    let previous_index =
-        load_reconcile_index(params.state_store.as_ref(), &params.source_id).await?;
+    let mut reconcile_state =
+        load_reconcile_state(params.state_store.as_ref(), &params.source_id).await?;
+    let previous_index = reconcile_state.index.clone();
     let effective_from = chrono::Utc::now().timestamp_millis().max(0) as u64;
     let (changes, next_index) = map_reconcile_snapshot(
         &params.source_id,
@@ -142,22 +145,18 @@ pub(crate) async fn reconcile_once(params: &ReconcilerParams) -> Result<()> {
         effective_from,
     );
 
-    if !changes.is_empty() {
-        let mut wrappers = Vec::with_capacity(changes.len());
-        for change in changes {
-            wrappers.push(SourceEventWrapper::new(
-                params.source_id.clone(),
-                SourceEvent::Change(change),
-                chrono::Utc::now(),
-            ));
-        }
-        params
-            .base
-            .dispatch_events_batch(wrappers)
-            .await
-            .context("Failed dispatching reconcile changes")?;
-    }
-
-    save_reconcile_index(params.state_store.as_ref(), &params.source_id, &next_index).await?;
+    prepare_reconcile_transition(
+        &mut reconcile_state,
+        next_index,
+        changes,
+        wal_coverage_sequence,
+    );
+    save_reconcile_state(
+        params.state_store.as_ref(),
+        &params.source_id,
+        &reconcile_state,
+    )
+    .await?;
+    replay_pending_delta(params.state_store.as_ref(), &params.source_id, &params.base).await?;
     Ok(())
 }

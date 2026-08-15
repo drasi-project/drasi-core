@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use drasi_core::models::SourceChange;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -75,4 +76,45 @@ pub struct SnapshotElement {
     pub properties: serde_json::Value,
     pub in_node_id: Option<String>,
     pub out_node_id: Option<String>,
+}
+
+/// Single durable owner of reconciliation, hydration, and replay state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconcileState {
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub index: HashMap<String, SnapshotElement>,
+    #[serde(default)]
+    pub pending_delta: Option<PendingDelta>,
+    #[serde(default)]
+    pub absences: HashMap<String, AbsenceObservation>,
+    #[serde(default)]
+    pub null_retry_counts: HashMap<u64, u32>,
+    #[serde(default)]
+    pub terminal_outcomes: HashMap<u64, HydrationTerminalOutcome>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingDelta {
+    pub changes: Vec<SourceChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AbsenceObservation {
+    pub generation: u64,
+    pub wal_coverage_sequence: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HydrationTerminalOutcome {
+    pub delivery_id: String,
+    pub root_id: Option<String>,
+    pub reason: String,
+    pub attempts: u32,
+    pub generation: u64,
 }

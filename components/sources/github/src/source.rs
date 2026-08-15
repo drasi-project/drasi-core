@@ -14,11 +14,12 @@
 
 //! Authorized GitHub source implementation.
 
-use crate::bootstrap::{replay_pending_bootstrap_delta, GitHubBootstrapProvider};
+use crate::bootstrap::GitHubBootstrapProvider;
 use crate::config::GitHubSourceConfig;
 use crate::graphql::GitHubGraphQLClient;
 use crate::hydrator::{
-    load_effective_repos, run_hydrator_loop, save_effective_repos, HydratorParams,
+    load_effective_repos, replay_pending_delta, run_hydrator_loop, save_effective_repos,
+    HydratorParams,
 };
 use crate::mapping::{node_labels, relation_labels};
 use crate::reconciler::{run_reconciler_loop, ReconcilerParams};
@@ -248,6 +249,7 @@ impl Source for GitHubSource {
             source_id: self.base.id.clone(),
             base: self.base.clone_shared(),
             state_store,
+            wal,
             api_client,
             projects: self.config.projects.clone(),
             static_repos: self.config.static_repository_set().unwrap_or_default(),
@@ -337,11 +339,11 @@ impl Source for GitHubSource {
         let starts_bootstrap = settings.enable_bootstrap && settings.resume_from.is_none();
         let response = self
             .base
-            .subscribe_with_bootstrap(&settings, "github")
+            .subscribe_with_bootstrap_readiness(&settings, "github")
             .await?;
 
         // The spawned bootstrap task owns the processing gate and replays pending
-        // deltas while excluding this query. Waiting on that gate here could
+        // deltas only after this query's full snapshot makes it ready. Waiting on that gate here could
         // deadlock if a large bootstrap fills its channel before this response is
         // returned to the query manager.
         if starts_bootstrap {
@@ -350,8 +352,7 @@ impl Source for GitHubSource {
 
         let _processing_guard = self.processing_gate.lock().await;
         if let Some(state_store) = self.base.state_store().await {
-            replay_pending_bootstrap_delta(state_store.as_ref(), &self.base.id, &self.base, None)
-                .await?;
+            replay_pending_delta(state_store.as_ref(), &self.base.id, &self.base).await?;
         }
         Ok(response)
     }
@@ -435,7 +436,7 @@ impl GitHubSourceBuilder {
         self.config.validate()?;
         if self.dispatch_mode == DispatchMode::Broadcast {
             return Err(anyhow!(
-                "GitHub source only supports DispatchMode::Channel because bootstrap reconciliation must exclude the bootstrapping query"
+                "GitHub source only supports DispatchMode::Channel because bootstrap reconciliation requires per-query readiness"
             ));
         }
 

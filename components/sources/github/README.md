@@ -16,7 +16,7 @@ This source accepts **signed GitHub webhooks**, durably admits each delivery int
   5. return `2xx`
 - WAL full with reject policy returns `503`.
 - A single sequential hydrator processes admitted deliveries FIFO.
-- Poison head is retained and retried with backoff (no DLQ/drop), and surfaced via `/health`.
+- Transient failures are retained and retried with backoff and surfaced via `/health`.
 - Body is treated as locator only; data changes come from GraphQL fetches.
 - Reconcile loop paginates and converges state (including missed deletes).
 
@@ -30,6 +30,10 @@ This source accepts **signed GitHub webhooks**, durably admits each delivery int
   have been pruned; this is part of the at-least-once convergence contract.
 - Receive order is FIFO by this source’s admitted WAL/hydrator sequencing, **not GitHub global causal order**.
 - The webhook inbox/admission seam and the WAL/hydrator seam are intentionally durability-first, not exactly-once.
+- Reconciliation stores generation-stamped absence observations with the WAL head they cover.
+  A stale admission covered by such an observation is a terminal no-op. An unseen non-delete
+  object returning `node: null` is retried three times for API lag, then durably classified
+  `gone-before-hydration` so it cannot poison FIFO indefinitely.
 
 ## Graph Schema
 

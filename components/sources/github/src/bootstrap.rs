@@ -17,7 +17,8 @@
 use crate::config::GitHubSourceConfig;
 use crate::graphql::{FetchedRoot, GitHubGraphQLClient, ReconcileSnapshot};
 use crate::hydrator::{
-    load_reconcile_index, save_effective_repos, save_reconcile_index, save_root_snapshot,
+    load_reconcile_state, prepare_reconcile_transition, replay_pending_delta, save_effective_repos,
+    save_reconcile_state, save_root_snapshot,
 };
 use crate::mapping::{map_reconcile_snapshot, map_root_diff, repositories_from_project_items};
 use crate::types::RootSnapshot;
@@ -28,24 +29,11 @@ use drasi_lib::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
 };
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
-use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
 use drasi_lib::sources::base::SourceBase;
 use drasi_lib::state_store::StateStoreProvider;
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{Mutex, RwLock};
-
-const PENDING_BOOTSTRAP_DELTA_KEY: &str = "pending-bootstrap-delta";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PendingBootstrapDelta {
-    pub(crate) changes: Vec<SourceChange>,
-    pub(crate) next_index: HashMap<String, crate::types::SnapshotElement>,
-    pub(crate) excluded_query_id: String,
-    pub(crate) committed: bool,
-}
 
 pub struct GitHubBootstrapProvider {
     config: GitHubSourceConfig,
@@ -96,13 +84,16 @@ impl BootstrapProvider for GitHubBootstrapProvider {
                 "GitHub bootstrap requires a durable state store provider (is_durable=true)"
             ));
         }
-        replay_pending_bootstrap_delta(
-            state_store.as_ref(),
-            &context.source_id,
-            source_base,
-            Some(&request.query_id),
-        )
-        .await?;
+        replay_pending_delta(state_store.as_ref(), &context.source_id, source_base).await?;
+
+        let wal_coverage_sequence = match source_base
+            .context()
+            .await
+            .and_then(|runtime| runtime.wal_provider)
+        {
+            Some(wal) => wal.head_sequence(&context.source_id).await.unwrap_or(0),
+            None => 0,
+        };
 
         let client =
             GitHubGraphQLClient::new(self.config.graphql_url.clone(), self.config.token.clone())
@@ -125,7 +116,9 @@ impl BootstrapProvider for GitHubBootstrapProvider {
             .await
             .context("Failed to fetch bootstrap snapshot")?;
 
-        let previous_index = load_reconcile_index(state_store.as_ref(), &context.source_id).await?;
+        let mut reconcile_state =
+            load_reconcile_state(state_store.as_ref(), &context.source_id).await?;
+        let previous_index = reconcile_state.index.clone();
         let effective_from = chrono::Utc::now().timestamp_millis().max(0) as u64;
         let (full_snapshot_changes, _) = map_reconcile_snapshot(
             &context.source_id,
@@ -147,34 +140,17 @@ impl BootstrapProvider for GitHubBootstrapProvider {
             effective_from,
         )?;
 
-        // The marker is written first in a prepared state. The reconcile index is
-        // persisted last, so a restart can distinguish a complete transition from
-        // a partial one even if promoting the marker to committed was interrupted.
-        let mut pending_delta = (!delta.is_empty()).then(|| PendingBootstrapDelta {
-            changes: delta,
-            next_index: next_index.clone(),
-            excluded_query_id: request.query_id.clone(),
-            committed: false,
-        });
-        if let Some(pending) = pending_delta.as_ref() {
-            save_pending_bootstrap_delta(state_store.as_ref(), &context.source_id, pending).await?;
-        }
         save_snapshot_roots(state_store.as_ref(), &context.source_id, root_snapshots).await?;
         save_effective_repos(state_store.as_ref(), &context.source_id, &effective_repos).await?;
-        save_reconcile_index(state_store.as_ref(), &context.source_id, &next_index).await?;
+        prepare_reconcile_transition(
+            &mut reconcile_state,
+            next_index,
+            delta,
+            wal_coverage_sequence,
+        );
+        save_reconcile_state(state_store.as_ref(), &context.source_id, &reconcile_state).await?;
         *self.effective_repos.write().await = effective_repos;
-
-        if let Some(pending) = pending_delta.as_mut() {
-            pending.committed = true;
-            save_pending_bootstrap_delta(state_store.as_ref(), &context.source_id, pending).await?;
-            replay_pending_bootstrap_delta(
-                state_store.as_ref(),
-                &context.source_id,
-                source_base,
-                Some(&request.query_id),
-            )
-            .await?;
-        }
+        replay_pending_delta(state_store.as_ref(), &context.source_id, source_base).await?;
 
         let node_filter: HashSet<String> = request.node_labels.into_iter().collect();
         let rel_filter: HashSet<String> = request.relation_labels.into_iter().collect();
@@ -191,88 +167,23 @@ impl BootstrapProvider for GitHubBootstrapProvider {
                 timestamp: chrono::Utc::now(),
                 sequence: context.next_sequence(),
             };
-            if event_tx.send(event).await.is_err() {
-                break;
-            }
+            event_tx
+                .send(event)
+                .await
+                .context("Bootstrap receiver closed before the full snapshot was emitted")?;
             sent += 1;
         }
+
+        source_base
+            .mark_bootstrap_query_ready(&request.query_id)
+            .await;
+        replay_pending_delta(state_store.as_ref(), &context.source_id, source_base).await?;
 
         Ok(BootstrapResult {
             event_count: sent,
             source_position: None,
         })
     }
-}
-
-pub(crate) async fn save_pending_bootstrap_delta(
-    state_store: &dyn StateStoreProvider,
-    source_id: &str,
-    pending: &PendingBootstrapDelta,
-) -> Result<()> {
-    let bytes =
-        serde_json::to_vec(pending).context("Failed to serialize pending bootstrap delta")?;
-    state_store
-        .set(source_id, PENDING_BOOTSTRAP_DELTA_KEY, bytes)
-        .await
-        .context("Failed to persist pending bootstrap delta")
-}
-
-pub(crate) async fn replay_pending_bootstrap_delta(
-    state_store: &dyn StateStoreProvider,
-    source_id: &str,
-    source_base: &SourceBase,
-    additional_excluded_query_id: Option<&str>,
-) -> Result<bool> {
-    let Some(bytes) = state_store
-        .get(source_id, PENDING_BOOTSTRAP_DELTA_KEY)
-        .await
-        .context("Failed to load pending bootstrap delta")?
-    else {
-        return Ok(false);
-    };
-    let mut pending: PendingBootstrapDelta =
-        serde_json::from_slice(&bytes).context("Failed to deserialize pending bootstrap delta")?;
-
-    if !pending.committed {
-        let current_index = load_reconcile_index(state_store, source_id).await?;
-        if current_index != pending.next_index {
-            return Ok(false);
-        }
-        pending.committed = true;
-        save_pending_bootstrap_delta(state_store, source_id, &pending).await?;
-    }
-
-    if source_base.channel_subscriber_count().await == 0 {
-        return Ok(false);
-    }
-
-    let events = pending
-        .changes
-        .iter()
-        .cloned()
-        .map(|change| {
-            SourceEventWrapper::new(
-                source_id.to_string(),
-                SourceEvent::Change(change),
-                chrono::Utc::now(),
-            )
-        })
-        .collect();
-    let mut excluded_query_ids = vec![pending.excluded_query_id.as_str()];
-    if let Some(query_id) = additional_excluded_query_id {
-        if query_id != pending.excluded_query_id {
-            excluded_query_ids.push(query_id);
-        }
-    }
-    source_base
-        .dispatch_events_batch_excluding_queries(events, &excluded_query_ids)
-        .await
-        .context("Failed dispatching pending bootstrap reconciliation changes")?;
-    state_store
-        .delete(source_id, PENDING_BOOTSTRAP_DELTA_KEY)
-        .await
-        .context("Failed to clear pending bootstrap delta")?;
-    Ok(true)
 }
 
 fn map_snapshot_roots(
