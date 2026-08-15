@@ -31,7 +31,7 @@
 
 use anyhow::Result;
 use log::{debug, error, info, warn};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, RwLock};
@@ -236,15 +236,6 @@ pub struct SourceBase {
     ///
     /// Only populated in Channel dispatch mode (Broadcast cannot filter per-subscriber).
     subscriber_resume_positions: Arc<RwLock<HashMap<usize, Bytes>>>,
-    /// Query owning each channel dispatcher, keyed by dispatcher index.
-    subscriber_query_ids: Arc<RwLock<HashMap<usize, String>>>,
-    /// Channel subscribers whose initial bootstrap has not completed.
-    ///
-    /// Dispatch drops live events for these subscribers. Sources that serialize
-    /// snapshot construction with live mutation dispatch can mark a query ready
-    /// while still holding that serialization gate, closing the registration →
-    /// snapshot handoff race without buffering stale live events.
-    subscriber_not_ready: Arc<RwLock<HashSet<usize>>>,
     /// Optional position comparator for per-subscriber replay filtering.
     ///
     /// Set by sources that support replay. Without a comparator, position
@@ -369,8 +360,6 @@ impl SourceBase {
             raw_config: None,
             subscriber_notify: Arc::new(Notify::new()),
             subscriber_resume_positions: Arc::new(RwLock::new(HashMap::new())),
-            subscriber_query_ids: Arc::new(RwLock::new(HashMap::new())),
-            subscriber_not_ready: Arc::new(RwLock::new(HashSet::new())),
             position_comparator: Arc::new(RwLock::new(None)),
             sequence_position_map: Arc::new(RwLock::new(BTreeMap::new())),
             bootstrap_boundary: Arc::new(tokio::sync::watch::channel(None).0),
@@ -665,8 +654,6 @@ impl SourceBase {
             raw_config: self.raw_config.clone(),
             subscriber_notify: self.subscriber_notify.clone(),
             subscriber_resume_positions: self.subscriber_resume_positions.clone(),
-            subscriber_query_ids: self.subscriber_query_ids.clone(),
-            subscriber_not_ready: self.subscriber_not_ready.clone(),
             position_comparator: self.position_comparator.clone(),
             sequence_position_map: self.sequence_position_map.clone(),
             bootstrap_boundary: self.bootstrap_boundary.clone(),
@@ -714,22 +701,12 @@ impl SourceBase {
     pub async fn create_streaming_receiver(
         &self,
     ) -> Result<Box<dyn ChangeReceiver<SourceEventWrapper>>> {
-        Ok(self.create_streaming_receiver_with_index(None).await?.0)
-    }
-
-    async fn create_streaming_receiver_with_index(
-        &self,
-        subscriber: Option<(&str, bool)>,
-    ) -> Result<(Box<dyn ChangeReceiver<SourceEventWrapper>>, Option<usize>)> {
-        let (receiver, dispatcher_idx): (
-            Box<dyn ChangeReceiver<SourceEventWrapper>>,
-            Option<usize>,
-        ) = match self.dispatch_mode {
+        let receiver: Box<dyn ChangeReceiver<SourceEventWrapper>> = match self.dispatch_mode {
             DispatchMode::Broadcast => {
                 // For broadcast mode, use the single dispatcher
                 let dispatchers = self.dispatchers.read().await;
                 if let Some(dispatcher) = dispatchers.first() {
-                    (dispatcher.create_receiver().await?, None)
+                    dispatcher.create_receiver().await?
                 } else {
                     return Err(anyhow::anyhow!("No broadcast dispatcher available"));
                 }
@@ -743,22 +720,9 @@ impl SourceBase {
 
                 // Add the new dispatcher to our list
                 let mut dispatchers = self.dispatchers.write().await;
-                let dispatcher_idx = dispatchers.len();
                 dispatchers.push(Box::new(dispatcher));
-                if let Some((query_id, ready)) = subscriber {
-                    self.subscriber_query_ids
-                        .write()
-                        .await
-                        .insert(dispatcher_idx, query_id.to_string());
-                    if !ready {
-                        self.subscriber_not_ready
-                            .write()
-                            .await
-                            .insert(dispatcher_idx);
-                    }
-                }
 
-                (receiver, Some(dispatcher_idx))
+                receiver
             }
         };
 
@@ -767,7 +731,7 @@ impl SourceBase {
         // avoiding a race between the dispatchers check and the await.
         self.subscriber_notify.notify_one();
 
-        Ok((receiver, dispatcher_idx))
+        Ok(receiver)
     }
 
     /// Wait until at least one subscriber has registered.
@@ -786,37 +750,9 @@ impl SourceBase {
             if !dispatchers.is_empty() {
                 return;
             }
-
             drop(dispatchers);
             self.subscriber_notify.notified().await;
         }
-    }
-
-    /// Return the number of dedicated channel subscribers currently registered.
-    pub async fn channel_subscriber_count(&self) -> usize {
-        if self.dispatch_mode == DispatchMode::Channel {
-            self.dispatchers.read().await.len()
-        } else {
-            0
-        }
-    }
-
-    /// Return the number of live channel subscribers eligible for dispatch.
-    ///
-    /// Bootstrap-readiness-gated subscribers are not eligible until their full
-    /// snapshot has completed.
-    pub async fn eligible_ready_channel_subscriber_count(&self) -> usize {
-        if self.dispatch_mode != DispatchMode::Channel {
-            return 0;
-        }
-
-        let dispatchers = self.dispatchers.read().await;
-        let not_ready = self.subscriber_not_ready.read().await;
-        dispatchers
-            .iter()
-            .enumerate()
-            .filter(|(idx, dispatcher)| !not_ready.contains(idx) && dispatcher.has_live_receiver())
-            .count()
     }
 
     /// Publish the bootstrap-to-CDC boundary token.
@@ -883,27 +819,8 @@ impl SourceBase {
         settings: &crate::config::SourceSubscriptionSettings,
         source_type: &str,
     ) -> Result<SubscriptionResponse> {
-        self.subscribe_with_bootstrap_context_internal(settings, source_type, HashMap::new(), false)
+        self.subscribe_with_bootstrap_context(settings, source_type, HashMap::new())
             .await
-    }
-
-    /// Subscribe while suppressing live delivery until the bootstrap is ready.
-    ///
-    /// The subscriber is registered as not-ready in the same critical section
-    /// that installs its dispatcher. Live events are dropped, not queued, until
-    /// [`mark_bootstrap_query_ready`](Self::mark_bootstrap_query_ready) is called.
-    pub async fn subscribe_with_bootstrap_readiness(
-        &self,
-        settings: &crate::config::SourceSubscriptionSettings,
-        source_type: &str,
-    ) -> Result<SubscriptionResponse> {
-        self.subscribe_with_bootstrap_context_internal(
-            settings,
-            source_type,
-            HashMap::new(),
-            settings.enable_bootstrap && settings.resume_from.is_none(),
-        )
-        .await
     }
 
     /// Subscribe to this source with optional bootstrap context properties.
@@ -912,22 +829,6 @@ impl SourceBase {
         settings: &crate::config::SourceSubscriptionSettings,
         source_type: &str,
         bootstrap_properties: HashMap<String, serde_json::Value>,
-    ) -> Result<SubscriptionResponse> {
-        self.subscribe_with_bootstrap_context_internal(
-            settings,
-            source_type,
-            bootstrap_properties,
-            false,
-        )
-        .await
-    }
-
-    async fn subscribe_with_bootstrap_context_internal(
-        &self,
-        settings: &crate::config::SourceSubscriptionSettings,
-        source_type: &str,
-        bootstrap_properties: HashMap<String, serde_json::Value>,
-        gate_live_until_bootstrap_ready: bool,
     ) -> Result<SubscriptionResponse> {
         info!(
             "Query '{}' subscribing to {} source '{}' (bootstrap: {}, resume_from: {:?}, request_handle: {})",
@@ -951,17 +852,16 @@ impl SourceBase {
         }
 
         // Create streaming receiver using helper method
-        let (receiver, dispatcher_idx) = self
-            .create_streaming_receiver_with_index(Some((
-                &settings.query_id,
-                !gate_live_until_bootstrap_ready,
-            )))
-            .await?;
+        let receiver = self.create_streaming_receiver().await?;
 
         // Register per-subscriber position filter for replay dedup.
+        // In Channel mode, the new dispatcher is the last entry in the vec.
         // In Broadcast mode, per-subscriber filtering is not supported.
-        if let Some(dispatcher_idx) = dispatcher_idx {
+        if self.dispatch_mode == DispatchMode::Channel {
             if let Some(ref resume_pos) = settings.resume_from {
+                let dispatchers = self.dispatchers.read().await;
+                let dispatcher_idx = dispatchers.len().saturating_sub(1);
+                drop(dispatchers);
                 self.subscriber_resume_positions
                     .write()
                     .await
@@ -1019,25 +919,6 @@ impl SourceBase {
             position_handle,
             bootstrap_result_receiver,
         })
-    }
-
-    /// Allow live delivery to every channel subscriber owned by `query_id`.
-    ///
-    /// Sources with a live-processing gate call this after the complete snapshot
-    /// has been emitted and before releasing that gate.
-    pub async fn mark_bootstrap_query_ready(&self, query_id: &str) {
-        let query_ids = self.subscriber_query_ids.read().await;
-        let indices = query_ids
-            .iter()
-            .filter_map(|(idx, id)| (id == query_id).then_some(*idx))
-            .collect::<Vec<_>>();
-        drop(query_ids);
-        if !indices.is_empty() {
-            let mut not_ready = self.subscriber_not_ready.write().await;
-            for idx in indices {
-                not_ready.remove(&idx);
-            }
-        }
     }
 
     /// Create only the bootstrap receiver for a subscription.
@@ -1238,8 +1119,6 @@ impl SourceBase {
             // begin streaming exactly at the snapshot boundary (Part 1).
             let boundary = self.bootstrap_boundary.clone();
             let is_initial_bootstrap = settings.resume_from.is_none();
-            let subscriber_not_ready = self.subscriber_not_ready.clone();
-            let subscriber_query_ids = self.subscriber_query_ids.clone();
 
             // Get instance_id from context for log routing isolation
             let instance_id = self
@@ -1287,22 +1166,6 @@ impl SourceBase {
                                             settings_clone.query_id
                                         );
                                     }
-                                }
-
-                                // Generic fallback for readiness-gated subscribers.
-                                // Gate-coordinated providers mark ready before they
-                                // return; this is intentionally idempotent.
-                                let query_ids = subscriber_query_ids.read().await;
-                                let indices = query_ids
-                                    .iter()
-                                    .filter_map(|(idx, id)| {
-                                        (id == &settings_clone.query_id).then_some(*idx)
-                                    })
-                                    .collect::<Vec<_>>();
-                                drop(query_ids);
-                                let mut not_ready = subscriber_not_ready.write().await;
-                                for idx in indices {
-                                    not_ready.remove(&idx);
                                 }
                             }
                         }
@@ -1443,15 +1306,11 @@ impl SourceBase {
         // Send to all dispatchers, filtering by per-subscriber resume position
         let dispatchers = self.dispatchers.read().await;
         let comparator = self.position_comparator.read().await;
-        let subscriber_not_ready = self.subscriber_not_ready.read().await;
         let mut cleared_indices: Vec<usize> = Vec::new();
         // Collect (dispatcher_index, new_high_water) updates for after dispatch.
         let mut hwm_updates: Vec<(usize, Bytes)> = Vec::new();
 
         for (idx, dispatcher) in dispatchers.iter().enumerate() {
-            if subscriber_not_ready.contains(&idx) {
-                continue;
-            }
             // Check per-subscriber position high-water mark.
             // Events at or before the subscriber's high-water mark are
             // suppressed.  When the event passes the mark, we deliver it
@@ -1481,7 +1340,6 @@ impl SourceBase {
             }
         }
         drop(comparator);
-        drop(subscriber_not_ready);
         drop(dispatchers);
         // The ordering-critical window ends once every subscriber has been
         // enqueued above; the high-water-mark bookkeeping below is unordered,
@@ -1508,50 +1366,8 @@ impl SourceBase {
     /// [`dispatch_event()`](Self::dispatch_event) per-event when the source
     /// processes multiple rows per poll cycle.
     pub async fn dispatch_events_batch(&self, events: Vec<SourceEventWrapper>) -> Result<()> {
-        self.dispatch_events_batch_internal(events, None, false)
-            .await
-            .map(|_| ())
-    }
-
-    /// Dispatch a batch only when at least one ready, live channel subscriber
-    /// can accept the complete batch.
-    ///
-    /// Returns the number of subscribers that accepted every event. A zero
-    /// result means no event was dispatched when no subscriber was initially
-    /// eligible, or no subscriber accepted the complete batch.
-    pub async fn dispatch_events_batch_to_eligible_ready_channel_subscribers(
-        &self,
-        events: Vec<SourceEventWrapper>,
-    ) -> Result<usize> {
-        if self.dispatch_mode != DispatchMode::Channel {
-            return Ok(0);
-        }
-        self.dispatch_events_batch_internal(events, None, true)
-            .await
-    }
-
-    /// Dispatch a batch to every channel subscriber except the named queries.
-    ///
-    /// Broadcast mode cannot target individual receivers, so the exclusion is
-    /// only applied in channel mode.
-    pub async fn dispatch_events_batch_excluding_queries(
-        &self,
-        events: Vec<SourceEventWrapper>,
-        query_ids: &[&str],
-    ) -> Result<()> {
-        self.dispatch_events_batch_internal(events, Some(query_ids), false)
-            .await
-            .map(|_| ())
-    }
-
-    async fn dispatch_events_batch_internal(
-        &self,
-        events: Vec<SourceEventWrapper>,
-        excluded_query_ids: Option<&[&str]>,
-        require_complete_ready_channel_delivery: bool,
-    ) -> Result<usize> {
         if events.is_empty() {
-            return Ok(0);
+            return Ok(());
         }
 
         // Serialize this batch against other dispatches on the same source so
@@ -1561,25 +1377,6 @@ impl SourceBase {
         let mut last_dispatch_ts = self.dispatch_order.lock().await;
         let dispatchers = self.dispatchers.read().await;
         let comparator = self.position_comparator.read().await;
-        let subscriber_query_ids = self.subscriber_query_ids.read().await;
-        let subscriber_not_ready = self.subscriber_not_ready.read().await;
-        let mut complete_dispatchers = dispatchers
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, dispatcher)| {
-                (!subscriber_not_ready.contains(&idx)
-                    && dispatcher.has_live_receiver()
-                    && !excluded_query_ids.is_some_and(|query_ids| {
-                        subscriber_query_ids.get(&idx).is_some_and(|subscriber_id| {
-                            query_ids.iter().any(|query_id| subscriber_id == query_id)
-                        })
-                    }))
-                .then_some(idx)
-            })
-            .collect::<HashSet<_>>();
-        if require_complete_ready_channel_delivery && complete_dispatchers.is_empty() {
-            return Ok(0);
-        }
 
         for mut wrapper in events {
             if let Some(ref pos) = wrapper.source_position {
@@ -1622,24 +1419,12 @@ impl SourceBase {
             let mut hwm_updates: Vec<(usize, Bytes)> = Vec::new();
 
             for (idx, dispatcher) in dispatchers.iter().enumerate() {
-                if subscriber_not_ready.contains(&idx) || !dispatcher.has_live_receiver() {
-                    continue;
-                }
-                if excluded_query_ids.is_some_and(|query_ids| {
-                    subscriber_query_ids.get(&idx).is_some_and(|subscriber_id| {
-                        query_ids.iter().any(|query_id| subscriber_id == query_id)
-                    })
-                }) {
-                    continue;
-                }
-
                 // Check per-subscriber position high-water mark
                 if let Some(ref cmp) = *comparator {
                     let resume_positions = self.subscriber_resume_positions.read().await;
                     if let Some(resume_pos) = resume_positions.get(&idx) {
                         if let Some(ref event_pos) = arc_wrapper.source_position {
                             if !cmp.position_reached(event_pos, resume_pos) {
-                                complete_dispatchers.remove(&idx);
                                 debug!(
                                     "[{}] Position filter: SKIPPING event for dispatcher {} \
                                      (event_pos={:?} <= resume_pos={:?})",
@@ -1669,7 +1454,6 @@ impl SourceBase {
                 }
 
                 if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                    complete_dispatchers.remove(&idx);
                     debug!("[{}] Failed to dispatch event: {}", self.id, e);
                 } else if let Some(ref event_pos) = arc_wrapper.source_position {
                     hwm_updates.push((idx, event_pos.clone()));
@@ -1687,10 +1471,8 @@ impl SourceBase {
 
         drop(comparator);
         drop(dispatchers);
-        drop(subscriber_query_ids);
-        drop(subscriber_not_ready);
 
-        Ok(complete_dispatchers.len())
+        Ok(())
     }
 
     /// Broadcast SourceControl events
@@ -1861,8 +1643,6 @@ impl SourceBase {
             let mut dispatchers = self.dispatchers.write().await;
             dispatchers.clear();
             self.subscriber_resume_positions.write().await.clear();
-            self.subscriber_query_ids.write().await.clear();
-            self.subscriber_not_ready.write().await.clear();
         }
     }
 

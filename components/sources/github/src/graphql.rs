@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Authoritative GitHub GraphQL client used by hydrator/reconciler/bootstrap.
+//! Authoritative GitHub GraphQL client used by startup scope discovery + hydrator.
 
 use crate::config::ProjectSpec;
 use crate::rate_limit::{classify_retry, exp_backoff};
@@ -21,12 +21,22 @@ use anyhow::{anyhow, Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+pub(crate) struct RetryableGraphQLError(anyhow::Error);
+
+impl fmt::Display for RetryableGraphQLError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for RetryableGraphQLError {}
 
 /// Fetched root object used by hydrator.
 #[derive(Debug, Clone, PartialEq)]
@@ -259,8 +269,8 @@ fragment ProjectItemFields on ProjectV2Item {
   }
   content {
     __typename
-    ... on Issue { id number title state repository { id nameWithOwner } }
-    ... on PullRequest { id number title state repository { id nameWithOwner } }
+    ... on Issue { id number title issueState: state repository { id nameWithOwner } }
+    ... on PullRequest { id number title pullRequestState: state repository { id nameWithOwner } }
     ... on DraftIssue { id title body }
   }
   fieldValues(first: 50) {
@@ -338,8 +348,8 @@ fragment ProjectItemFields on ProjectV2Item {
   }
   content {
     __typename
-    ... on Issue { id number title state repository { id nameWithOwner } }
-    ... on PullRequest { id number title state repository { id nameWithOwner } }
+    ... on Issue { id number title issueState: state repository { id nameWithOwner } }
+    ... on PullRequest { id number title pullRequestState: state repository { id nameWithOwner } }
     ... on DraftIssue { id title body }
   }
   fieldValues(first: 50) {
@@ -397,8 +407,8 @@ query($id: ID!) {
       }
       content {
         __typename
-        ... on Issue { id number title state repository { id nameWithOwner } }
-        ... on PullRequest { id number title state repository { id nameWithOwner } }
+        ... on Issue { id number title issueState: state repository { id nameWithOwner } }
+        ... on PullRequest { id number title pullRequestState: state repository { id nameWithOwner } }
         ... on DraftIssue { id title body }
       }
       fieldValues(first: 50) {
@@ -830,205 +840,6 @@ query($id: ID!) {
             .map(|Node::PullRequestReviewComment(comment)| comment))
     }
 
-    pub async fn fetch_all_issues(&self, repo: &str) -> Result<Vec<IssueData>> {
-        let (owner, name) = split_repo(repo)?;
-        let query = r#"
-query($owner: String!, $name: String!, $cursor: String) {
-  repository(owner: $owner, name: $name) {
-    issues(first: 100, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
-      pageInfo { hasNextPage endCursor }
-      nodes { ...IssueFields }
-    }
-  }
-}
-
-fragment IssueFields on Issue {
-  id
-  number
-  title
-  body
-  state
-  createdAt
-  updatedAt
-  closedAt
-  url
-  author { login }
-  repository { id nameWithOwner }
-  assignees(first: 20) { pageInfo { hasNextPage endCursor } nodes { id login } }
-  labels(first: 20) { pageInfo { hasNextPage endCursor } nodes { id name } }
-  comments(first: 50) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      id
-      body
-      createdAt
-      updatedAt
-      url
-      isMinimized
-      author {
-        __typename
-        login
-        ... on User { id databaseId }
-        ... on Bot { id databaseId }
-        ... on Organization { id databaseId }
-        ... on Mannequin { id databaseId }
-        ... on EnterpriseUserAccount { id }
-      }
-      issue { id }
-      pullRequest { id }
-      repository { id nameWithOwner }
-    }
-  }
-}
-"#;
-        #[derive(Debug, Deserialize)]
-        struct Resp {
-            repository: Option<Repo>,
-        }
-        #[derive(Debug, Deserialize)]
-        struct Repo {
-            issues: Connection<IssueData>,
-        }
-        let issues = self
-            .fetch_paginated(
-                query,
-                json!({ "owner": owner, "name": name }),
-                |data: Resp| data.repository.map(|r| r.issues),
-            )
-            .await?;
-
-        let mut out = Vec::with_capacity(issues.len());
-        for issue in issues {
-            out.push(self.with_paginated_issue(issue).await?);
-        }
-        Ok(out)
-    }
-
-    pub async fn fetch_all_pull_requests(&self, repo: &str) -> Result<Vec<PullRequestData>> {
-        let (owner, name) = split_repo(repo)?;
-        let query = r#"
-query($owner: String!, $name: String!, $cursor: String) {
-  repository(owner: $owner, name: $name) {
-    pullRequests(first: 100, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
-      pageInfo { hasNextPage endCursor }
-      nodes { ...PullRequestFields }
-    }
-  }
-}
-
-fragment PullRequestFields on PullRequest {
-  id
-  number
-  title
-  body
-  state
-  createdAt
-  updatedAt
-  closedAt
-  mergedAt
-  url
-  isDraft
-  headRefName
-  baseRefName
-  author { login }
-  repository { id nameWithOwner }
-  assignees(first: 20) { pageInfo { hasNextPage endCursor } nodes { id login } }
-  labels(first: 20) { pageInfo { hasNextPage endCursor } nodes { id name } }
-  comments(first: 50) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      id
-      body
-      createdAt
-      updatedAt
-      url
-      isMinimized
-      author {
-        __typename
-        login
-        ... on User { id databaseId }
-        ... on Bot { id databaseId }
-        ... on Organization { id databaseId }
-        ... on Mannequin { id databaseId }
-        ... on EnterpriseUserAccount { id }
-      }
-      issue { id }
-      pullRequest { id }
-      repository { id nameWithOwner }
-    }
-  }
-  reviews(first: 50) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      id
-      state
-      body
-      createdAt
-      updatedAt
-      url
-      author {
-        __typename
-        login
-        ... on User { id databaseId }
-        ... on Bot { id databaseId }
-        ... on Organization { id databaseId }
-        ... on Mannequin { id databaseId }
-        ... on EnterpriseUserAccount { id }
-      }
-      pullRequest { id repository { id nameWithOwner } }
-      comments(first: 50) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          id
-          body
-          path
-          position
-          line
-          diffHunk
-          createdAt
-          updatedAt
-          url
-          author {
-            __typename
-            login
-            ... on User { id databaseId }
-            ... on Bot { id databaseId }
-            ... on Organization { id databaseId }
-            ... on Mannequin { id databaseId }
-            ... on EnterpriseUserAccount { id }
-          }
-          repository { id nameWithOwner }
-          pullRequestReview { id pullRequest { id repository { id nameWithOwner } } }
-        }
-      }
-    }
-  }
-}
-"#;
-        #[derive(Debug, Deserialize)]
-        struct Resp {
-            repository: Option<Repo>,
-        }
-        #[derive(Debug, Deserialize)]
-        struct Repo {
-            #[serde(rename = "pullRequests")]
-            pull_requests: Connection<PullRequestData>,
-        }
-        let pull_requests = self
-            .fetch_paginated(
-                query,
-                json!({ "owner": owner, "name": name }),
-                |data: Resp| data.repository.map(|r| r.pull_requests),
-            )
-            .await?;
-
-        let mut out = Vec::with_capacity(pull_requests.len());
-        for pr in pull_requests {
-            out.push(self.with_paginated_pull_request(pr).await?);
-        }
-        Ok(out)
-    }
-
     pub async fn fetch_project_items(&self, project: &ProjectSpec) -> Result<Vec<ProjectItemData>> {
         let Some(project_data) = self
             .fetch_project_by_owner_number(&project.owner, project.number)
@@ -1099,8 +910,8 @@ fragment ProjectItemFields on ProjectV2Item {
   }
   content {
     __typename
-    ... on Issue { id number title state repository { id nameWithOwner } }
-    ... on PullRequest { id number title state repository { id nameWithOwner } }
+    ... on Issue { id number title issueState: state repository { id nameWithOwner } }
+    ... on PullRequest { id number title pullRequestState: state repository { id nameWithOwner } }
     ... on DraftIssue { id title body }
   }
   fieldValues(first: 50) {
@@ -1922,8 +1733,12 @@ query($id: ID!, $cursor: String) {
             {
                 Ok(response) => response,
                 Err(err) => {
-                    if attempt >= MAX_RETRIES || !is_retryable_transport_error(&err) {
+                    let retryable = is_retryable_transport_error(&err);
+                    if !retryable {
                         return Err(err).context("GitHub GraphQL request failed");
+                    }
+                    if attempt >= MAX_RETRIES {
+                        return Err(RetryableGraphQLError(err.into()).into());
                     }
                     sleep(exp_backoff(attempt)).await;
                     attempt = attempt.saturating_add(1);
@@ -1951,10 +1766,17 @@ query($id: ID!, $cursor: String) {
                         });
                     }
 
-                    if attempt < MAX_RETRIES && graphql_errors_retryable(&errors) {
-                        sleep(exp_backoff(attempt)).await;
-                        attempt = attempt.saturating_add(1);
-                        continue;
+                    if graphql_errors_retryable(&errors) {
+                        if attempt < MAX_RETRIES {
+                            sleep(exp_backoff(attempt)).await;
+                            attempt = attempt.saturating_add(1);
+                            continue;
+                        }
+                        return Err(RetryableGraphQLError(anyhow!(
+                            "GitHub GraphQL returned transient errors: {}",
+                            summarize_graphql_errors(&errors)
+                        ))
+                        .into());
                     }
 
                     return Err(anyhow!(
@@ -1977,10 +1799,16 @@ query($id: ID!, $cursor: String) {
                     decision.delay = exp_backoff(attempt);
                 }
             }
-            if !decision.retryable || attempt >= MAX_RETRIES {
+            if !decision.retryable {
                 return Err(anyhow!(
                     "GitHub GraphQL request failed: status={status}, body={body_text}"
                 ));
+            }
+            if attempt >= MAX_RETRIES {
+                return Err(RetryableGraphQLError(anyhow!(
+                    "GitHub GraphQL transient request failure: status={status}, body={body_text}"
+                ))
+                .into());
             }
 
             sleep(decision.delay).await;
@@ -2326,6 +2154,7 @@ pub enum ProjectItemContent {
         id: String,
         number: i64,
         title: String,
+        #[serde(rename = "issueState", alias = "state")]
         state: String,
         repository: RepositoryRef,
     },
@@ -2333,6 +2162,7 @@ pub enum ProjectItemContent {
         id: String,
         number: i64,
         title: String,
+        #[serde(rename = "pullRequestState", alias = "state")]
         state: String,
         repository: RepositoryRef,
     },
@@ -2392,79 +2222,6 @@ impl<T> Default for Connection<T> {
                 end_cursor: None,
             },
         }
-    }
-}
-
-/// Bundle used during full-reconcile passes.
-#[derive(Debug, Clone, Default)]
-pub struct ReconcileSnapshot {
-    pub repositories: HashMap<String, RepositoryData>,
-    pub issues: HashMap<String, IssueData>,
-    pub pull_requests: HashMap<String, PullRequestData>,
-    pub issue_comments: HashMap<String, IssueCommentData>,
-    pub reviews: HashMap<String, PullRequestReviewData>,
-    pub review_comments: HashMap<String, PullRequestReviewCommentData>,
-    pub projects: HashMap<String, ProjectData>,
-    pub project_items: HashMap<String, ProjectItemData>,
-}
-
-impl GitHubGraphQLClient {
-    pub async fn fetch_reconcile_snapshot(
-        &self,
-        repos: &[String],
-        projects: &[ProjectSpec],
-    ) -> Result<ReconcileSnapshot> {
-        let mut snapshot = ReconcileSnapshot::default();
-
-        for repo in repos {
-            let (owner, name) = split_repo(repo)?;
-            let Some(repository) = self.fetch_repository(&owner, &name).await? else {
-                continue;
-            };
-            snapshot
-                .repositories
-                .insert(repository.id.clone(), repository.clone());
-
-            for issue in self.fetch_all_issues(repo).await? {
-                snapshot.issues.insert(issue.id.clone(), issue.clone());
-                for comment in &issue.comments.nodes {
-                    snapshot
-                        .issue_comments
-                        .insert(comment.id.clone(), comment.clone());
-                }
-            }
-
-            for pr in self.fetch_all_pull_requests(repo).await? {
-                snapshot.pull_requests.insert(pr.id.clone(), pr.clone());
-                for comment in &pr.comments.nodes {
-                    snapshot
-                        .issue_comments
-                        .insert(comment.id.clone(), comment.clone());
-                }
-                for review in &pr.reviews.nodes {
-                    snapshot.reviews.insert(review.id.clone(), review.clone());
-                    for review_comment in &review.comments.nodes {
-                        snapshot
-                            .review_comments
-                            .insert(review_comment.id.clone(), review_comment.clone());
-                    }
-                }
-            }
-        }
-
-        for project_spec in projects {
-            if let Some(project) = self
-                .fetch_project_by_owner_number(&project_spec.owner, project_spec.number)
-                .await?
-            {
-                for item in &project.items.nodes {
-                    snapshot.project_items.insert(item.id.clone(), item.clone());
-                }
-                snapshot.projects.insert(project.id.clone(), project);
-            }
-        }
-
-        Ok(snapshot)
     }
 }
 

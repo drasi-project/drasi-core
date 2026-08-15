@@ -102,14 +102,12 @@ async fn main() -> Result<()> {
                 secret: webhook_secret.clone(),
                 body_limit_bytes: 1024 * 1024,
             },
-            reconcile_interval_secs: 300,
             durability: DurabilityConfig {
                 enabled: true,
                 max_events: 1024,
                 capacity_policy: CapacityPolicy::RejectIncoming,
             },
             graphql_url: graphql_url.clone(),
-            skip_initial_bootstrap: true,
         })
         .build()
         .context("Failed to build GitHub source")?;

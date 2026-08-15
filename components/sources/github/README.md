@@ -2,92 +2,105 @@
 
 Authorized GitHub source plugin for Drasi.
 
-This source accepts **signed GitHub webhooks**, durably admits each delivery into the source WAL, then performs **authoritative GitHub GraphQL fetches** to hydrate and emit normalized graph changes.
+## Minimal-v1 architecture
 
-## v1 Behavior
+The source runs with two WAL partitions:
 
-- PAT is configured through descriptor DTO as `SecretReference` (resolved before runtime).
-- Webhooks require `X-Hub-Signature-256` HMAC-SHA256 and are validated in constant time.
-- Delivery admission path is durable-first:
-  1. validate signature + headers
-  2. parse locator
-  3. append admission record to WAL
-  4. persist delivery GUID dedupe marker
-  5. return `2xx`
-- WAL full with reject policy returns `503`.
-- A single sequential hydrator processes admitted deliveries FIFO.
-- Transient failures are retained and retried with backoff and surfaced via `/health`.
-- Body is treated as locator only; data changes come from GraphQL fetches.
-- Reconcile loop paginates and converges state (including missed deletes).
+- `<source_id>::inbox` — admitted signed webhook deliveries (locator-only)
+- `<source_id>` — normalized output `SourceChange` events
 
-## Delivery Semantics
+Flow:
 
-- Runtime delivery is **at-least-once** from admitted webhook to emitted `SourceChange`.
-- Crash window: if the process crashes after dispatch but before the root committed-marker snapshot write, the admitted WAL record can replay and emit duplicate `SourceChange` events on recovery.
-- Consumers/queries must assume **idempotent/convergent processing** (duplicates are valid).
-- Delivery GUID markers are retained while their admission remains replayable in the WAL, then
-  compacted. A very old GitHub retry may be admitted again after both its WAL record and marker
-  have been pruned; this is part of the at-least-once convergence contract.
-- Receive order is FIFO by this source’s admitted WAL/hydrator sequencing, **not GitHub global causal order**.
-- The webhook inbox/admission seam and the WAL/hydrator seam are intentionally durability-first, not exactly-once.
-- Reconciliation stores generation-stamped absence observations with the WAL head they cover.
-  A stale admission covered by such an observation is a terminal no-op. An unseen non-delete
-  object returning `node: null` is retried three times for API lag, then durably classified
-  `gone-before-hydration` so it cannot poison FIFO indefinitely.
+1. Webhook ingress verifies HMAC + headers
+2. Under one ingress mutex, checks retained inbox WAL for duplicate delivery GUID
+3. Appends to inbox WAL before returning `2xx` (capacity/failure => `503`)
+4. One strict FIFO worker hydrates authoritative state via GraphQL
+5. Worker appends every normalized output change to output WAL **before** best-effort live dispatch
+6. Worker prunes inbox entry after processing
 
-## Graph Schema
+## Replay and retention
 
-- Node labels: `GitHubRepository`, `GitHubIssue`, `GitHubPullRequest`, `GitHubIssueComment`, `GitHubPullRequestReview`, `GitHubPullRequestReviewComment`, `GitHubProject`, `GitHubProjectItem`
-- Relation labels: `IN_REPOSITORY`, `COMMENT_ON`, `REVIEW_OF`, `PART_OF_REVIEW`, `IN_PROJECT`, `TRACKS`
+- `supports_replay = true`
+- Fresh subscribers replay retained output WAL from oldest sequence, then switch to live atomically.
+- Resumed subscribers replay from `resume_from` using normal WAL replay.
+- Output WAL pruning only advances from confirmed subscriber positions.
+- With no subscribers (or no confirmed positions), retained output WAL is not pruned.
 
-Full node/relation properties and IDs: [GRAPH_SCHEMA.md](GRAPH_SCHEMA.md).
+## Scope behavior
 
-## Configuration
+- Startup project discovery is **scope-only** (no startup graph emission).
+- Project item hydration can grow repository scope.
+- Scope does not shrink automatically (no reconcile loop/full inventory repair).
 
-Descriptor schema name: `source.github.GitHubSourceConfig` (version `1.0.0`).
+## Delivery semantics
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `token` | `SecretReference` | yes | GitHub PAT (descriptor-enforced secret reference) |
-| `repositories` | `string[]` | no | canonical `owner/repo` |
-| `projects` | `{ owner, number }[]` | no | project selectors |
-| `webhook.host` | `string` | no | default `0.0.0.0` |
-| `webhook.port` | `u16` | no | default `8080` |
-| `webhook.path` | `string` | no | default `/webhook` |
-| `webhook.secret` | `SecretReference` | yes | descriptor-enforced secret reference |
-| `webhook.bodyLimitBytes` | `usize` | no | default `10485760` |
-| `reconcileIntervalSecs` | `u64` | no | default `300` |
-| `durability` | object | yes | must have `enabled=true` |
-| `graphqlUrl` | `string` | no | default `https://api.github.com/graphql` |
-| `skipInitialBootstrap` | `bool` | no | default `false` |
+- At-least-once/convergent delivery.
+- Crash window between output append and inbox prune can replay a delivery; deterministic authoritative diffing converges state.
+- Non-delete `node: null` hydrations are retried with bounded attempts, then treated as `gone-before-hydration` and FIFO advances.
+- A durable ownership adjacency covers authoritative parent-delete cascades for comments, reviews, review comments, and Project Items; `TRACKS` remains non-owning.
 
-At least one of `repositories` or `projects` must be set.
+## Public config (v1)
 
-## Bootstrap Provider
+Schema name: `source.github.GitHubSourceConfig`
 
-The source ships with an internal bootstrap provider that fetches a full reconcile snapshot and emits initial inserts/updates for subscribed labels.
+The source properties are flat in the server source block:
 
-See [BOOTSTRAP.md](BOOTSTRAP.md).
+```yaml
+kind: github
+autoStart: true
+token:
+  kind: Secret
+  name: github-pat
+repositories:
+  - acme/widgets
+projects:
+  - owner: acme
+    number: 3
+webhook:
+  host: 0.0.0.0
+  port: 8080
+  path: /webhook
+  secret:
+    kind: Secret
+    name: github-webhook-secret
+  bodyLimitBytes: 10485760
+durability:
+  enabled: true
+  max_events: 10000
+  capacity_policy: RejectIncoming
+graphqlUrl: https://api.github.com/graphql
+```
 
-## Integration Test
+At least one repository or Project is required. `token` and `webhook.secret`
+must be SecretReferences. Unknown fields are rejected.
 
-`tests/integration_test.rs` uses a protocol/local harness:
+## Contracts preserved
 
-- local Axum mock GraphQL server
-- real webhook HTTP POSTs with HMAC signatures
-- DrasiLib + ApplicationReaction subscriptions
-- asserted create/update/delete flow plus project-item update/scope resolution, replay convergence, dedupe, bad signature, and WAL-full `503`
+- kind: `github`
+- plugin reference: `source/github`
+- crate/name: `drasi-source-github`
+- library basename: `libdrasi_source_github` on Linux/macOS (`drasi_source_github.dll` on Windows)
+- descriptor secret enforcement for `token` and `webhook.secret`
+- Graph schema: 8 nodes / 6 relations
+- body/status/author mapping contracts (`bodyDigest`, `statusName`, author fields)
+- no `performedViaGithubAppId` field
 
-Run:
+## Testing
+
+Unit tests:
 
 ```bash
 cargo test -p drasi-source-github
-cargo test -p drasi-source-github --test integration_test -- --nocapture
+```
+
+Integration tests (ignored by default):
+
+```bash
+cargo test -p drasi-source-github --test integration_test -- --ignored --nocapture
 ```
 
 ## Troubleshooting
 
-- `401` from webhook: verify `X-Hub-Signature-256` and shared secret.
-- `503` from webhook: WAL capacity reached; inspect hydrator health and head poison delivery.
-- No changes after webhook: verify GraphQL fetch for locator ID succeeds and `/health` is not degraded.
-- Startup failure “requires durable state store”: configure `DrasiLib` with a state store provider and WAL provider.
+- `401` webhook: signature/secret mismatch.
+- `503` webhook: inbox WAL full/failing or source in fatal hydrator state.
+- No updates: verify GraphQL authoritative fetch for locator node and `/health` status.

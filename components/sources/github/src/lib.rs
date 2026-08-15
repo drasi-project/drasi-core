@@ -23,12 +23,10 @@ pub mod config;
 pub mod descriptor;
 pub mod source;
 
-mod bootstrap;
 mod graphql;
 mod hydrator;
 mod mapping;
 mod rate_limit;
-mod reconciler;
 mod types;
 mod webhook;
 

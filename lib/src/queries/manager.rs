@@ -675,16 +675,6 @@ impl DrasiQuery {
         self.subscription_tasks.read().await.len()
     }
 
-    pub async fn processing_task_active(&self) -> bool {
-        self.base.task_handle.read().await.is_some()
-    }
-
-    pub async fn set_status_for_test(&self, status: ComponentStatus) {
-        self.base
-            .set_status(status, Some("test status".to_string()))
-            .await;
-    }
-
     /// Access the checkpoint store (for internal/test use only).
     #[doc(hidden)]
     pub async fn get_checkpoint_store(&self) -> Option<Arc<dyn CheckpointStore>> {

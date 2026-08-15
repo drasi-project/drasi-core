@@ -17,7 +17,7 @@
 use crate::graphql::{
     ActorRef, FetchedRoot, IssueCommentData, IssueData, ProjectData, ProjectItemContent,
     ProjectItemData, ProjectItemFieldValue, PullRequestData, PullRequestReviewCommentData,
-    PullRequestReviewData, ReconcileSnapshot, RepositoryData,
+    PullRequestReviewData, RepositoryData,
 };
 use crate::types::{RootSnapshot, SnapshotElement};
 use anyhow::Result;
@@ -97,77 +97,18 @@ pub fn map_root_delete_from_snapshot(
     let Some(previous) = previous else {
         return Vec::new();
     };
-    previous
-        .elements
-        .values()
+    let mut elements = previous.elements.values().collect::<Vec<_>>();
+    elements.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then_with(|| left.element_type.cmp(&right.element_type))
+    });
+    elements
+        .into_iter()
         .map(|e| SourceChange::Delete {
             metadata: element_metadata(source_id, &e.id, &e.labels, effective_from),
         })
         .collect()
-}
-
-/// Convert an entire reconciled snapshot into upsert changes and new state.
-pub fn map_reconcile_snapshot(
-    source_id: &str,
-    snapshot: &ReconcileSnapshot,
-    previous_index: &HashMap<String, SnapshotElement>,
-    effective_from: u64,
-) -> (Vec<SourceChange>, HashMap<String, SnapshotElement>) {
-    let mut next_index: HashMap<String, SnapshotElement> = HashMap::new();
-
-    for repository in snapshot.repositories.values() {
-        let root = FetchedRoot::Repository(repository.clone());
-        collect_snapshot_into(&mut next_index, build_snapshot(&root));
-    }
-    for issue in snapshot.issues.values() {
-        let root = FetchedRoot::Issue(issue.clone());
-        collect_snapshot_into(&mut next_index, build_snapshot(&root));
-    }
-    for pr in snapshot.pull_requests.values() {
-        let root = FetchedRoot::PullRequest(pr.clone());
-        collect_snapshot_into(&mut next_index, build_snapshot(&root));
-    }
-    for project in snapshot.projects.values() {
-        let root = FetchedRoot::Project(project.clone());
-        collect_snapshot_into(&mut next_index, build_snapshot(&root));
-    }
-    for item in snapshot.project_items.values() {
-        let root = FetchedRoot::ProjectItem(item.clone());
-        collect_snapshot_into(&mut next_index, build_snapshot(&root));
-    }
-
-    let mut changes = Vec::new();
-    for (element_id, next) in &next_index {
-        match previous_index.get(element_id) {
-            None => {
-                if let Some(insert) = snapshot_to_insert(source_id, next, effective_from) {
-                    changes.push(insert);
-                }
-            }
-            Some(prev) if prev != next => {
-                if let Some(update) = snapshot_to_update(source_id, next, effective_from) {
-                    changes.push(update);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    for (element_id, prev) in previous_index {
-        if !next_index.contains_key(element_id) {
-            changes.push(SourceChange::Delete {
-                metadata: element_metadata(source_id, &prev.id, &prev.labels, effective_from),
-            });
-        }
-    }
-
-    (changes, next_index)
-}
-
-fn collect_snapshot_into(index: &mut HashMap<String, SnapshotElement>, snapshot: RootSnapshot) {
-    for (id, element) in snapshot.elements {
-        index.insert(id, element);
-    }
 }
 
 fn diff_snapshots(
