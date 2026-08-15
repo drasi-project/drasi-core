@@ -25,7 +25,7 @@
 
 /// Build the coding-agent prompt for one execution.
 ///
-/// `execution_id` is the stable `execution:<uuid>` identifier for this run (see
+/// `execution_id` is the stable `execution:<runId>` identifier for this run (see
 /// [`crate::ids::execution_id`]); embedding it lets the reconciliation seam find
 /// a task whose creation response was lost.
 pub fn build_prompt(subject_number: u64, execution_id: &str) -> String {
@@ -47,7 +47,8 @@ pub fn build_prompt(subject_number: u64, execution_id: &str) -> String {
 mod tests {
     use super::*;
 
-    const EXECUTION_ID: &str = "execution:2f1c9e11-4a9d-4b66-a30d-1b8e7721fa4c";
+    const EXECUTION_ID: &str = "execution:validation:PVTI_item:sha256:\
+        aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     #[test]
     fn prompt_carries_only_the_two_correlation_inputs() {

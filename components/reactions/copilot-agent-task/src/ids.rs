@@ -22,25 +22,14 @@
 //! redelivered row can only ever resolve to the same execution.
 
 use drasi_workgraph_common::event::ExecutionId;
-use uuid::Uuid;
-
-/// Fixed namespace for this reaction's deterministic `executionId`. Generated
-/// once via `uuid::Uuid::new_v4()` and frozen here — it must never change, or
-/// all previously generated `executionId`s become unreproducible.
-const EXECUTION_ID_NAMESPACE: Uuid = Uuid::from_bytes([
-    0x8f, 0x2c, 0x9e, 0x11, 0x4a, 0x9d, 0x4b, 0x66, 0xa3, 0x0d, 0x1b, 0x8e, 0x77, 0x21, 0xfa, 0x4c,
-]);
+use drasi_workgraph_common::event::RunId;
 
 /// Compute the stable `executionId` for one run.
 ///
-/// `executionId` is a UUIDv5 (namespaced SHA-1) over the `runId` and nothing
-/// else, so exactly one execution exists per run. It is embedded in the agent
-/// prompt so the reconciliation seam can find a task that was created but whose
-/// HTTP response was lost (see [`crate::github`]).
-pub fn execution_id(run_id: &str) -> ExecutionId {
-    let uuid = Uuid::new_v5(&EXECUTION_ID_NAMESPACE, run_id.as_bytes());
-    ExecutionId::from_suffix(&uuid.to_string())
-        .expect("a UUIDv5 string is always a valid execution suffix")
+/// `executionId` is exactly `execution:<runId>`, so every participant can derive
+/// it without hashing or a component-specific namespace.
+pub fn execution_id(run_id: &RunId) -> ExecutionId {
+    ExecutionId::from_run_id(run_id)
 }
 
 /// The state-store key for one run's durable execution record.
@@ -56,23 +45,27 @@ mod tests {
     use super::*;
 
     const RUN_A: &str =
-        "run:sha256:0000000000000000000000000000000000000000000000000000000000000001";
+        "validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa";
     const RUN_B: &str =
-        "run:sha256:0000000000000000000000000000000000000000000000000000000000000002";
+        "validation:PVTI_other:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa";
+
+    fn run(value: &str) -> RunId {
+        RunId::try_from(value.to_string()).expect("valid run")
+    }
 
     #[test]
     fn execution_id_is_a_pure_function_of_the_run_id() {
-        let a = execution_id(RUN_A);
-        let b = execution_id(RUN_A);
+        let a = execution_id(&run(RUN_A));
+        let b = execution_id(&run(RUN_A));
         assert_eq!(a, b, "same run must yield the same execution id");
-        assert!(a.as_str().starts_with("execution:"));
+        assert_eq!(a.as_str(), format!("execution:{RUN_A}"));
     }
 
     #[test]
     fn execution_id_is_unique_per_run() {
         assert_ne!(
-            execution_id(RUN_A),
-            execution_id(RUN_B),
+            execution_id(&run(RUN_A)),
+            execution_id(&run(RUN_B)),
             "distinct runs must yield distinct execution ids"
         );
     }

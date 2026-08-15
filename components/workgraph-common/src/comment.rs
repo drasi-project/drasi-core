@@ -247,7 +247,7 @@ mod tests {
 
     fn event(payload: WorkGraphEventPayload) -> WorkGraphEvent {
         WorkGraphEvent::new(
-            run_id(ITEM, SUBJECT, &body_digest(Some(BODY))),
+            run_id(ITEM, &body_digest(Some(BODY))),
             ITEM,
             SUBJECT,
             payload,
@@ -256,6 +256,7 @@ mod tests {
     }
 
     fn all_payloads() -> Vec<WorkGraphEventPayload> {
+        let execution_id = ExecutionId::from_run_id(&run_id(ITEM, &body_digest(Some(BODY))));
         vec![
             WorkGraphEventPayload::ResponsibilityAssigned(ResponsibilityAssignedPayload {
                 responsibility_type: AssignedResponsibilityType::IssueValidation,
@@ -263,11 +264,11 @@ mod tests {
                 content_digest: body_digest(Some(BODY)),
             }),
             WorkGraphEventPayload::ExecutionStarted(ExecutionStartedPayload {
-                execution_id: ExecutionId::from_suffix("9f1c").expect("valid"),
+                execution_id: execution_id.clone(),
                 task_id: "task-42".to_string(),
             }),
             WorkGraphEventPayload::CompletedIssueValidation(CompletedIssueValidationPayload {
-                execution_id: ExecutionId::from_suffix("9f1c").expect("valid"),
+                execution_id,
                 outcome: ValidationOutcome::Passed,
                 reason_code: ValidationReasonCode::RequiredMarkerPresent,
             }),
@@ -293,11 +294,11 @@ mod tests {
     #[test]
     fn rendered_body_matches_the_exact_grammar() {
         let event = event(all_payloads().remove(1));
-        let body = render_comment(&event, "WorkGraph started validation").expect("render");
+        let body = render_comment(&event, "Issue validation started.").expect("render");
         let lines: Vec<&str> = body.split('\n').collect();
         assert_eq!(lines[0], COMMENT_MARKER);
         assert_eq!(lines[1], "");
-        assert_eq!(lines[2], "WorkGraph started validation");
+        assert_eq!(lines[2], "Issue validation started.");
         assert_eq!(lines[3], "");
         assert!(lines[4].starts_with('{'));
         assert!(body.ends_with('}'));
@@ -308,7 +309,7 @@ mod tests {
     #[test]
     fn crlf_bodies_parse() {
         let event = event(all_payloads().remove(0));
-        let body = render_comment(&event, "WorkGraph assigned validation").expect("render");
+        let body = render_comment(&event, "Issue validation assigned.").expect("render");
         let crlf = body.replace('\n', "\r\n");
         assert_eq!(parse_comment(&crlf).expect("parse crlf").event, event);
     }

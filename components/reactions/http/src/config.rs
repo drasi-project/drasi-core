@@ -18,7 +18,8 @@
 //! on top of the shared template primitives in
 //! [`drasi_lib::reactions::common::templates`]. The `template` field
 //! inherited from [`TemplateSpec`] is the HTTP request body; `url`,
-//! `method`, and `headers` come from the flattened [`HttpCallExt`].
+//! `method`, `headers`, and response policy come from the flattened
+//! [`HttpCallExt`].
 
 use anyhow::Context;
 use reqwest::{
@@ -59,9 +60,13 @@ pub struct HttpCallExt {
     /// Header values support Handlebars templates.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+
+    /// Treat GraphQL errors in an HTTP 2xx JSON response as delivery failures.
+    #[serde(default)]
+    pub fail_on_graphql_errors: bool,
 }
 
-/// Spec for a single HTTP call: a body template plus URL, method, headers.
+/// Spec for a single HTTP call and its response policy.
 pub type HttpCallSpec = TemplateSpec<HttpCallExt>;
 
 /// Per-query configuration: separate [`HttpCallSpec`] for each operation.

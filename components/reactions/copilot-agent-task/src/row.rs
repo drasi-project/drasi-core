@@ -244,7 +244,7 @@ mod tests {
         ResponsibilityAssignedPayload, WorkGraphEvent, WorkGraphEventPayload,
     };
     use drasi_workgraph_common::ids::{body_digest, run_id};
-    use drasi_workgraph_common::summary::{summary_for, SubjectRef};
+    use drasi_workgraph_common::summary::summary_for;
     use drasi_workgraph_common::trust::ActorType;
     use serde_json::json;
 
@@ -268,7 +268,7 @@ mod tests {
     fn assignment_body() -> String {
         let digest = body_digest(Some(ISSUE_BODY));
         let event = WorkGraphEvent::new(
-            run_id(ITEM, SUBJECT, &digest),
+            run_id(ITEM, &digest),
             ITEM,
             SUBJECT,
             WorkGraphEventPayload::ResponsibilityAssigned(ResponsibilityAssignedPayload {
@@ -278,13 +278,7 @@ mod tests {
             }),
         )
         .expect("assignment event");
-        let summary = summary_for(
-            &event,
-            SubjectRef {
-                repository: "drasi-project/drasi-core",
-                number: 42,
-            },
-        );
+        let summary = summary_for(&event);
         render_comment(&event, &summary).expect("render")
     }
 
@@ -353,7 +347,7 @@ mod tests {
         let accepted = row.accept_assignment(&config()).expect("accepted");
         assert_eq!(
             accepted.run_id.as_str(),
-            run_id(ITEM, SUBJECT, &body_digest(Some(ISSUE_BODY))).as_str()
+            run_id(ITEM, &body_digest(Some(ISSUE_BODY))).as_str()
         );
     }
 
@@ -492,24 +486,18 @@ mod tests {
     #[test]
     fn a_non_assignment_event_is_never_accepted() {
         let digest = body_digest(Some(ISSUE_BODY));
+        let run = run_id(ITEM, &digest);
         let started = WorkGraphEvent::new(
-            run_id(ITEM, SUBJECT, &digest),
+            run.clone(),
             ITEM,
             SUBJECT,
             WorkGraphEventPayload::ExecutionStarted(ExecutionStartedPayload {
-                execution_id: ExecutionId::from_suffix("2f1c9e11-4a9d-4b66-a30d-1b8e7721fa4c")
-                    .expect("execution id"),
+                execution_id: ExecutionId::from_run_id(&run),
                 task_id: "task-1".to_string(),
             }),
         )
         .expect("started event");
-        let summary = summary_for(
-            &started,
-            SubjectRef {
-                repository: "drasi-project/drasi-core",
-                number: 42,
-            },
-        );
+        let summary = summary_for(&started);
         let mut row = sample_row();
         row.event_body = render_comment(&started, &summary).expect("render");
         assert!(matches!(

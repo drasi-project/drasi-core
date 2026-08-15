@@ -46,10 +46,10 @@ use drasi_workgraph_common::{
     event::{
         AssignedResponsibilityType, CompletedIssueValidationPayload, ExecutionId,
         ExecutionStartedPayload, ProfileRef, ResponsibilityAssignedPayload, RoutingDecidedPayload,
-        ValidationOutcome, ValidationReasonCode, WorkGraphEvent, WorkGraphEventPayload,
+        RunId, ValidationOutcome, ValidationReasonCode, WorkGraphEvent, WorkGraphEventPayload,
     },
     ids::{body_digest, run_id},
-    summary::{summary_for, SubjectRef},
+    summary::summary_for,
 };
 use durable_memory_store::DurableMemoryStateStoreProvider;
 use mock_github::{
@@ -259,11 +259,7 @@ where
 
 fn event_for(body: &str, payload: WorkGraphEventPayload) -> WorkGraphEvent {
     WorkGraphEvent::new(
-        run_id(
-            PROJECT_ITEM_NODE_ID,
-            SUBJECT_NODE_ID,
-            &body_digest(Some(body)),
-        ),
+        run_for(body),
         PROJECT_ITEM_NODE_ID,
         SUBJECT_NODE_ID,
         payload,
@@ -272,13 +268,7 @@ fn event_for(body: &str, payload: WorkGraphEventPayload) -> WorkGraphEvent {
 }
 
 fn body_for(event: &WorkGraphEvent) -> String {
-    let summary = summary_for(
-        event,
-        SubjectRef {
-            repository: REPOSITORY,
-            number: SUBJECT_NUMBER,
-        },
-    );
+    let summary = summary_for(event);
     render_comment(event, &summary).expect("render")
 }
 
@@ -294,10 +284,11 @@ fn assignment_body(body: &str) -> String {
 }
 
 fn started_body(body: &str) -> String {
+    let execution_id = ExecutionId::from_run_id(&run_for(body));
     body_for(&event_for(
         body,
         WorkGraphEventPayload::ExecutionStarted(ExecutionStartedPayload {
-            execution_id: ExecutionId::from_suffix(EXECUTION_SUFFIX).expect("execution"),
+            execution_id,
             task_id: "agent-task-1234".to_string(),
         }),
     ))
@@ -308,14 +299,22 @@ fn completion_body(body: &str, outcome: ValidationOutcome, execution_suffix: &st
         ValidationOutcome::Passed => ValidationReasonCode::RequiredMarkerPresent,
         ValidationOutcome::Failed => ValidationReasonCode::RequiredMarkerMissing,
     };
-    body_for(&event_for(
+    let expected_execution = ExecutionId::from_run_id(&run_for(body));
+    let canonical = body_for(&event_for(
         body,
         WorkGraphEventPayload::CompletedIssueValidation(CompletedIssueValidationPayload {
-            execution_id: ExecutionId::from_suffix(execution_suffix).expect("execution"),
+            execution_id: expected_execution.clone(),
             outcome,
             reason_code: reason,
         }),
-    ))
+    ));
+    if execution_suffix == EXECUTION_SUFFIX {
+        canonical
+    } else {
+        let other_execution =
+            ExecutionId::from_run_id(&run_id("PVTI_other", &body_digest(Some(body))));
+        canonical.replace(expected_execution.as_str(), other_execution.as_str())
+    }
 }
 
 /// The exact `RoutingDecided` comment the reaction must produce.
@@ -338,13 +337,11 @@ fn seed_chain(github: &GithubState, body: &str, outcome: ValidationOutcome) -> S
 }
 
 fn expected_run_id(body: &str) -> String {
-    run_id(
-        PROJECT_ITEM_NODE_ID,
-        SUBJECT_NODE_ID,
-        &body_digest(Some(body)),
-    )
-    .as_str()
-    .to_string()
+    run_for(body).as_str().to_string()
+}
+
+fn run_for(body: &str) -> RunId {
+    run_id(PROJECT_ITEM_NODE_ID, &body_digest(Some(body)))
 }
 
 async fn record(store: &Arc<dyn StateStoreProvider>, body: &str) -> Option<RoutingRecord> {

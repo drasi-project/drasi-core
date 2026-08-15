@@ -47,7 +47,9 @@ use drasi_lib::channels::ComponentStatus;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::{DrasiLib, MemoryStateStoreProvider, Query};
-use drasi_reaction_http::{AdaptiveBatchConfig, HttpReaction};
+use drasi_reaction_http::{
+    AdaptiveBatchConfig, HttpCallExt, HttpQueryConfig, HttpReaction, TemplateSpec,
+};
 use serde_json::Value;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -88,6 +90,7 @@ async fn build_core(
             })
             .with_batch_endpoint("/batch");
     }
+
     let reaction = builder.build().expect("reaction builder");
 
     let core = Arc::new(
@@ -102,6 +105,52 @@ async fn build_core(
             .expect("build core"),
     );
 
+    (core, handle)
+}
+
+async fn build_graphql_core(
+    base_url: String,
+    store: Arc<dyn StateStoreProvider>,
+) -> (Arc<DrasiLib>, mock_source::MockSourceHandle) {
+    let (mock_source, handle) = mock_source::MockSource::new(SOURCE).expect("mock source");
+    let query = Query::cypher(QUERY)
+        .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+        .from_source(SOURCE)
+        .with_outbox_capacity(100)
+        .auto_start(true)
+        .build();
+    let reaction = HttpReaction::builder(REACTION)
+        .with_base_url(base_url)
+        .from_query(QUERY)
+        .with_recovery_policy(ReactionRecoveryPolicy::Strict)
+        .with_query_template(
+            QUERY,
+            HttpQueryConfig {
+                added: Some(TemplateSpec {
+                    template: String::new(),
+                    extension: HttpCallExt {
+                        url: "/graphql".to_string(),
+                        method: "POST".to_string(),
+                        headers: std::collections::HashMap::new(),
+                        fail_on_graphql_errors: true,
+                    },
+                }),
+                ..Default::default()
+            },
+        )
+        .build()
+        .expect("reaction builder");
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("graphql-e2e-core")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_state_store_provider(store)
+            .build()
+            .await
+            .expect("build core"),
+    );
     (core, handle)
 }
 
@@ -124,6 +173,15 @@ async fn respond_with(server: &MockServer, request_path: &str, status: u16) {
     Mock::given(method("POST"))
         .and(path(request_path.to_string()))
         .respond_with(ResponseTemplate::new(status))
+        .mount(server)
+        .await;
+}
+
+async fn respond_with_graphql(server: &MockServer, body: Value) {
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
         .mount(server)
         .await;
 }
@@ -456,6 +514,43 @@ async fn strict_fail_stops_on_sustained_failure_then_recovers_on_restart() {
         vec!["Alice"],
         "the un-acked event is replayed exactly once after recovery"
     );
+
+    core.stop().await.expect("stop core");
+}
+
+/// A GraphQL error in an HTTP 2xx response is not checkpointed. Once the
+/// downstream returns data successfully, restarting replays the same event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn strict_graphql_error_does_not_checkpoint_and_replays_after_recovery() {
+    let server = mock_server::start().await;
+    respond_with_graphql(
+        &server,
+        serde_json::json!({
+            "data": {"partial": true},
+            "errors": [{"message": "token ghp_must_never_be_logged"}]
+        }),
+    )
+    .await;
+    let store = Arc::new(MemoryStateStoreProvider::new());
+    let (core, handle) = build_graphql_core(server.uri(), store).await;
+    core.start().await.expect("start core");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    insert_person(&handle, "p1", "Alice").await;
+    assert!(
+        wait_for_reaction_status(&core, ComponentStatus::Error, Duration::from_secs(15)).await,
+        "GraphQL errors must exhaust retries and fail-stop under Strict"
+    );
+
+    respond_with_graphql(&server, serde_json::json!({"data": {"ok": true}})).await;
+    core.start_reaction(REACTION)
+        .await
+        .expect("restart reaction from Error");
+    assert_eq!(
+        wait_for_name_count(&server, 1, Duration::from_secs(10)).await,
+        1
+    );
+    assert_eq!(names_received(&server).await, vec!["Alice"]);
 
     core.stop().await.expect("stop core");
 }

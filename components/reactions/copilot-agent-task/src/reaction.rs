@@ -67,7 +67,7 @@ use drasi_workgraph_common::{
     },
     ids::{body_digest, event_id},
     status::AWAITING_VALIDATION,
-    summary::{summary_for, SubjectRef},
+    summary::summary_for,
 };
 
 use crate::config::CopilotAgentTaskReactionConfig;
@@ -544,7 +544,7 @@ impl LaunchCtx<'_> {
         }
 
         // 6. Durable reservation before any external write.
-        let execution = execution_id(run.as_str());
+        let execution = execution_id(&run);
         let started_event_id = event_id(&run, WorkGraphEventType::ExecutionStarted);
         let intent = ExecutionRecord::new(
             run.as_str(),
@@ -912,13 +912,7 @@ impl LaunchCtx<'_> {
             }),
         )
         .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
-        let summary = summary_for(
-            &event,
-            SubjectRef {
-                repository: &row.repository,
-                number: row.subject_number,
-            },
-        );
+        let summary = summary_for(&event);
         let body = render_comment(&event, &summary).map_err(|error| {
             anyhow::anyhow!("failed to render the ExecutionStarted comment: {error}")
         })?;

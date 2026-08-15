@@ -191,7 +191,7 @@ mod tests {
         WorkGraphEvent, WorkGraphEventPayload, WorkGraphEventType,
     };
     use crate::ids::{body_digest, event_id, run_id};
-    use crate::summary::{summary_for, SubjectRef};
+    use crate::summary::summary_for;
 
     const ITEM: &str = "PVTI_lADOABCDEF4AbcDEzgXYZ123";
     const SUBJECT: &str = "I_kwDOABCDEF6ABCDE";
@@ -201,12 +201,13 @@ mod tests {
             ValidationOutcome::Passed => ValidationReasonCode::RequiredMarkerPresent,
             ValidationOutcome::Failed => ValidationReasonCode::RequiredMarkerMissing,
         };
+        let run = run_id(ITEM, &body_digest(Some("body")));
         WorkGraphEvent::new(
-            run_id(ITEM, SUBJECT, &body_digest(Some("body"))),
+            run.clone(),
             ITEM,
             SUBJECT,
             WorkGraphEventPayload::CompletedIssueValidation(CompletedIssueValidationPayload {
-                execution_id: ExecutionId::from_suffix("abc").expect("valid"),
+                execution_id: ExecutionId::from_run_id(&run),
                 outcome,
                 reason_code: reason,
             }),
@@ -222,17 +223,10 @@ mod tests {
         }
     }
 
-    fn subject() -> SubjectRef<'static> {
-        SubjectRef {
-            repository: "owner/repo",
-            number: 5,
-        }
-    }
-
     #[test]
     fn identical_duplicates_coalesce_to_the_earliest_comment() {
         let event = completion(ValidationOutcome::Passed);
-        let summary = summary_for(&event, subject());
+        let summary = summary_for(&event);
         let observations = vec![
             observed("IC_first", &event, &summary),
             observed("IC_second", &event, &summary),
@@ -247,7 +241,7 @@ mod tests {
     fn differing_summaries_still_coalesce() {
         let event = completion(ValidationOutcome::Passed);
         let observations = vec![
-            observed("IC_first", &event, "WorkGraph issue validation passed"),
+            observed("IC_first", &event, "Issue validation passed."),
             observed("IC_second", &event, "something else entirely"),
         ];
         let accepted = coalesce(&observations, &event.event_id)
@@ -298,7 +292,7 @@ mod tests {
 
         // Byte-identical (bar the non-authoritative summary) is adoptable.
         let observations = vec![
-            observed("IC_first", &intended, "WorkGraph issue validation passed"),
+            observed("IC_first", &intended, "Issue validation passed."),
             observed("IC_second", &intended, "a different summary entirely"),
         ];
         let accepted = adopt_published_event(&observations, &intended)
@@ -360,12 +354,13 @@ mod tests {
     #[test]
     fn adoption_ignores_observations_of_other_events() {
         let intended = completion(ValidationOutcome::Passed);
+        let run = run_id(ITEM, &body_digest(Some("a different body")));
         let other_run = WorkGraphEvent::new(
-            run_id(ITEM, SUBJECT, &body_digest(Some("a different body"))),
+            run.clone(),
             ITEM,
             SUBJECT,
             WorkGraphEventPayload::CompletedIssueValidation(CompletedIssueValidationPayload {
-                execution_id: ExecutionId::from_suffix("abc").expect("valid"),
+                execution_id: ExecutionId::from_run_id(&run),
                 outcome: ValidationOutcome::Failed,
                 reason_code: ValidationReasonCode::RequiredMarkerMissing,
             }),

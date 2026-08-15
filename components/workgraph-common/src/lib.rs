@@ -73,13 +73,13 @@
 //!         WorkGraphEvent, WorkGraphEventPayload,
 //!     },
 //!     ids::{body_digest, run_id},
-//!     summary::{summary_for, SubjectRef},
+//!     summary::summary_for,
 //! };
 //!
 //! let item = "PVTI_lADOABCDEF4AbcDEzgXYZ123";
 //! let subject = "I_kwDOABCDEF6ABCDE";
 //! let digest = body_digest(Some("Please validate this."));
-//! let run = run_id(item, subject, &digest);
+//! let run = run_id(item, &digest);
 //!
 //! let event = WorkGraphEvent::new(
 //!     run,
@@ -95,10 +95,7 @@
 //!     }),
 //! )?;
 //!
-//! let summary = summary_for(
-//!     &event,
-//!     SubjectRef { repository: "drasi-project/drasi-core", number: 742 },
-//! );
+//! let summary = summary_for(&event);
 //! let body = render_comment(&event, &summary)?;
 //! assert_eq!(parse_comment(&body)?.event, event);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -129,7 +126,7 @@ pub use row::{
     accept_event_row, AcceptedEventRow, EventRow, RowError, AUTHOR_DATABASE_ID_FIELD,
     AUTHOR_TYPE_FIELD, BODY_DIGEST_FIELD, IS_EDITED_FIELD,
 };
-pub use summary::{summary_for, SubjectRef};
+pub use summary::summary_for;
 pub use trust::{
     author_identity_from_github_user, author_identity_from_source_row, is_trusted,
     validate_trusted_author, ActorType, AuthorIdentity, TrustError, TrustedAuthor,

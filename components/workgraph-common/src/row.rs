@@ -34,8 +34,8 @@
 //! `bodyDigest` is the **issue** body digest because that is the only
 //! `bodyDigest` the Source contract defines: it is projected on `GitHubIssue`
 //! and `GitHubPullRequest`, never on a comment node. It is exactly
-//! [`crate::ids::body_digest`] of the subject issue body, which is also the
-//! third input to [`crate::ids::run_id`], so a row carrying it binds the event
+//! [`crate::ids::body_digest`] of the subject issue body, which is also an input
+//! to [`crate::ids::run_id`], so a row carrying it binds the event
 //! to the precise issue body the run was opened for. A caller that also wants
 //! to detect a *comment* body changing after acceptance hashes the exact
 //! comment body it accepted and pins that hash durably; that is a separate
@@ -62,7 +62,7 @@
 //! 5. the event is the **expected type**;
 //! 6. the event names the row's Project item and subject; and
 //! 7. the event's `runId` is exactly
-//!    `run_id(projectItemNodeId, subjectNodeId, bodyDigest)`.
+//!    `run_id(projectItemNodeId, bodyDigest)`.
 //!
 //! Nothing here consults the network: acceptance is a pure function of the row.
 //! A reaction still re-reads live GitHub state before it writes, but it does so
@@ -173,7 +173,7 @@ pub enum RowError {
     /// The event's `runId` was not derived from the row's own binding.
     #[error(
         "event runId '{observed}' is not the run '{expected}' derived from the row's \
-         projectItemNodeId, subjectNodeId, and {BODY_DIGEST_FIELD}"
+         projectItemNodeId and {BODY_DIGEST_FIELD}"
     )]
     RunId {
         /// The run the event claimed.
@@ -228,7 +228,7 @@ pub fn accept_event_row(
             expected: row.subject_node_id.to_string(),
         });
     }
-    let expected_run = run_id(row.project_item_node_id, row.subject_node_id, &body_digest);
+    let expected_run = run_id(row.project_item_node_id, &body_digest);
     if comment.event.run_id != expected_run {
         return Err(RowError::RunId {
             observed: comment.event.run_id.clone(),
@@ -254,7 +254,7 @@ mod tests {
         ResponsibilityAssignedPayload, WorkGraphEventPayload,
     };
     use crate::ids::body_digest;
-    use crate::summary::{summary_for, SubjectRef};
+    use crate::summary::summary_for;
 
     const ITEM: &str = "PVTI_lADOABCDEF4AbcDEzgXYZ123";
     const SUBJECT: &str = "I_kwDOABCDEF6ABCDE";
@@ -272,7 +272,7 @@ mod tests {
 
     fn assignment_event() -> WorkGraphEvent {
         WorkGraphEvent::new(
-            run_id(ITEM, SUBJECT, &digest()),
+            run_id(ITEM, &digest()),
             ITEM,
             SUBJECT,
             WorkGraphEventPayload::ResponsibilityAssigned(ResponsibilityAssignedPayload {
@@ -285,13 +285,7 @@ mod tests {
     }
 
     fn body_for(event: &WorkGraphEvent) -> String {
-        let summary = summary_for(
-            event,
-            SubjectRef {
-                repository: "drasi-project/drasi-core",
-                number: 742,
-            },
-        );
+        let summary = summary_for(event);
         render_comment(event, &summary).expect("render")
     }
 
@@ -433,13 +427,13 @@ mod tests {
 
     #[test]
     fn a_wrong_event_type_is_rejected() {
+        let run = run_id(ITEM, &digest());
         let started = WorkGraphEvent::new(
-            run_id(ITEM, SUBJECT, &digest()),
+            run.clone(),
             ITEM,
             SUBJECT,
             WorkGraphEventPayload::ExecutionStarted(ExecutionStartedPayload {
-                execution_id: ExecutionId::from_suffix("2f1c9e11-4a9d-4b66-a30d-1b8e7721fa4c")
-                    .expect("execution id"),
+                execution_id: ExecutionId::from_run_id(&run),
                 task_id: "task-1".to_string(),
             }),
         )

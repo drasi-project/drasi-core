@@ -44,7 +44,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v5"] }
 thiserror = "2.0"
 # TODO(#574): Pin the same crates.io drasi-plugin-sdk version as the target
 # dynamic plugin loader before treating this crate as standalone.

@@ -25,7 +25,7 @@ use crate::config::{
     HttpReactionConfig, OperationType, TemplateRouting, TemplateSpec,
 };
 use crate::output::DefaultChangeNotification;
-use crate::process::{build_handlebars, render_batch_item};
+use crate::process::{build_handlebars, render_batch_item, validate_graphql_response};
 use crate::{HttpReaction, HttpReactionBuilder};
 
 // ---------------------------------------------------------------------------
@@ -126,6 +126,7 @@ fn builder_with_output_templates_round_trip() {
                     url: "/added".to_string(),
                     method: "POST".to_string(),
                     headers: HashMap::new(),
+                    fail_on_graphql_errors: false,
                 },
             }),
             updated: None,
@@ -165,6 +166,7 @@ fn builder_with_query_template_adds_to_routes() {
                         url: "/q1".to_string(),
                         method: "POST".to_string(),
                         headers: HashMap::new(),
+                        fail_on_graphql_errors: false,
                     },
                 }),
                 ..Default::default()
@@ -208,6 +210,7 @@ fn config_deserialize_with_output_templates() {
                     "url": "/default",
                     "method": "POST"
                 }
+
             },
             "routes": {
                 "q1": {
@@ -227,6 +230,53 @@ fn config_deserialize_with_output_templates() {
     let templates = c.output_templates.unwrap();
     assert!(templates.default_template.is_some());
     assert!(templates.routes.contains_key("q1"));
+}
+
+#[test]
+fn fail_on_graphql_errors_is_per_request_and_defaults_false() {
+    let omitted: HttpCallExt = serde_json::from_value(serde_json::json!({
+        "url": "/graphql",
+        "method": "POST"
+    }))
+    .expect("omitted flag parses");
+    assert!(!omitted.fail_on_graphql_errors);
+
+    let enabled: HttpCallExt = serde_json::from_value(serde_json::json!({
+        "url": "/graphql",
+        "method": "POST",
+        "failOnGraphqlErrors": true
+    }))
+    .expect("enabled flag parses");
+    assert!(enabled.fail_on_graphql_errors);
+}
+
+#[test]
+fn graphql_response_validation_accepts_data_and_absent_or_empty_errors() {
+    for body in [
+        br#"{"data":{"ok":true}}"#.as_slice(),
+        br#"{"data":{"ok":true},"errors":[]}"#.as_slice(),
+        br#"{"errors":[]}"#.as_slice(),
+        br#"{}"#.as_slice(),
+    ] {
+        validate_graphql_response(body).expect("valid GraphQL response");
+    }
+}
+
+#[test]
+fn graphql_response_validation_rejects_errors_and_invalid_json_without_leaking_messages() {
+    for body in [
+        br#"{"errors":[{"message":"token ghp_do_not_expose"}]}"#.as_slice(),
+        br#"{"data":{"partial":true},"errors":[{"message":"secret-value"}]}"#.as_slice(),
+        br#"not-json"#.as_slice(),
+        br#"[]"#.as_slice(),
+        br#"{"errors":{"message":"wrong shape"}}"#.as_slice(),
+    ] {
+        let error = validate_graphql_response(body).expect_err("response must fail");
+        let message = error.to_string();
+        assert!(!message.contains("ghp_do_not_expose"), "{message}");
+        assert!(!message.contains("secret-value"), "{message}");
+        assert!(!message.contains("wrong shape"), "{message}");
+    }
 }
 
 #[test]
@@ -516,6 +566,7 @@ fn spec_with(url: &str, template: &str, headers: HashMap<String, String>) -> Htt
                 url: url.to_string(),
                 method: "POST".to_string(),
                 headers,
+                fail_on_graphql_errors: false,
             },
         }),
         ..Default::default()
@@ -1106,6 +1157,7 @@ fn validate_rejects_invalid_url_template_in_route() {
                     url: "/x/{{#if}}".to_string(), // unclosed block → compile error
                     method: "POST".to_string(),
                     headers: HashMap::new(),
+                    fail_on_graphql_errors: false,
                 },
             }),
             ..Default::default()

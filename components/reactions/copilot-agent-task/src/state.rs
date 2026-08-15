@@ -420,9 +420,11 @@ mod tests {
     use drasi_lib::state_store::MemoryStateStoreProvider;
 
     const RUN_ID: &str =
-        "run:sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        "validation:PVTI_item:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const EVENT_ID: &str =
-        "event:sha256:2222222222222222222222222222222222222222222222222222222222222222";
+        "event:validation:PVTI_item:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:ExecutionStarted";
+    const EXECUTION_ID: &str =
+        "execution:validation:PVTI_item:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn row() -> LaunchRow {
         LaunchRow {
@@ -448,7 +450,7 @@ mod tests {
         ExecutionRecord::new(
             RUN_ID,
             EVENT_ID,
-            "execution:abc",
+            EXECUTION_ID,
             &row(),
             "sha256:abc",
             "issue-validator@0123456789abcdef0123456789abcdef01234567",
@@ -530,7 +532,7 @@ mod tests {
         // A row whose binding derives a different run can never adopt this
         // record, even when every other field matches.
         let other_run =
-            "run:sha256:3333333333333333333333333333333333333333333333333333333333333333";
+            "validation:PVTI_other:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         assert!(record.ensure_matches(other_run, &row()).is_err());
 
         let mut wrong_schema = record.clone();

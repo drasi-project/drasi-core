@@ -82,7 +82,7 @@ use drasi_workgraph_common::{
     },
     ids::{body_digest, event_id},
     row::AcceptedEventRow,
-    summary::{summary_for, SubjectRef},
+    summary::summary_for,
 };
 use log::{error, info, warn};
 
@@ -461,13 +461,7 @@ async fn route(
         WorkGraphEventPayload::RoutingDecided(decision.clone()),
     )
     .map_err(|error| PermanentCandidateError::new(error.to_string()))?;
-    let summary = summary_for(
-        &event,
-        SubjectRef {
-            repository: &candidate.repository,
-            number: candidate.subject_number,
-        },
-    );
+    let summary = summary_for(&event);
     let body = render_comment(&event, &summary)
         .map_err(|error| anyhow::anyhow!("failed to render the routing comment: {error}"))?;
 
@@ -721,13 +715,7 @@ fn render_pinned_decision(
     record: &RoutingRecord,
     intended: &WorkGraphEvent,
 ) -> anyhow::Result<String> {
-    let summary = summary_for(
-        intended,
-        SubjectRef {
-            repository: &record.repository,
-            number: record.subject_number,
-        },
-    );
+    let summary = summary_for(intended);
     render_comment(intended, &summary)
         .map_err(|error| anyhow::anyhow!("failed to render the routing comment: {error}"))
 }
@@ -1304,13 +1292,7 @@ mod tests {
 
     /// The canonical comment body for an event.
     fn event_body(event: &WorkGraphEvent) -> String {
-        let summary = summary_for(
-            event,
-            SubjectRef {
-                repository: "drasi-project/drasi-core",
-                number: 742,
-            },
-        );
+        let summary = summary_for(event);
         render_comment(event, &summary).expect("render")
     }
 
@@ -1321,13 +1303,7 @@ mod tests {
     }
 
     fn comment(node_id: &str, event: &WorkGraphEvent, identity: AuthorIdentity) -> IssueComment {
-        let summary = summary_for(
-            event,
-            SubjectRef {
-                repository: "drasi-project/drasi-core",
-                number: 742,
-            },
-        );
+        let summary = summary_for(event);
         IssueComment {
             node_id: node_id.to_string(),
             body: render_comment(event, &summary).expect("render"),
@@ -1338,7 +1314,7 @@ mod tests {
     }
 
     fn run() -> drasi_workgraph_common::event::RunId {
-        drasi_workgraph_common::ids::run_id(ITEM, SUBJECT, &body_digest(Some(BODY)))
+        drasi_workgraph_common::ids::run_id(ITEM, &body_digest(Some(BODY)))
     }
 
     fn assignment_event() -> WorkGraphEvent {
@@ -1361,7 +1337,7 @@ mod tests {
             ITEM,
             SUBJECT,
             WorkGraphEventPayload::ExecutionStarted(ExecutionStartedPayload {
-                execution_id: ExecutionId::from_suffix("exec-1").expect("execution"),
+                execution_id: ExecutionId::from_run_id(&run()),
                 task_id: "task-1".to_string(),
             }),
         )
@@ -1378,7 +1354,13 @@ mod tests {
             ITEM,
             SUBJECT,
             WorkGraphEventPayload::CompletedIssueValidation(CompletedIssueValidationPayload {
-                execution_id: ExecutionId::from_suffix(execution).expect("execution"),
+                execution_id: if execution == "exec-1" {
+                    ExecutionId::from_run_id(&run())
+                } else {
+                    let other_run =
+                        drasi_workgraph_common::ids::run_id("PVTI_other", &body_digest(Some(BODY)));
+                    ExecutionId::from_run_id(&other_run)
+                },
                 outcome,
                 reason_code: reason,
             }),
@@ -1432,7 +1414,7 @@ mod tests {
     fn a_complete_trusted_chain_yields_the_completion() {
         let chain = chain_for(&full_chain(ValidationOutcome::Passed)).expect("chain");
         assert_eq!(chain.completion.outcome, ValidationOutcome::Passed);
-        assert_eq!(chain.execution_id.as_str(), "execution:exec-1");
+        assert_eq!(chain.execution_id, ExecutionId::from_run_id(&run()),);
         assert_eq!(chain.accepted_completion.comment_node_id, "IC_complete");
         assert!(chain.accepted_completion.body_hash.starts_with("sha256:"));
     }
@@ -1528,21 +1510,20 @@ mod tests {
 
     #[test]
     fn a_completion_from_another_execution_is_rejected() {
-        let mut comments = full_chain(ValidationOutcome::Passed);
-        comments[2] = comment(
-            "IC_complete",
-            &completion_event(ValidationOutcome::Passed, "exec-other"),
-            trusted_identity(),
-        );
-        // The row delivers that same completion, so it is accepted as a row and
-        // rejected on the execution it reports.
-        let row = candidate_for(ValidationOutcome::Passed, "exec-other");
-        assert!(
-            chain_with(&config(), &row, &body_digest(Some(BODY)), &comments)
-                .expect_err("execution mismatch")
-                .to_string()
-                .contains("execution")
-        );
+        let run = run();
+        let other_run = drasi_workgraph_common::ids::run_id("PVTI_other", &body_digest(Some(BODY)));
+        let error = WorkGraphEvent::new(
+            run,
+            ITEM,
+            SUBJECT,
+            WorkGraphEventPayload::CompletedIssueValidation(CompletedIssueValidationPayload {
+                execution_id: ExecutionId::from_run_id(&other_run),
+                outcome: ValidationOutcome::Passed,
+                reason_code: ValidationReasonCode::RequiredMarkerPresent,
+            }),
+        )
+        .expect_err("execution mismatch must fail event validation");
+        assert!(error.to_string().contains("executionId"), "{error}");
     }
 
     #[test]
@@ -1779,7 +1760,7 @@ mod tests {
 
         // A comment carrying a different run entirely.
         let other_run = WorkGraphEvent::new(
-            drasi_workgraph_common::ids::run_id(ITEM, SUBJECT, &body_digest(Some("another body"))),
+            drasi_workgraph_common::ids::run_id(ITEM, &body_digest(Some("another body"))),
             ITEM,
             SUBJECT,
             WorkGraphEventPayload::RoutingDecided(RoutingDecidedPayload::for_outcome(

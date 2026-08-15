@@ -47,10 +47,10 @@ use drasi_source_application::{
 use drasi_workgraph_common::comment::render_comment;
 use drasi_workgraph_common::event::{
     AssignedResponsibilityType, ExecutionStartedPayload, ProfileRef, ResponsibilityAssignedPayload,
-    WorkGraphEvent, WorkGraphEventPayload, WorkGraphEventType,
+    RunId, WorkGraphEvent, WorkGraphEventPayload, WorkGraphEventType,
 };
 use drasi_workgraph_common::ids::{body_digest, event_id, run_id};
-use drasi_workgraph_common::summary::{summary_for, SubjectRef};
+use drasi_workgraph_common::summary::summary_for;
 use durable_memory_store::DurableMemoryStateStoreProvider;
 use mock_github::{
     GithubState, MockAuthor, ISSUE_NODE_ID, ISSUE_NUMBER, LAUNCHER_AUTHOR_DATABASE_ID,
@@ -243,26 +243,24 @@ where
 }
 
 /// The deterministic run ID the reaction derives for `body`.
+fn run_for(body: &str) -> RunId {
+    run_id(PROJECT_ITEM_NODE_ID, &body_digest(Some(body)))
+}
+
 fn run_id_for(body: &str) -> String {
-    run_id(
-        PROJECT_ITEM_NODE_ID,
-        SUBJECT_NODE_ID,
-        &body_digest(Some(body)),
-    )
-    .as_str()
-    .to_string()
+    run_for(body).as_str().to_string()
 }
 
 /// The stable execution ID for the run derived from `body`.
 fn execution_for(body: &str) -> String {
-    execution_id(&run_id_for(body)).as_str().to_string()
+    execution_id(&run_for(body)).as_str().to_string()
 }
 
 /// A trusted `ResponsibilityAssigned` comment body that pins `profile@sha`.
 fn assignment_body_with_profile(body: &str, profile: &str, sha: &str) -> String {
     let digest = body_digest(Some(body));
     let event = WorkGraphEvent::new(
-        run_id(PROJECT_ITEM_NODE_ID, SUBJECT_NODE_ID, &digest),
+        run_id(PROJECT_ITEM_NODE_ID, &digest),
         PROJECT_ITEM_NODE_ID,
         SUBJECT_NODE_ID,
         WorkGraphEventPayload::ResponsibilityAssigned(ResponsibilityAssignedPayload {
@@ -272,13 +270,7 @@ fn assignment_body_with_profile(body: &str, profile: &str, sha: &str) -> String 
         }),
     )
     .expect("assignment event");
-    let summary = summary_for(
-        &event,
-        SubjectRef {
-            repository: REPOSITORY,
-            number: SUBJECT_NUMBER,
-        },
-    );
+    let summary = summary_for(&event);
     render_comment(&event, &summary).expect("render assignment")
 }
 
@@ -291,8 +283,8 @@ fn assignment_body(body: &str) -> String {
 /// `body` once `task_id` is created — computed independently of the reaction.
 fn execution_started_body(body: &str, task_id: &str) -> String {
     let digest = body_digest(Some(body));
-    let run = run_id(PROJECT_ITEM_NODE_ID, SUBJECT_NODE_ID, &digest);
-    let execution = execution_id(run.as_str());
+    let run = run_id(PROJECT_ITEM_NODE_ID, &digest);
+    let execution = execution_id(&run);
     let event = WorkGraphEvent::new(
         run,
         PROJECT_ITEM_NODE_ID,
@@ -303,13 +295,7 @@ fn execution_started_body(body: &str, task_id: &str) -> String {
         }),
     )
     .expect("execution started event");
-    let summary = summary_for(
-        &event,
-        SubjectRef {
-            repository: REPOSITORY,
-            number: SUBJECT_NUMBER,
-        },
-    );
+    let summary = summary_for(&event);
     render_comment(&event, &summary).expect("render execution started")
 }
 
@@ -397,7 +383,6 @@ async fn happy_path_creates_one_task_and_one_execution_started_comment() {
         "carries the execution id"
     );
     for forbidden in [
-        PROJECT_ITEM_NODE_ID,
         PROJECT_NODE_ID,
         SUBJECT_NODE_ID,
         "run:",
@@ -830,8 +815,8 @@ async fn restart_after_ambiguous_adopts_task_and_posts_one_comment() {
     // The write the previous process could not confirm did in fact land: a task
     // whose prompt carries this run's execution ID exists on the server.
     let digest = body_digest(Some(ISSUE_BODY));
-    let run = run_id(PROJECT_ITEM_NODE_ID, SUBJECT_NODE_ID, &digest);
-    let execution = execution_id(run.as_str());
+    let run = run_id(PROJECT_ITEM_NODE_ID, &digest);
+    let execution = execution_id(&run);
     let started_event_id = event_id(&run, WorkGraphEventType::ExecutionStarted);
     let seeded_task_id = github.seed_task(&build_prompt(SUBJECT_NUMBER, execution.as_str()));
 
@@ -916,8 +901,8 @@ async fn a_divergent_preexisting_execution_started_is_never_adopted() {
     // The task for this execution already exists, so it is adopted and the run
     // reaches the comment step with no task write.
     let digest = body_digest(Some(ISSUE_BODY));
-    let run = run_id(PROJECT_ITEM_NODE_ID, SUBJECT_NODE_ID, &digest);
-    let execution = execution_id(run.as_str());
+    let run = run_id(PROJECT_ITEM_NODE_ID, &digest);
+    let execution = execution_id(&run);
     let seeded_task_id = github.seed_task(&build_prompt(SUBJECT_NUMBER, execution.as_str()));
 
     // A trusted, unedited comment written by *this* reaction's identity that
@@ -932,17 +917,7 @@ async fn a_divergent_preexisting_execution_started_is_never_adopted() {
         }),
     )
     .expect("event");
-    let divergent_body = render_comment(
-        &divergent,
-        &summary_for(
-            &divergent,
-            SubjectRef {
-                repository: REPOSITORY,
-                number: SUBJECT_NUMBER,
-            },
-        ),
-    )
-    .expect("render");
+    let divergent_body = render_comment(&divergent, &summary_for(&divergent)).expect("render");
     assert_ne!(
         divergent_body,
         execution_started_body(ISSUE_BODY, &seeded_task_id),

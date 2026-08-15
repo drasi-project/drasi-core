@@ -21,9 +21,9 @@
 //! ```json
 //! {
 //!   "schemaVersion": "workgraph.event/v1",
-//!   "eventId": "event:sha256:...",
+//!   "eventId": "event:validation:PVTI_...:sha256:...:ResponsibilityAssigned",
 //!   "eventType": "ResponsibilityAssigned",
-//!   "runId": "run:sha256:...",
+//!   "runId": "validation:PVTI_...:sha256:...",
 //!   "projectItemNodeId": "PVTI_...",
 //!   "subjectNodeId": "I_...",
 //!   "payload": {}
@@ -176,30 +176,152 @@ prefixed_hex_id!(
     64
 );
 
-prefixed_hex_id!(
-    /// A deterministic run identifier rendered as `run:sha256:<64-hex>`.
-    ///
-    /// See [`crate::ids::run_id`] for the derivation.
-    RunId,
-    "runId",
-    "run:sha256:",
-    64
-);
+/// A deterministic validation run identifier.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RunId(String);
 
-prefixed_hex_id!(
-    /// A deterministic event identifier rendered as `event:sha256:<64-hex>`.
-    ///
-    /// See [`crate::ids::event_id`] for the derivation.
-    EventId,
-    "eventId",
-    "event:sha256:",
-    64
-);
+impl RunId {
+    /// Build `validation:<projectItemNodeId>:<contentDigest>`.
+    pub fn new(
+        project_item_node_id: &str,
+        content_digest: &Sha256Digest,
+    ) -> Result<Self, EventError> {
+        Self::try_from(format!(
+            "validation:{project_item_node_id}:{}",
+            content_digest.as_str()
+        ))
+    }
 
-/// An agent-task execution identifier, rendered as `execution:<opaque>`.
-///
-/// The suffix is opaque to the event contract: it is minted by whichever
-/// component reserves the execution, and only its stability matters.
+    /// The full identifier.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The Project Item node ID embedded in this run.
+    pub fn project_item_node_id(&self) -> &str {
+        self.0
+            .strip_prefix("validation:")
+            .and_then(|value| value.split_once(":sha256:"))
+            .map(|(project_item_node_id, _)| project_item_node_id)
+            .expect("validated run IDs always contain a project item")
+    }
+}
+
+impl TryFrom<String> for RunId {
+    type Error = EventError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let Some(rest) = value.strip_prefix("validation:") else {
+            return Err(EventError::scalar(
+                "runId",
+                value,
+                "must start with 'validation:'",
+            ));
+        };
+        let Some((project_item_node_id, digest_hex)) = rest.split_once(":sha256:") else {
+            return Err(EventError::scalar(
+                "runId",
+                value,
+                "must be 'validation:<projectItemNodeId>:<contentDigest>'",
+            ));
+        };
+        if !crate::ids::is_valid_project_item_node_id(project_item_node_id) {
+            return Err(EventError::scalar(
+                "runId",
+                value,
+                "must contain a project item matching 'PVTI_[A-Za-z0-9]+'",
+            ));
+        }
+        let digest = format!("sha256:{digest_hex}");
+        Sha256Digest::try_from(digest).map_err(|_| {
+            EventError::scalar(
+                "runId",
+                value.clone(),
+                "must end with a valid sha256 content digest",
+            )
+        })?;
+        Ok(Self(value))
+    }
+}
+
+impl From<RunId> for String {
+    fn from(value: RunId) -> Self {
+        value.0
+    }
+}
+
+impl fmt::Display for RunId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A deterministic event identifier, rendered as `event:<runId>:<eventType>`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct EventId(String);
+
+impl EventId {
+    /// Build the identifier for one exact event type in a run.
+    pub fn new(run_id: &RunId, event_type: WorkGraphEventType) -> Self {
+        Self(format!("event:{run_id}:{}", event_type.as_str()))
+    }
+
+    /// The full identifier.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for EventId {
+    type Error = EventError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let Some(rest) = value.strip_prefix("event:") else {
+            return Err(EventError::scalar(
+                "eventId",
+                value,
+                "must start with 'event:'",
+            ));
+        };
+        let Some((run_id, event_type)) = rest.rsplit_once(':') else {
+            return Err(EventError::scalar(
+                "eventId",
+                value,
+                "must be 'event:<runId>:<eventType>'",
+            ));
+        };
+        RunId::try_from(run_id.to_string()).map_err(|_| {
+            EventError::scalar("eventId", value.clone(), "must contain a valid runId")
+        })?;
+        if !WorkGraphEventType::ALL
+            .iter()
+            .any(|candidate| candidate.as_str() == event_type)
+        {
+            return Err(EventError::scalar(
+                "eventId",
+                value,
+                "must end with an exact WorkGraph event type",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+impl From<EventId> for String {
+    fn from(value: EventId) -> Self {
+        value.0
+    }
+}
+
+impl fmt::Display for EventId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// An agent-task execution identifier, rendered as `execution:<runId>`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ExecutionId(String);
@@ -208,9 +330,9 @@ impl ExecutionId {
     /// The declared textual prefix, including the trailing colon.
     pub const PREFIX: &'static str = "execution:";
 
-    /// Build an execution ID from its opaque suffix.
-    pub fn from_suffix(suffix: &str) -> Result<Self, EventError> {
-        Self::try_from(format!("{}{suffix}", Self::PREFIX))
+    /// Build the execution ID for a run.
+    pub fn from_run_id(run_id: &RunId) -> Self {
+        Self(format!("{}{run_id}", Self::PREFIX))
     }
 
     /// The full identifier, including its prefix.
@@ -230,23 +352,13 @@ impl TryFrom<String> for ExecutionId {
                 "must start with 'execution:'",
             ));
         };
-        if suffix.is_empty() {
-            return Err(EventError::scalar(
+        RunId::try_from(suffix.to_string()).map_err(|_| {
+            EventError::scalar(
                 "executionId",
-                value,
-                "must carry a non-empty suffix",
-            ));
-        }
-        if suffix
-            .bytes()
-            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-        {
-            return Err(EventError::scalar(
-                "executionId",
-                value,
-                "must not contain whitespace or control characters",
-            ));
-        }
+                value.clone(),
+                "must contain a valid runId after 'execution:'",
+            )
+        })?;
         Ok(Self(value))
     }
 }
@@ -729,12 +841,37 @@ impl WorkGraphEvent {
 
     /// Validate node-ID shapes, payload consistency, and `eventId` derivation.
     pub fn validate(&self) -> Result<(), EventError> {
-        validate_node_id(
-            "projectItemNodeId",
-            &self.project_item_node_id,
-            "PVTI_",
-            "must be a GitHub Projects v2 item node ID starting with 'PVTI_'",
-        )?;
+        if !crate::ids::is_valid_project_item_node_id(&self.project_item_node_id) {
+            return Err(EventError::scalar(
+                "projectItemNodeId",
+                &self.project_item_node_id,
+                "must match 'PVTI_[A-Za-z0-9]+'",
+            ));
+        }
+        if self.run_id.project_item_node_id() != self.project_item_node_id {
+            return Err(EventError::Envelope(format!(
+                "runId '{}' does not name projectItemNodeId '{}'",
+                self.run_id, self.project_item_node_id
+            )));
+        }
+        let expected_execution = ExecutionId::from_run_id(&self.run_id);
+        let observed_execution = match &self.payload {
+            WorkGraphEventPayload::ExecutionStarted(payload) => Some(&payload.execution_id),
+            WorkGraphEventPayload::CompletedIssueValidation(payload) => Some(&payload.execution_id),
+            WorkGraphEventPayload::ResponsibilityAssigned(_)
+            | WorkGraphEventPayload::RoutingDecided(_) => None,
+        };
+        if let Some(observed_execution) = observed_execution {
+            if observed_execution != &expected_execution {
+                return Err(EventError::Inconsistent {
+                    event_type: self.event_type().as_str(),
+                    reason: format!(
+                        "executionId must be '{}' for runId '{}'",
+                        expected_execution, self.run_id
+                    ),
+                });
+            }
+        }
         validate_node_id(
             "subjectNodeId",
             &self.subject_node_id,
@@ -833,11 +970,7 @@ mod tests {
     const BLOB: &str = "0123456789abcdef0123456789abcdef01234567";
 
     fn sample_run() -> RunId {
-        run_id(
-            ITEM,
-            SUBJECT,
-            &body_digest(Some("Ready. workgraph:validate")),
-        )
+        run_id(ITEM, &body_digest(Some("Ready. workgraph:validate")))
     }
 
     fn assigned() -> WorkGraphEvent {
@@ -949,7 +1082,8 @@ mod tests {
     fn rejects_tampered_event_id() {
         let mut value: serde_json::Value =
             serde_json::from_str(&assigned().to_canonical_json()).expect("valid json");
-        value["eventId"] = serde_json::json!(format!("event:sha256:{}", "0".repeat(64)));
+        value["eventId"] =
+            serde_json::json!(format!("event:{}:RoutingDecided", sample_run().as_str()));
         let error = WorkGraphEvent::from_value(value).expect_err("event id must be derived");
         assert!(
             matches!(error, EventError::Envelope(ref message) if message.contains("deterministic")),
@@ -978,7 +1112,7 @@ mod tests {
             "projectItemNodeId": ITEM,
             "subjectNodeId": SUBJECT,
             "payload": {
-                "executionId": "execution:abc",
+                "executionId": "execution:validation:PVTI_other:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "outcome": "passed",
                 "reasonCode": "required-marker-missing"
             }
@@ -1040,7 +1174,7 @@ mod tests {
         assert!(Sha256Digest::try_from(format!("sha256:{}", "a".repeat(64))).is_ok());
         assert!(ExecutionId::try_from("exec:1".to_string()).is_err());
         assert!(ExecutionId::try_from("execution:".to_string()).is_err());
-        assert!(ExecutionId::try_from("execution:a b".to_string()).is_err());
+        assert!(ExecutionId::try_from("execution:arbitrary".to_string()).is_err());
         assert!(ProfileRef::new("issue-validator", "zz").is_err());
         assert!(ProfileRef::new("Issue-Validator", BLOB).is_err());
         let profile = ProfileRef::new("issue-validator", BLOB).expect("valid");
@@ -1052,10 +1186,13 @@ mod tests {
     fn rejects_malformed_node_ids() {
         let run = sample_run();
         let payload = WorkGraphEventPayload::ExecutionStarted(ExecutionStartedPayload {
-            execution_id: ExecutionId::from_suffix("abc").expect("valid"),
+            execution_id: ExecutionId::from_run_id(&run),
             task_id: "task-1".to_string(),
         });
         assert!(WorkGraphEvent::new(run.clone(), "PVT_wrong", SUBJECT, payload.clone()).is_err());
+        assert!(
+            WorkGraphEvent::new(run.clone(), "PVTI_with-dash", SUBJECT, payload.clone()).is_err()
+        );
         assert!(WorkGraphEvent::new(run, ITEM, "PR_wrong", payload).is_err());
     }
 }

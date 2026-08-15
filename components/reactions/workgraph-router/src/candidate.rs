@@ -169,7 +169,7 @@ mod tests {
         ValidationReasonCode, WorkGraphEvent, WorkGraphEventPayload,
     };
     use drasi_workgraph_common::ids::{body_digest, run_id};
-    use drasi_workgraph_common::summary::{summary_for, SubjectRef};
+    use drasi_workgraph_common::summary::summary_for;
     use drasi_workgraph_common::trust::ActorType;
 
     const ITEM: &str = "PVTI_item";
@@ -190,23 +190,18 @@ mod tests {
     }
 
     fn body_for(event: &WorkGraphEvent) -> String {
-        let summary = summary_for(
-            event,
-            SubjectRef {
-                repository: "drasi-project/drasi-core",
-                number: 742,
-            },
-        );
+        let summary = summary_for(event);
         render_comment(event, &summary).expect("render")
     }
 
     fn completion_body() -> String {
+        let run = run_id(ITEM, &body_digest(Some(ISSUE_BODY)));
         let event = WorkGraphEvent::new(
-            run_id(ITEM, SUBJECT, &body_digest(Some(ISSUE_BODY))),
+            run.clone(),
             ITEM,
             SUBJECT,
             WorkGraphEventPayload::CompletedIssueValidation(CompletedIssueValidationPayload {
-                execution_id: ExecutionId::from_suffix(EXECUTION).expect("execution"),
+                execution_id: ExecutionId::from_run_id(&run),
                 outcome: ValidationOutcome::Passed,
                 reason_code: ValidationReasonCode::RequiredMarkerPresent,
             }),
@@ -239,7 +234,7 @@ mod tests {
         let accepted = row.accept_completion(&config()).expect("accepted");
         assert_eq!(
             accepted.run_id.as_str(),
-            run_id(ITEM, SUBJECT, &body_digest(Some(ISSUE_BODY))).as_str()
+            run_id(ITEM, &body_digest(Some(ISSUE_BODY))).as_str()
         );
     }
 
@@ -335,12 +330,13 @@ mod tests {
 
     #[test]
     fn a_non_completion_event_is_never_accepted() {
+        let run = run_id(ITEM, &body_digest(Some(ISSUE_BODY)));
         let started = WorkGraphEvent::new(
-            run_id(ITEM, SUBJECT, &body_digest(Some(ISSUE_BODY))),
+            run.clone(),
             ITEM,
             SUBJECT,
             WorkGraphEventPayload::ExecutionStarted(ExecutionStartedPayload {
-                execution_id: ExecutionId::from_suffix(EXECUTION).expect("execution"),
+                execution_id: ExecutionId::from_run_id(&run),
                 task_id: "task-1".to_string(),
             }),
         )

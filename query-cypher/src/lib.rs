@@ -23,31 +23,6 @@ use std::sync::Arc;
 #[cfg(test)]
 mod tests;
 
-fn decode_newline_escape(text: &str) -> String {
-    let mut decoded = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            decoded.push(c);
-            continue;
-        }
-
-        let mut backslashes = 1;
-        while chars.next_if_eq(&'\\').is_some() {
-            backslashes += 1;
-        }
-
-        if backslashes == 1 && chars.next_if_eq(&'n').is_some() {
-            decoded.push('\n');
-        } else {
-            decoded.extend(std::iter::repeat_n('\\', backslashes));
-        }
-    }
-
-    decoded
-}
-
 peg::parser! {
     grammar cypher() for str {
         use drasi_query_ast::ast::*;
@@ -137,7 +112,7 @@ peg::parser! {
                 "'" text:$(duration()) "'" { Arc::from(text) }
             }
             /quiet! {
-                "'" text:$([^ '\'' | '\n' | '\r']*) "'" { Arc::from(decode_newline_escape(text)) }
+                "'" text:$([^ '\'' | '\n' | '\r']*) "'" { Arc::from(text) }
             }
             / expected!("a quoted string")
 

@@ -31,7 +31,7 @@ use crate::HttpReactionBuilder;
 // ---------------------------------------------------------------------------
 
 /// DTO for a single HTTP call spec. Mirrors `HttpCallSpec` on the wire:
-/// a Handlebars `template` (body) plus `url`, `method`, and `headers`.
+/// a Handlebars `template` (body) plus request and response options.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = reaction::http::HttpCallSpec)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -52,6 +52,11 @@ pub struct HttpCallSpecDto {
     /// Additional HTTP headers. Header values support Handlebars.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+
+    /// Fail delivery when an HTTP 2xx response contains GraphQL errors or is not
+    /// a valid top-level JSON object. Defaults to false.
+    #[serde(default)]
+    pub fail_on_graphql_errors: bool,
 }
 
 /// DTO for per-query call configuration: one [`HttpCallSpecDto`] per operation.
@@ -183,6 +188,7 @@ fn map_call_spec(dto: &HttpCallSpecDto) -> crate::config::HttpCallSpec {
             url: dto.url.clone(),
             method: dto.method.clone(),
             headers: dto.headers.clone(),
+            fail_on_graphql_errors: dto.fail_on_graphql_errors,
         },
     }
 }
@@ -216,6 +222,7 @@ fn dto_call_spec(spec: &crate::config::HttpCallSpec) -> HttpCallSpecDto {
         url: spec.extension.url.clone(),
         method: spec.extension.method.clone(),
         headers: spec.extension.headers.clone(),
+        fail_on_graphql_errors: spec.extension.fail_on_graphql_errors,
     }
 }
 
@@ -499,6 +506,34 @@ mod tests {
         assert_eq!(
             reaction.properties()["recoveryPolicy"],
             serde_json::json!("auto_skip_gap")
+        );
+    }
+
+    #[tokio::test]
+    async fn descriptor_round_trips_per_request_graphql_error_policy() {
+        let cfg = serde_json::json!({
+            "baseUrl": "http://localhost",
+            "outputTemplates": {
+                "routes": {
+                    "q1": {
+                        "added": {
+                            "url": "/graphql",
+                            "method": "POST",
+                            "template": "{}",
+                            "failOnGraphqlErrors": true
+                        }
+                    }
+                }
+            }
+        });
+        let reaction = HttpReactionDescriptor
+            .create_reaction("id", vec!["q1".to_string()], &cfg, true)
+            .await
+            .expect("GraphQL response policy parses");
+        assert_eq!(
+            reaction.properties()["outputTemplates"]["routes"]["q1"]["added"]
+                ["failOnGraphqlErrors"],
+            serde_json::json!(true)
         );
     }
 }

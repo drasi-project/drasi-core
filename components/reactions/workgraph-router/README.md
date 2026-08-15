@@ -26,9 +26,9 @@ Exactly one comment, in the exact shared grammar:
 ```text
 WorkGraphEvent/v1
 
-WorkGraph routed drasi-project/drasi-core#742 to AwaitingIssueRiskProfiling
+Issue routed to risk profiling.
 
-{"schemaVersion":"workgraph.event/v1","eventId":"event:sha256:…","eventType":"RoutingDecided","runId":"run:sha256:…","projectItemNodeId":"PVTI_…","subjectNodeId":"I_…","payload":{"fromStatus":"AwaitingValidation","toStatus":"AwaitingIssueRiskProfiling","nextResponsibilityType":"issue-risk-profiling"}}
+{"schemaVersion":"workgraph.event/v1","eventId":"event:validation:PVTI_example:sha256:…:RoutingDecided","eventType":"RoutingDecided","runId":"validation:PVTI_example:sha256:…","projectItemNodeId":"PVTI_example","subjectNodeId":"I_example","payload":{"fromStatus":"AwaitingValidation","toStatus":"AwaitingIssueRiskProfiling","nextResponsibilityType":"issue-risk-profiling"}}
 ```
 
 …followed by exactly one `updateProjectV2ItemFieldValue` mutation setting the
@@ -72,7 +72,7 @@ must deserialize into `RoutingCandidate` (unknown fields are rejected):
 can trigger routing.
 
 There is **no `runId` row field**: the run is derived from
-`run_id(projectItemNodeId, subjectNodeId, bodyDigest)`, and the completion event
+`run_id(projectItemNodeId, bodyDigest)`, and the completion event
 must name exactly that run. `bodyDigest` is the *issue* body digest because that
 is the only `bodyDigest` the Source contract defines (it is projected on
 `GitHubIssue`/`GitHubPullRequest`, never on a comment node).
@@ -102,7 +102,7 @@ RETURN i.repositoryNameWithOwner AS repository, i.number AS subjectNumber,
    `authorType` must be exactly the configured trusted identity, and `eventBody`
    must parse under the strict grammar into a `CompletedIssueValidation` that
    names this row's item, subject, and
-   `run_id(projectItemNodeId, subjectNodeId, bodyDigest)`.
+   `run_id(projectItemNodeId, bodyDigest)`.
 1. **Current body.** The authoritative issue body is re-read and digested; it
    must still equal the row's `bodyDigest`. An issue edited since validation
    therefore aborts the run with zero side effects.

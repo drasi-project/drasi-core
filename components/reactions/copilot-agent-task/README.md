@@ -109,7 +109,7 @@ aliases in Cypher). Unknown fields are rejected (`deny_unknown_fields`).
 | `baseRef` | query policy | string | Git ref the task runs against and the profile blob is read from |
 
 There is **no `runId` row field**. The run is derived from the row's own binding —
-`run_id(projectItemNodeId, subjectNodeId, bodyDigest)` — and the assignment event must name
+`run_id(projectItemNodeId, bodyDigest)` — and the assignment event must name
 exactly that run, so a row can never nominate a run its binding does not produce. `bodyDigest`
 is the *issue* body digest because that is the only `bodyDigest` the Source contract defines
 (it is projected on `GitHubIssue`/`GitHubPullRequest`, never on a comment node), and it is the
@@ -119,7 +119,7 @@ The reaction still re-reads the issue before any write and requires the **curren
 equal the row's `bodyDigest`, so a body edited since the row was emitted aborts the launch with
 zero side effects rather than proceeding on stale information.
 
-The `executionId` (`execution:<uuid-v5>`) is derived deterministically from the run alone — it
+The `executionId` (`execution:<runId>`) is derived deterministically from the run alone — it
 is not a query-row input, and there is exactly one execution per run.
 
 A launch query therefore looks like:
@@ -224,8 +224,7 @@ ambiguous failures stop the reaction so the batch replays on restart.
    **accept its assignment event**: `isEdited` must be `false`, `authorDatabaseId` +
    `authorType` must be exactly the configured trusted assignment identity, `eventBody` must
    parse under the strict `WorkGraphEvent/v1` grammar into a `ResponsibilityAssigned`, and that
-   event must name this row's item, subject, and `run_id(projectItemNodeId, subjectNodeId,
-   bodyDigest)`.
+   event must name this row's item, subject, and `run_id(projectItemNodeId, bodyDigest)`.
 2. **Read the authoritative issue** — `GET /repos/{owner}/{repo}/issues/{number}`; require
    `state == "open"`, `node_id == subjectNodeId`, and `body_digest(body) == bodyDigest`. A
    mismatch means the issue body changed since the assignment and aborts with **zero side
@@ -330,8 +329,8 @@ single-line JSON log to the `workgraph.execution_state` log target. The body mat
 {
   "schema": "workgraph.execution-state/v1",
   "reactionId": "copilot-launcher",
-  "executionId": "execution:<uuid>",
-  "runId": "run:sha256:<64-hex>",
+  "executionId": "execution:validation:PVTI_example:sha256:<64-hex>",
+  "runId": "validation:PVTI_example:sha256:<64-hex>",
   "status": "failed",
   "repository": "owner/repo",
   "issueNumber": 123,

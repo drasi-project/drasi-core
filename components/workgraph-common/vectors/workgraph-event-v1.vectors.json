@@ -1,16 +1,18 @@
 {
   "algorithms": {
     "bodyDigest": "\"sha256:\" + lowerHex(sha256(utf8(body ?? \"\")))",
-    "eventId": "\"event:sha256:\" + lowerHex(sha256(utf8(\"workgraph.event/v1\" + LF + runId + LF + eventType)))",
+    "eventId": "\"event:\" + runId + \":\" + eventType",
+    "executionId": "\"execution:\" + runId",
     "notes": [
-      "LF is a single U+000A. bodyDigest is embedded with its 'sha256:' prefix.",
-      "runId is embedded in the eventId preimage with its 'run:sha256:' prefix.",
+      "projectItemNodeId must match exactly PVTI_[A-Za-z0-9]+.",
+      "bodyDigest must match exactly sha256:[0-9a-f]{64}.",
+      "subjectNodeId is not an input to runId.",
       "eventType is the exact token, e.g. 'CompletedIssueValidation'.",
       "Comment grammar: 'WorkGraphEvent/v1' LF LF summary LF LF json, no fence, no trailing text.",
       "Parsers must normalize CRLF to LF before applying the grammar.",
       "Summaries are generated for humans and must never be parsed for meaning."
     ],
-    "runId": "\"run:sha256:\" + lowerHex(sha256(utf8(\"workgraph.run/v1\" + LF + projectItemNodeId + LF + subjectNodeId + LF + bodyDigest)))"
+    "runId": "\"validation:\" + projectItemNodeId + \":\" + bodyDigest"
   },
   "bodyDigests": [
     {
@@ -24,130 +26,130 @@
       "name": "empty-body"
     },
     {
-      "body": "Please validate this issue.\n\nworkgraph:validate\n",
-      "bodyDigest": "sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1",
+      "body": "Context\nWorkGraph-Validation: pass\n",
+      "bodyDigest": "sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa",
       "name": "sample-body"
     },
     {
-      "body": "Please validate this issue.\n",
-      "bodyDigest": "sha256:237eff62b1c56612574c0a0ba8585763cb57945b775c8309675730b22e8378fb",
+      "body": "Context\n",
+      "bodyDigest": "sha256:5ce27b561ce185abfd304dee0a86a21a1c974cf28ef7d9c0002467ec75f80d0c",
       "name": "edited-body"
     }
   ],
   "commentMarker": "WorkGraphEvent/v1",
   "comments": [
     {
-      "canonicalJson": "{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:f7157bb34419e97450897d17ed8e31444f76d25ef48b59c794778d8f8ffa3a91\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1\"}}",
-      "commentBody": "WorkGraphEvent/v1\n\nWorkGraph assigned issue validation for drasi-project/drasi-core#742\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:f7157bb34419e97450897d17ed8e31444f76d25ef48b59c794778d8f8ffa3a91\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1\"}}",
+      "canonicalJson": "{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ResponsibilityAssigned\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\"}}",
+      "commentBody": "WorkGraphEvent/v1\n\nIssue validation assigned.\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ResponsibilityAssigned\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\"}}",
       "name": "responsibility-assigned",
-      "summary": "WorkGraph assigned issue validation for drasi-project/drasi-core#742"
+      "summary": "Issue validation assigned."
     },
     {
-      "canonicalJson": "{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:0852afc26f01ca9ce28d446b98d913776fc8dbe88a42cb3fb9b4b1761f5ecb7f\",\"eventType\":\"ExecutionStarted\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"executionId\":\"execution:6f0a6b2f-6f1e-52b2-9f34-6d21b1f9a5c7\",\"taskId\":\"agent-task-1234\"}}",
-      "commentBody": "WorkGraphEvent/v1\n\nWorkGraph started the issue validation agent for drasi-project/drasi-core#742\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:0852afc26f01ca9ce28d446b98d913776fc8dbe88a42cb3fb9b4b1761f5ecb7f\",\"eventType\":\"ExecutionStarted\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"executionId\":\"execution:6f0a6b2f-6f1e-52b2-9f34-6d21b1f9a5c7\",\"taskId\":\"agent-task-1234\"}}",
+      "canonicalJson": "{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ExecutionStarted\",\"eventType\":\"ExecutionStarted\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"executionId\":\"execution:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"taskId\":\"agent-task-1234\"}}",
+      "commentBody": "WorkGraphEvent/v1\n\nIssue validation started.\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ExecutionStarted\",\"eventType\":\"ExecutionStarted\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"executionId\":\"execution:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"taskId\":\"agent-task-1234\"}}",
       "name": "execution-started",
-      "summary": "WorkGraph started the issue validation agent for drasi-project/drasi-core#742"
+      "summary": "Issue validation started."
     },
     {
-      "canonicalJson": "{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:2572e388793a007e39a307941fa55997547e92144f5fe13c78fb8e935683680c\",\"eventType\":\"CompletedIssueValidation\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"executionId\":\"execution:6f0a6b2f-6f1e-52b2-9f34-6d21b1f9a5c7\",\"outcome\":\"passed\",\"reasonCode\":\"required-marker-present\"}}",
-      "commentBody": "WorkGraphEvent/v1\n\nWorkGraph issue validation passed for drasi-project/drasi-core#742\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:2572e388793a007e39a307941fa55997547e92144f5fe13c78fb8e935683680c\",\"eventType\":\"CompletedIssueValidation\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"executionId\":\"execution:6f0a6b2f-6f1e-52b2-9f34-6d21b1f9a5c7\",\"outcome\":\"passed\",\"reasonCode\":\"required-marker-present\"}}",
+      "canonicalJson": "{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:CompletedIssueValidation\",\"eventType\":\"CompletedIssueValidation\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"executionId\":\"execution:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"outcome\":\"passed\",\"reasonCode\":\"required-marker-present\"}}",
+      "commentBody": "WorkGraphEvent/v1\n\nIssue validation passed.\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:CompletedIssueValidation\",\"eventType\":\"CompletedIssueValidation\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"executionId\":\"execution:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"outcome\":\"passed\",\"reasonCode\":\"required-marker-present\"}}",
       "name": "completed-issue-validation-passed",
-      "summary": "WorkGraph issue validation passed for drasi-project/drasi-core#742"
+      "summary": "Issue validation passed."
     },
     {
-      "canonicalJson": "{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:b59b3b93e081380c2e28241d1aee61c3ee45b0c84db85ceccd893254c08e42ec\",\"eventType\":\"RoutingDecided\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"fromStatus\":\"AwaitingValidation\",\"toStatus\":\"AwaitingIssueRiskProfiling\",\"nextResponsibilityType\":\"issue-risk-profiling\"}}",
-      "commentBody": "WorkGraphEvent/v1\n\nWorkGraph routed drasi-project/drasi-core#742 to AwaitingIssueRiskProfiling\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:b59b3b93e081380c2e28241d1aee61c3ee45b0c84db85ceccd893254c08e42ec\",\"eventType\":\"RoutingDecided\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"fromStatus\":\"AwaitingValidation\",\"toStatus\":\"AwaitingIssueRiskProfiling\",\"nextResponsibilityType\":\"issue-risk-profiling\"}}",
+      "canonicalJson": "{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:RoutingDecided\",\"eventType\":\"RoutingDecided\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"fromStatus\":\"AwaitingValidation\",\"toStatus\":\"AwaitingIssueRiskProfiling\",\"nextResponsibilityType\":\"issue-risk-profiling\"}}",
+      "commentBody": "WorkGraphEvent/v1\n\nIssue routed to risk profiling.\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:RoutingDecided\",\"eventType\":\"RoutingDecided\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"fromStatus\":\"AwaitingValidation\",\"toStatus\":\"AwaitingIssueRiskProfiling\",\"nextResponsibilityType\":\"issue-risk-profiling\"}}",
       "name": "routing-decided-passed",
-      "summary": "WorkGraph routed drasi-project/drasi-core#742 to AwaitingIssueRiskProfiling"
+      "summary": "Issue routed to risk profiling."
     },
     {
-      "canonicalJson": "{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:2572e388793a007e39a307941fa55997547e92144f5fe13c78fb8e935683680c\",\"eventType\":\"CompletedIssueValidation\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"executionId\":\"execution:6f0a6b2f-6f1e-52b2-9f34-6d21b1f9a5c7\",\"outcome\":\"failed\",\"reasonCode\":\"required-marker-missing\"}}",
-      "commentBody": "WorkGraphEvent/v1\n\nWorkGraph issue validation failed for drasi-project/drasi-core#742\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:2572e388793a007e39a307941fa55997547e92144f5fe13c78fb8e935683680c\",\"eventType\":\"CompletedIssueValidation\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"executionId\":\"execution:6f0a6b2f-6f1e-52b2-9f34-6d21b1f9a5c7\",\"outcome\":\"failed\",\"reasonCode\":\"required-marker-missing\"}}",
+      "canonicalJson": "{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:CompletedIssueValidation\",\"eventType\":\"CompletedIssueValidation\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"executionId\":\"execution:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"outcome\":\"failed\",\"reasonCode\":\"required-marker-missing\"}}",
+      "commentBody": "WorkGraphEvent/v1\n\nIssue validation failed.\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:CompletedIssueValidation\",\"eventType\":\"CompletedIssueValidation\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"executionId\":\"execution:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"outcome\":\"failed\",\"reasonCode\":\"required-marker-missing\"}}",
       "name": "completed-issue-validation-failed",
-      "summary": "WorkGraph issue validation failed for drasi-project/drasi-core#742"
+      "summary": "Issue validation failed."
     },
     {
-      "canonicalJson": "{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:b59b3b93e081380c2e28241d1aee61c3ee45b0c84db85ceccd893254c08e42ec\",\"eventType\":\"RoutingDecided\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"fromStatus\":\"AwaitingValidation\",\"toStatus\":\"NeedsMoreInformation\",\"nextResponsibilityType\":\"issue-correction\"}}",
-      "commentBody": "WorkGraphEvent/v1\n\nWorkGraph routed drasi-project/drasi-core#742 to NeedsMoreInformation\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:b59b3b93e081380c2e28241d1aee61c3ee45b0c84db85ceccd893254c08e42ec\",\"eventType\":\"RoutingDecided\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"fromStatus\":\"AwaitingValidation\",\"toStatus\":\"NeedsMoreInformation\",\"nextResponsibilityType\":\"issue-correction\"}}",
+      "canonicalJson": "{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:RoutingDecided\",\"eventType\":\"RoutingDecided\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"fromStatus\":\"AwaitingValidation\",\"toStatus\":\"NeedsMoreInformation\",\"nextResponsibilityType\":\"issue-correction\"}}",
+      "commentBody": "WorkGraphEvent/v1\n\nIssue routed for correction.\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:RoutingDecided\",\"eventType\":\"RoutingDecided\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"fromStatus\":\"AwaitingValidation\",\"toStatus\":\"NeedsMoreInformation\",\"nextResponsibilityType\":\"issue-correction\"}}",
       "name": "routing-decided-failed",
-      "summary": "WorkGraph routed drasi-project/drasi-core#742 to NeedsMoreInformation"
+      "summary": "Issue routed for correction."
     }
   ],
   "eventIds": [
     {
-      "eventId": "event:sha256:f7157bb34419e97450897d17ed8e31444f76d25ef48b59c794778d8f8ffa3a91",
+      "eventId": "event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ResponsibilityAssigned",
       "eventType": "ResponsibilityAssigned",
-      "runId": "run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664"
+      "runId": "validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa"
     },
     {
-      "eventId": "event:sha256:0852afc26f01ca9ce28d446b98d913776fc8dbe88a42cb3fb9b4b1761f5ecb7f",
+      "eventId": "event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ExecutionStarted",
       "eventType": "ExecutionStarted",
-      "runId": "run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664"
+      "runId": "validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa"
     },
     {
-      "eventId": "event:sha256:2572e388793a007e39a307941fa55997547e92144f5fe13c78fb8e935683680c",
+      "eventId": "event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:CompletedIssueValidation",
       "eventType": "CompletedIssueValidation",
-      "runId": "run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664"
+      "runId": "validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa"
     },
     {
-      "eventId": "event:sha256:b59b3b93e081380c2e28241d1aee61c3ee45b0c84db85ceccd893254c08e42ec",
+      "eventId": "event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:RoutingDecided",
       "eventType": "RoutingDecided",
-      "runId": "run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664"
+      "runId": "validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa"
     }
   ],
   "invalidComments": [
     {
-      "commentBody": "{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:f7157bb34419e97450897d17ed8e31444f76d25ef48b59c794778d8f8ffa3a91\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1\"}}",
+      "commentBody": "{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ResponsibilityAssigned\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\"}}",
       "name": "legacy-pure-json",
       "rejectedBecause": "NotWorkGraphEvent: legacy pure-JSON comments are ignored, not migrated"
     },
     {
-      "commentBody": "WorkGraphEvent/v1\n```json\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:f7157bb34419e97450897d17ed8e31444f76d25ef48b59c794778d8f8ffa3a91\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1\"}}\n```",
+      "commentBody": "WorkGraphEvent/v1\n```json\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ResponsibilityAssigned\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\"}}\n```",
       "name": "legacy-fenced",
       "rejectedBecause": "MissingBlankLineAfterMarker: fenced bodies are rejected, not migrated"
     },
     {
-      "commentBody": "WorkGraphEvent/v1\n\n\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:f7157bb34419e97450897d17ed8e31444f76d25ef48b59c794778d8f8ffa3a91\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1\"}}",
+      "commentBody": "WorkGraphEvent/v1\n\n\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ResponsibilityAssigned\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\"}}",
       "name": "empty-summary",
       "rejectedBecause": "EmptySummary"
     },
     {
-      "commentBody": "WorkGraphEvent/v1\n\nline one\nline two\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:f7157bb34419e97450897d17ed8e31444f76d25ef48b59c794778d8f8ffa3a91\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1\"}}",
+      "commentBody": "WorkGraphEvent/v1\n\nline one\nline two\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ResponsibilityAssigned\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\"}}",
       "name": "multiline-summary",
       "rejectedBecause": "MultilineSummary"
     },
     {
-      "commentBody": "WorkGraphEvent/v1\n\nsssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:f7157bb34419e97450897d17ed8e31444f76d25ef48b59c794778d8f8ffa3a91\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1\"}}",
+      "commentBody": "WorkGraphEvent/v1\n\nsssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ResponsibilityAssigned\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\"}}",
       "name": "summary-too-long",
       "rejectedBecause": "SummaryTooLong: summaries are capped at 120 characters"
     },
     {
-      "commentBody": "WorkGraphEvent/v1\n\nSummary line\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:f7157bb34419e97450897d17ed8e31444f76d25ef48b59c794778d8f8ffa3a91\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1\"}}\n\nthanks!",
+      "commentBody": "WorkGraphEvent/v1\n\nSummary line\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ResponsibilityAssigned\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\"}}\n\nthanks!",
       "name": "trailing-text",
       "rejectedBecause": "TrailingText: the JSON object must end the comment"
     },
     {
-      "commentBody": "WorkGraphEvent/v1\n\nSummary line\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:f7157bb34419e97450897d17ed8e31444f76d25ef48b59c794778d8f8ffa3a91\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1\"}}\n",
+      "commentBody": "WorkGraphEvent/v1\n\nSummary line\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ResponsibilityAssigned\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\"}}\n",
       "name": "trailing-newline",
       "rejectedBecause": "TrailingText: not even trailing whitespace is allowed"
     },
     {
-      "commentBody": "WorkGraphEvent/v1\n\nline one line two\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:f7157bb34419e97450897d17ed8e31444f76d25ef48b59c794778d8f8ffa3a91\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1\"}}",
+      "commentBody": "WorkGraphEvent/v1\n\nline one line two\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ResponsibilityAssigned\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\"}}",
       "name": "line-separator-summary",
       "rejectedBecause": "UnnormalizedSummary: U+2028/U+2029 would render as a second summary line"
     },
     {
-      "commentBody": "WorkGraphEvent/v1\n\nsafe‮drowssab\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:f7157bb34419e97450897d17ed8e31444f76d25ef48b59c794778d8f8ffa3a91\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1\"}}",
+      "commentBody": "WorkGraphEvent/v1\n\nsafe‮drowssab\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ResponsibilityAssigned\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\"}}",
       "name": "bidi-override-summary",
       "rejectedBecause": "UnnormalizedSummary: bidirectional overrides can misrepresent the summary to a reader"
     },
     {
-      "commentBody": "WorkGraphEvent/v1\n\nSummary line\n\n{\"actor\":\"mallory\",\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:f7157bb34419e97450897d17ed8e31444f76d25ef48b59c794778d8f8ffa3a91\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1\"}}",
+      "commentBody": "WorkGraphEvent/v1\n\nSummary line\n\n{\"actor\":\"mallory\",\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ResponsibilityAssigned\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\"}}",
       "name": "unknown-envelope-field",
       "rejectedBecause": "InvalidEvent: the envelope carries no actor; identity comes from GitHub metadata"
     },
     {
-      "commentBody": "WorkGraphEvent/v1\n\nSummary line\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:sha256:f7157bb34419e97450897d17ed8e31444f76d25ef48b59c794778d8f8ffa3a91\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664\",\"projectItemNodeId\":\"PVTI_lADOABCDEF4AbcDEzgXYZ123\",\"subjectNodeId\":\"I_kwDOABCDEF6ABCDE\",\"payload\":{\"timestamp\":\"2026-01-01T00:00:00Z\",\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1\"}}",
+      "commentBody": "WorkGraphEvent/v1\n\nSummary line\n\n{\"schemaVersion\":\"workgraph.event/v1\",\"eventId\":\"event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ResponsibilityAssigned\",\"eventType\":\"ResponsibilityAssigned\",\"runId\":\"validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\",\"projectItemNodeId\":\"PVTI_example\",\"subjectNodeId\":\"I_example\",\"payload\":{\"timestamp\":\"2026-01-01T00:00:00Z\",\"responsibilityType\":\"issue-validation\",\"profileRef\":\"issue-validator@0123456789abcdef0123456789abcdef01234567\",\"contentDigest\":\"sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa\"}}",
       "name": "unknown-payload-field",
       "rejectedBecause": "InvalidEvent: payloads deny unknown fields"
     }
@@ -156,39 +158,29 @@
   "note": "Generated by `cargo test -p drasi-workgraph-common --test vectors`. Do not edit by hand.",
   "runIds": [
     {
-      "bodyDigest": "sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1",
+      "bodyDigest": "sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa",
       "name": "sample",
-      "projectItemNodeId": "PVTI_lADOABCDEF4AbcDEzgXYZ123",
-      "runId": "run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664",
-      "subjectNodeId": "I_kwDOABCDEF6ABCDE"
+      "projectItemNodeId": "PVTI_example",
+      "runId": "validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa"
     },
     {
-      "bodyDigest": "sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1",
+      "bodyDigest": "sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa",
       "name": "other-project-item",
       "projectItemNodeId": "PVTI_other",
-      "runId": "run:sha256:28bd278a40f7cd0beeea9b47a468b324fe9970587ce126d4a3ab1e1c49c5fa67",
-      "subjectNodeId": "I_kwDOABCDEF6ABCDE"
+      "runId": "validation:PVTI_other:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa"
     },
     {
-      "bodyDigest": "sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1",
-      "name": "other-subject",
-      "projectItemNodeId": "PVTI_lADOABCDEF4AbcDEzgXYZ123",
-      "runId": "run:sha256:471413163f0e33dd8b97d1e6bc6d1d3badb866ac48cd848e50ab1cd49e5b87d6",
-      "subjectNodeId": "I_other"
-    },
-    {
-      "bodyDigest": "sha256:237eff62b1c56612574c0a0ba8585763cb57945b775c8309675730b22e8378fb",
+      "bodyDigest": "sha256:5ce27b561ce185abfd304dee0a86a21a1c974cf28ef7d9c0002467ec75f80d0c",
       "name": "edited-body",
-      "projectItemNodeId": "PVTI_lADOABCDEF4AbcDEzgXYZ123",
-      "runId": "run:sha256:086da0b7202fd5051d22c30caaa595329375f9fe14bbdbf6c98d4fb447688cad",
-      "subjectNodeId": "I_kwDOABCDEF6ABCDE"
+      "projectItemNodeId": "PVTI_example",
+      "runId": "validation:PVTI_example:sha256:5ce27b561ce185abfd304dee0a86a21a1c974cf28ef7d9c0002467ec75f80d0c"
     }
   ],
   "schemaVersion": "workgraph.event/v1",
   "subject": {
     "number": 742,
-    "projectItemNodeId": "PVTI_lADOABCDEF4AbcDEzgXYZ123",
+    "projectItemNodeId": "PVTI_example",
     "repository": "drasi-project/drasi-core",
-    "subjectNodeId": "I_kwDOABCDEF6ABCDE"
+    "subjectNodeId": "I_example"
   }
 }

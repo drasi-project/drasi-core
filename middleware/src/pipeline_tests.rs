@@ -59,11 +59,12 @@ const WORKGRAPH_COMMENT_PATTERN: &str = concat!(
     r"(?<payload>\{.*\})$"
 );
 
-const ITEM: &str = "PVTI_lADOABCDEF4AbcDEzgXYZ123";
-const SUBJECT: &str = "I_kwDOABCDEF6ABCDE";
-const RUN_ID: &str = "run:sha256:775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664";
+const ITEM: &str = "PVTI_example";
+const SUBJECT: &str = "I_example";
+const RUN_ID: &str =
+    "validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa";
 const EVENT_ID: &str =
-    "event:sha256:0852afc26f01ca9ce28d446b98d913776fc8dbe88a42cb3fb9b4b1761f5ecb7f";
+    "event:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa:ExecutionStarted";
 
 /// The canonical `ExecutionStarted` document from the shared crate's
 /// cross-language vectors (`components/workgraph-common/vectors`).
@@ -76,7 +77,7 @@ fn canonical_event_json() -> String {
         "projectItemNodeId": ITEM,
         "subjectNodeId": SUBJECT,
         "payload": {
-            "executionId": "execution:6f0a6b2f-6f1e-52b2-9f34-6d21b1f9a5c7",
+            "executionId": "execution:validation:PVTI_example:sha256:9faac769ff6962c7f331881d97518ff6a9df338da679c5d4851577cb7404a7fa",
             "taskId": "agent-task-1234"
         }
     })
@@ -274,7 +275,7 @@ async fn strict_workgraph_comments_are_extracted_and_promoted() {
     let pipeline = pipeline();
     let index = Arc::new(InMemoryElementIndex::new());
 
-    let body = comment_body("WorkGraph started the issue validation agent for owner/repo#742");
+    let body = comment_body("Issue validation started.");
     let outputs = pipeline
         .process(comment_change("comment:event", &body), index.clone())
         .await
@@ -318,7 +319,7 @@ async fn crlf_bodies_are_extracted() {
     let pipeline = pipeline();
     let index = Arc::new(InMemoryElementIndex::new());
 
-    let body = comment_body("WorkGraph started the issue validation agent").replace('\n', "\r\n");
+    let body = comment_body("Issue validation started.").replace('\n', "\r\n");
     let outputs = pipeline
         .process(comment_change("comment:crlf", &body), index)
         .await
@@ -450,7 +451,7 @@ async fn editing_a_comment_out_of_the_format_reconciles_promoted_elements() {
     let pipeline = pipeline();
     let index = Arc::new(InMemoryElementIndex::new());
 
-    let body = comment_body("WorkGraph started the issue validation agent");
+    let body = comment_body("Issue validation started.");
     let created = pipeline
         .process(comment_change("comment:event", &body), index.clone())
         .await

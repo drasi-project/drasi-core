@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use crate::evaluation::functions::{
-    Function, LTrim, Left, RTrim, RandomUUID, Replace, Reverse, Right, Sha256, Split, Substring,
-    ToLower, ToString, ToUpper, Trim,
+    Function, LTrim, Left, RTrim, RandomUUID, Replace, Reverse, Right, Split, Substring, ToLower,
+    ToString, ToUpper, Trim,
 };
 use crate::evaluation::variable_value::VariableValue;
 
@@ -42,7 +42,6 @@ fn create_string_expression_test_function_registry() -> Arc<FunctionRegistry> {
     registry.register_function("toUpper", Function::Scalar(Arc::new(ToUpper {})));
     registry.register_function("trim", Function::Scalar(Arc::new(Trim {})));
     registry.register_function("randomUUID", Function::Scalar(Arc::new(RandomUUID {})));
-    registry.register_function("sha256", Function::Scalar(Arc::new(Sha256 {})));
 
     registry
 }
@@ -774,77 +773,5 @@ async fn evaluate_contains_operator() {
             .await
             .unwrap(),
         VariableValue::Bool(false)
-    );
-}
-
-#[tokio::test]
-async fn evaluate_sha256() {
-    // Cypher source: sha256('abc')
-    let expr = "sha256('abc')";
-    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-
-    let function_registry = create_string_expression_test_function_registry();
-    let ari = Arc::new(InMemoryResultIndex::new());
-    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
-
-    let variables = QueryVariables::new();
-    {
-        let context =
-            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-        assert_eq!(
-            evaluator
-                .evaluate_expression(&context, &expr)
-                .await
-                .unwrap(),
-            VariableValue::String(
-                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string()
-            )
-        );
-    }
-
-    // Cypher source: sha256(NULL)
-    let expr = "sha256(NULL)";
-    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-    {
-        let context =
-            ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-        assert_eq!(
-            evaluator
-                .evaluate_expression(&context, &expr)
-                .await
-                .unwrap(),
-            VariableValue::Null
-        );
-    }
-}
-
-#[tokio::test]
-async fn evaluate_sha256_over_concatenated_literal_with_newline_escape() {
-    // Cypher source (single-quoted string, backslash-n newline escape):
-    //     sha256('workgraph.run/v1\n' + 'PVTI_lADOABCDEF4AbcDEzgXYZ123' + '\n' +
-    //            'I_kwDOABCDEF6ABCDE' + '\n' +
-    //            'sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1')
-    let expr = concat!(
-        "sha256('workgraph.run/v1\\n' + 'PVTI_lADOABCDEF4AbcDEzgXYZ123' + '\\n' + ",
-        "'I_kwDOABCDEF6ABCDE' + '\\n' + ",
-        "'sha256:09a16cabf7f29fd03469340079d25d1de2e818149c13f982d8133a87cbc8a5d1')"
-    );
-    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
-
-    let function_registry = create_string_expression_test_function_registry();
-    let ari = Arc::new(InMemoryResultIndex::new());
-    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
-
-    let variables = QueryVariables::new();
-    let context =
-        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-    assert_eq!(
-        evaluator
-            .evaluate_expression(&context, &expr)
-            .await
-            .unwrap(),
-        VariableValue::String(
-            "775813253e0b6106e5a5f40ea02dcee45021121ce3f79f2d23c180d9b3027664".to_string()
-        )
     );
 }
