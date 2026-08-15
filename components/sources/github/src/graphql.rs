@@ -22,6 +22,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT}
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
@@ -82,12 +83,19 @@ impl FetchedRoot {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GitHubGraphQLClient {
     client: reqwest::Client,
     graphql_url: String,
-    token: String,
     default_headers: HeaderMap,
+}
+
+impl fmt::Debug for GitHubGraphQLClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitHubGraphQLClient")
+            .field("graphql_url", &self.graphql_url)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GitHubGraphQLClient {
@@ -101,11 +109,10 @@ impl GitHubGraphQLClient {
             ACCEPT,
             HeaderValue::from_static("application/vnd.github+json"),
         );
-        let auth = format!("Bearer {token}");
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&auth).context("Failed to build auth header")?,
-        );
+        let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))
+            .context("Failed to build authorization header")?;
+        auth.set_sensitive(true);
+        headers.insert(AUTHORIZATION, auth);
 
         let client = reqwest::Client::builder()
             .default_headers(headers.clone())
@@ -116,13 +123,8 @@ impl GitHubGraphQLClient {
         Ok(Self {
             client,
             graphql_url,
-            token,
             default_headers: headers,
         })
-    }
-
-    pub fn token(&self) -> &str {
-        &self.token
     }
 
     pub async fn fetch_root_from_locator(

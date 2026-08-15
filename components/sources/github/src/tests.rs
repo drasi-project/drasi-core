@@ -15,18 +15,22 @@ use crate::rate_limit::{classify_retry, exp_backoff};
 use crate::reconciler::{run_reconciler_loop, ReconcilerParams};
 use crate::source::GitHubSourceBuilder;
 use crate::types::{HydratorHealth, RootSnapshot, SnapshotElement, WebhookLocator};
-use crate::webhook::{encode_admission_change, parse_locator, verify_signature};
+use crate::webhook::{
+    compact_dedupe_markers, dedupe_key, encode_admission_change, find_delivery_in_wal,
+    parse_locator, persist_dedupe_marker, verify_signature,
+};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::routing::post;
 use axum::{Json, Router};
 use drasi_core::models::SourceChange;
-use drasi_lib::channels::DispatchMode;
+use drasi_lib::channels::{ComponentStatus, DispatchMode};
 use drasi_lib::state_store::{
     MemoryStateStoreProvider, StateStoreError, StateStoreProvider, StateStoreResult,
 };
-use drasi_lib::wal::{CapacityPolicy, WalProvider};
+use drasi_lib::wal::{CapacityPolicy, WalError, WalProvider, WriteAheadLogConfig};
 use drasi_lib::{DrasiLib, DurabilityConfig, Source};
+use drasi_plugin_sdk::resolver::{register_secret_resolver, ResolverError, ValueResolver};
 use drasi_plugin_sdk::{ConfigValue, SourcePluginDescriptor};
 use drasi_state_store_redb::RedbStateStoreProvider;
 use drasi_wal_redb::RedbWalProvider;
@@ -34,7 +38,7 @@ use hmac::Mac;
 use reqwest::header::{HeaderMap as ReqwestHeaderMap, HeaderValue, AUTHORIZATION};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -210,6 +214,7 @@ struct FaultyStateStoreProvider {
     fail_key: String,
     fail_get: bool,
     fail_set: bool,
+    fail_delete_many: bool,
 }
 
 #[async_trait::async_trait]
@@ -253,6 +258,11 @@ impl StateStoreProvider for FaultyStateStoreProvider {
     }
 
     async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
+        if self.fail_delete_many && store_id == self.fail_store {
+            return Err(StateStoreError::StorageError(
+                "injected dedupe compaction failure".to_string(),
+            ));
+        }
         self.inner.delete_many(store_id, keys).await
     }
 
@@ -278,6 +288,72 @@ impl StateStoreProvider for FaultyStateStoreProvider {
 
     fn is_durable(&self) -> bool {
         self.inner.is_durable()
+    }
+}
+
+struct RecoverableReadWalProvider {
+    inner: Arc<dyn WalProvider>,
+    inject_after_append: AtomicBool,
+    fail_reads: AtomicBool,
+}
+
+impl RecoverableReadWalProvider {
+    fn recover(&self) {
+        self.inject_after_append.store(false, Ordering::SeqCst);
+        self.fail_reads.store(false, Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl WalProvider for RecoverableReadWalProvider {
+    async fn register(&self, source_id: &str, config: WriteAheadLogConfig) -> Result<(), WalError> {
+        self.inner.register(source_id, config).await
+    }
+
+    async fn append(&self, source_id: &str, event: &SourceChange) -> Result<u64, WalError> {
+        let sequence = self.inner.append(source_id, event).await?;
+        if self.inject_after_append.load(Ordering::SeqCst) {
+            self.fail_reads.store(true, Ordering::SeqCst);
+        }
+        Ok(sequence)
+    }
+
+    async fn read_from(
+        &self,
+        source_id: &str,
+        sequence: u64,
+    ) -> Result<Vec<(u64, SourceChange)>, WalError> {
+        if self.fail_reads.load(Ordering::SeqCst) {
+            return Err(WalError::StorageError(
+                "injected terminal WAL read failure".to_string(),
+            ));
+        }
+        self.inner.read_from(source_id, sequence).await
+    }
+
+    async fn prune_up_to(&self, source_id: &str, sequence: u64) -> Result<u64, WalError> {
+        self.inner.prune_up_to(source_id, sequence).await
+    }
+
+    async fn head_sequence(&self, source_id: &str) -> Result<u64, WalError> {
+        self.inner.head_sequence(source_id).await
+    }
+
+    async fn oldest_sequence(&self, source_id: &str) -> Result<Option<u64>, WalError> {
+        if self.fail_reads.load(Ordering::SeqCst) {
+            return Err(WalError::StorageError(
+                "injected terminal WAL read failure".to_string(),
+            ));
+        }
+        self.inner.oldest_sequence(source_id).await
+    }
+
+    async fn event_count(&self, source_id: &str) -> Result<u64, WalError> {
+        self.inner.event_count(source_id).await
+    }
+
+    async fn delete_wal(&self, source_id: &str) -> Result<(), WalError> {
+        self.inner.delete_wal(source_id).await
     }
 }
 
@@ -307,6 +383,213 @@ fn signature_validation_rejects_tampered_payload() {
 #[test]
 fn signature_validation_rejects_malformed_header() {
     assert!(verify_signature(b"secret", b"{}", "abcdef").is_err());
+}
+
+#[tokio::test]
+async fn dedupe_compaction_bounds_markers_and_allows_pruned_delivery_readmission() {
+    let temp = TempDir::new().expect("tempdir");
+    let wal = Arc::new(RedbWalProvider::new(temp.path()));
+    let state_store = Arc::new(MemoryStateStoreProvider::new());
+    wal.register(
+        "dedupe-bounded",
+        DurabilityConfig {
+            enabled: true,
+            max_events: 256,
+            capacity_policy: CapacityPolicy::RejectIncoming,
+        }
+        .to_wal_config(),
+    )
+    .await
+    .expect("register WAL");
+    let locator = WebhookLocator {
+        event_type: "issues".to_string(),
+        action: "edited".to_string(),
+        node_id: Some("I_1".to_string()),
+        repository_full_name: Some("acme/repo".to_string()),
+        parent_issue_id: None,
+        parent_pull_request_id: None,
+        project_id: None,
+        project_owner: None,
+        project_number: None,
+    };
+    let mut sequences = Vec::new();
+    for index in 0..100 {
+        let delivery_id = format!("delivery-{index}");
+        let change =
+            encode_admission_change("dedupe-bounded", &delivery_id, &locator).expect("encode");
+        let sequence = wal.append("dedupe-bounded", &change).await.expect("append");
+        sequences.push(sequence);
+        persist_dedupe_marker(
+            state_store.as_ref(),
+            "dedupe-bounded",
+            &dedupe_key(&delivery_id),
+            &delivery_id,
+            sequence,
+            "issues",
+            "edited",
+        )
+        .await
+        .expect("persist marker");
+
+        if index >= 10 {
+            wal.prune_up_to("dedupe-bounded", sequences[index - 10])
+                .await
+                .expect("prune old WAL");
+            compact_dedupe_markers(state_store.as_ref(), wal.as_ref(), "dedupe-bounded")
+                .await
+                .expect("compact markers");
+        }
+        let marker_count = state_store
+            .list_keys("dedupe-bounded")
+            .await
+            .expect("list markers")
+            .into_iter()
+            .filter(|key| key.starts_with("dedupe:"))
+            .count();
+        assert!(marker_count <= 10, "marker count was {marker_count}");
+    }
+
+    let old_delivery = "delivery-0";
+    assert!(!state_store
+        .contains_key("dedupe-bounded", &dedupe_key(old_delivery))
+        .await
+        .expect("check old marker"));
+    assert_eq!(
+        find_delivery_in_wal(wal.as_ref(), "dedupe-bounded", old_delivery)
+            .await
+            .expect("scan WAL"),
+        None
+    );
+
+    let readmitted = encode_admission_change("dedupe-bounded", old_delivery, &locator)
+        .expect("encode readmission");
+    let readmitted_sequence = wal
+        .append("dedupe-bounded", &readmitted)
+        .await
+        .expect("readmit old delivery after its WAL and marker were pruned");
+    persist_dedupe_marker(
+        state_store.as_ref(),
+        "dedupe-bounded",
+        &dedupe_key(old_delivery),
+        old_delivery,
+        readmitted_sequence,
+        "issues",
+        "edited",
+    )
+    .await
+    .expect("persist readmitted marker");
+}
+
+#[tokio::test]
+async fn retained_wal_delivery_remains_deduped_across_provider_restart() {
+    let temp = TempDir::new().expect("tempdir");
+    let state_store = Arc::new(MemoryStateStoreProvider::new());
+    let locator = WebhookLocator {
+        event_type: "issues".to_string(),
+        action: "edited".to_string(),
+        node_id: Some("I_retained".to_string()),
+        repository_full_name: Some("acme/repo".to_string()),
+        parent_issue_id: None,
+        parent_pull_request_id: None,
+        project_id: None,
+        project_owner: None,
+        project_number: None,
+    };
+    let config = DurabilityConfig {
+        enabled: true,
+        max_events: 32,
+        capacity_policy: CapacityPolicy::RejectIncoming,
+    }
+    .to_wal_config();
+    let sequence = {
+        let wal = RedbWalProvider::new(temp.path());
+        wal.register("dedupe-restart", config.clone())
+            .await
+            .expect("register first provider");
+        let change = encode_admission_change("dedupe-restart", "retained-delivery", &locator)
+            .expect("encode");
+        let sequence = wal.append("dedupe-restart", &change).await.expect("append");
+        persist_dedupe_marker(
+            state_store.as_ref(),
+            "dedupe-restart",
+            &dedupe_key("retained-delivery"),
+            "retained-delivery",
+            sequence,
+            "issues",
+            "edited",
+        )
+        .await
+        .expect("persist marker");
+        sequence
+    };
+
+    let restarted = RedbWalProvider::new(temp.path());
+    restarted
+        .register("dedupe-restart", config)
+        .await
+        .expect("register restarted provider");
+    compact_dedupe_markers(state_store.as_ref(), &restarted, "dedupe-restart")
+        .await
+        .expect("compact after restart");
+    assert!(state_store
+        .contains_key("dedupe-restart", &dedupe_key("retained-delivery"))
+        .await
+        .expect("check marker"));
+    assert_eq!(
+        find_delivery_in_wal(&restarted, "dedupe-restart", "retained-delivery")
+            .await
+            .expect("scan restarted WAL"),
+        Some(sequence)
+    );
+}
+
+#[tokio::test]
+async fn dedupe_compaction_error_retains_marker_conservatively() {
+    let temp = TempDir::new().expect("tempdir");
+    let wal = Arc::new(RedbWalProvider::new(temp.path()));
+    wal.register(
+        "dedupe-compaction-error",
+        DurabilityConfig {
+            enabled: true,
+            max_events: 32,
+            capacity_policy: CapacityPolicy::RejectIncoming,
+        }
+        .to_wal_config(),
+    )
+    .await
+    .expect("register WAL");
+    let inner = Arc::new(MemoryStateStoreProvider::new());
+    inner
+        .set(
+            "dedupe-compaction-error",
+            &dedupe_key("old"),
+            serde_json::to_vec(&json!({
+                "deliveryId": "old",
+                "admittedSequence": 0,
+                "eventType": "issues",
+                "action": "edited"
+            }))
+            .expect("serialize marker"),
+        )
+        .await
+        .expect("seed marker");
+    let faulty = FaultyStateStoreProvider {
+        inner: inner.clone(),
+        fail_store: "dedupe-compaction-error".to_string(),
+        fail_key: String::new(),
+        fail_get: false,
+        fail_set: false,
+        fail_delete_many: true,
+    };
+
+    let error = compact_dedupe_markers(&faulty, wal.as_ref(), "dedupe-compaction-error")
+        .await
+        .expect_err("compaction delete must fail");
+    assert!(format!("{error:#}").contains("dedupe compaction"));
+    assert!(inner
+        .contains_key("dedupe-compaction-error", &dedupe_key("old"))
+        .await
+        .expect("check retained marker"));
 }
 
 #[test]
@@ -655,23 +938,35 @@ fn descriptor_schema_has_no_dangling_references() {
 }
 
 #[tokio::test]
-async fn direct_builder_properties_and_configuration_snapshot_redact_secrets() {
-    let pat = "literal-pat-must-not-leak";
-    let webhook_secret = "literal-webhook-secret-must-not-leak";
+async fn direct_builder_properties_are_complete_and_round_trip() {
+    let pat = "literal-pat-for-protected-persistence";
+    let webhook_secret = "literal-webhook-secret-for-protected-persistence";
     let mut config = valid_config_with_port(0);
     config.token = pat.to_string();
     config.webhook.secret = webhook_secret.to_string();
+    let expected = config.clone();
     let source = GitHubSourceBuilder::new("github-secret-test")
         .with_config(config)
         .with_auto_start(false)
         .build()
         .expect("build source");
 
-    let properties_json = serde_json::to_string(&source.properties()).expect("properties JSON");
-    assert!(!properties_json.contains(pat));
-    assert!(!properties_json.contains(webhook_secret));
-    assert!(!source.properties().contains_key("token"));
-    assert!(source.properties()["webhook"].get("secret").is_none());
+    let properties = source.properties();
+    let properties_json = serde_json::to_string(&properties).expect("properties JSON");
+    assert!(properties_json.contains(pat));
+    assert!(properties_json.contains(webhook_secret));
+    let rebuilt_config: GitHubSourceConfig =
+        serde_json::from_value(serde_json::to_value(properties).expect("properties value"))
+            .expect("deserialize complete properties");
+    assert_eq!(rebuilt_config, expected);
+    let rebuilt = GitHubSourceBuilder::new("github-secret-test-rebuilt")
+        .with_config(rebuilt_config)
+        .build()
+        .expect("rebuild source from persisted properties");
+    assert_eq!(
+        serde_json::to_value(rebuilt.properties()).expect("rebuilt properties"),
+        serde_json::to_value(source.properties()).expect("original properties")
+    );
 
     let core = DrasiLib::builder()
         .with_id("github-secret-core")
@@ -682,8 +977,63 @@ async fn direct_builder_properties_and_configuration_snapshot_redact_secrets() {
     let snapshot_json =
         serde_json::to_string(&core.snapshot_configuration().await.expect("snapshot"))
             .expect("snapshot JSON");
-    assert!(!snapshot_json.contains(pat));
-    assert!(!snapshot_json.contains(webhook_secret));
+    assert!(snapshot_json.contains(pat));
+    assert!(snapshot_json.contains(webhook_secret));
+}
+
+#[tokio::test]
+async fn descriptor_properties_preserve_secret_references_without_resolved_values() {
+    struct TestSecretResolver;
+
+    #[async_trait::async_trait]
+    impl ValueResolver for TestSecretResolver {
+        async fn resolve_to_string(
+            &self,
+            value: &ConfigValue<String>,
+        ) -> Result<String, ResolverError> {
+            match value {
+                ConfigValue::Secret { name } if name == "github-pat-ref" => {
+                    Ok("resolved-pat-must-not-persist".to_string())
+                }
+                ConfigValue::Secret { name } if name == "github-hook-ref" => {
+                    Ok("resolved-hook-must-not-persist".to_string())
+                }
+                _ => Err(ResolverError::WrongResolverType),
+            }
+        }
+    }
+
+    register_secret_resolver(Arc::new(TestSecretResolver));
+    let raw = json!({
+        "token": { "kind": "Secret", "name": "github-pat-ref" },
+        "repositories": ["acme/repo"],
+        "projects": [],
+        "webhook": {
+            "host": "127.0.0.1",
+            "port": 8080,
+            "path": "/webhook",
+            "secret": { "kind": "Secret", "name": "github-hook-ref" },
+            "bodyLimitBytes": 1048576
+        },
+        "reconcileIntervalSecs": 60,
+        "durability": {
+            "enabled": true,
+            "maxEvents": 16,
+            "capacityPolicy": "RejectIncoming"
+        },
+        "graphqlUrl": "https://api.github.com/graphql",
+        "skipInitialBootstrap": true
+    });
+    let source = GitHubSourceDescriptor
+        .create_source("descriptor-source", &raw, false)
+        .await
+        .expect("create descriptor source");
+    let persisted = serde_json::to_value(source.properties()).expect("persist properties");
+    assert_eq!(persisted["token"], raw["token"]);
+    assert_eq!(persisted["webhook"]["secret"], raw["webhook"]["secret"]);
+    let text = persisted.to_string();
+    assert!(!text.contains("resolved-pat-must-not-persist"));
+    assert!(!text.contains("resolved-hook-must-not-persist"));
 }
 
 #[test]
@@ -869,6 +1219,7 @@ async fn graphql_client_sends_bearer_token_header() {
         "test-pat-token".to_string(),
     )
     .expect("client");
+    assert!(!format!("{client:?}").contains("test-pat-token"));
     client
         .fetch_repository("acme", "repo")
         .await
@@ -876,7 +1227,46 @@ async fn graphql_client_sends_bearer_token_header() {
 
     let auth = state.auth_header.read().await.clone().expect("auth header");
     assert_eq!(auth, "Bearer test-pat-token");
+    let invalid_token = "invalid-pat-must-not-leak\n";
+    let error =
+        GitHubGraphQLClient::new(format!("http://{addr}/graphql"), invalid_token.to_string())
+            .expect_err("newline makes an invalid header value");
+    assert!(!format!("{error:#?}").contains(invalid_token.trim()));
+    let request_error_client = GitHubGraphQLClient::new(
+        "not a valid URL".to_string(),
+        "request-error-pat-must-not-leak".to_string(),
+    )
+    .expect("construct client with deferred invalid URL");
+    let request_error = request_error_client
+        .fetch_repository("acme", "repo")
+        .await
+        .expect_err("invalid URL must fail request");
+    assert!(!format!("{request_error:#?}").contains("request-error-pat-must-not-leak"));
     server.abort();
+}
+
+#[test]
+fn resolved_config_debug_and_schema_redact_secret_literals() {
+    let mut config = valid_config_with_port(8080);
+    config.token = "debug-pat-must-not-leak".to_string();
+    config.webhook.secret = "debug-hook-must-not-leak".to_string();
+    let debug = format!("{config:?}");
+    assert!(!debug.contains(&config.token));
+    assert!(!debug.contains(&config.webhook.secret));
+
+    let schema = GitHubSourceDescriptor.config_schema_json();
+    assert!(!schema.contains(&config.token));
+    assert!(!schema.contains(&config.webhook.secret));
+
+    let dto: GitHubSourceConfigDto = serde_json::from_value(json!({
+        "token": "dto-pat-must-not-leak",
+        "repositories": ["acme/repo"],
+        "webhook": { "secret": "dto-hook-must-not-leak" }
+    }))
+    .expect("parse DTO for debug test");
+    let dto_debug = format!("{dto:?}");
+    assert!(!dto_debug.contains("dto-pat-must-not-leak"));
+    assert!(!dto_debug.contains("dto-hook-must-not-leak"));
 }
 
 #[tokio::test]
@@ -2345,6 +2735,7 @@ async fn start_fails_fast_when_loading_effective_repos_errors() {
         fail_key: "effective-repos".to_string(),
         fail_get: true,
         fail_set: false,
+        fail_delete_many: false,
     });
 
     let core = DrasiLib::builder()
@@ -2457,6 +2848,106 @@ async fn stop_aborts_hung_graphql_task_and_allows_listener_restart() {
         .expect("second stop");
     graphql_server.abort();
     let _ = graphql_server.await;
+}
+
+#[tokio::test]
+async fn fatal_wal_read_marks_source_error_rejects_admission_and_recovers_after_restart() {
+    async fn send_delivery(port: u16, delivery_id: &str) -> reqwest::Response {
+        let body = br#"{"action":"updated","repository":{"full_name":"acme/repo"}}"#;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret").expect("create HMAC");
+        mac.update(body);
+        reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/webhook"))
+            .header(
+                "X-Hub-Signature-256",
+                format!("sha256={}", hex::encode(mac.finalize().into_bytes())),
+            )
+            .header("X-GitHub-Delivery", delivery_id)
+            .header("X-GitHub-Event", "push")
+            .body(body.as_slice().to_vec())
+            .send()
+            .await
+            .expect("send webhook")
+    }
+
+    let source_id = "github-terminal-wal";
+    let webhook_port = find_available_port().await;
+    let source = GitHubSourceBuilder::new(source_id)
+        .with_config(valid_config_with_port(webhook_port))
+        .build()
+        .expect("build source");
+    let temp = TempDir::new().expect("tempdir");
+    let inner_wal: Arc<dyn WalProvider> = Arc::new(RedbWalProvider::new(temp.path()));
+    let wal = Arc::new(RecoverableReadWalProvider {
+        inner: inner_wal.clone(),
+        inject_after_append: AtomicBool::new(true),
+        fail_reads: AtomicBool::new(false),
+    });
+    let core = DrasiLib::builder()
+        .with_id("github-terminal-wal-core")
+        .with_source(source)
+        .with_state_store_provider(Arc::new(
+            RedbStateStoreProvider::new(temp.path().join("terminal-state.redb"))
+                .expect("state store"),
+        ))
+        .with_wal_provider(wal.clone())
+        .build()
+        .await
+        .expect("build core");
+    core.start().await.expect("start core");
+
+    let admitted = send_delivery(webhook_port, "fatal-trigger").await;
+    assert_eq!(admitted.status(), reqwest::StatusCode::OK);
+    drasi_lib::wait_for_status(
+        &core.component_graph(),
+        source_id,
+        &[ComponentStatus::Error],
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("fatal WAL read must transition source to Error");
+
+    let retained_before = inner_wal
+        .event_count(source_id)
+        .await
+        .expect("count WAL before rejected request");
+    let rejected = send_delivery(webhook_port, "must-not-ack").await;
+    assert_eq!(rejected.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let retained_after = inner_wal
+        .event_count(source_id)
+        .await
+        .expect("count WAL after rejected request");
+    assert_eq!(retained_after, retained_before);
+
+    core.stop_source(source_id)
+        .await
+        .expect("stop failed source");
+    drasi_lib::wait_for_status(
+        &core.component_graph(),
+        source_id,
+        &[ComponentStatus::Stopped],
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("failed source must finish stopping");
+    wal.recover();
+    core.start_source(source_id)
+        .await
+        .expect("restart recovered source");
+    drasi_lib::wait_for_status(
+        &core.component_graph(),
+        source_id,
+        &[ComponentStatus::Running],
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("source must return to Running");
+    let recovered = send_delivery(webhook_port, "after-recovery").await;
+    assert_eq!(recovered.status(), reqwest::StatusCode::OK);
+    core.stop_source(source_id)
+        .await
+        .expect("stop recovered source");
+    core.stop().await.expect("stop core");
 }
 
 #[tokio::test]
@@ -3629,6 +4120,7 @@ async fn reconcile_index_commit_failure_keeps_webhook_admission_in_wal() {
         fail_key: "reconcile-index".to_string(),
         fail_get: false,
         fail_set: true,
+        fail_delete_many: false,
     });
     let params = HydratorParams {
         source_id: "src".to_string(),

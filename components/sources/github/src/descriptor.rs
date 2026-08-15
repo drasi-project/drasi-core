@@ -18,10 +18,11 @@ use crate::config::{GitHubSourceConfig, ProjectSpec, WebhookConfig};
 use crate::GitHubSourceBuilder;
 use anyhow::{anyhow, Context};
 use drasi_plugin_sdk::prelude::*;
+use std::fmt;
 use utoipa::OpenApi;
 
 /// GitHub source configuration DTO.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = source::github::GitHubSourceConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GitHubSourceConfigDto {
@@ -46,6 +47,21 @@ pub struct GitHubSourceConfigDto {
     pub skip_initial_bootstrap: bool,
 }
 
+impl fmt::Debug for GitHubSourceConfigDto {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitHubSourceConfigDto")
+            .field("token", &"[REDACTED]")
+            .field("repositories", &self.repositories)
+            .field("projects", &self.projects)
+            .field("webhook", &self.webhook)
+            .field("reconcile_interval_secs", &self.reconcile_interval_secs)
+            .field("durability", &self.durability)
+            .field("graphql_url", &self.graphql_url)
+            .field("skip_initial_bootstrap", &self.skip_initial_bootstrap)
+            .finish()
+    }
+}
+
 fn default_reconcile_interval() -> ConfigValueU64 {
     ConfigValue::Static(300)
 }
@@ -65,7 +81,7 @@ pub struct ProjectSpecDto {
 }
 
 /// Webhook listener DTO.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WebhookConfigDto {
     #[serde(default = "default_host")]
@@ -82,6 +98,18 @@ pub struct WebhookConfigDto {
     #[serde(default = "default_body_limit")]
     #[schema(value_type = ConfigValueUsize)]
     pub body_limit_bytes: ConfigValueUsize,
+}
+
+impl fmt::Debug for WebhookConfigDto {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebhookConfigDto")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("path", &self.path)
+            .field("secret", &"[REDACTED]")
+            .field("body_limit_bytes", &self.body_limit_bytes)
+            .finish()
+    }
 }
 
 #[derive(utoipa::ToSchema)]
