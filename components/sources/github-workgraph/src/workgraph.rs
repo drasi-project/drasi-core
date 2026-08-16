@@ -198,7 +198,7 @@ pub fn classify(body: &str) -> Classification {
     parsed
 }
 fn marked_family(body: &str) -> Option<bool> {
-    for line in body.lines() {
+    for line in body.lines().flat_map(|line| line.split("\\n")) {
         if line.starts_with(ASSIGNMENT_FAMILY) {
             return Some(true);
         }
@@ -206,9 +206,7 @@ fn marked_family(body: &str) -> Option<bool> {
             return Some(false);
         }
     }
-    let details = body.starts_with("<details")
-        && (body.contains(ASSIGNMENT_FAMILY) || body.contains(RESULT_FAMILY));
-    details.then(|| body.contains(ASSIGNMENT_FAMILY))
+    None
 }
 fn split_envelope(body: &str, is_assignment: bool) -> Result<&str, EnvelopeError> {
     let body = body.strip_suffix('\n').unwrap_or(body);

@@ -27,7 +27,7 @@ use drasi_lib::wal::CapacityPolicy;
 use drasi_lib::DurabilityConfig;
 use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
 use serde_json::{json, Value};
-const ASSIGN: &str = "<details>\n<summary>WorkGraph Assignment</summary>\n\nWorkGraphAssignment/v1\n\nValidate the synthetic fixture Issue.\n\n```json\n{\n  \"assignmentId\": \"fixture-701-validation\",\n  \"agentProfile\": \"issue-validator\",\n  \"priority\": 10,\n  \"taskType\": \"issue-validation\",\n  \"task\": {\n    \"validationProfile\": \"default\",\n    \"criteria\": [\n      \"The Issue has a non-empty title\",\n      \"The Issue body is present\"\n    ]\n  }\n}\n```\n</details>\n";
+const ASSIGN: &str = "<details>\n<summary>WorkGraph Assignment</summary>\n\nWorkGraphAssignment/v1\n\nAutomatically validate this newly opened Issue.\n\n```json\n{\n  \"assignmentId\": \"{{after.assignmentId}}\",\n  \"agentProfile\": \"issue-validator\",\n  \"priority\": 10,\n  \"taskType\": \"issue-validation\",\n  \"task\": {\n    \"validationProfile\": \"new-issue-default\",\n    \"criteria\": [\n      \"The Issue has a non-empty title\",\n      \"The Issue body is present\"\n    ]\n  }\n}\n```\n</details>\n";
 const RESULT: &str = "<details>\n<summary>WorkGraph Result</summary>\n\nWorkGraphResult/v1\n\nEvaluated both requested validation criteria.\n\n```json\n{\n  \"assignmentId\": \"assignment-validation-001\",\n  \"taskType\": \"issue-validation\",\n  \"outcome\": \"succeeded\",\n  \"summary\": \"Evaluated both requested validation criteria.\",\n  \"result\": {\n    \"criteria\": [\n      {\n        \"criterion\": \"The issue defines acceptance criteria\",\n        \"passed\": true,\n        \"evidence\": \"The body contains an acceptance checklist.\"\n      },\n      {\n        \"criterion\": \"The issue identifies an owner\",\n        \"passed\": false,\n        \"evidence\": \"The title and body do not identify an owner.\"\n      }\n    ]\n  }\n}\n```\n</details>";
 fn org() -> Value {
     json!({"login":"acme","id":42,"node_id":"O_1","url":"https://api.github.com/orgs/acme"})
@@ -277,7 +277,7 @@ fn comments_create_edit_and_delete_every_class() {
     let assignment = convert("issue_comment", &comment_event("created", ASSIGN, false));
     assert_eq!(
         assignment[0].get_reference().element_id.as_ref(),
-        "workgraph-assignment:O_1:fixture-701-validation"
+        "workgraph-assignment:O_1:%7B%7Bafter.assignmentId%7D%7D"
     );
     assert_eq!(
         prop(&assignment[0], "priority"),
@@ -308,13 +308,14 @@ fn comments_create_edit_and_delete_every_class() {
     assert!(
         ordinary_to_assignment.starts_with("D:COMMENT_ON")
             && ordinary_to_assignment
-                .ends_with("workgraph-assignment:O_1:fixture-701-validation>I_42")
+                .ends_with("workgraph-assignment:O_1:%7B%7Bafter.assignmentId%7D%7D>I_42")
     );
-    let renamed = ASSIGN.replace("fixture-701-validation", "a43");
+    let renamed = ASSIGN.replace("{{after.assignmentId}}", "a43");
     let rename = changes("issue_comment", &edited(ASSIGN, &renamed));
     assert!(
-        rename.contains("D:WorkGraphAssignment:workgraph-assignment:O_1:fixture-701-validation")
-            && rename.contains("I:WorkGraphAssignment:workgraph-assignment:O_1:a43")
+        rename.contains(
+            "D:WorkGraphAssignment:workgraph-assignment:O_1:%7B%7Bafter.assignmentId%7D%7D"
+        ) && rename.contains("I:WorkGraphAssignment:workgraph-assignment:O_1:a43")
     );
     let retarget = changes(
         "issue_comment",
@@ -357,6 +358,7 @@ fn envelopes_and_payloads_are_strictly_typed() {
         "plain",
         "Mention WorkGraphAssignment/v1 inline.",
         "<details>\n<summary>Notes</summary>\n\nordinary\n</details>",
+        "<details>\n<summary>Discussion</summary>\n\nI tried WorkGraphAssignment/v1 inline.\n</details>",
     ] {
         assert_eq!(classify(body), Classification::Ordinary);
     }
@@ -390,8 +392,8 @@ fn envelopes_and_payloads_are_strictly_typed() {
         ASSIGN.replacen("</summary>\n\n", "</summary>\n", 1),
         ASSIGN.replacen("/v1\n\n", "/v1\n", 1),
         ASSIGN.replacen(
-            "Validate the synthetic fixture Issue.\n\n",
-            "Validate the synthetic fixture Issue.\n",
+            "Automatically validate this newly opened Issue.\n\n",
+            "Automatically validate this newly opened Issue.\n",
             1,
         ),
         compact,
