@@ -29,7 +29,9 @@ separation without duplicating any WorkGraph domain logic, this crate:
 Every node label, relation ID/direction, status-label derivation rule, and
 `WorkGraphAssignment`/`WorkGraphResult`/`WorkGraphError` comment-parsing rule
 therefore comes from the source crate, unchanged. This crate never
-re-implements any of that.
+re-implements any of that. In particular, bootstrap comments use the same
+literal closed `<details>` wrapper, exact Assignment/Result summary labels,
+LF-only spacing, typed two-space JSON, and single final LF as live webhooks.
 
 ## Scope (prototype)
 
@@ -160,6 +162,7 @@ The test suite in `src/tests.rs` runs a fake GitHub GraphQL API via
 [`wiremock`](https://docs.rs/wiremock) and verifies: multi-page cursor
 pagination, `BootstrapRequest` node/relation label filtering, exact
 `event_count`, `source_position` always being `None`, and that a
-WorkGraph Assignment comment is reconstructed into a `WorkGraphAssignment`
-node purely through the shared `Converter`/`workgraph::classify` — proving
-this crate does not duplicate that parsing logic.
+canonical WorkGraph Assignment and Result comments are reconstructed into their
+typed nodes purely through the shared `Converter`/`workgraph::classify`, while
+a malformed canonical wrapper becomes `WorkGraphError` — proving this crate
+does not duplicate that parsing logic.

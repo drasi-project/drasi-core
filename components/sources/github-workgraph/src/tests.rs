@@ -28,8 +28,114 @@ use drasi_lib::DurabilityConfig;
 use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
 use serde_json::{json, Value};
 
-const ASSIGN: &str = "WorkGraphAssignment/v1\n\nValidate.\n\n```json\n{\"assignmentId\":\"a42\",\"agentProfile\":\"validator\",\"priority\":10,\"taskType\":\"issue-validation\",\"task\":{\"validationProfile\":\"default\",\"criteria\":[\"Reproduces\"]}}\n```";
-const RESULT: &str = "WorkGraphResult/v1\n\nDone.\n\n```json\n{\"assignmentId\":\"a42\",\"taskType\":\"issue-validation\",\"outcome\":\"succeeded\",\"summary\":\"Passed.\",\"result\":{\"criteria\":[{\"criterion\":\"Reproduces\",\"passed\":true,\"evidence\":\"Yes\"}]}}\n```";
+const ASSIGN: &str = r#"<details>
+<summary>WorkGraph Assignment</summary>
+
+WorkGraphAssignment/v1
+
+Validate the synthetic fixture Issue.
+
+```json
+{
+  "assignmentId": "fixture-701-validation",
+  "agentProfile": "issue-validator",
+  "priority": 10,
+  "taskType": "issue-validation",
+  "task": {
+    "validationProfile": "default",
+    "criteria": [
+      "The Issue has a non-empty title",
+      "The Issue body is present"
+    ]
+  }
+}
+```
+</details>
+"#;
+
+const RESULT: &str = r#"<details>
+<summary>WorkGraph Result</summary>
+
+WorkGraphResult/v1
+
+Evaluated both requested validation criteria.
+
+```json
+{
+  "assignmentId": "assignment-validation-001",
+  "taskType": "issue-validation",
+  "outcome": "succeeded",
+  "summary": "Evaluated both requested validation criteria.",
+  "result": {
+    "criteria": [
+      {
+        "criterion": "The issue defines acceptance criteria",
+        "passed": true,
+        "evidence": "The body contains an acceptance checklist."
+      },
+      {
+        "criterion": "The issue identifies an owner",
+        "passed": false,
+        "evidence": "The title and body do not identify an owner."
+      }
+    ]
+  }
+}
+```
+</details>
+"#;
+
+const RISK_ASSIGNMENT: &str = r#"<details>
+<summary>WorkGraph Assignment</summary>
+
+WorkGraphAssignment/v1
+
+Profile delivery risk.
+
+```json
+{
+  "assignmentId": "assignment-risk-001",
+  "agentProfile": "issue-risk-profiler",
+  "priority": 4,
+  "taskType": "issue-risk-profile",
+  "task": {
+    "riskProfile": "delivery",
+    "dimensions": [
+      "Security impact",
+      "Rollback complexity"
+    ]
+  }
+}
+```
+</details>
+"#;
+
+const RISK_RESULT: &str = r#"<details>
+<summary>WorkGraph Result</summary>
+
+WorkGraphResult/v1
+
+Scored both requested risk dimensions.
+
+```json
+{
+  "assignmentId": "assignment-risk-001",
+  "taskType": "issue-risk-profile",
+  "outcome": "blocked",
+  "summary": "Scored both requested risk dimensions.",
+  "result": {
+    "dimensions": [
+      {
+        "dimension": "Security impact",
+        "score": 100,
+        "rationale": "The change affects authorization checks."
+      }
+    ]
+  }
+}
+```
+</details>
+"#;
 
 fn org() -> Value {
     json!({"login":"acme","id":42,"node_id":"O_1","url":"https://api.github.com/orgs/acme"})
@@ -273,7 +379,7 @@ fn comments_create_edit_and_delete_every_class() {
     let assignment = convert("issue_comment", &comment_event("created", ASSIGN, false));
     assert_eq!(
         assignment[0].get_reference().element_id.as_ref(),
-        "workgraph-assignment:O_1:a42"
+        "workgraph-assignment:O_1:fixture-701-validation"
     );
     assert_eq!(
         prop(&assignment[0], "priority"),
@@ -283,8 +389,15 @@ fn comments_create_edit_and_delete_every_class() {
         prop(&assignment[0], "task"),
         Some(ElementValue::Object(_))
     ));
+    assert_eq!(text(&assignment[0], "authorLogin").as_deref(), Some("bot"));
+    assert_eq!(
+        text(&assignment[0], "sourceCommentNodeId").as_deref(),
+        Some("IC_9")
+    );
+    assert_eq!(label(&assignment[1]), "COMMENT_ON");
     let result = convert("issue_comment", &comment_event("created", RESULT, false));
     assert_eq!(result.len(), 3);
+    assert_eq!(label(&result[1]), "COMMENT_ON");
     assert_eq!(label(&result[2]), "RESULT_FOR");
     assert!(matches!(
         prop(&result[0], "result"),
@@ -295,25 +408,42 @@ fn comments_create_edit_and_delete_every_class() {
         &comment_event("created", "WorkGraphAssignment/v1\n\nbad", false),
     );
     assert_eq!(label(&invalid[0]), "WorkGraphError");
+    assert_eq!(label(&invalid[1]), "ERROR_ON");
     assert_eq!(
         text(&invalid[0], "sourceCommentBody").as_deref(),
         Some("WorkGraphAssignment/v1\n\nbad")
+    );
+    let malformed_result = RESULT.replacen("<details>", "<details open>", 1);
+    let invalid_result = convert(
+        "issue_comment",
+        &comment_event("created", &malformed_result, false),
+    );
+    assert_eq!(label(&invalid_result[0]), "WorkGraphError");
+    assert_eq!(label(&invalid_result[1]), "ERROR_ON");
+    assert_eq!(
+        text(&invalid_result[0], "sourceCommentBody").as_deref(),
+        Some(malformed_result.as_str())
     );
 
     let ordinary_to_assignment = changes("issue_comment", &edited("plain", ASSIGN));
     assert!(
         ordinary_to_assignment.starts_with("D:COMMENT_ON")
-            && ordinary_to_assignment.ends_with("workgraph-assignment:O_1:a42>I_42")
+            && ordinary_to_assignment
+                .ends_with("workgraph-assignment:O_1:fixture-701-validation>I_42")
     );
-    let renamed = ASSIGN.replace("a42", "a43");
+    let renamed = ASSIGN.replace("fixture-701-validation", "fixture-702-validation");
     let rename = changes("issue_comment", &edited(ASSIGN, &renamed));
     assert!(
-        rename.contains("D:WorkGraphAssignment:workgraph-assignment:O_1:a42")
-            && rename.contains("I:WorkGraphAssignment:workgraph-assignment:O_1:a43")
+        rename.contains("D:WorkGraphAssignment:workgraph-assignment:O_1:fixture-701-validation")
+            && rename
+                .contains("I:WorkGraphAssignment:workgraph-assignment:O_1:fixture-702-validation")
     );
     let retarget = changes(
         "issue_comment",
-        &edited(RESULT, &RESULT.replace("a42", "a43")),
+        &edited(
+            RESULT,
+            &RESULT.replace("assignment-validation-001", "assignment-validation-002"),
+        ),
     );
     assert!(retarget.contains("D:RESULT_FOR") && retarget.contains("I:RESULT_FOR"));
     let error_to_plain = changes(
@@ -331,96 +461,291 @@ fn invalid_code(body: &str) -> &'static str {
         other => panic!("expected invalid, got {other:?}"),
     }
 }
+
 fn envelope(marker: &str, value: Value) -> String {
-    format!("{marker}\n\nsummary\n\n```json\n{value}\n```")
+    let label = match marker {
+        "WorkGraphAssignment/v1" => "WorkGraph Assignment",
+        "WorkGraphResult/v1" => "WorkGraph Result",
+        other => panic!("unsupported test marker {other}"),
+    };
+    let json = serde_json::to_string_pretty(&value).unwrap();
+    format!(
+        "<details>\n<summary>{label}</summary>\n\n{marker}\n\nsummary\n\n```json\n{json}\n```\n</details>\n"
+    )
 }
 
 #[test]
-fn envelopes_and_payloads_are_strictly_typed() {
-    for body in ["plain", " WorkGraphResult/v1"] {
+fn canonical_envelopes_and_payloads_are_strictly_typed() {
+    for body in [
+        "plain",
+        " WorkGraphResult/v1",
+        "<details>\n<summary>Release notes</summary>\n\nOrdinary prose.\n</details>\n",
+    ] {
         assert_eq!(classify(body), Classification::Ordinary);
     }
-    for (body, code) in [
-        ("WorkGraphAssignment/", error_code::UNSUPPORTED_VERSION),
-        ("WorkGraphAssignment/v1 ", error_code::UNSUPPORTED_VERSION),
-        (
-            "WorkGraphAssignment/v2\n\ns\n\n```json\n{}\n```",
-            error_code::UNSUPPORTED_VERSION,
-        ),
-        (
-            "WorkGraphAssignment/v1\n\n```json\n{}\n```",
-            error_code::MISSING_HUMAN_SUMMARY,
-        ),
-        (
-            "WorkGraphAssignment/v1\n\ns",
-            error_code::MISSING_JSON_BLOCK,
-        ),
-        (
-            "WorkGraphAssignment/v1\n\ns\n\n```json\n{}\n```\n```yaml\nx\n```",
-            error_code::MULTIPLE_JSON_BLOCKS,
-        ),
-        (
-            "WorkGraphAssignment/v1\n\ns\n\n```json\n{}",
-            error_code::UNTERMINATED_JSON_BLOCK,
-        ),
-        (
-            "WorkGraphAssignment/v1\n\ns\n\n```json\n{}\n```\ntext",
-            error_code::UNEXPECTED_TRAILING_CONTENT,
-        ),
-        (
-            "WorkGraphAssignment/v1\n\ns\n\n```json\n[1,2]\n```",
-            error_code::JSON_NOT_OBJECT,
-        ),
-    ] {
-        assert_eq!(invalid_code(body), code);
-    }
+
+    let Classification::Assignment(assignment) = classify(ASSIGN) else {
+        panic!("canonical dogfood Assignment must parse");
+    };
+    assert_eq!(assignment.assignment_id, "fixture-701-validation");
+    assert_eq!(assignment.task_type, TaskType::IssueValidation);
+
+    let Classification::Result(result) = classify(RESULT) else {
+        panic!("canonical demo Result must parse");
+    };
+    assert_eq!(result.assignment_id, "assignment-validation-001");
+    assert_eq!(result.outcome, Outcome::Succeeded);
+    assert_eq!(result.task_type, TaskType::IssueValidation);
+
+    let Classification::Assignment(risk_assignment) = classify(RISK_ASSIGNMENT) else {
+        panic!("canonical risk Assignment must parse");
+    };
+    assert_eq!(risk_assignment.task_type, TaskType::IssueRiskProfile);
+
+    let Classification::Result(risk_result) = classify(RISK_RESULT) else {
+        panic!("canonical risk Result must parse");
+    };
+    assert_eq!(risk_result.outcome, Outcome::Blocked);
+    assert_eq!(risk_result.task_type, TaskType::IssueRiskProfile);
+
     assert!(matches!(
-        classify(&ASSIGN.replace('\n', "\r\n")),
+        classify(&ASSIGN.replacen(
+            "Validate the synthetic fixture Issue.",
+            "WorkGraphResult/v1",
+            1,
+        )),
         Classification::Assignment(_)
     ));
+    assert!(matches!(
+        classify(&RESULT.replacen(
+            "Evaluated both requested validation criteria.",
+            "WorkGraphAssignment/v1",
+            1,
+        )),
+        Classification::Result(_)
+    ));
 
-    let assignment = json!({"assignmentId":"a","agentProfile":"p","priority":0,
-        "taskType":"issue-validation","task":{"validationProfile":"v","criteria":["c"]}});
-    let risk = json!({"assignmentId":"a","agentProfile":"p","priority":1,
-        "taskType":"issue-risk-profile","task":{"riskProfile":"r","dimensions":["security"]}});
-    for value in [assignment.clone(), risk] {
-        assert!(matches!(
-            classify(&envelope("WorkGraphAssignment/v1", value)),
-            Classification::Assignment(_)
-        ));
+    assert_eq!(
+        assignment_element_id("O_1", "a:b /ü"),
+        "workgraph-assignment:O_1:a%3Ab%20%2F%C3%BC"
+    );
+    assert_eq!(encode_id_component("a:b"), "a%3Ab");
+}
+
+fn assert_malformed_variants(
+    body: &str,
+    label: &str,
+    other_label: &str,
+    marker: &str,
+    other_marker: &str,
+    human_summary: &str,
+) {
+    let prefix = format!("<details>\n<summary>{label}</summary>\n\n");
+    let json_start = body.find("```json\n").unwrap() + "```json\n".len();
+    let json_end = json_start + body[json_start..].find("\n```\n").unwrap();
+    let json_text = &body[json_start..json_end];
+    let compact_json =
+        serde_json::to_string(&serde_json::from_str::<Value>(json_text).unwrap()).unwrap();
+    let unwrapped = body
+        .strip_prefix(&prefix)
+        .unwrap()
+        .strip_suffix("</details>\n")
+        .unwrap()
+        .to_string();
+
+    let variants = [
+        ("unwrapped legacy envelope", unwrapped),
+        (
+            "open attribute",
+            body.replacen("<details>", "<details open>", 1),
+        ),
+        (
+            "arbitrary attribute",
+            body.replacen("<details>", "<details class=\"workgraph\">", 1),
+        ),
+        (
+            "wrong summary label",
+            body.replacen(
+                &format!("<summary>{label}</summary>"),
+                &format!("<summary>{other_label}</summary>"),
+                1,
+            ),
+        ),
+        (
+            "missing summary label",
+            body.replacen(&format!("<summary>{label}</summary>\n"), "", 1),
+        ),
+        ("wrong marker", body.replacen(marker, other_marker, 1)),
+        ("missing marker", body.replacen(marker, "", 1)),
+        ("CRLF bytes", body.replace('\n', "\r\n")),
+        ("literal newline escapes", body.replace('\n', "\\n")),
+        (
+            "extra LF after details",
+            body.replacen("<details>\n", "<details>\n\n", 1),
+        ),
+        (
+            "several extra LFs after details",
+            body.replacen("<details>\n", "<details>\n\n\n\n", 1),
+        ),
+        (
+            "missing blank after summary label",
+            body.replacen("</summary>\n\n", "</summary>\n", 1),
+        ),
+        (
+            "extra blank after summary label",
+            body.replacen("</summary>\n\n", "</summary>\n\n\n", 1),
+        ),
+        (
+            "missing blank after marker",
+            body.replacen(&format!("{marker}\n\n"), &format!("{marker}\n"), 1),
+        ),
+        (
+            "extra blank after marker",
+            body.replacen(&format!("{marker}\n\n"), &format!("{marker}\n\n\n"), 1),
+        ),
+        (
+            "missing blank after human summary",
+            body.replacen(
+                &format!("{human_summary}\n\n```json"),
+                &format!("{human_summary}\n```json"),
+                1,
+            ),
+        ),
+        (
+            "extra blank after human summary",
+            body.replacen(
+                &format!("{human_summary}\n\n```json"),
+                &format!("{human_summary}\n\n\n```json"),
+                1,
+            ),
+        ),
+        (
+            "multiline human summary",
+            body.replacen(human_summary, &format!("{human_summary}\ncontinued"), 1),
+        ),
+        ("empty human summary", body.replacen(human_summary, "", 1)),
+        ("compact JSON", body.replacen(json_text, &compact_json, 1)),
+        (
+            "mismatched opening fence",
+            body.replacen("```json\n", "```yaml\n", 1),
+        ),
+        (
+            "mismatched closing fence",
+            body.replacen("\n```\n</details>", "\n~~~\n</details>", 1),
+        ),
+        (
+            "extra fence",
+            body.replacen(
+                "\n```\n</details>",
+                "\n```\n```yaml\n{}\n```\n</details>",
+                1,
+            ),
+        ),
+        ("prose before wrapper", format!("Unexpected prose.\n{body}")),
+        ("prose after wrapper", format!("{body}Unexpected prose.\n")),
+        (
+            "unclosed wrapper",
+            body.strip_suffix("</details>\n").unwrap().to_string(),
+        ),
+        (
+            "missing final LF",
+            body.strip_suffix('\n').unwrap().to_string(),
+        ),
+        ("extra final LF", format!("{body}\n")),
+    ];
+
+    for (name, malformed) in variants {
+        assert!(
+            matches!(classify(&malformed), Classification::Invalid(_)),
+            "{name} must be a WorkGraphError for {marker}"
+        );
     }
+}
+
+#[test]
+fn assignment_and_result_envelopes_reject_every_noncanonical_boundary() {
+    assert_malformed_variants(
+        ASSIGN,
+        "WorkGraph Assignment",
+        "WorkGraph Result",
+        "WorkGraphAssignment/v1",
+        "WorkGraphResult/v1",
+        "Validate the synthetic fixture Issue.",
+    );
+    assert_malformed_variants(
+        RESULT,
+        "WorkGraph Result",
+        "WorkGraph Assignment",
+        "WorkGraphResult/v1",
+        "WorkGraphAssignment/v1",
+        "Evaluated both requested validation criteria.",
+    );
+}
+
+#[test]
+fn envelope_errors_and_typed_schema_errors_remain_specific() {
+    let unsupported_assignment = ASSIGN.replace("WorkGraphAssignment/v1", "WorkGraphAssignment/v2");
+    let unsupported_result = RESULT.replace("WorkGraphResult/v1", "WorkGraphResult/v2");
+    for body in [
+        "WorkGraphAssignment/",
+        "WorkGraphAssignment/v1 ",
+        &unsupported_assignment,
+        &unsupported_result,
+    ] {
+        assert_eq!(invalid_code(body), error_code::UNSUPPORTED_VERSION);
+    }
+
+    for body in [ASSIGN, RESULT] {
+        let json_start = body.find("```json\n").unwrap() + "```json\n".len();
+        let json_end = json_start + body[json_start..].find("\n```\n").unwrap();
+        let json_text = &body[json_start..json_end];
+        let compact =
+            serde_json::to_string(&serde_json::from_str::<Value>(json_text).unwrap()).unwrap();
+        assert_eq!(
+            invalid_code(&body.replacen(json_text, &compact, 1)),
+            error_code::NON_CANONICAL_JSON
+        );
+        assert_eq!(
+            invalid_code(&body.replacen(json_text, "not-json", 1)),
+            error_code::INVALID_JSON
+        );
+        assert_eq!(
+            invalid_code(&body.replacen(json_text, "[\n  1,\n  2\n]", 1)),
+            error_code::JSON_NOT_OBJECT
+        );
+    }
+
     for patch in [
         json!({"assignmentId":"","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":"v","criteria":["c"]}}),
         json!({"assignmentId":"a","agentProfile":"p","priority":-1,"taskType":"issue-validation","task":{"validationProfile":"v","criteria":["c"]}}),
         json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":"v","criteria":[]},"assignedBy":"x"}),
+        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"unknown","task":{"validationProfile":"v","criteria":["c"]}}),
     ] {
         assert_eq!(
             invalid_code(&envelope("WorkGraphAssignment/v1", patch)),
             error_code::INVALID_ASSIGNMENT_PAYLOAD
         );
     }
-    let result = json!({"assignmentId":"a","taskType":"issue-risk-profile","outcome":"blocked",
-        "summary":"s","result":{"dimensions":[{"dimension":"security","score":100,"rationale":"r"}]}});
-    let Classification::Result(parsed) = classify(&envelope("WorkGraphResult/v1", result)) else {
-        panic!("valid result");
-    };
-    assert_eq!(parsed.outcome, Outcome::Blocked);
-    assert_eq!(parsed.task_type, TaskType::IssueRiskProfile);
     for bad in [
         json!({"assignmentId":"a","taskType":"issue-risk-profile","outcome":"partial","summary":"s","result":{"dimensions":[]}}),
         json!({"assignmentId":"a","taskType":"issue-risk-profile","outcome":"failed","summary":"s","result":{"dimensions":[{"dimension":"d","score":101,"rationale":"r"}]}}),
         json!({"assignmentId":"a","taskType":"issue-validation","outcome":"failed","summary":"","result":{"criteria":[]}}),
+        json!({"assignmentId":"a","taskType":"issue-validation","outcome":"failed","summary":"s","result":{"criteria":[{"criterion":"c","passed":true,"evidence":"e"}]},"resultId":"r"}),
     ] {
         assert_eq!(
             invalid_code(&envelope("WorkGraphResult/v1", bad)),
             error_code::INVALID_RESULT_PAYLOAD
         );
     }
+
     assert_eq!(
-        assignment_element_id("O_1", "a:b /ü"),
-        "workgraph-assignment:O_1:a%3Ab%20%2F%C3%BC"
+        invalid_code(&envelope(
+            "WorkGraphAssignment/v1",
+            json!({"assignmentId":"a","agentProfile":"p","priority":0,
+                "taskType":"issue-validation","task":{"validationProfile":"v","criteria":[]}})
+        )),
+        error_code::INVALID_ASSIGNMENT_PAYLOAD
     );
-    assert_eq!(encode_id_component("a:b"), "a%3Ab");
 }
 
 fn config() -> GitHubWorkGraphSourceConfig {
