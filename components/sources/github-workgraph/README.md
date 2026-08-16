@@ -114,8 +114,8 @@ payload, including field order. CRLF, literal `\n` separators, compact JSON,
 additional or mismatched fences, wrapper attributes, missing or extra blank
 lines, prose outside the wrapper, and missing or extra final LFs are invalid.
 The Result human summary and typed `summary` field must not contain
-`WorkGraphResult/v1`, even as a substring. Every object rejects unknown fields;
-the marker supplies the version.
+`WorkGraphResult/v1`, even as a substring, and they must byte-equal each other.
+Every object rejects unknown fields; the marker supplies the version.
 
 | Type | Strict required JSON |
 |---|---|

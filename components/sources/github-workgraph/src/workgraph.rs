@@ -247,6 +247,10 @@ pub fn classify(body: &str) -> Classification {
             Err(message) => invalid(error_code::INVALID_ASSIGNMENT_PAYLOAD, message),
         },
         EnvelopeKind::Result => match parse_result(value) {
+            Ok(result) if result.summary != summary => invalid(
+                error_code::INVALID_RESULT_PAYLOAD,
+                "human summary must byte-equal Result payload summary",
+            ),
             Ok(result) if canonical_json(&result, &json_text) => {
                 Classification::Result(Box::new(result))
             }
