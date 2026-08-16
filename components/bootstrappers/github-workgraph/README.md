@@ -51,18 +51,53 @@ re-implements any of that.
 
 ### Example
 
+Configure the bootstrapper as a top-level provider and reference it by ID from
+the Source:
+
 ```yaml
-bootstrap_provider:
-  type: github-workgraph
-  token:
-    kind: Secret
-    name: github-readonly-token
-  maxConcurrency: 4
+stateStore:
+  kind: redb
+  path: ./data/github-workgraph-state.redb
+
+bootstrapProviders:
+  - id: github-workgraph-bootstrap
+    kind: github-workgraph
+    token:
+      kind: Secret
+      name: github-workgraph-api-token
+    apiBaseUrl: https://api.github.com/graphql
+    maxConcurrency: 4
+
+sources:
+  - id: github-workgraph
+    kind: github-workgraph
+    organization: drasi-project
+    webhook:
+      host: 0.0.0.0
+      port: 8080
+      path: /webhook
+      secret:
+        kind: Secret
+        name: github-workgraph-webhook-secret
+      bodyLimitBytes: 26214400
+    durability:
+      enabled: true
+      maxEvents: 10000
+      capacityPolicy: RejectIncoming
+    bootstrapProvider: github-workgraph-bootstrap
 ```
 
 The organization is read from the parent `github-workgraph` Source
 configuration, ensuring bootstrap and webhook streaming cannot target different
-organizations.
+organizations. Do not use an inline `bootstrapProvider` mapping for this pair:
+drasi-server applies same-kind inheritance to inline providers, which would copy
+Source-only fields such as `organization`, `webhook`, and `durability` into this
+bootstrapper's strict configuration. A top-level `bootstrapProviders` entry and
+string reference keep the two configurations separate while still passing the
+parent Source configuration to the bootstrap descriptor.
+
+The durable `stateStore` is required by the streaming Source, not by this
+bootstrapper.
 
 ### Authentication
 
@@ -87,7 +122,7 @@ not an oversight.
 
 ## Bounded concurrency
 
-Two independent bounds, both derived from `max_concurrency`:
+Two independent bounds, both derived from `maxConcurrency`:
 
 - A `tokio::sync::Semaphore`-gated `JoinSet` limits how many repositories are
   processed concurrently.
