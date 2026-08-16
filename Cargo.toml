@@ -38,6 +38,7 @@ members = [
   "components/bootstrappers/neo4j",
   "components/neo4j-common",
   "components/bootstrappers/kafka",
+  "components/bootstrappers/github-workgraph",
 
   # Source Plugins
   "components/sources/postgres",
@@ -207,6 +208,7 @@ drasi-source-open511 = { version = "0.1.1", path = "components/sources/open511" 
 drasi-bootstrap-open511 = { version = "0.1.0", path = "components/bootstrappers/open511" }
 drasi-source-neo4j = { version = "0.1.4", path = "components/sources/neo4j" }
 drasi-source-github-workgraph = { version = "0.1.0", path = "components/sources/github-workgraph" }
+drasi-bootstrap-github-workgraph = { version = "0.1.0", path = "components/bootstrappers/github-workgraph" }
 drasi-bootstrap-neo4j = { version = "0.1.4", path = "components/bootstrappers/neo4j" }
 drasi-neo4j-common = { version = "0.1.4", path = "components/neo4j-common" }
 drasi-bootstrap-sqlite = { version = "0.1.9", path = "components/bootstrappers/sqlite" }
