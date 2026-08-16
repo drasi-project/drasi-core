@@ -477,7 +477,9 @@ fn canonical_envelopes_and_payloads_are_strictly_typed() {
     for body in [
         "plain",
         " WorkGraphResult/v1",
+        "Mention WorkGraphAssignment/v1 inline.",
         "<details>\n<summary>Release notes</summary>\n\nOrdinary prose.\n</details>\n",
+        "<details>\n<summary>Discussion</summary>\n\nI tried WorkGraphAssignment/v1 inline.\n</details>\n",
     ] {
         assert_eq!(classify(body), Classification::Ordinary);
     }

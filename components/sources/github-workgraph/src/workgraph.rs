@@ -218,10 +218,6 @@ pub fn classify(body: &str) -> Classification {
         return Classification::Ordinary;
     };
 
-    let kind = match kind {
-        Ok(kind) => kind,
-        Err(error) => return Classification::Invalid(error),
-    };
     let (summary, json_text) = match split_envelope(body, kind) {
         Ok(parts) => parts,
         Err(err) => return Classification::Invalid(err),
@@ -263,66 +259,40 @@ pub fn classify(body: &str) -> Classification {
     }
 }
 
-fn candidate_kind(body: &str) -> Option<Result<EnvelopeKind, EnvelopeError>> {
-    if body.starts_with(ASSIGNMENT_FAMILY) {
-        return Some(Ok(EnvelopeKind::Assignment));
-    }
-    if body.starts_with(RESULT_FAMILY) {
-        return Some(Ok(EnvelopeKind::Result));
-    }
-
-    let wrapper_start = body
-        .find("<details")
-        .or_else(|| body.find("<summary>WorkGraph "))
-        .or_else(|| body.find(DETAILS_CLOSE))?;
-    let wrapper = &body[wrapper_start..];
-    let header = wrapper.split(FENCE_OPEN).next().unwrap_or(wrapper);
-    let lines: Vec<&str> = header.split('\n').collect();
-    let assignment_marker = lines
-        .iter()
-        .position(|line| line.trim_end_matches('\r').starts_with(ASSIGNMENT_FAMILY));
-    let result_marker = lines
-        .iter()
-        .position(|line| line.trim_end_matches('\r').starts_with(RESULT_FAMILY));
-    match (assignment_marker, result_marker) {
-        (Some(assignment), Some(result)) if assignment < result => {
-            return Some(Ok(EnvelopeKind::Assignment));
+fn candidate_kind(body: &str) -> Option<EnvelopeKind> {
+    let logical_lines: Vec<&str> = body.lines().flat_map(|line| line.split("\\n")).collect();
+    for line in &logical_lines {
+        if line.starts_with(ASSIGNMENT_FAMILY) {
+            return Some(EnvelopeKind::Assignment);
         }
-        (Some(_), Some(_)) => return Some(Ok(EnvelopeKind::Result)),
-        (Some(_), None) => return Some(Ok(EnvelopeKind::Assignment)),
-        (None, Some(_)) => return Some(Ok(EnvelopeKind::Result)),
-        (None, None) => {}
+        if line.starts_with(RESULT_FAMILY) {
+            return Some(EnvelopeKind::Result);
+        }
     }
 
-    let assignment_summary = lines
+    let wrapper_hint = body.contains("<details")
+        || body.contains(DETAILS_CLOSE)
+        || body.contains("<summary>WorkGraph ");
+    if !wrapper_hint {
+        return None;
+    }
+
+    let assignment_summary = logical_lines
         .iter()
         .position(|line| line.trim_end_matches('\r') == ASSIGNMENT_SUMMARY);
-    let result_summary = lines
+    let result_summary = logical_lines
         .iter()
         .position(|line| line.trim_end_matches('\r') == RESULT_SUMMARY);
     match (assignment_summary, result_summary) {
         (Some(assignment), Some(result)) if assignment < result => {
-            return Some(Ok(EnvelopeKind::Assignment));
+            return Some(EnvelopeKind::Assignment);
         }
-        (Some(_), Some(_)) => return Some(Ok(EnvelopeKind::Result)),
-        (Some(_), None) => return Some(Ok(EnvelopeKind::Assignment)),
-        (None, Some(_)) => return Some(Ok(EnvelopeKind::Result)),
+        (Some(_), Some(_)) => return Some(EnvelopeKind::Result),
+        (Some(_), None) => return Some(EnvelopeKind::Assignment),
+        (None, Some(_)) => return Some(EnvelopeKind::Result),
         (None, None) => {}
     }
-
-    let escaped_lines = !wrapper.contains('\n') && wrapper.contains("\\n");
-    let assignment_marker = escaped_lines && wrapper.contains(ASSIGNMENT_FAMILY);
-    let result_marker = escaped_lines && wrapper.contains(RESULT_FAMILY);
-
-    match (assignment_marker, result_marker) {
-        (true, false) => Some(Ok(EnvelopeKind::Assignment)),
-        (false, true) => Some(Ok(EnvelopeKind::Result)),
-        (true, true) => Some(envelope_err(
-            error_code::INVALID_ENVELOPE,
-            "a WorkGraph comment cannot contain both Assignment and Result markers",
-        )),
-        (false, false) => None,
-    }
+    None
 }
 
 fn split_envelope(body: &str, kind: EnvelopeKind) -> Result<(String, String), EnvelopeError> {
