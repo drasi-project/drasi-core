@@ -365,6 +365,12 @@ fn split_envelope(body: &str, kind: EnvelopeKind) -> Result<(String, String), En
             "a non-empty one-line human summary is required",
         );
     }
+    if kind == EnvelopeKind::Result && summary.contains(RESULT_MARKER) {
+        return envelope_err(
+            error_code::INVALID_ENVELOPE,
+            "the Result human summary must not contain the WorkGraphResult/v1 marker",
+        );
+    }
     if lines.get(6) != Some(&"") {
         return invalid_format();
     }
@@ -459,6 +465,10 @@ fn parse_result(value: serde_json::Value) -> Result<WorkResult, String> {
     let root: ResultRoot = typed(value)?;
     non_empty(&root.assignment_id, "assignmentId")?;
     non_empty(&root.summary, "summary")?;
+    require(
+        !root.summary.contains(RESULT_MARKER),
+        "summary must not contain the WorkGraphResult/v1 marker",
+    )?;
     let result = match root.task_type {
         TaskType::IssueValidation => {
             let result: IssueValidationResult = typed(root.result)?;
