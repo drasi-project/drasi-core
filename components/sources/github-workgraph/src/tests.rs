@@ -517,10 +517,9 @@ fn canonical_envelopes_and_payloads_are_strictly_typed() {
         Classification::Assignment(_)
     ));
     assert!(matches!(
-        classify(&RESULT.replacen(
+        classify(&RESULT.replace(
             "Evaluated both requested validation criteria.",
-            "WorkGraphAssignment/v1",
-            1,
+            "WorkGraphAssignment/v1"
         )),
         Classification::Result(_)
     ));
@@ -723,6 +722,15 @@ fn envelope_errors_and_typed_schema_errors_remain_specific() {
     assert_eq!(
         invalid_code(&repeated_result_marker),
         error_code::INVALID_ENVELOPE
+    );
+    let mismatched_result_summary = RESULT.replacen(
+        "Evaluated both requested validation criteria.",
+        "Changed only the human summary.",
+        1,
+    );
+    assert_eq!(
+        invalid_code(&mismatched_result_summary),
+        error_code::INVALID_RESULT_PAYLOAD
     );
 
     for patch in [
