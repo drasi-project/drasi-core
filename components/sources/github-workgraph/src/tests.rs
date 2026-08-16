@@ -715,6 +715,16 @@ fn envelope_errors_and_typed_schema_errors_remain_specific() {
         );
     }
 
+    let repeated_result_marker = RESULT.replacen(
+        "Evaluated both requested validation criteria.",
+        "Do not repeat WorkGraphResult/v1 in the summary.",
+        1,
+    );
+    assert_eq!(
+        invalid_code(&repeated_result_marker),
+        error_code::INVALID_ENVELOPE
+    );
+
     for patch in [
         json!({"assignmentId":"","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":"v","criteria":["c"]}}),
         json!({"assignmentId":"a","agentProfile":"p","priority":-1,"taskType":"issue-validation","task":{"validationProfile":"v","criteria":["c"]}}),
@@ -730,6 +740,7 @@ fn envelope_errors_and_typed_schema_errors_remain_specific() {
         json!({"assignmentId":"a","taskType":"issue-risk-profile","outcome":"partial","summary":"s","result":{"dimensions":[]}}),
         json!({"assignmentId":"a","taskType":"issue-risk-profile","outcome":"failed","summary":"s","result":{"dimensions":[{"dimension":"d","score":101,"rationale":"r"}]}}),
         json!({"assignmentId":"a","taskType":"issue-validation","outcome":"failed","summary":"","result":{"criteria":[]}}),
+        json!({"assignmentId":"a","taskType":"issue-validation","outcome":"failed","summary":"Do not repeat WorkGraphResult/v1 in the summary.","result":{"criteria":[{"criterion":"c","passed":true,"evidence":"e"}]}}),
         json!({"assignmentId":"a","taskType":"issue-validation","outcome":"failed","summary":"s","result":{"criteria":[{"criterion":"c","passed":true,"evidence":"e"}]},"resultId":"r"}),
     ] {
         assert_eq!(
