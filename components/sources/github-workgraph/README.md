@@ -76,26 +76,25 @@ Brief non-empty human summary.
   "priority": 10,
   "taskType": "issue-validation",
   "task": {
-    "validationProfile": "default",
-    "criteria": [
-      "Reproduces"
-    ]
+    "validationProfile": "new-issue-default"
   }
 }
 ```
 </details>
 ````
 
-Results use exact summary `<summary>WorkGraph Result</summary>` and marker `WorkGraphResult/v1`; their producer omits the final LF. Assignments require exactly one final LF, Results end exactly at `</details>`, and only LF separators are accepted. The opening tag must be exact `<details>` (no `open` or attributes), every displayed blank line is required, Result human summary must byte-equal payload `summary`, and JSON must exactly equal `serde_json::to_string_pretty` output. Extra whitespace, CRLF, prose, tags, fences, compact JSON, literal `\n` escapes, mismatched families, and unclosed wrappers are invalid marked comments. Every payload rejects unknown fields; the marker supplies the version. Unrelated comments, unrelated `<details>` blocks, and review bodies remain ordinary.
+Results use exact summary `<summary>WorkGraph Result</summary>` and marker `WorkGraphResult/v1`; both producers and parsers require exactly one final LF after `</details>`, and only LF separators are accepted. The opening tag must be exact `<details>` (no `open` or attributes), every displayed blank line is required, Result human summary must byte-equal payload `summary`, and JSON must exactly equal `serde_json::to_string_pretty` output. Missing or extra final LF, extra whitespace, CRLF, prose, tags, fences, compact JSON, literal `\n` escapes, mismatched families, and unclosed wrappers are invalid marked comments. Every payload rejects unknown fields; the marker supplies the version. Unrelated comments, unrelated `<details>` blocks, and review bodies remain ordinary.
 
 | Type | Strict required JSON |
 |---|---|
 | Assignment | non-empty `assignmentId`, non-empty `agentProfile`, integer `priority >= 0`, `taskType`, typed `task` |
-| validation task | `validationProfile`, non-empty `criteria` array of non-empty strings |
+| validation task | one non-empty `validationProfile`; criteria resolve from `.github/workgraph/profiles/issue-validation/<validationProfile>.md` |
 | risk task | `riskProfile`, non-empty `dimensions` array of non-empty strings |
 | Result | non-empty `assignmentId`, `taskType`, `outcome` (`succeeded`, `failed`, `blocked`), non-empty `summary`, typed `result` |
 | validation result | non-empty `criteria` array of `{criterion, passed, evidence}` |
 | risk result | non-empty `dimensions` array of `{dimension, score: 0..=100, rationale}` |
+
+An issue-validation Assignment carries only the profile name. Core does not resolve repository profile files; the agent/reporter reads `.github/workgraph/profiles/issue-validation/<validationProfile>.md`. A legacy `task.criteria` field is rejected as unknown. Result criterion entries are unchanged.
 
 `taskType` is `issue-validation` or `issue-risk-profile`. There is no `assignedBy` or `resultId`. A Result's immutable comment ID is its identity; `RESULT_FOR` is derived without checking Assignment existence or task-type equality. Assignment-ID uniqueness within the organization is a producer contract, not a source lookup. Unmarked comments are ordinary nodes; invalid marked comments become only a deterministic, snapshot-free `WorkGraphError`, with stable envelope, JSON, and typed-payload error codes.
 

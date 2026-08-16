@@ -27,8 +27,8 @@ use drasi_lib::wal::CapacityPolicy;
 use drasi_lib::DurabilityConfig;
 use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
 use serde_json::{json, Value};
-const ASSIGN: &str = "<details>\n<summary>WorkGraph Assignment</summary>\n\nWorkGraphAssignment/v1\n\nAutomatically validate this newly opened Issue.\n\n```json\n{\n  \"assignmentId\": \"{{after.assignmentId}}\",\n  \"agentProfile\": \"issue-validator\",\n  \"priority\": 10,\n  \"taskType\": \"issue-validation\",\n  \"task\": {\n    \"validationProfile\": \"new-issue-default\",\n    \"criteria\": [\n      \"The Issue has a non-empty title\",\n      \"The Issue body is present\"\n    ]\n  }\n}\n```\n</details>\n";
-const RESULT: &str = "<details>\n<summary>WorkGraph Result</summary>\n\nWorkGraphResult/v1\n\nEvaluated both requested validation criteria.\n\n```json\n{\n  \"assignmentId\": \"assignment-validation-001\",\n  \"taskType\": \"issue-validation\",\n  \"outcome\": \"succeeded\",\n  \"summary\": \"Evaluated both requested validation criteria.\",\n  \"result\": {\n    \"criteria\": [\n      {\n        \"criterion\": \"The issue defines acceptance criteria\",\n        \"passed\": true,\n        \"evidence\": \"The body contains an acceptance checklist.\"\n      },\n      {\n        \"criterion\": \"The issue identifies an owner\",\n        \"passed\": false,\n        \"evidence\": \"The title and body do not identify an owner.\"\n      }\n    ]\n  }\n}\n```\n</details>";
+const ASSIGN: &str = "<details>\n<summary>WorkGraph Assignment</summary>\n\nWorkGraphAssignment/v1\n\nAutomatically validate this newly opened Issue.\n\n```json\n{\n  \"assignmentId\": \"{{after.assignmentId}}\",\n  \"agentProfile\": \"issue-validator\",\n  \"priority\": 10,\n  \"taskType\": \"issue-validation\",\n  \"task\": {\n    \"validationProfile\": \"new-issue-default\"\n  }\n}\n```\n</details>\n";
+const RESULT: &str = "<details>\n<summary>WorkGraph Result</summary>\n\nWorkGraphResult/v1\n\nEvaluated both requested validation criteria.\n\n```json\n{\n  \"assignmentId\": \"assignment-validation-001\",\n  \"taskType\": \"issue-validation\",\n  \"outcome\": \"succeeded\",\n  \"summary\": \"Evaluated both requested validation criteria.\",\n  \"result\": {\n    \"criteria\": [\n      {\n        \"criterion\": \"The issue defines acceptance criteria\",\n        \"passed\": true,\n        \"evidence\": \"The body contains an acceptance checklist.\"\n      },\n      {\n        \"criterion\": \"The issue identifies an owner\",\n        \"passed\": false,\n        \"evidence\": \"The title and body do not identify an owner.\"\n      }\n    ]\n  }\n}\n```\n</details>\n";
 fn org() -> Value {
     json!({"login":"acme","id":42,"node_id":"O_1","url":"https://api.github.com/orgs/acme"})
 }
@@ -283,10 +283,12 @@ fn comments_create_edit_and_delete_every_class() {
         prop(&assignment[0], "priority"),
         Some(ElementValue::Integer(10))
     );
-    assert!(matches!(
+    assert_eq!(
         prop(&assignment[0], "task"),
-        Some(ElementValue::Object(_))
-    ));
+        Some(ElementValue::from(&json!({
+            "validationProfile": "new-issue-default"
+        })))
+    );
     let result = convert("issue_comment", &comment_event("created", RESULT, false));
     assert_eq!(result.len(), 3);
     assert_eq!(label(&result[2]), "RESULT_FOR");
@@ -342,13 +344,13 @@ fn envelope(marker: &str, value: Value) -> String {
     canonical(marker, &payload)
 }
 fn canonical(marker: &str, payload: &str) -> String {
-    let (summary, newline) = if marker.starts_with("WorkGraphAssignment/") {
-        ("WorkGraph Assignment", "\n")
+    let summary = if marker.starts_with("WorkGraphAssignment/") {
+        "WorkGraph Assignment"
     } else {
-        ("WorkGraph Result", "")
+        "WorkGraph Result"
     };
     format!(
-        "<details>\n<summary>{summary}</summary>\n\n{marker}\n\nsummary\n\n```json\n{payload}\n```\n</details>{newline}"
+        "<details>\n<summary>{summary}</summary>\n\n{marker}\n\nsummary\n\n```json\n{payload}\n```\n</details>\n"
     )
 }
 
@@ -365,11 +367,12 @@ fn envelopes_and_payloads_are_strictly_typed() {
     assert!(matches!(classify(RESULT), Classification::Result(_)));
     let compact = canonical(
         "WorkGraphAssignment/v1",
-        r#"{"assignmentId":"a42","agentProfile":"validator","priority":10,"taskType":"issue-validation","task":{"validationProfile":"default","criteria":["Reproduces"]}}"#,
+        r#"{"assignmentId":"a42","agentProfile":"validator","priority":10,"taskType":"issue-validation","task":{"validationProfile":"default"}}"#,
     );
     for invalid in [
         "WorkGraphAssignment/v1\n\nsummary".to_owned(),
         ASSIGN.trim_end_matches('\n').to_owned(),
+        RESULT.trim_end_matches('\n').to_owned(),
         ASSIGN.replace('\n', "\r\n"),
         ASSIGN.replacen("<details>", "<details open>", 1),
         ASSIGN.replacen("<details>", "<details data-kind=\"assignment\">", 1),
@@ -398,15 +401,28 @@ fn envelopes_and_payloads_are_strictly_typed() {
     let unsupported = invalid_code(&ASSIGN.replace("/v1", "/v2"));
     assert_eq!(unsupported, error_code::UNSUPPORTED_VERSION);
     for patch in [
-        json!({"assignmentId":"","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":"v","criteria":["c"]}}),
-        json!({"assignmentId":"a","agentProfile":"p","priority":-1,"taskType":"issue-validation","task":{"validationProfile":"v","criteria":["c"]}}),
-        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":"v","criteria":[]},"assignedBy":"x"}),
+        json!({"assignmentId":"","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":"v"}}),
+        json!({"assignmentId":"a","agentProfile":"p","priority":-1,"taskType":"issue-validation","task":{"validationProfile":"v"}}),
+        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":""}}),
+        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{}}),
+        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":"v"},"assignedBy":"x"}),
     ] {
         assert_eq!(
             invalid_code(&envelope("WorkGraphAssignment/v1", patch)),
             error_code::INVALID_ASSIGNMENT_PAYLOAD
         );
     }
+    let stale_criteria = envelope(
+        "WorkGraphAssignment/v1",
+        json!({"assignmentId":"a","agentProfile":"p","priority":0,
+            "taskType":"issue-validation",
+            "task":{"validationProfile":"v","criteria":["c"]}}),
+    );
+    let Classification::Invalid(error) = classify(&stale_criteria) else {
+        panic!("legacy task.criteria must be rejected");
+    };
+    assert_eq!(error.code, error_code::INVALID_ASSIGNMENT_PAYLOAD);
+    assert!(error.message.contains("unknown field `criteria`"));
     let risk = canonical(
         "WorkGraphAssignment/v1",
         "{\n  \"assignmentId\": \"a\",\n  \"agentProfile\": \"p\",\n  \"priority\": 1,\n  \"taskType\": \"issue-risk-profile\",\n  \"task\": {\n    \"riskProfile\": \"r\",\n    \"dimensions\": [\n      \"security\"\n    ]\n  }\n}",

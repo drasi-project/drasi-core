@@ -62,7 +62,7 @@ macro_rules! strict {
     )+};
 }
 strict! {
-    struct IssueValidationTask { validation_profile: String, criteria: Vec<String> }
+    struct IssueValidationTask { validation_profile: String }
     struct IssueRiskProfileTask { risk_profile: String, dimensions: Vec<String> }
     struct IssueValidationResult { criteria: Vec<CriterionResult> }
     struct CriterionResult { criterion: String, passed: bool, evidence: String }
@@ -214,17 +214,12 @@ fn marked_family(body: &str) -> Option<bool> {
     None
 }
 fn split_envelope(body: &str, is_assignment: bool) -> Result<(&str, &str), EnvelopeError> {
-    if is_assignment && !body.ends_with('\n') {
-        return envelope_err(
+    let body = body.strip_suffix('\n').ok_or_else(|| {
+        EnvelopeError::new(
             error_code::UNEXPECTED_TRAILING_CONTENT,
-            "Assignment requires one final LF",
-        );
-    }
-    let body = if is_assignment {
-        &body[..body.len() - 1]
-    } else {
-        body
-    };
+            "the WorkGraph wrapper requires one final LF",
+        )
+    })?;
     let (summary_tag, family) = if is_assignment {
         (ASSIGNMENT_SUMMARY, ASSIGNMENT_FAMILY)
     } else {
@@ -281,7 +276,7 @@ fn parse_assignment(value: serde_json::Value) -> Result<Assignment, String> {
     let task = match root.task_type {
         TaskType::IssueValidation => {
             let task: IssueValidationTask = typed(root.task)?;
-            non_empty_strings(&task.criteria, "task.criteria")?;
+            non_empty(&task.validation_profile, "task.validationProfile")?;
             AssignmentTask::IssueValidation(task)
         }
         TaskType::IssueRiskProfile => {
