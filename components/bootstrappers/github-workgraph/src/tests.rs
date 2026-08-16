@@ -53,11 +53,7 @@ Validate the synthetic fixture Issue.
   "priority": 10,
   "taskType": "issue-validation",
   "task": {
-    "validationProfile": "default",
-    "criteria": [
-      "The Issue has a non-empty title",
-      "The Issue body is present"
-    ]
+    "validationProfile": "new-issue-default"
   }
 }
 ```
