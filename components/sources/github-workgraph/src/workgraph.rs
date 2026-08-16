@@ -74,7 +74,7 @@ macro_rules! strict {
 }
 
 strict! {
-    struct IssueValidationTask { validation_profile: String, criteria: Vec<String> }
+    struct IssueValidationTask { validation_profile: String }
     struct IssueRiskProfileTask { risk_profile: String, dimensions: Vec<String> }
     struct IssueValidationResult { criteria: Vec<CriterionResult> }
     struct CriterionResult { criterion: String, passed: bool, evidence: String }
@@ -443,7 +443,7 @@ fn parse_assignment(value: serde_json::Value) -> Result<Assignment, String> {
     let task = match root.task_type {
         TaskType::IssueValidation => {
             let task: IssueValidationTask = typed(root.task)?;
-            non_empty_strings(&task.criteria, "task.criteria")?;
+            non_empty(&task.validation_profile, "task.validationProfile")?;
             AssignmentTask::IssueValidation(task)
         }
         TaskType::IssueRiskProfile => {

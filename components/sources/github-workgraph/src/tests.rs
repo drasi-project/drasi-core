@@ -42,11 +42,7 @@ Validate the synthetic fixture Issue.
   "priority": 10,
   "taskType": "issue-validation",
   "task": {
-    "validationProfile": "default",
-    "criteria": [
-      "The Issue has a non-empty title",
-      "The Issue body is present"
-    ]
+    "validationProfile": "new-issue-default"
   }
 }
 ```
@@ -385,10 +381,12 @@ fn comments_create_edit_and_delete_every_class() {
         prop(&assignment[0], "priority"),
         Some(ElementValue::Integer(10))
     );
-    assert!(matches!(
+    assert_eq!(
         prop(&assignment[0], "task"),
-        Some(ElementValue::Object(_))
-    ));
+        Some(ElementValue::from(&json!({
+            "validationProfile": "new-issue-default"
+        })))
+    );
     assert_eq!(text(&assignment[0], "authorLogin").as_deref(), Some("bot"));
     assert_eq!(
         text(&assignment[0], "sourceCommentNodeId").as_deref(),
@@ -726,16 +724,30 @@ fn envelope_errors_and_typed_schema_errors_remain_specific() {
     );
 
     for patch in [
-        json!({"assignmentId":"","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":"v","criteria":["c"]}}),
-        json!({"assignmentId":"a","agentProfile":"p","priority":-1,"taskType":"issue-validation","task":{"validationProfile":"v","criteria":["c"]}}),
-        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":"v","criteria":[]},"assignedBy":"x"}),
-        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"unknown","task":{"validationProfile":"v","criteria":["c"]}}),
+        json!({"assignmentId":"","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":"v"}}),
+        json!({"assignmentId":"a","agentProfile":"p","priority":-1,"taskType":"issue-validation","task":{"validationProfile":"v"}}),
+        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":""}}),
+        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{}}),
+        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":"v"},"assignedBy":"x"}),
+        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"unknown","task":{"validationProfile":"v"}}),
     ] {
         assert_eq!(
             invalid_code(&envelope("WorkGraphAssignment/v1", patch)),
             error_code::INVALID_ASSIGNMENT_PAYLOAD
         );
     }
+    let stale_criteria = envelope(
+        "WorkGraphAssignment/v1",
+        json!({"assignmentId":"a","agentProfile":"p","priority":0,
+            "taskType":"issue-validation",
+            "task":{"validationProfile":"v","criteria":["c"]}}),
+    );
+    let Classification::Invalid(error) = classify(&stale_criteria) else {
+        panic!("legacy task.criteria must be rejected");
+    };
+    assert_eq!(error.code, error_code::INVALID_ASSIGNMENT_PAYLOAD);
+    assert!(error.message.contains("unknown field `criteria`"));
+
     for bad in [
         json!({"assignmentId":"a","taskType":"issue-risk-profile","outcome":"partial","summary":"s","result":{"dimensions":[]}}),
         json!({"assignmentId":"a","taskType":"issue-risk-profile","outcome":"failed","summary":"s","result":{"dimensions":[{"dimension":"d","score":101,"rationale":"r"}]}}),
@@ -753,7 +765,7 @@ fn envelope_errors_and_typed_schema_errors_remain_specific() {
         invalid_code(&envelope(
             "WorkGraphAssignment/v1",
             json!({"assignmentId":"a","agentProfile":"p","priority":0,
-                "taskType":"issue-validation","task":{"validationProfile":"v","criteria":[]}})
+                "taskType":"issue-validation","task":{"validationProfile":null}})
         )),
         error_code::INVALID_ASSIGNMENT_PAYLOAD
     );

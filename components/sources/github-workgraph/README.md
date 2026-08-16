@@ -95,11 +95,7 @@ Validate the synthetic fixture Issue.
   "priority": 10,
   "taskType": "issue-validation",
   "task": {
-    "validationProfile": "default",
-    "criteria": [
-      "The Issue has a non-empty title",
-      "The Issue body is present"
-    ]
+    "validationProfile": "new-issue-default"
   }
 }
 ```
@@ -124,11 +120,17 @@ the marker supplies the version.
 | Type | Strict required JSON |
 |---|---|
 | Assignment | non-empty `assignmentId`, non-empty `agentProfile`, integer `priority >= 0`, `taskType`, typed `task` |
-| validation task | `validationProfile`, non-empty `criteria` array of non-empty strings |
+| validation task | one non-empty `validationProfile`; criteria resolve from `.github/workgraph/profiles/issue-validation/<validationProfile>.md` |
 | risk task | `riskProfile`, non-empty `dimensions` array of non-empty strings |
 | Result | non-empty `assignmentId`, `taskType`, `outcome` (`succeeded`, `failed`, `blocked`), non-empty `summary`, typed `result` |
 | validation result | non-empty `criteria` array of `{criterion, passed, evidence}` |
 | risk result | non-empty `dimensions` array of `{dimension, score: 0..=100, rationale}` |
+
+An issue-validation Assignment carries only the profile name. Core does not
+resolve repository profile files; the agent/reporter reads
+`.github/workgraph/profiles/issue-validation/<validationProfile>.md`. A legacy
+`task.criteria` field is rejected as unknown. Result criterion entries are
+unchanged.
 
 `taskType` is `issue-validation` or `issue-risk-profile`. There is no
 `assignedBy` or `resultId`. A Result's immutable comment ID is its identity;
