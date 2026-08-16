@@ -158,12 +158,11 @@ struct ResultRoot {
     result: serde_json::Value,
 }
 pub fn classify(body: &str) -> Classification {
-    let normalized = body.replace("\r\n", "\n");
-    let Some(is_assignment) = marked_family(&normalized) else {
+    let Some(is_assignment) = marked_family(body) else {
         return Classification::Ordinary;
     };
-    let json_text = match split_envelope(&normalized, is_assignment) {
-        Ok(json) => json,
+    let (human_summary, json_text) = match split_envelope(body, is_assignment) {
+        Ok(parts) => parts,
         Err(err) => return Classification::Invalid(err),
     };
     let value: serde_json::Value = match serde_json::from_str(json_text) {
@@ -186,6 +185,12 @@ pub fn classify(body: &str) -> Classification {
             Ok(value) => value,
             Err(message) => return invalid(error_code::INVALID_RESULT_PAYLOAD, message),
         };
+        if result.summary != human_summary {
+            return invalid(
+                error_code::INVALID_RESULT_PAYLOAD,
+                "human summary must byte-equal Result payload summary",
+            );
+        }
         let canonical = serde_json::to_string_pretty(&result);
         (Classification::Result(Box::new(result)), canonical)
     };
@@ -208,8 +213,18 @@ fn marked_family(body: &str) -> Option<bool> {
     }
     None
 }
-fn split_envelope(body: &str, is_assignment: bool) -> Result<&str, EnvelopeError> {
-    let body = body.strip_suffix('\n').unwrap_or(body);
+fn split_envelope(body: &str, is_assignment: bool) -> Result<(&str, &str), EnvelopeError> {
+    if is_assignment && !body.ends_with('\n') {
+        return envelope_err(
+            error_code::UNEXPECTED_TRAILING_CONTENT,
+            "Assignment requires one final LF",
+        );
+    }
+    let body = if is_assignment {
+        &body[..body.len() - 1]
+    } else {
+        body
+    };
     let (summary_tag, family) = if is_assignment {
         (ASSIGNMENT_SUMMARY, ASSIGNMENT_FAMILY)
     } else {
@@ -248,14 +263,15 @@ fn split_envelope(body: &str, is_assignment: bool) -> Result<&str, EnvelopeError
             "a non-empty human summary followed by exactly one blank line is required",
         );
     }
-    json_and_close
+    let json_text = json_and_close
         .strip_suffix("\n```\n</details>")
         .ok_or_else(|| {
             EnvelopeError::new(
                 error_code::UNEXPECTED_TRAILING_CONTENT,
                 "the JSON fence and details wrapper must close with no trailing content",
             )
-        })
+        })?;
+    Ok((human_summary, json_text))
 }
 fn parse_assignment(value: serde_json::Value) -> Result<Assignment, String> {
     let root: AssignmentRoot = typed(value)?;

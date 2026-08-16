@@ -86,7 +86,7 @@ Brief non-empty human summary.
 </details>
 ````
 
-Results use exact summary `<summary>WorkGraph Result</summary>` and marker `WorkGraphResult/v1`; their producer omits the final LF. The parser accepts exactly EOF or one LF after `</details>` and normalizes real CRLF. The opening tag must be exact `<details>` (no `open` or attributes), every displayed blank line is required, and the JSON must exactly equal `serde_json::to_string_pretty` output. Extra whitespace, prose, tags, fences, compact JSON, literal `\n` escapes, mismatched families, and unclosed wrappers are invalid marked comments. Every payload rejects unknown fields; the marker supplies the version. Unrelated comments, unrelated `<details>` blocks, and review bodies remain ordinary.
+Results use exact summary `<summary>WorkGraph Result</summary>` and marker `WorkGraphResult/v1`; their producer omits the final LF. Assignments require exactly one final LF, Results end exactly at `</details>`, and only LF separators are accepted. The opening tag must be exact `<details>` (no `open` or attributes), every displayed blank line is required, Result human summary must byte-equal payload `summary`, and JSON must exactly equal `serde_json::to_string_pretty` output. Extra whitespace, CRLF, prose, tags, fences, compact JSON, literal `\n` escapes, mismatched families, and unclosed wrappers are invalid marked comments. Every payload rejects unknown fields; the marker supplies the version. Unrelated comments, unrelated `<details>` blocks, and review bodies remain ordinary.
 
 | Type | Strict required JSON |
 |---|---|

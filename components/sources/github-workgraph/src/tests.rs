@@ -356,34 +356,21 @@ fn canonical(marker: &str, payload: &str) -> String {
 fn envelopes_and_payloads_are_strictly_typed() {
     for body in [
         "plain",
-        "Mention WorkGraphAssignment/v1 inline.",
         "<details>\n<summary>Notes</summary>\n\nordinary\n</details>",
         "<details>\n<summary>Discussion</summary>\n\nI tried WorkGraphAssignment/v1 inline.\n</details>",
     ] {
         assert_eq!(classify(body), Classification::Ordinary);
     }
-    for (valid, assignment) in [
-        (ASSIGN.to_owned(), true),
-        (ASSIGN.trim_end_matches('\n').to_owned(), true),
-        (ASSIGN.replace('\n', "\r\n"), true),
-        (RESULT.to_owned(), false),
-        (format!("{RESULT}\n"), false),
-    ] {
-        let actual = classify(&valid);
-        assert!(
-            matches!(
-                (&actual, assignment),
-                (&Classification::Assignment(_), true) | (&Classification::Result(_), false)
-            ),
-            "{actual:?}: {valid:?}"
-        );
-    }
+    assert!(matches!(classify(ASSIGN), Classification::Assignment(_)));
+    assert!(matches!(classify(RESULT), Classification::Result(_)));
     let compact = canonical(
         "WorkGraphAssignment/v1",
         r#"{"assignmentId":"a42","agentProfile":"validator","priority":10,"taskType":"issue-validation","task":{"validationProfile":"default","criteria":["Reproduces"]}}"#,
     );
     for invalid in [
         "WorkGraphAssignment/v1\n\nsummary".to_owned(),
+        ASSIGN.trim_end_matches('\n').to_owned(),
+        ASSIGN.replace('\n', "\r\n"),
         ASSIGN.replacen("<details>", "<details open>", 1),
         ASSIGN.replacen("<details>", "<details data-kind=\"assignment\">", 1),
         ASSIGN.replace("WorkGraph Assignment", "WorkGraph Result"),
@@ -397,6 +384,8 @@ fn envelopes_and_payloads_are_strictly_typed() {
         compact,
         canonical("WorkGraphAssignment/v1", "[]"),
         format!("{ASSIGN}\n"),
+        format!("{RESULT}\n"),
+        RESULT.replacen("Evaluated both", "Changed both", 1),
         format!("{ASSIGN}prose"),
         ASSIGN.replace("</details>", "```yaml\nx\n```\n</details>"),
         ASSIGN.replace('\n', "\\n"),
@@ -406,11 +395,8 @@ fn envelopes_and_payloads_are_strictly_typed() {
             "{invalid}"
         );
     }
-    assert_eq!(
-        invalid_code(&ASSIGN.replace("/v1", "/v2")),
-        error_code::UNSUPPORTED_VERSION
-    );
-
+    let unsupported = invalid_code(&ASSIGN.replace("/v1", "/v2"));
+    assert_eq!(unsupported, error_code::UNSUPPORTED_VERSION);
     for patch in [
         json!({"assignmentId":"","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":"v","criteria":["c"]}}),
         json!({"assignmentId":"a","agentProfile":"p","priority":-1,"taskType":"issue-validation","task":{"validationProfile":"v","criteria":["c"]}}),
@@ -428,7 +414,7 @@ fn envelopes_and_payloads_are_strictly_typed() {
     assert!(matches!(classify(&risk), Classification::Assignment(_)));
     let result = canonical(
         "WorkGraphResult/v1",
-        "{\n  \"assignmentId\": \"a\",\n  \"taskType\": \"issue-risk-profile\",\n  \"outcome\": \"blocked\",\n  \"summary\": \"s\",\n  \"result\": {\n    \"dimensions\": [\n      {\n        \"dimension\": \"security\",\n        \"score\": 100,\n        \"rationale\": \"r\"\n      }\n    ]\n  }\n}",
+        "{\n  \"assignmentId\": \"a\",\n  \"taskType\": \"issue-risk-profile\",\n  \"outcome\": \"blocked\",\n  \"summary\": \"summary\",\n  \"result\": {\n    \"dimensions\": [\n      {\n        \"dimension\": \"security\",\n        \"score\": 100,\n        \"rationale\": \"r\"\n      }\n    ]\n  }\n}",
     );
     let Classification::Result(parsed) = classify(&result) else {
         panic!("valid result");
