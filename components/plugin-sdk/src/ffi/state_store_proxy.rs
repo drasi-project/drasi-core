@@ -34,6 +34,18 @@ pub struct FfiStateStoreProxy {
 unsafe impl Send for FfiStateStoreProxy {}
 unsafe impl Sync for FfiStateStoreProxy {}
 
+impl FfiStateStoreProxy {
+    /// Wrap a host-provided state-store vtable.
+    ///
+    /// # Safety
+    ///
+    /// `vtable` must be non-null, point to a fully initialized vtable, and remain
+    /// valid with its backing state for the lifetime of this proxy.
+    pub unsafe fn from_raw(vtable: *const StateStoreVtable) -> Self {
+        Self { vtable }
+    }
+}
+
 #[async_trait::async_trait]
 impl StateStoreProvider for FfiStateStoreProxy {
     async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {

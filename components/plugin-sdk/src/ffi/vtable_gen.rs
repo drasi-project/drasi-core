@@ -2898,8 +2898,8 @@ fn build_source_runtime_context(
     let state_store: Option<Arc<dyn StateStoreProvider>> = if ffi_ctx.state_store.is_null() {
         None
     } else {
-        Some(Arc::new(FfiStateStoreProxy {
-            vtable: ffi_ctx.state_store,
+        Some(Arc::new(unsafe {
+            FfiStateStoreProxy::from_raw(ffi_ctx.state_store)
         }))
     };
     let identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>> =
@@ -2944,8 +2944,8 @@ fn build_reaction_runtime_context(
     let state_store: Option<Arc<dyn StateStoreProvider>> = if ffi_ctx.state_store.is_null() {
         None
     } else {
-        Some(Arc::new(FfiStateStoreProxy {
-            vtable: ffi_ctx.state_store,
+        Some(Arc::new(unsafe {
+            FfiStateStoreProxy::from_raw(ffi_ctx.state_store)
         }))
     };
     let identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>> =

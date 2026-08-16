@@ -44,7 +44,10 @@ use super::types::FfiStr;
 ///   async workers). `FfiBootstrapResult` also carries optional provider
 ///   error text (`error_ptr`/`error_len`/`error_drop_fn`) so failures
 ///   surface with their message instead of only a negative code.
-pub const FFI_SDK_VERSION: &str = "0.13.0";
+/// - `0.14.0`: `StateStoreVtable` appends `is_durable_fn` so dynamic plugins
+///   can distinguish persistent host stores from in-memory providers. The
+///   nullable callback fails closed when the capability is unavailable.
+pub const FFI_SDK_VERSION: &str = "0.14.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
