@@ -80,22 +80,44 @@ Assignment moves only `RESULT_FOR`. Review submit inserts; edit/dismiss updates.
 
 Only Issue/PR conversation comments are classified. The envelope is exact:
 
-````text
+````markdown
+<details>
+<summary>WorkGraph Assignment</summary>
+
 WorkGraphAssignment/v1
 
-Brief non-empty human summary.
+Validate the synthetic fixture Issue.
 
 ```json
-{ "assignmentId": "a-42", "agentProfile": "validator", "priority": 10,
+{
+  "assignmentId": "fixture-701-validation",
+  "agentProfile": "issue-validator",
+  "priority": 10,
   "taskType": "issue-validation",
-  "task": { "validationProfile": "default", "criteria": ["Reproduces"] } }
+  "task": {
+    "validationProfile": "default",
+    "criteria": [
+      "The Issue has a non-empty title",
+      "The Issue body is present"
+    ]
+  }
+}
 ```
+</details>
 ````
 
-The first line is `WorkGraphAssignment/v1` or `WorkGraphResult/v1`; another
-version after either family prefix is invalid. Exactly one ` ```json ` object,
-one closing ` ``` `, and only trailing whitespace are allowed. Every object
-rejects unknown fields; the marker supplies the version.
+Result comments use `<summary>WorkGraph Result</summary>` and
+`WorkGraphResult/v1`. The opening tag is literal `<details>` with no attributes,
+so GitHub collapses the body by default. Every separator is LF: there is one LF
+after the opening and summary lines, one blank line after the summary label,
+marker, and one-line non-empty human summary, and exactly one final LF after
+`</details>`.
+
+The fenced object must equal the canonical two-space serialization of the typed
+payload, including field order. CRLF, literal `\n` separators, compact JSON,
+additional or mismatched fences, wrapper attributes, missing or extra blank
+lines, prose outside the wrapper, and missing or extra final LFs are invalid.
+Every object rejects unknown fields; the marker supplies the version.
 
 | Type | Strict required JSON |
 |---|---|

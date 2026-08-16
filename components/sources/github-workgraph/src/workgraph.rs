@@ -17,10 +17,17 @@ use serde::{Deserialize, Serialize};
 const ASSIGNMENT_FAMILY: &str = "WorkGraphAssignment/";
 const RESULT_FAMILY: &str = "WorkGraphResult/";
 const SUPPORTED_VERSION: &str = "v1";
+const DETAILS_OPEN: &str = "<details>";
+const DETAILS_CLOSE: &str = "</details>";
+const ASSIGNMENT_SUMMARY: &str = "<summary>WorkGraph Assignment</summary>";
+const RESULT_SUMMARY: &str = "<summary>WorkGraph Result</summary>";
+const ASSIGNMENT_MARKER: &str = "WorkGraphAssignment/v1";
+const RESULT_MARKER: &str = "WorkGraphResult/v1";
 const FENCE_OPEN: &str = "```json";
 const FENCE_CLOSE: &str = "```";
 
 pub mod error_code {
+    pub const INVALID_ENVELOPE: &str = "invalid-envelope";
     pub const UNSUPPORTED_VERSION: &str = "unsupported-workgraph-version";
     pub const MISSING_HUMAN_SUMMARY: &str = "missing-human-summary";
     pub const MISSING_JSON_BLOCK: &str = "missing-json-block";
@@ -29,6 +36,7 @@ pub mod error_code {
     pub const UNEXPECTED_TRAILING_CONTENT: &str = "unexpected-trailing-content";
     pub const INVALID_JSON: &str = "invalid-json";
     pub const JSON_NOT_OBJECT: &str = "json-not-object";
+    pub const NON_CANONICAL_JSON: &str = "non-canonical-json";
     pub const INVALID_ASSIGNMENT_PAYLOAD: &str = "invalid-assignment-payload";
     pub const INVALID_RESULT_PAYLOAD: &str = "invalid-result-payload";
 }
@@ -88,7 +96,8 @@ pub enum TaskResult {
     IssueRiskProfile(IssueRiskProfileResult),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Assignment {
     pub assignment_id: String,
     pub agent_profile: String,
@@ -97,7 +106,8 @@ pub struct Assignment {
     pub task: AssignmentTask,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkResult {
     pub assignment_id: String,
     pub task_type: TaskType,
@@ -174,25 +184,45 @@ struct ResultRoot {
     result: serde_json::Value,
 }
 
-pub fn classify(body: &str) -> Classification {
-    let normalized = body.replace("\r\n", "\n");
-    let mut lines = normalized.split('\n');
-    let Some(marker) = lines.next() else {
-        return Classification::Ordinary;
-    };
-    let (is_assignment, version) = if let Some(v) = marker.strip_prefix(ASSIGNMENT_FAMILY) {
-        (true, v)
-    } else if let Some(v) = marker.strip_prefix(RESULT_FAMILY) {
-        (false, v)
-    } else {
-        return Classification::Ordinary;
-    };
-    if version != SUPPORTED_VERSION {
-        let message = format!("unsupported WorkGraph version '{version}', expected 'v1'");
-        return invalid(error_code::UNSUPPORTED_VERSION, message);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvelopeKind {
+    Assignment,
+    Result,
+}
+
+impl EnvelopeKind {
+    fn family(self) -> &'static str {
+        match self {
+            Self::Assignment => ASSIGNMENT_FAMILY,
+            Self::Result => RESULT_FAMILY,
+        }
     }
-    let rest: Vec<&str> = lines.collect();
-    let (summary, json_text) = match split_envelope(&rest) {
+
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Assignment => ASSIGNMENT_MARKER,
+            Self::Result => RESULT_MARKER,
+        }
+    }
+
+    fn summary(self) -> &'static str {
+        match self {
+            Self::Assignment => ASSIGNMENT_SUMMARY,
+            Self::Result => RESULT_SUMMARY,
+        }
+    }
+}
+
+pub fn classify(body: &str) -> Classification {
+    let Some(kind) = candidate_kind(body) else {
+        return Classification::Ordinary;
+    };
+
+    let kind = match kind {
+        Ok(kind) => kind,
+        Err(error) => return Classification::Invalid(error),
+    };
+    let (summary, json_text) = match split_envelope(body, kind) {
         Ok(parts) => parts,
         Err(err) => return Classification::Invalid(err),
     };
@@ -208,45 +238,195 @@ pub fn classify(body: &str) -> Classification {
         let message = "the fenced JSON block must contain exactly one JSON object";
         return invalid(error_code::JSON_NOT_OBJECT, message);
     }
-    let parsed = if is_assignment {
-        parse_assignment(value)
-            .map(|a| Classification::Assignment(Box::new(a)))
-            .map_err(|m| (error_code::INVALID_ASSIGNMENT_PAYLOAD, m))
-    } else {
-        parse_result(value)
-            .map(|r| Classification::Result(Box::new(r)))
-            .map_err(|m| (error_code::INVALID_RESULT_PAYLOAD, m))
-    };
-    parsed.unwrap_or_else(|(code, m)| Classification::Invalid(EnvelopeError::new(code, m)))
+
+    match kind {
+        EnvelopeKind::Assignment => match parse_assignment(value) {
+            Ok(assignment) if canonical_json(&assignment, &json_text) => {
+                Classification::Assignment(Box::new(assignment))
+            }
+            Ok(_) => invalid(
+                error_code::NON_CANONICAL_JSON,
+                "the Assignment JSON must use the canonical two-space typed formatting",
+            ),
+            Err(message) => invalid(error_code::INVALID_ASSIGNMENT_PAYLOAD, message),
+        },
+        EnvelopeKind::Result => match parse_result(value) {
+            Ok(result) if canonical_json(&result, &json_text) => {
+                Classification::Result(Box::new(result))
+            }
+            Ok(_) => invalid(
+                error_code::NON_CANONICAL_JSON,
+                "the Result JSON must use the canonical two-space typed formatting",
+            ),
+            Err(message) => invalid(error_code::INVALID_RESULT_PAYLOAD, message),
+        },
+    }
 }
 
-fn split_envelope(lines: &[&str]) -> Result<(String, String), EnvelopeError> {
-    let missing = "exactly one fenced ```json block is required";
-    let unterminated = "the ```json block is not terminated by a ``` line";
-    let is_fence = |line: &&str| line.starts_with(FENCE_CLOSE);
-    let Some(open) = lines.iter().position(is_fence) else {
-        return envelope_err(error_code::MISSING_JSON_BLOCK, missing);
-    };
-    if lines[open] != FENCE_OPEN {
-        return envelope_err(error_code::MISSING_JSON_BLOCK, missing);
+fn candidate_kind(body: &str) -> Option<Result<EnvelopeKind, EnvelopeError>> {
+    if body.starts_with(ASSIGNMENT_FAMILY) {
+        return Some(Ok(EnvelopeKind::Assignment));
     }
-    let Some(close) = lines[open + 1..]
+    if body.starts_with(RESULT_FAMILY) {
+        return Some(Ok(EnvelopeKind::Result));
+    }
+
+    let wrapper_start = body
+        .find("<details")
+        .or_else(|| body.find("<summary>WorkGraph "))
+        .or_else(|| body.find(DETAILS_CLOSE))?;
+    let wrapper = &body[wrapper_start..];
+    let header = wrapper.split(FENCE_OPEN).next().unwrap_or(wrapper);
+    let lines: Vec<&str> = header.split('\n').collect();
+    let assignment_marker = lines
+        .iter()
+        .position(|line| line.trim_end_matches('\r').starts_with(ASSIGNMENT_FAMILY));
+    let result_marker = lines
+        .iter()
+        .position(|line| line.trim_end_matches('\r').starts_with(RESULT_FAMILY));
+    match (assignment_marker, result_marker) {
+        (Some(assignment), Some(result)) if assignment < result => {
+            return Some(Ok(EnvelopeKind::Assignment));
+        }
+        (Some(_), Some(_)) => return Some(Ok(EnvelopeKind::Result)),
+        (Some(_), None) => return Some(Ok(EnvelopeKind::Assignment)),
+        (None, Some(_)) => return Some(Ok(EnvelopeKind::Result)),
+        (None, None) => {}
+    }
+
+    let assignment_summary = lines
+        .iter()
+        .position(|line| line.trim_end_matches('\r') == ASSIGNMENT_SUMMARY);
+    let result_summary = lines
+        .iter()
+        .position(|line| line.trim_end_matches('\r') == RESULT_SUMMARY);
+    match (assignment_summary, result_summary) {
+        (Some(assignment), Some(result)) if assignment < result => {
+            return Some(Ok(EnvelopeKind::Assignment));
+        }
+        (Some(_), Some(_)) => return Some(Ok(EnvelopeKind::Result)),
+        (Some(_), None) => return Some(Ok(EnvelopeKind::Assignment)),
+        (None, Some(_)) => return Some(Ok(EnvelopeKind::Result)),
+        (None, None) => {}
+    }
+
+    let escaped_lines = !wrapper.contains('\n') && wrapper.contains("\\n");
+    let assignment_marker = escaped_lines && wrapper.contains(ASSIGNMENT_FAMILY);
+    let result_marker = escaped_lines && wrapper.contains(RESULT_FAMILY);
+
+    match (assignment_marker, result_marker) {
+        (true, false) => Some(Ok(EnvelopeKind::Assignment)),
+        (false, true) => Some(Ok(EnvelopeKind::Result)),
+        (true, true) => Some(envelope_err(
+            error_code::INVALID_ENVELOPE,
+            "a WorkGraph comment cannot contain both Assignment and Result markers",
+        )),
+        (false, false) => None,
+    }
+}
+
+fn split_envelope(body: &str, kind: EnvelopeKind) -> Result<(String, String), EnvelopeError> {
+    let invalid_format = || {
+        envelope_err(
+            error_code::INVALID_ENVELOPE,
+            "the WorkGraph details wrapper, labels, spacing, and LF bytes must be exact",
+        )
+    };
+    if body.contains('\r') {
+        return invalid_format();
+    }
+
+    if let Some(version) = marker_version(body, kind) {
+        if version != SUPPORTED_VERSION {
+            let message = format!("unsupported WorkGraph version '{version}', expected 'v1'");
+            return envelope_err(error_code::UNSUPPORTED_VERSION, message);
+        }
+    }
+
+    let lines: Vec<&str> = body.split('\n').collect();
+    if lines.first() != Some(&DETAILS_OPEN)
+        || lines.get(1) != Some(&kind.summary())
+        || lines.get(2) != Some(&"")
+        || lines.get(3) != Some(&kind.marker())
+        || lines.get(4) != Some(&"")
+    {
+        return invalid_format();
+    }
+
+    let Some(summary) = lines.get(5) else {
+        return envelope_err(
+            error_code::MISSING_HUMAN_SUMMARY,
+            "a non-empty one-line human summary is required",
+        );
+    };
+    if summary.trim().is_empty() || *summary == FENCE_OPEN {
+        return envelope_err(
+            error_code::MISSING_HUMAN_SUMMARY,
+            "a non-empty one-line human summary is required",
+        );
+    }
+    if lines.get(6) != Some(&"") {
+        return invalid_format();
+    }
+
+    let fence_lines: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| line.starts_with(FENCE_CLOSE).then_some(index))
+        .collect();
+    if lines.get(7) != Some(&FENCE_OPEN) {
+        let code = if fence_lines.is_empty() {
+            error_code::MISSING_JSON_BLOCK
+        } else {
+            error_code::INVALID_ENVELOPE
+        };
+        return envelope_err(code, "exactly one fenced ```json block is required");
+    }
+    if fence_lines.len() > 2 {
+        return envelope_err(
+            error_code::MULTIPLE_JSON_BLOCKS,
+            "only one fenced JSON block is allowed in a WorkGraph comment",
+        );
+    }
+
+    let Some(close) = lines[8..]
         .iter()
         .position(|line| *line == FENCE_CLOSE)
-        .map(|offset| open + 1 + offset)
+        .map(|offset| 8 + offset)
     else {
-        return envelope_err(error_code::UNTERMINATED_JSON_BLOCK, unterminated);
+        return envelope_err(
+            error_code::UNTERMINATED_JSON_BLOCK,
+            "the ```json block is not terminated by an exact ``` line",
+        );
     };
-    let tail = &lines[close + 1..];
-    if tail.iter().any(is_fence) {
+    if fence_lines.iter().any(|index| *index > close) {
         let message = "only one fenced block is allowed in a WorkGraph comment";
         return envelope_err(error_code::MULTIPLE_JSON_BLOCKS, message);
     }
-    if tail.iter().any(|line| !line.trim().is_empty()) {
-        let message = "only whitespace is allowed after the closing JSON fence";
-        return envelope_err(error_code::UNEXPECTED_TRAILING_CONTENT, message);
+
+    let tail = &lines[close + 1..];
+    if tail != [DETAILS_CLOSE, ""] {
+        let code = if tail.first() == Some(&DETAILS_CLOSE) {
+            error_code::UNEXPECTED_TRAILING_CONTENT
+        } else {
+            error_code::INVALID_ENVELOPE
+        };
+        return envelope_err(
+            code,
+            "the closing fence must be followed by </details> and exactly one final LF",
+        );
     }
-    Ok((lines[..open].join("\n"), lines[open + 1..close].join("\n")))
+
+    Ok(((*summary).to_string(), lines[8..close].join("\n")))
+}
+
+fn marker_version(body: &str, kind: EnvelopeKind) -> Option<&str> {
+    body.split('\n')
+        .find_map(|line| line.strip_prefix(kind.family()))
+}
+
+fn canonical_json<T: Serialize>(value: &T, json_text: &str) -> bool {
+    serde_json::to_string_pretty(value).is_ok_and(|canonical| canonical == json_text)
 }
 
 fn parse_assignment(value: serde_json::Value) -> Result<Assignment, String> {
