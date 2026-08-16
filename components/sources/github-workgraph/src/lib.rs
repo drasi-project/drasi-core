@@ -13,36 +13,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! GitHub source plugin for Drasi.
-//!
-//! This source receives signed GitHub webhooks, durably persists admitted
-//! deliveries to the Drasi WAL, then hydrates authoritative object state from
-//! the GitHub GraphQL API and emits normalized `SourceChange` events.
-
 pub mod config;
 pub mod descriptor;
+pub mod mapping;
 pub mod source;
+pub mod webhook;
+pub mod workgraph;
 
-mod graphql;
-mod hydrator;
-mod mapping;
-mod rate_limit;
-mod types;
-mod webhook;
-
-pub use config::GitHubSourceConfig;
-pub use source::{GitHubSource, GitHubSourceBuilder};
+pub use config::GitHubWorkGraphSourceConfig;
+pub use source::{GitHubWorkGraphSource, GitHubWorkGraphSourceBuilder};
 
 #[cfg(test)]
 mod tests;
 
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
-    plugin_id = "github-source",
+    plugin_id = "github-workgraph-source",
     core_version = env!("CARGO_PKG_VERSION"),
     lib_version = env!("CARGO_PKG_VERSION"),
     plugin_version = env!("CARGO_PKG_VERSION"),
-    source_descriptors = [descriptor::GitHubSourceDescriptor],
+    source_descriptors = [descriptor::GitHubWorkGraphSourceDescriptor],
     reaction_descriptors = [],
     bootstrap_descriptors = [],
 );

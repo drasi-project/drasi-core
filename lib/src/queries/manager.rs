@@ -2349,10 +2349,7 @@ impl Query for DrasiQuery {
         debug_assert!(
             matches!(
                 self.base.status_handle().get_status().await,
-                ComponentStatus::Running
-                    | ComponentStatus::Starting
-                    | ComponentStatus::Stopping
-                    | ComponentStatus::Error
+                ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Stopping
             ),
             "DrasiQuery::stop() called but local handle is not in expected pre-stop state"
         );
@@ -3044,7 +3041,7 @@ impl QueryManager {
         .await
     }
 
-    /// Stop all running, starting, or failed queries.
+    /// Stop all currently running or starting queries.
     ///
     /// # Errors
     /// Returns an error listing any queries that failed to stop.
@@ -3068,9 +3065,7 @@ impl QueryManager {
                     .map(|n| {
                         matches!(
                             n.status,
-                            ComponentStatus::Running
-                                | ComponentStatus::Starting
-                                | ComponentStatus::Error
+                            ComponentStatus::Running | ComponentStatus::Starting
                         )
                     })
                     .unwrap_or(false)
