@@ -39,17 +39,62 @@ const RESULT_COMMENT_NODE_ID: &str = "IC_result";
 const INVALID_COMMENT_NODE_ID: &str = "IC_invalid";
 const ORDINARY_COMMENT_NODE_ID: &str = "IC_ordinary";
 
-const ASSIGNMENT_COMMENT_BODY: &str = "WorkGraphAssignment/v1\n\
-Please validate this issue.\n\
-```json\n\
-{\"assignmentId\":\"assign-1\",\"agentProfile\":\"triage-bot\",\"priority\":1,\"taskType\":\"issue-validation\",\"task\":{\"validationProfile\":\"default\",\"criteria\":[\"title-present\"]}}\n\
-```";
+const ASSIGNMENT_COMMENT_BODY: &str = r#"<details>
+<summary>WorkGraph Assignment</summary>
 
-const RESULT_COMMENT_BODY: &str = "WorkGraphResult/v1\n\
-Validation complete.\n\
-```json\n\
-{\"assignmentId\":\"assign-1\",\"taskType\":\"issue-validation\",\"outcome\":\"succeeded\",\"summary\":\"Passed.\",\"result\":{\"criteria\":[{\"criterion\":\"title-present\",\"passed\":true,\"evidence\":\"Title is present.\"}]}}\n\
-```";
+WorkGraphAssignment/v1
+
+Validate the synthetic fixture Issue.
+
+```json
+{
+  "assignmentId": "fixture-701-validation",
+  "agentProfile": "issue-validator",
+  "priority": 10,
+  "taskType": "issue-validation",
+  "task": {
+    "validationProfile": "default",
+    "criteria": [
+      "The Issue has a non-empty title",
+      "The Issue body is present"
+    ]
+  }
+}
+```
+</details>
+"#;
+
+const RESULT_COMMENT_BODY: &str = r#"<details>
+<summary>WorkGraph Result</summary>
+
+WorkGraphResult/v1
+
+Evaluated both requested validation criteria.
+
+```json
+{
+  "assignmentId": "assignment-validation-001",
+  "taskType": "issue-validation",
+  "outcome": "succeeded",
+  "summary": "Evaluated both requested validation criteria.",
+  "result": {
+    "criteria": [
+      {
+        "criterion": "The issue defines acceptance criteria",
+        "passed": true,
+        "evidence": "The body contains an acceptance checklist."
+      },
+      {
+        "criterion": "The issue identifies an owner",
+        "passed": false,
+        "evidence": "The title and body do not identify an owner."
+      }
+    ]
+  }
+}
+```
+</details>
+"#;
 
 fn org_fixture() -> Value {
     json!({
@@ -119,7 +164,20 @@ fn invalid_comment_fixture() -> Value {
     let mut comment = assignment_comment_fixture();
     comment["node_id"] = json!(INVALID_COMMENT_NODE_ID);
     comment["id"] = json!(6003);
-    comment["body"] = json!("WorkGraphResult/v1\nInvalid payload.\n```json\nnot-json\n```");
+    comment["body"] = json!(
+        r#"<details>
+<summary>WorkGraph Result</summary>
+
+WorkGraphResult/v1
+
+Invalid payload.
+
+```json
+not-json
+```
+</details>
+"#
+    );
     comment
 }
 
@@ -380,7 +438,7 @@ async fn bootstraps_full_repository_via_shared_converter() {
         "status label must be derived by the shared mapping::derive_status, not reimplemented"
     );
 
-    let assignment_id = assignment_element_id(ORG_NODE_ID, "assign-1");
+    let assignment_id = assignment_element_id(ORG_NODE_ID, "fixture-701-validation");
     let assignment_event = events
         .iter()
         .find(|e| e.change.get_reference().element_id.as_ref() == assignment_id)
@@ -406,7 +464,10 @@ async fn bootstraps_full_repository_via_shared_converter() {
         panic!("RESULT_FOR must be an inserted relation");
     };
     assert_eq!(in_node.element_id.as_ref(), RESULT_COMMENT_NODE_ID);
-    assert_eq!(out_node.element_id.as_ref(), assignment_id);
+    assert_eq!(
+        out_node.element_id.as_ref(),
+        assignment_element_id(ORG_NODE_ID, "assignment-validation-001")
+    );
 
     let error_id = comment_error_element_id(INVALID_COMMENT_NODE_ID);
     let error_event = events
