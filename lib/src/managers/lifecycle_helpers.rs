@@ -259,10 +259,7 @@ where
             ));
         }
 
-        if matches!(
-            status,
-            ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Error
-        ) {
+        if matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
             g.validate_and_transition(
                 id,
                 ComponentStatus::Stopping,

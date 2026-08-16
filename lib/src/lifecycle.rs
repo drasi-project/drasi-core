@@ -199,7 +199,7 @@ impl LifecycleManager {
             };
             if !matches!(
                 live_status,
-                ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Error
+                ComponentStatus::Running | ComponentStatus::Starting
             ) {
                 continue;
             }

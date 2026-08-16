@@ -51,23 +51,6 @@ fn new_provider(root: &std::path::Path) -> Arc<dyn WalProvider> {
     Arc::new(RedbWalProvider::new(root))
 }
 
-fn single_wal_file(root: &std::path::Path) -> std::path::PathBuf {
-    let mut files = std::fs::read_dir(root)
-        .unwrap()
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("redb"))
-        .collect::<Vec<_>>();
-    files.sort();
-    assert_eq!(
-        files.len(),
-        1,
-        "expected exactly one wal file in {}, found {:?}",
-        root.display(),
-        files
-    );
-    files.remove(0)
-}
-
 async fn register_default(provider: &Arc<dyn WalProvider>, source_id: &str) {
     provider
         .register(source_id, default_config())
@@ -783,7 +766,7 @@ async fn test_delete_wal_clears_state_and_file() {
         .await
         .unwrap();
 
-    let wal_path = single_wal_file(tmp.path());
+    let wal_path = tmp.path().join(format!("{TEST_SRC}.redb"));
     assert!(wal_path.exists());
 
     provider.delete_wal(TEST_SRC).await.unwrap();
@@ -911,6 +894,7 @@ async fn test_register_rejects_invalid_source_ids() {
         "a\\b",
         "with space",
         "emoji😀",
+        "has:colon",
         "a\0b",
     ];
 
@@ -936,36 +920,9 @@ async fn test_register_accepts_valid_source_ids() {
     let tmp = TempDir::new().unwrap();
     let provider = new_provider(tmp.path());
 
-    for good in ["src", "SRC_1", "my-source-42", "A", "0", "src:inbox"] {
+    for good in ["src", "SRC_1", "my-source-42", "A", "0"] {
         provider.register(good, default_config()).await.unwrap();
     }
-}
-
-#[tokio::test]
-async fn test_distinct_source_ids_do_not_alias_wal_files() {
-    let tmp = TempDir::new().unwrap();
-    let provider = new_provider(tmp.path());
-    let source_a = "a:b";
-    let source_b = "a_3a_b";
-
-    provider.register(source_a, default_config()).await.unwrap();
-    provider.register(source_b, default_config()).await.unwrap();
-
-    provider
-        .append(source_a, &make_test_insert("from-a"))
-        .await
-        .unwrap();
-    provider
-        .append(source_b, &make_test_insert("from-b"))
-        .await
-        .unwrap();
-
-    let a_events = provider.read_from(source_a, 1).await.unwrap();
-    let b_events = provider.read_from(source_b, 1).await.unwrap();
-    assert_eq!(a_events.len(), 1);
-    assert_eq!(b_events.len(), 1);
-    assert_eq!(a_events[0].1, make_test_insert("from-a"));
-    assert_eq!(b_events[0].1, make_test_insert("from-b"));
 }
 
 #[tokio::test]
@@ -1095,7 +1052,7 @@ async fn test_corrupt_counter_errors_on_open() {
     }
 
     // Overwrite the persisted counter with a non-8-byte value.
-    let wal_path = single_wal_file(tmp.path());
+    let wal_path = tmp.path().join(format!("{TEST_SRC}.redb"));
     {
         let db = redb::Database::create(&wal_path).unwrap();
         let write_txn = db.begin_write().unwrap();
