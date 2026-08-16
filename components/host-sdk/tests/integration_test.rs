@@ -2264,6 +2264,119 @@ async fn test_reaction_identity_provider_cross_cdylib_clone_stress() {
 }
 
 // ============================================================================
+// State store durability bridge E2E test
+// ============================================================================
+
+extern "C" fn resolve_github_workgraph_test_secret(
+    _ctx: *const std::ffi::c_void,
+    _config_value_json: drasi_plugin_sdk::ffi::FfiStr,
+) -> drasi_plugin_sdk::ffi::FfiGetSecretResult {
+    drasi_plugin_sdk::ffi::FfiGetSecretResult::ok("test-webhook-secret".to_string())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn test_github_workgraph_source_state_store_durability_cross_cdylib() {
+    let path = require_plugin("drasi-source-github-workgraph");
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap_or_else(|error| panic!("failed to load GitHub WorkGraph source: {error:#}"));
+    plugin.inject_config_resolver(std::ptr::null_mut(), resolve_github_workgraph_test_secret);
+    let descriptor = plugin
+        .source_plugins
+        .first()
+        .expect("GitHub WorkGraph source descriptor");
+    let config = serde_json::json!({
+        "organization": "drasi-project",
+        "webhook": {
+            "host": "127.0.0.1",
+            "port": 0,
+            "path": "/webhook",
+            "secret": {
+                "kind": "Secret",
+                "name": "github-webhook-secret"
+            },
+            "bodyLimitBytes": 1024
+        },
+        "durability": {
+            "enabled": true,
+            "maxEvents": 10000,
+            "capacityPolicy": "RejectIncoming"
+        }
+    });
+
+    let durable_source = descriptor
+        .create_source("github-workgraph-durable", &config, false)
+        .await
+        .expect("create durable GitHub WorkGraph source");
+    let durable_temp = tempfile::tempdir().expect("durable temp directory");
+    let durable_store: std::sync::Arc<dyn drasi_lib::StateStoreProvider> = std::sync::Arc::new(
+        drasi_state_store_redb::RedbStateStoreProvider::new(durable_temp.path().join("state.redb"))
+            .expect("redb state store"),
+    );
+    let durable_wal: std::sync::Arc<dyn drasi_lib::WalProvider> = std::sync::Arc::new(
+        drasi_wal_redb::RedbWalProvider::new(durable_temp.path().join("wal")),
+    );
+    let (durable_update_tx, _durable_update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
+    let mut durable_context = drasi_lib::SourceRuntimeContext::new(
+        "durability-bridge-test",
+        "github-workgraph-durable",
+        Some(durable_store),
+        durable_update_tx,
+        None,
+    );
+    durable_context.wal_provider = Some(durable_wal);
+    durable_source.initialize(durable_context).await;
+    durable_source
+        .start()
+        .await
+        .unwrap_or_else(|error| panic!("GitHub WorkGraph rejected bridged redb: {error:#}"));
+    durable_source
+        .stop()
+        .await
+        .expect("stop durable GitHub WorkGraph source");
+
+    let memory_source = descriptor
+        .create_source("github-workgraph-memory", &config, false)
+        .await
+        .expect("create in-memory GitHub WorkGraph source");
+    let memory_temp = tempfile::tempdir().expect("memory temp directory");
+    let memory_store: std::sync::Arc<dyn drasi_lib::StateStoreProvider> =
+        std::sync::Arc::new(drasi_lib::MemoryStateStoreProvider::new());
+    let memory_wal: std::sync::Arc<dyn drasi_lib::WalProvider> = std::sync::Arc::new(
+        drasi_wal_redb::RedbWalProvider::new(memory_temp.path().join("wal")),
+    );
+    let (memory_update_tx, _memory_update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
+    let mut memory_context = drasi_lib::SourceRuntimeContext::new(
+        "durability-bridge-test",
+        "github-workgraph-memory",
+        Some(memory_store),
+        memory_update_tx,
+        None,
+    );
+    memory_context.wal_provider = Some(memory_wal);
+    memory_source.initialize(memory_context).await;
+    let error = memory_source
+        .start()
+        .await
+        .expect_err("in-memory state store must be rejected");
+    assert!(
+        error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("requires a durable state store"),
+        "unexpected GitHub WorkGraph startup error: {error:#}"
+    );
+}
+
+// ============================================================================
 // Reaction enqueue_query_result E2E Tests
 // ============================================================================
 
