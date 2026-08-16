@@ -64,6 +64,7 @@ impl StateStoreVtableBuilder {
             key_count_fn: ss_key_count,
             sync_fn: ss_sync,
             drop_fn: ss_drop,
+            is_durable_fn: Some(ss_is_durable),
         }
     }
 }
@@ -279,6 +280,15 @@ extern "C" fn ss_sync(state: *mut c_void) -> FfiResult {
             Some(Err(e)) => FfiResult::err(e.to_string()),
             None => FfiResult::err("failed to build runtime".to_string()),
         }
+    })
+}
+
+extern "C" fn ss_is_durable(state: *mut c_void) -> bool {
+    ffi_guard(false, || {
+        if state.is_null() {
+            return false;
+        }
+        provider_ref(state).is_durable()
     })
 }
 

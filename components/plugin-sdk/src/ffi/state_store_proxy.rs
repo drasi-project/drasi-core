@@ -173,4 +173,17 @@ impl StateStoreProvider for FfiStateStoreProxy {
                 .map_err(drasi_lib::StateStoreError::Other)
         }
     }
+
+    fn is_durable(&self) -> bool {
+        let Some(vtable) = (unsafe { self.vtable.as_ref() }) else {
+            return false;
+        };
+        if vtable.state.is_null() {
+            return false;
+        }
+
+        vtable
+            .is_durable_fn
+            .is_some_and(|is_durable_fn| is_durable_fn(vtable.state))
+    }
 }
