@@ -746,18 +746,6 @@ fn envelope_errors_and_typed_schema_errors_remain_specific() {
             error_code::INVALID_ASSIGNMENT_PAYLOAD
         );
     }
-    let stale_criteria = envelope(
-        "WorkGraphAssignment/v1",
-        json!({"assignmentId":"a","agentProfile":"p","priority":0,
-            "taskType":"issue-validation",
-            "task":{"validationProfile":"v","criteria":["c"]}}),
-    );
-    let Classification::Invalid(error) = classify(&stale_criteria) else {
-        panic!("legacy task.criteria must be rejected");
-    };
-    assert_eq!(error.code, error_code::INVALID_ASSIGNMENT_PAYLOAD);
-    assert!(error.message.contains("unknown field `criteria`"));
-
     for bad in [
         json!({"assignmentId":"a","taskType":"issue-risk-profile","outcome":"partial","summary":"s","result":{"dimensions":[]}}),
         json!({"assignmentId":"a","taskType":"issue-risk-profile","outcome":"failed","summary":"s","result":{"dimensions":[{"dimension":"d","score":101,"rationale":"r"}]}}),
@@ -779,6 +767,22 @@ fn envelope_errors_and_typed_schema_errors_remain_specific() {
         )),
         error_code::INVALID_ASSIGNMENT_PAYLOAD
     );
+}
+
+#[test]
+fn issue_validation_assignment_rejects_stale_criteria() {
+    let stale_criteria = envelope(
+        "WorkGraphAssignment/v1",
+        json!({"assignmentId":"a","agentProfile":"p","priority":0,
+            "taskType":"issue-validation",
+            "task":{"validationProfile":"v","criteria":["c"]}}),
+    );
+    let Classification::Invalid(error) = classify(&stale_criteria) else {
+        panic!("legacy task.criteria must be rejected");
+    };
+
+    assert_eq!(error.code, error_code::INVALID_ASSIGNMENT_PAYLOAD);
+    assert!(error.message.contains("unknown field `criteria`"));
 }
 
 fn config() -> GitHubWorkGraphSourceConfig {
