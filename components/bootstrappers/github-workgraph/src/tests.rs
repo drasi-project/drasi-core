@@ -81,9 +81,16 @@ fn labels() -> Value {
     json!({"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]})
 }
 
+fn fixture_database_id(id: &str) -> u64 {
+    id.bytes().fold(0_u64, |value, byte| {
+        value.wrapping_mul(31).wrapping_add(u64::from(byte))
+    })
+}
+
 fn issue(id: &str, body: &str, state: &str, typed: bool, comments: u64) -> Value {
+    let database_id = fixture_database_id(id);
     json!({
-        "node_id":id,"id":10,"number":10,"title":id,"body":body,"state":state,
+        "node_id":id,"id":database_id,"number":10,"title":id,"body":body,"state":state,
         "state_reason":if state == "CLOSED" { json!("COMPLETED") } else { Value::Null },
         "locked":false,"created_at":"2026-01-01T00:00:00Z",
         "updated_at":"2026-01-02T00:00:00Z",
@@ -319,6 +326,23 @@ async fn snapshots_generic_open_and_open_closed_tasks_with_parents_and_comments(
             .count(),
         2
     );
+    for task_id in ["I_task_open", "I_task_closed"] {
+        let relation_id = format!("TASK_FOR:{}", fixture_database_id(task_id));
+        let relation = events
+            .iter()
+            .find(|event| id(event) == relation_id && label(event) == "TASK_FOR")
+            .expect("TASK_FOR uses the child database ID");
+        let SourceChange::Insert {
+            element: Element::Relation {
+                in_node, out_node, ..
+            },
+        } = &relation.change
+        else {
+            panic!("bootstrap relation is an insert");
+        };
+        assert_eq!(in_node.element_id.as_ref(), task_id);
+        assert_eq!(out_node.element_id.as_ref(), "I_parent");
+    }
     for event in events.iter().filter(|event| label(event) == "RESULT_FOR") {
         let SourceChange::Insert {
             element: Element::Relation {
