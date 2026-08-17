@@ -22,15 +22,17 @@ use crate::workgraph::{
     assignment_element_id, classify, encode_id_component, error_code, Classification, Outcome,
     TaskType,
 };
-use drasi_core::evaluation::context::QueryVariables;
+use drasi_core::evaluation::context::{QueryPartEvaluationContext, QueryVariables};
 use drasi_core::evaluation::functions::{Function, FunctionRegistry, Insert};
 use drasi_core::evaluation::variable_value::VariableValue;
 use drasi_core::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock};
 use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 use drasi_core::models::{Element, ElementValue, SourceChange};
+use drasi_core::query::QueryBuilder;
 use drasi_lib::wal::CapacityPolicy;
 use drasi_lib::DurabilityConfig;
 use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
+use drasi_query_cypher::CypherParser;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -168,6 +170,14 @@ fn issue(mut labels: Value) -> Value {
 fn item_event(action: &str, labels: Value) -> Value {
     json!({"action":action,"organization":org(),"repository":repo(),"issue":issue(labels)})
 }
+fn pull_request_event(action: &str, labels: Value) -> Value {
+    let mut pull_request = issue(labels);
+    pull_request["node_id"] = json!("PR_5");
+    pull_request["draft"] = json!(false);
+    pull_request["merged"] = json!(false);
+    json!({"action":action,"organization":org(),"repository":repo(),
+        "pull_request":pull_request})
+}
 fn comment_event(action: &str, body: &str, pr: bool) -> Value {
     let mut parent = issue(json!([]));
     if pr {
@@ -181,7 +191,7 @@ fn comment_event(action: &str, body: &str, pr: bool) -> Value {
 }
 fn review(action: &str) -> Value {
     json!({"action":action,"organization":org(),"repository":repo(),
-        "pull_request":{"node_id":"PR_5"},"review":{"node_id":"PRR_3","id":55,
+        "pull_request":{"node_id":"PR_5","state":"open"},"review":{"node_id":"PRR_3","id":55,
         "state":"approved","body":"LGTM","submitted_at":"2024-03-05T00:00:00Z",
         "commit_id":"abc","html_url":"https://gh/reviews/3",
         "user":{"login":"ada","node_id":"U_ada","id":1,"type":"User"}}})
@@ -341,7 +351,7 @@ fn repository_filter_handles_transfer_and_rename_boundaries_without_state() {
 
     let mut transferred_in = in_repository(item_event("transferred", json!([])), "gadgets");
     transferred_in["changes"] = json!({
-        "new_issue":{"node_id":"I_99","number":99,"labels":[]},
+        "new_issue":{"node_id":"I_99","number":99,"state":"open","labels":[]},
         "new_repository":{
             "node_id":"R_8","name":"widgets","full_name":"acme/widgets",
             "owner":{"login":"acme"}
@@ -363,7 +373,7 @@ fn repository_filter_handles_transfer_and_rename_boundaries_without_state() {
 
     let mut transferred_out = item_event("transferred", json!([]));
     transferred_out["changes"] = json!({
-        "new_issue":{"node_id":"I_99","number":99,"labels":[]},
+        "new_issue":{"node_id":"I_99","number":99,"state":"open","labels":[]},
         "new_repository":{
             "node_id":"R_8","name":"gadgets","full_name":"acme/gadgets",
             "owner":{"login":"acme"}
@@ -381,6 +391,24 @@ fn repository_filter_handles_transfer_and_rename_boundaries_without_state() {
     assert!(!moved_out
         .iter()
         .any(|change| change.get_reference().element_id.as_ref() == "I_99"));
+
+    let mut transferred_closed = in_repository(item_event("transferred", json!([])), "gadgets");
+    transferred_closed["changes"] = json!({
+        "new_issue":{"node_id":"I_100","number":100,"state":"closed","labels":[]},
+        "new_repository":{
+            "node_id":"R_8","name":"widgets","full_name":"acme/widgets",
+            "owner":{"login":"acme"}
+        }
+    });
+    let closed_move = Converter::new("gh", "acme", 1)
+        .with_repository_filter(&filter)
+        .convert("issues", &transferred_closed)
+        .unwrap()
+        .unwrap();
+    assert!(
+        closed_move.is_empty(),
+        "a closed Issue transferred into scope must not be projected"
+    );
 
     let renamed_out = in_repository(
         json!({"action":"renamed","organization":org(),"repository":repo(),
@@ -408,6 +436,287 @@ fn repository_filter_handles_transfer_and_rename_boundaries_without_state() {
         change.get_reference().element_id.as_ref() == "R_7"
             && matches!(change, SourceChange::Insert { .. })
     }));
+}
+
+#[test]
+fn open_only_projection_tombstones_reopens_and_gates_children() {
+    let converter = Converter::new("gh", "acme", 1);
+    for (event, key, id, node_label) in [
+        ("issues", "issue", "I_42", "GitHubIssue"),
+        ("pull_request", "pull_request", "PR_5", "GitHubPullRequest"),
+    ] {
+        let open = if event == "issues" {
+            item_event("opened", json!([]))
+        } else {
+            pull_request_event("opened", json!([]))
+        };
+        let mut closed = open.clone();
+        closed["action"] = json!("closed");
+        closed[key]["state"] = json!("closed");
+        let tombstones = converter.convert(event, &closed).unwrap().unwrap();
+        assert!(tombstones.iter().any(|change| {
+            change.get_reference().element_id.as_ref() == id
+                && label(change) == node_label
+                && matches!(change, SourceChange::Delete { .. })
+        }));
+        assert!(tombstones.iter().any(|change| {
+            label(change) == "IN_REPOSITORY" && matches!(change, SourceChange::Delete { .. })
+        }));
+        assert!(
+            tombstones
+                .iter()
+                .all(|change| !matches!(label(change).as_str(), "COMMENT_ON" | "REVIEW_OF")),
+            "close must not pretend to enumerate child relations"
+        );
+
+        let mut closed_edit = closed.clone();
+        closed_edit["action"] = json!("edited");
+        assert!(
+            converter.convert(event, &closed_edit).unwrap().is_none(),
+            "non-terminal events for closed work items must be ignored"
+        );
+
+        let mut reopened = closed;
+        reopened["action"] = json!("reopened");
+        reopened[key]["state"] = json!("open");
+        let reconstructed = converter.convert(event, &reopened).unwrap().unwrap();
+        assert!(reconstructed.iter().any(|change| {
+            change.get_reference().element_id.as_ref() == id
+                && label(change) == node_label
+                && matches!(change, SourceChange::Insert { .. })
+        }));
+        assert!(reconstructed.iter().any(|change| {
+            label(change) == "IN_REPOSITORY" && matches!(change, SourceChange::Insert { .. })
+        }));
+    }
+
+    for on_pull_request in [false, true] {
+        let open = comment_event("created", "ordinary", on_pull_request);
+        assert!(converter.convert("issue_comment", &open).unwrap().is_some());
+        let mut closed = open;
+        closed["issue"]["state"] = json!("closed");
+        assert!(converter
+            .convert("issue_comment", &closed)
+            .unwrap()
+            .is_none());
+    }
+
+    let open_review = review("submitted");
+    assert!(converter
+        .convert("pull_request_review", &open_review)
+        .unwrap()
+        .is_some());
+    let mut closed_review = open_review;
+    closed_review["pull_request"]["state"] = json!("closed");
+    assert!(converter
+        .convert("pull_request_review", &closed_review)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn open_only_projection_rejects_missing_or_invalid_parent_state() {
+    for (event, mut payload, pointer) in [
+        ("issues", item_event("edited", json!([])), "/issue/state"),
+        (
+            "pull_request",
+            pull_request_event("edited", json!([])),
+            "/pull_request/state",
+        ),
+        (
+            "issue_comment",
+            comment_event("created", "ordinary", false),
+            "/issue/state",
+        ),
+        (
+            "pull_request_review",
+            review("submitted"),
+            "/pull_request/state",
+        ),
+    ] {
+        *payload.pointer_mut(pointer).unwrap() = json!("unknown");
+        assert!(matches!(
+            Converter::new("gh", "acme", 1).convert(event, &payload),
+            Err(ConvertError::InvalidPayload(message)) if message.contains(".state")
+        ));
+    }
+
+    let mut missing_parent_state = comment_event("created", "ordinary", true);
+    missing_parent_state["issue"]
+        .as_object_mut()
+        .unwrap()
+        .remove("state");
+    assert_eq!(
+        Converter::new("gh", "acme", 1).convert("issue_comment", &missing_parent_state),
+        Err(ConvertError::InvalidPayload(
+            "'issue.state' must be either 'open' or 'closed'".into()
+        ))
+    );
+
+    let mut inconsistent_open = item_event("opened", json!([]));
+    inconsistent_open["issue"]["state"] = json!("closed");
+    assert_eq!(
+        Converter::new("gh", "acme", 1).convert("issues", &inconsistent_open),
+        Err(ConvertError::InvalidPayload(
+            "'issue.state' must be 'open' for action 'opened'".into()
+        ))
+    );
+
+    let mut transferred = item_event("transferred", json!([]));
+    transferred["changes"] = json!({
+        "new_issue":{"node_id":"I_99","number":99,"labels":[]},
+        "new_repository":{
+            "node_id":"R_8","name":"widgets","full_name":"acme/widgets",
+            "owner":{"login":"acme"}
+        }
+    });
+    assert_eq!(
+        Converter::new("gh", "acme", 1).convert("issues", &transferred),
+        Err(ConvertError::InvalidPayload(
+            "'changes.new_issue.state' must be either 'open' or 'closed'".into()
+        ))
+    );
+}
+
+#[test]
+fn repository_filter_allows_only_terminal_cleanup_outside_scope() {
+    let filter = RepositoryFilter::new("acme", &["widgets".to_string()]).unwrap();
+    let converter = Converter::new("gh", "acme", 1).with_repository_filter(&filter);
+
+    for (event, key) in [("issues", "issue"), ("pull_request", "pull_request")] {
+        let mut included_close = if event == "issues" {
+            item_event("closed", json!([]))
+        } else {
+            pull_request_event("closed", json!([]))
+        };
+        included_close[key]["state"] = json!("closed");
+        assert!(converter.convert(event, &included_close).unwrap().is_some());
+
+        let excluded_close = in_repository(included_close, "gadgets");
+        let tombstones = converter
+            .convert(event, &excluded_close)
+            .unwrap()
+            .expect("terminal cleanup bypasses the current repository name filter");
+        assert!(tombstones
+            .iter()
+            .all(|change| matches!(change, SourceChange::Delete { .. })));
+
+        let included_reopen = if event == "issues" {
+            item_event("reopened", json!([]))
+        } else {
+            pull_request_event("reopened", json!([]))
+        };
+        assert!(converter
+            .convert(event, &included_reopen)
+            .unwrap()
+            .is_some());
+
+        let excluded_reopen = in_repository(included_reopen, "gadgets");
+        assert!(converter
+            .convert(event, &excluded_reopen)
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[test]
+fn state_less_issue_pin_actions_remain_ignored() {
+    for action in ["pinned", "unpinned"] {
+        let mut payload = item_event(action, json!([]));
+        payload["issue"].as_object_mut().unwrap().remove("state");
+        assert!(Converter::new("gh", "acme", 1)
+            .convert("issues", &payload)
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn closing_parent_retracts_child_match_and_reopen_restores_it() {
+    let registry = Arc::new(FunctionRegistry::new());
+    let parser = Arc::new(CypherParser::new(registry.clone()));
+    let query = QueryBuilder::new(
+        "MATCH (comment:GitHubIssueComment)-[:COMMENT_ON]->(issue:GitHubIssue) \
+         RETURN comment.nodeId AS commentId",
+        parser,
+    )
+    .with_function_registry(registry)
+    .build()
+    .await;
+
+    for change in convert("issues", &item_event("opened", json!([]))) {
+        query.process_source_change(change).await.unwrap();
+    }
+    let mut results = Vec::new();
+    for change in convert(
+        "issue_comment",
+        &comment_event("created", "ordinary", false),
+    ) {
+        results.extend(query.process_source_change(change).await.unwrap());
+    }
+    assert!(results
+        .iter()
+        .any(|result| matches!(result, QueryPartEvaluationContext::Adding { .. })));
+
+    let mut closed = item_event("closed", json!([]));
+    closed["issue"]["state"] = json!("closed");
+    let mut results = Vec::new();
+    for change in convert("issues", &closed) {
+        results.extend(query.process_source_change(change).await.unwrap());
+    }
+    assert!(results
+        .iter()
+        .any(|result| matches!(result, QueryPartEvaluationContext::Removing { .. })));
+
+    let reopened = item_event("reopened", json!([]));
+    let mut results = Vec::new();
+    for change in convert("issues", &reopened) {
+        results.extend(query.process_source_change(change).await.unwrap());
+    }
+    assert!(results
+        .iter()
+        .any(|result| matches!(result, QueryPartEvaluationContext::Adding { .. })));
+
+    let registry = Arc::new(FunctionRegistry::new());
+    let parser = Arc::new(CypherParser::new(registry.clone()));
+    let query = QueryBuilder::new(
+        "MATCH (review:GitHubPullRequestReview)-[:REVIEW_OF]->(pr:GitHubPullRequest) \
+         RETURN review.nodeId AS reviewId",
+        parser,
+    )
+    .with_function_registry(registry)
+    .build()
+    .await;
+
+    for change in convert("pull_request", &pull_request_event("opened", json!([]))) {
+        query.process_source_change(change).await.unwrap();
+    }
+    let mut results = Vec::new();
+    for change in convert("pull_request_review", &review("submitted")) {
+        results.extend(query.process_source_change(change).await.unwrap());
+    }
+    assert!(results
+        .iter()
+        .any(|result| matches!(result, QueryPartEvaluationContext::Adding { .. })));
+
+    let mut closed = pull_request_event("closed", json!([]));
+    closed["pull_request"]["state"] = json!("closed");
+    let mut results = Vec::new();
+    for change in convert("pull_request", &closed) {
+        results.extend(query.process_source_change(change).await.unwrap());
+    }
+    assert!(results
+        .iter()
+        .any(|result| matches!(result, QueryPartEvaluationContext::Removing { .. })));
+
+    let reopened = pull_request_event("reopened", json!([]));
+    let mut results = Vec::new();
+    for change in convert("pull_request", &reopened) {
+        results.extend(query.process_source_change(change).await.unwrap());
+    }
+    assert!(results
+        .iter()
+        .any(|result| matches!(result, QueryPartEvaluationContext::Adding { .. })));
 }
 
 #[test]
@@ -452,7 +761,7 @@ fn families_actions_ids_properties_and_directions() {
     assert!(changes("issues", &deleted).ends_with("D:GitHubIssue:I_42"));
 
     let mut transfer = item_event("transferred", json!([]));
-    transfer["changes"] = json!({"new_issue":{"node_id":"I_99","number":99,"labels":[]},
+    transfer["changes"] = json!({"new_issue":{"node_id":"I_99","number":99,"state":"open","labels":[]},
         "new_repository":{"node_id":"R_8","owner":{"login":"acme"}}});
     let moved = changes("issues", &transfer);
     assert!(moved.contains("D:GitHubIssue:I_42") && moved.contains("I:GitHubIssue:I_99"));

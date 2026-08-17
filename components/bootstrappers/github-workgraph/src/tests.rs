@@ -288,14 +288,22 @@ async fn mount_full_fixture(server: &MockServer) {
     .await;
     mount_query(
         server,
-        &["issues(first", "nodes { name node_id: id }"],
+        &[
+            "issues(first",
+            "states: [OPEN]",
+            "nodes { name node_id: id }",
+        ],
         json!({ "repository": { "issues": connection(vec![issue_fixture()], false, None) } }),
         None,
     )
     .await;
     mount_query(
         server,
-        &["pullRequests(first", "nodes { name node_id: id }"],
+        &[
+            "pullRequests(first",
+            "states: [OPEN]",
+            "nodes { name node_id: id }",
+        ],
         json!({ "repository": { "pullRequests": connection(vec![pr_fixture()], false, None) } }),
         None,
     )
@@ -690,6 +698,75 @@ async fn paginates_repositories_across_multiple_pages() {
 }
 
 #[tokio::test]
+async fn open_state_filter_is_reused_for_every_issue_and_pr_page() {
+    let server = MockServer::start().await;
+    mount_query(
+        &server,
+        &["avatar_url: avatarUrl"],
+        json!({ "organization": org_fixture() }),
+        Some(1),
+    )
+    .await;
+    mount_query(
+        &server,
+        &["repositories(first"],
+        json!({ "organization": { "repositories": connection(vec![repo_fixture()], false, None) } }),
+        Some(1),
+    )
+    .await;
+
+    mount_query(
+        &server,
+        &["issues(first", "states: [OPEN]", "\"cursor\":null"],
+        json!({ "repository": {
+            "issues": connection(vec![], true, Some("ISSUE_PAGE_2"))
+        } }),
+        Some(1),
+    )
+    .await;
+    mount_query(
+        &server,
+        &[
+            "issues(first",
+            "states: [OPEN]",
+            "\"cursor\":\"ISSUE_PAGE_2\"",
+        ],
+        json!({ "repository": {
+            "issues": connection(vec![], false, None)
+        } }),
+        Some(1),
+    )
+    .await;
+    mount_query(
+        &server,
+        &["pullRequests(first", "states: [OPEN]", "\"cursor\":null"],
+        json!({ "repository": {
+            "pullRequests": connection(vec![], true, Some("PR_PAGE_2"))
+        } }),
+        Some(1),
+    )
+    .await;
+    mount_query(
+        &server,
+        &[
+            "pullRequests(first",
+            "states: [OPEN]",
+            "\"cursor\":\"PR_PAGE_2\"",
+        ],
+        json!({ "repository": {
+            "pullRequests": connection(vec![], false, None)
+        } }),
+        Some(1),
+    )
+    .await;
+
+    let provider = provider_for(&server);
+    let (result, events) = run_bootstrap(&provider, all_labels_request()).await;
+    assert_eq!(result.event_count, 3);
+    assert_eq!(result.event_count, events.len());
+}
+
+#[tokio::test]
 async fn bootstrap_rejects_labels_without_graphql_node_ids() {
     let server = MockServer::start().await;
     mount_query(
@@ -736,6 +813,53 @@ async fn bootstrap_rejects_labels_without_graphql_node_ids() {
     assert!(
         rx.try_recv().is_err(),
         "invalid label identity must not emit a partial snapshot"
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_rejects_closed_item_returned_by_open_filter() {
+    let server = MockServer::start().await;
+    mount_query(
+        &server,
+        &["avatar_url: avatarUrl"],
+        json!({ "organization": org_fixture() }),
+        Some(1),
+    )
+    .await;
+    mount_query(
+        &server,
+        &["repositories(first"],
+        json!({ "organization": { "repositories": connection(vec![repo_fixture()], false, None) } }),
+        Some(1),
+    )
+    .await;
+    let mut issue = issue_fixture();
+    issue["state"] = json!("CLOSED");
+    issue["labels"]["pageInfo"] = json!({ "hasNextPage": false, "endCursor": null });
+    issue["comments"]["totalCount"] = json!(0);
+    mount_query(
+        &server,
+        &["issues(first", "states: [OPEN]"],
+        json!({ "repository": { "issues": connection(vec![issue], false, None) } }),
+        Some(1),
+    )
+    .await;
+
+    let provider = provider_for(&server);
+    let context = BootstrapContext::new_minimal("test-server".to_string(), "gh-src".to_string());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    let error = provider
+        .bootstrap(all_labels_request(), &context, tx, None)
+        .await
+        .expect_err("a closed item from an OPEN-filtered query must fail bootstrap");
+
+    assert!(
+        format!("{error:#}").contains("'issue.state' must be 'open' for action 'opened'"),
+        "unexpected bootstrap error: {error:#}"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "a violated OPEN invariant must not emit a partial snapshot"
     );
 }
 

@@ -44,7 +44,11 @@ are ignored. Filtering is stateless: each supported delivery carries its
 repository metadata, so an excluded repository returns `204` before any WAL or
 delivery-dedupe write. Transfers and repository renames use the old/new
 repository metadata in that delivery to emit only the in-scope side. The Source
-does not call GitHub or maintain a repository cache.
+does not call GitHub or maintain a repository cache. The only filter exception
+is an idempotent Issue/PR `closed` (or Issue `deleted`) tombstone: it is emitted
+even when the delivery's current repository name is excluded, so an item
+projected before a repository rename can still be removed. This exception emits
+deletes only and cannot introduce out-of-scope graph state.
 
 ## Graph contract
 
@@ -119,6 +123,35 @@ Repository and work-item actions upsert/update/delete their nodes, parent
 relations, and status state. Comment edits classify `changes.body.from` and the
 new body: changing Assignment ID replaces its node, while changing a Result's
 Assignment moves only `RESULT_FOR`. Review submit inserts; edit/dismiss updates.
+
+### Open-only work-item projection
+
+Only open Issues and Pull Requests are query-visible. `opened` and `reopened`
+deliveries insert the complete work-item node and its deterministic
+`IN_REPOSITORY` relation from payload data. A `closed` delivery deletes any
+deterministic status error and `ERROR_ON`, then deletes `IN_REPOSITORY` and the
+Issue/PR node. `deleted` and the old side of an Issue transfer use the same
+tombstone path. A transferred Issue is inserted on the new side only when the
+new Issue payload has `state: open`.
+
+Other Issue/PR actions are ignored when the payload state is closed.
+`issue_comment` deliveries (for both Issues and PR conversations) and
+`pull_request_review` deliveries are processed only when their embedded parent
+has `state: open`. Missing or unknown parent state is a payload-shape error.
+Every required state is present in GitHub's webhook payload; no GitHub API call,
+Issue/PR cache, or repository cache is used.
+
+Issue `pinned`/`unpinned` deliveries are ignored: the graph has no pin property,
+and GitHub's payload for those actions does not guarantee parent `state`.
+
+Closing a parent does not enumerate or delete its comment/review nodes or
+`COMMENT_ON`/`REVIEW_OF` relations because their IDs are not included in the
+close delivery. The absent parent makes those paths non-matchable, so active
+query rows retract. Reopening reinserts the same globally identified parent,
+which makes pre-existing child paths match again. Child deliveries received
+while the parent is closed are intentionally ignored, so closed-period child
+edits, deletions, or additions are not reflected until a later bootstrap. This
+is the explicit payload-only, cache-free prototype behavior.
 
 ## WorkGraph comments
 
