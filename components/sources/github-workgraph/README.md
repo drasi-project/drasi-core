@@ -1,17 +1,18 @@
 # GitHub WorkGraph Source
 
-Streams one organization's GitHub webhook into Drasi. Conversion is read-only
-and payload-only: the source has no GitHub token and makes no REST or GraphQL
-calls. A separately configured bootstrap provider owns initial materialization;
-bootstrap and streaming must use the schema and IDs below.
+Streams one organization's GitHub webhook into Drasi. Conversion is read-only,
+stateless, cache-free, and payload-only. The Source never calls GitHub; the
+separate `github-workgraph` bootstrap provider owns initial API reads.
 
 ## Configuration
 
 ```yaml
 id: github-workgraph
 kind: github-workgraph
-autoStart: true
 organization: drasi-project
+taskIssueType:
+  id: IT_CONFIGURED_GRAPHQL_NODE_ID
+  name: WorkGraphTask
 repositories:
   - drasi-workgraph-demo
 webhook:
@@ -28,142 +29,59 @@ durability:
   capacityPolicy: RejectIncoming
 ```
 
-`organization` is one login. `repositories` is optional: omitted or empty means
-all repositories in that organization. Each entry is either a bare repository
-name (`drasi-workgraph-demo`) or a full `owner/name`; a full owner must match
-`organization` case-insensitively. Names are case-insensitive, limited to 100
-ASCII letters, digits, `.`, `-`, or `_`, and normalized to sorted, deduplicated
-lowercase bare names. Malformed entries and foreign owners are rejected. The
-secret is a `SecretReference`, the path is static, durability uses
-`RejectIncoming`, and unknown or obsolete fields are rejected.
+`taskIssueType.id` is the exact GitHub GraphQL Issue Type node ID and
+`taskIssueType.name` is its exact, case-sensitive name. Both are required and
+deployment-configurable; Core has no built-in Issue Type ID or name.
 
-Create one organization webhook using `application/json` and the same secret for
-`repository`, `issues`, `issue_comment`, `pull_request`, and
-`pull_request_review`. Other families, including inline comments and Projects,
-are ignored. Filtering is stateless: each supported delivery carries its
-repository metadata, so an excluded repository returns `204` before any WAL or
-delivery-dedupe write. Transfers and repository renames use the old/new
-repository metadata in that delivery to emit only the in-scope side. The Source
-does not call GitHub or maintain a repository cache. The only filter exception
-is an idempotent Issue/PR `closed` (or Issue `deleted`) tombstone: it is emitted
-even when the delivery's current repository name is excluded, so an item
-projected before a repository rename can still be removed. This exception emits
-deletes only and cannot introduce out-of-scope graph state.
+`organization` is one login. `repositories` is optional; empty means all
+repositories in the organization. Entries may be bare names or matching
+`owner/name` values and are normalized to sorted lowercase names. The webhook
+secret must be a `SecretReference`, the path must be static, and durability must
+use `RejectIncoming`.
+
+Configure one organization webhook for `repository`, `issues`, `sub_issues`,
+`issue_comment`, `pull_request`, and `pull_request_review`. Other event families
+are ignored.
 
 ## Graph contract
 
-Properties are camelCase. Missing optional fields are omitted; explicit nulls
-remain null. GitHub IDs are global payload `node_id` values.
+All IDs are GitHub GraphQL node IDs from webhook payload `node_id` fields.
+Properties are camelCase.
 
-| Node | ID | Payload-derived properties |
+| Node | ID | Notes |
 |---|---|---|
-| `GitHubOrganization` | `organization.node_id` | `nodeId`, `databaseId`, `login`, `url`, `avatarUrl`, `description` |
-| `GitHubRepository` | `repository.node_id` | identity/name/owner, URL, privacy/archive/fork/visibility, default branch, topics, timestamps |
-| `GitHubIssue` | `issue.node_id` | identity/number/title/body/bodyDigest/state/stateReason/lock/timestamps, author, URL, repository, assignees, labels, labelDetails, status/statusLabel |
-| `GitHubPullRequest` | `pull_request.node_id` | Issue fields except `stateReason`, plus draft/merge and head/base ref/SHA |
-| `GitHubIssueComment`, `GitHubPullRequestComment` | `comment.node_id` | identity/body/timestamps/isEdited, author, URL, repository |
-| `GitHubPullRequestReview` | `review.node_id` | identity/state/body/submittedAt/commitId, author, URL, repository |
-| `WorkGraphAssignment` | `workgraph-assignment:{organization.node_id}:{encode(assignmentId)}` | typed Assignment fields and source-comment provenance |
-| `WorkGraphResult` | `comment.node_id` | typed Result fields and source-comment provenance |
-| invalid-comment `WorkGraphError` | `workgraph-error:comment:{comment.node_id}` | error code/message, complete body, comment provenance |
-| status-conflict `WorkGraphError` | `workgraph-error:status:{subject.node_id}` | sorted labels and subject/repository provenance |
+| `GitHubOrganization` | organization node ID | organization metadata |
+| `GitHubRepository` | repository node ID | repository metadata |
+| `GitHubIssue` | Issue node ID | open, non-task Issue |
+| `GitHubPullRequest` | PR node ID | open PR |
+| `GitHubIssueComment` / `GitHubPullRequestComment` | comment node ID | ordinary conversation comment |
+| `GitHubPullRequestReview` | review node ID | PR review |
+| `WorkGraphTask` | typed child Issue node ID | native Issue metadata plus strict Assignment fields |
+| `WorkGraphTaskResult` | result comment node ID | strict Result fields and comment provenance |
+| `WorkGraphError` | deterministic error ID | malformed task, malformed marked Result, or status conflict |
 
-`bodyDigest` is `sha256:` plus lowercase SHA-256 of exact UTF-8 `body ?? ""`.
-`encode` leaves ASCII alphanumerics and `-._~` literal and encodes every other
-UTF-8 byte as uppercase `%HH`. Reviews use `submittedAt`; no timestamp is
-fabricated.
+A typed child is emitted only as `WorkGraphTask`; it is never also emitted as
+`GitHubIssue`.
 
-`labels` remains the ordered list of label names. `labelDetails` is the same
-ordered list with generic paired GitHub identity:
+| Relation | Direction | Stable ID |
+|---|---|---|
+| `IN_ORGANIZATION` | repository → organization | `IN_ORGANIZATION:{repository}:{organization}` |
+| `IN_REPOSITORY` | Issue/PR/task → repository | `IN_REPOSITORY:{item}:{repository}` |
+| `TASK_FOR` | task → parent Issue | `TASK_FOR:{task}` |
+| `COMMENT_ON` | ordinary comment/result → Issue/PR/task | `COMMENT_ON:{comment}:{parent}` |
+| `RESULT_FOR` | result → task | `RESULT_FOR:{comment}:{task}` |
+| `REVIEW_OF` | review → PR | `REVIEW_OF:{review}:{pr}` |
+| `ERROR_ON` | comment/status error → subject | deterministic from source and subject IDs |
 
-```json
-[
-  {
-    "name": "bug",
-    "nodeId": "LA_kwDO..."
-  }
-]
-```
+The parent edge has one identity per task, so parent removal, replacement, task
+type transitions, and task deletion can tombstone it without a cache.
 
-The list-of-map value is directly consumable by Drasi Cypher. To preserve every
-current non-status label and prepend the configured `status:awaitingValidation`
-GraphQL node ID, use:
+## Task and Result wire formats
 
-```cypher
-coll.insert(
-  [label IN issue.labelDetails
-   WHERE NOT (label.name STARTS WITH 'status:')
-   | label.nodeId],
-  0,
-  $awaitingValidationLabelId
-)
-```
-
-`coll.insert` is used because the supported dialect does not concatenate lists
-with `+`. Webhook Issue/PR label objects already carry both fields, so this adds
-no API call or cache. A present `labels` array is rejected as a payload-shape
-error unless every entry has a nonempty string `name` and `node_id`; omitting the
-whole field on a partial update still leaves all label-derived properties
-unchanged.
-
-| Relation and direction | Stable ID |
-|---|---|
-| Repository `IN_ORGANIZATION` Organization | `IN_ORGANIZATION:{repository}:{organization}` |
-| Issue/PR `IN_REPOSITORY` Repository | `IN_REPOSITORY:{item}:{repository}` |
-| Comment/Assignment/Result `COMMENT_ON` Issue/PR | `COMMENT_ON:{comment}:{parent}` |
-| Review `REVIEW_OF` PR | `REVIEW_OF:{review}:{pr}` |
-| Result `RESULT_FOR` Assignment | `RESULT_FOR:{comment}:{assignment_element_id}` |
-| Error `ERROR_ON` Issue/PR | invalid: `ERROR_ON:{comment}:{parent}`; status: `ERROR_ON:{error}:{subject}` |
-
-Drasi `in_node` is the relation tail and `out_node` its head. Nodes precede
-inserted relations; relations precede deleted nodes. Embedded parents in
-comment/review payloads provide endpoints but are not upserted.
-
-Repository and work-item actions upsert/update/delete their nodes, parent
-relations, and status state. Comment edits classify `changes.body.from` and the
-new body: changing Assignment ID replaces its node, while changing a Result's
-Assignment moves only `RESULT_FOR`. Review submit inserts; edit/dismiss updates.
-
-### Open-only work-item projection
-
-Only open Issues and Pull Requests are query-visible. `opened` and `reopened`
-deliveries insert the complete work-item node and its deterministic
-`IN_REPOSITORY` relation from payload data. A `closed` delivery deletes any
-deterministic status error and `ERROR_ON`, then deletes `IN_REPOSITORY` and the
-Issue/PR node. `deleted` and the old side of an Issue transfer use the same
-tombstone path. A transferred Issue is inserted on the new side only when the
-new Issue payload has `state: open`.
-
-Other Issue/PR actions are ignored when the payload state is closed.
-`issue_comment` deliveries (for both Issues and PR conversations) and
-`pull_request_review` deliveries are processed only when their embedded parent
-has `state: open`. Missing or unknown parent state is a payload-shape error.
-Every required state is present in GitHub's webhook payload; no GitHub API call,
-Issue/PR cache, or repository cache is used.
-
-Issue `pinned`/`unpinned` deliveries are ignored: the graph has no pin property,
-and GitHub's payload for those actions does not guarantee parent `state`.
-
-Closing a parent does not enumerate or delete its comment/review nodes or
-`COMMENT_ON`/`REVIEW_OF` relations because their IDs are not included in the
-close delivery. The absent parent makes those paths non-matchable, so active
-query rows retract. Reopening reinserts the same globally identified parent,
-which makes pre-existing child paths match again. Child deliveries received
-while the parent is closed are intentionally ignored, so closed-period child
-edits, deletions, or additions are not reflected until a later bootstrap. This
-is the explicit payload-only, cache-free prototype behavior.
-
-## WorkGraph comments
-
-Only Issue/PR conversation comments are classified. The envelope is exact:
-
-````markdown
-<details>
-<summary>WorkGraph Assignment</summary>
-
-WorkGraphAssignment/v1
-
-Validate the synthetic fixture Issue.
+A configured typed Issue body is exactly the existing strict
+WorkGraphAssignment JSON object serialized with two-space indentation. There is
+no marker, Markdown fence, details element, summary, surrounding prose, or final
+newline:
 
 ```json
 {
@@ -176,68 +94,67 @@ Validate the synthetic fixture Issue.
   }
 }
 ```
-</details>
+
+`taskType` is `issue-validation` or `issue-risk-profile`. Validation tasks
+require `task.validationProfile`. Risk tasks require `task.riskProfile` and a
+non-empty `task.dimensions` string list. Unknown fields, compact/reordered JSON,
+invalid values, whitespace outside the object, and all legacy comment envelopes
+are rejected. A malformed typed task emits `WorkGraphError`.
+
+A task Result comment has exactly this grammar:
+
+````text
+WorkGraphTaskResult/v1
+
+```json
+{
+  "assignmentId": "fixture-701-validation",
+  "taskType": "issue-validation",
+  "outcome": "succeeded",
+  "summary": "Validated the issue.",
+  "result": {
+    "criteria": [
+      {
+        "criterion": "Acceptance criteria",
+        "passed": true,
+        "evidence": "Present."
+      }
+    ]
+  }
+}
+```
 ````
 
-Result comments use `<summary>WorkGraph Result</summary>` and
-`WorkGraphResult/v1`. The opening tag is literal `<details>` with no attributes,
-so GitHub collapses the body by default. Every separator is LF: there is one LF
-after the opening and summary lines, one blank line after the summary label,
-marker, and one-line non-empty human summary, and exactly one final LF after
-`</details>`.
+The marker is the first byte, separators are LF, JSON is strict canonical
+two-space typed JSON, and the closing fence has exactly one final LF. No details
+wrapper, prose, or extra bytes are allowed. A marked malformed Result on a typed
+task emits `WorkGraphError`. The same marker on an ordinary Issue is an ordinary
+`GitHubIssueComment`. Unmarked task comments are also ordinary comments.
+Multiple valid Results are allowed.
 
-The fenced object must equal the canonical two-space serialization of the typed
-payload, including field order. CRLF, literal `\n` separators, compact JSON,
-additional or mismatched fences, wrapper attributes, missing or extra blank
-lines, prose outside the wrapper, and missing or extra final LFs are invalid.
-The Result human summary and typed `summary` field must not contain
-`WorkGraphResult/v1`, even as a substring, and they must byte-equal each other.
-Every object rejects unknown fields; the marker supplies the version.
+## Live projection behavior
 
-| Type | Strict required JSON |
-|---|---|
-| Assignment | non-empty `assignmentId`, non-empty `agentProfile`, integer `priority >= 0`, `taskType`, typed `task` |
-| validation task | one non-empty `validationProfile`; criteria resolve from `.github/workgraph/profiles/issue-validation/<validationProfile>.md` |
-| risk task | `riskProfile`, non-empty `dimensions` array of non-empty strings |
-| Result | non-empty `assignmentId`, `taskType`, `outcome` (`succeeded`, `failed`, `blocked`), non-empty `summary`, typed `result` |
-| validation result | non-empty `criteria` array of `{criterion, passed, evidence}` |
-| risk result | non-empty `dimensions` array of `{dimension, score: 0..=100, rationale}` |
+Generic Issues and PRs retain open-only behavior: opening/reopening inserts,
+closing deletes, and other closed-item activity is ignored. Existing
+repository filtering and close/delete tombstone exceptions remain unchanged.
 
-An issue-validation Assignment carries only the profile name. Core does not
-resolve repository profile files; the agent/reporter reads
-`.github/workgraph/profiles/issue-validation/<validationProfile>.md`. A legacy
-`task.criteria` field is rejected as unknown. Result criterion entries are
-unchanged.
+Configured typed tasks are different:
 
-`taskType` is `issue-validation` or `issue-risk-profile`. There is no
-`assignedBy` or `resultId`. A Result's immutable comment ID is its identity;
-`RESULT_FOR` is derived without checking Assignment existence or task-type
-equality. Assignment-ID uniqueness within the organization is a producer
-contract, not a source lookup.
+- OPEN and CLOSED tasks are retained. Close updates `state`, `stateReason`, and
+  `closedAt`; reopen updates the same task identity.
+- `issues` events handle body, Issue Type, state, transfer, and repository
+  transitions. A transition away from the configured exact type removes the
+  task and allows an open generic Issue; a transition into the type removes the
+  generic Issue and creates the task or task error.
+- `sub_issues` add/remove actions create or delete the native `TASK_FOR` edge.
+  Either the `issues` or `sub_issues` delivery may arrive first; stable IDs and
+  payload-complete upserts converge without delivery-order state.
+- Task delete removes the task, repository edge, parent edge, and task error.
+- Task comments continue to be processed while the task is closed. Result and
+  ordinary comment create/edit/delete transitions are deterministic and use
+  only current and `changes.body.from` payload content.
 
-Unmarked comments are ordinary nodes. Invalid marked comments become only a
-deterministic, snapshot-free `WorkGraphError`, with stable envelope, JSON, and
-typed-payload error codes.
-
-## Status, durability, and limitations
-
-The exact case-sensitive `status:` prefix derives Issue/PR workflow status:
-zero matches sets `status`/`statusLabel` null and deletes any prior error; one
-sets suffix/full label and deletes the error; multiple set both null and upsert
-a deterministic error plus `ERROR_ON`. A missing `labels` array changes none of
-`labels`, `labelDetails`, `status`, or `statusLabel`.
-
-Ingress verifies raw-body `X-Hub-Signature-256`, validates and converts, then
-serially appends every `SourceChange` to the existing WAL before storing the
-`X-GitHub-Delivery` dedupe marker and returning `202`. A background dispatcher
-uses `SourceBase`; replay positions are big-endian `u64`; pruning stops at the
-minimum confirmed position. Invalid signature is `401`, malformed headers/JSON
-`400`, organization mismatch `403`, payload shape error `422`, ignored events
-`204`, and WAL/state/capacity failure `503`.
-
-WAL append is per change, not webhook-transactional. A crash may persist a
-prefix that redelivery repeats, so consumers must tolerate observable
-at-least-once changes despite stable IDs. GitHub provides no ordering guarantee
-or automatic failed-delivery retry. Payload-only deletes/transfers cannot infer
-unknown descendants; PRs and reviews have no delete action. Completed-delivery
-dedupe markers grow with deliveries and are retained until deprovisioning.
+Ingress verifies `X-Hub-Signature-256`, converts the payload, appends each
+change to the WAL, persists the delivery dedupe marker, and then acknowledges.
+Stable IDs make redelivery idempotent at the graph identity level, but consumers
+must still tolerate at-least-once change delivery.

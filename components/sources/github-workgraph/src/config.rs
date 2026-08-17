@@ -40,6 +40,34 @@ pub(crate) struct DurabilityConfigDef {
 
 pub const DEFAULT_BODY_LIMIT_BYTES: usize = 25 * 1024 * 1024;
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskIssueType {
+    pub id: String,
+    pub name: String,
+}
+
+impl TaskIssueType {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.id.trim().is_empty() && self.id.trim() == self.id,
+            "taskIssueType.id must be a non-empty GraphQL node ID without surrounding whitespace"
+        );
+        ensure!(
+            !self.name.trim().is_empty() && self.name.trim() == self.name,
+            "taskIssueType.name must be a non-empty exact Issue Type name without surrounding whitespace"
+        );
+        Ok(())
+    }
+
+    pub fn matches(&self, issue_type: Option<&Value>) -> bool {
+        issue_type.is_some_and(|issue_type| {
+            issue_type.get("node_id").and_then(Value::as_str) == Some(self.id.as_str())
+                && issue_type.get("name").and_then(Value::as_str) == Some(self.name.as_str())
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RepositoryFilter {
     names: BTreeSet<String>,
@@ -142,6 +170,7 @@ impl Default for WebhookConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GitHubWorkGraphSourceConfig {
     pub organization: String,
+    pub task_issue_type: TaskIssueType,
     #[serde(default)]
     pub repositories: Vec<String>,
     pub webhook: WebhookConfig,
@@ -153,6 +182,7 @@ impl Default for GitHubWorkGraphSourceConfig {
     fn default() -> Self {
         Self {
             organization: String::new(),
+            task_issue_type: TaskIssueType::default(),
             repositories: Vec::new(),
             webhook: WebhookConfig::default(),
             durability: DurabilityConfig {
@@ -186,6 +216,7 @@ impl GitHubWorkGraphSourceConfig {
             self.durability.capacity_policy == CapacityPolicy::RejectIncoming,
             "durability.capacityPolicy must be RejectIncoming"
         );
+        self.task_issue_type.validate()?;
         RepositoryFilter::new(org, &self.repositories)?;
         Ok(())
     }

@@ -16,14 +16,14 @@
 //!
 //! Enumerates repositories in one configured GitHub organization over the
 //! GitHub GraphQL v4 API, applies the Source's optional repository allowlist,
-//! and snapshots each selected repository's currently-open Issues and Pull
-//! Requests, their conversation comments, and PR reviews.
+//! and snapshots open generic Issues and Pull Requests plus open and closed
+//! configured WorkGraph task Issues, their parents, comments, and PR reviews.
 //!
 //! # Reuse, not duplication
 //!
 //! This crate never re-implements any WorkGraph domain rule. Every node
 //! label, relation ID/direction, status-label derivation, and
-//! `WorkGraphAssignment`/`WorkGraphResult`/`WorkGraphError` parsing rule comes
+//! `WorkGraphTask`/`WorkGraphTaskResult`/`WorkGraphError` parsing rule comes
 //! from [`drasi_source_github_workgraph::mapping::Converter`] — the exact
 //! same converter the streaming `drasi-source-github-workgraph` source uses
 //! for live webhook deliveries. This crate's only job is to fetch GitHub data
@@ -35,10 +35,11 @@
 //!
 //! - One configured organization; all repositories the token can see by
 //!   default, or the Source's normalized repository allowlist.
-//! - Only currently-**open** Issues and Pull Requests (no closed history).
-//! - Issue/PR conversation comments and PR reviews only.
+//! - Open generic Issues and Pull Requests.
+//! - Open and closed configured WorkGraph task Issues and all task comments.
+//! - Generic Issue/PR conversation comments and PR reviews.
 //! - Excluded: Projects, Project Items, inline diff comments, closed-item
-//!   history, reactions, and workflow-run execution state.
+//!   non-task closed history, reactions, and workflow-run execution state.
 //!
 //! # `source_position` is always `None`
 //!
@@ -66,7 +67,7 @@ use drasi_lib::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
 };
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
-use drasi_source_github_workgraph::config::RepositoryFilter;
+use drasi_source_github_workgraph::config::{RepositoryFilter, TaskIssueType};
 use drasi_source_github_workgraph::mapping::{Converter, NODE_LABELS, RELATION_LABELS};
 use log::{info, warn};
 use serde_json::{json, Value};
@@ -110,6 +111,11 @@ impl GitHubWorkGraphBootstrapProviderBuilder {
 
     pub fn with_repositories(mut self, repositories: Vec<String>) -> Self {
         self.config.repositories = repositories;
+        self
+    }
+
+    pub fn with_task_issue_type(mut self, task_issue_type: TaskIssueType) -> Self {
+        self.config.task_issue_type = task_issue_type;
         self
     }
 
@@ -186,12 +192,23 @@ impl BootstrapProvider for GitHubWorkGraphBootstrapProvider {
             let source_id = context.source_id.clone();
             let org_value = org_value.clone();
             let semaphore = semaphore.clone();
+            let task_issue_type = self.config.task_issue_type.clone();
+            let repository_filter = self.repository_filter.clone();
             join_set.spawn(async move {
                 let _permit = semaphore
                     .acquire_owned()
                     .await
                     .map_err(|_| anyhow!("bootstrap concurrency semaphore closed"))?;
-                process_repository(&client, &organization, &source_id, &org_value, repo).await
+                process_repository(
+                    &client,
+                    &organization,
+                    &source_id,
+                    &org_value,
+                    repo,
+                    &task_issue_type,
+                    &repository_filter,
+                )
+                .await
             });
         }
 
@@ -267,6 +284,8 @@ async fn process_repository(
     source_id: &str,
     org_value: &Value,
     repo_value: Value,
+    task_issue_type: &TaskIssueType,
+    repository_filter: &RepositoryFilter,
 ) -> Result<Vec<SourceChange>> {
     let owner = repo_value
         .pointer("/owner/login")
@@ -287,6 +306,8 @@ async fn process_repository(
         "repository",
         "created",
         json!({ "organization": org_value, "repository": repo_value }),
+        task_issue_type,
+        repository_filter,
     )?);
 
     let issues = client
@@ -294,6 +315,9 @@ async fn process_repository(
         .await
         .with_context(|| format!("failed to fetch issues for {owner}/{name}"))?;
     for issue in issues {
+        if task_issue_type.matches(issue.get("type")) {
+            continue;
+        }
         let issue_node_id = required_node_id(&issue)?;
         changes.extend(convert(
             source_id,
@@ -305,6 +329,8 @@ async fn process_repository(
                 "repository": repo_value,
                 "issue": issue,
             }),
+            task_issue_type,
+            repository_filter,
         )?);
 
         if client::item_comment_count(&issue) > 0 {
@@ -326,6 +352,98 @@ async fn process_repository(
                         "issue": { "node_id": issue_node_id, "state": "open" },
                         "comment": comment,
                     }),
+                    task_issue_type,
+                    repository_filter,
+                )?);
+            }
+        }
+    }
+
+    let tasks = client
+        .fetch_tasks(&owner, &name, task_issue_type)
+        .await
+        .with_context(|| format!("failed to fetch WorkGraph tasks for {owner}/{name}"))?;
+    for task in tasks {
+        let task_node_id = required_node_id(&task)?;
+        let action = if task.get("state").and_then(Value::as_str) == Some("closed") {
+            "closed"
+        } else {
+            "opened"
+        };
+        changes.extend(convert(
+            source_id,
+            organization,
+            "issues",
+            action,
+            json!({
+                "organization": org_value,
+                "repository": repo_value,
+                "issue": task,
+            }),
+            task_issue_type,
+            repository_filter,
+        )?);
+
+        if let Some(parent) = task.get("parent").filter(|parent| !parent.is_null()) {
+            let parent_repo = parent
+                .get("repository")
+                .ok_or_else(|| anyhow!("task parent missing repository"))?;
+            if repository_filter
+                .includes_repository(parent_repo)
+                .context("task parent repository cannot be matched against repositories filter")?
+            {
+                changes.extend(convert(
+                    source_id,
+                    organization,
+                    "repository",
+                    "created",
+                    json!({
+                        "organization": org_value,
+                        "repository": parent_repo,
+                    }),
+                    task_issue_type,
+                    repository_filter,
+                )?);
+            }
+            changes.extend(convert(
+                source_id,
+                organization,
+                "sub_issues",
+                "sub_issue_added",
+                json!({
+                    "organization": org_value,
+                    "repository": parent_repo,
+                    "parent_issue": parent,
+                    "parent_issue_repo": parent_repo,
+                    "sub_issue": task,
+                    "sub_issue_repo": repo_value,
+                }),
+                task_issue_type,
+                repository_filter,
+            )?);
+        }
+
+        if client::item_comment_count(&task) > 0 {
+            let comments = client
+                .fetch_issue_comments(&task_node_id)
+                .await
+                .with_context(|| {
+                    format!("failed to fetch comments for task {owner}/{name}#{task_node_id}")
+                })?;
+            for comment in comments {
+                changes.extend(convert(
+                    source_id,
+                    organization,
+                    "issue_comment",
+                    "created",
+                    json!({
+                        "organization": org_value,
+                        "repository": repo_value,
+                        "issue": task,
+                        "comment": comment,
+                    }),
+                    task_issue_type,
+                    repository_filter,
                 )?);
             }
         }
@@ -347,6 +465,8 @@ async fn process_repository(
                 "repository": repo_value,
                 "pull_request": pr,
             }),
+            task_issue_type,
+            repository_filter,
         )?);
 
         if client::item_comment_count(&pr) > 0 {
@@ -375,6 +495,8 @@ async fn process_repository(
                         },
                         "comment": comment,
                     }),
+                    task_issue_type,
+                    repository_filter,
                 )?);
             }
         }
@@ -398,6 +520,8 @@ async fn process_repository(
                         "pull_request": { "node_id": pr_node_id, "state": "open" },
                         "review": review,
                     }),
+                    task_issue_type,
+                    repository_filter,
                 )?);
             }
         }
@@ -424,12 +548,15 @@ fn convert(
     event_type: &str,
     action: &str,
     mut payload: Value,
+    task_issue_type: &TaskIssueType,
+    repository_filter: &RepositoryFilter,
 ) -> Result<Vec<SourceChange>> {
     if let Value::Object(map) = &mut payload {
         map.insert("action".to_string(), json!(action));
     }
     let effective_from = Utc::now().timestamp_millis().max(0) as u64;
-    let converter = Converter::new(source_id, organization, effective_from);
+    let converter = Converter::new(source_id, organization, task_issue_type, effective_from)
+        .with_repository_filter(repository_filter);
     match converter.convert(event_type, &payload) {
         Ok(Some(changes)) => Ok(changes),
         Ok(None) => Ok(Vec::new()),

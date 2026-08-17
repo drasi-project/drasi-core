@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config::{GitHubWorkGraphSourceConfig, WebhookConfig, DEFAULT_BODY_LIMIT_BYTES};
+use crate::config::{
+    GitHubWorkGraphSourceConfig, TaskIssueType, WebhookConfig, DEFAULT_BODY_LIMIT_BYTES,
+};
 use crate::GitHubWorkGraphSourceBuilder;
 use anyhow::{anyhow, Context};
 use drasi_plugin_sdk::prelude::*;
@@ -24,6 +26,7 @@ use utoipa::OpenApi;
 pub struct GitHubWorkGraphSourceConfigDto {
     #[schema(value_type = ConfigValueString)]
     pub organization: ConfigValueString,
+    pub task_issue_type: TaskIssueTypeDto,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schema(value_type = Vec<ConfigValueString>)]
     pub repositories: Vec<ConfigValueString>,
@@ -31,6 +34,15 @@ pub struct GitHubWorkGraphSourceConfigDto {
     #[serde(default, with = "crate::config::DurabilityConfigDef")]
     #[schema(value_type = DurabilityConfigSchema)]
     pub durability: drasi_lib::DurabilityConfig,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskIssueTypeDto {
+    #[schema(value_type = ConfigValueString)]
+    pub id: ConfigValueString,
+    #[schema(value_type = ConfigValueString)]
+    pub name: ConfigValueString,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
@@ -81,6 +93,7 @@ fn default_body_limit() -> ConfigValueUsize {
 #[derive(OpenApi)]
 #[openapi(components(schemas(
     GitHubWorkGraphSourceConfigDto,
+    TaskIssueTypeDto,
     WebhookConfigDto,
     ConfigValueStringSchema,
     ConfigValueU16Schema,
@@ -99,7 +112,7 @@ impl SourcePluginDescriptor for GitHubWorkGraphSourceDescriptor {
         "github-workgraph"
     }
     fn config_version(&self) -> &str {
-        "1.0.0"
+        "2.0.0"
     }
     fn config_schema_name(&self) -> &str {
         "source.github_workgraph.GitHubWorkGraphSourceConfig"
@@ -126,6 +139,10 @@ impl SourcePluginDescriptor for GitHubWorkGraphSourceDescriptor {
         let repositories = mapper.resolve_string_vec(&dto.repositories).await?;
         let config = GitHubWorkGraphSourceConfig {
             organization: mapper.resolve_string(&dto.organization).await?,
+            task_issue_type: TaskIssueType {
+                id: mapper.resolve_string(&dto.task_issue_type.id).await?,
+                name: mapper.resolve_string(&dto.task_issue_type.name).await?,
+            },
             repositories,
             webhook: WebhookConfig {
                 host: mapper.resolve_string(&dto.webhook.host).await?,

@@ -14,26 +14,15 @@
 
 use serde::{Deserialize, Serialize};
 
-const ASSIGNMENT_FAMILY: &str = "WorkGraphAssignment/";
-const RESULT_FAMILY: &str = "WorkGraphResult/";
+const RESULT_FAMILY: &str = "WorkGraphTaskResult/";
+const RESULT_MARKER: &str = "WorkGraphTaskResult/v1";
+const RESULT_PREFIX: &str = "WorkGraphTaskResult/v1\n\n```json\n";
+const RESULT_SUFFIX: &str = "\n```\n";
 const SUPPORTED_VERSION: &str = "v1";
-const DETAILS_OPEN: &str = "<details>";
-const DETAILS_CLOSE: &str = "</details>";
-const ASSIGNMENT_SUMMARY: &str = "<summary>WorkGraph Assignment</summary>";
-const RESULT_SUMMARY: &str = "<summary>WorkGraph Result</summary>";
-const ASSIGNMENT_MARKER: &str = "WorkGraphAssignment/v1";
-const RESULT_MARKER: &str = "WorkGraphResult/v1";
-const FENCE_OPEN: &str = "```json";
-const FENCE_CLOSE: &str = "```";
 
 pub mod error_code {
-    pub const INVALID_ENVELOPE: &str = "invalid-envelope";
     pub const UNSUPPORTED_VERSION: &str = "unsupported-workgraph-version";
-    pub const MISSING_HUMAN_SUMMARY: &str = "missing-human-summary";
-    pub const MISSING_JSON_BLOCK: &str = "missing-json-block";
-    pub const MULTIPLE_JSON_BLOCKS: &str = "multiple-json-blocks";
-    pub const UNTERMINATED_JSON_BLOCK: &str = "unterminated-json-block";
-    pub const UNEXPECTED_TRAILING_CONTENT: &str = "unexpected-trailing-content";
+    pub const INVALID_ENVELOPE: &str = "invalid-envelope";
     pub const INVALID_JSON: &str = "invalid-json";
     pub const JSON_NOT_OBJECT: &str = "json-not-object";
     pub const NON_CANONICAL_JSON: &str = "non-canonical-json";
@@ -117,12 +106,12 @@ pub struct WorkResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EnvelopeError {
+pub struct WorkGraphError {
     pub code: &'static str,
     pub message: String,
 }
 
-impl EnvelopeError {
+impl WorkGraphError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -131,37 +120,17 @@ impl EnvelopeError {
     }
 }
 
-fn invalid(code: &'static str, message: impl Into<String>) -> Classification {
-    Classification::Invalid(EnvelopeError::new(code, message))
-}
-
-fn envelope_err<T>(code: &'static str, message: impl Into<String>) -> Result<T, EnvelopeError> {
-    Err(EnvelopeError::new(code, message))
-}
-
-fn require(ok: bool, message: impl Into<String>) -> Result<(), String> {
-    if ok {
-        Ok(())
-    } else {
-        Err(message.into())
-    }
-}
-
-fn non_empty(value: &str, field: &str) -> Result<(), String> {
-    let filled = !value.trim().is_empty();
-    require(filled, format!("{field} must be a non-empty string"))
-}
-
-fn typed<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, String> {
-    serde_json::from_value(value).map_err(|e| e.to_string())
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskClassification {
+    Task(Box<Assignment>),
+    Invalid(WorkGraphError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Classification {
+pub enum ResultClassification {
     Ordinary,
-    Assignment(Box<Assignment>),
     Result(Box<WorkResult>),
-    Invalid(EnvelopeError),
+    Invalid(WorkGraphError),
 }
 
 #[derive(Deserialize)]
@@ -184,225 +153,95 @@ struct ResultRoot {
     result: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EnvelopeKind {
-    Assignment,
-    Result,
-}
-
-impl EnvelopeKind {
-    fn family(self) -> &'static str {
-        match self {
-            Self::Assignment => ASSIGNMENT_FAMILY,
-            Self::Result => RESULT_FAMILY,
-        }
-    }
-
-    fn marker(self) -> &'static str {
-        match self {
-            Self::Assignment => ASSIGNMENT_MARKER,
-            Self::Result => RESULT_MARKER,
-        }
-    }
-
-    fn summary(self) -> &'static str {
-        match self {
-            Self::Assignment => ASSIGNMENT_SUMMARY,
-            Self::Result => RESULT_SUMMARY,
-        }
-    }
-}
-
-pub fn classify(body: &str) -> Classification {
-    let Some(kind) = candidate_kind(body) else {
-        return Classification::Ordinary;
-    };
-
-    let (summary, json_text) = match split_envelope(body, kind) {
-        Ok(parts) => parts,
-        Err(err) => return Classification::Invalid(err),
-    };
-    if summary.trim().is_empty() {
-        let message = "a non-empty human summary is required between the marker and the JSON";
-        return invalid(error_code::MISSING_HUMAN_SUMMARY, message);
-    }
-    let value: serde_json::Value = match serde_json::from_str(&json_text) {
+pub fn classify_task_body(body: &str) -> TaskClassification {
+    let value: serde_json::Value = match serde_json::from_str(body) {
         Ok(value) => value,
-        Err(e) => return invalid(error_code::INVALID_JSON, format!("invalid JSON: {e}")),
+        Err(error) => {
+            return TaskClassification::Invalid(WorkGraphError::new(
+                error_code::INVALID_JSON,
+                format!("task body is not valid JSON: {error}"),
+            ))
+        }
     };
     if !value.is_object() {
-        let message = "the fenced JSON block must contain exactly one JSON object";
-        return invalid(error_code::JSON_NOT_OBJECT, message);
+        return TaskClassification::Invalid(WorkGraphError::new(
+            error_code::JSON_NOT_OBJECT,
+            "task body must contain exactly one JSON object",
+        ));
     }
-
-    match kind {
-        EnvelopeKind::Assignment => match parse_assignment(value) {
-            Ok(assignment) if canonical_json(&assignment, &json_text) => {
-                Classification::Assignment(Box::new(assignment))
-            }
-            Ok(_) => invalid(
-                error_code::NON_CANONICAL_JSON,
-                "the Assignment JSON must use the canonical two-space typed formatting",
-            ),
-            Err(message) => invalid(error_code::INVALID_ASSIGNMENT_PAYLOAD, message),
-        },
-        EnvelopeKind::Result => match parse_result(value) {
-            Ok(result) if result.summary != summary => invalid(
-                error_code::INVALID_RESULT_PAYLOAD,
-                "human summary must byte-equal Result payload summary",
-            ),
-            Ok(result) if canonical_json(&result, &json_text) => {
-                Classification::Result(Box::new(result))
-            }
-            Ok(_) => invalid(
-                error_code::NON_CANONICAL_JSON,
-                "the Result JSON must use the canonical two-space typed formatting",
-            ),
-            Err(message) => invalid(error_code::INVALID_RESULT_PAYLOAD, message),
-        },
+    match parse_assignment(value) {
+        Ok(assignment) if canonical_json(&assignment, body) => {
+            TaskClassification::Task(Box::new(assignment))
+        }
+        Ok(_) => TaskClassification::Invalid(WorkGraphError::new(
+            error_code::NON_CANONICAL_JSON,
+            "task body must use canonical two-space typed JSON with no surrounding content",
+        )),
+        Err(message) => TaskClassification::Invalid(WorkGraphError::new(
+            error_code::INVALID_ASSIGNMENT_PAYLOAD,
+            message,
+        )),
     }
 }
 
-fn candidate_kind(body: &str) -> Option<EnvelopeKind> {
-    let logical_lines: Vec<&str> = body.lines().flat_map(|line| line.split("\\n")).collect();
-    for line in &logical_lines {
-        if line.starts_with(ASSIGNMENT_FAMILY) {
-            return Some(EnvelopeKind::Assignment);
-        }
-        if line.starts_with(RESULT_FAMILY) {
-            return Some(EnvelopeKind::Result);
-        }
+pub fn classify_result(body: &str) -> ResultClassification {
+    if !body.starts_with(RESULT_FAMILY) {
+        return ResultClassification::Ordinary;
     }
-
-    let wrapper_hint = body.contains("<details")
-        || body.contains(DETAILS_CLOSE)
-        || body.contains("<summary>WorkGraph ");
-    if !wrapper_hint {
-        return None;
+    let version = body
+        .split_once('\n')
+        .map_or(body, |(first, _)| first)
+        .strip_prefix(RESULT_FAMILY)
+        .unwrap_or_default();
+    if version != SUPPORTED_VERSION {
+        return ResultClassification::Invalid(WorkGraphError::new(
+            error_code::UNSUPPORTED_VERSION,
+            format!("unsupported WorkGraph task Result version '{version}', expected 'v1'"),
+        ));
     }
-
-    let assignment_summary = logical_lines
-        .iter()
-        .position(|line| line.trim_end_matches('\r') == ASSIGNMENT_SUMMARY);
-    let result_summary = logical_lines
-        .iter()
-        .position(|line| line.trim_end_matches('\r') == RESULT_SUMMARY);
-    match (assignment_summary, result_summary) {
-        (Some(assignment), Some(result)) if assignment < result => {
-            return Some(EnvelopeKind::Assignment);
-        }
-        (Some(_), Some(_)) => return Some(EnvelopeKind::Result),
-        (Some(_), None) => return Some(EnvelopeKind::Assignment),
-        (None, Some(_)) => return Some(EnvelopeKind::Result),
-        (None, None) => {}
-    }
-    None
-}
-
-fn split_envelope(body: &str, kind: EnvelopeKind) -> Result<(String, String), EnvelopeError> {
-    let invalid_format = || {
-        envelope_err(
-            error_code::INVALID_ENVELOPE,
-            "the WorkGraph details wrapper, labels, spacing, and LF bytes must be exact",
-        )
-    };
-    if body.contains('\r') {
-        return invalid_format();
-    }
-
-    if let Some(version) = marker_version(body, kind) {
-        if version != SUPPORTED_VERSION {
-            let message = format!("unsupported WorkGraph version '{version}', expected 'v1'");
-            return envelope_err(error_code::UNSUPPORTED_VERSION, message);
-        }
-    }
-
-    let lines: Vec<&str> = body.split('\n').collect();
-    if lines.first() != Some(&DETAILS_OPEN)
-        || lines.get(1) != Some(&kind.summary())
-        || lines.get(2) != Some(&"")
-        || lines.get(3) != Some(&kind.marker())
-        || lines.get(4) != Some(&"")
-    {
-        return invalid_format();
-    }
-
-    let Some(summary) = lines.get(5) else {
-        return envelope_err(
-            error_code::MISSING_HUMAN_SUMMARY,
-            "a non-empty one-line human summary is required",
-        );
-    };
-    if summary.trim().is_empty() || *summary == FENCE_OPEN {
-        return envelope_err(
-            error_code::MISSING_HUMAN_SUMMARY,
-            "a non-empty one-line human summary is required",
-        );
-    }
-    if kind == EnvelopeKind::Result && summary.contains(RESULT_MARKER) {
-        return envelope_err(
-            error_code::INVALID_ENVELOPE,
-            "the Result human summary must not contain the WorkGraphResult/v1 marker",
-        );
-    }
-    if lines.get(6) != Some(&"") {
-        return invalid_format();
-    }
-
-    let fence_lines: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| line.starts_with(FENCE_CLOSE).then_some(index))
-        .collect();
-    if lines.get(7) != Some(&FENCE_OPEN) {
-        let code = if fence_lines.is_empty() {
-            error_code::MISSING_JSON_BLOCK
-        } else {
-            error_code::INVALID_ENVELOPE
-        };
-        return envelope_err(code, "exactly one fenced ```json block is required");
-    }
-    if fence_lines.len() > 2 {
-        return envelope_err(
-            error_code::MULTIPLE_JSON_BLOCKS,
-            "only one fenced JSON block is allowed in a WorkGraph comment",
-        );
-    }
-
-    let Some(close) = lines[8..]
-        .iter()
-        .position(|line| *line == FENCE_CLOSE)
-        .map(|offset| 8 + offset)
+    let Some(json_text) = body
+        .strip_prefix(RESULT_PREFIX)
+        .and_then(|body| body.strip_suffix(RESULT_SUFFIX))
     else {
-        return envelope_err(
-            error_code::UNTERMINATED_JSON_BLOCK,
-            "the ```json block is not terminated by an exact ``` line",
-        );
+        return ResultClassification::Invalid(WorkGraphError::new(
+            error_code::INVALID_ENVELOPE,
+            "the WorkGraph task Result marker, fence, spacing, and final LF must be exact",
+        ));
     };
-    if fence_lines.iter().any(|index| *index > close) {
-        let message = "only one fenced block is allowed in a WorkGraph comment";
-        return envelope_err(error_code::MULTIPLE_JSON_BLOCKS, message);
+    if json_text.is_empty() || json_text.contains("\n```") {
+        return ResultClassification::Invalid(WorkGraphError::new(
+            error_code::INVALID_ENVELOPE,
+            "the WorkGraph task Result must contain exactly one fenced JSON object",
+        ));
     }
-
-    let tail = &lines[close + 1..];
-    if tail != [DETAILS_CLOSE, ""] {
-        let code = if tail.first() == Some(&DETAILS_CLOSE) {
-            error_code::UNEXPECTED_TRAILING_CONTENT
-        } else {
-            error_code::INVALID_ENVELOPE
-        };
-        return envelope_err(
-            code,
-            "the closing fence must be followed by </details> and exactly one final LF",
-        );
+    let value: serde_json::Value = match serde_json::from_str(json_text) {
+        Ok(value) => value,
+        Err(error) => {
+            return ResultClassification::Invalid(WorkGraphError::new(
+                error_code::INVALID_JSON,
+                format!("invalid Result JSON: {error}"),
+            ))
+        }
+    };
+    if !value.is_object() {
+        return ResultClassification::Invalid(WorkGraphError::new(
+            error_code::JSON_NOT_OBJECT,
+            "the Result JSON block must contain exactly one JSON object",
+        ));
     }
-
-    Ok(((*summary).to_string(), lines[8..close].join("\n")))
-}
-
-fn marker_version(body: &str, kind: EnvelopeKind) -> Option<&str> {
-    body.split('\n')
-        .find_map(|line| line.strip_prefix(kind.family()))
+    match parse_result(value) {
+        Ok(result) if canonical_json(&result, json_text) => {
+            ResultClassification::Result(Box::new(result))
+        }
+        Ok(_) => ResultClassification::Invalid(WorkGraphError::new(
+            error_code::NON_CANONICAL_JSON,
+            "the Result JSON must use canonical two-space typed formatting",
+        )),
+        Err(message) => ResultClassification::Invalid(WorkGraphError::new(
+            error_code::INVALID_RESULT_PAYLOAD,
+            message,
+        )),
+    }
 }
 
 fn canonical_json<T: Serialize>(value: &T, json_text: &str) -> bool {
@@ -422,6 +261,7 @@ fn parse_assignment(value: serde_json::Value) -> Result<Assignment, String> {
         }
         TaskType::IssueRiskProfile => {
             let task: IssueRiskProfileTask = typed(root.task)?;
+            non_empty(&task.risk_profile, "task.riskProfile")?;
             non_empty_strings(&task.dimensions, "task.dimensions")?;
             AssignmentTask::IssueRiskProfile(task)
         }
@@ -441,25 +281,28 @@ fn parse_result(value: serde_json::Value) -> Result<WorkResult, String> {
     non_empty(&root.summary, "summary")?;
     require(
         !root.summary.contains(RESULT_MARKER),
-        "summary must not contain the WorkGraphResult/v1 marker",
+        "summary must not contain the WorkGraphTaskResult/v1 marker",
     )?;
     let result = match root.task_type {
         TaskType::IssueValidation => {
             let result: IssueValidationResult = typed(root.result)?;
-            let ok = !result.criteria.is_empty();
-            require(ok, "result.criteria must contain at least one item")?;
+            require(
+                !result.criteria.is_empty(),
+                "result.criteria must contain at least one item",
+            )?;
             TaskResult::IssueValidation(result)
         }
         TaskType::IssueRiskProfile => {
             let result: IssueRiskProfileResult = typed(root.result)?;
-            let ok = !result.dimensions.is_empty();
-            require(ok, "result.dimensions must contain at least one item")?;
-            let scored = result
-                .dimensions
-                .iter()
-                .all(|d| (0..=100).contains(&d.score));
             require(
-                scored,
+                !result.dimensions.is_empty(),
+                "result.dimensions must contain at least one item",
+            )?;
+            require(
+                result
+                    .dimensions
+                    .iter()
+                    .all(|dimension| (0..=100).contains(&dimension.score)),
                 "result.dimensions[].score must be between 0 and 100",
             )?;
             TaskResult::IssueRiskProfile(result)
@@ -474,35 +317,42 @@ fn parse_result(value: serde_json::Value) -> Result<WorkResult, String> {
     })
 }
 
-fn non_empty_strings(values: &[String], field: &str) -> Result<(), String> {
-    let some = !values.is_empty();
-    require(some, format!("{field} must contain at least one item"))?;
-    let filled = values.iter().all(|value| !value.trim().is_empty());
-    require(filled, format!("{field} entries must be non-empty strings"))
+fn typed<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, String> {
+    serde_json::from_value(value).map_err(|error| error.to_string())
 }
 
-pub fn encode_id_component(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.as_bytes() {
-        let ch = *byte as char;
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '.' | '_' | '~') {
-            encoded.push(ch);
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
+fn require(ok: bool, message: impl Into<String>) -> Result<(), String> {
+    if ok {
+        Ok(())
+    } else {
+        Err(message.into())
     }
-    encoded
 }
 
-pub fn assignment_element_id(organization_node_id: &str, assignment_id: &str) -> String {
-    format!(
-        "workgraph-assignment:{organization_node_id}:{}",
-        encode_id_component(assignment_id)
+fn non_empty(value: &str, field: &str) -> Result<(), String> {
+    require(
+        !value.trim().is_empty(),
+        format!("{field} must be a non-empty string"),
+    )
+}
+
+fn non_empty_strings(values: &[String], field: &str) -> Result<(), String> {
+    require(
+        !values.is_empty(),
+        format!("{field} must contain at least one item"),
+    )?;
+    require(
+        values.iter().all(|value| !value.trim().is_empty()),
+        format!("{field} entries must be non-empty strings"),
     )
 }
 
 pub fn comment_error_element_id(comment_node_id: &str) -> String {
     format!("workgraph-error:comment:{comment_node_id}")
+}
+
+pub fn task_error_element_id(task_node_id: &str) -> String {
+    format!("workgraph-error:task:{task_node_id}")
 }
 
 pub fn status_error_element_id(subject_node_id: &str) -> String {
