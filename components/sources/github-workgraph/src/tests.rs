@@ -19,11 +19,16 @@ use crate::webhook::verify_signature;
 use crate::workgraph::{
     classify_result, classify_task_body, error_code, ResultClassification, TaskClassification,
 };
+use drasi_core::evaluation::context::QueryPartEvaluationContext;
+use drasi_core::evaluation::functions::FunctionRegistry;
 use drasi_core::models::{Element, ElementValue, SourceChange};
+use drasi_core::query::{ContinuousQuery, QueryBuilder};
 use drasi_lib::wal::CapacityPolicy;
 use drasi_lib::DurabilityConfig;
 use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
+use drasi_query_cypher::CypherParser;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 const TASK_TYPE_ID: &str = "IT_test";
 const TASK_TYPE_NAME: &str = "WorkGraphTask";
@@ -114,6 +119,7 @@ fn repo(name: &str) -> Value {
     json!({
         "node_id": format!("R_{name}"), "id": 7, "name": name,
         "full_name": format!("acme/{name}"), "owner":{"login":"acme"},
+        "url":format!("https://api.github.com/repos/acme/{name}"),
         "html_url": format!("https://github.com/acme/{name}"), "private":false,
         "archived":false, "fork":false, "visibility":"public"
     })
@@ -127,6 +133,7 @@ fn issue(id: &str, body: &str, typed: bool, state: &str) -> Value {
         "updated_at":"2026-01-02T00:00:00Z",
         "closed_at": if state == "closed" { json!("2026-01-02T00:00:00Z") } else { Value::Null },
         "labels":[], "assignees":[], "html_url":format!("https://github.com/acme/widgets/issues/{id}"),
+        "repository_url":"https://api.github.com/repos/acme/widgets",
         "type": if typed { json!({"node_id":TASK_TYPE_ID,"name":TASK_TYPE_NAME}) } else { Value::Null },
         "user":{"login":"ada","node_id":"U_ada","id":1,"type":"User"}
     })
@@ -149,7 +156,8 @@ fn comment_event(action: &str, body: &str, state: &str, typed: bool, id: &str) -
     })
 }
 
-fn sub_issue_event(action: &str, child: Value, parent: Value) -> Value {
+fn sub_issue_event(action: &str, child: Value, mut parent: Value) -> Value {
+    parent["repository_url"] = json!("https://api.github.com/repos/acme/parents");
     if action.starts_with("parent_issue_") {
         json!({
             "action":action, "organization":org(), "repository":repo("widgets"),
@@ -169,6 +177,56 @@ fn convert(event: &str, payload: &Value) -> Vec<SourceChange> {
         .convert(event, payload)
         .unwrap()
         .unwrap()
+}
+
+async fn task_path_query() -> ContinuousQuery {
+    let registry = Arc::new(FunctionRegistry::new());
+    let parser = Arc::new(CypherParser::new(registry.clone()));
+    QueryBuilder::new(
+        "MATCH (task:WorkGraphTask)-[:TASK_FOR]->(parent:GitHubIssue) \
+         RETURN task.nodeId AS taskId",
+        parser,
+    )
+    .with_function_registry(registry)
+    .build()
+    .await
+}
+
+async fn task_node_query() -> ContinuousQuery {
+    let registry = Arc::new(FunctionRegistry::new());
+    let parser = Arc::new(CypherParser::new(registry.clone()));
+    QueryBuilder::new(
+        "MATCH (task:WorkGraphTask) RETURN task.nodeId AS taskId",
+        parser,
+    )
+    .with_function_registry(registry)
+    .build()
+    .await
+}
+
+async fn process_changes(
+    query: &ContinuousQuery,
+    changes: Vec<SourceChange>,
+) -> Vec<QueryPartEvaluationContext> {
+    let mut results = Vec::new();
+    for change in changes {
+        results.extend(query.process_source_change(change).await.unwrap());
+    }
+    results
+}
+
+fn additions(results: &[QueryPartEvaluationContext]) -> usize {
+    results
+        .iter()
+        .filter(|result| matches!(result, QueryPartEvaluationContext::Adding { .. }))
+        .count()
+}
+
+fn removals(results: &[QueryPartEvaluationContext]) -> usize {
+    results
+        .iter()
+        .filter(|result| matches!(result, QueryPartEvaluationContext::Removing { .. }))
+        .count()
 }
 
 fn label(change: &SourceChange) -> &str {
@@ -273,12 +331,12 @@ fn typed_issue_emits_task_not_github_issue() {
         &issue_event("opened", issue("I_task", VALIDATION_TASK, true, "open")),
     );
     assert!(changes.iter().any(|change| {
-        label(change) == "WorkGraphTask" && id(change) == "I_task" && is_insert(change)
+        label(change) == "WorkGraphTask" && id(change) == "I_task" && is_update(change)
     }));
     assert!(changes.iter().any(|change| {
         label(change) == "IN_REPOSITORY"
             && id(change) == "IN_REPOSITORY:I_task:R_widgets"
-            && is_insert(change)
+            && is_update(change)
     }));
     assert!(!changes.iter().any(|change| label(change) == "GitHubIssue"));
     assert_eq!(
@@ -381,15 +439,20 @@ fn issue_type_transitions_replace_node_kinds() {
                 "GitHubIssue" | "WorkGraphTask" | "IN_REPOSITORY"
             )
         })
-        .map(|change| (label(change), is_insert(change), is_delete(change)))
+        .map(|change| {
+            (
+                label(change),
+                is_insert(change),
+                is_update(change),
+                is_delete(change),
+            )
+        })
         .collect();
     assert_eq!(
         transition,
         vec![
-            ("IN_REPOSITORY", false, true),
-            ("GitHubIssue", false, true),
-            ("WorkGraphTask", true, false),
-            ("IN_REPOSITORY", true, false),
+            ("WorkGraphTask", false, true, false),
+            ("IN_REPOSITORY", false, true, false),
         ]
     );
 
@@ -404,16 +467,21 @@ fn issue_type_transitions_replace_node_kinds() {
                 "TASK_FOR" | "WorkGraphTask" | "GitHubIssue" | "IN_REPOSITORY"
             )
         })
-        .map(|change| (label(change), is_insert(change), is_delete(change)))
+        .map(|change| {
+            (
+                label(change),
+                is_insert(change),
+                is_update(change),
+                is_delete(change),
+            )
+        })
         .collect();
     assert_eq!(
         transition,
         vec![
-            ("TASK_FOR", false, true),
-            ("IN_REPOSITORY", false, true),
-            ("WorkGraphTask", false, true),
-            ("GitHubIssue", true, false),
-            ("IN_REPOSITORY", true, false),
+            ("TASK_FOR", false, false, true),
+            ("GitHubIssue", false, true, false),
+            ("IN_REPOSITORY", false, true, false),
         ]
     );
 }
@@ -479,7 +547,7 @@ fn sub_issue_add_upserts_task_parent_and_relations() {
         label(change) == "GitHubIssue" && id(change) == "I_parent" && is_update(change)
     }));
     assert!(changes.iter().any(|change| {
-        label(change) == "TASK_FOR" && id(change) == "TASK_FOR:I_task" && is_insert(change)
+        label(change) == "TASK_FOR" && id(change) == "TASK_FOR:I_task" && is_update(change)
     }));
 }
 
@@ -494,7 +562,7 @@ fn sub_issue_delivery_variants_are_stable_and_removal_is_payload_only() {
         );
         assert!(changes
             .iter()
-            .any(|change| id(change) == "TASK_FOR:I_task" && is_insert(change)));
+            .any(|change| id(change) == "TASK_FOR:I_task" && is_update(change)));
     }
 
     for action in ["sub_issue_removed", "parent_issue_removed"] {
@@ -511,7 +579,8 @@ fn sub_issue_delivery_variants_are_stable_and_removal_is_payload_only() {
 #[test]
 fn schema_minimal_sub_issue_payloads_never_fail_conversion() {
     let child = issue("I_task", VALIDATION_TASK, true, "open");
-    let parent = issue("I_parent", "parent", false, "open");
+    let mut parent = issue("I_parent", "parent", false, "open");
+    parent["repository_url"] = json!("https://api.github.com/repos/acme/parents");
     let fixtures = [
         json!({
             "action":"parent_issue_added","organization":org(),
@@ -555,6 +624,84 @@ fn schema_minimal_sub_issue_payloads_never_fail_conversion() {
 }
 
 #[test]
+fn optional_sub_issue_repositories_do_not_gate_nodes_or_task_for() {
+    let child = issue("I_task", VALIDATION_TASK, true, "open");
+    let mut parent = issue("I_parent", "parent", false, "open");
+    parent["repository_url"] = json!("https://api.github.com/repos/acme/parents");
+
+    let parent_action = json!({
+        "action":"parent_issue_added","organization":org(),
+        "repository":repo("widgets"),"sub_issue":child,"parent_issue":parent
+    });
+    let changes = convert("sub_issues", &parent_action);
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphTask" && is_update(change)));
+    assert!(changes.iter().any(|change| {
+        label(change) == "TASK_FOR" && id(change) == "TASK_FOR:I_task" && is_update(change)
+    }));
+    assert!(!changes.iter().any(|change| {
+        label(change) == "IN_REPOSITORY" && id(change) == "IN_REPOSITORY:I_parent:R_widgets"
+    }));
+
+    let mut sub_parent = issue("I_parent", "parent", false, "open");
+    sub_parent["repository_url"] = json!("https://api.github.com/repos/acme/parents");
+    let sub_action = json!({
+        "action":"sub_issue_added","organization":org(),
+        "repository":repo("parents"),"sub_issue":issue(
+            "I_task", VALIDATION_TASK, true, "open"
+        ),"parent_issue":sub_parent
+    });
+    let changes = convert("sub_issues", &sub_action);
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphTask" && is_update(change)));
+    assert!(changes.iter().any(|change| {
+        label(change) == "TASK_FOR" && id(change) == "TASK_FOR:I_task" && is_update(change)
+    }));
+    assert!(!changes.iter().any(|change| {
+        label(change) == "IN_REPOSITORY" && id(change) == "IN_REPOSITORY:I_task:R_parents"
+    }));
+
+    for action in ["parent_issue_removed", "sub_issue_removed"] {
+        let payload = if action.starts_with("parent_issue_") {
+            json!({
+                "action":action,"organization":org(),
+                "repository":repo("widgets"),
+                "sub_issue":issue("I_task", VALIDATION_TASK, true, "open")
+            })
+        } else {
+            json!({
+                "action":action,"organization":org(),
+                "repository":repo("parents"),
+                "parent_issue":issue("I_parent", "parent", false, "open"),
+                "sub_issue":issue("I_task", VALIDATION_TASK, true, "open")
+            })
+        };
+        let changes = convert("sub_issues", &payload);
+        assert!(changes.iter().any(|change| {
+            label(change) == "TASK_FOR" && id(change) == "TASK_FOR:I_task" && is_delete(change)
+        }));
+    }
+}
+
+#[test]
+fn same_repository_url_allows_authoritative_top_level_fallback() {
+    let child = issue("I_task", VALIDATION_TASK, true, "open");
+    let parent = issue("I_parent", "parent", false, "open");
+    let payload = json!({
+        "action":"sub_issue_added","organization":org(),
+        "repository":repo("widgets"),"sub_issue":child,"parent_issue":parent
+    });
+    let changes = convert("sub_issues", &payload);
+    assert!(changes.iter().any(|change| {
+        label(change) == "IN_REPOSITORY"
+            && id(change) == "IN_REPOSITORY:I_task:R_widgets"
+            && is_update(change)
+    }));
+}
+
+#[test]
 fn sub_issue_and_issue_delivery_order_converge_on_same_ids() {
     let child = issue("I_task", VALIDATION_TASK, true, "open");
     let parent = issue("I_parent", "parent", false, "open");
@@ -568,6 +715,77 @@ fn sub_issue_and_issue_delivery_order_converge_on_same_ids() {
     assert!(sub_changes
         .iter()
         .any(|change| id(change) == "TASK_FOR:I_task"));
+}
+
+#[tokio::test]
+async fn task_delivery_orders_and_repeats_emit_one_add_and_no_removal() {
+    for action in ["opened", "typed"] {
+        for sub_issue_first in [true, false] {
+            let query = task_path_query().await;
+            let child = issue("I_task", VALIDATION_TASK, true, "open");
+            let parent = issue("I_parent", "parent", false, "open");
+            let sub_issue = sub_issue_event("sub_issue_added", child.clone(), parent.clone());
+            let mut issue_delivery = issue_event(action, child.clone());
+            if action == "typed" {
+                let generic = issue_event("opened", issue("I_task", "ordinary", false, "open"));
+                assert_eq!(
+                    additions(&process_changes(&query, convert("issues", &generic)).await),
+                    0
+                );
+                issue_delivery["type"] = json!({"node_id":TASK_TYPE_ID,"name":TASK_TYPE_NAME});
+            }
+
+            let deliveries = if sub_issue_first {
+                [
+                    ("sub_issues", sub_issue.clone()),
+                    ("issues", issue_delivery.clone()),
+                ]
+            } else {
+                [
+                    ("issues", issue_delivery.clone()),
+                    ("sub_issues", sub_issue.clone()),
+                ]
+            };
+            let mut all_results = Vec::new();
+            for (event, payload) in &deliveries {
+                all_results.extend(process_changes(&query, convert(event, payload)).await);
+            }
+            assert_eq!(
+                additions(&all_results),
+                1,
+                "{action}, sub_issue_first={sub_issue_first}"
+            );
+            assert_eq!(removals(&all_results), 0);
+
+            let mut repeated = Vec::new();
+            for (event, payload) in deliveries {
+                repeated.extend(process_changes(&query, convert(event, &payload)).await);
+            }
+            assert_eq!(additions(&repeated), 0);
+            assert_eq!(removals(&repeated), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn update_on_missing_task_node_produces_exactly_one_add() {
+    for action in ["opened", "typed"] {
+        let query = task_node_query().await;
+        if action == "typed" {
+            let generic = issue_event("opened", issue("I_task", "ordinary", false, "open"));
+            process_changes(&query, convert("issues", &generic)).await;
+        }
+        let mut payload = issue_event(action, issue("I_task", VALIDATION_TASK, true, "open"));
+        if action == "typed" {
+            payload["type"] = json!({"node_id":TASK_TYPE_ID,"name":TASK_TYPE_NAME});
+        }
+        let first = process_changes(&query, convert("issues", &payload)).await;
+        assert_eq!(additions(&first), 1);
+        assert_eq!(removals(&first), 0);
+        let repeated = process_changes(&query, convert("issues", &payload)).await;
+        assert_eq!(additions(&repeated), 0);
+        assert_eq!(removals(&repeated), 0);
+    }
 }
 
 #[test]
@@ -817,6 +1035,18 @@ fn excluded_task_addition_is_ignored_but_removal_converges() {
             "sub_issues",
             &sub_issue_event("sub_issue_added", child.clone(), parent.clone())
         )
+        .unwrap()
+        .is_none());
+    let mut parent_without_child_repo = issue("I_parent", "parent", false, "open");
+    parent_without_child_repo["repository_url"] =
+        json!("https://api.github.com/repos/acme/parents");
+    let no_optional_repo = json!({
+        "action":"sub_issue_added","organization":org(),
+        "repository":repo("parents"),"sub_issue":child.clone(),
+        "parent_issue":parent_without_child_repo
+    });
+    assert!(converter
+        .convert("sub_issues", &no_optional_repo)
         .unwrap()
         .is_none());
     let removal = converter
