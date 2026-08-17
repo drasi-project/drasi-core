@@ -24,7 +24,7 @@ use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use log::{debug, error, info, warn};
 use mysql_async::prelude::{Query, Queryable};
-use mysql_async::{BinlogStream, BinlogStreamRequest, Conn, OptsBuilder, Row, SslOpts};
+use mysql_async::{BinlogStream, BinlogStreamRequest, Conn, OptsBuilder, Row};
 use mysql_common::binlog::events::{
     BinlogEventHeader, Event, EventData, RowsEventData, TableMapEvent,
 };
@@ -35,8 +35,9 @@ use tokio::sync::RwLock;
 use drasi_core::models::SourceChange;
 use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
 use drasi_lib::sources::base::SourceBase;
+use drasi_mysql_common::connect_with_ssl_mode;
 
-use crate::config::{MySqlSourceConfig, SslMode, StartPosition};
+use crate::config::{MySqlSourceConfig, StartPosition};
 use crate::decoder::MySqlDecoder;
 use crate::types::ReplicationState;
 
@@ -189,56 +190,19 @@ impl ReplicationStream {
         &mut self,
         start_position: &StartPosition,
     ) -> Result<BinlogStream> {
-        match self.config.ssl_mode {
-            SslMode::IfAvailable => match self
-                .connect_binlog_stream_with_ssl(start_position, Some(self.relaxed_ssl_opts()))
-                .await
-            {
-                Ok(stream) => Ok(stream),
-                Err(ssl_error) => {
-                    warn!(
-                        "SSL connection attempt failed for source {}, retrying without SSL: {ssl_error}",
-                        self.source_id
-                    );
-                    self.connect_binlog_stream_with_ssl(start_position, None)
-                        .await
-                        .context("Failed to connect without SSL after SSL fallback")
-                }
-            },
-            SslMode::Disabled => {
-                self.connect_binlog_stream_with_ssl(start_position, None)
-                    .await
-            }
-            SslMode::Require => {
-                self.connect_binlog_stream_with_ssl(start_position, Some(self.relaxed_ssl_opts()))
-                    .await
-            }
-            SslMode::RequireVerifyCa => {
-                self.connect_binlog_stream_with_ssl(start_position, Some(self.verify_ca_ssl_opts()))
-                    .await
-            }
-            SslMode::RequireVerifyFull => {
-                self.connect_binlog_stream_with_ssl(start_position, Some(SslOpts::default()))
-                    .await
-            }
-        }
-    }
+        let build_opts = || {
+            OptsBuilder::default()
+                .ip_or_hostname(&self.config.host)
+                .tcp_port(self.config.port)
+                .user(Some(&self.config.user))
+                .pass(Some(&self.config.password))
+                .db_name(Some(&self.config.database))
+                .prefer_socket(Some(false))
+        };
 
-    async fn connect_binlog_stream_with_ssl(
-        &mut self,
-        start_position: &StartPosition,
-        ssl_opts: Option<SslOpts>,
-    ) -> Result<BinlogStream> {
-        let opts = OptsBuilder::default()
-            .ip_or_hostname(&self.config.host)
-            .tcp_port(self.config.port)
-            .user(Some(&self.config.user))
-            .pass(Some(&self.config.password))
-            .db_name(Some(&self.config.database))
-            .prefer_socket(Some(false))
-            .ssl_opts(ssl_opts);
-
-        let mut conn = Conn::new(opts).await?;
+        let mut conn = connect_with_ssl_mode(build_opts, self.config.ssl_mode)
+            .await
+            .context("Failed to connect to MySQL for binlog replication")?;
         self.configure_heartbeat(&mut conn).await?;
 
         let resolved = self
@@ -591,16 +555,6 @@ impl ReplicationStream {
             std::cmp::Ordering::Greater => false,
             std::cmp::Ordering::Equal => a.binlog_position < b.binlog_position,
         }
-    }
-
-    fn relaxed_ssl_opts(&self) -> SslOpts {
-        SslOpts::default()
-            .with_danger_accept_invalid_certs(true)
-            .with_danger_skip_domain_validation(true)
-    }
-
-    fn verify_ca_ssl_opts(&self) -> SslOpts {
-        SslOpts::default().with_danger_skip_domain_validation(true)
     }
 
     async fn close_stream(stream: BinlogStream) {

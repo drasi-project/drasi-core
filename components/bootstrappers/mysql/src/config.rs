@@ -16,7 +16,7 @@
 //!
 //! Shared types (TableKeyConfig, is_valid_identifier) come from drasi-mysql-common.
 
-pub use drasi_mysql_common::{is_valid_identifier, TableKeyConfig};
+pub use drasi_mysql_common::{is_valid_identifier, SslMode, TableKeyConfig};
 
 /// MySQL bootstrap provider configuration
 #[derive(Clone, PartialEq)]
@@ -39,6 +39,12 @@ pub struct MySqlBootstrapConfig {
     /// Tables to bootstrap
     pub tables: Vec<String>,
 
+    /// SSL/TLS mode for the MySQL connection.
+    ///
+    /// Defaults to [`SslMode::IfAvailable`], which negotiates TLS when the server
+    /// offers it and falls back to plaintext otherwise.
+    pub ssl_mode: SslMode,
+
     /// Table key configurations
     pub table_keys: Vec<TableKeyConfig>,
 }
@@ -52,6 +58,7 @@ impl std::fmt::Debug for MySqlBootstrapConfig {
             .field("user", &self.user)
             .field("password", &"[REDACTED]")
             .field("tables", &self.tables)
+            .field("ssl_mode", &self.ssl_mode)
             .field("table_keys", &self.table_keys)
             .finish()
     }
