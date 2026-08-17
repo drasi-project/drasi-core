@@ -64,8 +64,8 @@ const SUPPORTED_EVENTS: &str = "repository issues issue_comment pull_request pul
 const REPOSITORY_ACTIONS: &str = "created edited renamed archived unarchived privatized \
      publicized deleted transferred";
 const ISSUE_ACTIONS: &str = "opened deleted transferred assigned closed demilestoned edited \
-     field_added field_removed labeled locked milestoned pinned reopened typed unassigned \
-     unlabeled unlocked unpinned untyped";
+     field_added field_removed labeled locked milestoned reopened typed unassigned unlabeled \
+     unlocked untyped";
 const ISSUE_COMMENT_ACTIONS: &str = "created edited deleted pinned unpinned";
 const PULL_REQUEST_ACTIONS: &str = "opened assigned auto_merge_disabled auto_merge_enabled \
      closed converted_to_draft demilestoned dequeued edited enqueued labeled locked milestoned \
@@ -168,6 +168,9 @@ impl<'a> Converter<'a> {
         if !self.delivery_in_scope(event_type, action, payload)? {
             return Ok(None);
         }
+        if !self.delivery_projects_open(event_type, action, payload)? {
+            return Ok(None);
+        }
         let d = &Delivery {
             action,
             payload,
@@ -193,6 +196,11 @@ impl<'a> Converter<'a> {
         let Some(filter) = self.repository_filter else {
             return Ok(true);
         };
+        if (event_type == "issues" && in_table("closed deleted", action))
+            || (event_type == "pull_request" && action == "closed")
+        {
+            return Ok(true);
+        }
         let current = self.repository_in_scope(payload.get("repository"))?;
         if event_type == "issues" && action == "transferred" {
             if current {
@@ -211,6 +219,45 @@ impl<'a> Converter<'a> {
             return Ok(current || previous);
         }
         Ok(current)
+    }
+
+    fn delivery_projects_open(
+        &self,
+        event_type: &str,
+        action: &str,
+        payload: &Value,
+    ) -> Result<bool, ConvertError> {
+        match event_type {
+            "repository" => Ok(true),
+            "issues" if in_table("closed deleted transferred", action) => Ok(true),
+            "pull_request" if action == "closed" => Ok(true),
+            "issues" => work_item_action_projects_open(
+                action,
+                payload
+                    .get("issue")
+                    .ok_or_else(|| invalid("missing 'issue'"))?,
+                "issue",
+            ),
+            "pull_request" => work_item_action_projects_open(
+                action,
+                payload
+                    .get("pull_request")
+                    .ok_or_else(|| invalid("missing 'pull_request'"))?,
+                "pull_request",
+            ),
+            "issue_comment" => item_is_open(
+                payload
+                    .get("issue")
+                    .ok_or_else(|| invalid("missing 'issue'"))?,
+                "issue",
+            ),
+            _ => item_is_open(
+                payload
+                    .get("pull_request")
+                    .ok_or_else(|| invalid("missing 'pull_request'"))?,
+                "pull_request",
+            ),
+        }
     }
 
     fn repository_in_scope(&self, repository: Option<&Value>) -> Result<bool, ConvertError> {
@@ -301,8 +348,8 @@ impl<'a> Converter<'a> {
         let repo = payload.get("repository");
         let repo_id = required_str(payload, "/repository/node_id")?;
         match action {
-            "deleted" => delete_work_item(cs, &item_id, &repo_id, label),
-            "opened" => insert_work_item(cs, item, repo, &item_id, &repo_id, label)?,
+            "closed" | "deleted" => delete_work_item(cs, &item_id, &repo_id, label),
+            "opened" | "reopened" => insert_work_item(cs, item, repo, &item_id, &repo_id, label)?,
             "transferred" => {
                 if owner_in_org(repo, self.organization) && self.repository_in_scope(repo)? {
                     delete_work_item(cs, &item_id, &repo_id, label);
@@ -315,6 +362,7 @@ impl<'a> Converter<'a> {
                 };
                 if owner_in_org(Some(new_repo), self.organization)
                     && self.repository_in_scope(Some(new_repo))?
+                    && item_is_open(new_item, "changes.new_issue")?
                 {
                     let new_id = required_str(new_item, "/node_id")?;
                     let new_repo_id = required_str(new_repo, "/node_id")?;
@@ -626,6 +674,30 @@ fn names<'a>(container: &'a Value, key: &str, field: &'a str) -> Option<Vec<&'a 
             .filter_map(|item| item.get(field).and_then(Value::as_str))
             .collect(),
     )
+}
+
+fn item_is_open(item: &Value, path: &str) -> Result<bool, ConvertError> {
+    match item.get("state").and_then(Value::as_str) {
+        Some("open") => Ok(true),
+        Some("closed") => Ok(false),
+        _ => Err(invalid(format!(
+            "'{path}.state' must be either 'open' or 'closed'"
+        ))),
+    }
+}
+
+fn work_item_action_projects_open(
+    action: &str,
+    item: &Value,
+    path: &str,
+) -> Result<bool, ConvertError> {
+    let is_open = item_is_open(item, path)?;
+    if !is_open && in_table("opened reopened", action) {
+        return Err(invalid(format!(
+            "'{path}.state' must be 'open' for action '{action}'"
+        )));
+    }
+    Ok(is_open)
 }
 
 fn label_details(item: &Value) -> Result<Option<ElementValue>, ConvertError> {

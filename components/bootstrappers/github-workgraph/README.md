@@ -37,12 +37,18 @@ Issue and Pull Request label selections alias each GraphQL label `id` to
 `labelDetails: [{name, nodeId}]` property as live webhooks while retaining
 `labels`, `status`, and `statusLabel`. Missing or malformed label node IDs fail
 bootstrap rather than emit a partial identity list.
+The synthetic comment and review envelopes passed to the shared converter mark
+their parents open because those parents came from the `states: [OPEN]`
+connections. A response that nevertheless contains a closed work item fails
+shared conversion instead of entering the snapshot.
 
 ## Scope (prototype)
 
 - One configured GitHub organization; all repositories the token can see by
   default, or only the Source's normalized `repositories` allowlist.
 - Only currently **open** Issues and Pull Requests (no closed history).
+  Both top-level GraphQL connections use `states: [OPEN]`; every cursor page
+  reuses that same filtered query.
 - Issue/PR conversation comments and submitted or dismissed PR reviews.
 - **Excluded**: GitHub Projects and Project Items, inline diff/review
   comments, closed-item history, reactions, and workflow-run execution

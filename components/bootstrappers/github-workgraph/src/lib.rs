@@ -323,7 +323,7 @@ async fn process_repository(
                     json!({
                         "organization": org_value,
                         "repository": repo_value,
-                        "issue": { "node_id": issue_node_id },
+                        "issue": { "node_id": issue_node_id, "state": "open" },
                         "comment": comment,
                     }),
                 )?);
@@ -368,7 +368,11 @@ async fn process_repository(
                         // `pull_request` present (even empty) is exactly the
                         // discriminator `mapping::comment_event` checks via
                         // `issue.get("pull_request").is_some()`.
-                        "issue": { "node_id": pr_node_id, "pull_request": {} },
+                        "issue": {
+                            "node_id": pr_node_id,
+                            "state": "open",
+                            "pull_request": {}
+                        },
                         "comment": comment,
                     }),
                 )?);
@@ -391,7 +395,7 @@ async fn process_repository(
                     json!({
                         "organization": org_value,
                         "repository": repo_value,
-                        "pull_request": { "node_id": pr_node_id },
+                        "pull_request": { "node_id": pr_node_id, "state": "open" },
                         "review": review,
                     }),
                 )?);
