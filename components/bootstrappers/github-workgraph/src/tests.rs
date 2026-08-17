@@ -72,7 +72,8 @@ fn repo(name: &str) -> Value {
         "html_url":format!("https://github.com/acme/{name}"),"private":false,
         "archived":false,"fork":false,"visibility":"PUBLIC",
         "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z",
-        "defaultBranchRef":{"name":"main"},"repositoryTopics":{"nodes":[]}
+        "defaultBranchRef":{"name":"main"},
+        "repositoryTopics":{"nodes":[{"topic":{"name":"workgraph"}}]}
     })
 }
 
@@ -158,19 +159,19 @@ async fn mount_snapshot(server: &MockServer, task_body: &str, result_body: &str)
     .await;
     mount_query(
         server,
-        &["search(query:", "state:open"],
-        json!({"search":connection(
+        &["states: [$state]", "\"state\":\"OPEN\""],
+        json!({"repository":{"issues":connection(
             vec![task("I_task_open","OPEN",task_body,2)],false,None
-        )}),
+        )}}),
         Some(1),
     )
     .await;
     mount_query(
         server,
-        &["search(query:", "state:closed"],
-        json!({"search":connection(
+        &["states: [$state]", "\"state\":\"CLOSED\""],
+        json!({"repository":{"issues":connection(
             vec![task("I_task_closed","CLOSED",TASK_BODY,1)],false,None
-        )}),
+        )}}),
         Some(1),
     )
     .await;
@@ -280,6 +281,21 @@ async fn snapshots_generic_open_and_open_closed_tasks_with_parents_and_comments(
     assert!(events
         .iter()
         .any(|event| id(event) == "I_parent" && label(event) == "GitHubIssue"));
+    let parent_repository = events
+        .iter()
+        .find(|event| id(event) == "R_parents" && label(event) == "GitHubRepository")
+        .expect("parent repository from child task query");
+    let SourceChange::Insert { element } = &parent_repository.change else {
+        panic!("bootstrap nodes are inserts");
+    };
+    assert_eq!(
+        element.get_property("defaultBranch"),
+        &drasi_core::models::ElementValue::from(&json!("main"))
+    );
+    assert_eq!(
+        element.get_property("topics"),
+        &drasi_core::models::ElementValue::from(&json!(["workgraph"]))
+    );
     assert!(events
         .iter()
         .any(|event| id(event) == "IC_plain" && label(event) == "GitHubIssueComment"));
@@ -369,28 +385,32 @@ async fn task_open_and_closed_connections_follow_every_cursor() {
     wrong_type["type"]["node_id"] = json!("IT_other");
     mount_query(
         &server,
-        &["search(query:", "state:open", "\"cursor\":null"],
-        json!({"search":connection(
+        &["states: [$state]", "\"state\":\"OPEN\"", "\"cursor\":null"],
+        json!({"repository":{"issues":connection(
             vec![task("I_open_1","OPEN",TASK_BODY,0),wrong_type],true,Some("NEXT")
-        )}),
+        )}}),
         Some(1),
     )
     .await;
     mount_query(
         &server,
-        &["search(query:", "state:open", "\"cursor\":\"NEXT\""],
-        json!({"search":connection(
+        &[
+            "states: [$state]",
+            "\"state\":\"OPEN\"",
+            "\"cursor\":\"NEXT\"",
+        ],
+        json!({"repository":{"issues":connection(
             vec![task("I_open_2","OPEN",TASK_BODY,0)],false,None
-        )}),
+        )}}),
         Some(1),
     )
     .await;
     mount_query(
         &server,
-        &["search(query:", "state:closed"],
-        json!({"search":connection(
+        &["states: [$state]", "\"state\":\"CLOSED\""],
+        json!({"repository":{"issues":connection(
             vec![task("I_closed","CLOSED",TASK_BODY,0)],false,None
-        )}),
+        )}}),
         Some(1),
     )
     .await;
@@ -408,6 +428,54 @@ async fn task_open_and_closed_connections_follow_every_cursor() {
             .collect::<Vec<_>>(),
         vec!["I_open_1", "I_open_2", "I_closed"]
     );
+}
+
+#[tokio::test]
+async fn repository_issue_pagination_is_complete_beyond_search_cap() {
+    let server = MockServer::start().await;
+    for page in 0..=10 {
+        let cursor_needle = if page == 0 {
+            "\"cursor\":null".to_string()
+        } else {
+            format!("\"cursor\":\"PAGE_{page}\"")
+        };
+        let count = if page == 10 { 1 } else { 100 };
+        let first = page * 100;
+        let nodes = (first..first + count)
+            .map(|index| issue(&format!("I_{index}"), TASK_BODY, "OPEN", true, 0))
+            .collect();
+        let next = (page < 10).then(|| format!("PAGE_{}", page + 1));
+        mount_query(
+            &server,
+            &[
+                "issues(first: $pageSize",
+                "states: [$state]",
+                "\"state\":\"OPEN\"",
+                &cursor_needle,
+            ],
+            json!({"repository":{"issues":connection(
+                nodes, page < 10, next.as_deref()
+            )}}),
+            Some(1),
+        )
+        .await;
+    }
+    mount_query(
+        &server,
+        &["states: [$state]", "\"state\":\"CLOSED\""],
+        json!({"repository":{"issues":connection(vec![],false,None)}}),
+        Some(1),
+    )
+    .await;
+
+    let client =
+        GitHubGraphQLClient::new("token", &format!("{}/graphql", server.uri()), 1).unwrap();
+    let tasks = client
+        .fetch_tasks("acme", "widgets", &task_type())
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1001);
+    assert_eq!(tasks.last().unwrap()["node_id"], json!("I_1000"));
 }
 
 #[tokio::test]
@@ -436,11 +504,11 @@ async fn ordinary_open_issue_with_result_marker_stays_generic_comment() {
         Some(1),
     )
     .await;
-    for state in ["open", "closed"] {
+    for state in ["OPEN", "CLOSED"] {
         mount_query(
             &server,
-            &["search(query:", &format!("state:{state}")],
-            json!({"search":connection(vec![],false,None)}),
+            &["states: [$state]", &format!("\"state\":\"{state}\"")],
+            json!({"repository":{"issues":connection(vec![],false,None)}}),
             Some(1),
         )
         .await;

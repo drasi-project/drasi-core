@@ -80,11 +80,11 @@ query($org: String!, $cursor: String, $pageSize: Int!) {
 "#;
 
 const TASK_ISSUES_QUERY: &str = r#"
-query($query: String!, $cursor: String, $pageSize: Int!) {
-  search(query: $query, type: ISSUE, first: $pageSize, after: $cursor) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      ... on Issue {
+query($owner: String!, $name: String!, $cursor: String, $pageSize: Int!, $state: IssueState!) {
+  repository(owner: $owner, name: $name) {
+    issues(first: $pageSize, after: $cursor, states: [$state]) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
         node_id: id
         id: databaseId
         number
@@ -141,6 +141,8 @@ query($query: String!, $cursor: String, $pageSize: Int!) {
             visibility
             created_at: createdAt
             updated_at: updatedAt
+            defaultBranchRef { name }
+            repositoryTopics(first: 50) { nodes { topic { name } } }
           }
         }
       }
@@ -516,20 +518,23 @@ impl GitHubGraphQLClient {
         task_issue_type: &drasi_source_github_workgraph::config::TaskIssueType,
     ) -> Result<Vec<Value>> {
         let mut tasks = Vec::new();
-        for state in ["open", "closed"] {
-            let type_name = task_issue_type
-                .name
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"");
-            let search = format!("repo:{owner}/{name} is:issue state:{state} type:\"{type_name}\"");
+        for state in ["OPEN", "CLOSED"] {
+            let (owner, name) = (owner.to_string(), name.to_string());
             let nodes = self
-                .fetch_connection(TASK_ISSUES_QUERY, &["search"], None, move |cursor| {
-                    json!({
-                        "query": search,
-                        "cursor": cursor,
-                        "pageSize": DEFAULT_PAGE_SIZE,
-                    })
-                })
+                .fetch_connection(
+                    TASK_ISSUES_QUERY,
+                    &["repository", "issues"],
+                    None,
+                    move |cursor| {
+                        json!({
+                            "owner": owner,
+                            "name": name,
+                            "state": state,
+                            "cursor": cursor,
+                            "pageSize": DEFAULT_PAGE_SIZE,
+                        })
+                    },
+                )
                 .await?;
             for node in nodes {
                 let mut node = self.complete_item_labels(node).await?;
@@ -722,7 +727,7 @@ fn reshape_task(mut node: Value) -> Value {
         if !parent.is_null() {
             let mut shaped = reshape_work_item(parent.take());
             if let Some(repository) = shaped.get_mut("repository") {
-                lower_str(repository, "visibility");
+                *repository = reshape_repository(repository.take());
             }
             *parent = shaped;
         }
@@ -819,6 +824,35 @@ mod tests {
         let shaped = reshape_repository(raw);
         assert_eq!(shaped["default_branch"], Value::Null);
         assert_eq!(shaped["topics"], json!([]));
+    }
+
+    #[test]
+    fn parent_and_enumerated_repository_shapes_are_order_independent() {
+        let raw = json!({
+            "node_id": "R_parent",
+            "name": "parents",
+            "full_name": "acme/parents",
+            "owner": {"login":"acme"},
+            "visibility": "PUBLIC",
+            "defaultBranchRef": {"name":"trunk"},
+            "repositoryTopics": {"nodes":[
+                {"topic":{"name":"planning"}},
+                {"topic":{"name":"workgraph"}}
+            ]}
+        });
+        let enumerated = reshape_repository(raw.clone());
+        let task = reshape_task(json!({
+            "parent": {
+                "state":"OPEN",
+                "assignees":{"nodes":[]},
+                "labels":{"nodes":[]},
+                "repository":raw
+            }
+        }));
+        let embedded = task.pointer("/parent/repository").unwrap();
+        assert_eq!(embedded, &enumerated);
+        assert_eq!(embedded["default_branch"], json!("trunk"));
+        assert_eq!(embedded["topics"], json!(["planning", "workgraph"]));
     }
 
     #[test]

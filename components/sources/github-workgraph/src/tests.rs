@@ -36,6 +36,15 @@ const VALIDATION_TASK: &str = r#"{
     "validationProfile": "new-issue-default"
   }
 }"#;
+const UPDATED_VALIDATION_TASK: &str = r#"{
+  "assignmentId": "assignment-validation-001",
+  "agentProfile": "issue-validator",
+  "priority": 11,
+  "taskType": "issue-validation",
+  "task": {
+    "validationProfile": "updated-default"
+  }
+}"#;
 const RISK_TASK: &str = r#"{
   "assignmentId": "assignment-risk-001",
   "agentProfile": "issue-risk-profiler",
@@ -141,11 +150,18 @@ fn comment_event(action: &str, body: &str, state: &str, typed: bool, id: &str) -
 }
 
 fn sub_issue_event(action: &str, child: Value, parent: Value) -> Value {
-    json!({
-        "action":action, "organization":org(), "repository":repo("parents"),
-        "parent_issue":parent, "parent_issue_repo":repo("parents"),
-        "sub_issue":child, "sub_issue_repo":repo("widgets")
-    })
+    if action.starts_with("parent_issue_") {
+        json!({
+            "action":action, "organization":org(), "repository":repo("widgets"),
+            "parent_issue":parent, "parent_issue_repo":repo("parents"),
+            "sub_issue":child
+        })
+    } else {
+        json!({
+            "action":action, "organization":org(), "repository":repo("parents"),
+            "parent_issue":parent, "sub_issue":child, "sub_issue_repo":repo("widgets")
+        })
+    }
 }
 
 fn convert(event: &str, payload: &Value) -> Vec<SourceChange> {
@@ -256,9 +272,14 @@ fn typed_issue_emits_task_not_github_issue() {
         "issues",
         &issue_event("opened", issue("I_task", VALIDATION_TASK, true, "open")),
     );
-    assert!(changes
-        .iter()
-        .any(|change| label(change) == "WorkGraphTask" && id(change) == "I_task"));
+    assert!(changes.iter().any(|change| {
+        label(change) == "WorkGraphTask" && id(change) == "I_task" && is_insert(change)
+    }));
+    assert!(changes.iter().any(|change| {
+        label(change) == "IN_REPOSITORY"
+            && id(change) == "IN_REPOSITORY:I_task:R_widgets"
+            && is_insert(change)
+    }));
     assert!(!changes.iter().any(|change| label(change) == "GitHubIssue"));
     assert_eq!(
         property(&changes, "WorkGraphTask", "assignmentId"),
@@ -284,13 +305,50 @@ fn task_state_is_retained_on_close_and_reopen() {
         &ElementValue::from(&json!("completed"))
     );
 
-    let reopened = convert(
-        "issues",
-        &issue_event("reopened", issue("I_task", VALIDATION_TASK, true, "open")),
-    );
+    let mut reopened_issue = issue("I_task", VALIDATION_TASK, true, "open");
+    reopened_issue["title"] = json!("Reopened task");
+    reopened_issue["labels"] = json!([
+        {"name":"reopened-label","node_id":"L_reopened"}
+    ]);
+    let reopened = convert("issues", &issue_event("reopened", reopened_issue));
     assert!(reopened
         .iter()
-        .any(|change| label(change) == "WorkGraphTask" && is_insert(change)));
+        .any(|change| label(change) == "WorkGraphTask" && is_update(change)));
+    assert!(reopened.iter().any(|change| {
+        label(change) == "IN_REPOSITORY"
+            && id(change) == "IN_REPOSITORY:I_task:R_widgets"
+            && is_update(change)
+    }));
+    assert_eq!(
+        property(&reopened, "WorkGraphTask", "title"),
+        &ElementValue::from(&json!("Reopened task"))
+    );
+    assert_eq!(
+        property(&reopened, "WorkGraphTask", "labels"),
+        &ElementValue::from(&json!(["reopened-label"]))
+    );
+}
+
+#[test]
+fn retained_task_edits_update_properties_and_repository_relation() {
+    let mut payload = issue_event(
+        "edited",
+        issue("I_task", UPDATED_VALIDATION_TASK, true, "open"),
+    );
+    payload["changes"] = json!({"body":{"from":VALIDATION_TASK}});
+    let changes = convert("issues", &payload);
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphTask" && is_update(change)));
+    assert!(changes.iter().any(|change| {
+        label(change) == "IN_REPOSITORY"
+            && id(change) == "IN_REPOSITORY:I_task:R_widgets"
+            && is_update(change)
+    }));
+    assert_eq!(
+        property(&changes, "WorkGraphTask", "priority"),
+        &ElementValue::Integer(11)
+    );
 }
 
 #[test]
@@ -313,24 +371,69 @@ fn task_delete_removes_task_repository_and_parent_relation() {
 #[test]
 fn issue_type_transitions_replace_node_kinds() {
     let mut to_task = issue_event("typed", issue("I_task", VALIDATION_TASK, true, "open"));
-    to_task["changes"] = json!({"type":{"from":null}});
+    to_task["type"] = json!({"node_id":TASK_TYPE_ID,"name":TASK_TYPE_NAME});
     let changes = convert("issues", &to_task);
-    assert!(changes
+    let transition: Vec<_> = changes
         .iter()
-        .any(|change| label(change) == "GitHubIssue" && is_delete(change)));
-    assert!(changes
-        .iter()
-        .any(|change| label(change) == "WorkGraphTask" && is_insert(change)));
+        .filter(|change| {
+            matches!(
+                label(change),
+                "GitHubIssue" | "WorkGraphTask" | "IN_REPOSITORY"
+            )
+        })
+        .map(|change| (label(change), is_insert(change), is_delete(change)))
+        .collect();
+    assert_eq!(
+        transition,
+        vec![
+            ("IN_REPOSITORY", false, true),
+            ("GitHubIssue", false, true),
+            ("WorkGraphTask", true, false),
+            ("IN_REPOSITORY", true, false),
+        ]
+    );
 
     let mut from_task = issue_event("untyped", issue("I_task", "ordinary", false, "open"));
-    from_task["changes"] = json!({"type":{"from":{"node_id":TASK_TYPE_ID,"name":TASK_TYPE_NAME}}});
+    from_task["type"] = json!({"node_id":TASK_TYPE_ID,"name":TASK_TYPE_NAME});
     let changes = convert("issues", &from_task);
-    assert!(changes
+    let transition: Vec<_> = changes
         .iter()
-        .any(|change| label(change) == "WorkGraphTask" && is_delete(change)));
-    assert!(changes
-        .iter()
-        .any(|change| label(change) == "GitHubIssue" && is_insert(change)));
+        .filter(|change| {
+            matches!(
+                label(change),
+                "TASK_FOR" | "WorkGraphTask" | "GitHubIssue" | "IN_REPOSITORY"
+            )
+        })
+        .map(|change| (label(change), is_insert(change), is_delete(change)))
+        .collect();
+    assert_eq!(
+        transition,
+        vec![
+            ("TASK_FOR", false, true),
+            ("IN_REPOSITORY", false, true),
+            ("WorkGraphTask", false, true),
+            ("GitHubIssue", true, false),
+            ("IN_REPOSITORY", true, false),
+        ]
+    );
+}
+
+#[test]
+fn unrelated_typed_and_untyped_events_only_update_generic_issue() {
+    for action in ["typed", "untyped"] {
+        let mut payload = issue_event(action, issue("I_generic", "ordinary", false, "open"));
+        payload["type"] = json!({"node_id":"IT_unrelated","name":"Feature"});
+        if action == "typed" {
+            payload["issue"]["type"] = payload["type"].clone();
+        }
+        let changes = convert("issues", &payload);
+        assert!(changes
+            .iter()
+            .any(|change| label(change) == "GitHubIssue" && is_update(change)));
+        assert!(!changes
+            .iter()
+            .any(|change| { matches!(label(change), "WorkGraphTask" | "TASK_FOR") }));
+    }
 }
 
 #[test]
@@ -366,10 +469,15 @@ fn sub_issue_add_upserts_task_parent_and_relations() {
     let changes = convert("sub_issues", &payload);
     assert!(changes
         .iter()
-        .any(|change| label(change) == "WorkGraphTask"));
-    assert!(changes
-        .iter()
-        .any(|change| label(change) == "GitHubIssue" && id(change) == "I_parent"));
+        .any(|change| label(change) == "WorkGraphTask" && is_update(change)));
+    assert!(changes.iter().any(|change| {
+        label(change) == "IN_REPOSITORY"
+            && id(change) == "IN_REPOSITORY:I_task:R_widgets"
+            && is_update(change)
+    }));
+    assert!(changes.iter().any(|change| {
+        label(change) == "GitHubIssue" && id(change) == "I_parent" && is_update(change)
+    }));
     assert!(changes.iter().any(|change| {
         label(change) == "TASK_FOR" && id(change) == "TASK_FOR:I_task" && is_insert(change)
     }));
@@ -388,6 +496,7 @@ fn sub_issue_delivery_variants_are_stable_and_removal_is_payload_only() {
             .iter()
             .any(|change| id(change) == "TASK_FOR:I_task" && is_insert(change)));
     }
+
     for action in ["sub_issue_removed", "parent_issue_removed"] {
         let changes = convert(
             "sub_issues",
@@ -396,6 +505,52 @@ fn sub_issue_delivery_variants_are_stable_and_removal_is_payload_only() {
         assert_eq!(changes.len(), 1);
         assert_eq!(id(&changes[0]), "TASK_FOR:I_task");
         assert!(is_delete(&changes[0]));
+    }
+}
+
+#[test]
+fn schema_minimal_sub_issue_payloads_never_fail_conversion() {
+    let child = issue("I_task", VALIDATION_TASK, true, "open");
+    let parent = issue("I_parent", "parent", false, "open");
+    let fixtures = [
+        json!({
+            "action":"parent_issue_added","organization":org(),
+            "repository":repo("widgets"),"sub_issue":child
+        }),
+        json!({
+            "action":"parent_issue_removed","organization":org(),
+            "repository":repo("widgets"),"sub_issue":issue(
+                "I_task", VALIDATION_TASK, true, "open"
+            )
+        }),
+        json!({
+            "action":"sub_issue_added","organization":org(),
+            "repository":repo("parents"),"parent_issue":parent
+        }),
+        json!({
+            "action":"sub_issue_removed","organization":org(),
+            "repository":repo("parents"),"parent_issue":issue(
+                "I_parent", "parent", false, "open"
+            )
+        }),
+    ];
+    for (index, fixture) in fixtures.into_iter().enumerate() {
+        let changes = Converter::new("gh", "acme", &task_type(), 1)
+            .convert("sub_issues", &fixture)
+            .expect("schema-valid asymmetric payload must not produce a 422")
+            .unwrap();
+        match index {
+            0 => assert!(changes
+                .iter()
+                .any(|change| label(change) == "WorkGraphTask" && is_update(change))),
+            1 => {
+                assert_eq!(changes.len(), 1);
+                assert_eq!(id(&changes[0]), "TASK_FOR:I_task");
+                assert!(is_delete(&changes[0]));
+            }
+            2 | 3 => assert!(changes.is_empty()),
+            _ => unreachable!(),
+        }
     }
 }
 

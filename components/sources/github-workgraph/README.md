@@ -145,10 +145,22 @@ Configured typed tasks are different:
 - `issues` events handle body, Issue Type, state, transfer, and repository
   transitions. A transition away from the configured exact type removes the
   task and allows an open generic Issue; a transition into the type removes the
-  generic Issue and creates the task or task error.
+  generic Issue and creates the task or task error. GitHub `typed` and `untyped`
+  deliveries identify the assigned/removed type in their required top-level
+  `type` object; they do not carry `changes.type.from`. Core combines that
+  object with the current `issue.type` and requires both configured ID and name
+  to match.
 - `sub_issues` add/remove actions create or delete the native `TASK_FOR` edge.
   Either the `issues` or `sub_issues` delivery may arrive first; stable IDs and
-  payload-complete upserts converge without delivery-order state.
+  payload-complete updates converge without delivery-order state. GitHub's
+  asymmetric payload guarantee is honored: `parent_issue_*` requires only
+  `sub_issue`, while `sub_issue_*` requires only `parent_issue`; an omitted
+  optional counterpart is accepted and any derivable node/relation change is
+  still emitted.
+- A true open/type transition inserts a new representation. Edits, close,
+  reopen, and cache-free `sub_issues` observations update retained task,
+  repository, and `IN_REPOSITORY` identities so Drasi loads prior properties
+  and computes removals as well as additions.
 - Task delete removes the task, repository edge, parent edge, and task error.
 - Task comments continue to be processed while the task is closed. Result and
   ordinary comment create/edit/delete transitions are deterministic and use
