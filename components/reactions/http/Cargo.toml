@@ -41,7 +41,7 @@ log = "0.4"
 handlebars = "5.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", features = ["arbitrary_precision"] }
+serde_json = { version = "1.0", features = ["raw_value"] }
 tokio = { version = "1.0", features = ["full"] }
 chrono = "0.4"
 # TODO(#574): Pin the same crates.io drasi-plugin-sdk version as the target

@@ -21,8 +21,8 @@ use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
     Client, Method, Response, StatusCode,
 };
-use serde_json::{Map, Value};
-use std::time::Duration;
+use serde_json::{value::RawValue, Map, Value};
+use std::{collections::HashMap, time::Duration};
 
 use crate::config::{
     parse_http_method, resolve_http_url, HttpCallSpec, HttpReactionConfig, TemplateRouting,
@@ -529,40 +529,118 @@ async fn validate_success_response(
         body.extend_from_slice(&chunk);
     }
 
-    let document: Value = serde_json::from_slice(&body).map_err(|e| {
+    // RawValue validates the complete document while preserving number text only
+    // in this response path; normal serde_json::Value parsing remains unchanged.
+    let document: Box<RawValue> = serde_json::from_slice(&body).map_err(|e| {
         anyhow!(
             "{description} returned invalid JSON required by \
              `rejectNonEmptyJsonPointer` validation: {e}"
         )
     })?;
 
-    let Some(value) = document.pointer(pointer) else {
+    let Some(value) = resolve_raw_json_pointer(document, pointer).map_err(|e| {
+        anyhow!(
+            "{description} returned JSON that could not be inspected for \
+             `rejectNonEmptyJsonPointer` validation: {e}"
+        )
+    })?
+    else {
         return Ok(());
     };
-    if is_empty_json_value(value) {
+    let (is_empty, kind) = classify_raw_json_value(&value).map_err(|e| {
+        anyhow!(
+            "{description} returned JSON that could not be inspected for \
+             `rejectNonEmptyJsonPointer` validation: {e}"
+        )
+    })?;
+    if is_empty {
         return Ok(());
     }
 
     Err(anyhow!(
         "{description} response validation failed: JSON pointer '{}' resolved to a non-empty {}",
         truncate_for_log(pointer),
-        json_value_kind(value)
+        kind
     ))
 }
 
-fn is_empty_json_value(value: &Value) -> bool {
-    match value {
-        Value::Null => true,
-        Value::Bool(value) => !value,
-        Value::Number(value) => is_json_number_zero(value),
-        Value::String(value) => value.is_empty(),
-        Value::Array(value) => value.is_empty(),
-        Value::Object(value) => value.is_empty(),
+fn resolve_raw_json_pointer(
+    mut current: Box<RawValue>,
+    pointer: &str,
+) -> serde_json::Result<Option<Box<RawValue>>> {
+    if pointer.is_empty() {
+        return Ok(Some(current));
+    }
+
+    let Some(tokens) = pointer.strip_prefix('/') else {
+        return Ok(None);
+    };
+
+    for encoded_token in tokens.split('/') {
+        let token = encoded_token.replace("~1", "/").replace("~0", "~");
+        current = match current.get().trim_start().as_bytes().first() {
+            Some(b'{') => {
+                let mut object: HashMap<String, Box<RawValue>> =
+                    serde_json::from_str(current.get())?;
+                let Some(value) = object.remove(&token) else {
+                    return Ok(None);
+                };
+                value
+            }
+            Some(b'[') => {
+                let Some(index) = parse_json_pointer_array_index(&token) else {
+                    return Ok(None);
+                };
+                let array: Vec<Box<RawValue>> = serde_json::from_str(current.get())?;
+                let Some(value) = array.into_iter().nth(index) else {
+                    return Ok(None);
+                };
+                value
+            }
+            _ => return Ok(None),
+        };
+    }
+
+    Ok(Some(current))
+}
+
+fn parse_json_pointer_array_index(token: &str) -> Option<usize> {
+    if token == "0" {
+        return Some(0);
+    }
+    if token.is_empty()
+        || token.starts_with('0')
+        || !token.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    token.parse().ok()
+}
+
+fn classify_raw_json_value(value: &RawValue) -> Result<(bool, &'static str)> {
+    let raw = value.get().trim();
+    match raw.as_bytes().first() {
+        Some(b'n') => Ok((true, "null")),
+        Some(b'f') => Ok((true, "boolean")),
+        Some(b't') => Ok((false, "boolean")),
+        Some(b'"') => {
+            let string: String = serde_json::from_str(raw)?;
+            Ok((string.is_empty(), "string"))
+        }
+        Some(b'[') => {
+            let array: Vec<Box<RawValue>> = serde_json::from_str(raw)?;
+            Ok((array.is_empty(), "array"))
+        }
+        Some(b'{') => {
+            let object: HashMap<String, Box<RawValue>> = serde_json::from_str(raw)?;
+            Ok((object.is_empty(), "object"))
+        }
+        Some(b'-' | b'0'..=b'9') => Ok((is_json_number_zero(raw), "number")),
+        _ => Err(anyhow!("validated JSON had an unrecognized value type")),
     }
 }
 
-fn is_json_number_zero(number: &serde_json::Number) -> bool {
-    let lexeme = number.as_str();
+fn is_json_number_zero(lexeme: &str) -> bool {
     let significand = lexeme
         .split_once('e')
         .or_else(|| lexeme.split_once('E'))
@@ -579,17 +657,6 @@ fn is_json_number_zero(number: &serde_json::Number) -> bool {
     }
 
     saw_digit
-}
-
-fn json_value_kind(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
 }
 
 /// How a non-2xx HTTP response status should be handled.
@@ -746,7 +813,15 @@ mod tests {
     }
 
     #[test]
-    fn numeric_empty_values_use_exact_json_lexemes() {
+    fn raw_value_feature_does_not_change_normal_json_number_parsing() {
+        assert!(
+            serde_json::from_str::<Value>("1e400").is_err(),
+            "raw response inspection must not change normal serde_json::Value number semantics"
+        );
+    }
+
+    #[test]
+    fn raw_numeric_empty_values_use_exact_json_lexemes() {
         for raw in [
             "0",
             "-0",
@@ -756,8 +831,11 @@ mod tests {
             "0E+400",
             "-0.000e+999",
         ] {
-            let value: Value = serde_json::from_str(raw).expect("valid zero JSON number");
-            assert!(is_empty_json_value(&value), "{raw} should be zero");
+            let value: Box<RawValue> =
+                serde_json::from_str(raw).expect("valid raw zero JSON number");
+            let (is_empty, kind) = classify_raw_json_value(&value).expect("zero should classify");
+            assert_eq!(kind, "number");
+            assert!(is_empty, "{raw} should be zero");
         }
 
         for raw in [
@@ -770,9 +848,53 @@ mod tests {
             "0.0000000000000000000000000000000000001",
             "1234567890123456789012345678901234567890",
         ] {
-            let value: Value = serde_json::from_str(raw).expect("valid nonzero JSON number");
-            assert!(!is_empty_json_value(&value), "{raw} should be nonzero");
+            let value: Box<RawValue> =
+                serde_json::from_str(raw).expect("valid raw nonzero JSON number");
+            let (is_empty, kind) =
+                classify_raw_json_value(&value).expect("nonzero should classify");
+            assert_eq!(kind, "number");
+            assert!(!is_empty, "{raw} should be nonzero");
         }
+    }
+
+    #[test]
+    fn raw_json_pointer_preserves_rfc_6901_traversal_semantics() {
+        let document: Box<RawValue> = serde_json::from_str(
+            r#"{
+                "a/b": {
+                    "~key": [
+                        {"errors": 0},
+                        {"errors": 1e400}
+                    ]
+                },
+                "01": "object key"
+            }"#,
+        )
+        .expect("valid raw JSON document");
+
+        let value = resolve_raw_json_pointer(document, "/a~1b/~0key/1/errors")
+            .expect("pointer should resolve")
+            .expect("pointer target should exist");
+        assert_eq!(value.get(), "1e400");
+
+        let document: Box<RawValue> =
+            serde_json::from_str(r#"[10, 20]"#).expect("valid raw JSON array");
+        assert!(
+            resolve_raw_json_pointer(document, "/01")
+                .expect("array pointer should be inspected")
+                .is_none(),
+            "array indices with a leading zero are not valid RFC 6901 indices"
+        );
+
+        let document: Box<RawValue> =
+            serde_json::from_str(r#"{"01":"object key"}"#).expect("valid raw JSON object");
+        assert_eq!(
+            resolve_raw_json_pointer(document, "/01")
+                .expect("object pointer should resolve")
+                .expect("numeric object key should exist")
+                .get(),
+            r#""object key""#
+        );
     }
 
     #[test]
