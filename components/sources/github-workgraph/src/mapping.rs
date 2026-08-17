@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::config::RepositoryFilter;
 use crate::workgraph::{
     assignment_element_id, classify, comment_error_element_id, status_error_element_id,
     Classification,
@@ -130,6 +131,7 @@ pub struct Converter<'a> {
     source_id: &'a str,
     organization: &'a str,
     effective_from: u64,
+    repository_filter: Option<&'a RepositoryFilter>,
 }
 
 impl<'a> Converter<'a> {
@@ -138,7 +140,13 @@ impl<'a> Converter<'a> {
             source_id,
             organization,
             effective_from,
+            repository_filter: None,
         }
+    }
+
+    pub fn with_repository_filter(mut self, repository_filter: &'a RepositoryFilter) -> Self {
+        self.repository_filter = Some(repository_filter);
+        self
     }
 
     pub fn convert(
@@ -157,6 +165,9 @@ impl<'a> Converter<'a> {
         if !is_known_action(event_type, action) {
             return Ok(None);
         }
+        if !self.delivery_in_scope(event_type, action, payload)? {
+            return Ok(None);
+        }
         let d = &Delivery {
             action,
             payload,
@@ -171,6 +182,45 @@ impl<'a> Converter<'a> {
             _ => self.review_event(&mut cs, d)?,
         }
         Ok(Some(cs.changes))
+    }
+
+    fn delivery_in_scope(
+        &self,
+        event_type: &str,
+        action: &str,
+        payload: &Value,
+    ) -> Result<bool, ConvertError> {
+        let Some(filter) = self.repository_filter else {
+            return Ok(true);
+        };
+        let current = self.repository_in_scope(payload.get("repository"))?;
+        if event_type == "issues" && action == "transferred" {
+            if current {
+                return Ok(true);
+            }
+            return match payload.pointer("/changes/new_repository") {
+                Some(repository) => self.repository_in_scope(Some(repository)),
+                None => Ok(false),
+            };
+        }
+        if event_type == "repository" && action == "renamed" {
+            let previous = payload
+                .pointer("/changes/repository/name/from")
+                .and_then(Value::as_str)
+                .is_some_and(|name| filter.includes_name(name));
+            return Ok(current || previous);
+        }
+        Ok(current)
+    }
+
+    fn repository_in_scope(&self, repository: Option<&Value>) -> Result<bool, ConvertError> {
+        let Some(filter) = self.repository_filter else {
+            return Ok(true);
+        };
+        let repository = repository.ok_or_else(|| invalid("missing 'repository'"))?;
+        filter
+            .includes_repository(repository)
+            .map_err(|error| invalid(error.to_string()))
     }
 
     fn validate_organization(&self, payload: &Value) -> Result<String, ConvertError> {
@@ -196,6 +246,31 @@ impl<'a> Converter<'a> {
         let repo_id = required_str(payload, "/repository/node_id")?;
         let in_org = owner_in_org(Some(repo), self.organization);
         let relation_id = rel_id(REL_IN_ORGANIZATION, &repo_id, org);
+        if action == "renamed" && self.repository_filter.is_some() {
+            let current = self.repository_in_scope(Some(repo))?;
+            let previous = payload
+                .pointer("/changes/repository/name/from")
+                .and_then(Value::as_str)
+                .is_some_and(|name| {
+                    self.repository_filter
+                        .is_some_and(|filter| filter.includes_name(name))
+                });
+            match (previous, current) {
+                (true, false) => {
+                    cs.delete(&relation_id, REL_IN_ORGANIZATION);
+                    cs.delete(&repo_id, NODE_REPOSITORY);
+                    return Ok(());
+                }
+                (false, true) => {
+                    cs.node(Update, org, NODE_ORGANIZATION, org_props(payload));
+                    cs.node(Insert, &repo_id, NODE_REPOSITORY, repository_props(repo));
+                    cs.relation(Insert, REL_IN_ORGANIZATION, &relation_id, &repo_id, org);
+                    return Ok(());
+                }
+                (false, false) => return Ok(()),
+                (true, true) => {}
+            }
+        }
         match action {
             "created" | "transferred" if action == "created" || in_org => {
                 let op = if action == "created" { Insert } else { Update };
@@ -229,7 +304,7 @@ impl<'a> Converter<'a> {
             "deleted" => delete_work_item(cs, &item_id, &repo_id, label),
             "opened" => insert_work_item(cs, item, repo, &item_id, &repo_id, label),
             "transferred" => {
-                if owner_in_org(repo, self.organization) {
+                if owner_in_org(repo, self.organization) && self.repository_in_scope(repo)? {
                     delete_work_item(cs, &item_id, &repo_id, label);
                 }
                 let (Some(new_item), Some(new_repo)) = (
@@ -238,7 +313,9 @@ impl<'a> Converter<'a> {
                 ) else {
                     return Ok(());
                 };
-                if owner_in_org(Some(new_repo), self.organization) {
+                if owner_in_org(Some(new_repo), self.organization)
+                    && self.repository_in_scope(Some(new_repo))?
+                {
                     let new_id = required_str(new_item, "/node_id")?;
                     let new_repo_id = required_str(new_repo, "/node_id")?;
                     insert_work_item(cs, new_item, Some(new_repo), &new_id, &new_repo_id, label);

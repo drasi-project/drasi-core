@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config::{GitHubWorkGraphSourceConfig, WebhookConfig};
+use crate::config::{GitHubWorkGraphSourceConfig, RepositoryFilter, WebhookConfig};
 use crate::descriptor::GitHubWorkGraphSourceDescriptor;
 use crate::mapping::{
     derive_status, ConvertError, Converter, Status, NODE_LABELS, RELATION_LABELS,
@@ -171,6 +171,11 @@ fn review(action: &str) -> Value {
         "commit_id":"abc","html_url":"https://gh/reviews/3",
         "user":{"login":"ada","node_id":"U_ada","id":1,"type":"User"}}})
 }
+fn in_repository(mut payload: Value, name: &str) -> Value {
+    payload["repository"]["name"] = json!(name);
+    payload["repository"]["full_name"] = json!(format!("acme/{name}"));
+    payload
+}
 fn convert(event: &str, payload: &Value) -> Vec<SourceChange> {
     Converter::new("gh", "acme", 1)
         .convert(event, payload)
@@ -239,6 +244,155 @@ fn edited(from: &str, to: &str) -> Value {
     let mut payload = comment_event("edited", to, false);
     payload["changes"] = json!({"body":{"from":from}});
     payload
+}
+
+#[test]
+fn repository_filter_is_stateless_across_supported_families() {
+    let filter = RepositoryFilter::new(
+        "acme",
+        &[
+            "AcMe/Widgets".to_string(),
+            "widgets".to_string(),
+            "WIDGETS".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(filter.canonical_names(), vec!["widgets"]);
+
+    let mut pr = issue(json!([]));
+    pr["node_id"] = json!("PR_5");
+    let families = [
+        (
+            "repository",
+            json!({"action":"created","organization":org(),"repository":repo()}),
+        ),
+        ("issues", item_event("opened", json!([]))),
+        (
+            "pull_request",
+            json!({"action":"opened","organization":org(),"repository":repo(),"pull_request":pr}),
+        ),
+        ("issue_comment", comment_event("created", "ordinary", false)),
+        ("pull_request_review", review("submitted")),
+    ];
+    for (event, payload) in families {
+        let converter = Converter::new("gh", "acme", 1).with_repository_filter(&filter);
+        assert!(
+            converter.convert(event, &payload).unwrap().is_some(),
+            "{event} in the configured repository must be included"
+        );
+
+        let excluded = in_repository(payload, "gadgets");
+        assert!(
+            converter.convert(event, &excluded).unwrap().is_none(),
+            "{event} outside the configured repository must be ignored"
+        );
+    }
+
+    let empty = RepositoryFilter::new("acme", &[]).unwrap();
+    assert!(Converter::new("gh", "acme", 1)
+        .with_repository_filter(&empty)
+        .convert(
+            "issues",
+            &in_repository(item_event("opened", json!([])), "gadgets")
+        )
+        .unwrap()
+        .is_some());
+    assert!(Converter::new("gh", "acme", 1)
+        .with_repository_filter(&filter)
+        .convert("push", &json!({}))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn repository_filter_handles_transfer_and_rename_boundaries_without_state() {
+    let filter = RepositoryFilter::new("acme", &["widgets".to_string()]).unwrap();
+
+    let incomplete_transfer = item_event("transferred", json!([]));
+    let changes = Converter::new("gh", "acme", 1)
+        .with_repository_filter(&filter)
+        .convert("issues", &incomplete_transfer)
+        .unwrap()
+        .unwrap();
+    assert!(changes.iter().any(|change| {
+        change.get_reference().element_id.as_ref() == "I_42"
+            && matches!(change, SourceChange::Delete { .. })
+    }));
+    assert!(Converter::new("gh", "acme", 1)
+        .with_repository_filter(&filter)
+        .convert("issues", &in_repository(incomplete_transfer, "gadgets"))
+        .unwrap()
+        .is_none());
+
+    let mut transferred_in = in_repository(item_event("transferred", json!([])), "gadgets");
+    transferred_in["changes"] = json!({
+        "new_issue":{"node_id":"I_99","number":99,"labels":[]},
+        "new_repository":{
+            "node_id":"R_8","name":"widgets","full_name":"acme/widgets",
+            "owner":{"login":"acme"}
+        }
+    });
+    let moved_in = Converter::new("gh", "acme", 1)
+        .with_repository_filter(&filter)
+        .convert("issues", &transferred_in)
+        .unwrap()
+        .unwrap();
+    assert!(moved_in.iter().any(|change| {
+        change.get_reference().element_id.as_ref() == "I_99"
+            && matches!(change, SourceChange::Insert { .. })
+    }));
+    assert!(!moved_in.iter().any(|change| {
+        change.get_reference().element_id.as_ref() == "I_42"
+            && matches!(change, SourceChange::Delete { .. })
+    }));
+
+    let mut transferred_out = item_event("transferred", json!([]));
+    transferred_out["changes"] = json!({
+        "new_issue":{"node_id":"I_99","number":99,"labels":[]},
+        "new_repository":{
+            "node_id":"R_8","name":"gadgets","full_name":"acme/gadgets",
+            "owner":{"login":"acme"}
+        }
+    });
+    let moved_out = Converter::new("gh", "acme", 1)
+        .with_repository_filter(&filter)
+        .convert("issues", &transferred_out)
+        .unwrap()
+        .unwrap();
+    assert!(moved_out.iter().any(|change| {
+        change.get_reference().element_id.as_ref() == "I_42"
+            && matches!(change, SourceChange::Delete { .. })
+    }));
+    assert!(!moved_out
+        .iter()
+        .any(|change| change.get_reference().element_id.as_ref() == "I_99"));
+
+    let renamed_out = in_repository(
+        json!({"action":"renamed","organization":org(),"repository":repo(),
+            "changes":{"repository":{"name":{"from":"widgets"}}}}),
+        "gadgets",
+    );
+    let changes = Converter::new("gh", "acme", 1)
+        .with_repository_filter(&filter)
+        .convert("repository", &renamed_out)
+        .unwrap()
+        .unwrap();
+    assert!(changes.iter().any(|change| {
+        change.get_reference().element_id.as_ref() == "R_7"
+            && matches!(change, SourceChange::Delete { .. })
+    }));
+
+    let renamed_in = json!({"action":"renamed","organization":org(),"repository":repo(),
+        "changes":{"repository":{"name":{"from":"gadgets"}}}});
+    let changes = Converter::new("gh", "acme", 1)
+        .with_repository_filter(&filter)
+        .convert("repository", &renamed_in)
+        .unwrap()
+        .unwrap();
+    assert!(changes.iter().any(|change| {
+        change.get_reference().element_id.as_ref() == "R_7"
+            && matches!(change, SourceChange::Insert { .. })
+    }));
 }
 
 #[test]
@@ -788,6 +942,7 @@ fn issue_validation_assignment_rejects_stale_criteria() {
 fn config() -> GitHubWorkGraphSourceConfig {
     GitHubWorkGraphSourceConfig {
         organization: "acme".into(),
+        repositories: Vec::new(),
         webhook: WebhookConfig {
             secret: "secret".into(),
             ..WebhookConfig::default()
@@ -809,6 +964,14 @@ fn config_and_signature_contracts() {
     }))
     .unwrap();
     assert_eq!(custom.durability.max_events, 123);
+    assert!(custom.repositories.is_empty());
+    let normalized = GitHubWorkGraphSourceConfig {
+        repositories: vec!["Widgets".into(), "acme/widgets".into(), "gadgets".into()],
+        ..config()
+    }
+    .normalized()
+    .unwrap();
+    assert_eq!(normalized.repositories, vec!["gadgets", "widgets"]);
     for bad in [
         json!({"organization":"","webhook":{"secret":"s"}}),
         json!({"organization":"acme/x","webhook":{"secret":"s"}}),
@@ -816,21 +979,37 @@ fn config_and_signature_contracts() {
         json!({"organization":"acme","webhook":{"secret":"s","path":"/:"}}),
         json!({"organization":"acme","webhook":{"secret":"s"},"token":"x"}),
         json!({"organization":"acme","webhook":{"secret":"s"},"durability":{"enabled":true,"max_events":123}}),
+        json!({"organization":"acme","repositories":[""],"webhook":{"secret":"s"}}),
+        json!({"organization":"acme","repositories":[" widgets"],"webhook":{"secret":"s"}}),
+        json!({"organization":"acme","repositories":["other/widgets"],"webhook":{"secret":"s"}}),
+        json!({"organization":"acme","repositories":["acme/widgets/extra"],"webhook":{"secret":"s"}}),
+        json!({"organization":"acme","repositories":["widgets#1"],"webhook":{"secret":"s"}}),
     ] {
         assert!(serde_json::from_value::<GitHubWorkGraphSourceConfig>(bad)
             .and_then(|value| value.validate().map_err(serde::de::Error::custom))
             .is_err());
     }
     let source = crate::GitHubWorkGraphSourceBuilder::new("gh")
-        .with_config(config())
+        .with_config(GitHubWorkGraphSourceConfig {
+            repositories: vec!["Widgets".into(), "acme/widgets".into()],
+            ..config()
+        })
         .build()
         .unwrap();
     assert_eq!(
         drasi_lib::Source::properties(&source)["webhook"]["secret"],
         json!("[REDACTED]")
     );
+    assert_eq!(
+        drasi_lib::Source::properties(&source)["repositories"],
+        json!(["widgets"])
+    );
     let schema = GitHubWorkGraphSourceDescriptor.config_schema_json();
-    assert!(schema.contains("\"maxEvents\"") && !schema.contains("\"max_events\""));
+    assert!(
+        schema.contains("\"maxEvents\"")
+            && schema.contains("\"repositories\"")
+            && !schema.contains("\"max_events\"")
+    );
     let signature = "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17";
     assert!(verify_signature(b"It's a Secret to Everybody", b"Hello, World!", signature).is_ok());
     assert!(verify_signature(b"wrong", b"Hello, World!", signature).is_err());

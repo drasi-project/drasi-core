@@ -35,7 +35,8 @@ LF-only spacing, typed two-space JSON, and single final LF as live webhooks.
 
 ## Scope (prototype)
 
-- One configured GitHub organization; every repository the token can see.
+- One configured GitHub organization; all repositories the token can see by
+  default, or only the Source's normalized `repositories` allowlist.
 - Only currently **open** Issues and Pull Requests (no closed history).
 - Issue/PR conversation comments and submitted or dismissed PR reviews.
 - **Excluded**: GitHub Projects and Project Items, inline diff/review
@@ -74,6 +75,8 @@ sources:
   - id: github-workgraph
     kind: github-workgraph
     organization: drasi-project
+    repositories:
+      - drasi-workgraph-demo
     webhook:
       host: 0.0.0.0
       port: 8080
@@ -89,9 +92,15 @@ sources:
     bootstrapProvider: github-workgraph-bootstrap
 ```
 
-The organization is read from the parent `github-workgraph` Source
-configuration, ensuring bootstrap and webhook streaming cannot target different
-organizations. Do not use an inline `bootstrapProvider` mapping for this pair:
+The organization and optional `repositories` allowlist are read from the parent
+`github-workgraph` Source configuration, ensuring bootstrap and webhook
+streaming cannot target different repository scopes. Omitted or empty means all
+repositories. Bare names and same-organization `owner/name` values are accepted,
+then normalized to sorted, deduplicated lowercase bare names. Bootstrap
+enumerates the organization once and filters that repository list before any
+per-repository Issue, PR, comment, or review request; it needs no repository
+cache and makes no extra filtering API calls. Do not use an inline
+`bootstrapProvider` mapping for this pair:
 drasi-server applies same-kind inheritance to inline providers, which would copy
 Source-only fields such as `organization`, `webhook`, and `durability` into this
 bootstrapper's strict configuration. A top-level `bootstrapProviders` entry and

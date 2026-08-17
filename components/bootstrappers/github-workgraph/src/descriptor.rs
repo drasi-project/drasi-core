@@ -33,8 +33,9 @@ fn default_max_concurrency() -> ConfigValue<usize> {
 
 /// GitHub WorkGraph bootstrap configuration DTO.
 ///
-/// The organization comes from the parent `github-workgraph` Source
-/// configuration so bootstrap and streaming always target the same graph.
+/// The organization and repository allowlist come from the parent
+/// `github-workgraph` Source configuration so bootstrap and streaming always
+/// target the same graph.
 /// `token` **must** be a read-only credential (a fine-grained PAT scoped to
 /// `Issues: Read`, `Pull requests: Read`, `Metadata: Read` on the target
 /// organization, or an equivalent read-only GitHub App installation token).
@@ -108,9 +109,11 @@ impl BootstrapPluginDescriptor for GitHubWorkGraphBootstrapDescriptor {
         let source_dto: GitHubWorkGraphSourceConfigDto =
             serde_json::from_value(source_config_json.clone())?;
         let mapper = DtoMapper::new();
+        let repositories = mapper.resolve_string_vec(&source_dto.repositories).await?;
 
         let provider = GitHubWorkGraphBootstrapProvider::builder()
             .with_organization(mapper.resolve_string(&source_dto.organization).await?)
+            .with_repositories(repositories)
             .with_token(mapper.resolve_string(&dto.token).await?)
             .with_api_base_url(mapper.resolve_string(&dto.api_base_url).await?)
             .with_max_concurrency(mapper.resolve_typed(&dto.max_concurrency).await?)
@@ -125,13 +128,14 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
-    async fn descriptor_reads_organization_from_source_config() {
+    async fn descriptor_reads_scope_from_source_config() {
         let descriptor = GitHubWorkGraphBootstrapDescriptor;
         let provider = descriptor
             .create_bootstrap_provider(
                 &json!({ "token": "read-only-token" }),
                 &json!({
                     "organization": "acme",
+                    "repositories": ["widgets", "acme/widgets"],
                     "webhook": { "secret": "webhook-secret" }
                 }),
             )
@@ -141,5 +145,18 @@ mod tests {
         let schema = descriptor.config_schema_json();
         assert!(schema.contains("\"token\""));
         assert!(!schema.contains("\"organization\""));
+        assert!(!schema.contains("\"repositories\""));
+
+        let foreign = descriptor
+            .create_bootstrap_provider(
+                &json!({ "token": "read-only-token" }),
+                &json!({
+                    "organization": "acme",
+                    "repositories": ["other/widgets"],
+                    "webhook": { "secret": "webhook-secret" }
+                }),
+            )
+            .await;
+        assert!(foreign.is_err());
     }
 }
