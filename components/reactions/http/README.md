@@ -14,7 +14,8 @@ Changes can be distributed two ways:
   a `batchEndpoint`.
 
 Single-notification mode supports [Handlebars](https://handlebarsjs.com/) templating of
-the request URL, body, and headers, plus per-query routing and bearer-token authentication.
+the request URL, body, and headers, per-query routing, bearer-token authentication, and
+optional validation of successful JSON responses.
 Adaptive batch mode coalesces changes into a canonical `BatchEnvelope` POSTed to
 `batchEndpoint`; per-query **body** templates still apply to each item (the URL, method, and
 headers do not, because a batch is a single request).
@@ -235,7 +236,7 @@ optional unless noted; defaults are applied by the builder.
 | `base_url` | `String` | `http://localhost` | `with_base_url` | Base URL prepended to every relative per-call URL. |
 | `token` | `Option<String>` | `None` | `with_token` | Bearer token sent as `Authorization: Bearer <token>` on every request. |
 | `timeout_ms` | `u64` | `5000` | `with_timeout_ms` | Per-request HTTP timeout in milliseconds. |
-| `output_templates` | `Option<HttpOutputTemplates>` | `None` | `with_default_template`, `with_query_template`, `with_output_templates` | Per-query and default templates. In single-notification mode the URL, body, and headers are templated; in adaptive mode only the per-query **body** template applies to each batched item. See [Output templates](#output-templates-and-per-query-routing). |
+| `output_templates` | `Option<HttpOutputTemplates>` | `None` | `with_default_template`, `with_query_template`, `with_output_templates` | Per-query and default call specifications. In single-notification mode the URL, body, headers, and optional response validator apply; in adaptive mode only the per-query **body** template applies to each batched item. See [Output templates](#output-templates-and-per-query-routing). |
 | `adaptive` | `Option<AdaptiveBatchConfig>` | `None` | `with_adaptive` | When `Some`, enables [adaptive batching](#adaptive-batching) and requires `batch_endpoint`. When `None`, the reaction delivers one HTTP request per result. |
 | `batch_endpoint` | `Option<String>` | `None` | `with_batch_endpoint` | Path appended to `base_url`. Required with `adaptive`; every coalesced batch is POSTed to `{base_url}{batch_endpoint}` as a single payload. Invalid combinations fail at `build()` time. |
 | `recovery_policy` | `Option<ReactionRecoveryPolicy>` | `strict` | `with_recovery_policy` | Behavior on a **sustained** delivery failure. `strict` (default) fail-stops the reaction (`Error`) without advancing the checkpoint, so the un-acked work replays from the query outbox on restart; `auto_skip_gap` skips the failed batch and keeps running. In declarative config the key is `recoveryPolicy` (`strict` \| `auto_skip_gap`). |
@@ -270,7 +271,7 @@ Builder-only settings (not stored on `HttpReactionConfig`):
 ### `HttpCallSpec`
 
 `HttpCallSpec = TemplateSpec<HttpCallExt>` — a Handlebars body `template` plus an
-`HttpCallExt { url, method, headers }`.
+`HttpCallExt { url, method, headers, reject_non_empty_json_pointer }`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -278,6 +279,7 @@ Builder-only settings (not stored on `HttpReactionConfig`):
 | `extension.url` | `String` | _empty_ | Handlebars template for the URL. A relative value is appended to `base_url`; an absolute `http(s)://` value is allowed only if its scheme, host, and port match `base_url`. |
 | `extension.method` | `String` | `POST` | HTTP method: `GET`, `POST`, `PUT`, `PATCH`, or `DELETE` (case-insensitive). |
 | `extension.headers` | `HashMap<String, String>` | _empty_ | Additional headers. Values support Handlebars templates. |
+| `extension.reject_non_empty_json_pointer` | `Option<String>` | `None` | Literal RFC 6901 JSON pointer used to validate a 2xx response, for example `/errors`. See [Delivery failure handling](#delivery-failure-handling). Not templated, and rejected when adaptive mode is enabled. |
 
 ### `AdaptiveBatchConfig`
 
@@ -306,7 +308,7 @@ when it creates the reaction (the equivalent of `with_queries(...)`).
 | `token` | string \| ConfigValue | `with_token` | Bearer token. |
 | `timeoutMs` | number \| ConfigValue | `with_timeout_ms` | Default `5000`. |
 | `priorityQueueCapacity` | number \| ConfigValue | `with_priority_queue_capacity` | Inbound queue capacity (default `10000`). Declarative-only — a `ReactionBase` parameter, not a field of `HttpReactionConfig`. |
-| `outputTemplates` | object | `with_output_templates` | `defaultTemplate` + `routes`; each entry has `added` / `updated` / `deleted`, each with `template` / `url` / `method` / `headers`. |
+| `outputTemplates` | object | `with_output_templates` | `defaultTemplate` + `routes`; each entry has `added` / `updated` / `deleted`, each with `template` / `url` / `method` / `headers` / `rejectNonEmptyJsonPointer`. |
 | `adaptive` | object | `with_adaptive` | `adaptiveMinBatchSize`, `adaptiveMaxBatchSize`, `adaptiveWindowSize`, `adaptiveBatchTimeoutMs`. |
 | `batchEndpoint` | string \| ConfigValue | `with_batch_endpoint` | Required whenever `adaptive` is set. |
 
@@ -327,6 +329,20 @@ Single-notification example (per-query REST routing, token from an environment v
     }
   }
 }
+```
+
+For an API such as GitHub GraphQL that can report logical errors in an HTTP 2xx
+response, set the validator only on the calls that require it:
+
+```yaml
+outputTemplates:
+  routes:
+    work-items:
+      added:
+        url: /graphql
+        method: POST
+        template: '{"query":"mutation { ... }"}'
+        rejectNonEmptyJsonPointer: /errors
 ```
 
 Adaptive (batched) example:
@@ -374,6 +390,7 @@ let orders = HttpQueryConfig {
             url: "/orders".to_string(),
             method: "POST".to_string(),
             headers: HashMap::new(),
+            ..Default::default()
         },
     }),
     deleted: Some(TemplateSpec {
@@ -382,6 +399,7 @@ let orders = HttpQueryConfig {
             url: "/orders/{{before.id}}".to_string(),
             method: "DELETE".to_string(),
             headers: HashMap::new(),
+            ..Default::default()
         },
     }),
     ..Default::default()
@@ -396,8 +414,9 @@ dotted segments.
 ## Templating
 
 Templates use [Handlebars](https://handlebarsjs.com/) syntax and apply to the body
-`template`, the `url`, and header values. HTTP methods are static and validated at build
-time. The render context depends on the operation:
+`template`, the `url`, and header values. HTTP methods and
+`rejectNonEmptyJsonPointer` values are static and validated at build time. The render
+context depends on the operation:
 
 | Variable | Available for | Meaning |
 |----------|---------------|---------|
@@ -504,6 +523,9 @@ Content-Type: application/json
   rendered custom headers.
 - **Body** — the rendered `template`. When the template is empty (including the synthesized
   default), the body is the `DefaultChangeNotification` envelope shown above.
+- **Response validation** — when `rejectNonEmptyJsonPointer` is configured, the 2xx body
+  must be valid JSON no larger than 1 MiB and the pointer must be missing or resolve to an
+  accepted empty value.
 
 ### `BatchEnvelope` (batch-endpoint path)
 
@@ -548,7 +570,8 @@ throughput. The batcher:
 Use adaptive batching when your receiver can accept many changes in one request and the
 per-request overhead is the bottleneck. Per-query **body** templates still apply to each
 batched item; if each change must go to its own templated URL/method/headers, use
-single-notification mode instead.
+single-notification mode instead. Adaptive configuration that includes a per-call
+`rejectNonEmptyJsonPointer` fails validation rather than silently ignoring it.
 
 ---
 
@@ -571,11 +594,22 @@ behaviour is always on and cannot be disabled.
 
 ## Delivery failure handling
 
-The HTTP reaction is fire-and-forget: it does not persist delivery checkpoints or replay
-requests after process failure. Each outbound request is attempted up to three times for
-transient failures (network errors, 408, 409, 425, 429, and 5xx responses) with short
-exponential backoff. Non-retryable HTTP failures are logged as permanent failures and the
-reaction continues processing later events.
+Each outbound request is attempted up to three times for transport failures and retryable
+statuses (408, 409, 425, 429, and 5xx) with short exponential backoff. Auth/permission
+statuses (401, 403, and 407) are sustained delivery failures, while other non-retryable 4xx
+responses are permanent poison events that are dropped.
+
+When a per-call `rejectNonEmptyJsonPointer` is configured, every 2xx response body is read
+incrementally with a fixed 1 MiB limit and parsed as JSON. A missing pointer is accepted.
+The following resolved values are also accepted: `null`, `false`, numeric zero, an empty
+string, an empty array, or an empty object. Any other value, malformed JSON, a response-read
+failure, or a body over the limit is a sustained delivery failure. Logical response
+validation returns immediately after that single HTTP request and is never retried in
+process. Error messages identify the failure without including the downstream body.
+
+Under the default `strict` recovery policy, a sustained failure stops the reaction without
+advancing its checkpoint, so the event can replay from the query outbox after restart.
+`auto_skip_gap` instead advances past the failed event and keeps the reaction running.
 
 ---
 
@@ -628,6 +662,7 @@ let orders = HttpQueryConfig {
             url: "/orders".to_string(),
             method: "POST".to_string(),
             headers: HashMap::new(),
+            ..Default::default()
         },
     }),
     updated: Some(TemplateSpec {
@@ -636,6 +671,7 @@ let orders = HttpQueryConfig {
             url: "/orders/{{after.id}}".to_string(),
             method: "PUT".to_string(),
             headers: HashMap::new(),
+            ..Default::default()
         },
     }),
     deleted: Some(TemplateSpec {
@@ -644,6 +680,7 @@ let orders = HttpQueryConfig {
             url: "/orders/{{before.id}}".to_string(),
             method: "DELETE".to_string(),
             headers: HashMap::new(),
+            ..Default::default()
         },
     }),
 };
@@ -690,6 +727,7 @@ let default_tmpl = HttpQueryConfig {
             url: "/events".to_string(),
             method: "POST".to_string(),
             headers,
+            ..Default::default()
         },
     }),
     ..Default::default()

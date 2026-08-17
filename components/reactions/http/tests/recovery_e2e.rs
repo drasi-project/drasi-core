@@ -31,6 +31,9 @@
 //! * `strict_fail_stops_on_sustained_failure_then_recovers_on_restart` — under the
 //!   default Strict policy a sustained 5xx outage stops the reaction without
 //!   losing the un-acked event, which is replayed once the downstream recovers.
+//! * `strict_logical_2xx_failure_replays_without_in_process_retry` — a configured
+//!   response validator fail-stops on a logical 2xx failure after one request and
+//!   leaves the event un-acked for replay.
 //! * `auto_skip_gap_keeps_running_and_skips_failed_batch` — under AutoSkipGap a
 //!   sustained outage is skipped and the reaction keeps delivering later events.
 //! * `adaptive_permanent_4xx_is_dropped_and_reaction_keeps_running` — in adaptive
@@ -47,8 +50,10 @@ use drasi_lib::channels::ComponentStatus;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::{DrasiLib, MemoryStateStoreProvider, Query};
-use drasi_reaction_http::{AdaptiveBatchConfig, HttpReaction};
-use serde_json::Value;
+use drasi_reaction_http::{
+    AdaptiveBatchConfig, HttpCallExt, HttpQueryConfig, HttpReaction, TemplateSpec,
+};
+use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -64,6 +69,16 @@ async fn build_core(
     store: Arc<dyn StateStoreProvider>,
     policy: ReactionRecoveryPolicy,
     adaptive: bool,
+) -> (Arc<DrasiLib>, mock_source::MockSourceHandle) {
+    build_core_with_validator(base_url, store, policy, adaptive, None).await
+}
+
+async fn build_core_with_validator(
+    base_url: String,
+    store: Arc<dyn StateStoreProvider>,
+    policy: ReactionRecoveryPolicy,
+    adaptive: bool,
+    reject_non_empty_json_pointer: Option<&str>,
 ) -> (Arc<DrasiLib>, mock_source::MockSourceHandle) {
     let (mock_source, handle) = mock_source::MockSource::new(SOURCE).expect("mock source");
 
@@ -87,6 +102,23 @@ async fn build_core(
                 adaptive_batch_timeout_ms: 50,
             })
             .with_batch_endpoint("/batch");
+    }
+    if let Some(pointer) = reject_non_empty_json_pointer {
+        builder = builder.with_query_template(
+            QUERY,
+            HttpQueryConfig {
+                added: Some(TemplateSpec {
+                    template: String::new(),
+                    extension: HttpCallExt {
+                        url: format!("/changes/{QUERY}"),
+                        method: "POST".to_string(),
+                        headers: Default::default(),
+                        reject_non_empty_json_pointer: Some(pointer.to_string()),
+                    },
+                }),
+                ..Default::default()
+            },
+        );
     }
     let reaction = builder.build().expect("reaction builder");
 
@@ -124,6 +156,15 @@ async fn respond_with(server: &MockServer, request_path: &str, status: u16) {
     Mock::given(method("POST"))
         .and(path(request_path.to_string()))
         .respond_with(ResponseTemplate::new(status))
+        .mount(server)
+        .await;
+}
+
+async fn respond_with_json(server: &MockServer, request_path: &str, status: u16, body: Value) {
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path(request_path.to_string()))
+        .respond_with(ResponseTemplate::new(status).set_body_json(body))
         .mount(server)
         .await;
 }
@@ -456,6 +497,67 @@ async fn strict_fail_stops_on_sustained_failure_then_recovers_on_restart() {
         vec!["Alice"],
         "the un-acked event is replayed exactly once after recovery"
     );
+
+    core.stop().await.expect("stop core");
+}
+
+/// A logical failure in an HTTP 200 response is sustained delivery failure, not
+/// a retryable HTTP status. Strict therefore fail-stops after one request and
+/// leaves the checkpoint behind the event so an operator restart can replay it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn strict_logical_2xx_failure_replays_without_in_process_retry() {
+    let server = mock_server::start().await;
+    respond_with_json(
+        &server,
+        "/changes/e2e-query",
+        200,
+        json!({"errors": [{"message": "logical failure"}]}),
+    )
+    .await;
+    let store = Arc::new(MemoryStateStoreProvider::new());
+    let (core, handle) = build_core_with_validator(
+        server.uri(),
+        store,
+        ReactionRecoveryPolicy::Strict,
+        false,
+        Some("/errors"),
+    )
+    .await;
+    core.start().await.expect("start core");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    insert_person(&handle, "p1", "Alice").await;
+    assert!(
+        wait_for_reaction_status(&core, ComponentStatus::Error, Duration::from_secs(5)).await,
+        "logical 2xx rejection must fail-stop under Strict"
+    );
+    assert_eq!(
+        wait_for_name_count(&server, 1, Duration::from_secs(2)).await,
+        1
+    );
+    assert_no_extra_deliveries(&server, 1, Duration::from_millis(500)).await;
+
+    respond_with_json(
+        &server,
+        "/changes/e2e-query",
+        200,
+        json!({"data": {"ok": true}}),
+    )
+    .await;
+    core.start_reaction(REACTION)
+        .await
+        .expect("restart reaction from Error");
+
+    assert_eq!(
+        wait_for_name_count(&server, 1, Duration::from_secs(10)).await,
+        1
+    );
+    assert_eq!(
+        names_received(&server).await,
+        vec!["Alice"],
+        "the logical failure left the event un-acked for one replay"
+    );
+    assert_no_extra_deliveries(&server, 1, Duration::from_millis(500)).await;
 
     core.stop().await.expect("stop core");
 }

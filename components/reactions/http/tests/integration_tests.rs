@@ -21,6 +21,7 @@ mod mock_source;
 
 use anyhow::Result;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +34,9 @@ use drasi_reaction_http::{
 };
 use mock_source::{MockSource, PropertyMapBuilder};
 use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
 
@@ -98,6 +102,143 @@ async fn wait_for_requests(server: &wiremock::MockServer, expected: usize, max_m
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+async fn wait_for_status(reaction: &HttpReaction, expected: ComponentStatus, max_ms: u64) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_millis(max_ms);
+    loop {
+        if reaction.status().await == expected {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn response_validator_config(path: &str, pointer: Option<&str>) -> HttpQueryConfig {
+    HttpQueryConfig {
+        added: Some(TemplateSpec {
+            template: String::new(),
+            extension: HttpCallExt {
+                url: path.to_string(),
+                method: "POST".to_string(),
+                headers: HashMap::new(),
+                reject_non_empty_json_pointer: pointer.map(str::to_string),
+            },
+        }),
+        ..Default::default()
+    }
+}
+
+fn response_validator_reaction(
+    id: &str,
+    base_url: String,
+    pointer: Option<&str>,
+) -> Arc<HttpReaction> {
+    Arc::new(
+        HttpReaction::builder(id)
+            .with_base_url(base_url)
+            .with_query("q1")
+            .with_query_template("q1", response_validator_config("/graphql", pointer))
+            .build()
+            .expect("response-validating reaction should build"),
+    )
+}
+
+struct RawResponseServer {
+    uri: String,
+    requests: Arc<AtomicUsize>,
+    task: JoinHandle<()>,
+}
+
+impl RawResponseServer {
+    async fn start(response: Vec<u8>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("raw response server should bind");
+        let address = listener
+            .local_addr()
+            .expect("raw response server should have a local address");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = Arc::clone(&requests);
+        let task = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                request_count.fetch_add(1, Ordering::SeqCst);
+                read_http_request(&mut stream).await;
+                let _ = stream.write_all(&response).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        Self {
+            uri: format!("http://{address}"),
+            requests,
+            task,
+        }
+    }
+}
+
+impl Drop for RawResponseServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn read_http_request(stream: &mut TcpStream) {
+    const MAX_TEST_REQUEST_BYTES: usize = 64 * 1024;
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let Ok(read) = stream.read(&mut buffer).await else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.len() > MAX_TEST_REQUEST_BYTES {
+            return;
+        }
+
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        if request.len() >= header_end + 4 + content_length {
+            return;
+        }
+    }
+}
+
+async fn wait_for_raw_requests(server: &RawResponseServer, expected: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while server.requests.load(Ordering::SeqCst) < expected {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {expected} raw HTTP request(s)"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn chunked_response(body: &[u8], chunk_size: usize) -> Vec<u8> {
+    let mut response =
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            .to_vec();
+    for chunk in body.chunks(chunk_size) {
+        response.extend_from_slice(format!("{:X}\r\n", chunk.len()).as_bytes());
+        response.extend_from_slice(chunk);
+        response.extend_from_slice(b"\r\n");
+    }
+    response.extend_from_slice(b"0\r\n\r\n");
+    response
 }
 
 #[tokio::test]
@@ -228,6 +369,7 @@ async fn standard_uses_per_query_template() {
             url: "/items/{{after.id}}".to_string(),
             method: "PUT".to_string(),
             headers,
+            ..Default::default()
         },
     };
     let r = Arc::new(
@@ -276,6 +418,7 @@ async fn standard_body_render_error_uses_default_envelope_on_configured_route() 
             url: "/items".to_string(),
             method: "POST".to_string(),
             headers: HashMap::new(),
+            ..Default::default()
         },
     };
     let r = Arc::new(
@@ -342,6 +485,186 @@ async fn standard_authorization_header_sent_when_token_set() {
 }
 
 // ---------------------------------------------------------------------------
+// Standard mode: successful-response JSON validation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn response_validator_accepts_missing_and_empty_values() {
+    let cases = [
+        ("missing", json!({"data": {"ok": true}})),
+        ("null", json!({"errors": null})),
+        ("false", json!({"errors": false})),
+        ("zero", json!({"errors": 0})),
+        ("empty-string", json!({"errors": ""})),
+        ("empty-array", json!({"errors": []})),
+        ("empty-object", json!({"errors": {}})),
+    ];
+
+    for (name, response_body) in cases {
+        let server = mock_server::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+            .mount(&server)
+            .await;
+        let reaction = response_validator_reaction(name, server.uri(), Some("/errors"));
+        reaction.start().await.unwrap();
+        enqueue_add(&reaction, "q1", json!({"id": 1})).await;
+        wait_for_requests(&server, 1, 2000).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "{name} should require exactly one request"
+        );
+        assert_eq!(
+            reaction.status().await,
+            ComponentStatus::Running,
+            "{name} should pass validation"
+        );
+        reaction.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn response_validator_rejects_non_empty_values_without_retry() {
+    let cases = [
+        ("array", json!({"errors": [{"message": "nope"}]})),
+        ("object", json!({"errors": {"message": "nope"}})),
+        ("string", json!({"errors": "nope"})),
+        ("true", json!({"errors": true})),
+        ("nonzero", json!({"errors": 1})),
+    ];
+
+    for (name, response_body) in cases {
+        let server = mock_server::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+            .mount(&server)
+            .await;
+        let reaction = response_validator_reaction(name, server.uri(), Some("/errors"));
+        reaction.start().await.unwrap();
+        enqueue_add(&reaction, "q1", json!({"id": 1})).await;
+        assert!(
+            wait_for_status(&reaction, ComponentStatus::Error, 2000).await,
+            "{name} should fail-stop"
+        );
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "{name} logical rejection must not retry"
+        );
+        reaction.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn response_validator_rejects_malformed_json_and_oversized_body_once() {
+    let cases = [
+        (
+            "malformed",
+            ResponseTemplate::new(200).set_body_string("{not-json"),
+        ),
+        (
+            "oversized",
+            ResponseTemplate::new(200).set_body_bytes(vec![b' '; 1024 * 1024 + 1]),
+        ),
+    ];
+
+    for (name, response) in cases {
+        let server = mock_server::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        let reaction = response_validator_reaction(name, server.uri(), Some("/errors"));
+        reaction.start().await.unwrap();
+        enqueue_add(&reaction, "q1", json!({"id": 1})).await;
+        assert!(
+            wait_for_status(&reaction, ComponentStatus::Error, 3000).await,
+            "{name} should fail-stop"
+        );
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "{name} response failure must not retry"
+        );
+        reaction.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn omitted_response_validator_preserves_status_only_2xx_behavior() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{not-json"))
+        .mount(&server)
+        .await;
+    let reaction = response_validator_reaction("legacy", server.uri(), None);
+    reaction.start().await.unwrap();
+    enqueue_add(&reaction, "q1", json!({"id": 1})).await;
+    wait_for_requests(&server, 1, 2000).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(reaction.status().await, ComponentStatus::Running);
+    reaction.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn response_validator_bounds_chunked_body_without_retry() {
+    let body = vec![b' '; 1024 * 1024 + 1];
+    let server = RawResponseServer::start(chunked_response(&body, 16 * 1024)).await;
+    let reaction =
+        response_validator_reaction("chunked-overflow", server.uri.clone(), Some("/errors"));
+    reaction.start().await.unwrap();
+    enqueue_add(&reaction, "q1", json!({"id": 1})).await;
+    wait_for_raw_requests(&server, 1).await;
+    assert!(
+        wait_for_status(&reaction, ComponentStatus::Error, 3000).await,
+        "chunked response over the 1 MiB limit should fail-stop"
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    assert_eq!(
+        server.requests.load(Ordering::SeqCst),
+        1,
+        "chunked overflow must not retry"
+    );
+    reaction.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn response_validator_treats_truncated_body_as_read_failure_without_retry() {
+    let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\nConnection: close\r\n\r\n{\"errors\":[".to_vec();
+    let server = RawResponseServer::start(response).await;
+    let reaction =
+        response_validator_reaction("truncated-body", server.uri.clone(), Some("/errors"));
+    reaction.start().await.unwrap();
+    enqueue_add(&reaction, "q1", json!({"id": 1})).await;
+    wait_for_raw_requests(&server, 1).await;
+    assert!(
+        wait_for_status(&reaction, ComponentStatus::Error, 3000).await,
+        "truncated response body should fail-stop"
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    assert_eq!(
+        server.requests.load(Ordering::SeqCst),
+        1,
+        "response read failure must not retry"
+    );
+    reaction.stop().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
 // UPDATE / DELETE context building
 // ---------------------------------------------------------------------------
 
@@ -360,6 +683,7 @@ async fn standard_update_template_receives_before_and_after() {
             url: "/items/{{after.id}}".to_string(),
             method: "PUT".to_string(),
             headers: HashMap::new(),
+            ..Default::default()
         },
     };
     let r = Arc::new(
@@ -409,6 +733,7 @@ async fn standard_delete_template_receives_before() {
             url: "/items/{{before.id}}".to_string(),
             method: "DELETE".to_string(),
             headers: HashMap::new(),
+            ..Default::default()
         },
     };
     let r = Arc::new(
@@ -814,6 +1139,7 @@ async fn ssrf_guard_blocks_absolute_url_with_mismatched_host() {
             url: "http://evil.example.com/x".to_string(),
             method: "POST".to_string(),
             headers: HashMap::new(),
+            ..Default::default()
         },
     };
     // DELETE template renders a safe relative URL — must be delivered, and
@@ -824,6 +1150,7 @@ async fn ssrf_guard_blocks_absolute_url_with_mismatched_host() {
             url: "/safe".to_string(),
             method: "POST".to_string(),
             headers: HashMap::new(),
+            ..Default::default()
         },
     };
 
@@ -1152,6 +1479,7 @@ async fn template_context_exposes_query_id_metadata_and_operation() {
             url: "/ingest".to_string(),
             method: "POST".to_string(),
             headers: HashMap::new(),
+            ..Default::default()
         },
     };
     let r = Arc::new(
@@ -1213,6 +1541,7 @@ async fn route_resolves_via_last_dotted_segment() {
             url: "/seg".to_string(),
             method: "POST".to_string(),
             headers: HashMap::new(),
+            ..Default::default()
         },
     };
     let r = Arc::new(
@@ -1260,7 +1589,7 @@ async fn standard_retries_transient_failure_then_succeeds() {
         .await;
     Mock::given(method("POST"))
         .and(path("/changes/q1"))
-        .respond_with(ResponseTemplate::new(200))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {}})))
         .mount(&server)
         .await;
 
@@ -1268,6 +1597,10 @@ async fn standard_retries_transient_failure_then_succeeds() {
         HttpReaction::builder("retry-then-ok")
             .with_base_url(server.uri())
             .with_query("q1")
+            .with_query_template(
+                "q1",
+                response_validator_config("/changes/q1", Some("/errors")),
+            )
             .build()
             .unwrap(),
     );
@@ -1297,6 +1630,10 @@ async fn standard_drops_permanent_4xx_and_continues() {
         HttpReaction::builder("perm-4xx")
             .with_base_url(server.uri())
             .with_query("q1")
+            .with_query_template(
+                "q1",
+                response_validator_config("/changes/q1", Some("/errors")),
+            )
             .build()
             .unwrap(),
     );
@@ -1336,6 +1673,10 @@ async fn standard_auth_rejection_fail_stops_and_does_not_drop_event() {
         HttpReaction::builder("auth-401")
             .with_base_url(server.uri())
             .with_query("q1")
+            .with_query_template(
+                "q1",
+                response_validator_config("/changes/q1", Some("/errors")),
+            )
             .build()
             .unwrap(),
     );
@@ -1421,6 +1762,7 @@ async fn standard_absolute_url_matching_base_is_allowed() {
             url: absolute,
             method: "POST".to_string(),
             headers: HashMap::new(),
+            ..Default::default()
         },
     };
     let r = Arc::new(
@@ -1464,6 +1806,7 @@ async fn standard_url_render_failure_falls_back_to_changes_endpoint() {
             url: "/items/{{badhelper after.id}}".to_string(),
             method: "POST".to_string(),
             headers: HashMap::new(),
+            ..Default::default()
         },
     };
     let r = Arc::new(
@@ -1508,6 +1851,7 @@ async fn standard_header_render_failure_drops_only_that_header() {
             url: "/h".to_string(),
             method: "POST".to_string(),
             headers,
+            ..Default::default()
         },
     };
     let r = Arc::new(
@@ -1558,6 +1902,7 @@ async fn standard_routes_two_queries_to_distinct_endpoints() {
                 url: url.to_string(),
                 method: "POST".to_string(),
                 headers: HashMap::new(),
+                ..Default::default()
             },
         }),
         ..Default::default()

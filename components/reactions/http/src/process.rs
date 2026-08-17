@@ -19,7 +19,7 @@ use handlebars::Handlebars;
 use log::{debug, error, warn};
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
-    Client, Method, StatusCode,
+    Client, Method, Response, StatusCode,
 };
 use serde_json::{Map, Value};
 use std::time::Duration;
@@ -31,6 +31,10 @@ use crate::output::{DefaultChangeNotification, Operation};
 
 const MAX_DELIVERY_ATTEMPTS: usize = 3;
 const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Maximum response body inspected by a configured JSON response validator.
+/// The limit is enforced while chunks are read, before JSON parsing.
+const MAX_VALIDATED_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
 
 /// Maximum length of a downstream-supplied string (response body, rendered URL)
 /// allowed into a log line.
@@ -67,6 +71,24 @@ pub(crate) enum DeliveryOutcome {
     Delivered,
     /// The event was permanently undeliverable and dropped.
     Dropped,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DeliveryOptions<'a> {
+    description: &'a str,
+    reject_non_empty_json_pointer: Option<&'a str>,
+}
+
+impl<'a> DeliveryOptions<'a> {
+    pub(crate) const fn new(
+        description: &'a str,
+        reject_non_empty_json_pointer: Option<&'a str>,
+    ) -> Self {
+        Self {
+            description,
+            reject_non_empty_json_pointer,
+        }
+    }
 }
 
 /// Build a [`Handlebars`] registry pre-loaded with the `json` helper used
@@ -330,7 +352,10 @@ pub(crate) async fn process_result(
         headers,
         body,
         reaction_name,
-        "HTTP request",
+        DeliveryOptions::new(
+            "HTTP request",
+            call_spec.extension.reject_non_empty_json_pointer.as_deref(),
+        ),
     )
     .await
 }
@@ -372,7 +397,7 @@ pub(crate) async fn post_default_notification(
         headers,
         body,
         reaction_name,
-        "default-notification HTTP request",
+        DeliveryOptions::new("default-notification HTTP request", None),
     )
     .await
 }
@@ -384,8 +409,12 @@ pub(crate) async fn send_with_retry(
     headers: HeaderMap,
     body: String,
     reaction_name: &str,
-    description: &str,
+    options: DeliveryOptions<'_>,
 ) -> Result<DeliveryOutcome> {
+    let DeliveryOptions {
+        description,
+        reject_non_empty_json_pointer,
+    } = options;
     let mut backoff = INITIAL_RETRY_BACKOFF;
 
     for attempt in 1..=MAX_DELIVERY_ATTEMPTS {
@@ -405,6 +434,9 @@ pub(crate) async fn send_with_retry(
                 );
 
                 if status.is_success() {
+                    if let Some(pointer) = reject_non_empty_json_pointer {
+                        validate_success_response(response, pointer, description).await?;
+                    }
                     return Ok(DeliveryOutcome::Delivered);
                 }
 
@@ -473,6 +505,73 @@ pub(crate) async fn send_with_retry(
     }
 
     unreachable!("retry loop always returns")
+}
+
+async fn validate_success_response(
+    mut response: Response,
+    pointer: &str,
+    description: &str,
+) -> Result<()> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        anyhow!(
+            "{description} returned a 2xx response whose body could not be read for \
+             `rejectNonEmptyJsonPointer` validation: {}",
+            truncate_for_log(&e.to_string())
+        )
+    })? {
+        if chunk.len() > MAX_VALIDATED_RESPONSE_BODY_BYTES.saturating_sub(body.len()) {
+            return Err(anyhow!(
+                "{description} returned a 2xx response body exceeding the \
+                 {MAX_VALIDATED_RESPONSE_BODY_BYTES}-byte validation limit"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let document: Value = serde_json::from_slice(&body).map_err(|e| {
+        anyhow!(
+            "{description} returned invalid JSON required by \
+             `rejectNonEmptyJsonPointer` validation: {e}"
+        )
+    })?;
+
+    let Some(value) = document.pointer(pointer) else {
+        return Ok(());
+    };
+    if is_empty_json_value(value) {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "{description} response validation failed: JSON pointer '{}' resolved to a non-empty {}",
+        truncate_for_log(pointer),
+        json_value_kind(value)
+    ))
+}
+
+fn is_empty_json_value(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Bool(value) => !value,
+        Value::Number(value) => {
+            value.as_i64() == Some(0) || value.as_u64() == Some(0) || value.as_f64() == Some(0.0)
+        }
+        Value::String(value) => value.is_empty(),
+        Value::Array(value) => value.is_empty(),
+        Value::Object(value) => value.is_empty(),
+    }
+}
+
+fn json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// How a non-2xx HTTP response status should be handled.
