@@ -33,8 +33,8 @@ use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 
 use crate::config::MySqlBootstrapConfig;
 use drasi_mysql_common::{
-    connect_with_ssl_mode, escape_identifier, format_value_for_key, is_valid_identifier,
-    quote_identifier,
+    canonicalize_json_text, connect_with_ssl_mode, format_datetime, format_time,
+    format_value_for_key, is_valid_identifier, normalize_time_text, quote_identifier,
 };
 
 /// Binlog position captured during bootstrap snapshot.
@@ -145,9 +145,13 @@ impl MySqlBootstrapHandler {
                 .pass(Some(&self.config.password))
                 .db_name(Some(&self.config.database))
         };
-        let conn = connect_with_ssl_mode(build_opts, self.config.ssl_mode)
+        let mut conn = connect_with_ssl_mode(build_opts, self.config.ssl_mode)
             .await
             .context("Failed to connect to MySQL for bootstrap")?;
+        // Pin session TZ to UTC so TIMESTAMP text matches CDC epoch→UTC formatting.
+        conn.query_drop("SET time_zone = '+00:00'")
+            .await
+            .context("Failed to set MySQL bootstrap session time_zone to UTC")?;
         Ok(conn)
     }
 
@@ -296,9 +300,14 @@ impl MySqlBootstrapHandler {
 
     /// Converts a MySQL row value to an ElementValue using column type metadata.
     ///
-    /// The text protocol returns all values as `Value::Bytes`. We use the column
-    /// type to properly parse integers, floats, dates, etc. so that bootstrap
-    /// and CDC produce identical type mappings.
+    /// Bootstrap uses the text protocol (`query_iter`), which returns values as
+    /// `Value::Bytes`. We use the column type to parse integers, floats, dates,
+    /// etc. so bootstrap and CDC produce identical type mappings.
+    ///
+    /// `Value::Date` / `Value::Time` arms are retained for defensive completeness
+    /// if a binary-protocol path is ever used; text-protocol DATETIME/TIME
+    /// parity (including trailing zeros) comes from MySQL's text representation
+    /// and `normalize_time_text`.
     fn convert_column_value(&self, row: &Row, idx: usize, col_type: ColumnType) -> ElementValue {
         match row.as_ref(idx) {
             None | Some(mysql_async::Value::NULL) => ElementValue::Null,
@@ -312,13 +321,13 @@ impl MySqlBootstrapHandler {
             }
             Some(mysql_async::Value::Float(val)) => ElementValue::Float(OrderedFloat(*val as f64)),
             Some(mysql_async::Value::Double(val)) => ElementValue::Float(OrderedFloat(*val)),
-            Some(mysql_async::Value::Date(y, m, d, h, min, s, _)) => ElementValue::String(
-                Arc::from(format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}")),
+            // Binary-protocol fallback only; text protocol uses the Bytes arm below.
+            Some(mysql_async::Value::Date(y, m, d, h, min, s, micros)) => ElementValue::String(
+                Arc::from(format_datetime(*y, *m, *d, *h, *min, *s, *micros, None)),
             ),
-            Some(mysql_async::Value::Time(_, days, hours, minutes, seconds, micros)) => {
-                let total_hours = days * 24 + u32::from(*hours);
-                ElementValue::String(Arc::from(format!(
-                    "{total_hours:03}:{minutes:02}:{seconds:02}.{micros:06}"
+            Some(mysql_async::Value::Time(neg, days, hours, minutes, seconds, micros)) => {
+                ElementValue::String(Arc::from(format_time(
+                    *neg, *days, *hours, *minutes, *seconds, *micros, None,
                 )))
             }
             Some(mysql_async::Value::Bytes(bytes)) => {
@@ -364,28 +373,21 @@ impl MySqlBootstrapHandler {
                         ElementValue::String(Arc::from(format!("{text} 00:00:00")))
                     }
                     ColumnType::MYSQL_TYPE_TIME | ColumnType::MYSQL_TYPE_TIME2 => {
-                        // CDC formats time as "HHH:MM:SS.micros", normalize
-                        let parts: Vec<&str> = text.splitn(2, '.').collect();
-                        let time_part = parts[0];
-                        let micros = parts.get(1).unwrap_or(&"000000");
-                        let hms: Vec<&str> = time_part.split(':').collect();
-                        if hms.len() == 3 {
-                            let h: u32 = hms[0].parse().unwrap_or(0);
-                            let m: u32 = hms[1].parse().unwrap_or(0);
-                            let s: u32 = hms[2].parse().unwrap_or(0);
-                            let micros_val: u32 = micros.parse().unwrap_or(0);
-                            ElementValue::String(Arc::from(format!(
-                                "{h:03}:{m:02}:{s:02}.{micros_val:06}"
-                            )))
-                        } else {
-                            ElementValue::String(Arc::from(text.into_owned()))
-                        }
+                        // Normalize to "HHH:MM:SS[.ffffff]" to match CDC.
+                        // Fractional precision (including trailing zeros) is taken from the
+                        // text MySQL returns for the declared FSP.
+                        ElementValue::String(Arc::from(normalize_time_text(&text)))
                     }
                     ColumnType::MYSQL_TYPE_DATETIME | ColumnType::MYSQL_TYPE_DATETIME2 => {
+                        // Text protocol already includes fractional seconds when present.
                         ElementValue::String(Arc::from(text.into_owned()))
                     }
                     ColumnType::MYSQL_TYPE_TIMESTAMP | ColumnType::MYSQL_TYPE_TIMESTAMP2 => {
+                        // Session time_zone is UTC, so this matches CDC epoch→UTC formatting.
                         ElementValue::String(Arc::from(text.into_owned()))
+                    }
+                    ColumnType::MYSQL_TYPE_JSON => {
+                        ElementValue::String(Arc::from(canonicalize_json_text(&text)))
                     }
                     // All other types (VARCHAR, DECIMAL, ENUM, SET, BLOB, etc.) as strings
                     _ => ElementValue::String(Arc::from(text.into_owned())),

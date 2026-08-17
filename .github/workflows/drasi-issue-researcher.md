@@ -4,6 +4,7 @@ on:
     types: [labeled]
     names: [needs-research]
 permissions:
+  copilot-requests: write
   contents: read
   actions: read
   issues: read

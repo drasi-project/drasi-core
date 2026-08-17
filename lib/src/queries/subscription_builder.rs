@@ -72,14 +72,13 @@ impl SubscriptionSettingsBuilder {
 
             match matching_indices.len() {
                 0 => {
-                    // Not found in any source config — default to the first source.
-                    // This is intentional: labels that aren't explicitly mapped in
-                    // source configuration are assumed to belong to the primary
-                    // (first) source, which is the common single-source case.
-                    if let Some(first_settings) = settings_vec.first_mut() {
-                        first_settings.nodes.insert(node_label.clone());
-                    } else {
+                    if settings_vec.is_empty() {
                         bail!("No sources configured for query");
+                    }
+
+                    // Broadcast to all sources; each source filters out labels it does not own.
+                    for settings in settings_vec.iter_mut() {
+                        settings.nodes.insert(node_label.clone());
                     }
                 }
                 1 => {
@@ -114,46 +113,43 @@ impl SubscriptionSettingsBuilder {
                 }
             }
 
-            match matching_indices.len() {
-                0 => {
-                    // Not found in any source config
-                    // Check if this is a join relation
-                    if let Some(join_configs) = joins {
-                        if let Some(join_config) =
-                            join_configs.iter().find(|j| j.id == *relation_label)
-                        {
-                            // This is a join relation - verify that all node labels in the join keys
-                            // match node labels from the query
-                            for key in &join_config.keys {
-                                if !query_labels.node_labels.contains(&key.label) {
-                                    bail!(
-                                        "Join relation '{}' references node label '{}' which is not found in the query",
-                                        relation_label,
-                                        key.label
-                                    );
-                                }
-                            }
-                            // Join relation is valid, don't add to any source
-                            continue;
-                        }
-                    }
+            if matching_indices.len() > 1 {
+                bail!(
+                    "Relation label '{relation_label}' is configured in multiple sources. Each relation label must be assigned to exactly one source."
+                );
+            }
 
-                    // Not a join relation - add to first source (default)
-                    if let Some(first_settings) = settings_vec.first_mut() {
-                        first_settings.relations.insert(relation_label.clone());
-                    } else {
-                        bail!("No sources configured for query");
+            if let Some(join_config) = joins
+                .as_ref()
+                .and_then(|join_configs| join_configs.iter().find(|j| j.id == *relation_label))
+            {
+                if !matching_indices.is_empty() {
+                    bail!(
+                        "Join relation '{relation_label}' cannot be assigned to a source because it is synthetic."
+                    );
+                }
+
+                for key in &join_config.keys {
+                    if !query_labels.node_labels.contains(&key.label) {
+                        bail!(
+                            "Join relation '{}' references node label '{}' which is not found in the query",
+                            relation_label,
+                            key.label
+                        );
                     }
                 }
-                1 => {
-                    // Found in exactly one source - already in the HashSet from initialization
-                    // Nothing to do, it's already there
+
+                continue;
+            }
+
+            if matching_indices.is_empty() {
+                if settings_vec.is_empty() {
+                    bail!("No sources configured for query");
                 }
-                _ => {
-                    // Found in multiple sources - error
-                    bail!(
-                        "Relation label '{relation_label}' is configured in multiple sources. Each relation label must be assigned to exactly one source."
-                    );
+
+                // Broadcast to all sources; each source filters out labels it does not own.
+                for settings in settings_vec.iter_mut() {
+                    settings.relations.insert(relation_label.clone());
                 }
             }
         }
@@ -215,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn test_node_label_not_in_any_source_goes_to_first() {
+    fn test_node_label_not_in_any_source_goes_to_all() {
         let sources = vec![
             SourceSubscriptionConfig {
                 source_id: "source1".to_string(),
@@ -244,7 +240,7 @@ mod tests {
         let settings = result.unwrap();
         assert_eq!(settings.len(), 2);
         assert!(settings[0].nodes.contains("Person"));
-        assert!(!settings[1].nodes.contains("Person"));
+        assert!(settings[1].nodes.contains("Person"));
     }
 
     #[test]
@@ -301,13 +297,21 @@ mod tests {
     }
 
     #[test]
-    fn test_relation_label_not_in_any_source_goes_to_first() {
-        let sources = vec![SourceSubscriptionConfig {
-            source_id: "source1".to_string(),
-            nodes: vec![],
-            relations: vec![],
-            pipeline: vec![],
-        }];
+    fn test_relation_label_not_in_any_source_goes_to_all() {
+        let sources = vec![
+            SourceSubscriptionConfig {
+                source_id: "source1".to_string(),
+                nodes: vec![],
+                relations: vec![],
+                pipeline: vec![],
+            },
+            SourceSubscriptionConfig {
+                source_id: "source2".to_string(),
+                nodes: vec![],
+                relations: vec![],
+                pipeline: vec![],
+            },
+        ];
 
         let query_config = create_test_query_config(sources);
         let query_labels = QueryLabels {
@@ -320,8 +324,9 @@ mod tests {
         assert!(result.is_ok());
 
         let settings = result.unwrap();
-        assert_eq!(settings.len(), 1);
+        assert_eq!(settings.len(), 2);
         assert!(settings[0].relations.contains("KNOWS"));
+        assert!(settings[1].relations.contains("KNOWS"));
     }
 
     #[test]
@@ -393,6 +398,102 @@ mod tests {
         // But Order and Customer should be in nodes
         assert!(settings[0].nodes.contains("Order"));
         assert!(settings[0].nodes.contains("Customer"));
+    }
+
+    #[test]
+    fn test_configured_join_relation_error() {
+        let sources = vec![SourceSubscriptionConfig {
+            source_id: "source1".to_string(),
+            nodes: vec![],
+            relations: vec!["CUSTOMER".to_string()],
+            pipeline: vec![],
+        }];
+
+        let mut query_config = create_test_query_config(sources);
+        query_config.joins = Some(vec![QueryJoinConfig {
+            id: "CUSTOMER".to_string(),
+            keys: vec![
+                QueryJoinKeyConfig {
+                    label: "Order".to_string(),
+                    property: "customer_id".to_string(),
+                },
+                QueryJoinKeyConfig {
+                    label: "Customer".to_string(),
+                    property: "id".to_string(),
+                },
+            ],
+        }]);
+
+        let query_labels = QueryLabels {
+            node_labels: vec!["Order".to_string(), "Customer".to_string()],
+            relation_labels: vec!["CUSTOMER".to_string()],
+        };
+
+        let error =
+            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels)
+                .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("cannot be assigned to a source because it is synthetic"));
+    }
+
+    #[test]
+    fn test_cross_source_join_settings_are_order_independent() {
+        fn build(source_ids: &[&str]) -> Vec<SourceSubscriptionSettings> {
+            let sources = source_ids
+                .iter()
+                .map(|source_id| SourceSubscriptionConfig {
+                    source_id: (*source_id).to_string(),
+                    nodes: vec![],
+                    relations: vec![],
+                    pipeline: vec![],
+                })
+                .collect();
+            let mut query_config = create_test_query_config(sources);
+            query_config.joins = Some(vec![QueryJoinConfig {
+                id: "PICKUP_BY".to_string(),
+                keys: vec![
+                    QueryJoinKeyConfig {
+                        label: "orders".to_string(),
+                        property: "vehicle_id".to_string(),
+                    },
+                    QueryJoinKeyConfig {
+                        label: "vehicles".to_string(),
+                        property: "id".to_string(),
+                    },
+                ],
+            }]);
+
+            let query_labels = QueryLabels {
+                node_labels: vec!["orders".to_string(), "vehicles".to_string()],
+                relation_labels: vec!["PICKUP_BY".to_string(), "CONTAINS".to_string()],
+            };
+
+            SubscriptionSettingsBuilder::build_subscription_settings(&query_config, &query_labels)
+                .unwrap()
+        }
+
+        let forward = build(&["physical-ops", "retail-ops"]);
+        let reverse = build(&["retail-ops", "physical-ops"]);
+
+        for source_id in ["physical-ops", "retail-ops"] {
+            let forward_settings = forward
+                .iter()
+                .find(|settings| settings.source_id == source_id)
+                .unwrap();
+            let reverse_settings = reverse
+                .iter()
+                .find(|settings| settings.source_id == source_id)
+                .unwrap();
+
+            assert_eq!(forward_settings.nodes, reverse_settings.nodes);
+            assert!(forward_settings.nodes.contains("orders"));
+            assert!(forward_settings.nodes.contains("vehicles"));
+            assert_eq!(forward_settings.relations, reverse_settings.relations);
+            assert!(forward_settings.relations.contains("CONTAINS"));
+            assert!(!forward_settings.relations.contains("PICKUP_BY"));
+        }
     }
 
     #[test]
@@ -479,16 +580,20 @@ mod tests {
 
         // Order should be in first source
         assert!(settings[0].nodes.contains("Order"));
+        assert!(!settings[1].nodes.contains("Order"));
         // Customer should be in second source
         assert!(settings[1].nodes.contains("Customer"));
-        // Product not in any source config, should go to first
+        assert!(!settings[0].nodes.contains("Customer"));
+        // Unmapped labels are offered to all sources.
         assert!(settings[0].nodes.contains("Product"));
+        assert!(settings[1].nodes.contains("Product"));
 
         // PLACED_BY is a join, should not be in any relations
         assert!(!settings[0].relations.contains("PLACED_BY"));
         assert!(!settings[1].relations.contains("PLACED_BY"));
 
-        // CONTAINS is not in any config and not a join, should go to first
+        // Unmapped physical relations are also offered to all sources.
         assert!(settings[0].relations.contains("CONTAINS"));
+        assert!(settings[1].relations.contains("CONTAINS"));
     }
 }

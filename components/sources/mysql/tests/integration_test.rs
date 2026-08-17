@@ -26,7 +26,7 @@ use testcontainers_modules::mysql::Mysql;
 use tokio::time::{sleep, timeout, Duration};
 
 use drasi_bootstrap_mysql::MySqlBootstrapProvider;
-use drasi_source_mysql::{MySqlReplicationSource, StartPosition, TableKeyConfig};
+use drasi_source_mysql::{MySqlReplicationSource, SslMode, StartPosition, TableKeyConfig};
 
 /// Extract the trailing integer primary key from an element id of the form
 /// `table:pk` (e.g. `items:42` → 42).
@@ -281,12 +281,15 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
             tinyint_col TINYINT NOT NULL,
             bool_col BOOLEAN NOT NULL,
             date_col DATE NOT NULL,
-            time_col TIME NOT NULL,
-            datetime_col DATETIME NOT NULL,
+            time_col TIME(6) NOT NULL,
+            datetime_col DATETIME(6) NOT NULL,
+            datetime_zero_col DATETIME(6) NOT NULL,
             timestamp_col TIMESTAMP NOT NULL,
+            timestamp_zero_col TIMESTAMP NULL,
             year_col YEAR NOT NULL,
             enum_col ENUM('red', 'green', 'blue') NOT NULL,
             set_col SET('a', 'b', 'c') NOT NULL,
+            json_col JSON NOT NULL,
             marker VARCHAR(10) NOT NULL DEFAULT 'v1'
         )",
     )
@@ -304,16 +307,20 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
         .unwrap();
     conn.query_drop("FLUSH PRIVILEGES").await.unwrap();
 
+    // Allow zero YEAR / TIMESTAMP sentinels for edge-case parity coverage.
+    conn.query_drop("SET SESSION sql_mode = ''").await.unwrap();
+
     // Insert a row BEFORE starting the source, so bootstrap will pick it up.
     conn.query_drop(
         "INSERT INTO type_test
             (int_col, bigint_col, float_col, double_col, decimal_col, varchar_col,
-             tinyint_col, bool_col, date_col, time_col, datetime_col, timestamp_col,
-             year_col, enum_col, set_col, marker)
+             tinyint_col, bool_col, date_col, time_col, datetime_col, datetime_zero_col,
+             timestamp_col, timestamp_zero_col, year_col, enum_col, set_col, json_col, marker)
         VALUES
             (42, 9876543210, 3.14, 2.718281828, 99.95, 'hello',
-             7, TRUE, '2025-06-15', '13:45:30', '2025-06-15 13:45:30', '2025-06-15 13:45:30',
-             2025, 'green', 'a,c', 'v1')",
+             7, TRUE, '2025-06-15', '13:45:30.123456', '2025-06-15 13:45:30.123456',
+             '2025-06-15 13:45:30.000000', '2025-06-15 13:45:30', '0000-00-00 00:00:00',
+             0, 'green', 'a,c', '{\"k\": 1}', 'v1')",
     )
     .await
     .unwrap();
@@ -342,6 +349,7 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
         .with_user("test")
         .with_password("test")
         .with_tables(vec!["type_test".to_string()])
+        .with_ssl_mode(SslMode::Disabled)
         .with_start_position(StartPosition::FromEnd)
         .add_table_key(TableKeyConfig {
             table: "type_test".to_string(),
@@ -367,10 +375,13 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
                 t.date_col AS date_col,
                 t.time_col AS time_col,
                 t.datetime_col AS datetime_col,
+                t.datetime_zero_col AS datetime_zero_col,
                 t.timestamp_col AS timestamp_col,
+                t.timestamp_zero_col AS timestamp_zero_col,
                 t.year_col AS year_col,
                 t.enum_col AS enum_col,
                 t.set_col AS set_col,
+                t.json_col AS json_col,
                 t.marker AS marker",
         )
         .from_source("mysql-type-test")
@@ -449,12 +460,8 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
     drasi.stop().await.unwrap();
 
     // Step 4: Compare all unchanged columns between bootstrap and CDC.
-    // If type mappings are consistent, these values must be identical.
-    // Compare columns that should produce identical types between bootstrap and CDC.
-    // ENUM, SET, and TIMESTAMP are excluded because the binlog encodes them as raw
-    // integers/bitfields without schema context, while the text protocol returns
-    // human-readable strings. Resolving this would require schema introspection in
-    // the CDC decoder.
+    // If type mappings are consistent, these values must be identical — including
+    // ENUM/SET labels, TIMESTAMP UTC strings, fractional DATETIME, and compact JSON.
     let columns_to_compare = [
         "id",
         "int_col",
@@ -468,7 +475,13 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
         "date_col",
         "time_col",
         "datetime_col",
+        "datetime_zero_col",
+        "timestamp_col",
+        "timestamp_zero_col",
         "year_col",
+        "enum_col",
+        "set_col",
+        "json_col",
     ];
 
     let mut mismatches = Vec::new();
