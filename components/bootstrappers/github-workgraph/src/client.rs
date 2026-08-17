@@ -80,9 +80,9 @@ query($org: String!, $cursor: String, $pageSize: Int!) {
 "#;
 
 const TASK_ISSUES_QUERY: &str = r#"
-query($owner: String!, $name: String!, $cursor: String, $pageSize: Int!, $state: IssueState!) {
+query($owner: String!, $name: String!, $cursor: String, $pageSize: Int!, $state: IssueState!, $issueType: String!) {
   repository(owner: $owner, name: $name) {
-    issues(first: $pageSize, after: $cursor, states: [$state]) {
+    issues(first: $pageSize, after: $cursor, states: [$state], filterBy: {type: $issueType}) {
       pageInfo { hasNextPage endCursor }
       nodes {
         node_id: id
@@ -520,6 +520,7 @@ impl GitHubGraphQLClient {
         let mut tasks = Vec::new();
         for state in ["OPEN", "CLOSED"] {
             let (owner, name) = (owner.to_string(), name.to_string());
+            let issue_type = task_issue_type.name.clone();
             let nodes = self
                 .fetch_connection(
                     TASK_ISSUES_QUERY,
@@ -530,6 +531,7 @@ impl GitHubGraphQLClient {
                             "owner": owner,
                             "name": name,
                             "state": state,
+                            "issueType": issue_type,
                             "cursor": cursor,
                             "pageSize": DEFAULT_PAGE_SIZE,
                         })

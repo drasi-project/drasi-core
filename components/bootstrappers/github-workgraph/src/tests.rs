@@ -159,7 +159,11 @@ async fn mount_snapshot(server: &MockServer, task_body: &str, result_body: &str)
     .await;
     mount_query(
         server,
-        &["states: [$state]", "\"state\":\"OPEN\""],
+        &[
+            "filterBy: {type: $issueType}",
+            "\"state\":\"OPEN\"",
+            "\"issueType\":\"WorkGraphTask\"",
+        ],
         json!({"repository":{"issues":connection(
             vec![task("I_task_open","OPEN",task_body,2)],false,None
         )}}),
@@ -168,7 +172,11 @@ async fn mount_snapshot(server: &MockServer, task_body: &str, result_body: &str)
     .await;
     mount_query(
         server,
-        &["states: [$state]", "\"state\":\"CLOSED\""],
+        &[
+            "filterBy: {type: $issueType}",
+            "\"state\":\"CLOSED\"",
+            "\"issueType\":\"WorkGraphTask\"",
+        ],
         json!({"repository":{"issues":connection(
             vec![task("I_task_closed","CLOSED",TASK_BODY,1)],false,None
         )}}),
@@ -385,7 +393,12 @@ async fn task_open_and_closed_connections_follow_every_cursor() {
     wrong_type["type"]["node_id"] = json!("IT_other");
     mount_query(
         &server,
-        &["states: [$state]", "\"state\":\"OPEN\"", "\"cursor\":null"],
+        &[
+            "filterBy: {type: $issueType}",
+            "\"state\":\"OPEN\"",
+            "\"issueType\":\"WorkGraphTask\"",
+            "\"cursor\":null",
+        ],
         json!({"repository":{"issues":connection(
             vec![task("I_open_1","OPEN",TASK_BODY,0),wrong_type],true,Some("NEXT")
         )}}),
@@ -396,7 +409,9 @@ async fn task_open_and_closed_connections_follow_every_cursor() {
         &server,
         &[
             "states: [$state]",
+            "filterBy: {type: $issueType}",
             "\"state\":\"OPEN\"",
+            "\"issueType\":\"WorkGraphTask\"",
             "\"cursor\":\"NEXT\"",
         ],
         json!({"repository":{"issues":connection(
@@ -407,7 +422,11 @@ async fn task_open_and_closed_connections_follow_every_cursor() {
     .await;
     mount_query(
         &server,
-        &["states: [$state]", "\"state\":\"CLOSED\""],
+        &[
+            "filterBy: {type: $issueType}",
+            "\"state\":\"CLOSED\"",
+            "\"issueType\":\"WorkGraphTask\"",
+        ],
         json!({"repository":{"issues":connection(
             vec![task("I_closed","CLOSED",TASK_BODY,0)],false,None
         )}}),
@@ -449,8 +468,9 @@ async fn repository_issue_pagination_is_complete_beyond_search_cap() {
             &server,
             &[
                 "issues(first: $pageSize",
-                "states: [$state]",
+                "filterBy: {type: $issueType}",
                 "\"state\":\"OPEN\"",
+                "\"issueType\":\"WorkGraphTask\"",
                 &cursor_needle,
             ],
             json!({"repository":{"issues":connection(
@@ -462,7 +482,11 @@ async fn repository_issue_pagination_is_complete_beyond_search_cap() {
     }
     mount_query(
         &server,
-        &["states: [$state]", "\"state\":\"CLOSED\""],
+        &[
+            "filterBy: {type: $issueType}",
+            "\"state\":\"CLOSED\"",
+            "\"issueType\":\"WorkGraphTask\"",
+        ],
         json!({"repository":{"issues":connection(vec![],false,None)}}),
         Some(1),
     )
@@ -507,7 +531,11 @@ async fn ordinary_open_issue_with_result_marker_stays_generic_comment() {
     for state in ["OPEN", "CLOSED"] {
         mount_query(
             &server,
-            &["states: [$state]", &format!("\"state\":\"{state}\"")],
+            &[
+                "filterBy: {type: $issueType}",
+                &format!("\"state\":\"{state}\""),
+                "\"issueType\":\"WorkGraphTask\"",
+            ],
             json!({"repository":{"issues":connection(vec![],false,None)}}),
             Some(1),
         )

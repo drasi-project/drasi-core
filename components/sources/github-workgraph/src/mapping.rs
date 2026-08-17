@@ -222,11 +222,16 @@ impl<'a> Converter<'a> {
             return Ok(true);
         }
         if event_type == "sub_issues" {
-            return self.repository_in_scope(
-                payload
-                    .get("sub_issue_repo")
-                    .or_else(|| payload.get("repository")),
-            );
+            if in_table("parent_issue_added parent_issue_removed", action) {
+                return self.repository_in_scope(payload.get("repository"));
+            }
+            if let Some(repository) = payload.get("sub_issue_repo") {
+                return self.repository_in_scope(Some(repository));
+            }
+            if let Some(name) = payload.get("sub_issue").and_then(issue_repository_name) {
+                return Ok(filter.includes_name(name));
+            }
+            return self.repository_in_scope(payload.get("repository"));
         }
         let current = self.repository_in_scope(payload.get("repository"))?;
         if event_type == "issues" && action == "transferred" {
@@ -442,7 +447,7 @@ impl<'a> Converter<'a> {
                 {
                     let new_id = required_str(new_issue, "/node_id")?;
                     let new_repo_id = required_str(new_repo, "/node_id")?;
-                    upsert_task(cs, Insert, new_issue, Some(new_repo), &new_id, &new_repo_id)?;
+                    upsert_task(cs, new_issue, Some(new_repo), &new_id, Some(&new_repo_id))?;
                 }
             }
             return Ok(());
@@ -454,47 +459,33 @@ impl<'a> Converter<'a> {
         }
 
         if !current_task {
-            delete_task(cs, &issue_id, &repo_id);
             if item_is_open(issue, "issue")? && self.repository_in_scope(repo)? {
-                insert_work_item(cs, issue, repo, &issue_id, &repo_id, NODE_ISSUE)?;
+                clean_task_transition_artifacts(cs, &issue_id);
+                update_work_item(cs, issue, repo, &issue_id, &repo_id, NODE_ISSUE)?;
+            } else {
+                delete_task(cs, &issue_id, &repo_id);
             }
             return Ok(());
         }
 
         if !previous_task {
-            delete_work_item(cs, &issue_id, &repo_id, NODE_ISSUE);
+            clean_generic_transition_artifacts(cs, &issue_id);
         }
         let body = issue.get("body").and_then(Value::as_str).unwrap_or("");
-        let base_insert = d.action == "opened" || (d.action == "typed" && current_task);
-        let previous_valid = d
-            .payload
-            .pointer("/changes/body/from")
-            .and_then(Value::as_str)
-            .map(|body| matches!(classify_task_body(body), TaskClassification::Task(_)));
         match classify_task_body(body) {
             TaskClassification::Task(_) => {
-                let op = if base_insert || previous_valid == Some(false) {
-                    Insert
-                } else {
-                    Update
-                };
                 let error_id = task_error_element_id(&issue_id);
                 cs.delete(&error_id, NODE_WORKGRAPH_ERROR);
-                upsert_task(cs, op, issue, repo, &issue_id, &repo_id)?;
+                upsert_task(cs, issue, repo, &issue_id, Some(&repo_id))?;
             }
             TaskClassification::Invalid(error) => {
-                let op = if base_insert || previous_valid == Some(true) {
-                    Insert
-                } else {
-                    Update
-                };
                 delete_task_node(cs, &issue_id, &repo_id);
                 let mut props = task_error_props(issue, repo, body);
                 props.text("errorKind", "invalid-workgraph-task");
                 props.text("errorCode", error.code);
                 props.text("errorMessage", &error.message);
                 cs.node(
-                    op,
+                    Update,
                     &task_error_element_id(&issue_id),
                     NODE_WORKGRAPH_ERROR,
                     props,
@@ -541,50 +532,65 @@ impl<'a> Converter<'a> {
             return Ok(());
         }
 
+        let top_repository = d.payload.get("repository");
         let child_repo = if parent_action {
-            d.payload.get("repository")
+            top_repository
         } else {
-            d.payload.get("sub_issue_repo")
+            d.payload.get("sub_issue_repo").or_else(|| {
+                top_repository.filter(|repo| repository_is_authoritative_for(child, repo))
+            })
         };
-        if let Some(child_repo) = child_repo {
-            let child_repo_id = required_str(child_repo, "/node_id")?;
-            match classify_task_body(child.get("body").and_then(Value::as_str).unwrap_or("")) {
-                TaskClassification::Task(_) => {
-                    cs.delete(&task_error_element_id(&child_id), NODE_WORKGRAPH_ERROR);
-                    upsert_task(
-                        cs,
-                        Update,
-                        child,
-                        Some(child_repo),
-                        &child_id,
-                        &child_repo_id,
-                    )?;
+        let child_repo_id = child_repo
+            .map(|repo| required_str(repo, "/node_id"))
+            .transpose()?;
+        match classify_task_body(child.get("body").and_then(Value::as_str).unwrap_or("")) {
+            TaskClassification::Task(_) => {
+                cs.delete(&task_error_element_id(&child_id), NODE_WORKGRAPH_ERROR);
+                upsert_task(cs, child, child_repo, &child_id, child_repo_id.as_deref())?;
+            }
+            TaskClassification::Invalid(error) => {
+                match child_repo_id.as_deref() {
+                    Some(repo_id) => delete_task_node(cs, &child_id, repo_id),
+                    None => {
+                        clean_task_transition_artifacts(cs, &child_id);
+                        cs.delete(&child_id, NODE_WORKGRAPH_TASK);
+                    }
                 }
-                TaskClassification::Invalid(error) => {
-                    delete_task_node(cs, &child_id, &child_repo_id);
-                    let body = child.get("body").and_then(Value::as_str).unwrap_or("");
-                    let mut props = task_error_props(child, Some(child_repo), body);
-                    props.text("errorKind", "invalid-workgraph-task");
-                    props.text("errorCode", error.code);
-                    props.text("errorMessage", &error.message);
-                    cs.node(
-                        Update,
-                        &task_error_element_id(&child_id),
-                        NODE_WORKGRAPH_ERROR,
-                        props,
-                    );
-                    return Ok(());
-                }
+                let body = child.get("body").and_then(Value::as_str).unwrap_or("");
+                let mut props = task_error_props(child, child_repo, body);
+                props.text("errorKind", "invalid-workgraph-task");
+                props.text("errorCode", error.code);
+                props.text("errorMessage", &error.message);
+                cs.node(
+                    Update,
+                    &task_error_element_id(&child_id),
+                    NODE_WORKGRAPH_ERROR,
+                    props,
+                );
+                return Ok(());
             }
         }
 
-        let parent_repo = if parent_action {
-            d.payload.get("parent_issue_repo")
-        } else {
-            d.payload.get("repository")
+        let Some(parent) = parent else {
+            return Ok(());
         };
-        if let (Some(parent), Some(parent_repo)) = (parent, parent_repo) {
-            let parent_id = required_str(parent, "/node_id")?;
+        let parent_id = required_str(parent, "/node_id")?;
+        cs.relation(
+            Update,
+            REL_TASK_FOR,
+            &task_for_rel_id(&child_id),
+            &child_id,
+            &parent_id,
+        );
+
+        let parent_repo = if parent_action {
+            d.payload.get("parent_issue_repo").or_else(|| {
+                top_repository.filter(|repo| repository_is_authoritative_for(parent, repo))
+            })
+        } else {
+            top_repository
+        };
+        if let Some(parent_repo) = parent_repo {
             if !self.is_task_issue(parent)
                 && item_is_open(parent, "parent_issue")?
                 && self.repository_in_scope(Some(parent_repo))?
@@ -605,13 +611,6 @@ impl<'a> Converter<'a> {
                     NODE_ISSUE,
                 )?;
             }
-            cs.relation(
-                Insert,
-                REL_TASK_FOR,
-                &task_for_rel_id(&child_id),
-                &child_id,
-                &parent_id,
-            );
         }
         Ok(())
     }
@@ -780,11 +779,10 @@ fn update_work_item(
 
 fn upsert_task(
     cs: &mut Changes,
-    op: Op,
     issue: &Value,
     repo: Option<&Value>,
     issue_id: &str,
-    repo_id: &str,
+    repo_id: Option<&str>,
 ) -> Mapped {
     let TaskClassification::Task(assignment) =
         classify_task_body(issue.get("body").and_then(Value::as_str).unwrap_or(""))
@@ -806,14 +804,16 @@ fn upsert_task(
         props.copy("issueTypeId", issue_type.get("node_id"));
         props.copy("issueTypeName", issue_type.get("name"));
     }
-    cs.node(op, issue_id, NODE_WORKGRAPH_TASK, props);
-    cs.relation(
-        op,
-        REL_IN_REPOSITORY,
-        &rel_id(REL_IN_REPOSITORY, issue_id, repo_id),
-        issue_id,
-        repo_id,
-    );
+    cs.node(Update, issue_id, NODE_WORKGRAPH_TASK, props);
+    if let Some(repo_id) = repo_id {
+        cs.relation(
+            Update,
+            REL_IN_REPOSITORY,
+            &rel_id(REL_IN_REPOSITORY, issue_id, repo_id),
+            issue_id,
+            repo_id,
+        );
+    }
     Ok(())
 }
 
@@ -832,8 +832,19 @@ fn task_for_rel_id(task_id: &str) -> String {
     format!("{REL_TASK_FOR}:{task_id}")
 }
 
-fn delete_task_node(cs: &mut Changes, issue_id: &str, repo_id: &str) {
+fn clean_generic_transition_artifacts(cs: &mut Changes, issue_id: &str) {
+    let error_id = status_error_element_id(issue_id);
+    cs.delete(&rel_id(REL_ERROR_ON, &error_id, issue_id), REL_ERROR_ON);
+    cs.delete(&error_id, NODE_WORKGRAPH_ERROR);
+}
+
+fn clean_task_transition_artifacts(cs: &mut Changes, issue_id: &str) {
     cs.delete(&task_for_rel_id(issue_id), REL_TASK_FOR);
+    cs.delete(&task_error_element_id(issue_id), NODE_WORKGRAPH_ERROR);
+}
+
+fn delete_task_node(cs: &mut Changes, issue_id: &str, repo_id: &str) {
+    clean_task_transition_artifacts(cs, issue_id);
     cs.delete(
         &rel_id(REL_IN_REPOSITORY, issue_id, repo_id),
         REL_IN_REPOSITORY,
@@ -843,7 +854,6 @@ fn delete_task_node(cs: &mut Changes, issue_id: &str, repo_id: &str) {
 
 fn delete_task(cs: &mut Changes, issue_id: &str, repo_id: &str) {
     delete_task_node(cs, issue_id, repo_id);
-    cs.delete(&task_error_element_id(issue_id), NODE_WORKGRAPH_ERROR);
 }
 
 fn delete_work_item(cs: &mut Changes, item_id: &str, repo_id: &str, label: &str) {
@@ -1107,6 +1117,40 @@ fn owner_in_org(repo: Option<&Value>, organization: &str) -> bool {
     repo.and_then(|r| r.pointer("/owner/login"))
         .and_then(Value::as_str)
         .is_some_and(|owner| owner.eq_ignore_ascii_case(organization))
+}
+
+fn repository_is_authoritative_for(issue: &Value, repository: &Value) -> bool {
+    let same_node_id = issue
+        .pointer("/repository/node_id")
+        .and_then(Value::as_str)
+        .zip(repository.get("node_id").and_then(Value::as_str))
+        .is_some_and(|(issue_id, repo_id)| issue_id == repo_id);
+    if same_node_id {
+        return true;
+    }
+
+    let Some(issue_url) = issue.get("repository_url").and_then(Value::as_str) else {
+        return false;
+    };
+    if repository.get("url").and_then(Value::as_str) == Some(issue_url) {
+        return true;
+    }
+    issue_url
+        .rsplit_once("/repos/")
+        .map(|(_, name)| name.trim_end_matches('/'))
+        .zip(repository.get("full_name").and_then(Value::as_str))
+        .is_some_and(|(issue_name, repo_name)| issue_name.eq_ignore_ascii_case(repo_name))
+}
+
+fn issue_repository_name(issue: &Value) -> Option<&str> {
+    issue
+        .get("repository_url")
+        .and_then(Value::as_str)?
+        .rsplit_once("/repos/")
+        .map(|(_, name)| name.trim_end_matches('/'))?
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .filter(|name| !name.is_empty())
 }
 
 fn required_str(value: &Value, pointer: &str) -> Result<String, ConvertError> {

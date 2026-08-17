@@ -156,11 +156,18 @@ Configured typed tasks are different:
   asymmetric payload guarantee is honored: `parent_issue_*` requires only
   `sub_issue`, while `sub_issue_*` requires only `parent_issue`; an omitted
   optional counterpart is accepted and any derivable node/relation change is
-  still emitted.
-- A true open/type transition inserts a new representation. Edits, close,
-  reopen, and cache-free `sub_issues` observations update retained task,
-  repository, and `IN_REPOSITORY` identities so Drasi loads prior properties
-  and computes removals as well as additions.
+  still emitted. `TASK_FOR` needs only child and parent node IDs and is not
+  gated by optional `sub_issue_repo`/`parent_issue_repo` objects. The top-level
+  repository is reused only for the Issue it authoritatively describes, or when
+  `repository_url`/embedded repository identity proves a same-repository
+  fallback; cross-repository metadata is never invented.
+- Task nodes, `TASK_FOR`, and task `IN_REPOSITORY` use Update-based idempotent
+  upserts for open, typed, edit, close, reopen, transfer, and `sub_issues`
+  observations. Drasi Update-on-missing produces the first Add, while repeats
+  load prior state and do not create duplicate Add/removal deltas. A
+  generic↔task type transition updates the shared Issue node ID in place and
+  cleans only representation-specific relations/errors rather than deleting
+  and reinserting the shared node.
 - Task delete removes the task, repository edge, parent edge, and task error.
 - Task comments continue to be processed while the task is closed. Result and
   ordinary comment create/edit/delete transitions are deterministic and use

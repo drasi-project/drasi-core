@@ -82,8 +82,11 @@ fields from the parent Source configuration.
 
 Repositories, open generic Issues/PRs, OPEN tasks, CLOSED tasks, labels,
 comments, and reviews follow every GraphQL cursor. Tasks use the repository
-`issues(states: ...)` connection followed by exact configured ID+name filtering,
-not GraphQL search, so GitHub's 1,000-result search cap cannot truncate a
+`issues(states: ..., filterBy: {type: $issueType})` connection. GitHub's live
+GraphQL schema defines `IssueFilters.type` as a `String`; bootstrap passes the
+configured exact Issue Type name as that variable, then defensively requires
+both the configured name and GraphQL node ID on every returned Issue. It does
+not use GraphQL search, so the 1,000-result search cap cannot truncate a
 snapshot. Open tasks selected by both the generic-open and task connections are
 emitted once and never as generic Issues.
 
@@ -109,7 +112,8 @@ make test
 make lint
 ```
 
-Wiremock tests cover initial and cursor pages (including more than 1,000 tasks),
-open generic and open/closed task selection, complete order-independent parent
-repositories, comments on closed tasks, strict task/Result errors, repository
-filtering, requested-label filtering, and live-converter parity.
+Wiremock tests assert the `filterBy.type` query/variable contract, exact-ID
+defense, initial and cursor pages (including more than 1,000 tasks), open generic
+and open/closed task selection, complete order-independent parent repositories,
+comments on closed tasks, strict task/Result errors, repository filtering,
+requested-label filtering, and live-converter parity.
