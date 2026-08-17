@@ -32,6 +32,11 @@ therefore comes from the source crate, unchanged. This crate never
 re-implements any of that. In particular, bootstrap comments use the same
 literal closed `<details>` wrapper, exact Assignment/Result summary labels,
 LF-only spacing, typed two-space JSON, and single final LF as live webhooks.
+Issue and Pull Request label selections alias each GraphQL label `id` to
+`node_id`; the shared converter therefore emits the same ordered
+`labelDetails: [{name, nodeId}]` property as live webhooks while retaining
+`labels`, `status`, and `statusLabel`. Missing or malformed label node IDs fail
+bootstrap rather than emit a partial identity list.
 
 ## Scope (prototype)
 
@@ -153,8 +158,9 @@ the added complexity of per-repository fan-out.
   known partial snapshot when a request or repository task fails, but upstream
   state can still change between successfully fetched pages.
 - Issue/PR labels, comments, reviews, repositories, issues, and pull requests
-  are cursor-paginated in full. Assignees and repository topics fit within
-  GitHub's resource limits and are fetched inline.
+  are cursor-paginated in full. Label pages fetch both name and GraphQL node ID,
+  without a label cache or any additional webhook-side API call. Assignees and
+  repository topics fit within GitHub's resource limits and are fetched inline.
 - Enum casing (`state`, `state_reason`, `visibility`, review `state`) is
   lowercased to match the REST/webhook convention `Converter` expects; this
   covers every enum value currently used by `mapping.rs`.

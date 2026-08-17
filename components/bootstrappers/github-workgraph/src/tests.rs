@@ -25,7 +25,7 @@ use crate::GitHubWorkGraphBootstrapProvider;
 use drasi_core::models::{Element, ElementValue, SourceChange};
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use drasi_lib::channels::BootstrapEvent;
-use drasi_source_github_workgraph::mapping::{NODE_ISSUE, NODE_ORGANIZATION};
+use drasi_source_github_workgraph::mapping::{NODE_ISSUE, NODE_ORGANIZATION, NODE_PULL_REQUEST};
 use drasi_source_github_workgraph::workgraph::{assignment_element_id, comment_error_element_id};
 use serde_json::{json, Value};
 use wiremock::matchers::{body_string_contains, method, path};
@@ -142,7 +142,7 @@ fn issue_fixture() -> Value {
         "assignees": { "nodes": [{ "login": "ada" }] },
         "labels": {
             "pageInfo": { "hasNextPage": true, "endCursor": "LABEL_PAGE_2" },
-            "nodes": [{ "name": "bug" }]
+            "nodes": [{ "name": "bug", "node_id": "L_bug" }]
         },
         "comments": { "totalCount": 4 },
     })
@@ -216,7 +216,7 @@ fn pr_fixture() -> Value {
         "assignees": { "nodes": [] },
         "labels": {
             "pageInfo": { "hasNextPage": false, "endCursor": null },
-            "nodes": []
+            "nodes": [{ "name": "enhancement", "node_id": "L_enhancement" }]
         },
         "draft": false,
         "merged": false,
@@ -288,23 +288,27 @@ async fn mount_full_fixture(server: &MockServer) {
     .await;
     mount_query(
         server,
-        &["issues(first"],
+        &["issues(first", "nodes { name node_id: id }"],
         json!({ "repository": { "issues": connection(vec![issue_fixture()], false, None) } }),
         None,
     )
     .await;
     mount_query(
         server,
-        &["pullRequests(first"],
+        &["pullRequests(first", "nodes { name node_id: id }"],
         json!({ "repository": { "pullRequests": connection(vec![pr_fixture()], false, None) } }),
         None,
     )
     .await;
     mount_query(
         server,
-        &["labels(first: $pageSize", "\"cursor\":\"LABEL_PAGE_2\""],
+        &[
+            "labels(first: $pageSize",
+            "nodes { name node_id: id }",
+            "\"cursor\":\"LABEL_PAGE_2\"",
+        ],
         json!({ "node": { "labels": connection(
-            vec![json!({ "name": "status:in-progress" })],
+            vec![json!({ "name": "status:in-progress", "node_id": "L_status_in_progress" })],
             false,
             None,
         ) } }),
@@ -490,6 +494,27 @@ async fn bootstraps_full_repository_via_shared_converter() {
         &drasi_core::models::ElementValue::from(&json!("status:in-progress")),
         "status label must be derived by the shared mapping::derive_status, not reimplemented"
     );
+    assert_eq!(
+        element.get_property("labelDetails"),
+        &ElementValue::from(&json!([
+            {"name":"bug","nodeId":"L_bug"},
+            {"name":"status:in-progress","nodeId":"L_status_in_progress"}
+        ])),
+        "bootstrap must expose the same ordered label name/node-ID pairs as live mapping"
+    );
+    let pr_event = events
+        .iter()
+        .find(|event| label_of(event) == NODE_PULL_REQUEST)
+        .expect("pull request node present");
+    let SourceChange::Insert { element } = &pr_event.change else {
+        panic!("pull request must be an Insert");
+    };
+    assert_eq!(
+        element.get_property("labelDetails"),
+        &ElementValue::from(&json!([
+            {"name":"enhancement","nodeId":"L_enhancement"}
+        ]))
+    );
 
     let assignment_id = assignment_element_id(ORG_NODE_ID, "fixture-701-validation");
     let assignment_event = events
@@ -662,6 +687,56 @@ async fn paginates_repositories_across_multiple_pages() {
     assert_eq!(repo_ids.len(), 2);
     assert!(repo_ids.contains(REPO_NODE_ID));
     assert!(repo_ids.contains("R_repo2"));
+}
+
+#[tokio::test]
+async fn bootstrap_rejects_labels_without_graphql_node_ids() {
+    let server = MockServer::start().await;
+    mount_query(
+        &server,
+        &["avatar_url: avatarUrl"],
+        json!({ "organization": org_fixture() }),
+        Some(1),
+    )
+    .await;
+    mount_query(
+        &server,
+        &["repositories(first"],
+        json!({ "organization": { "repositories": connection(vec![repo_fixture()], false, None) } }),
+        Some(1),
+    )
+    .await;
+    let mut issue = issue_fixture();
+    issue["labels"]["pageInfo"] = json!({ "hasNextPage": false, "endCursor": null });
+    issue["labels"]["nodes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("node_id");
+    issue["comments"]["totalCount"] = json!(0);
+    mount_query(
+        &server,
+        &["issues(first", "nodes { name node_id: id }"],
+        json!({ "repository": { "issues": connection(vec![issue], false, None) } }),
+        Some(1),
+    )
+    .await;
+
+    let provider = provider_for(&server);
+    let context = BootstrapContext::new_minimal("test-server".to_string(), "gh-src".to_string());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    let error = provider
+        .bootstrap(all_labels_request(), &context, tx, None)
+        .await
+        .expect_err("a label without a GraphQL node ID must fail bootstrap");
+
+    assert!(
+        format!("{error:#}").contains("'labels[0].node_id' must be nonempty text"),
+        "unexpected bootstrap error: {error:#}"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "invalid label identity must not emit a partial snapshot"
+    );
 }
 
 #[tokio::test]
