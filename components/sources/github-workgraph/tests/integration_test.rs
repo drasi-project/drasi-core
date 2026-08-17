@@ -78,6 +78,7 @@ impl Harness {
     fn build(max_events: u64, port: u16) -> GitHubWorkGraphSource {
         let config = GitHubWorkGraphSourceConfig {
             organization: "acme".into(),
+            repositories: Vec::new(),
             webhook: WebhookConfig {
                 host: "127.0.0.1".into(),
                 port,

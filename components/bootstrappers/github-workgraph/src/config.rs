@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use drasi_source_github_workgraph::config::RepositoryFilter;
 use serde::{Deserialize, Serialize};
 
 /// Default GitHub GraphQL API endpoint (github.com; override for GHE).
@@ -33,6 +34,9 @@ pub const DEFAULT_PAGE_SIZE: u32 = 100;
 pub struct GitHubWorkGraphBootstrapConfig {
     /// The single GitHub organization login to enumerate.
     pub organization: String,
+    /// Canonical lowercase repository names to include. Empty means all.
+    #[serde(default)]
+    pub repositories: Vec<String>,
     /// A read-only GitHub token (PAT or GitHub App installation token).
     pub token: String,
     /// GraphQL API endpoint. Override for GitHub Enterprise Server.
@@ -46,6 +50,7 @@ impl Default for GitHubWorkGraphBootstrapConfig {
     fn default() -> Self {
         Self {
             organization: String::new(),
+            repositories: Vec::new(),
             token: String::new(),
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
@@ -69,7 +74,15 @@ impl GitHubWorkGraphBootstrapConfig {
             "api_base_url cannot be empty"
         );
         anyhow::ensure!(self.max_concurrency > 0, "max_concurrency must be > 0");
+        RepositoryFilter::new(&self.organization, &self.repositories)?;
         Ok(())
+    }
+
+    pub fn normalized(mut self) -> anyhow::Result<Self> {
+        self.validate()?;
+        self.repositories =
+            RepositoryFilter::new(&self.organization, &self.repositories)?.canonical_names();
+        Ok(self)
     }
 }
 
@@ -114,5 +127,35 @@ mod tests {
             ..GitHubWorkGraphBootstrapConfig::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn normalizes_repository_filter() {
+        let config = GitHubWorkGraphBootstrapConfig {
+            organization: "acme".to_string(),
+            repositories: vec![
+                "Widgets".to_string(),
+                "acme/widgets".to_string(),
+                "gadgets".to_string(),
+            ],
+            token: "t".to_string(),
+            ..GitHubWorkGraphBootstrapConfig::default()
+        }
+        .normalized()
+        .unwrap();
+
+        assert_eq!(config.repositories, vec!["gadgets", "widgets"]);
+    }
+
+    #[test]
+    fn rejects_foreign_repository_owner() {
+        let config = GitHubWorkGraphBootstrapConfig {
+            organization: "acme".to_string(),
+            repositories: vec!["other/widgets".to_string()],
+            token: "t".to_string(),
+            ..GitHubWorkGraphBootstrapConfig::default()
+        };
+
+        assert!(config.validate().is_err());
     }
 }

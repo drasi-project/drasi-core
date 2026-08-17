@@ -12,6 +12,8 @@ id: github-workgraph
 kind: github-workgraph
 autoStart: true
 organization: drasi-project
+repositories:
+  - drasi-workgraph-demo
 webhook:
   host: 0.0.0.0
   port: 8080
@@ -26,14 +28,23 @@ durability:
   capacityPolicy: RejectIncoming
 ```
 
-`organization` is one login; there is no repository, Project, token, or API
-scope. The secret is a `SecretReference`, the path is static, durability uses
+`organization` is one login. `repositories` is optional: omitted or empty means
+all repositories in that organization. Each entry is either a bare repository
+name (`drasi-workgraph-demo`) or a full `owner/name`; a full owner must match
+`organization` case-insensitively. Names are case-insensitive, limited to 100
+ASCII letters, digits, `.`, `-`, or `_`, and normalized to sorted, deduplicated
+lowercase bare names. Malformed entries and foreign owners are rejected. The
+secret is a `SecretReference`, the path is static, durability uses
 `RejectIncoming`, and unknown or obsolete fields are rejected.
 
 Create one organization webhook using `application/json` and the same secret for
 `repository`, `issues`, `issue_comment`, `pull_request`, and
 `pull_request_review`. Other families, including inline comments and Projects,
-are ignored.
+are ignored. Filtering is stateless: each supported delivery carries its
+repository metadata, so an excluded repository returns `204` before any WAL or
+delivery-dedupe write. Transfers and repository renames use the old/new
+repository metadata in that delivery to emit only the in-scope side. The Source
+does not call GitHub or maintain a repository cache.
 
 ## Graph contract
 

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config::GitHubWorkGraphSourceConfig;
+use crate::config::{GitHubWorkGraphSourceConfig, RepositoryFilter};
 use crate::mapping::{NODE_LABELS, RELATION_LABELS};
 use crate::webhook::{serve, IngressParams};
 use anyhow::{anyhow, Context, Result};
@@ -45,6 +45,7 @@ async fn report(base: &SourceBase, status: ComponentStatus, message: &str) {
 pub struct GitHubWorkGraphSource {
     pub(crate) base: SourceBase,
     config: GitHubWorkGraphSourceConfig,
+    repository_filter: RepositoryFilter,
     wal: Arc<RwLock<Option<Arc<dyn WalProvider>>>>,
     notify: Arc<Notify>,
     replay_gate: Arc<Mutex<()>>,
@@ -139,6 +140,7 @@ impl Source for GitHubWorkGraphSource {
         let ingress = IngressParams {
             source_id: self.base.id.clone(),
             organization: self.config.organization.clone(),
+            repository_filter: self.repository_filter.clone(),
             path: self.config.webhook.path.clone(),
             secret: self.config.webhook.secret.clone(),
             body_limit_bytes: self.config.webhook.body_limit_bytes,
@@ -392,7 +394,8 @@ impl GitHubWorkGraphSourceBuilder {
         self
     }
     pub fn build(self) -> Result<GitHubWorkGraphSource> {
-        self.config.validate()?;
+        let config = self.config.normalized()?;
+        let repository_filter = config.repository_filter()?;
         let mut params = SourceBaseParams::new(&self.id)
             .with_dispatch_mode(DispatchMode::Channel)
             .with_auto_start(self.auto_start);
@@ -401,7 +404,8 @@ impl GitHubWorkGraphSourceBuilder {
         }
         Ok(GitHubWorkGraphSource {
             base: SourceBase::new(params)?,
-            config: self.config,
+            config,
+            repository_filter,
             wal: Arc::new(RwLock::new(None)),
             notify: Arc::new(Notify::new()),
             replay_gate: Arc::new(Mutex::new(())),

@@ -14,9 +14,10 @@
 
 //! GitHub WorkGraph bootstrap provider.
 //!
-//! Enumerates every repository in one configured GitHub organization over the
-//! GitHub GraphQL v4 API, and snapshots each repository's currently-open
-//! Issues and Pull Requests, their conversation comments, and PR reviews.
+//! Enumerates repositories in one configured GitHub organization over the
+//! GitHub GraphQL v4 API, applies the Source's optional repository allowlist,
+//! and snapshots each selected repository's currently-open Issues and Pull
+//! Requests, their conversation comments, and PR reviews.
 //!
 //! # Reuse, not duplication
 //!
@@ -32,7 +33,8 @@
 //!
 //! # Scope (prototype)
 //!
-//! - One configured organization; all repositories the token can see.
+//! - One configured organization; all repositories the token can see by
+//!   default, or the Source's normalized repository allowlist.
 //! - Only currently-**open** Issues and Pull Requests (no closed history).
 //! - Issue/PR conversation comments and PR reviews only.
 //! - Excluded: Projects, Project Items, inline diff comments, closed-item
@@ -64,6 +66,7 @@ use drasi_lib::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
 };
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
+use drasi_source_github_workgraph::config::RepositoryFilter;
 use drasi_source_github_workgraph::mapping::{Converter, NODE_LABELS, RELATION_LABELS};
 use log::{info, warn};
 use serde_json::{json, Value};
@@ -74,6 +77,7 @@ use tokio::task::JoinSet;
 
 pub struct GitHubWorkGraphBootstrapProvider {
     config: GitHubWorkGraphBootstrapConfig,
+    repository_filter: RepositoryFilter,
 }
 
 impl GitHubWorkGraphBootstrapProvider {
@@ -104,6 +108,11 @@ impl GitHubWorkGraphBootstrapProviderBuilder {
         self
     }
 
+    pub fn with_repositories(mut self, repositories: Vec<String>) -> Self {
+        self.config.repositories = repositories;
+        self
+    }
+
     pub fn with_api_base_url(mut self, api_base_url: impl Into<String>) -> Self {
         self.config.api_base_url = api_base_url.into();
         self
@@ -115,9 +124,11 @@ impl GitHubWorkGraphBootstrapProviderBuilder {
     }
 
     pub fn build(self) -> Result<GitHubWorkGraphBootstrapProvider> {
-        self.config.validate()?;
+        let config = self.config.normalized()?;
+        let repository_filter = RepositoryFilter::new(&config.organization, &config.repositories)?;
         Ok(GitHubWorkGraphBootstrapProvider {
-            config: self.config,
+            config,
+            repository_filter,
         })
     }
 }
@@ -144,10 +155,20 @@ impl BootstrapProvider for GitHubWorkGraphBootstrapProvider {
 
         let org_value = client.fetch_organization(&self.config.organization).await?;
         let repos = client.fetch_repositories(&self.config.organization).await?;
+        let mut selected_repos = Vec::new();
+        for repo in repos {
+            if self
+                .repository_filter
+                .includes_repository(&repo)
+                .context("GitHub repository cannot be matched against repositories filter")?
+            {
+                selected_repos.push(repo);
+            }
+        }
         info!(
-            "[{}] GitHub WorkGraph bootstrap: {} repositories in '{}'",
+            "[{}] GitHub WorkGraph bootstrap: {} selected repositories in '{}'",
             context.source_id,
-            repos.len(),
+            selected_repos.len(),
             self.config.organization
         );
 
@@ -159,7 +180,7 @@ impl BootstrapProvider for GitHubWorkGraphBootstrapProvider {
         // in sequence (issues, PRs, then per-item comments/reviews).
         let semaphore = Arc::new(Semaphore::new(self.config.max_concurrency.max(1)));
         let mut join_set = JoinSet::new();
-        for repo in repos {
+        for repo in selected_repos {
             let client = client.clone();
             let organization = self.config.organization.clone();
             let source_id = context.source_id.clone();

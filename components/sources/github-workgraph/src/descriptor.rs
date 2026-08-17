@@ -24,6 +24,9 @@ use utoipa::OpenApi;
 pub struct GitHubWorkGraphSourceConfigDto {
     #[schema(value_type = ConfigValueString)]
     pub organization: ConfigValueString,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(value_type = Vec<ConfigValueString>)]
+    pub repositories: Vec<ConfigValueString>,
     pub webhook: WebhookConfigDto,
     #[serde(default, with = "crate::config::DurabilityConfigDef")]
     #[schema(value_type = DurabilityConfigSchema)]
@@ -120,8 +123,10 @@ impl SourcePluginDescriptor for GitHubWorkGraphSourceDescriptor {
             _ => anyhow::bail!("'webhook.secret' must use SecretReference"),
         }
         let mapper = DtoMapper::new();
+        let repositories = mapper.resolve_string_vec(&dto.repositories).await?;
         let config = GitHubWorkGraphSourceConfig {
             organization: mapper.resolve_string(&dto.organization).await?,
+            repositories,
             webhook: WebhookConfig {
                 host: mapper.resolve_string(&dto.webhook.host).await?,
                 port: mapper.resolve_typed(&dto.webhook.port).await?,

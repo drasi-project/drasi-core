@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::config::RepositoryFilter;
 use crate::mapping::{ConvertError, Converter};
 use anyhow::{anyhow, Context, Result};
 use axum::body::Bytes;
@@ -38,6 +39,7 @@ const DELIVERY_KEY_PREFIX: &str = "delivery:";
 pub struct IngressParams {
     pub source_id: String,
     pub organization: String,
+    pub repository_filter: RepositoryFilter,
     pub path: String,
     pub secret: String,
     pub body_limit_bytes: usize,
@@ -50,6 +52,7 @@ pub struct IngressParams {
 struct IngressState {
     source_id: String,
     organization: String,
+    repository_filter: RepositoryFilter,
     secret: Vec<u8>,
     wal: Arc<dyn WalProvider>,
     state_store: Arc<dyn StateStoreProvider>,
@@ -61,6 +64,7 @@ pub async fn serve(listener: TcpListener, params: IngressParams) -> Result<()> {
     let state = Arc::new(IngressState {
         source_id: params.source_id,
         organization: params.organization,
+        repository_filter: params.repository_filter,
         secret: params.secret.into_bytes(),
         wal: params.wal,
         state_store: params.state_store,
@@ -134,7 +138,8 @@ async fn handle_delivery(
         return Ok(None);
     }
     let effective_from = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    let converter = Converter::new(source_id, &state.organization, effective_from);
+    let converter = Converter::new(source_id, &state.organization, effective_from)
+        .with_repository_filter(&state.repository_filter);
     let changes = match converter.convert(event_type, &payload) {
         Ok(Some(changes)) => changes,
         Ok(None) => {

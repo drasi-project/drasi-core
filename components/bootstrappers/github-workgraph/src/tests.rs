@@ -337,13 +337,70 @@ async fn mount_full_fixture(server: &MockServer) {
 }
 
 fn provider_for(server: &MockServer) -> GitHubWorkGraphBootstrapProvider {
+    provider_for_repositories(server, Vec::new())
+}
+
+fn provider_for_repositories(
+    server: &MockServer,
+    repositories: Vec<String>,
+) -> GitHubWorkGraphBootstrapProvider {
     GitHubWorkGraphBootstrapProvider::builder()
         .with_organization("acme")
+        .with_repositories(repositories)
         .with_token("read-only-test-token")
         .with_api_base_url(format!("{}/graphql", server.uri()))
         .with_max_concurrency(2)
         .build()
         .expect("valid config")
+}
+
+#[tokio::test]
+async fn empty_repository_filter_preserves_all_repository_bootstrap() {
+    let server = MockServer::start().await;
+    mount_full_fixture(&server).await;
+    let provider = provider_for_repositories(&server, Vec::new());
+
+    let (result, events) = run_bootstrap(&provider, all_labels_request()).await;
+
+    assert_eq!(result.event_count, 18);
+    assert_eq!(result.event_count, events.len());
+}
+
+#[tokio::test]
+async fn repository_filter_matches_streaming_scope_before_child_fetches() {
+    let included_server = MockServer::start().await;
+    mount_full_fixture(&included_server).await;
+    let provider = provider_for_repositories(
+        &included_server,
+        vec![
+            "ACME/Widgets".to_string(),
+            "widgets".to_string(),
+            "WIDGETS".to_string(),
+        ],
+    );
+    let (included, events) = run_bootstrap(&provider, all_labels_request()).await;
+    assert_eq!(included.event_count, 18);
+    assert_eq!(included.event_count, events.len());
+
+    let excluded_server = MockServer::start().await;
+    mount_query(
+        &excluded_server,
+        &["avatar_url: avatarUrl"],
+        json!({ "organization": org_fixture() }),
+        Some(1),
+    )
+    .await;
+    mount_query(
+        &excluded_server,
+        &["repositories(first"],
+        json!({ "organization": { "repositories": connection(vec![repo_fixture()], false, None) } }),
+        Some(1),
+    )
+    .await;
+    let provider = provider_for_repositories(&excluded_server, vec!["gadgets".to_string()]);
+    let (excluded, events) = run_bootstrap(&provider, all_labels_request()).await;
+    assert_eq!(excluded.event_count, 0);
+    assert!(events.is_empty());
 }
 
 fn all_labels_request() -> BootstrapRequest {
