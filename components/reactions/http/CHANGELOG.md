@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Adaptive mode opts in via the `adaptive` config block (`adaptiveMinBatchSize`, `adaptiveMaxBatchSize`, `adaptiveWindowSize`, `adaptiveBatchTimeoutMs`) and coalesces items into `BatchEnvelope` payloads. Each batch item is a rendered per-query body template, or the default `DefaultChangeNotification` envelope when no body template applies; `outputTemplates` may be combined with adaptive batch mode (only the body template applies to batched items, since a batch is a single POST).
 - Configuration is validated at construction: `HttpReactionBuilder::build()` validates base URL, timeout, adaptive ranges, batch endpoint path, HTTP methods, headers, templates, and route keys.
+- Standard per-call specs support `rejectNonEmptyJsonPointer` to reject logical failures in JSON 2xx responses. Validation is bounded to 1 MiB, does not retry logical failures in process, and is rejected with adaptive mode rather than ignored.
 - Per-query routes resolve by full query id, then by the **last dotted segment** of the query id (`routes.my_query` matches a wire id of `source.my_query`), then by the shared default template.
 - Template render context includes `query_id`, `query_name`, `timestamp`, `metadata`, `operation`, and the applicable `before`, `after`, and `data` values.
 - New `from_query` builder alias for `with_query`.
