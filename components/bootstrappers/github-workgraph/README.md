@@ -81,10 +81,18 @@ fields from the parent Source configuration.
 ## Pagination and consistency
 
 Repositories, open generic Issues/PRs, OPEN tasks, CLOSED tasks, labels,
-comments, and reviews follow every GraphQL cursor. Parent identity and
-repository are selected with each task rather than inferred from repository
-iteration. Repository processing and HTTP requests are independently bounded by
-`maxConcurrency`.
+comments, and reviews follow every GraphQL cursor. Tasks use the repository
+`issues(states: ...)` connection followed by exact configured ID+name filtering,
+not GraphQL search, so GitHub's 1,000-result search cap cannot truncate a
+snapshot. Open tasks selected by both the generic-open and task connections are
+emitted once and never as generic Issues.
+
+Parent identity and repository are selected with each task rather than inferred
+from repository iteration. Embedded parent repositories select and reshape the
+same default branch, topics, and metadata as organization repository
+enumeration, so first-wins snapshot dedup is complete regardless of concurrent
+repository completion order. Repository processing and HTTP requests are
+independently bounded by `maxConcurrency`.
 
 GitHub does not offer a transaction spanning these queries. Bootstrap fails on
 any repository task error rather than intentionally returning a partial
@@ -101,6 +109,7 @@ make test
 make lint
 ```
 
-Wiremock tests cover initial and cursor pages, open generic and open/closed task
-selection, parents, comments on closed tasks, strict task/Result errors,
-repository filtering, requested-label filtering, and live-converter parity.
+Wiremock tests cover initial and cursor pages (including more than 1,000 tasks),
+open generic and open/closed task selection, complete order-independent parent
+repositories, comments on closed tasks, strict task/Result errors, repository
+filtering, requested-label filtering, and live-converter parity.

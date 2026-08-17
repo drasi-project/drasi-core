@@ -209,28 +209,11 @@ impl<'a> Converter<'a> {
         let Some(filter) = self.repository_filter else {
             return Ok(true);
         };
-        if event_type == "issues" && in_table("closed deleted", action) {
-            let issue = payload
-                .get("issue")
-                .ok_or_else(|| invalid("missing 'issue'"))?;
-            let current_task = self.is_task_issue(issue);
-            let previous_task = self
-                .previous_issue_type(payload)
-                .is_some_and(|issue_type| self.task_issue_type.matches(Some(issue_type)));
-            if action == "deleted" || (!current_task && !previous_task) {
+        if event_type == "issues" {
+            let (current_task, previous_task) = self.issue_task_states(action, payload)?;
+            if action == "deleted" || (!current_task && (action == "closed" || previous_task)) {
                 return Ok(true);
             }
-        }
-        if event_type == "issues"
-            && (self
-                .previous_issue_type(payload)
-                .is_some_and(|issue_type| self.task_issue_type.matches(Some(issue_type)))
-                || (in_table("typed untyped", action)
-                    && !payload
-                        .get("issue")
-                        .is_some_and(|issue| self.is_task_issue(issue))))
-        {
-            return Ok(true);
         }
         if (event_type == "pull_request" && action == "closed")
             || (event_type == "sub_issues"
@@ -279,11 +262,8 @@ impl<'a> Converter<'a> {
                 let issue = payload
                     .get("issue")
                     .ok_or_else(|| invalid("missing 'issue'"))?;
-                if self.is_task_issue(issue)
-                    || self
-                        .previous_issue_type(payload)
-                        .is_some_and(|issue_type| self.task_issue_type.matches(Some(issue_type)))
-                {
+                let (current_task, previous_task) = self.issue_task_states(action, payload)?;
+                if current_task || previous_task {
                     Ok(true)
                 } else {
                     work_item_action_projects_open(action, issue, "issue")
@@ -329,11 +309,37 @@ impl<'a> Converter<'a> {
         self.task_issue_type.matches(issue.get("type"))
     }
 
-    fn previous_issue_type<'b>(&self, payload: &'b Value) -> Option<&'b Value> {
-        payload
-            .pointer("/changes/type/from")
-            .or_else(|| payload.pointer("/changes/issue_type/from"))
-            .filter(|value| !value.is_null())
+    fn issue_task_states(
+        &self,
+        action: &str,
+        payload: &Value,
+    ) -> Result<(bool, bool), ConvertError> {
+        let issue = payload
+            .get("issue")
+            .ok_or_else(|| invalid("missing 'issue'"))?;
+        let issue_task = self.is_task_issue(issue);
+        match action {
+            "typed" => {
+                let assigned = payload
+                    .get("type")
+                    .ok_or_else(|| invalid("missing 'type' for typed issue delivery"))?;
+                required_str(assigned, "/node_id")?;
+                required_str(assigned, "/name")?;
+                let assigned_task = self.task_issue_type.matches(Some(assigned));
+                let issue_type_absent = issue.get("type").is_none_or(Value::is_null);
+                Ok((issue_task || (issue_type_absent && assigned_task), false))
+            }
+            "untyped" => {
+                let removed = payload
+                    .get("type")
+                    .ok_or_else(|| invalid("missing 'type' for untyped issue delivery"))?;
+                required_str(removed, "/node_id")?;
+                required_str(removed, "/name")?;
+                let removed_task = self.task_issue_type.matches(Some(removed));
+                Ok((issue_task && !removed_task, removed_task))
+            }
+            _ => Ok((issue_task, issue_task)),
+        }
     }
 
     fn validate_organization(&self, payload: &Value) -> Result<String, ConvertError> {
@@ -401,24 +407,7 @@ impl<'a> Converter<'a> {
     }
 
     fn issue_event(&self, cs: &mut Changes, d: &Delivery) -> Mapped {
-        let issue = d
-            .payload
-            .get("issue")
-            .ok_or_else(|| invalid("missing 'issue'"))?;
-        let current_task = self.is_task_issue(issue);
-        let changed_type = d
-            .payload
-            .pointer("/changes/type/from")
-            .or_else(|| d.payload.pointer("/changes/issue_type/from"));
-        let previous_task = match changed_type {
-            Some(issue_type) if !issue_type.is_null() => {
-                self.task_issue_type.matches(Some(issue_type))
-                    || (in_table("typed untyped", d.action) && !current_task)
-            }
-            Some(_) => in_table("typed untyped", d.action) && !current_task,
-            None if in_table("typed untyped", d.action) && !current_task => true,
-            None => current_task,
-        };
+        let (current_task, previous_task) = self.issue_task_states(d.action, d.payload)?;
 
         if current_task || previous_task {
             return self.task_issue_event(cs, d, current_task, previous_task);
@@ -476,7 +465,7 @@ impl<'a> Converter<'a> {
             delete_work_item(cs, &issue_id, &repo_id, NODE_ISSUE);
         }
         let body = issue.get("body").and_then(Value::as_str).unwrap_or("");
-        let base_insert = !previous_task || in_table("opened reopened typed", d.action);
+        let base_insert = d.action == "opened" || (d.action == "typed" && current_task);
         let previous_valid = d
             .payload
             .pointer("/changes/body/from")
@@ -516,92 +505,114 @@ impl<'a> Converter<'a> {
     }
 
     fn sub_issue_event(&self, cs: &mut Changes, d: &Delivery) -> Mapped {
-        let child = d
-            .payload
-            .get("sub_issue")
-            .ok_or_else(|| invalid("missing 'sub_issue'"))?;
-        let child_id = required_str(child, "/node_id")?;
+        let parent_action = in_table("parent_issue_added parent_issue_removed", d.action);
+        let child = if parent_action {
+            Some(
+                d.payload
+                    .get("sub_issue")
+                    .ok_or_else(|| invalid("missing 'sub_issue' for parent_issue action"))?,
+            )
+        } else {
+            d.payload.get("sub_issue")
+        };
+        let parent = if parent_action {
+            d.payload.get("parent_issue")
+        } else {
+            Some(
+                d.payload
+                    .get("parent_issue")
+                    .ok_or_else(|| invalid("missing 'parent_issue' for sub_issue action"))?,
+            )
+        };
 
         if in_table("parent_issue_removed sub_issue_removed", d.action) {
-            cs.delete(&task_for_rel_id(&child_id), REL_TASK_FOR);
+            if let Some(child) = child {
+                let child_id = required_str(child, "/node_id")?;
+                cs.delete(&task_for_rel_id(&child_id), REL_TASK_FOR);
+            }
             return Ok(());
         }
-        let parent = d
-            .payload
-            .get("parent_issue")
-            .ok_or_else(|| invalid("missing 'parent_issue'"))?;
-        let parent_id = required_str(parent, "/node_id")?;
+
+        let Some(child) = child else {
+            return Ok(());
+        };
+        let child_id = required_str(child, "/node_id")?;
         if !self.is_task_issue(child) {
             return Ok(());
         }
 
-        let child_repo = d
-            .payload
-            .get("sub_issue_repo")
-            .or_else(|| d.payload.get("repository"))
-            .ok_or_else(|| invalid("missing child repository"))?;
-        let child_repo_id = required_str(child_repo, "/node_id")?;
-        match classify_task_body(child.get("body").and_then(Value::as_str).unwrap_or("")) {
-            TaskClassification::Task(_) => {
-                cs.delete(&task_error_element_id(&child_id), NODE_WORKGRAPH_ERROR);
-                upsert_task(
-                    cs,
-                    Insert,
-                    child,
-                    Some(child_repo),
-                    &child_id,
-                    &child_repo_id,
-                )?;
-            }
-            TaskClassification::Invalid(error) => {
-                delete_task_node(cs, &child_id, &child_repo_id);
-                let body = child.get("body").and_then(Value::as_str).unwrap_or("");
-                let mut props = task_error_props(child, Some(child_repo), body);
-                props.text("errorKind", "invalid-workgraph-task");
-                props.text("errorCode", error.code);
-                props.text("errorMessage", &error.message);
-                cs.node(
-                    Insert,
-                    &task_error_element_id(&child_id),
-                    NODE_WORKGRAPH_ERROR,
-                    props,
-                );
-                return Ok(());
+        let child_repo = if parent_action {
+            d.payload.get("repository")
+        } else {
+            d.payload.get("sub_issue_repo")
+        };
+        if let Some(child_repo) = child_repo {
+            let child_repo_id = required_str(child_repo, "/node_id")?;
+            match classify_task_body(child.get("body").and_then(Value::as_str).unwrap_or("")) {
+                TaskClassification::Task(_) => {
+                    cs.delete(&task_error_element_id(&child_id), NODE_WORKGRAPH_ERROR);
+                    upsert_task(
+                        cs,
+                        Update,
+                        child,
+                        Some(child_repo),
+                        &child_id,
+                        &child_repo_id,
+                    )?;
+                }
+                TaskClassification::Invalid(error) => {
+                    delete_task_node(cs, &child_id, &child_repo_id);
+                    let body = child.get("body").and_then(Value::as_str).unwrap_or("");
+                    let mut props = task_error_props(child, Some(child_repo), body);
+                    props.text("errorKind", "invalid-workgraph-task");
+                    props.text("errorCode", error.code);
+                    props.text("errorMessage", &error.message);
+                    cs.node(
+                        Update,
+                        &task_error_element_id(&child_id),
+                        NODE_WORKGRAPH_ERROR,
+                        props,
+                    );
+                    return Ok(());
+                }
             }
         }
 
-        let parent_repo = d
-            .payload
-            .get("parent_issue_repo")
-            .or_else(|| d.payload.get("repository"));
-        if !self.is_task_issue(parent)
-            && item_is_open(parent, "parent_issue")?
-            && self.repository_in_scope(parent_repo)?
-        {
-            let parent_repo = parent_repo.ok_or_else(|| invalid("missing parent repository"))?;
-            let parent_repo_id = required_str(parent_repo, "/node_id")?;
-            cs.node(
+        let parent_repo = if parent_action {
+            d.payload.get("parent_issue_repo")
+        } else {
+            d.payload.get("repository")
+        };
+        if let (Some(parent), Some(parent_repo)) = (parent, parent_repo) {
+            let parent_id = required_str(parent, "/node_id")?;
+            if !self.is_task_issue(parent)
+                && item_is_open(parent, "parent_issue")?
+                && self.repository_in_scope(Some(parent_repo))?
+            {
+                let parent_repo_id = required_str(parent_repo, "/node_id")?;
+                cs.node(
+                    Update,
+                    &parent_repo_id,
+                    NODE_REPOSITORY,
+                    repository_props(parent_repo),
+                );
+                update_work_item(
+                    cs,
+                    parent,
+                    Some(parent_repo),
+                    &parent_id,
+                    &parent_repo_id,
+                    NODE_ISSUE,
+                )?;
+            }
+            cs.relation(
                 Insert,
-                &parent_repo_id,
-                NODE_REPOSITORY,
-                repository_props(parent_repo),
-            );
-            insert_work_item(
-                cs,
-                parent,
-                Some(parent_repo),
+                REL_TASK_FOR,
+                &task_for_rel_id(&child_id),
+                &child_id,
                 &parent_id,
-                &parent_repo_id,
-                NODE_ISSUE,
-            )?;
+            );
         }
-        cs.relation(
-            Insert,
-            REL_TASK_FOR,
-            &task_for_rel_id(&child_id),
-            &child_id,
-            &parent_id,
-        );
         Ok(())
     }
 
@@ -752,6 +763,21 @@ fn insert_work_item(
     Ok(())
 }
 
+fn update_work_item(
+    cs: &mut Changes,
+    item: &Value,
+    repo: Option<&Value>,
+    item_id: &str,
+    repo_id: &str,
+    label: &'static str,
+) -> Mapped {
+    cs.node(Update, item_id, label, work_item_props(item, repo, label)?);
+    let id = rel_id(REL_IN_REPOSITORY, item_id, repo_id);
+    cs.relation(Update, REL_IN_REPOSITORY, &id, item_id, repo_id);
+    status_changes(cs, Update, item, repo, item_id, label);
+    Ok(())
+}
+
 fn upsert_task(
     cs: &mut Changes,
     op: Op,
@@ -782,7 +808,7 @@ fn upsert_task(
     }
     cs.node(op, issue_id, NODE_WORKGRAPH_TASK, props);
     cs.relation(
-        Insert,
+        op,
         REL_IN_REPOSITORY,
         &rel_id(REL_IN_REPOSITORY, issue_id, repo_id),
         issue_id,
