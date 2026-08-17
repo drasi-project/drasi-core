@@ -432,11 +432,12 @@ impl<'a> Converter<'a> {
             .get("issue")
             .ok_or_else(|| invalid("missing 'issue'"))?;
         let issue_id = required_str(d.payload, "/issue/node_id")?;
+        let task_database_id = required_database_id(issue, "/id")?;
         let repo = d.payload.get("repository");
         let repo_id = required_str(d.payload, "/repository/node_id")?;
 
         if d.action == "transferred" {
-            delete_task(cs, &issue_id, &repo_id);
+            delete_task(cs, &issue_id, &task_database_id, &repo_id);
             if let (Some(new_issue), Some(new_repo)) = (
                 d.payload.pointer("/changes/new_issue"),
                 d.payload.pointer("/changes/new_repository"),
@@ -454,16 +455,16 @@ impl<'a> Converter<'a> {
         }
 
         if d.action == "deleted" {
-            delete_task(cs, &issue_id, &repo_id);
+            delete_task(cs, &issue_id, &task_database_id, &repo_id);
             return Ok(());
         }
 
         if !current_task {
             if item_is_open(issue, "issue")? && self.repository_in_scope(repo)? {
-                clean_task_transition_artifacts(cs, &issue_id);
-                update_work_item(cs, issue, repo, &issue_id, &repo_id, NODE_ISSUE)?;
+                clean_task_transition_artifacts(cs, &issue_id, &task_database_id);
+                update_issue_from_task(cs, issue, repo, &issue_id, &repo_id)?;
             } else {
-                delete_task(cs, &issue_id, &repo_id);
+                delete_task(cs, &issue_id, &task_database_id, &repo_id);
             }
             return Ok(());
         }
@@ -479,7 +480,7 @@ impl<'a> Converter<'a> {
                 upsert_task(cs, issue, repo, &issue_id, Some(&repo_id))?;
             }
             TaskClassification::Invalid(error) => {
-                delete_task_node(cs, &issue_id, &repo_id);
+                delete_task_representation(cs, &issue_id, &repo_id);
                 let mut props = task_error_props(issue, repo, body);
                 props.text("errorKind", "invalid-workgraph-task");
                 props.text("errorCode", error.code);
@@ -517,10 +518,12 @@ impl<'a> Converter<'a> {
         };
 
         if in_table("parent_issue_removed sub_issue_removed", d.action) {
-            if let Some(child) = child {
-                let child_id = required_str(child, "/node_id")?;
-                cs.delete(&task_for_rel_id(&child_id), REL_TASK_FOR);
-            }
+            let child_database_id = match child {
+                Some(child) => required_database_id(child, "/id")
+                    .or_else(|_| required_database_id(d.payload, "/sub_issue_id"))?,
+                None => required_database_id(d.payload, "/sub_issue_id")?,
+            };
+            cs.delete(&task_for_rel_id(&child_database_id), REL_TASK_FOR);
             return Ok(());
         }
 
@@ -528,6 +531,7 @@ impl<'a> Converter<'a> {
             return Ok(());
         };
         let child_id = required_str(child, "/node_id")?;
+        let child_database_id = required_database_id(child, "/id")?;
         if !self.is_task_issue(child) {
             return Ok(());
         }
@@ -550,11 +554,8 @@ impl<'a> Converter<'a> {
             }
             TaskClassification::Invalid(error) => {
                 match child_repo_id.as_deref() {
-                    Some(repo_id) => delete_task_node(cs, &child_id, repo_id),
-                    None => {
-                        clean_task_transition_artifacts(cs, &child_id);
-                        cs.delete(&child_id, NODE_WORKGRAPH_TASK);
-                    }
+                    Some(repo_id) => delete_task_representation(cs, &child_id, repo_id),
+                    None => cs.delete(&child_id, NODE_WORKGRAPH_TASK),
                 }
                 let body = child.get("body").and_then(Value::as_str).unwrap_or("");
                 let mut props = task_error_props(child, child_repo, body);
@@ -578,7 +579,7 @@ impl<'a> Converter<'a> {
         cs.relation(
             Update,
             REL_TASK_FOR,
-            &task_for_rel_id(&child_id),
+            &task_for_rel_id(&child_database_id),
             &child_id,
             &parent_id,
         );
@@ -630,7 +631,7 @@ impl<'a> Converter<'a> {
         let repo_id = required_str(payload, "/repository/node_id")?;
         match action {
             "closed" | "deleted" => delete_work_item(cs, &item_id, &repo_id, label),
-            "opened" | "reopened" => insert_work_item(cs, item, repo, &item_id, &repo_id, label)?,
+            "opened" | "reopened" => update_work_item(cs, item, repo, &item_id, &repo_id, label)?,
             "transferred" => {
                 if owner_in_org(repo, self.organization) && self.repository_in_scope(repo)? {
                     delete_work_item(cs, &item_id, &repo_id, label);
@@ -647,7 +648,7 @@ impl<'a> Converter<'a> {
                 {
                     let new_id = required_str(new_item, "/node_id")?;
                     let new_repo_id = required_str(new_repo, "/node_id")?;
-                    insert_work_item(cs, new_item, Some(new_repo), &new_id, &new_repo_id, label)?;
+                    update_work_item(cs, new_item, Some(new_repo), &new_id, &new_repo_id, label)?;
                 }
             }
             _ => {
@@ -747,21 +748,6 @@ impl<'a> Converter<'a> {
     }
 }
 
-fn insert_work_item(
-    cs: &mut Changes,
-    item: &Value,
-    repo: Option<&Value>,
-    item_id: &str,
-    repo_id: &str,
-    label: &'static str,
-) -> Mapped {
-    cs.node(Insert, item_id, label, work_item_props(item, repo, label)?);
-    let id = rel_id(REL_IN_REPOSITORY, item_id, repo_id);
-    cs.relation(Insert, REL_IN_REPOSITORY, &id, item_id, repo_id);
-    status_changes(cs, Insert, item, repo, item_id, label);
-    Ok(())
-}
-
 fn update_work_item(
     cs: &mut Changes,
     item: &Value,
@@ -774,6 +760,32 @@ fn update_work_item(
     let id = rel_id(REL_IN_REPOSITORY, item_id, repo_id);
     cs.relation(Update, REL_IN_REPOSITORY, &id, item_id, repo_id);
     status_changes(cs, Update, item, repo, item_id, label);
+    Ok(())
+}
+
+fn update_issue_from_task(
+    cs: &mut Changes,
+    issue: &Value,
+    repo: Option<&Value>,
+    issue_id: &str,
+    repo_id: &str,
+) -> Mapped {
+    let mut props = work_item_props(issue, repo, NODE_ISSUE)?;
+    for key in [
+        "assignmentId",
+        "agentProfile",
+        "priority",
+        "taskType",
+        "task",
+        "issueTypeId",
+        "issueTypeName",
+    ] {
+        props.insert(key, ElementValue::Null);
+    }
+    cs.node(Update, issue_id, NODE_ISSUE, props);
+    let id = rel_id(REL_IN_REPOSITORY, issue_id, repo_id);
+    cs.relation(Update, REL_IN_REPOSITORY, &id, issue_id, repo_id);
+    status_changes(cs, Update, issue, repo, issue_id, NODE_ISSUE);
     Ok(())
 }
 
@@ -828,8 +840,8 @@ fn task_error_props(issue: &Value, repo: Option<&Value>, body: &str) -> ElementP
     props
 }
 
-fn task_for_rel_id(task_id: &str) -> String {
-    format!("{REL_TASK_FOR}:{task_id}")
+fn task_for_rel_id(task_database_id: &str) -> String {
+    format!("{REL_TASK_FOR}:{task_database_id}")
 }
 
 fn clean_generic_transition_artifacts(cs: &mut Changes, issue_id: &str) {
@@ -838,13 +850,12 @@ fn clean_generic_transition_artifacts(cs: &mut Changes, issue_id: &str) {
     cs.delete(&error_id, NODE_WORKGRAPH_ERROR);
 }
 
-fn clean_task_transition_artifacts(cs: &mut Changes, issue_id: &str) {
-    cs.delete(&task_for_rel_id(issue_id), REL_TASK_FOR);
+fn clean_task_transition_artifacts(cs: &mut Changes, issue_id: &str, task_database_id: &str) {
+    cs.delete(&task_for_rel_id(task_database_id), REL_TASK_FOR);
     cs.delete(&task_error_element_id(issue_id), NODE_WORKGRAPH_ERROR);
 }
 
-fn delete_task_node(cs: &mut Changes, issue_id: &str, repo_id: &str) {
-    clean_task_transition_artifacts(cs, issue_id);
+fn delete_task_representation(cs: &mut Changes, issue_id: &str, repo_id: &str) {
     cs.delete(
         &rel_id(REL_IN_REPOSITORY, issue_id, repo_id),
         REL_IN_REPOSITORY,
@@ -852,8 +863,9 @@ fn delete_task_node(cs: &mut Changes, issue_id: &str, repo_id: &str) {
     cs.delete(issue_id, NODE_WORKGRAPH_TASK);
 }
 
-fn delete_task(cs: &mut Changes, issue_id: &str, repo_id: &str) {
-    delete_task_node(cs, issue_id, repo_id);
+fn delete_task(cs: &mut Changes, issue_id: &str, task_database_id: &str, repo_id: &str) {
+    clean_task_transition_artifacts(cs, issue_id, task_database_id);
+    delete_task_representation(cs, issue_id, repo_id);
 }
 
 fn delete_work_item(cs: &mut Changes, item_id: &str, repo_id: &str, label: &str) {
@@ -1151,6 +1163,22 @@ fn issue_repository_name(issue: &Value) -> Option<&str> {
         .rsplit_once('/')
         .map(|(_, name)| name)
         .filter(|name| !name.is_empty())
+}
+
+fn required_database_id(value: &Value, pointer: &str) -> Result<String, ConvertError> {
+    let id = value
+        .pointer(pointer)
+        .ok_or_else(|| invalid(format!("missing '{pointer}'")))?;
+    if let Some(id) = id.as_u64() {
+        return Ok(id.to_string());
+    }
+    if let Some(id) = id.as_i64().filter(|id| *id >= 0) {
+        return Ok(id.to_string());
+    }
+    id.as_str()
+        .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+        .map(str::to_string)
+        .ok_or_else(|| invalid(format!("'{pointer}' must be a non-negative database ID")))
 }
 
 fn required_str(value: &Value, pointer: &str) -> Result<String, ConvertError> {

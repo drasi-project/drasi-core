@@ -158,7 +158,8 @@ fn comment_event(action: &str, body: &str, state: &str, typed: bool, id: &str) -
 
 fn sub_issue_event(action: &str, child: Value, mut parent: Value) -> Value {
     parent["repository_url"] = json!("https://api.github.com/repos/acme/parents");
-    if action.starts_with("parent_issue_") {
+    let child_database_id = child["id"].clone();
+    let mut payload = if action.starts_with("parent_issue_") {
         json!({
             "action":action, "organization":org(), "repository":repo("widgets"),
             "parent_issue":parent, "parent_issue_repo":repo("parents"),
@@ -169,7 +170,11 @@ fn sub_issue_event(action: &str, child: Value, mut parent: Value) -> Value {
             "action":action, "organization":org(), "repository":repo("parents"),
             "parent_issue":parent, "sub_issue":child, "sub_issue_repo":repo("widgets")
         })
+    };
+    if action.ends_with("_removed") {
+        payload["sub_issue_id"] = child_database_id;
     }
+    payload
 }
 
 fn convert(event: &str, payload: &Value) -> Vec<SourceChange> {
@@ -184,7 +189,7 @@ async fn task_path_query() -> ContinuousQuery {
     let parser = Arc::new(CypherParser::new(registry.clone()));
     QueryBuilder::new(
         "MATCH (task:WorkGraphTask)-[:TASK_FOR]->(parent:GitHubIssue) \
-         RETURN task.nodeId AS taskId",
+         RETURN task.nodeId AS taskId, parent.nodeId AS parentId",
         parser,
     )
     .with_function_registry(registry)
@@ -202,6 +207,22 @@ async fn task_node_query() -> ContinuousQuery {
     .with_function_registry(registry)
     .build()
     .await
+}
+
+async fn generic_issue_query(predicate: Option<&str>) -> ContinuousQuery {
+    let registry = Arc::new(FunctionRegistry::new());
+    let parser = Arc::new(CypherParser::new(registry.clone()));
+    let query = match predicate {
+        Some(predicate) => format!(
+            "MATCH (issue:GitHubIssue) WHERE {predicate} \
+             RETURN issue.nodeId AS issueId"
+        ),
+        None => "MATCH (issue:GitHubIssue) RETURN issue.nodeId AS issueId".to_string(),
+    };
+    QueryBuilder::new(query, parser)
+        .with_function_registry(registry)
+        .build()
+        .await
 }
 
 async fn process_changes(
@@ -416,7 +437,7 @@ fn task_delete_removes_task_repository_and_parent_relation() {
         &issue_event("deleted", issue("I_task", VALIDATION_TASK, true, "closed")),
     );
     for (expected_id, expected_label) in [
-        ("TASK_FOR:I_task", "TASK_FOR"),
+        ("TASK_FOR:42", "TASK_FOR"),
         ("IN_REPOSITORY:I_task:R_widgets", "IN_REPOSITORY"),
         ("I_task", "WorkGraphTask"),
     ] {
@@ -486,6 +507,47 @@ fn issue_type_transitions_replace_node_kinds() {
     );
 }
 
+#[tokio::test]
+async fn untyped_transition_nulls_all_task_only_properties() {
+    let query = generic_issue_query(Some("issue.assignmentId = 'assignment-validation-001'")).await;
+    let generic_query = generic_issue_query(None).await;
+    let task = issue_event("opened", issue("I_task", VALIDATION_TASK, true, "open"));
+    process_changes(&query, convert("issues", &task)).await;
+    process_changes(&generic_query, convert("issues", &task)).await;
+
+    let mut untyped = issue_event("untyped", issue("I_task", "ordinary", false, "open"));
+    untyped["type"] = json!({"node_id":TASK_TYPE_ID,"name":TASK_TYPE_NAME});
+    let changes = convert("issues", &untyped);
+    for key in [
+        "assignmentId",
+        "agentProfile",
+        "priority",
+        "taskType",
+        "task",
+        "issueTypeId",
+        "issueTypeName",
+    ] {
+        assert_eq!(
+            property(&changes, "GitHubIssue", key),
+            &ElementValue::Null,
+            "{key} was not cleared"
+        );
+    }
+    let results = process_changes(&query, changes).await;
+    assert_eq!(additions(&results), 0);
+    assert_eq!(removals(&results), 0);
+
+    let first_generic = process_changes(&generic_query, convert("issues", &untyped)).await;
+    assert_eq!(additions(&first_generic), 1);
+    assert_eq!(removals(&first_generic), 0);
+    let repeated = process_changes(&query, convert("issues", &untyped)).await;
+    assert_eq!(additions(&repeated), 0);
+    assert_eq!(removals(&repeated), 0);
+    let repeated_generic = process_changes(&generic_query, convert("issues", &untyped)).await;
+    assert_eq!(additions(&repeated_generic), 0);
+    assert_eq!(removals(&repeated_generic), 0);
+}
+
 #[test]
 fn unrelated_typed_and_untyped_events_only_update_generic_issue() {
     for action in ["typed", "untyped"] {
@@ -527,6 +589,45 @@ fn body_edits_switch_between_task_and_error() {
         .any(|change| label(change) == "WorkGraphTask"));
 }
 
+#[tokio::test]
+async fn malformed_body_repair_preserves_task_for_identity() {
+    let query = task_path_query().await;
+    let child = issue("I_task", VALIDATION_TASK, true, "open");
+    let parent = issue("I_parent", "parent", false, "open");
+    let initial = process_changes(
+        &query,
+        convert(
+            "sub_issues",
+            &sub_issue_event("sub_issue_added", child, parent),
+        ),
+    )
+    .await;
+    assert_eq!(additions(&initial), 1);
+
+    let mut malformed = issue_event("edited", issue("I_task", "{}", true, "open"));
+    malformed["changes"] = json!({"body":{"from":VALIDATION_TASK}});
+    let malformed_changes = convert("issues", &malformed);
+    assert!(!malformed_changes
+        .iter()
+        .any(|change| label(change) == "TASK_FOR"));
+    let malformed_results = process_changes(&query, malformed_changes).await;
+    assert_eq!(removals(&malformed_results), 1);
+
+    let mut repaired = issue_event("edited", issue("I_task", VALIDATION_TASK, true, "open"));
+    repaired["changes"] = json!({"body":{"from":"{}"}});
+    let repaired_changes = convert("issues", &repaired);
+    assert!(!repaired_changes
+        .iter()
+        .any(|change| label(change) == "TASK_FOR"));
+    let repaired_results = process_changes(&query, repaired_changes).await;
+    assert_eq!(additions(&repaired_results), 1);
+    assert_eq!(removals(&repaired_results), 0);
+
+    let repeated = process_changes(&query, convert("issues", &repaired)).await;
+    assert_eq!(additions(&repeated), 0);
+    assert_eq!(removals(&repeated), 0);
+}
+
 #[test]
 fn sub_issue_add_upserts_task_parent_and_relations() {
     let payload = sub_issue_event(
@@ -547,7 +648,7 @@ fn sub_issue_add_upserts_task_parent_and_relations() {
         label(change) == "GitHubIssue" && id(change) == "I_parent" && is_update(change)
     }));
     assert!(changes.iter().any(|change| {
-        label(change) == "TASK_FOR" && id(change) == "TASK_FOR:I_task" && is_update(change)
+        label(change) == "TASK_FOR" && id(change) == "TASK_FOR:42" && is_update(change)
     }));
 }
 
@@ -562,7 +663,7 @@ fn sub_issue_delivery_variants_are_stable_and_removal_is_payload_only() {
         );
         assert!(changes
             .iter()
-            .any(|change| id(change) == "TASK_FOR:I_task" && is_update(change)));
+            .any(|change| id(change) == "TASK_FOR:42" && is_update(change)));
     }
 
     for action in ["sub_issue_removed", "parent_issue_removed"] {
@@ -571,7 +672,7 @@ fn sub_issue_delivery_variants_are_stable_and_removal_is_payload_only() {
             &sub_issue_event(action, child.clone(), parent.clone()),
         );
         assert_eq!(changes.len(), 1);
-        assert_eq!(id(&changes[0]), "TASK_FOR:I_task");
+        assert_eq!(id(&changes[0]), "TASK_FOR:42");
         assert!(is_delete(&changes[0]));
     }
 }
@@ -598,6 +699,7 @@ fn schema_minimal_sub_issue_payloads_never_fail_conversion() {
         }),
         json!({
             "action":"sub_issue_removed","organization":org(),
+            "sub_issue_id":42,
             "repository":repo("parents"),"parent_issue":issue(
                 "I_parent", "parent", false, "open"
             )
@@ -614,10 +716,15 @@ fn schema_minimal_sub_issue_payloads_never_fail_conversion() {
                 .any(|change| label(change) == "WorkGraphTask" && is_update(change))),
             1 => {
                 assert_eq!(changes.len(), 1);
-                assert_eq!(id(&changes[0]), "TASK_FOR:I_task");
+                assert_eq!(id(&changes[0]), "TASK_FOR:42");
                 assert!(is_delete(&changes[0]));
             }
-            2 | 3 => assert!(changes.is_empty()),
+            2 => assert!(changes.is_empty()),
+            3 => {
+                assert_eq!(changes.len(), 1);
+                assert_eq!(id(&changes[0]), "TASK_FOR:42");
+                assert!(is_delete(&changes[0]));
+            }
             _ => unreachable!(),
         }
     }
@@ -638,7 +745,7 @@ fn optional_sub_issue_repositories_do_not_gate_nodes_or_task_for() {
         .iter()
         .any(|change| label(change) == "WorkGraphTask" && is_update(change)));
     assert!(changes.iter().any(|change| {
-        label(change) == "TASK_FOR" && id(change) == "TASK_FOR:I_task" && is_update(change)
+        label(change) == "TASK_FOR" && id(change) == "TASK_FOR:42" && is_update(change)
     }));
     assert!(!changes.iter().any(|change| {
         label(change) == "IN_REPOSITORY" && id(change) == "IN_REPOSITORY:I_parent:R_widgets"
@@ -657,7 +764,7 @@ fn optional_sub_issue_repositories_do_not_gate_nodes_or_task_for() {
         .iter()
         .any(|change| label(change) == "WorkGraphTask" && is_update(change)));
     assert!(changes.iter().any(|change| {
-        label(change) == "TASK_FOR" && id(change) == "TASK_FOR:I_task" && is_update(change)
+        label(change) == "TASK_FOR" && id(change) == "TASK_FOR:42" && is_update(change)
     }));
     assert!(!changes.iter().any(|change| {
         label(change) == "IN_REPOSITORY" && id(change) == "IN_REPOSITORY:I_task:R_parents"
@@ -667,12 +774,14 @@ fn optional_sub_issue_repositories_do_not_gate_nodes_or_task_for() {
         let payload = if action.starts_with("parent_issue_") {
             json!({
                 "action":action,"organization":org(),
+                "sub_issue_id":42,
                 "repository":repo("widgets"),
                 "sub_issue":issue("I_task", VALIDATION_TASK, true, "open")
             })
         } else {
             json!({
                 "action":action,"organization":org(),
+                "sub_issue_id":42,
                 "repository":repo("parents"),
                 "parent_issue":issue("I_parent", "parent", false, "open"),
                 "sub_issue":issue("I_task", VALIDATION_TASK, true, "open")
@@ -680,7 +789,7 @@ fn optional_sub_issue_repositories_do_not_gate_nodes_or_task_for() {
         };
         let changes = convert("sub_issues", &payload);
         assert!(changes.iter().any(|change| {
-            label(change) == "TASK_FOR" && id(change) == "TASK_FOR:I_task" && is_delete(change)
+            label(change) == "TASK_FOR" && id(change) == "TASK_FOR:42" && is_delete(change)
         }));
     }
 }
@@ -712,9 +821,7 @@ fn sub_issue_and_issue_delivery_order_converge_on_same_ids() {
     );
     assert!(issue_changes.iter().any(|change| id(change) == "I_task"));
     assert!(sub_changes.iter().any(|change| id(change) == "I_task"));
-    assert!(sub_changes
-        .iter()
-        .any(|change| id(change) == "TASK_FOR:I_task"));
+    assert!(sub_changes.iter().any(|change| id(change) == "TASK_FOR:42"));
 }
 
 #[tokio::test]
@@ -768,6 +875,45 @@ async fn task_delivery_orders_and_repeats_emit_one_add_and_no_removal() {
 }
 
 #[tokio::test]
+async fn parent_open_and_sub_issue_orders_emit_one_add() {
+    for sub_issue_first in [true, false] {
+        let query = generic_issue_query(None).await;
+        let child = issue("I_task", VALIDATION_TASK, true, "open");
+        let mut parent = issue("I_parent", "parent", false, "open");
+        parent["repository_url"] = json!("https://api.github.com/repos/acme/parents");
+        let sub_issue = sub_issue_event("sub_issue_added", child, parent.clone());
+        let parent_open = json!({
+            "action":"opened","organization":org(),
+            "repository":repo("parents"),"issue":parent
+        });
+        let deliveries = if sub_issue_first {
+            [
+                ("sub_issues", sub_issue.clone()),
+                ("issues", parent_open.clone()),
+            ]
+        } else {
+            [
+                ("issues", parent_open.clone()),
+                ("sub_issues", sub_issue.clone()),
+            ]
+        };
+        let mut first = Vec::new();
+        for (event, payload) in &deliveries {
+            first.extend(process_changes(&query, convert(event, payload)).await);
+        }
+        assert_eq!(additions(&first), 1);
+        assert_eq!(removals(&first), 0);
+
+        let mut repeated = Vec::new();
+        for (event, payload) in deliveries {
+            repeated.extend(process_changes(&query, convert(event, &payload)).await);
+        }
+        assert_eq!(additions(&repeated), 0);
+        assert_eq!(removals(&repeated), 0);
+    }
+}
+
+#[tokio::test]
 async fn update_on_missing_task_node_produces_exactly_one_add() {
     for action in ["opened", "typed"] {
         let query = task_node_query().await;
@@ -788,21 +934,66 @@ async fn update_on_missing_task_node_produces_exactly_one_add() {
     }
 }
 
-#[test]
-fn parent_transition_reuses_one_relation_identity() {
+#[tokio::test]
+async fn parent_transition_reuses_one_relation_identity() {
+    let query = task_path_query().await;
     let child = issue("I_task", VALIDATION_TASK, true, "open");
     let old_parent = issue("I_parent_1", "parent", false, "open");
     let new_parent = issue("I_parent_2", "parent", false, "open");
-    let remove = convert(
+    let initial = convert(
         "sub_issues",
-        &sub_issue_event("sub_issue_removed", child.clone(), old_parent),
+        &sub_issue_event("sub_issue_added", child.clone(), old_parent),
     );
-    let add = convert(
+    assert_eq!(additions(&process_changes(&query, initial).await), 1);
+
+    let reparent = convert(
         "sub_issues",
         &sub_issue_event("sub_issue_added", child, new_parent),
     );
-    assert_eq!(id(&remove[0]), "TASK_FOR:I_task");
-    assert!(add.iter().any(|change| id(change) == "TASK_FOR:I_task"));
+    let relation = reparent
+        .iter()
+        .find(|change| label(change) == "TASK_FOR")
+        .expect("reparent relation update");
+    assert_eq!(id(relation), "TASK_FOR:42");
+    let SourceChange::Update {
+        element: Element::Relation {
+            in_node, out_node, ..
+        },
+    } = relation
+    else {
+        panic!("reparent must update the stable relation");
+    };
+    assert_eq!(in_node.element_id.as_ref(), "I_task");
+    assert_eq!(out_node.element_id.as_ref(), "I_parent_2");
+    let results = process_changes(&query, reparent).await;
+    assert_eq!(additions(&results), 1);
+    assert_eq!(removals(&results), 1);
+}
+
+#[tokio::test]
+async fn asymmetric_removal_uses_required_child_database_id() {
+    let query = task_path_query().await;
+    let child = issue("I_task", VALIDATION_TASK, true, "open");
+    let mut parent = issue("I_parent", "parent", false, "open");
+    parent["repository_url"] = json!("https://api.github.com/repos/acme/parents");
+    let initial = convert(
+        "sub_issues",
+        &sub_issue_event("sub_issue_added", child, parent.clone()),
+    );
+    assert_eq!(additions(&process_changes(&query, initial).await), 1);
+
+    let removal = json!({
+        "action":"sub_issue_removed","organization":org(),
+        "repository":repo("parents"),"parent_issue_id":42,
+        "parent_issue":parent,"sub_issue_id":42
+    });
+    let changes = convert("sub_issues", &removal);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(id(&changes[0]), "TASK_FOR:42");
+    assert!(is_delete(&changes[0]));
+    let results = process_changes(&query, changes).await;
+    assert_eq!(additions(&results), 0);
+    assert_eq!(removals(&results), 1);
 }
 
 #[test]
@@ -1056,7 +1247,7 @@ fn excluded_task_addition_is_ignored_but_removal_converges() {
         )
         .unwrap()
         .unwrap();
-    assert_eq!(id(&removal[0]), "TASK_FOR:I_task");
+    assert_eq!(id(&removal[0]), "TASK_FOR:42");
 }
 
 #[test]

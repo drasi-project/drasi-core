@@ -67,14 +67,18 @@ A typed child is emitted only as `WorkGraphTask`; it is never also emitted as
 |---|---|---|
 | `IN_ORGANIZATION` | repository → organization | `IN_ORGANIZATION:{repository}:{organization}` |
 | `IN_REPOSITORY` | Issue/PR/task → repository | `IN_REPOSITORY:{item}:{repository}` |
-| `TASK_FOR` | task → parent Issue | `TASK_FOR:{task}` |
+| `TASK_FOR` | task → parent Issue | `TASK_FOR:{task.databaseId}` |
 | `COMMENT_ON` | ordinary comment/result → Issue/PR/task | `COMMENT_ON:{comment}:{parent}` |
 | `RESULT_FOR` | result → task | `RESULT_FOR:{comment}:{task}` |
 | `REVIEW_OF` | review → PR | `REVIEW_OF:{review}:{pr}` |
 | `ERROR_ON` | comment/status error → subject | deterministic from source and subject IDs |
 
-The parent edge has one identity per task, so parent removal, replacement, task
-type transitions, and task deletion can tombstone it without a cache.
+The parent edge has one identity per task keyed by GitHub's numeric child Issue
+database ID. Its endpoints remain the child and parent GraphQL node IDs. This
+keeps Cypher topology unchanged while allowing an asymmetric
+`sub_issue_removed` payload to tombstone the relation from required
+`sub_issue_id` without a child object or cache. Reparenting updates that same
+identity to the new parent endpoint.
 
 ## Task and Result wire formats
 
@@ -134,9 +138,10 @@ Multiple valid Results are allowed.
 
 ## Live projection behavior
 
-Generic Issues and PRs retain open-only behavior: opening/reopening inserts,
-closing deletes, and other closed-item activity is ignored. Existing
-repository filtering and close/delete tombstone exceptions remain unchanged.
+Generic Issues and PRs retain open-only behavior: opening/reopening uses
+Update-on-missing idempotent materialization, closing deletes, and other
+closed-item activity is ignored. Existing repository filtering and
+close/delete tombstone exceptions remain unchanged.
 
 Configured typed tasks are different:
 
@@ -168,6 +173,14 @@ Configured typed tasks are different:
   generic↔task type transition updates the shared Issue node ID in place and
   cleans only representation-specific relations/errors rather than deleting
   and reinserting the shared node.
+- A malformed body replaces only the still-typed task node with
+  `WorkGraphError`; its native `TASK_FOR` relation is retained. Repairing the
+  body rematerializes the same task node and immediately reconnects the
+  existing parent path. Only untyping, task deletion/transfer, or an explicit
+  native sub-issue removal tombstones `TASK_FOR`.
+- Untyping explicitly writes null for every task-only property before the
+  shared node becomes `GitHubIssue`, because Drasi Update merges omitted
+  properties.
 - Task delete removes the task, repository edge, parent edge, and task error.
 - Task comments continue to be processed while the task is closed. Result and
   ordinary comment create/edit/delete transitions are deterministic and use

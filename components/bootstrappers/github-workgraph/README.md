@@ -29,6 +29,10 @@ use identical:
 - repository allowlist decisions; and
 - strict raw task and Result wire formats.
 
+This includes `TASK_FOR:{child.databaseId}` relation identity. Bootstrap keeps
+the task/parent GraphQL node IDs as relation endpoints, exactly like live
+mapping.
+
 Bootstrap never creates `GitHubIssue` for a typed task. It emits the task's
 parent Issue only when the parent is open and its authoritative repository is
 allowed. `TASK_FOR` still records the native parent identity from GitHub.
