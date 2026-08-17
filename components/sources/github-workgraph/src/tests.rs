@@ -209,6 +209,22 @@ async fn task_node_query() -> ContinuousQuery {
     .await
 }
 
+async fn task_parent_query(parent_id: &str) -> ContinuousQuery {
+    let registry = Arc::new(FunctionRegistry::new());
+    let parser = Arc::new(CypherParser::new(registry.clone()));
+    QueryBuilder::new(
+        format!(
+            "MATCH (task:WorkGraphTask)-[:TASK_FOR]->(parent:GitHubIssue) \
+             WHERE parent.nodeId = '{parent_id}' \
+             RETURN task.nodeId AS taskId"
+        ),
+        parser,
+    )
+    .with_function_registry(registry)
+    .build()
+    .await
+}
+
 async fn generic_issue_query(predicate: Option<&str>) -> ContinuousQuery {
     let registry = Arc::new(FunctionRegistry::new());
     let parser = Arc::new(CypherParser::new(registry.clone()));
@@ -628,6 +644,78 @@ async fn malformed_body_repair_preserves_task_for_identity() {
     assert_eq!(removals(&repeated), 0);
 }
 
+#[tokio::test]
+async fn malformed_link_reparent_then_repair_uses_latest_parent() {
+    let old_query = task_parent_query("I_parent_1").await;
+    let new_query = task_parent_query("I_parent_2").await;
+    for parent_id in ["I_parent_1", "I_parent_2"] {
+        let mut parent = issue(parent_id, "parent", false, "open");
+        parent["repository_url"] = json!("https://api.github.com/repos/acme/parents");
+        let opened = json!({
+            "action":"opened","organization":org(),
+            "repository":repo("parents"),"issue":parent
+        });
+        process_changes(&old_query, convert("issues", &opened)).await;
+        process_changes(&new_query, convert("issues", &opened)).await;
+    }
+
+    let malformed = issue("I_task", "{}", true, "open");
+    let linked = sub_issue_event(
+        "sub_issue_added",
+        malformed.clone(),
+        issue("I_parent_1", "parent", false, "open"),
+    );
+    let linked_changes = convert("sub_issues", &linked);
+    let linked_relation = linked_changes
+        .iter()
+        .find(|change| label(change) == "TASK_FOR")
+        .expect("malformed child still links");
+    assert_eq!(id(linked_relation), "TASK_FOR:42");
+    assert!(linked_changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphError"));
+    process_changes(&old_query, convert("sub_issues", &linked)).await;
+    process_changes(&new_query, convert("sub_issues", &linked)).await;
+
+    let reparented = sub_issue_event(
+        "sub_issue_added",
+        malformed,
+        issue("I_parent_2", "parent", false, "open"),
+    );
+    let reparented_changes = convert("sub_issues", &reparented);
+    let relation = reparented_changes
+        .iter()
+        .find(|change| label(change) == "TASK_FOR")
+        .expect("malformed reparent relation");
+    assert_eq!(id(relation), "TASK_FOR:42");
+    let SourceChange::Update {
+        element: Element::Relation { out_node, .. },
+    } = relation
+    else {
+        panic!("reparent uses an idempotent relation update");
+    };
+    assert_eq!(out_node.element_id.as_ref(), "I_parent_2");
+    process_changes(&old_query, convert("sub_issues", &reparented)).await;
+    process_changes(&new_query, convert("sub_issues", &reparented)).await;
+
+    let mut repaired = issue_event("edited", issue("I_task", VALIDATION_TASK, true, "open"));
+    repaired["changes"] = json!({"body":{"from":"{}"}});
+    let repaired_changes = convert("issues", &repaired);
+    assert!(!repaired_changes
+        .iter()
+        .any(|change| label(change) == "TASK_FOR"));
+    let old_results = process_changes(&old_query, convert("issues", &repaired)).await;
+    let new_results = process_changes(&new_query, convert("issues", &repaired)).await;
+    assert_eq!(additions(&old_results), 0);
+    assert_eq!(removals(&old_results), 0);
+    assert_eq!(additions(&new_results), 1);
+    assert_eq!(removals(&new_results), 0);
+
+    let repeated = process_changes(&new_query, convert("issues", &repaired)).await;
+    assert_eq!(additions(&repeated), 0);
+    assert_eq!(removals(&repeated), 0);
+}
+
 #[test]
 fn sub_issue_add_upserts_task_parent_and_relations() {
     let payload = sub_issue_event(
@@ -728,6 +816,22 @@ fn schema_minimal_sub_issue_payloads_never_fail_conversion() {
             _ => unreachable!(),
         }
     }
+}
+
+#[test]
+fn sub_issue_removal_without_optional_child_identity_is_noop() {
+    let mut parent = issue("I_parent", "parent", false, "open");
+    parent["repository_url"] = json!("https://api.github.com/repos/acme/parents");
+    let payload = json!({
+        "action":"sub_issue_removed","organization":org(),
+        "repository":repo("parents"),"parent_issue_id":42,
+        "parent_issue":parent
+    });
+    let changes = Converter::new("gh", "acme", &task_type(), 1)
+        .convert("sub_issues", &payload)
+        .expect("schema-valid child-less removal must not produce a 422")
+        .unwrap();
+    assert!(changes.is_empty());
 }
 
 #[test]
