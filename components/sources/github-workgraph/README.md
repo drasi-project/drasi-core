@@ -76,9 +76,11 @@ A typed child is emitted only as `WorkGraphTask`; it is never also emitted as
 The parent edge has one identity per task keyed by GitHub's numeric child Issue
 database ID. Its endpoints remain the child and parent GraphQL node IDs. This
 keeps Cypher topology unchanged while allowing an asymmetric
-`sub_issue_removed` payload to tombstone the relation from required
-`sub_issue_id` without a child object or cache. Reparenting updates that same
-identity to the new parent endpoint.
+`sub_issue_removed` payload to tombstone the relation from `sub_issue_id`
+without a child object or cache. GitHub permits both `sub_issue` and
+`sub_issue_id` to be absent; that schema-valid variant is acknowledged as a
+no-op because no edge identity is derivable payload-only. Reparenting updates
+the same identity to the new parent endpoint.
 
 ## Task and Result wire formats
 
@@ -177,7 +179,10 @@ Configured typed tasks are different:
   `WorkGraphError`; its native `TASK_FOR` relation is retained. Repairing the
   body rematerializes the same task node and immediately reconnects the
   existing parent path. Only untyping, task deletion/transfer, or an explicit
-  native sub-issue removal tombstones `TASK_FOR`.
+  native sub-issue removal tombstones `TASK_FOR`. A `sub_issues` add/reparent
+  updates the native relation before Assignment parsing, so even a malformed
+  child tracks its latest parent and a later parent-less `issues.edited` repair
+  reconnects only that edge.
 - Untyping explicitly writes null for every task-only property before the
   shared node becomes `GitHubIssue`, because Drasi Update merges omitted
   properties.

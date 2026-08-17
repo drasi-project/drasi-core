@@ -521,7 +521,10 @@ impl<'a> Converter<'a> {
             let child_database_id = match child {
                 Some(child) => required_database_id(child, "/id")
                     .or_else(|_| required_database_id(d.payload, "/sub_issue_id"))?,
-                None => required_database_id(d.payload, "/sub_issue_id")?,
+                None => match d.payload.get("sub_issue_id") {
+                    Some(_) => required_database_id(d.payload, "/sub_issue_id")?,
+                    None => return Ok(()),
+                },
             };
             cs.delete(&task_for_rel_id(&child_database_id), REL_TASK_FOR);
             return Ok(());
@@ -536,6 +539,10 @@ impl<'a> Converter<'a> {
             return Ok(());
         }
 
+        let parent_id = parent
+            .map(|parent| required_str(parent, "/node_id"))
+            .transpose()?;
+
         let top_repository = d.payload.get("repository");
         let child_repo = if parent_action {
             top_repository
@@ -547,42 +554,49 @@ impl<'a> Converter<'a> {
         let child_repo_id = child_repo
             .map(|repo| required_str(repo, "/node_id"))
             .transpose()?;
-        match classify_task_body(child.get("body").and_then(Value::as_str).unwrap_or("")) {
-            TaskClassification::Task(_) => {
-                cs.delete(&task_error_element_id(&child_id), NODE_WORKGRAPH_ERROR);
-                upsert_task(cs, child, child_repo, &child_id, child_repo_id.as_deref())?;
-            }
-            TaskClassification::Invalid(error) => {
-                match child_repo_id.as_deref() {
-                    Some(repo_id) => delete_task_representation(cs, &child_id, repo_id),
-                    None => cs.delete(&child_id, NODE_WORKGRAPH_TASK),
+        let valid_task =
+            match classify_task_body(child.get("body").and_then(Value::as_str).unwrap_or("")) {
+                TaskClassification::Task(_) => {
+                    cs.delete(&task_error_element_id(&child_id), NODE_WORKGRAPH_ERROR);
+                    upsert_task(cs, child, child_repo, &child_id, child_repo_id.as_deref())?;
+                    true
                 }
-                let body = child.get("body").and_then(Value::as_str).unwrap_or("");
-                let mut props = task_error_props(child, child_repo, body);
-                props.text("errorKind", "invalid-workgraph-task");
-                props.text("errorCode", error.code);
-                props.text("errorMessage", &error.message);
-                cs.node(
-                    Update,
-                    &task_error_element_id(&child_id),
-                    NODE_WORKGRAPH_ERROR,
-                    props,
-                );
-                return Ok(());
-            }
+                TaskClassification::Invalid(error) => {
+                    match child_repo_id.as_deref() {
+                        Some(repo_id) => delete_task_representation(cs, &child_id, repo_id),
+                        None => cs.delete(&child_id, NODE_WORKGRAPH_TASK),
+                    }
+                    let body = child.get("body").and_then(Value::as_str).unwrap_or("");
+                    let mut props = task_error_props(child, child_repo, body);
+                    props.text("errorKind", "invalid-workgraph-task");
+                    props.text("errorCode", error.code);
+                    props.text("errorMessage", &error.message);
+                    cs.node(
+                        Update,
+                        &task_error_element_id(&child_id),
+                        NODE_WORKGRAPH_ERROR,
+                        props,
+                    );
+                    false
+                }
+            };
+        if let Some(parent_id) = &parent_id {
+            cs.relation(
+                Update,
+                REL_TASK_FOR,
+                &task_for_rel_id(&child_database_id),
+                &child_id,
+                parent_id,
+            );
+        }
+        if !valid_task {
+            return Ok(());
         }
 
         let Some(parent) = parent else {
             return Ok(());
         };
-        let parent_id = required_str(parent, "/node_id")?;
-        cs.relation(
-            Update,
-            REL_TASK_FOR,
-            &task_for_rel_id(&child_database_id),
-            &child_id,
-            &parent_id,
-        );
+        let parent_id = parent_id.expect("parent ID accompanies parent");
 
         let parent_repo = if parent_action {
             d.payload.get("parent_issue_repo").or_else(|| {
