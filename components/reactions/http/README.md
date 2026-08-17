@@ -605,7 +605,9 @@ The following resolved values are also accepted: `null`, `false`, numeric zero, 
 string, an empty array, or an empty object. Any other value, malformed JSON, a response-read
 failure, or a body over the limit is a sustained delivery failure. Logical response
 validation returns immediately after that single HTTP request and is never retried in
-process. Error messages identify the failure without including the downstream body.
+process. Numeric zero is determined from the exact JSON significand, so exponent magnitude
+cannot make a nonzero value appear empty. Error messages identify the failure without
+including the downstream body.
 
 Under the default `strict` recovery policy, a sustained failure stops the reaction without
 advancing its checkpoint, so the event can replay from the query outbox after restart.

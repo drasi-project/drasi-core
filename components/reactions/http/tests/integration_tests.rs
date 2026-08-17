@@ -567,7 +567,8 @@ async fn response_validator_rejects_extreme_nonzero_numbers_without_retry() {
     let cases = [
         ("tiny-positive", r#"{"errors":1e-400}"#),
         ("tiny-negative", r#"{"errors":-1e-400}"#),
-        ("large-positive", r#"{"errors":1e+400}"#),
+        ("large-positive", r#"{"errors":1e400}"#),
+        ("large-positive-explicit-sign", r#"{"errors":1e+400}"#),
         (
             "small-decimal",
             r#"{"errors":0.0000000000000000000000000000000000001}"#,
