@@ -49,6 +49,7 @@ subtle = "2"
 tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+drasi-query-cypher.workspace = true
 drasi-state-store-redb = { path = "../../state_stores/redb" }
 drasi-wal-redb = { path = "../../wals/redb" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

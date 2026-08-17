@@ -22,11 +22,17 @@ use crate::workgraph::{
     assignment_element_id, classify, encode_id_component, error_code, Classification, Outcome,
     TaskType,
 };
+use drasi_core::evaluation::context::QueryVariables;
+use drasi_core::evaluation::functions::{Function, FunctionRegistry, Insert};
+use drasi_core::evaluation::variable_value::VariableValue;
+use drasi_core::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock};
+use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 use drasi_core::models::{Element, ElementValue, SourceChange};
 use drasi_lib::wal::CapacityPolicy;
 use drasi_lib::DurabilityConfig;
 use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 const ASSIGN: &str = r#"<details>
 <summary>WorkGraph Assignment</summary>
@@ -142,7 +148,16 @@ fn repo() -> Value {
         "archived":false,"fork":false,"visibility":"public","default_branch":"main",
         "topics":["graph"],"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-02-01T00:00:00Z"})
 }
-fn issue(labels: Value) -> Value {
+fn issue(mut labels: Value) -> Value {
+    if let Some(labels) = labels.as_array_mut() {
+        for (index, label) in labels.iter_mut().enumerate() {
+            if let Some(label) = label.as_object_mut() {
+                label
+                    .entry("node_id")
+                    .or_insert_with(|| json!(format!("L_{index}")));
+            }
+        }
+    }
     json!({"node_id":"I_42","id":4242,"number":42,"title":"Broken","body":"It breaks.",
         "state":"open","state_reason":null,"locked":false,"created_at":"2024-03-01T00:00:00Z",
         "updated_at":"2024-03-02T00:00:00Z","closed_at":null,"labels":labels,
@@ -422,6 +437,13 @@ fn families_actions_ids_properties_and_directions() {
         "I:GitHubIssue:I_42|I:IN_REPOSITORY:IN_REPOSITORY:I_42:R_7:I_42>R_7"
     );
     assert_eq!(text(&mapped[0], "status").as_deref(), Some("ready"));
+    assert_eq!(
+        prop(&mapped[0], "labelDetails"),
+        Some(ElementValue::from(&json!([
+            {"name":"bug","nodeId":"L_0"},
+            {"name":"status:ready","nodeId":"L_1"}
+        ])))
+    );
     assert_eq!(text(&mapped[0], "authorId").as_deref(), Some("U_ada"));
     assert!(text(&mapped[0], "bodyDigest")
         .unwrap()
@@ -437,7 +459,7 @@ fn families_actions_ids_properties_and_directions() {
     transfer["changes"]["new_repository"]["owner"]["login"] = json!("other");
     assert!(!changes("issues", &transfer).contains("I:GitHubIssue:I_99"));
 
-    let mut pr = issue(json!([]));
+    let mut pr = issue(json!([{"name":"docs","node_id":"L_docs"}]));
     pr["node_id"] = json!("PR_5");
     pr["draft"] = json!(true);
     pr["head"] = json!({"ref":"feature","sha":"abc"});
@@ -445,6 +467,12 @@ fn families_actions_ids_properties_and_directions() {
     let mapped = convert("pull_request", &pr);
     assert_eq!(prop(&mapped[0], "isDraft"), Some(ElementValue::Bool(true)));
     assert_eq!(text(&mapped[0], "headRefName").as_deref(), Some("feature"));
+    assert_eq!(
+        prop(&mapped[0], "labelDetails"),
+        Some(ElementValue::from(
+            &json!([{"name":"docs","nodeId":"L_docs"}])
+        ))
+    );
     assert_eq!(
         changes("pull_request_review", &review("submitted")),
         "I:GitHubPullRequestReview:PRR_3|I:REVIEW_OF:REVIEW_OF:PRR_3:PR_5:PRR_3>PR_5"
@@ -514,6 +542,85 @@ fn status_is_exact_and_conflicts_are_snapshot_free() {
     let mapped = convert("issues", &unknown);
     assert_eq!(mapped.len(), 1);
     assert_eq!(prop(&mapped[0], "status"), None);
+}
+
+#[test]
+fn label_details_reject_missing_or_malformed_node_ids() {
+    let mut missing = item_event("opened", json!([{"name":"bug"}]));
+    missing["issue"]["labels"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("node_id");
+    assert_eq!(
+        Converter::new("gh", "acme", 1).convert("issues", &missing),
+        Err(ConvertError::InvalidPayload(
+            "'labels[0].node_id' must be nonempty text".into()
+        ))
+    );
+
+    for malformed in [json!(""), json!("   "), json!(42)] {
+        let mut payload = item_event("opened", json!([{"name":"bug"}]));
+        payload["issue"]["labels"][0]["node_id"] = malformed;
+        assert!(matches!(
+            Converter::new("gh", "acme", 1).convert("issues", &payload),
+            Err(ConvertError::InvalidPayload(message))
+                if message == "'labels[0].node_id' must be nonempty text"
+        ));
+    }
+
+    for malformed in [Value::Null, json!(""), json!("   "), json!(42)] {
+        let mut payload = item_event("opened", json!([{"name":"bug"}]));
+        payload["issue"]["labels"][0]["name"] = malformed;
+        assert!(matches!(
+            Converter::new("gh", "acme", 1).convert("issues", &payload),
+            Err(ConvertError::InvalidPayload(message))
+                if message == "'labels[0].name' must be nonempty text"
+        ));
+    }
+
+    let mut partial = item_event("edited", json!([]));
+    partial["issue"].as_object_mut().unwrap().remove("labels");
+    let mapped = convert("issues", &partial);
+    assert_eq!(prop(&mapped[0], "labels"), None);
+    assert_eq!(prop(&mapped[0], "labelDetails"), None);
+}
+
+#[tokio::test]
+async fn label_details_build_complete_label_ids_with_supported_cypher() {
+    let mapped = convert(
+        "issues",
+        &item_event("opened", json!([{"name":"bug"},{"name":"status:ready"}])),
+    );
+    let mut variables = QueryVariables::new();
+    variables.insert(
+        "issue".into(),
+        VariableValue::Element(Arc::new(element(&mapped[0]).clone())),
+    );
+    variables.insert(
+        "awaitingValidationLabelId".into(),
+        VariableValue::String("L_awaiting_validation".into()),
+    );
+
+    let expression = drasi_query_cypher::parse_expression(
+        "coll.insert([label IN issue.labelDetails WHERE NOT (label.name STARTS WITH 'status:') | label.nodeId], 0, $awaitingValidationLabelId)",
+    )
+    .unwrap();
+    let registry = Arc::new(FunctionRegistry::new());
+    registry.register_function("coll.insert", Function::Scalar(Arc::new(Insert {})));
+    let evaluator = ExpressionEvaluator::new(registry, Arc::new(InMemoryResultIndex::new()));
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expression)
+            .await
+            .unwrap(),
+        VariableValue::List(vec![
+            VariableValue::String("L_awaiting_validation".into()),
+            VariableValue::String("L_0".into()),
+        ])
+    );
 }
 
 #[test]

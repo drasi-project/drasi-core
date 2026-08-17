@@ -302,7 +302,7 @@ impl<'a> Converter<'a> {
         let repo_id = required_str(payload, "/repository/node_id")?;
         match action {
             "deleted" => delete_work_item(cs, &item_id, &repo_id, label),
-            "opened" => insert_work_item(cs, item, repo, &item_id, &repo_id, label),
+            "opened" => insert_work_item(cs, item, repo, &item_id, &repo_id, label)?,
             "transferred" => {
                 if owner_in_org(repo, self.organization) && self.repository_in_scope(repo)? {
                     delete_work_item(cs, &item_id, &repo_id, label);
@@ -318,11 +318,11 @@ impl<'a> Converter<'a> {
                 {
                     let new_id = required_str(new_item, "/node_id")?;
                     let new_repo_id = required_str(new_repo, "/node_id")?;
-                    insert_work_item(cs, new_item, Some(new_repo), &new_id, &new_repo_id, label);
+                    insert_work_item(cs, new_item, Some(new_repo), &new_id, &new_repo_id, label)?;
                 }
             }
             _ => {
-                cs.node(Update, &item_id, label, work_item_props(item, repo, label));
+                cs.node(Update, &item_id, label, work_item_props(item, repo, label)?);
                 status_changes(cs, Update, item, repo, &item_id, label);
             }
         }
@@ -423,11 +423,12 @@ fn insert_work_item(
     item_id: &str,
     repo_id: &str,
     label: &'static str,
-) {
-    cs.node(Insert, item_id, label, work_item_props(item, repo, label));
+) -> Mapped {
+    cs.node(Insert, item_id, label, work_item_props(item, repo, label)?);
     let id = rel_id(REL_IN_REPOSITORY, item_id, repo_id);
     cs.relation(Insert, REL_IN_REPOSITORY, &id, item_id, repo_id);
     status_changes(cs, Insert, item, repo, item_id, label);
+    Ok(())
 }
 
 fn delete_work_item(cs: &mut Changes, item_id: &str, repo_id: &str, label: &str) {
@@ -627,6 +628,35 @@ fn names<'a>(container: &'a Value, key: &str, field: &'a str) -> Option<Vec<&'a 
     )
 }
 
+fn label_details(item: &Value) -> Result<Option<ElementValue>, ConvertError> {
+    let Some(labels) = item.get("labels") else {
+        return Ok(None);
+    };
+    let labels = labels
+        .as_array()
+        .ok_or_else(|| invalid("'labels' must be an array"))?;
+    let mut details = Vec::with_capacity(labels.len());
+
+    for (index, label) in labels.iter().enumerate() {
+        let name = label
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| invalid(format!("'labels[{index}].name' must be nonempty text")))?;
+        let node_id = label
+            .get("node_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| invalid(format!("'labels[{index}].node_id' must be nonempty text")))?;
+        details.push(ElementValue::from(&serde_json::json!({
+            "name": name,
+            "nodeId": node_id,
+        })));
+    }
+
+    Ok(Some(ElementValue::List(details)))
+}
+
 fn strings<'a>(values: impl Iterator<Item = &'a str>) -> ElementValue {
     ElementValue::List(values.map(|v| ElementValue::String(Arc::from(v))).collect())
 }
@@ -670,7 +700,11 @@ fn repository_props(repo: &Value) -> ElementPropertyMap {
     props
 }
 
-fn work_item_props(item: &Value, repo: Option<&Value>, label: &str) -> ElementPropertyMap {
+fn work_item_props(
+    item: &Value,
+    repo: Option<&Value>,
+    label: &str,
+) -> Result<ElementPropertyMap, ConvertError> {
     let is_issue = label == NODE_ISSUE;
     let mut props = ElementPropertyMap::new();
     props.table(item, WORK_ITEM_PROPS);
@@ -690,7 +724,10 @@ fn work_item_props(item: &Value, repo: Option<&Value>, label: &str) -> ElementPr
     if let Some(assignees) = names(item, "assignees", "login") {
         props.insert("assignees", strings(assignees.into_iter()));
     }
-    if let Some(labels) = names(item, "labels", "name") {
+    if let Some(details) = label_details(item)? {
+        props.insert("labelDetails", details);
+        let labels =
+            names(item, "labels", "name").expect("label details validate the labels array");
         props.insert("labels", strings(labels.into_iter()));
         match derive_status(item) {
             Status::One(full) => {
@@ -703,7 +740,7 @@ fn work_item_props(item: &Value, repo: Option<&Value>, label: &str) -> ElementPr
             }
         }
     }
-    props
+    Ok(props)
 }
 
 trait Props {

@@ -55,7 +55,7 @@ remain null. GitHub IDs are global payload `node_id` values.
 |---|---|---|
 | `GitHubOrganization` | `organization.node_id` | `nodeId`, `databaseId`, `login`, `url`, `avatarUrl`, `description` |
 | `GitHubRepository` | `repository.node_id` | identity/name/owner, URL, privacy/archive/fork/visibility, default branch, topics, timestamps |
-| `GitHubIssue` | `issue.node_id` | identity/number/title/body/bodyDigest/state/stateReason/lock/timestamps, author, URL, repository, assignees, labels, status |
+| `GitHubIssue` | `issue.node_id` | identity/number/title/body/bodyDigest/state/stateReason/lock/timestamps, author, URL, repository, assignees, labels, labelDetails, status/statusLabel |
 | `GitHubPullRequest` | `pull_request.node_id` | Issue fields except `stateReason`, plus draft/merge and head/base ref/SHA |
 | `GitHubIssueComment`, `GitHubPullRequestComment` | `comment.node_id` | identity/body/timestamps/isEdited, author, URL, repository |
 | `GitHubPullRequestReview` | `review.node_id` | identity/state/body/submittedAt/commitId, author, URL, repository |
@@ -68,6 +68,39 @@ remain null. GitHub IDs are global payload `node_id` values.
 `encode` leaves ASCII alphanumerics and `-._~` literal and encodes every other
 UTF-8 byte as uppercase `%HH`. Reviews use `submittedAt`; no timestamp is
 fabricated.
+
+`labels` remains the ordered list of label names. `labelDetails` is the same
+ordered list with generic paired GitHub identity:
+
+```json
+[
+  {
+    "name": "bug",
+    "nodeId": "LA_kwDO..."
+  }
+]
+```
+
+The list-of-map value is directly consumable by Drasi Cypher. To preserve every
+current non-status label and prepend the configured `status:awaitingValidation`
+GraphQL node ID, use:
+
+```cypher
+coll.insert(
+  [label IN issue.labelDetails
+   WHERE NOT (label.name STARTS WITH 'status:')
+   | label.nodeId],
+  0,
+  $awaitingValidationLabelId
+)
+```
+
+`coll.insert` is used because the supported dialect does not concatenate lists
+with `+`. Webhook Issue/PR label objects already carry both fields, so this adds
+no API call or cache. A present `labels` array is rejected as a payload-shape
+error unless every entry has a nonempty string `name` and `node_id`; omitting the
+whole field on a partial update still leaves all label-derived properties
+unchanged.
 
 | Relation and direction | Stable ID |
 |---|---|
@@ -159,7 +192,7 @@ The exact case-sensitive `status:` prefix derives Issue/PR workflow status:
 zero matches sets `status`/`statusLabel` null and deletes any prior error; one
 sets suffix/full label and deletes the error; multiple set both null and upsert
 a deterministic error plus `ERROR_ON`. A missing `labels` array changes none of
-those fields.
+`labels`, `labelDetails`, `status`, or `statusLabel`.
 
 Ingress verifies raw-body `X-Hub-Signature-256`, validates and converts, then
 serially appends every `SourceChange` to the existing WAL before storing the

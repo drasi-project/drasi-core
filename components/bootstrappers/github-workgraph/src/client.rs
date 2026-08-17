@@ -102,7 +102,7 @@ query($owner: String!, $name: String!, $cursor: String, $pageSize: Int!) {
         assignees(first: 50) { nodes { login } }
         labels(first: $pageSize) {
           pageInfo { hasNextPage endCursor }
-          nodes { name }
+          nodes { name node_id: id }
         }
         comments { totalCount }
       }
@@ -133,7 +133,7 @@ query($owner: String!, $name: String!, $cursor: String, $pageSize: Int!) {
         assignees(first: 50) { nodes { login } }
         labels(first: $pageSize) {
           pageInfo { hasNextPage endCursor }
-          nodes { name }
+          nodes { name node_id: id }
         }
         draft: isDraft
         merged
@@ -156,13 +156,13 @@ query($id: ID!, $cursor: String, $pageSize: Int!) {
     ... on Issue {
       labels(first: $pageSize, after: $cursor) {
         pageInfo { hasNextPage endCursor }
-        nodes { name }
+        nodes { name node_id: id }
       }
     }
     ... on PullRequest {
       labels(first: $pageSize, after: $cursor) {
         pageInfo { hasNextPage endCursor }
-        nodes { name }
+        nodes { name node_id: id }
       }
     }
   }
