@@ -31,7 +31,9 @@ use drasi_lib::context::SourceRuntimeContext;
 use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::wal::{CapacityPolicy, WalProvider};
 use drasi_lib::{DurabilityConfig, Source};
-use drasi_source_github_workgraph::config::{GitHubWorkGraphSourceConfig, WebhookConfig};
+use drasi_source_github_workgraph::config::{
+    GitHubWorkGraphSourceConfig, TaskIssueType, WebhookConfig,
+};
 use drasi_source_github_workgraph::source::{GitHubWorkGraphSource, GitHubWorkGraphSourceBuilder};
 use drasi_state_store_redb::RedbStateStoreProvider;
 use drasi_wal_redb::RedbWalProvider;
@@ -78,6 +80,10 @@ impl Harness {
     fn build(max_events: u64, port: u16) -> GitHubWorkGraphSource {
         let config = GitHubWorkGraphSourceConfig {
             organization: "acme".into(),
+            task_issue_type: TaskIssueType {
+                id: "IT_test".into(),
+                name: "WorkGraphTask".into(),
+            },
             repositories: Vec::new(),
             webhook: WebhookConfig {
                 host: "127.0.0.1".into(),

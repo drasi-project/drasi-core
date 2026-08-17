@@ -2293,6 +2293,10 @@ async fn test_github_workgraph_source_state_store_durability_cross_cdylib() {
         .expect("GitHub WorkGraph source descriptor");
     let config = serde_json::json!({
         "organization": "drasi-project",
+        "taskIssueType": {
+            "id": "IT_test",
+            "name": "WorkGraphTask"
+        },
         "webhook": {
             "host": "127.0.0.1",
             "port": 0,

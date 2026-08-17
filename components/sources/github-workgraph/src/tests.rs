@@ -12,92 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config::{GitHubWorkGraphSourceConfig, RepositoryFilter, WebhookConfig};
+use crate::config::{GitHubWorkGraphSourceConfig, RepositoryFilter, TaskIssueType, WebhookConfig};
 use crate::descriptor::GitHubWorkGraphSourceDescriptor;
-use crate::mapping::{
-    derive_status, ConvertError, Converter, Status, NODE_LABELS, RELATION_LABELS,
-};
+use crate::mapping::{Converter, NODE_LABELS, RELATION_LABELS};
 use crate::webhook::verify_signature;
 use crate::workgraph::{
-    assignment_element_id, classify, encode_id_component, error_code, Classification, Outcome,
-    TaskType,
+    classify_result, classify_task_body, error_code, ResultClassification, TaskClassification,
 };
-use drasi_core::evaluation::context::{QueryPartEvaluationContext, QueryVariables};
-use drasi_core::evaluation::functions::{Function, FunctionRegistry, Insert};
-use drasi_core::evaluation::variable_value::VariableValue;
-use drasi_core::evaluation::{ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock};
-use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 use drasi_core::models::{Element, ElementValue, SourceChange};
-use drasi_core::query::QueryBuilder;
 use drasi_lib::wal::CapacityPolicy;
 use drasi_lib::DurabilityConfig;
 use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
-use drasi_query_cypher::CypherParser;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
-const ASSIGN: &str = r#"<details>
-<summary>WorkGraph Assignment</summary>
-
-WorkGraphAssignment/v1
-
-Validate the synthetic fixture Issue.
-
-```json
-{
-  "assignmentId": "fixture-701-validation",
+const TASK_TYPE_ID: &str = "IT_test";
+const TASK_TYPE_NAME: &str = "WorkGraphTask";
+const VALIDATION_TASK: &str = r#"{
+  "assignmentId": "assignment-validation-001",
   "agentProfile": "issue-validator",
   "priority": 10,
   "taskType": "issue-validation",
   "task": {
     "validationProfile": "new-issue-default"
   }
-}
-```
-</details>
-"#;
-
-const RESULT: &str = r#"<details>
-<summary>WorkGraph Result</summary>
-
-WorkGraphResult/v1
-
-Evaluated both requested validation criteria.
-
-```json
-{
-  "assignmentId": "assignment-validation-001",
-  "taskType": "issue-validation",
-  "outcome": "succeeded",
-  "summary": "Evaluated both requested validation criteria.",
-  "result": {
-    "criteria": [
-      {
-        "criterion": "The issue defines acceptance criteria",
-        "passed": true,
-        "evidence": "The body contains an acceptance checklist."
-      },
-      {
-        "criterion": "The issue identifies an owner",
-        "passed": false,
-        "evidence": "The title and body do not identify an owner."
-      }
-    ]
-  }
-}
-```
-</details>
-"#;
-
-const RISK_ASSIGNMENT: &str = r#"<details>
-<summary>WorkGraph Assignment</summary>
-
-WorkGraphAssignment/v1
-
-Profile delivery risk.
-
-```json
-{
+}"#;
+const RISK_TASK: &str = r#"{
   "assignmentId": "assignment-risk-001",
   "agentProfile": "issue-risk-profiler",
   "priority": 4,
@@ -109,1324 +48,675 @@ Profile delivery risk.
       "Rollback complexity"
     ]
   }
+}"#;
+const RESULT: &str = r#"WorkGraphTaskResult/v1
+
+```json
+{
+  "assignmentId": "assignment-validation-001",
+  "taskType": "issue-validation",
+  "outcome": "succeeded",
+  "summary": "Validated the issue.",
+  "result": {
+    "criteria": [
+      {
+        "criterion": "Acceptance criteria",
+        "passed": true,
+        "evidence": "Present."
+      }
+    ]
+  }
 }
 ```
-</details>
 "#;
-
-const RISK_RESULT: &str = r#"<details>
-<summary>WorkGraph Result</summary>
-
-WorkGraphResult/v1
-
-Scored both requested risk dimensions.
+const RISK_RESULT: &str = r#"WorkGraphTaskResult/v1
 
 ```json
 {
   "assignmentId": "assignment-risk-001",
   "taskType": "issue-risk-profile",
   "outcome": "blocked",
-  "summary": "Scored both requested risk dimensions.",
+  "summary": "Scored delivery risk.",
   "result": {
     "dimensions": [
       {
         "dimension": "Security impact",
         "score": 100,
-        "rationale": "The change affects authorization checks."
+        "rationale": "Authorization changes."
       }
     ]
   }
 }
 ```
-</details>
 "#;
 
+fn task_type() -> TaskIssueType {
+    TaskIssueType {
+        id: TASK_TYPE_ID.to_string(),
+        name: TASK_TYPE_NAME.to_string(),
+    }
+}
+
 fn org() -> Value {
-    json!({"login":"acme","id":42,"node_id":"O_1","url":"https://api.github.com/orgs/acme"})
+    json!({"login":"acme","id":42,"node_id":"O_1"})
 }
-fn repo() -> Value {
-    json!({"node_id":"R_7","id":7,"name":"widgets","full_name":"acme/widgets",
-        "owner":{"login":"acme"},"html_url":"https://gh/acme/widgets","private":false,
-        "archived":false,"fork":false,"visibility":"public","default_branch":"main",
-        "topics":["graph"],"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-02-01T00:00:00Z"})
+
+fn repo(name: &str) -> Value {
+    json!({
+        "node_id": format!("R_{name}"), "id": 7, "name": name,
+        "full_name": format!("acme/{name}"), "owner":{"login":"acme"},
+        "html_url": format!("https://github.com/acme/{name}"), "private":false,
+        "archived":false, "fork":false, "visibility":"public"
+    })
 }
-fn issue(mut labels: Value) -> Value {
-    if let Some(labels) = labels.as_array_mut() {
-        for (index, label) in labels.iter_mut().enumerate() {
-            if let Some(label) = label.as_object_mut() {
-                label
-                    .entry("node_id")
-                    .or_insert_with(|| json!(format!("L_{index}")));
-            }
+
+fn issue(id: &str, body: &str, typed: bool, state: &str) -> Value {
+    json!({
+        "node_id": id, "id": 42, "number":42, "title":"Work item", "body":body,
+        "state":state, "state_reason": if state == "closed" { json!("completed") } else { Value::Null },
+        "locked":false, "created_at":"2026-01-01T00:00:00Z",
+        "updated_at":"2026-01-02T00:00:00Z",
+        "closed_at": if state == "closed" { json!("2026-01-02T00:00:00Z") } else { Value::Null },
+        "labels":[], "assignees":[], "html_url":format!("https://github.com/acme/widgets/issues/{id}"),
+        "type": if typed { json!({"node_id":TASK_TYPE_ID,"name":TASK_TYPE_NAME}) } else { Value::Null },
+        "user":{"login":"ada","node_id":"U_ada","id":1,"type":"User"}
+    })
+}
+
+fn issue_event(action: &str, item: Value) -> Value {
+    json!({"action":action,"organization":org(),"repository":repo("widgets"),"issue":item})
+}
+
+fn comment_event(action: &str, body: &str, state: &str, typed: bool, id: &str) -> Value {
+    json!({
+        "action":action, "organization":org(), "repository":repo("widgets"),
+        "issue":issue("I_task", VALIDATION_TASK, typed, state),
+        "comment":{
+            "node_id":id,"id":9001,"body":body,
+            "created_at":"2026-01-03T00:00:00Z","updated_at":"2026-01-03T00:00:00Z",
+            "html_url":"https://github.com/acme/widgets/issues/42#issuecomment-9001",
+            "user":{"login":"bot","node_id":"U_bot","id":2,"type":"Bot"}
         }
-    }
-    json!({"node_id":"I_42","id":4242,"number":42,"title":"Broken","body":"It breaks.",
-        "state":"open","state_reason":null,"locked":false,"created_at":"2024-03-01T00:00:00Z",
-        "updated_at":"2024-03-02T00:00:00Z","closed_at":null,"labels":labels,
-        "assignees":[{"login":"grace"}],"author_association":"MEMBER",
-        "html_url":"https://gh/acme/widgets/issues/42",
-        "user":{"login":"ada","node_id":"U_ada","id":1,"type":"User"}})
+    })
 }
-fn item_event(action: &str, labels: Value) -> Value {
-    json!({"action":action,"organization":org(),"repository":repo(),"issue":issue(labels)})
+
+fn sub_issue_event(action: &str, child: Value, parent: Value) -> Value {
+    json!({
+        "action":action, "organization":org(), "repository":repo("parents"),
+        "parent_issue":parent, "parent_issue_repo":repo("parents"),
+        "sub_issue":child, "sub_issue_repo":repo("widgets")
+    })
 }
-fn pull_request_event(action: &str, labels: Value) -> Value {
-    let mut pull_request = issue(labels);
-    pull_request["node_id"] = json!("PR_5");
-    pull_request["draft"] = json!(false);
-    pull_request["merged"] = json!(false);
-    json!({"action":action,"organization":org(),"repository":repo(),
-        "pull_request":pull_request})
-}
-fn comment_event(action: &str, body: &str, pr: bool) -> Value {
-    let mut parent = issue(json!([]));
-    if pr {
-        parent["pull_request"] = json!({"url":"https://api.github.com/pulls/42"});
-    }
-    json!({"action":action,"organization":org(),"repository":repo(),"issue":parent,
-        "comment":{"node_id":"IC_9","id":9001,"body":body,
-        "created_at":"2024-03-03T00:00:00Z","updated_at":"2024-03-03T00:00:00Z",
-        "author_association":"CONTRIBUTOR","html_url":"https://gh/comments/9001",
-        "user":{"login":"bot","node_id":"U_bot","id":2,"type":"Bot"}}})
-}
-fn review(action: &str) -> Value {
-    json!({"action":action,"organization":org(),"repository":repo(),
-        "pull_request":{"node_id":"PR_5","state":"open"},"review":{"node_id":"PRR_3","id":55,
-        "state":"approved","body":"LGTM","submitted_at":"2024-03-05T00:00:00Z",
-        "commit_id":"abc","html_url":"https://gh/reviews/3",
-        "user":{"login":"ada","node_id":"U_ada","id":1,"type":"User"}}})
-}
-fn in_repository(mut payload: Value, name: &str) -> Value {
-    payload["repository"]["name"] = json!(name);
-    payload["repository"]["full_name"] = json!(format!("acme/{name}"));
-    payload
-}
+
 fn convert(event: &str, payload: &Value) -> Vec<SourceChange> {
-    Converter::new("gh", "acme", 1)
+    Converter::new("gh", "acme", &task_type(), 1)
         .convert(event, payload)
         .unwrap()
         .unwrap()
 }
-fn element(change: &SourceChange) -> &Element {
-    match change {
-        SourceChange::Insert { element } | SourceChange::Update { element } => element,
-        _ => panic!("expected element"),
-    }
-}
-fn label(change: &SourceChange) -> String {
+
+fn label(change: &SourceChange) -> &str {
     let metadata = match change {
         SourceChange::Delete { metadata } => metadata,
-        _ => match element(change) {
+        SourceChange::Insert { element } | SourceChange::Update { element } => match element {
             Element::Node { metadata, .. } | Element::Relation { metadata, .. } => metadata,
         },
+        SourceChange::Future { .. } => panic!("unexpected future change"),
     };
-    metadata.labels.join(",")
+    &metadata.labels[0]
 }
-fn render(change: &SourceChange) -> String {
-    let op = match change {
-        SourceChange::Insert { .. } => "I",
-        SourceChange::Update { .. } => "U",
-        SourceChange::Delete { .. } => "D",
-        SourceChange::Future { .. } => "F",
-    };
-    let id = &change.get_reference().element_id;
-    match change {
-        SourceChange::Insert { element } | SourceChange::Update { element } => match element {
-            Element::Relation {
-                in_node, out_node, ..
-            } => format!(
-                "{op}:{}:{id}:{}>{}",
-                label(change),
-                in_node.element_id,
-                out_node.element_id
-            ),
-            _ => format!("{op}:{}:{id}", label(change)),
-        },
-        _ => format!("{op}:{}:{id}", label(change)),
-    }
+
+fn id(change: &SourceChange) -> &str {
+    &change.get_reference().element_id
 }
-fn changes(event: &str, payload: &Value) -> String {
-    convert(event, payload)
+
+fn is_insert(change: &SourceChange) -> bool {
+    matches!(change, SourceChange::Insert { .. })
+}
+
+fn is_update(change: &SourceChange) -> bool {
+    matches!(change, SourceChange::Update { .. })
+}
+
+fn is_delete(change: &SourceChange) -> bool {
+    matches!(change, SourceChange::Delete { .. })
+}
+
+fn property<'a>(changes: &'a [SourceChange], node_label: &str, key: &str) -> &'a ElementValue {
+    changes
         .iter()
-        .map(render)
-        .collect::<Vec<_>>()
-        .join("|")
-}
-fn prop(change: &SourceChange, key: &str) -> Option<ElementValue> {
-    match element(change) {
-        Element::Node { properties, .. } | Element::Relation { properties, .. } => {
-            properties.get(key).cloned()
-        }
-    }
-}
-fn text(change: &SourceChange, key: &str) -> Option<String> {
-    match prop(change, key) {
-        Some(ElementValue::String(value)) => Some(value.to_string()),
-        _ => None,
-    }
-}
-fn edited(from: &str, to: &str) -> Value {
-    let mut payload = comment_event("edited", to, false);
-    payload["changes"] = json!({"body":{"from":from}});
-    payload
+        .find_map(|change| match change {
+            SourceChange::Insert {
+                element:
+                    Element::Node {
+                        metadata,
+                        properties,
+                    },
+            }
+            | SourceChange::Update {
+                element:
+                    Element::Node {
+                        metadata,
+                        properties,
+                    },
+            } if metadata.labels[0].as_ref() == node_label => properties.get(key),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing {node_label}.{key}"))
 }
 
 #[test]
-fn repository_filter_is_stateless_across_supported_families() {
-    let filter = RepositoryFilter::new(
-        "acme",
-        &[
-            "AcMe/Widgets".to_string(),
-            "widgets".to_string(),
-            "WIDGETS".to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(filter.canonical_names(), vec!["widgets"]);
-
-    let mut pr = issue(json!([]));
-    pr["node_id"] = json!("PR_5");
-    let families = [
-        (
-            "repository",
-            json!({"action":"created","organization":org(),"repository":repo()}),
-        ),
-        ("issues", item_event("opened", json!([]))),
-        (
-            "pull_request",
-            json!({"action":"opened","organization":org(),"repository":repo(),"pull_request":pr}),
-        ),
-        ("issue_comment", comment_event("created", "ordinary", false)),
-        ("pull_request_review", review("submitted")),
-    ];
-    for (event, payload) in families {
-        let converter = Converter::new("gh", "acme", 1).with_repository_filter(&filter);
-        assert!(
-            converter.convert(event, &payload).unwrap().is_some(),
-            "{event} in the configured repository must be included"
-        );
-
-        let excluded = in_repository(payload, "gadgets");
-        assert!(
-            converter.convert(event, &excluded).unwrap().is_none(),
-            "{event} outside the configured repository must be ignored"
-        );
+fn raw_task_bodies_accept_both_strict_assignment_types() {
+    for body in [VALIDATION_TASK, RISK_TASK] {
+        assert!(matches!(
+            classify_task_body(body),
+            TaskClassification::Task(_)
+        ));
     }
+    for body in [
+        &format!("{VALIDATION_TASK}\n"),
+        r#"{"assignmentId":"compact"}"#,
+        "WorkGraphAssignment/v1\n{}",
+        "prose\n{}",
+    ] {
+        assert!(matches!(
+            classify_task_body(body),
+            TaskClassification::Invalid(_)
+        ));
+    }
+}
 
-    let empty = RepositoryFilter::new("acme", &[]).unwrap();
-    assert!(Converter::new("gh", "acme", 1)
-        .with_repository_filter(&empty)
+#[test]
+fn exact_result_grammar_accepts_both_result_types() {
+    assert!(matches!(
+        classify_result(RESULT),
+        ResultClassification::Result(_)
+    ));
+    assert!(matches!(
+        classify_result(RISK_RESULT),
+        ResultClassification::Result(_)
+    ));
+    assert!(matches!(
+        classify_result("WorkGraphTaskResult/v1\n\n```json\n{}\n```"),
+        ResultClassification::Invalid(_)
+    ));
+    assert!(matches!(
+        classify_result("WorkGraphTaskResult/v2\n\n```json\n{}\n```\n"),
+        ResultClassification::Invalid(error) if error.code == error_code::UNSUPPORTED_VERSION
+    ));
+    assert!(matches!(
+        classify_result("prefix WorkGraphTaskResult/v1"),
+        ResultClassification::Ordinary
+    ));
+}
+
+#[test]
+fn typed_issue_emits_task_not_github_issue() {
+    let changes = convert(
+        "issues",
+        &issue_event("opened", issue("I_task", VALIDATION_TASK, true, "open")),
+    );
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphTask" && id(change) == "I_task"));
+    assert!(!changes.iter().any(|change| label(change) == "GitHubIssue"));
+    assert_eq!(
+        property(&changes, "WorkGraphTask", "assignmentId"),
+        &ElementValue::from(&json!("assignment-validation-001"))
+    );
+}
+
+#[test]
+fn task_state_is_retained_on_close_and_reopen() {
+    let closed = convert(
+        "issues",
+        &issue_event("closed", issue("I_task", VALIDATION_TASK, true, "closed")),
+    );
+    assert!(closed
+        .iter()
+        .any(|change| label(change) == "WorkGraphTask" && is_update(change)));
+    assert_eq!(
+        property(&closed, "WorkGraphTask", "state"),
+        &ElementValue::from(&json!("closed"))
+    );
+    assert_eq!(
+        property(&closed, "WorkGraphTask", "stateReason"),
+        &ElementValue::from(&json!("completed"))
+    );
+
+    let reopened = convert(
+        "issues",
+        &issue_event("reopened", issue("I_task", VALIDATION_TASK, true, "open")),
+    );
+    assert!(reopened
+        .iter()
+        .any(|change| label(change) == "WorkGraphTask" && is_insert(change)));
+}
+
+#[test]
+fn task_delete_removes_task_repository_and_parent_relation() {
+    let changes = convert(
+        "issues",
+        &issue_event("deleted", issue("I_task", VALIDATION_TASK, true, "closed")),
+    );
+    for (expected_id, expected_label) in [
+        ("TASK_FOR:I_task", "TASK_FOR"),
+        ("IN_REPOSITORY:I_task:R_widgets", "IN_REPOSITORY"),
+        ("I_task", "WorkGraphTask"),
+    ] {
+        assert!(changes.iter().any(|change| {
+            id(change) == expected_id && label(change) == expected_label && is_delete(change)
+        }));
+    }
+}
+
+#[test]
+fn issue_type_transitions_replace_node_kinds() {
+    let mut to_task = issue_event("typed", issue("I_task", VALIDATION_TASK, true, "open"));
+    to_task["changes"] = json!({"type":{"from":null}});
+    let changes = convert("issues", &to_task);
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "GitHubIssue" && is_delete(change)));
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphTask" && is_insert(change)));
+
+    let mut from_task = issue_event("untyped", issue("I_task", "ordinary", false, "open"));
+    from_task["changes"] = json!({"type":{"from":{"node_id":TASK_TYPE_ID,"name":TASK_TYPE_NAME}}});
+    let changes = convert("issues", &from_task);
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphTask" && is_delete(change)));
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "GitHubIssue" && is_insert(change)));
+}
+
+#[test]
+fn body_edits_switch_between_task_and_error() {
+    let mut malformed = issue_event("edited", issue("I_task", "{}", true, "open"));
+    malformed["changes"] = json!({"body":{"from":VALIDATION_TASK}});
+    let changes = convert("issues", &malformed);
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphTask" && is_delete(change)));
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphError"));
+
+    let mut repaired = issue_event("edited", issue("I_task", VALIDATION_TASK, true, "open"));
+    repaired["changes"] = json!({"body":{"from":"{}"}});
+    let changes = convert("issues", &repaired);
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphError" && is_delete(change)));
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphTask"));
+}
+
+#[test]
+fn sub_issue_add_upserts_task_parent_and_relations() {
+    let payload = sub_issue_event(
+        "sub_issue_added",
+        issue("I_task", VALIDATION_TASK, true, "closed"),
+        issue("I_parent", "parent", false, "open"),
+    );
+    let changes = convert("sub_issues", &payload);
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphTask"));
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "GitHubIssue" && id(change) == "I_parent"));
+    assert!(changes.iter().any(|change| {
+        label(change) == "TASK_FOR" && id(change) == "TASK_FOR:I_task" && is_insert(change)
+    }));
+}
+
+#[test]
+fn sub_issue_delivery_variants_are_stable_and_removal_is_payload_only() {
+    let child = issue("I_task", VALIDATION_TASK, true, "open");
+    let parent = issue("I_parent", "parent", false, "open");
+    for action in ["sub_issue_added", "parent_issue_added"] {
+        let changes = convert(
+            "sub_issues",
+            &sub_issue_event(action, child.clone(), parent.clone()),
+        );
+        assert!(changes
+            .iter()
+            .any(|change| id(change) == "TASK_FOR:I_task" && is_insert(change)));
+    }
+    for action in ["sub_issue_removed", "parent_issue_removed"] {
+        let changes = convert(
+            "sub_issues",
+            &sub_issue_event(action, child.clone(), parent.clone()),
+        );
+        assert_eq!(changes.len(), 1);
+        assert_eq!(id(&changes[0]), "TASK_FOR:I_task");
+        assert!(is_delete(&changes[0]));
+    }
+}
+
+#[test]
+fn sub_issue_and_issue_delivery_order_converge_on_same_ids() {
+    let child = issue("I_task", VALIDATION_TASK, true, "open");
+    let parent = issue("I_parent", "parent", false, "open");
+    let issue_changes = convert("issues", &issue_event("opened", child.clone()));
+    let sub_changes = convert(
+        "sub_issues",
+        &sub_issue_event("sub_issue_added", child, parent),
+    );
+    assert!(issue_changes.iter().any(|change| id(change) == "I_task"));
+    assert!(sub_changes.iter().any(|change| id(change) == "I_task"));
+    assert!(sub_changes
+        .iter()
+        .any(|change| id(change) == "TASK_FOR:I_task"));
+}
+
+#[test]
+fn parent_transition_reuses_one_relation_identity() {
+    let child = issue("I_task", VALIDATION_TASK, true, "open");
+    let old_parent = issue("I_parent_1", "parent", false, "open");
+    let new_parent = issue("I_parent_2", "parent", false, "open");
+    let remove = convert(
+        "sub_issues",
+        &sub_issue_event("sub_issue_removed", child.clone(), old_parent),
+    );
+    let add = convert(
+        "sub_issues",
+        &sub_issue_event("sub_issue_added", child, new_parent),
+    );
+    assert_eq!(id(&remove[0]), "TASK_FOR:I_task");
+    assert!(add.iter().any(|change| id(change) == "TASK_FOR:I_task"));
+}
+
+#[test]
+fn task_transfer_obeys_repository_filter() {
+    let filter = RepositoryFilter::new("acme", &["widgets".to_string()]).unwrap();
+    let mut payload = issue_event("transferred", issue("I_old", VALIDATION_TASK, true, "open"));
+    payload["changes"] = json!({
+        "new_issue":issue("I_new", VALIDATION_TASK, true, "open"),
+        "new_repository":repo("excluded")
+    });
+    let changes = Converter::new("gh", "acme", &task_type(), 1)
+        .with_repository_filter(&filter)
+        .convert("issues", &payload)
+        .unwrap()
+        .unwrap();
+    assert!(changes
+        .iter()
+        .any(|change| id(change) == "I_old" && is_delete(change)));
+    assert!(!changes.iter().any(|change| id(change) == "I_new"));
+}
+
+#[test]
+fn task_close_respects_filter_while_delete_still_tombstones() {
+    let filter = RepositoryFilter::new("acme", &["included".to_string()]).unwrap();
+    let issue_type = task_type();
+    let converter = Converter::new("gh", "acme", &issue_type, 1).with_repository_filter(&filter);
+    let closed = issue_event("closed", issue("I_task", VALIDATION_TASK, true, "closed"));
+    assert!(converter.convert("issues", &closed).unwrap().is_none());
+    let deleted = issue_event("deleted", issue("I_task", VALIDATION_TASK, true, "closed"));
+    assert!(converter
+        .convert("issues", &deleted)
+        .unwrap()
+        .unwrap()
+        .iter()
+        .any(|change| label(change) == "WorkGraphTask" && is_delete(change)));
+}
+
+#[test]
+fn task_comments_continue_while_closed() {
+    for state in ["open", "closed"] {
+        let ordinary = convert(
+            "issue_comment",
+            &comment_event("created", "ordinary", state, true, "IC_plain"),
+        );
+        assert!(ordinary
+            .iter()
+            .any(|change| { label(change) == "GitHubIssueComment" && id(change) == "IC_plain" }));
+        let result = convert(
+            "issue_comment",
+            &comment_event("created", RESULT, state, true, "IC_result"),
+        );
+        assert!(result
+            .iter()
+            .any(|change| { label(change) == "WorkGraphTaskResult" && id(change) == "IC_result" }));
+        assert!(result.iter().any(|change| label(change) == "COMMENT_ON"));
+        assert!(result.iter().any(|change| label(change) == "RESULT_FOR"));
+    }
+}
+
+#[test]
+fn result_marker_on_ordinary_issue_stays_ordinary() {
+    let changes = convert(
+        "issue_comment",
+        &comment_event("created", RESULT, "open", false, "IC_ordinary"),
+    );
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "GitHubIssueComment"));
+    assert!(!changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphTaskResult"));
+}
+
+#[test]
+fn malformed_marked_result_emits_error() {
+    let changes = convert(
+        "issue_comment",
+        &comment_event(
+            "created",
+            "WorkGraphTaskResult/v1\n\n```json\n{}\n```\n",
+            "closed",
+            true,
+            "IC_bad",
+        ),
+    );
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphError"));
+    assert!(!changes
+        .iter()
+        .any(|change| label(change) == "GitHubIssueComment"));
+}
+
+#[test]
+fn comment_edits_replace_ordinary_result_and_error_nodes() {
+    let mut to_result = comment_event("edited", RESULT, "closed", true, "IC_edit");
+    to_result["changes"] = json!({"body":{"from":"ordinary"}});
+    let changes = convert("issue_comment", &to_result);
+    assert!(changes
+        .iter()
+        .any(|change| { label(change) == "GitHubIssueComment" && is_delete(change) }));
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphTaskResult" && is_insert(change)));
+
+    let mut to_error = comment_event(
+        "edited",
+        "WorkGraphTaskResult/v1\nbad",
+        "closed",
+        true,
+        "IC_edit",
+    );
+    to_error["changes"] = json!({"body":{"from":RESULT}});
+    let changes = convert("issue_comment", &to_error);
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphTaskResult" && is_delete(change)));
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphError" && is_insert(change)));
+}
+
+#[test]
+fn comment_delete_removes_result_relations_and_node() {
+    let changes = convert(
+        "issue_comment",
+        &comment_event("deleted", RESULT, "closed", true, "IC_result"),
+    );
+    for expected in ["RESULT_FOR", "COMMENT_ON", "WorkGraphTaskResult"] {
+        assert!(changes
+            .iter()
+            .any(|change| label(change) == expected && is_delete(change)));
+    }
+}
+
+#[test]
+fn ordinary_and_result_comment_updates_and_deletes_work_in_every_task_state() {
+    for state in ["open", "closed"] {
+        let mut ordinary_edit = comment_event("edited", "ordinary after", state, true, "IC_plain");
+        ordinary_edit["changes"] = json!({"body":{"from":"ordinary before"}});
+        let changes = convert("issue_comment", &ordinary_edit);
+        assert!(changes
+            .iter()
+            .any(|change| label(change) == "GitHubIssueComment" && is_update(change)));
+        let changes = convert(
+            "issue_comment",
+            &comment_event("deleted", "ordinary after", state, true, "IC_plain"),
+        );
+        assert!(changes
+            .iter()
+            .any(|change| label(change) == "GitHubIssueComment" && is_delete(change)));
+
+        let mut result_edit = comment_event("edited", RESULT, state, true, "IC_result");
+        result_edit["changes"] = json!({"body":{"from":RESULT}});
+        let changes = convert("issue_comment", &result_edit);
+        assert!(changes
+            .iter()
+            .any(|change| label(change) == "WorkGraphTaskResult" && is_update(change)));
+        let changes = convert(
+            "issue_comment",
+            &comment_event("deleted", RESULT, state, true, "IC_result"),
+        );
+        assert!(changes
+            .iter()
+            .any(|change| label(change) == "WorkGraphTaskResult" && is_delete(change)));
+    }
+}
+
+#[test]
+fn close_and_result_order_both_produce_complete_changes() {
+    let close = convert(
+        "issues",
+        &issue_event("closed", issue("I_task", VALIDATION_TASK, true, "closed")),
+    );
+    let result = convert(
+        "issue_comment",
+        &comment_event("created", RESULT, "closed", true, "IC_result"),
+    );
+    assert!(close.iter().any(|change| label(change) == "WorkGraphTask"));
+    assert!(result
+        .iter()
+        .any(|change| label(change) == "WorkGraphTaskResult"));
+}
+
+#[test]
+fn multiple_results_have_independent_comment_identities() {
+    let first = convert(
+        "issue_comment",
+        &comment_event("created", RESULT, "open", true, "IC_1"),
+    );
+    let second = convert(
+        "issue_comment",
+        &comment_event("created", RESULT, "open", true, "IC_2"),
+    );
+    assert!(first
+        .iter()
+        .any(|change| { label(change) == "WorkGraphTaskResult" && id(change) == "IC_1" }));
+    assert!(second
+        .iter()
+        .any(|change| { label(change) == "WorkGraphTaskResult" && id(change) == "IC_2" }));
+}
+
+#[test]
+fn generic_issues_remain_open_only() {
+    let closed = convert(
+        "issues",
+        &issue_event("closed", issue("I_generic", "ordinary", false, "closed")),
+    );
+    assert!(closed
+        .iter()
+        .any(|change| label(change) == "GitHubIssue" && is_delete(change)));
+    assert!(Converter::new("gh", "acme", &task_type(), 1)
         .convert(
             "issues",
-            &in_repository(item_event("opened", json!([])), "gadgets")
+            &issue_event("edited", issue("I_generic", "ordinary", false, "closed"))
         )
         .unwrap()
-        .is_some());
-    assert!(Converter::new("gh", "acme", 1)
-        .with_repository_filter(&filter)
-        .convert("push", &json!({}))
-        .unwrap()
         .is_none());
 }
 
 #[test]
-fn repository_filter_handles_transfer_and_rename_boundaries_without_state() {
-    let filter = RepositoryFilter::new("acme", &["widgets".to_string()]).unwrap();
-
-    let incomplete_transfer = item_event("transferred", json!([]));
-    let changes = Converter::new("gh", "acme", 1)
-        .with_repository_filter(&filter)
-        .convert("issues", &incomplete_transfer)
-        .unwrap()
-        .unwrap();
-    assert!(changes.iter().any(|change| {
-        change.get_reference().element_id.as_ref() == "I_42"
-            && matches!(change, SourceChange::Delete { .. })
-    }));
-    assert!(Converter::new("gh", "acme", 1)
-        .with_repository_filter(&filter)
-        .convert("issues", &in_repository(incomplete_transfer, "gadgets"))
-        .unwrap()
-        .is_none());
-
-    let mut transferred_in = in_repository(item_event("transferred", json!([])), "gadgets");
-    transferred_in["changes"] = json!({
-        "new_issue":{"node_id":"I_99","number":99,"state":"open","labels":[]},
-        "new_repository":{
-            "node_id":"R_8","name":"widgets","full_name":"acme/widgets",
-            "owner":{"login":"acme"}
-        }
-    });
-    let moved_in = Converter::new("gh", "acme", 1)
-        .with_repository_filter(&filter)
-        .convert("issues", &transferred_in)
-        .unwrap()
-        .unwrap();
-    assert!(moved_in.iter().any(|change| {
-        change.get_reference().element_id.as_ref() == "I_99"
-            && matches!(change, SourceChange::Insert { .. })
-    }));
-    assert!(!moved_in.iter().any(|change| {
-        change.get_reference().element_id.as_ref() == "I_42"
-            && matches!(change, SourceChange::Delete { .. })
-    }));
-
-    let mut transferred_out = item_event("transferred", json!([]));
-    transferred_out["changes"] = json!({
-        "new_issue":{"node_id":"I_99","number":99,"state":"open","labels":[]},
-        "new_repository":{
-            "node_id":"R_8","name":"gadgets","full_name":"acme/gadgets",
-            "owner":{"login":"acme"}
-        }
-    });
-    let moved_out = Converter::new("gh", "acme", 1)
-        .with_repository_filter(&filter)
-        .convert("issues", &transferred_out)
-        .unwrap()
-        .unwrap();
-    assert!(moved_out.iter().any(|change| {
-        change.get_reference().element_id.as_ref() == "I_42"
-            && matches!(change, SourceChange::Delete { .. })
-    }));
-    assert!(!moved_out
-        .iter()
-        .any(|change| change.get_reference().element_id.as_ref() == "I_99"));
-
-    let mut transferred_closed = in_repository(item_event("transferred", json!([])), "gadgets");
-    transferred_closed["changes"] = json!({
-        "new_issue":{"node_id":"I_100","number":100,"state":"closed","labels":[]},
-        "new_repository":{
-            "node_id":"R_8","name":"widgets","full_name":"acme/widgets",
-            "owner":{"login":"acme"}
-        }
-    });
-    let closed_move = Converter::new("gh", "acme", 1)
-        .with_repository_filter(&filter)
-        .convert("issues", &transferred_closed)
-        .unwrap()
-        .unwrap();
-    assert!(
-        closed_move.is_empty(),
-        "a closed Issue transferred into scope must not be projected"
-    );
-
-    let renamed_out = in_repository(
-        json!({"action":"renamed","organization":org(),"repository":repo(),
-            "changes":{"repository":{"name":{"from":"widgets"}}}}),
-        "gadgets",
-    );
-    let changes = Converter::new("gh", "acme", 1)
-        .with_repository_filter(&filter)
-        .convert("repository", &renamed_out)
-        .unwrap()
-        .unwrap();
-    assert!(changes.iter().any(|change| {
-        change.get_reference().element_id.as_ref() == "R_7"
-            && matches!(change, SourceChange::Delete { .. })
-    }));
-
-    let renamed_in = json!({"action":"renamed","organization":org(),"repository":repo(),
-        "changes":{"repository":{"name":{"from":"gadgets"}}}});
-    let changes = Converter::new("gh", "acme", 1)
-        .with_repository_filter(&filter)
-        .convert("repository", &renamed_in)
-        .unwrap()
-        .unwrap();
-    assert!(changes.iter().any(|change| {
-        change.get_reference().element_id.as_ref() == "R_7"
-            && matches!(change, SourceChange::Insert { .. })
-    }));
-}
-
-#[test]
-fn open_only_projection_tombstones_reopens_and_gates_children() {
-    let converter = Converter::new("gh", "acme", 1);
-    for (event, key, id, node_label) in [
-        ("issues", "issue", "I_42", "GitHubIssue"),
-        ("pull_request", "pull_request", "PR_5", "GitHubPullRequest"),
-    ] {
-        let open = if event == "issues" {
-            item_event("opened", json!([]))
-        } else {
-            pull_request_event("opened", json!([]))
-        };
-        let mut closed = open.clone();
-        closed["action"] = json!("closed");
-        closed[key]["state"] = json!("closed");
-        let tombstones = converter.convert(event, &closed).unwrap().unwrap();
-        assert!(tombstones.iter().any(|change| {
-            change.get_reference().element_id.as_ref() == id
-                && label(change) == node_label
-                && matches!(change, SourceChange::Delete { .. })
-        }));
-        assert!(tombstones.iter().any(|change| {
-            label(change) == "IN_REPOSITORY" && matches!(change, SourceChange::Delete { .. })
-        }));
-        assert!(
-            tombstones
-                .iter()
-                .all(|change| !matches!(label(change).as_str(), "COMMENT_ON" | "REVIEW_OF")),
-            "close must not pretend to enumerate child relations"
-        );
-
-        let mut closed_edit = closed.clone();
-        closed_edit["action"] = json!("edited");
-        assert!(
-            converter.convert(event, &closed_edit).unwrap().is_none(),
-            "non-terminal events for closed work items must be ignored"
-        );
-
-        let mut reopened = closed;
-        reopened["action"] = json!("reopened");
-        reopened[key]["state"] = json!("open");
-        let reconstructed = converter.convert(event, &reopened).unwrap().unwrap();
-        assert!(reconstructed.iter().any(|change| {
-            change.get_reference().element_id.as_ref() == id
-                && label(change) == node_label
-                && matches!(change, SourceChange::Insert { .. })
-        }));
-        assert!(reconstructed.iter().any(|change| {
-            label(change) == "IN_REPOSITORY" && matches!(change, SourceChange::Insert { .. })
-        }));
-    }
-
-    for on_pull_request in [false, true] {
-        let open = comment_event("created", "ordinary", on_pull_request);
-        assert!(converter.convert("issue_comment", &open).unwrap().is_some());
-        let mut closed = open;
-        closed["issue"]["state"] = json!("closed");
-        assert!(converter
-            .convert("issue_comment", &closed)
-            .unwrap()
-            .is_none());
-    }
-
-    let open_review = review("submitted");
+fn excluded_task_addition_is_ignored_but_removal_converges() {
+    let filter = RepositoryFilter::new("acme", &["parents".to_string()]).unwrap();
+    let child = issue("I_task", VALIDATION_TASK, true, "open");
+    let parent = issue("I_parent", "parent", false, "open");
+    let issue_type = task_type();
+    let converter = Converter::new("gh", "acme", &issue_type, 1).with_repository_filter(&filter);
     assert!(converter
-        .convert("pull_request_review", &open_review)
-        .unwrap()
-        .is_some());
-    let mut closed_review = open_review;
-    closed_review["pull_request"]["state"] = json!("closed");
-    assert!(converter
-        .convert("pull_request_review", &closed_review)
-        .unwrap()
-        .is_none());
-}
-
-#[test]
-fn open_only_projection_rejects_missing_or_invalid_parent_state() {
-    for (event, mut payload, pointer) in [
-        ("issues", item_event("edited", json!([])), "/issue/state"),
-        (
-            "pull_request",
-            pull_request_event("edited", json!([])),
-            "/pull_request/state",
-        ),
-        (
-            "issue_comment",
-            comment_event("created", "ordinary", false),
-            "/issue/state",
-        ),
-        (
-            "pull_request_review",
-            review("submitted"),
-            "/pull_request/state",
-        ),
-    ] {
-        *payload.pointer_mut(pointer).unwrap() = json!("unknown");
-        assert!(matches!(
-            Converter::new("gh", "acme", 1).convert(event, &payload),
-            Err(ConvertError::InvalidPayload(message)) if message.contains(".state")
-        ));
-    }
-
-    let mut missing_parent_state = comment_event("created", "ordinary", true);
-    missing_parent_state["issue"]
-        .as_object_mut()
-        .unwrap()
-        .remove("state");
-    assert_eq!(
-        Converter::new("gh", "acme", 1).convert("issue_comment", &missing_parent_state),
-        Err(ConvertError::InvalidPayload(
-            "'issue.state' must be either 'open' or 'closed'".into()
-        ))
-    );
-
-    let mut inconsistent_open = item_event("opened", json!([]));
-    inconsistent_open["issue"]["state"] = json!("closed");
-    assert_eq!(
-        Converter::new("gh", "acme", 1).convert("issues", &inconsistent_open),
-        Err(ConvertError::InvalidPayload(
-            "'issue.state' must be 'open' for action 'opened'".into()
-        ))
-    );
-
-    let mut transferred = item_event("transferred", json!([]));
-    transferred["changes"] = json!({
-        "new_issue":{"node_id":"I_99","number":99,"labels":[]},
-        "new_repository":{
-            "node_id":"R_8","name":"widgets","full_name":"acme/widgets",
-            "owner":{"login":"acme"}
-        }
-    });
-    assert_eq!(
-        Converter::new("gh", "acme", 1).convert("issues", &transferred),
-        Err(ConvertError::InvalidPayload(
-            "'changes.new_issue.state' must be either 'open' or 'closed'".into()
-        ))
-    );
-}
-
-#[test]
-fn repository_filter_allows_only_terminal_cleanup_outside_scope() {
-    let filter = RepositoryFilter::new("acme", &["widgets".to_string()]).unwrap();
-    let converter = Converter::new("gh", "acme", 1).with_repository_filter(&filter);
-
-    for (event, key) in [("issues", "issue"), ("pull_request", "pull_request")] {
-        let mut included_close = if event == "issues" {
-            item_event("closed", json!([]))
-        } else {
-            pull_request_event("closed", json!([]))
-        };
-        included_close[key]["state"] = json!("closed");
-        assert!(converter.convert(event, &included_close).unwrap().is_some());
-
-        let excluded_close = in_repository(included_close, "gadgets");
-        let tombstones = converter
-            .convert(event, &excluded_close)
-            .unwrap()
-            .expect("terminal cleanup bypasses the current repository name filter");
-        assert!(tombstones
-            .iter()
-            .all(|change| matches!(change, SourceChange::Delete { .. })));
-
-        let included_reopen = if event == "issues" {
-            item_event("reopened", json!([]))
-        } else {
-            pull_request_event("reopened", json!([]))
-        };
-        assert!(converter
-            .convert(event, &included_reopen)
-            .unwrap()
-            .is_some());
-
-        let excluded_reopen = in_repository(included_reopen, "gadgets");
-        assert!(converter
-            .convert(event, &excluded_reopen)
-            .unwrap()
-            .is_none());
-    }
-}
-
-#[test]
-fn state_less_issue_pin_actions_remain_ignored() {
-    for action in ["pinned", "unpinned"] {
-        let mut payload = item_event(action, json!([]));
-        payload["issue"].as_object_mut().unwrap().remove("state");
-        assert!(Converter::new("gh", "acme", 1)
-            .convert("issues", &payload)
-            .unwrap()
-            .is_none());
-    }
-}
-
-#[tokio::test]
-async fn closing_parent_retracts_child_match_and_reopen_restores_it() {
-    let registry = Arc::new(FunctionRegistry::new());
-    let parser = Arc::new(CypherParser::new(registry.clone()));
-    let query = QueryBuilder::new(
-        "MATCH (comment:GitHubIssueComment)-[:COMMENT_ON]->(issue:GitHubIssue) \
-         RETURN comment.nodeId AS commentId",
-        parser,
-    )
-    .with_function_registry(registry)
-    .build()
-    .await;
-
-    for change in convert("issues", &item_event("opened", json!([]))) {
-        query.process_source_change(change).await.unwrap();
-    }
-    let mut results = Vec::new();
-    for change in convert(
-        "issue_comment",
-        &comment_event("created", "ordinary", false),
-    ) {
-        results.extend(query.process_source_change(change).await.unwrap());
-    }
-    assert!(results
-        .iter()
-        .any(|result| matches!(result, QueryPartEvaluationContext::Adding { .. })));
-
-    let mut closed = item_event("closed", json!([]));
-    closed["issue"]["state"] = json!("closed");
-    let mut results = Vec::new();
-    for change in convert("issues", &closed) {
-        results.extend(query.process_source_change(change).await.unwrap());
-    }
-    assert!(results
-        .iter()
-        .any(|result| matches!(result, QueryPartEvaluationContext::Removing { .. })));
-
-    let reopened = item_event("reopened", json!([]));
-    let mut results = Vec::new();
-    for change in convert("issues", &reopened) {
-        results.extend(query.process_source_change(change).await.unwrap());
-    }
-    assert!(results
-        .iter()
-        .any(|result| matches!(result, QueryPartEvaluationContext::Adding { .. })));
-
-    let registry = Arc::new(FunctionRegistry::new());
-    let parser = Arc::new(CypherParser::new(registry.clone()));
-    let query = QueryBuilder::new(
-        "MATCH (review:GitHubPullRequestReview)-[:REVIEW_OF]->(pr:GitHubPullRequest) \
-         RETURN review.nodeId AS reviewId",
-        parser,
-    )
-    .with_function_registry(registry)
-    .build()
-    .await;
-
-    for change in convert("pull_request", &pull_request_event("opened", json!([]))) {
-        query.process_source_change(change).await.unwrap();
-    }
-    let mut results = Vec::new();
-    for change in convert("pull_request_review", &review("submitted")) {
-        results.extend(query.process_source_change(change).await.unwrap());
-    }
-    assert!(results
-        .iter()
-        .any(|result| matches!(result, QueryPartEvaluationContext::Adding { .. })));
-
-    let mut closed = pull_request_event("closed", json!([]));
-    closed["pull_request"]["state"] = json!("closed");
-    let mut results = Vec::new();
-    for change in convert("pull_request", &closed) {
-        results.extend(query.process_source_change(change).await.unwrap());
-    }
-    assert!(results
-        .iter()
-        .any(|result| matches!(result, QueryPartEvaluationContext::Removing { .. })));
-
-    let reopened = pull_request_event("reopened", json!([]));
-    let mut results = Vec::new();
-    for change in convert("pull_request", &reopened) {
-        results.extend(query.process_source_change(change).await.unwrap());
-    }
-    assert!(results
-        .iter()
-        .any(|result| matches!(result, QueryPartEvaluationContext::Adding { .. })));
-}
-
-#[test]
-fn families_actions_ids_properties_and_directions() {
-    assert_eq!(NODE_LABELS.len(), 10);
-    assert_eq!(RELATION_LABELS.len(), 6);
-    let created = json!({"action":"created","organization":org(),"repository":repo()});
-    assert_eq!(
-        changes("repository", &created),
-        "U:GitHubOrganization:O_1|I:GitHubRepository:R_7|I:IN_ORGANIZATION:IN_ORGANIZATION:R_7:O_1:R_7>O_1"
-    );
-    assert_eq!(
-        text(&convert("repository", &created)[1], "createdAt").unwrap(),
-        "2024-01-01T00:00:00Z"
-    );
-    let mut epoch = created.clone();
-    epoch["repository"]["created_at"] = json!(1_704_067_200_i64);
-    assert_eq!(
-        text(&convert("repository", &epoch)[1], "createdAt").unwrap(),
-        "2024-01-01T00:00:00Z"
-    );
-
-    let opened = item_event("opened", json!([{"name":"bug"},{"name":"status:ready"}]));
-    let mapped = convert("issues", &opened);
-    assert_eq!(
-        &changes("issues", &opened)[..66],
-        "I:GitHubIssue:I_42|I:IN_REPOSITORY:IN_REPOSITORY:I_42:R_7:I_42>R_7"
-    );
-    assert_eq!(text(&mapped[0], "status").as_deref(), Some("ready"));
-    assert_eq!(
-        prop(&mapped[0], "labelDetails"),
-        Some(ElementValue::from(&json!([
-            {"name":"bug","nodeId":"L_0"},
-            {"name":"status:ready","nodeId":"L_1"}
-        ])))
-    );
-    assert_eq!(text(&mapped[0], "authorId").as_deref(), Some("U_ada"));
-    assert!(text(&mapped[0], "bodyDigest")
-        .unwrap()
-        .starts_with("sha256:"));
-    let deleted = item_event("deleted", json!([]));
-    assert!(changes("issues", &deleted).ends_with("D:GitHubIssue:I_42"));
-
-    let mut transfer = item_event("transferred", json!([]));
-    transfer["changes"] = json!({"new_issue":{"node_id":"I_99","number":99,"state":"open","labels":[]},
-        "new_repository":{"node_id":"R_8","owner":{"login":"acme"}}});
-    let moved = changes("issues", &transfer);
-    assert!(moved.contains("D:GitHubIssue:I_42") && moved.contains("I:GitHubIssue:I_99"));
-    transfer["changes"]["new_repository"]["owner"]["login"] = json!("other");
-    assert!(!changes("issues", &transfer).contains("I:GitHubIssue:I_99"));
-
-    let mut pr = issue(json!([{"name":"docs","node_id":"L_docs"}]));
-    pr["node_id"] = json!("PR_5");
-    pr["draft"] = json!(true);
-    pr["head"] = json!({"ref":"feature","sha":"abc"});
-    let pr = json!({"action":"opened","organization":org(),"repository":repo(),"pull_request":pr});
-    let mapped = convert("pull_request", &pr);
-    assert_eq!(prop(&mapped[0], "isDraft"), Some(ElementValue::Bool(true)));
-    assert_eq!(text(&mapped[0], "headRefName").as_deref(), Some("feature"));
-    assert_eq!(
-        prop(&mapped[0], "labelDetails"),
-        Some(ElementValue::from(
-            &json!([{"name":"docs","nodeId":"L_docs"}])
-        ))
-    );
-    assert_eq!(
-        changes("pull_request_review", &review("submitted")),
-        "I:GitHubPullRequestReview:PRR_3|I:REVIEW_OF:REVIEW_OF:PRR_3:PR_5:PRR_3>PR_5"
-    );
-    assert_eq!(
-        text(
-            &convert("pull_request_review", &review("dismissed"))[0],
-            "state"
+        .convert(
+            "sub_issues",
+            &sub_issue_event("sub_issue_added", child.clone(), parent.clone())
         )
-        .unwrap(),
-        "dismissed"
-    );
-
-    let converter = Converter::new("gh", "acme", 1);
-    for event in ["push", "projects_v2", "pull_request_review_comment"] {
-        assert!(converter.convert(event, &opened).unwrap().is_none());
-    }
-    let future = item_event("future_action", json!([]));
-    assert!(converter.convert("issues", &future).unwrap().is_none());
-    let mut other = opened;
-    other["organization"]["login"] = json!("other");
-    assert!(matches!(
-        converter.convert("issues", &other),
-        Err(ConvertError::OrganizationMismatch(_))
-    ));
-}
-
-#[test]
-fn status_is_exact_and_conflicts_are_snapshot_free() {
-    for (value, expected) in [
-        (json!({}), Status::Unknown),
-        (json!({"labels":[]}), Status::Zero),
-        (json!({"labels":[{"name":"Status:x"}]}), Status::Zero),
-        (
-            json!({"labels":[{"name":"status:x"}]}),
-            Status::One("status:x".into()),
-        ),
-        (
-            json!({"labels":[{"name":"status:z"},{"name":"status:a"}]}),
-            Status::Conflict(vec!["status:a".into(), "status:z".into()]),
-        ),
-    ] {
-        assert_eq!(derive_status(&value), expected);
-    }
-    let conflict = convert(
-        "issues",
-        &item_event(
-            "labeled",
-            json!([
-        {"name":"status:z"},{"name":"status:a"}]),
-        ),
-    );
-    assert_eq!(prop(&conflict[0], "status"), Some(ElementValue::Null));
-    assert_eq!(label(&conflict[1]), "WorkGraphError");
-    assert_eq!(
-        text(&conflict[1], "errorCode").as_deref(),
-        Some("multiple-status-labels")
-    );
-    assert_eq!(
-        render(&conflict[2]),
-        "U:ERROR_ON:ERROR_ON:workgraph-error:status:I_42:I_42:workgraph-error:status:I_42>I_42"
-    );
-    let opened = item_event("opened", json!([{"name":"status:a"},{"name":"status:b"}]));
-    assert!(render(&convert("issues", &opened)[3]).starts_with("I:ERROR_ON"));
-    let mut unknown = item_event("edited", json!([]));
-    unknown["issue"].as_object_mut().unwrap().remove("labels");
-    let mapped = convert("issues", &unknown);
-    assert_eq!(mapped.len(), 1);
-    assert_eq!(prop(&mapped[0], "status"), None);
-}
-
-#[test]
-fn label_details_reject_missing_or_malformed_node_ids() {
-    let mut missing = item_event("opened", json!([{"name":"bug"}]));
-    missing["issue"]["labels"][0]
-        .as_object_mut()
         .unwrap()
-        .remove("node_id");
-    assert_eq!(
-        Converter::new("gh", "acme", 1).convert("issues", &missing),
-        Err(ConvertError::InvalidPayload(
-            "'labels[0].node_id' must be nonempty text".into()
-        ))
-    );
-
-    for malformed in [json!(""), json!("   "), json!(42)] {
-        let mut payload = item_event("opened", json!([{"name":"bug"}]));
-        payload["issue"]["labels"][0]["node_id"] = malformed;
-        assert!(matches!(
-            Converter::new("gh", "acme", 1).convert("issues", &payload),
-            Err(ConvertError::InvalidPayload(message))
-                if message == "'labels[0].node_id' must be nonempty text"
-        ));
-    }
-
-    for malformed in [Value::Null, json!(""), json!("   "), json!(42)] {
-        let mut payload = item_event("opened", json!([{"name":"bug"}]));
-        payload["issue"]["labels"][0]["name"] = malformed;
-        assert!(matches!(
-            Converter::new("gh", "acme", 1).convert("issues", &payload),
-            Err(ConvertError::InvalidPayload(message))
-                if message == "'labels[0].name' must be nonempty text"
-        ));
-    }
-
-    let mut partial = item_event("edited", json!([]));
-    partial["issue"].as_object_mut().unwrap().remove("labels");
-    let mapped = convert("issues", &partial);
-    assert_eq!(prop(&mapped[0], "labels"), None);
-    assert_eq!(prop(&mapped[0], "labelDetails"), None);
-}
-
-#[tokio::test]
-async fn label_details_build_complete_label_ids_with_supported_cypher() {
-    let mapped = convert(
-        "issues",
-        &item_event("opened", json!([{"name":"bug"},{"name":"status:ready"}])),
-    );
-    let mut variables = QueryVariables::new();
-    variables.insert(
-        "issue".into(),
-        VariableValue::Element(Arc::new(element(&mapped[0]).clone())),
-    );
-    variables.insert(
-        "awaitingValidationLabelId".into(),
-        VariableValue::String("L_awaiting_validation".into()),
-    );
-
-    let expression = drasi_query_cypher::parse_expression(
-        "coll.insert([label IN issue.labelDetails WHERE NOT (label.name STARTS WITH 'status:') | label.nodeId], 0, $awaitingValidationLabelId)",
-    )
-    .unwrap();
-    let registry = Arc::new(FunctionRegistry::new());
-    registry.register_function("coll.insert", Function::Scalar(Arc::new(Insert {})));
-    let evaluator = ExpressionEvaluator::new(registry, Arc::new(InMemoryResultIndex::new()));
-    let context =
-        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
-
-    assert_eq!(
-        evaluator
-            .evaluate_expression(&context, &expression)
-            .await
-            .unwrap(),
-        VariableValue::List(vec![
-            VariableValue::String("L_awaiting_validation".into()),
-            VariableValue::String("L_0".into()),
-        ])
-    );
-}
-
-#[test]
-fn comments_create_edit_and_delete_every_class() {
-    assert_eq!(
-        changes("issue_comment", &comment_event("created", "hello", false)),
-        "I:GitHubIssueComment:IC_9|I:COMMENT_ON:COMMENT_ON:IC_9:I_42:IC_9>I_42"
-    );
-    assert_eq!(
-        label(&convert("issue_comment", &comment_event("created", "hi", true))[0]),
-        "GitHubPullRequestComment"
-    );
-    let assignment = convert("issue_comment", &comment_event("created", ASSIGN, false));
-    assert_eq!(
-        assignment[0].get_reference().element_id.as_ref(),
-        "workgraph-assignment:O_1:fixture-701-validation"
-    );
-    assert_eq!(
-        prop(&assignment[0], "priority"),
-        Some(ElementValue::Integer(10))
-    );
-    assert_eq!(
-        prop(&assignment[0], "task"),
-        Some(ElementValue::from(&json!({
-            "validationProfile": "new-issue-default"
-        })))
-    );
-    assert_eq!(text(&assignment[0], "authorLogin").as_deref(), Some("bot"));
-    assert_eq!(
-        text(&assignment[0], "sourceCommentNodeId").as_deref(),
-        Some("IC_9")
-    );
-    assert_eq!(label(&assignment[1]), "COMMENT_ON");
-    let result = convert("issue_comment", &comment_event("created", RESULT, false));
-    assert_eq!(result.len(), 3);
-    assert_eq!(label(&result[1]), "COMMENT_ON");
-    assert_eq!(label(&result[2]), "RESULT_FOR");
-    assert!(matches!(
-        prop(&result[0], "result"),
-        Some(ElementValue::Object(_))
-    ));
-    let invalid = convert(
-        "issue_comment",
-        &comment_event("created", "WorkGraphAssignment/v1\n\nbad", false),
-    );
-    assert_eq!(label(&invalid[0]), "WorkGraphError");
-    assert_eq!(label(&invalid[1]), "ERROR_ON");
-    assert_eq!(
-        text(&invalid[0], "sourceCommentBody").as_deref(),
-        Some("WorkGraphAssignment/v1\n\nbad")
-    );
-    let malformed_result = RESULT.replacen("<details>", "<details open>", 1);
-    let invalid_result = convert(
-        "issue_comment",
-        &comment_event("created", &malformed_result, false),
-    );
-    assert_eq!(label(&invalid_result[0]), "WorkGraphError");
-    assert_eq!(label(&invalid_result[1]), "ERROR_ON");
-    assert_eq!(
-        text(&invalid_result[0], "sourceCommentBody").as_deref(),
-        Some(malformed_result.as_str())
-    );
-
-    let ordinary_to_assignment = changes("issue_comment", &edited("plain", ASSIGN));
-    assert!(
-        ordinary_to_assignment.starts_with("D:COMMENT_ON")
-            && ordinary_to_assignment
-                .ends_with("workgraph-assignment:O_1:fixture-701-validation>I_42")
-    );
-    let renamed = ASSIGN.replace("fixture-701-validation", "fixture-702-validation");
-    let rename = changes("issue_comment", &edited(ASSIGN, &renamed));
-    assert!(
-        rename.contains("D:WorkGraphAssignment:workgraph-assignment:O_1:fixture-701-validation")
-            && rename
-                .contains("I:WorkGraphAssignment:workgraph-assignment:O_1:fixture-702-validation")
-    );
-    let retarget = changes(
-        "issue_comment",
-        &edited(
-            RESULT,
-            &RESULT.replace("assignment-validation-001", "assignment-validation-002"),
-        ),
-    );
-    assert!(retarget.contains("D:RESULT_FOR") && retarget.contains("I:RESULT_FOR"));
-    let error_to_plain = changes(
-        "issue_comment",
-        &edited("WorkGraphAssignment/v1\n\nbad", "plain"),
-    );
-    assert!(error_to_plain.starts_with("D:ERROR_ON") && error_to_plain.ends_with("IC_9>I_42"));
-    let deleted = changes("issue_comment", &comment_event("deleted", RESULT, false));
-    assert!(deleted.starts_with("D:RESULT_FOR") && deleted.ends_with("D:WorkGraphResult:IC_9"));
-}
-
-fn invalid_code(body: &str) -> &'static str {
-    match classify(body) {
-        Classification::Invalid(error) => error.code,
-        other => panic!("expected invalid, got {other:?}"),
-    }
-}
-
-fn envelope(marker: &str, value: Value) -> String {
-    let label = match marker {
-        "WorkGraphAssignment/v1" => "WorkGraph Assignment",
-        "WorkGraphResult/v1" => "WorkGraph Result",
-        other => panic!("unsupported test marker {other}"),
-    };
-    let json = serde_json::to_string_pretty(&value).unwrap();
-    format!(
-        "<details>\n<summary>{label}</summary>\n\n{marker}\n\nsummary\n\n```json\n{json}\n```\n</details>\n"
-    )
-}
-
-#[test]
-fn canonical_envelopes_and_payloads_are_strictly_typed() {
-    for body in [
-        "plain",
-        " WorkGraphResult/v1",
-        "Mention WorkGraphAssignment/v1 inline.",
-        "<details>\n<summary>Release notes</summary>\n\nOrdinary prose.\n</details>\n",
-        "<details>\n<summary>Discussion</summary>\n\nI tried WorkGraphAssignment/v1 inline.\n</details>\n",
-    ] {
-        assert_eq!(classify(body), Classification::Ordinary);
-    }
-
-    let Classification::Assignment(assignment) = classify(ASSIGN) else {
-        panic!("canonical dogfood Assignment must parse");
-    };
-    assert_eq!(assignment.assignment_id, "fixture-701-validation");
-    assert_eq!(assignment.task_type, TaskType::IssueValidation);
-
-    let Classification::Result(result) = classify(RESULT) else {
-        panic!("canonical demo Result must parse");
-    };
-    assert_eq!(result.assignment_id, "assignment-validation-001");
-    assert_eq!(result.outcome, Outcome::Succeeded);
-    assert_eq!(result.task_type, TaskType::IssueValidation);
-
-    let Classification::Assignment(risk_assignment) = classify(RISK_ASSIGNMENT) else {
-        panic!("canonical risk Assignment must parse");
-    };
-    assert_eq!(risk_assignment.task_type, TaskType::IssueRiskProfile);
-
-    let Classification::Result(risk_result) = classify(RISK_RESULT) else {
-        panic!("canonical risk Result must parse");
-    };
-    assert_eq!(risk_result.outcome, Outcome::Blocked);
-    assert_eq!(risk_result.task_type, TaskType::IssueRiskProfile);
-
-    assert!(matches!(
-        classify(&ASSIGN.replacen(
-            "Validate the synthetic fixture Issue.",
-            "WorkGraphResult/v1",
-            1,
-        )),
-        Classification::Assignment(_)
-    ));
-    assert!(matches!(
-        classify(&RESULT.replace(
-            "Evaluated both requested validation criteria.",
-            "WorkGraphAssignment/v1"
-        )),
-        Classification::Result(_)
-    ));
-
-    assert_eq!(
-        assignment_element_id("O_1", "a:b /ü"),
-        "workgraph-assignment:O_1:a%3Ab%20%2F%C3%BC"
-    );
-    assert_eq!(encode_id_component("a:b"), "a%3Ab");
-}
-
-fn assert_malformed_variants(
-    body: &str,
-    label: &str,
-    other_label: &str,
-    marker: &str,
-    other_marker: &str,
-    human_summary: &str,
-) {
-    let prefix = format!("<details>\n<summary>{label}</summary>\n\n");
-    let json_start = body.find("```json\n").unwrap() + "```json\n".len();
-    let json_end = json_start + body[json_start..].find("\n```\n").unwrap();
-    let json_text = &body[json_start..json_end];
-    let compact_json =
-        serde_json::to_string(&serde_json::from_str::<Value>(json_text).unwrap()).unwrap();
-    let unwrapped = body
-        .strip_prefix(&prefix)
+        .is_none());
+    let removal = converter
+        .convert(
+            "sub_issues",
+            &sub_issue_event("sub_issue_removed", child, parent),
+        )
         .unwrap()
-        .strip_suffix("</details>\n")
-        .unwrap()
-        .to_string();
-
-    let variants = [
-        ("unwrapped legacy envelope", unwrapped),
-        (
-            "open attribute",
-            body.replacen("<details>", "<details open>", 1),
-        ),
-        (
-            "arbitrary attribute",
-            body.replacen("<details>", "<details class=\"workgraph\">", 1),
-        ),
-        (
-            "wrong summary label",
-            body.replacen(
-                &format!("<summary>{label}</summary>"),
-                &format!("<summary>{other_label}</summary>"),
-                1,
-            ),
-        ),
-        (
-            "missing summary label",
-            body.replacen(&format!("<summary>{label}</summary>\n"), "", 1),
-        ),
-        ("wrong marker", body.replacen(marker, other_marker, 1)),
-        ("missing marker", body.replacen(marker, "", 1)),
-        ("CRLF bytes", body.replace('\n', "\r\n")),
-        ("literal newline escapes", body.replace('\n', "\\n")),
-        (
-            "extra LF after details",
-            body.replacen("<details>\n", "<details>\n\n", 1),
-        ),
-        (
-            "several extra LFs after details",
-            body.replacen("<details>\n", "<details>\n\n\n\n", 1),
-        ),
-        (
-            "missing blank after summary label",
-            body.replacen("</summary>\n\n", "</summary>\n", 1),
-        ),
-        (
-            "extra blank after summary label",
-            body.replacen("</summary>\n\n", "</summary>\n\n\n", 1),
-        ),
-        (
-            "missing blank after marker",
-            body.replacen(&format!("{marker}\n\n"), &format!("{marker}\n"), 1),
-        ),
-        (
-            "extra blank after marker",
-            body.replacen(&format!("{marker}\n\n"), &format!("{marker}\n\n\n"), 1),
-        ),
-        (
-            "missing blank after human summary",
-            body.replacen(
-                &format!("{human_summary}\n\n```json"),
-                &format!("{human_summary}\n```json"),
-                1,
-            ),
-        ),
-        (
-            "extra blank after human summary",
-            body.replacen(
-                &format!("{human_summary}\n\n```json"),
-                &format!("{human_summary}\n\n\n```json"),
-                1,
-            ),
-        ),
-        (
-            "multiline human summary",
-            body.replacen(human_summary, &format!("{human_summary}\ncontinued"), 1),
-        ),
-        ("empty human summary", body.replacen(human_summary, "", 1)),
-        ("compact JSON", body.replacen(json_text, &compact_json, 1)),
-        (
-            "mismatched opening fence",
-            body.replacen("```json\n", "```yaml\n", 1),
-        ),
-        (
-            "mismatched closing fence",
-            body.replacen("\n```\n</details>", "\n~~~\n</details>", 1),
-        ),
-        (
-            "extra fence",
-            body.replacen(
-                "\n```\n</details>",
-                "\n```\n```yaml\n{}\n```\n</details>",
-                1,
-            ),
-        ),
-        ("prose before wrapper", format!("Unexpected prose.\n{body}")),
-        ("prose after wrapper", format!("{body}Unexpected prose.\n")),
-        (
-            "unclosed wrapper",
-            body.strip_suffix("</details>\n").unwrap().to_string(),
-        ),
-        (
-            "missing final LF",
-            body.strip_suffix('\n').unwrap().to_string(),
-        ),
-        ("extra final LF", format!("{body}\n")),
-    ];
-
-    for (name, malformed) in variants {
-        assert!(
-            matches!(classify(&malformed), Classification::Invalid(_)),
-            "{name} must be a WorkGraphError for {marker}"
-        );
-    }
+        .unwrap();
+    assert_eq!(id(&removal[0]), "TASK_FOR:I_task");
 }
 
 #[test]
-fn assignment_and_result_envelopes_reject_every_noncanonical_boundary() {
-    assert_malformed_variants(
-        ASSIGN,
-        "WorkGraph Assignment",
-        "WorkGraph Result",
-        "WorkGraphAssignment/v1",
-        "WorkGraphResult/v1",
-        "Validate the synthetic fixture Issue.",
-    );
-    assert_malformed_variants(
-        RESULT,
-        "WorkGraph Result",
-        "WorkGraph Assignment",
-        "WorkGraphResult/v1",
-        "WorkGraphAssignment/v1",
-        "Evaluated both requested validation criteria.",
-    );
-}
-
-#[test]
-fn envelope_errors_and_typed_schema_errors_remain_specific() {
-    let unsupported_assignment = ASSIGN.replace("WorkGraphAssignment/v1", "WorkGraphAssignment/v2");
-    let unsupported_result = RESULT.replace("WorkGraphResult/v1", "WorkGraphResult/v2");
-    for body in [
-        "WorkGraphAssignment/",
-        "WorkGraphAssignment/v1 ",
-        &unsupported_assignment,
-        &unsupported_result,
-    ] {
-        assert_eq!(invalid_code(body), error_code::UNSUPPORTED_VERSION);
-    }
-
-    for body in [ASSIGN, RESULT] {
-        let json_start = body.find("```json\n").unwrap() + "```json\n".len();
-        let json_end = json_start + body[json_start..].find("\n```\n").unwrap();
-        let json_text = &body[json_start..json_end];
-        let compact =
-            serde_json::to_string(&serde_json::from_str::<Value>(json_text).unwrap()).unwrap();
-        assert_eq!(
-            invalid_code(&body.replacen(json_text, &compact, 1)),
-            error_code::NON_CANONICAL_JSON
-        );
-        assert_eq!(
-            invalid_code(&body.replacen(json_text, "not-json", 1)),
-            error_code::INVALID_JSON
-        );
-        assert_eq!(
-            invalid_code(&body.replacen(json_text, "[\n  1,\n  2\n]", 1)),
-            error_code::JSON_NOT_OBJECT
-        );
-    }
-
-    let repeated_result_marker = RESULT.replacen(
-        "Evaluated both requested validation criteria.",
-        "Do not repeat WorkGraphResult/v1 in the summary.",
-        1,
-    );
-    assert_eq!(
-        invalid_code(&repeated_result_marker),
-        error_code::INVALID_ENVELOPE
-    );
-    let mismatched_result_summary = RESULT.replacen(
-        "Evaluated both requested validation criteria.",
-        "Changed only the human summary.",
-        1,
-    );
-    assert_eq!(
-        invalid_code(&mismatched_result_summary),
-        error_code::INVALID_RESULT_PAYLOAD
-    );
-
-    for patch in [
-        json!({"assignmentId":"","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":"v"}}),
-        json!({"assignmentId":"a","agentProfile":"p","priority":-1,"taskType":"issue-validation","task":{"validationProfile":"v"}}),
-        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":""}}),
-        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{}}),
-        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"issue-validation","task":{"validationProfile":"v"},"assignedBy":"x"}),
-        json!({"assignmentId":"a","agentProfile":"p","priority":0,"taskType":"unknown","task":{"validationProfile":"v"}}),
-    ] {
-        assert_eq!(
-            invalid_code(&envelope("WorkGraphAssignment/v1", patch)),
-            error_code::INVALID_ASSIGNMENT_PAYLOAD
-        );
-    }
-    for bad in [
-        json!({"assignmentId":"a","taskType":"issue-risk-profile","outcome":"partial","summary":"s","result":{"dimensions":[]}}),
-        json!({"assignmentId":"a","taskType":"issue-risk-profile","outcome":"failed","summary":"s","result":{"dimensions":[{"dimension":"d","score":101,"rationale":"r"}]}}),
-        json!({"assignmentId":"a","taskType":"issue-validation","outcome":"failed","summary":"","result":{"criteria":[]}}),
-        json!({"assignmentId":"a","taskType":"issue-validation","outcome":"failed","summary":"Do not repeat WorkGraphResult/v1 in the summary.","result":{"criteria":[{"criterion":"c","passed":true,"evidence":"e"}]}}),
-        json!({"assignmentId":"a","taskType":"issue-validation","outcome":"failed","summary":"s","result":{"criteria":[{"criterion":"c","passed":true,"evidence":"e"}]},"resultId":"r"}),
-    ] {
-        assert_eq!(
-            invalid_code(&envelope("WorkGraphResult/v1", bad)),
-            error_code::INVALID_RESULT_PAYLOAD
-        );
-    }
-
-    assert_eq!(
-        invalid_code(&envelope(
-            "WorkGraphAssignment/v1",
-            json!({"assignmentId":"a","agentProfile":"p","priority":0,
-                "taskType":"issue-validation","task":{"validationProfile":null}})
-        )),
-        error_code::INVALID_ASSIGNMENT_PAYLOAD
-    );
-}
-
-#[test]
-fn issue_validation_assignment_rejects_stale_criteria() {
-    let stale_criteria = envelope(
-        "WorkGraphAssignment/v1",
-        json!({"assignmentId":"a","agentProfile":"p","priority":0,
-            "taskType":"issue-validation",
-            "task":{"validationProfile":"v","criteria":["c"]}}),
-    );
-    let Classification::Invalid(error) = classify(&stale_criteria) else {
-        panic!("legacy task.criteria must be rejected");
-    };
-
-    assert_eq!(error.code, error_code::INVALID_ASSIGNMENT_PAYLOAD);
-    assert!(error.message.contains("unknown field `criteria`"));
-}
-
-fn config() -> GitHubWorkGraphSourceConfig {
-    GitHubWorkGraphSourceConfig {
-        organization: "acme".into(),
-        repositories: Vec::new(),
+fn config_requires_exact_task_type_id_and_name() {
+    let mut config = GitHubWorkGraphSourceConfig {
+        organization: "acme".to_string(),
+        task_issue_type: task_type(),
+        repositories: vec![],
         webhook: WebhookConfig {
-            secret: "secret".into(),
+            secret: "secret".to_string(),
             ..WebhookConfig::default()
         },
         durability: DurabilityConfig {
             enabled: true,
-            max_events: 10_000,
             capacity_policy: CapacityPolicy::RejectIncoming,
+            ..DurabilityConfig::default()
         },
-    }
+    };
+    assert!(config.validate().is_ok());
+    config.task_issue_type.id.clear();
+    assert!(config.validate().is_err());
+    config.task_issue_type = task_type();
+    config.task_issue_type.name = " WorkGraphTask".to_string();
+    assert!(config.validate().is_err());
 }
 
 #[test]
-fn config_and_signature_contracts() {
-    assert!(config().validate().is_ok());
-    let custom: GitHubWorkGraphSourceConfig = serde_json::from_value(json!({
-        "organization":"acme","webhook":{"secret":"s"},
-        "durability":{"enabled":true,"maxEvents":123,"capacityPolicy":"RejectIncoming"}
-    }))
-    .unwrap();
-    assert_eq!(custom.durability.max_events, 123);
-    assert!(custom.repositories.is_empty());
-    let normalized = GitHubWorkGraphSourceConfig {
-        repositories: vec!["Widgets".into(), "acme/widgets".into(), "gadgets".into()],
-        ..config()
-    }
-    .normalized()
-    .unwrap();
-    assert_eq!(normalized.repositories, vec!["gadgets", "widgets"]);
-    for bad in [
-        json!({"organization":"","webhook":{"secret":"s"}}),
-        json!({"organization":"acme/x","webhook":{"secret":"s"}}),
-        json!({"organization":"acme","webhook":{"secret":"s","path":"relative"}}),
-        json!({"organization":"acme","webhook":{"secret":"s","path":"/:"}}),
-        json!({"organization":"acme","webhook":{"secret":"s"},"token":"x"}),
-        json!({"organization":"acme","webhook":{"secret":"s"},"durability":{"enabled":true,"max_events":123}}),
-        json!({"organization":"acme","repositories":[""],"webhook":{"secret":"s"}}),
-        json!({"organization":"acme","repositories":[" widgets"],"webhook":{"secret":"s"}}),
-        json!({"organization":"acme","repositories":["other/widgets"],"webhook":{"secret":"s"}}),
-        json!({"organization":"acme","repositories":["acme/widgets/extra"],"webhook":{"secret":"s"}}),
-        json!({"organization":"acme","repositories":["widgets#1"],"webhook":{"secret":"s"}}),
-    ] {
-        assert!(serde_json::from_value::<GitHubWorkGraphSourceConfig>(bad)
-            .and_then(|value| value.validate().map_err(serde::de::Error::custom))
-            .is_err());
-    }
-    let source = crate::GitHubWorkGraphSourceBuilder::new("gh")
-        .with_config(GitHubWorkGraphSourceConfig {
-            repositories: vec!["Widgets".into(), "acme/widgets".into()],
-            ..config()
-        })
-        .build()
-        .unwrap();
-    assert_eq!(
-        drasi_lib::Source::properties(&source)["webhook"]["secret"],
-        json!("[REDACTED]")
-    );
-    assert_eq!(
-        drasi_lib::Source::properties(&source)["repositories"],
-        json!(["widgets"])
-    );
-    let schema = GitHubWorkGraphSourceDescriptor.config_schema_json();
-    assert!(
-        schema.contains("\"maxEvents\"")
-            && schema.contains("\"repositories\"")
-            && !schema.contains("\"max_events\"")
-    );
-    let signature = "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17";
-    assert!(verify_signature(b"It's a Secret to Everybody", b"Hello, World!", signature).is_ok());
-    assert!(verify_signature(b"wrong", b"Hello, World!", signature).is_err());
+fn descriptor_exposes_task_type_and_graph_schema() {
+    let descriptor = GitHubWorkGraphSourceDescriptor;
+    let schema = descriptor.config_schema_json();
+    assert!(schema.contains("taskIssueType"));
+    assert!(NODE_LABELS.contains(&"WorkGraphTask"));
+    assert!(NODE_LABELS.contains(&"WorkGraphTaskResult"));
+    assert!(!NODE_LABELS.contains(&"WorkGraphAssignment"));
+    assert!(RELATION_LABELS.contains(&"TASK_FOR"));
+}
+
+#[test]
+fn signature_verification_remains_strict() {
+    let body = br#"{"action":"opened"}"#;
+    assert!(verify_signature(
+        b"secret",
+        body,
+        "sha256=d42142b53efbc7cf5cd20b6e074eb33707e0de3b368f698e6d6f6c824ffb8d37"
+    )
+    .is_ok());
+    assert!(verify_signature(b"secret", body, "sha256=00").is_err());
 }

@@ -79,6 +79,76 @@ query($org: String!, $cursor: String, $pageSize: Int!) {
 }
 "#;
 
+const TASK_ISSUES_QUERY: &str = r#"
+query($query: String!, $cursor: String, $pageSize: Int!) {
+  search(query: $query, type: ISSUE, first: $pageSize, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on Issue {
+        node_id: id
+        id: databaseId
+        number
+        title
+        body
+        state
+        state_reason: stateReason
+        locked
+        created_at: createdAt
+        updated_at: updatedAt
+        closed_at: closedAt
+        html_url: url
+        type: issueType { node_id: id name }
+        author_association: authorAssociation
+        user: author { login type: __typename ... on Node { node_id: id } ... on Bot { id: databaseId } ... on Mannequin { id: databaseId } ... on Organization { id: databaseId } ... on User { id: databaseId } }
+        assignees(first: 50) { nodes { login } }
+        labels(first: $pageSize) {
+          pageInfo { hasNextPage endCursor }
+          nodes { name node_id: id }
+        }
+        comments { totalCount }
+        parent {
+          node_id: id
+          id: databaseId
+          number
+          title
+          body
+          state
+          state_reason: stateReason
+          locked
+          created_at: createdAt
+          updated_at: updatedAt
+          closed_at: closedAt
+          html_url: url
+          type: issueType { node_id: id name }
+          author_association: authorAssociation
+          user: author { login type: __typename ... on Node { node_id: id } ... on Bot { id: databaseId } ... on Mannequin { id: databaseId } ... on Organization { id: databaseId } ... on User { id: databaseId } }
+          assignees(first: 50) { nodes { login } }
+          labels(first: $pageSize) {
+            pageInfo { hasNextPage endCursor }
+            nodes { name node_id: id }
+          }
+          repository {
+            node_id: id
+            id: databaseId
+            name
+            full_name: nameWithOwner
+            owner { login }
+            description
+            html_url: url
+            private: isPrivate
+            archived: isArchived
+            fork: isFork
+            visibility
+            created_at: createdAt
+            updated_at: updatedAt
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
 const ISSUES_QUERY: &str = r#"
 query($owner: String!, $name: String!, $cursor: String, $pageSize: Int!) {
   repository(owner: $owner, name: $name) {
@@ -97,6 +167,7 @@ query($owner: String!, $name: String!, $cursor: String, $pageSize: Int!) {
         updated_at: updatedAt
         closed_at: closedAt
         html_url: url
+        type: issueType { node_id: id name }
         author_association: authorAssociation
         user: author { login type: __typename ... on Node { node_id: id } ... on Bot { id: databaseId } ... on Mannequin { id: databaseId } ... on Organization { id: databaseId } ... on User { id: databaseId } }
         assignees(first: 50) { nodes { login } }
@@ -438,6 +509,43 @@ impl GitHubGraphQLClient {
         Ok(items)
     }
 
+    pub async fn fetch_tasks(
+        &self,
+        owner: &str,
+        name: &str,
+        task_issue_type: &drasi_source_github_workgraph::config::TaskIssueType,
+    ) -> Result<Vec<Value>> {
+        let mut tasks = Vec::new();
+        for state in ["open", "closed"] {
+            let type_name = task_issue_type
+                .name
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            let search = format!("repo:{owner}/{name} is:issue state:{state} type:\"{type_name}\"");
+            let nodes = self
+                .fetch_connection(TASK_ISSUES_QUERY, &["search"], None, move |cursor| {
+                    json!({
+                        "query": search,
+                        "cursor": cursor,
+                        "pageSize": DEFAULT_PAGE_SIZE,
+                    })
+                })
+                .await?;
+            for node in nodes {
+                let mut node = self.complete_item_labels(node).await?;
+                if let Some(parent) = node.get("parent").filter(|parent| !parent.is_null()) {
+                    let parent = self.complete_item_labels(parent.clone()).await?;
+                    node["parent"] = parent;
+                }
+                let node = reshape_task(reshape_work_item(node));
+                if task_issue_type.matches(node.get("type")) {
+                    tasks.push(node);
+                }
+            }
+        }
+        Ok(tasks)
+    }
+
     pub async fn fetch_pull_requests(&self, owner: &str, name: &str) -> Result<Vec<Value>> {
         let (owner, name) = (owner.to_string(), name.to_string());
         let nodes = self
@@ -604,6 +712,19 @@ fn reshape_work_item(mut node: Value) -> Value {
                 .cloned()
                 .unwrap_or_default();
             map.insert("labels".to_string(), Value::Array(nodes));
+        }
+    }
+    node
+}
+
+fn reshape_task(mut node: Value) -> Value {
+    if let Some(parent) = node.get_mut("parent") {
+        if !parent.is_null() {
+            let mut shaped = reshape_work_item(parent.take());
+            if let Some(repository) = shaped.get_mut("repository") {
+                lower_str(repository, "visibility");
+            }
+            *parent = shaped;
         }
     }
     node

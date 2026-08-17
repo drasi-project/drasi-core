@@ -76,7 +76,7 @@ impl BootstrapPluginDescriptor for GitHubWorkGraphBootstrapDescriptor {
     }
 
     fn config_version(&self) -> &str {
-        "1.0.0"
+        "2.0.0"
     }
 
     fn config_schema_name(&self) -> &str {
@@ -113,6 +113,14 @@ impl BootstrapPluginDescriptor for GitHubWorkGraphBootstrapDescriptor {
 
         let provider = GitHubWorkGraphBootstrapProvider::builder()
             .with_organization(mapper.resolve_string(&source_dto.organization).await?)
+            .with_task_issue_type(drasi_source_github_workgraph::config::TaskIssueType {
+                id: mapper
+                    .resolve_string(&source_dto.task_issue_type.id)
+                    .await?,
+                name: mapper
+                    .resolve_string(&source_dto.task_issue_type.name)
+                    .await?,
+            })
             .with_repositories(repositories)
             .with_token(mapper.resolve_string(&dto.token).await?)
             .with_api_base_url(mapper.resolve_string(&dto.api_base_url).await?)
@@ -135,6 +143,7 @@ mod tests {
                 &json!({ "token": "read-only-token" }),
                 &json!({
                     "organization": "acme",
+                    "taskIssueType": {"id":"IT_test","name":"WorkGraphTask"},
                     "repositories": ["widgets", "acme/widgets"],
                     "webhook": { "secret": "webhook-secret" }
                 }),
@@ -152,6 +161,7 @@ mod tests {
                 &json!({ "token": "read-only-token" }),
                 &json!({
                     "organization": "acme",
+                    "taskIssueType": {"id":"IT_test","name":"WorkGraphTask"},
                     "repositories": ["other/widgets"],
                     "webhook": { "secret": "webhook-secret" }
                 }),

@@ -141,6 +141,7 @@ impl Source for GitHubWorkGraphSource {
             source_id: self.base.id.clone(),
             organization: self.config.organization.clone(),
             repository_filter: self.repository_filter.clone(),
+            task_issue_type: self.config.task_issue_type.clone(),
             path: self.config.webhook.path.clone(),
             secret: self.config.webhook.secret.clone(),
             body_limit_bytes: self.config.webhook.body_limit_bytes,

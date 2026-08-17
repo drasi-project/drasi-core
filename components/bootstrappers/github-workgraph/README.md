@@ -1,78 +1,41 @@
 # GitHub WorkGraph Bootstrap Provider
 
-`drasi-bootstrap-github-workgraph` is a [Drasi bootstrap provider](../README.md)
-that snapshots one GitHub organization's currently-open Issues and Pull
-Requests — plus their conversation comments and PR reviews — as the initial
-state for a query subscribed to the
-[`drasi-source-github-workgraph`](../../sources/github-workgraph/README.md)
-source.
+`drasi-bootstrap-github-workgraph` snapshots the initial graph for a
+`github-workgraph` Source using GitHub's read-only GraphQL API.
 
-## Reuse, not duplication
+## Snapshot scope
 
-This crate owns **all** GitHub API access; the streaming source itself makes
-zero GitHub API calls (it only receives webhook deliveries). To keep that
-separation without duplicating any WorkGraph domain logic, this crate:
+For every repository allowed by the Source configuration, bootstrap retrieves:
 
-1. Fetches data over the GitHub GraphQL v4 API, aliasing fields so the JSON
-   shape matches GitHub's REST/webhook resource representation.
-2. Performs a small amount of purely syntactic reshaping (flattening
-   `defaultBranchRef`/`repositoryTopics` connections, nesting
-   `head`/`base` ref+sha pairs, lowercasing a few enum fields) — no
-   WorkGraph node/relation/status semantics are touched here.
-3. Wraps each entity in a synthetic webhook-delivery envelope (e.g.
-   `{"action": "opened", "organization": ..., "repository": ..., "issue": ...}`)
-   and hands it to
-   `drasi_source_github_workgraph::mapping::Converter::convert(...)` — the
-   **exact same converter** the streaming source uses for live webhook
-   deliveries.
+- open generic Issues, excluding the configured exact task Issue Type;
+- open Pull Requests;
+- paginated OPEN and CLOSED Issues matching the configured task Issue Type;
+- each task's authoritative parent Issue and parent repository;
+- all comments on every task, including closed tasks; and
+- comments/reviews on open generic Issues and PRs.
 
-Every node label, relation ID/direction, status-label derivation rule, and
-`WorkGraphAssignment`/`WorkGraphResult`/`WorkGraphError` comment-parsing rule
-therefore comes from the source crate, unchanged. This crate never
-re-implements any of that. In particular, bootstrap comments use the same
-literal closed `<details>` wrapper, exact Assignment/Result summary labels,
-LF-only spacing, typed two-space JSON, and single final LF as live webhooks.
-Issue and Pull Request label selections alias each GraphQL label `id` to
-`node_id`; the shared converter therefore emits the same ordered
-`labelDetails: [{name, nodeId}]` property as live webhooks while retaining
-`labels`, `status`, and `statusLabel`. Missing or malformed label node IDs fail
-bootstrap rather than emit a partial identity list.
-The synthetic comment and review envelopes passed to the shared converter mark
-their parents open because those parents came from the `states: [OPEN]`
-connections. A response that nevertheless contains a closed work item fails
-shared conversion instead of entering the snapshot.
+Task Issue Type identity (`taskIssueType.id` and `taskIssueType.name`),
+organization, and repository allowlist are inherited from the Source
+configuration. Both type fields must match exactly. Core does not hardcode a
+deployment ID.
 
-## Scope (prototype)
+Every fetched object is reshaped into webhook JSON and passed through the same
+`mapping::Converter` used by live deliveries. Consequently bootstrap and live
+use identical:
 
-- One configured GitHub organization; all repositories the token can see by
-  default, or only the Source's normalized `repositories` allowlist.
-- Only currently **open** Issues and Pull Requests (no closed history).
-  Both top-level GraphQL connections use `states: [OPEN]`; every cursor page
-  reuses that same filtered query.
-- Issue/PR conversation comments and submitted or dismissed PR reviews.
-- **Excluded**: GitHub Projects and Project Items, inline diff/review
-  comments, closed-item history, reactions, and workflow-run execution
-  state. None of these map to a WorkGraph node/relation the source
-  understands.
+- `WorkGraphTask`, `WorkGraphTaskResult`, and `WorkGraphError` parsing;
+- node and relation IDs/directions;
+- generic open-only and task open/closed behavior;
+- repository allowlist decisions; and
+- strict raw task and Result wire formats.
+
+Bootstrap never creates `GitHubIssue` for a typed task. It emits the task's
+parent Issue only when the parent is open and its authoritative repository is
+allowed. `TASK_FOR` still records the native parent identity from GitHub.
 
 ## Configuration
 
-| Field             | Type                 | Description                                                                 |
-| ----------------- | -------------------- | ---------------------------------------------------------------------------- |
-| `token`           | `ConfigValue<string>`| A **read-only** GitHub token. Use a `Secret` reference in production.       |
-| `apiBaseUrl`      | `ConfigValue<string>`| GraphQL endpoint. Default `https://api.github.com/graphql`; override for GHE.|
-| `maxConcurrency`  | `ConfigValue<usize>` | Bound on concurrently in-flight GraphQL requests and concurrent repository tasks. Default `4`. |
-
-### Example
-
-Configure the bootstrapper as a top-level provider and reference it by ID from
-the Source:
-
 ```yaml
-stateStore:
-  kind: redb
-  path: ./data/github-workgraph-state.redb
-
 bootstrapProviders:
   - id: github-workgraph-bootstrap
     kind: github-workgraph
@@ -86,16 +49,15 @@ sources:
   - id: github-workgraph
     kind: github-workgraph
     organization: drasi-project
+    taskIssueType:
+      id: IT_CONFIGURED_GRAPHQL_NODE_ID
+      name: WorkGraphTask
     repositories:
       - drasi-workgraph-demo
     webhook:
-      host: 0.0.0.0
-      port: 8080
-      path: /webhook
       secret:
         kind: Secret
         name: github-workgraph-webhook-secret
-      bodyLimitBytes: 26214400
     durability:
       enabled: true
       maxEvents: 10000
@@ -103,87 +65,42 @@ sources:
     bootstrapProvider: github-workgraph-bootstrap
 ```
 
-The organization and optional `repositories` allowlist are read from the parent
-`github-workgraph` Source configuration, ensuring bootstrap and webhook
-streaming cannot target different repository scopes. Omitted or empty means all
-repositories. Bare names and same-organization `owner/name` values are accepted,
-then normalized to sorted, deduplicated lowercase bare names. Bootstrap
-enumerates the organization once and filters that repository list before any
-per-repository Issue, PR, comment, or review request; it needs no repository
-cache and makes no extra filtering API calls. Do not use an inline
-`bootstrapProvider` mapping for this pair:
-drasi-server applies same-kind inheritance to inline providers, which would copy
-Source-only fields such as `organization`, `webhook`, and `durability` into this
-bootstrapper's strict configuration. A top-level `bootstrapProviders` entry and
-string reference keep the two configurations separate while still passing the
-parent Source configuration to the bootstrap descriptor.
+| Bootstrap field | Description |
+|---|---|
+| `token` | Read-only GitHub token; use a Secret reference |
+| `apiBaseUrl` | GraphQL endpoint; defaults to `https://api.github.com/graphql` |
+| `maxConcurrency` | Bound for request and repository concurrency; defaults to 4 |
 
-The durable `stateStore` is required by the streaming Source, not by this
-bootstrapper.
+The token needs read access for Issues, Pull Requests, and repository metadata.
+The provider never writes to GitHub.
 
-### Authentication
+Use a top-level provider and string reference. The Source owns organization,
+repository, and task Issue Type scope; the bootstrap descriptor reads those
+fields from the parent Source configuration.
 
-The token must be **read-only**: a fine-grained personal access token scoped
-to `Issues: Read`, `Pull requests: Read`, and `Metadata: Read` on the target
-organization is sufficient, or an equivalent read-only GitHub App
-installation token. This bootstrapper never requests or uses any write
-scope, and never mutates GitHub state.
+## Pagination and consistency
 
-## `source_position` is always `None`
+Repositories, open generic Issues/PRs, OPEN tasks, CLOSED tasks, labels,
+comments, and reviews follow every GraphQL cursor. Parent identity and
+repository are selected with each task rather than inferred from repository
+iteration. Repository processing and HTTP requests are independently bounded by
+`maxConcurrency`.
 
-> **This bootstrapper never sets `source_position`.**
+GitHub does not offer a transaction spanning these queries. Bootstrap fails on
+any repository task error rather than intentionally returning a partial
+snapshot, but GitHub state can change between successful pages.
 
-The GitHub WorkGraph source is driven entirely by webhook deliveries. Unlike
-a database WAL LSN or a Kafka partition offset, a missed webhook delivery
-cannot be re-requested from GitHub by position — there is no durable,
-replayable cursor to snapshot against. Because of this, every
-`BootstrapResult` this provider returns carries `source_position: None`, and
-the framework cannot seed a bootstrap-to-streaming replay checkpoint for this
-source. This is a fundamental limitation of GitHub's webhook delivery model,
-not an oversight.
+Webhook delivery has no durable replay cursor, so `BootstrapResult` always has
+`source_position: None`.
 
-## Bounded concurrency
-
-Two independent bounds, both derived from `maxConcurrency`:
-
-- A `tokio::sync::Semaphore`-gated `JoinSet` limits how many repositories are
-  processed concurrently.
-- The GraphQL client itself holds a semaphore bounding the number of
-  concurrently in-flight HTTP requests, regardless of how many repository
-  tasks are running.
-
-Within one repository, issues, pull requests, and their comments/reviews are
-fetched sequentially — cross-repository parallelism plus the client's
-request-level semaphore already provide genuine bounded concurrency without
-the added complexity of per-repository fan-out.
-
-## Known prototype limitations
-
-- GitHub does not provide a transaction spanning the GraphQL requests used to
-  enumerate the organization. The bootstrapper fails rather than returning a
-  known partial snapshot when a request or repository task fails, but upstream
-  state can still change between successfully fetched pages.
-- Issue/PR labels, comments, reviews, repositories, issues, and pull requests
-  are cursor-paginated in full. Label pages fetch both name and GraphQL node ID,
-  without a label cache or any additional webhook-side API call. Assignees and
-  repository topics fit within GitHub's resource limits and are fetched inline.
-- Enum casing (`state`, `state_reason`, `visibility`, review `state`) is
-  lowercased to match the REST/webhook convention `Converter` expects; this
-  covers every enum value currently used by `mapping.rs`.
-
-## Testing
+## Validation
 
 ```bash
-make build   # cargo build
-make test    # cargo test (wiremock-backed, no network access required)
-make lint    # cargo clippy --all-targets --all-features -- -D warnings
+make build
+make test
+make lint
 ```
 
-The test suite in `src/tests.rs` runs a fake GitHub GraphQL API via
-[`wiremock`](https://docs.rs/wiremock) and verifies: multi-page cursor
-pagination, `BootstrapRequest` node/relation label filtering, exact
-`event_count`, `source_position` always being `None`, and that a
-canonical WorkGraph Assignment and Result comments are reconstructed into their
-typed nodes purely through the shared `Converter`/`workgraph::classify`, while
-a malformed canonical wrapper becomes `WorkGraphError` — proving this crate
-does not duplicate that parsing logic.
+Wiremock tests cover initial and cursor pages, open generic and open/closed task
+selection, parents, comments on closed tasks, strict task/Result errors,
+repository filtering, requested-label filtering, and live-converter parity.
