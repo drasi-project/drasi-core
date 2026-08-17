@@ -563,6 +563,76 @@ async fn response_validator_rejects_non_empty_values_without_retry() {
 }
 
 #[tokio::test]
+async fn response_validator_rejects_extreme_nonzero_numbers_without_retry() {
+    let cases = [
+        ("tiny-positive", r#"{"errors":1e-400}"#),
+        ("tiny-negative", r#"{"errors":-1e-400}"#),
+        ("large-positive", r#"{"errors":1e+400}"#),
+        (
+            "small-decimal",
+            r#"{"errors":0.0000000000000000000000000000000000001}"#,
+        ),
+    ];
+
+    for (name, response_body) in cases {
+        let server = mock_server::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(response_body))
+            .mount(&server)
+            .await;
+        let reaction = response_validator_reaction(name, server.uri(), Some("/errors"));
+        reaction.start().await.unwrap();
+        enqueue_add(&reaction, "q1", json!({"id": 1})).await;
+        assert!(
+            wait_for_status(&reaction, ComponentStatus::Error, 2000).await,
+            "{name} should fail-stop"
+        );
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "{name} logical rejection must not retry"
+        );
+        reaction.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn response_validator_accepts_exact_zero_number_forms() {
+    let cases = [
+        ("integer-zero", r#"{"errors":0}"#),
+        ("negative-zero", r#"{"errors":-0}"#),
+        ("decimal-zero", r#"{"errors":0.0}"#),
+        ("exponent-zero", r#"{"errors":0e-400}"#),
+        ("negative-exponent-zero", r#"{"errors":-0.000e+999}"#),
+    ];
+
+    for (name, response_body) in cases {
+        let server = mock_server::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(response_body))
+            .mount(&server)
+            .await;
+        let reaction = response_validator_reaction(name, server.uri(), Some("/errors"));
+        reaction.start().await.unwrap();
+        enqueue_add(&reaction, "q1", json!({"id": 1})).await;
+        wait_for_requests(&server, 1, 2000).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(
+            reaction.status().await,
+            ComponentStatus::Running,
+            "{name} should be accepted as mathematical zero"
+        );
+        reaction.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn response_validator_rejects_malformed_json_and_oversized_body_once() {
     let cases = [
         (

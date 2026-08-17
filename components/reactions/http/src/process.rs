@@ -554,13 +554,31 @@ fn is_empty_json_value(value: &Value) -> bool {
     match value {
         Value::Null => true,
         Value::Bool(value) => !value,
-        Value::Number(value) => {
-            value.as_i64() == Some(0) || value.as_u64() == Some(0) || value.as_f64() == Some(0.0)
-        }
+        Value::Number(value) => is_json_number_zero(value),
         Value::String(value) => value.is_empty(),
         Value::Array(value) => value.is_empty(),
         Value::Object(value) => value.is_empty(),
     }
+}
+
+fn is_json_number_zero(number: &serde_json::Number) -> bool {
+    let lexeme = number.as_str();
+    let significand = lexeme
+        .split_once('e')
+        .or_else(|| lexeme.split_once('E'))
+        .map_or(lexeme, |(significand, _)| significand);
+    let mut saw_digit = false;
+
+    for byte in significand.bytes() {
+        match byte {
+            b'0' => saw_digit = true,
+            b'1'..=b'9' => return false,
+            b'-' | b'.' => {}
+            _ => return false,
+        }
+    }
+
+    saw_digit
 }
 
 fn json_value_kind(value: &Value) -> &'static str {
@@ -724,6 +742,36 @@ mod tests {
                 !is_retryable_status(StatusCode::from_u16(code).unwrap()),
                 "{code} should NOT be retryable"
             );
+        }
+    }
+
+    #[test]
+    fn numeric_empty_values_use_exact_json_lexemes() {
+        for raw in [
+            "0",
+            "-0",
+            "0.0",
+            "-0.000",
+            "0e-400",
+            "0E+400",
+            "-0.000e+999",
+        ] {
+            let value: Value = serde_json::from_str(raw).expect("valid zero JSON number");
+            assert!(is_empty_json_value(&value), "{raw} should be zero");
+        }
+
+        for raw in [
+            "1",
+            "-1",
+            "1e-400",
+            "-1e-400",
+            "1e+400",
+            "-1e+400",
+            "0.0000000000000000000000000000000000001",
+            "1234567890123456789012345678901234567890",
+        ] {
+            let value: Value = serde_json::from_str(raw).expect("valid nonzero JSON number");
+            assert!(!is_empty_json_value(&value), "{raw} should be nonzero");
         }
     }
 

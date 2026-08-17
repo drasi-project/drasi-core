@@ -169,6 +169,15 @@ async fn respond_with_json(server: &MockServer, request_path: &str, status: u16,
         .await;
 }
 
+async fn respond_with_body(server: &MockServer, request_path: &str, status: u16, body: &str) {
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path(request_path.to_string()))
+        .respond_with(ResponseTemplate::new(status).set_body_string(body))
+        .mount(server)
+        .await;
+}
+
 fn extract_names(body: &Value, out: &mut Vec<String>) {
     if let Some(items) = body.get("batch").and_then(|b| b.as_array()) {
         for item in items {
@@ -507,13 +516,7 @@ async fn strict_fail_stops_on_sustained_failure_then_recovers_on_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn strict_logical_2xx_failure_replays_without_in_process_retry() {
     let server = mock_server::start().await;
-    respond_with_json(
-        &server,
-        "/changes/e2e-query",
-        200,
-        json!({"errors": [{"message": "logical failure"}]}),
-    )
-    .await;
+    respond_with_body(&server, "/changes/e2e-query", 200, r#"{"errors":1e-400}"#).await;
     let store = Arc::new(MemoryStateStoreProvider::new());
     let (core, handle) = build_core_with_validator(
         server.uri(),
