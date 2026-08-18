@@ -20,12 +20,14 @@ use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChang
 use drasi_lib::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
 };
-use drasi_lib::channels::{BootstrapEvent, SourceChangeEvent};
+use drasi_lib::channels::BootstrapEvent;
 use drasi_oracle_common::{
     extract_row_properties, split_table_name, OracleConnection, OracleSourceConfig,
     PrimaryKeyCache, Scn, SslMode, TableKeyConfig, ORACLE_BOOTSTRAP_SCN_CONTEXT_PROPERTY,
 };
+use log::warn;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub struct OracleBootstrapProvider {
     config: OracleSourceConfig,
@@ -56,23 +58,12 @@ impl BootstrapProvider for OracleBootstrapProvider {
             .get_typed_property::<u64>(ORACLE_BOOTSTRAP_SCN_CONTEXT_PROPERTY)?
             .map(Scn);
 
-        let events = tokio::task::spawn_blocking(move || {
+        let context = context.clone();
+        let count = tokio::task::spawn_blocking(move || {
             let mut handler = OracleBootstrapHandler::new(config, source_id, snapshot_scn);
-            handler.execute(&request)
+            handler.execute(&request, &context, &event_tx)
         })
         .await??;
-
-        let count = events.len();
-        for event in events {
-            event_tx
-                .send(BootstrapEvent {
-                    source_id: event.source_id,
-                    change: event.change,
-                    timestamp: event.timestamp,
-                    sequence: context.next_sequence(),
-                })
-                .await?;
-        }
 
         Ok(BootstrapResult {
             event_count: count,
@@ -173,25 +164,29 @@ impl OracleBootstrapHandler {
         }
     }
 
-    fn execute(&mut self, request: &BootstrapRequest) -> Result<Vec<SourceChangeEvent>> {
+    fn execute(
+        &mut self,
+        request: &BootstrapRequest,
+        context: &BootstrapContext,
+        event_tx: &drasi_lib::channels::BootstrapEventSender,
+    ) -> Result<usize> {
         let connection = OracleConnection::connect(&self.config)?;
         let conn = connection.inner();
         self.pk_cache.discover_keys(conn, &self.config)?;
 
         let tables = self.tables_for_request(request);
-        let mut events = Vec::new();
+        let mut count = 0usize;
 
         for table in tables {
             let (schema, table_name) = split_table_name(&table, &self.config.user)?;
-            let query = if let Some(snapshot_scn) = self.snapshot_scn {
+            let current_query = format!("SELECT * FROM \"{schema}\".\"{table_name}\"");
+            let as_of_query = self.snapshot_scn.map(|snapshot_scn| {
                 format!(
                     "SELECT * FROM \"{schema}\".\"{table_name}\" AS OF SCN {}",
                     snapshot_scn.0
                 )
-            } else {
-                format!("SELECT * FROM \"{schema}\".\"{table_name}\"")
-            };
-            let rows = conn.query(&query, &[])?;
+            });
+            let rows = query_table_rows(conn, as_of_query.as_deref(), &current_query)?;
             for row in rows {
                 let row = row?;
                 let properties = extract_row_properties(&row)?;
@@ -208,16 +203,19 @@ impl OracleBootstrapHandler {
                     },
                     properties,
                 };
-                events.push(SourceChangeEvent {
-                    source_id: self.source_id.clone(),
-                    change: SourceChange::Insert { element },
-                    timestamp,
-                    sequence: None,
-                });
+                event_tx
+                    .blocking_send(BootstrapEvent {
+                        source_id: self.source_id.clone(),
+                        change: SourceChange::Insert { element },
+                        timestamp,
+                        sequence: context.next_sequence(),
+                    })
+                    .map_err(|e| anyhow::anyhow!("Failed to send Oracle bootstrap event: {e}"))?;
+                count += 1;
             }
         }
 
-        Ok(events)
+        Ok(count)
     }
 
     fn tables_for_request(&self, request: &BootstrapRequest) -> Vec<String> {
@@ -244,4 +242,37 @@ impl OracleBootstrapHandler {
             .cloned()
             .collect()
     }
+}
+
+fn is_ora_01466(error: &oracle::Error) -> bool {
+    error.to_string().contains("ORA-01466")
+}
+
+/// Read a table snapshot, retrying flashback when Oracle has not yet made the
+/// captured SCN readable after recent DDL (`ORA-01466`).
+fn query_table_rows<'conn>(
+    conn: &'conn oracle::Connection,
+    as_of_query: Option<&str>,
+    current_query: &str,
+) -> Result<oracle::ResultSet<'conn, oracle::Row>> {
+    if let Some(as_of_query) = as_of_query {
+        for attempt in 1..=5 {
+            match conn.query(as_of_query, &[]) {
+                Ok(rows) => return Ok(rows),
+                Err(error) if is_ora_01466(&error) && attempt < 5 => {
+                    warn!("Oracle flashback snapshot not ready (ORA-01466), retry {attempt}/5");
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Err(error) if is_ora_01466(&error) => {
+                    warn!(
+                        "Oracle AS OF SCN still returned ORA-01466 after retries; reading current table image"
+                    );
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    Ok(conn.query(current_query, &[])?)
 }
