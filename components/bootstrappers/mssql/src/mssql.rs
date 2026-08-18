@@ -22,7 +22,7 @@ use drasi_core::models::{
 };
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest, BootstrapResult};
-use drasi_lib::channels::{BootstrapEvent, SourceChangeEvent};
+use drasi_lib::channels::BootstrapEvent;
 use drasi_mssql_common::{
     validate_sql_identifier, Lsn, MsSqlConnection, MsSqlSourceConfig, PrimaryKeyCache,
 };
@@ -30,6 +30,7 @@ use log::{debug, info, warn};
 use ordered_float::OrderedFloat;
 use std::sync::Arc;
 use tiberius::Row;
+use tokio_stream::StreamExt;
 
 /// Bootstrap provider for MS SQL Server
 ///
@@ -361,36 +362,25 @@ impl MsSqlBootstrapHandler {
         // Query all rows from the table
         let query = format!("SELECT * FROM {table_name}");
         let stream = client.query(&query, &[]).await?;
-        let rows = stream.into_results().await?;
+        let mut rows = stream.into_row_stream();
 
         let mut count = 0;
-        let mut batch = Vec::new();
-        let batch_size = 1000;
+        while let Some(row) = rows.next().await {
+            let row = row?;
+            let source_change = self
+                .row_to_source_change(&row, label, table_name, effective_from)
+                .await?;
 
-        for row_set in rows {
-            for row in row_set {
-                let source_change = self
-                    .row_to_source_change(&row, label, table_name, effective_from)
-                    .await?;
-
-                batch.push(SourceChangeEvent {
+            event_tx
+                .send(BootstrapEvent {
                     source_id: self.source_id.clone(),
                     change: source_change,
                     timestamp: chrono::Utc::now(),
-                    sequence: None,
-                });
-
-                if batch.len() >= batch_size {
-                    self.send_batch(&mut batch, context, event_tx).await?;
-                    count += batch_size;
-                }
-            }
-        }
-
-        // Send remaining batch
-        if !batch.is_empty() {
-            count += batch.len();
-            self.send_batch(&mut batch, context, event_tx).await?;
+                    sequence: context.next_sequence(),
+                })
+                .await
+                .map_err(|e| anyhow!("Failed to send bootstrap event: {e}"))?;
+            count += 1;
         }
 
         Ok(count)
@@ -524,33 +514,6 @@ impl MsSqlBootstrapHandler {
                 }
             }
         }
-    }
-
-    /// Send a batch of changes
-    async fn send_batch(
-        &self,
-        batch: &mut Vec<SourceChangeEvent>,
-        context: &BootstrapContext,
-        event_tx: &tokio::sync::mpsc::Sender<BootstrapEvent>,
-    ) -> Result<()> {
-        for event in batch.drain(..) {
-            // Get next sequence number for this bootstrap event
-            let sequence = context.next_sequence();
-
-            let bootstrap_event = BootstrapEvent {
-                source_id: event.source_id,
-                change: event.change,
-                timestamp: event.timestamp,
-                sequence,
-            };
-
-            event_tx
-                .send(bootstrap_event)
-                .await
-                .map_err(|e| anyhow!("Failed to send bootstrap event: {e}"))?;
-        }
-
-        Ok(())
     }
 }
 

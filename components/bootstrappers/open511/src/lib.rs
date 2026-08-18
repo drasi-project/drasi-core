@@ -212,31 +212,46 @@ impl BootstrapProvider for Open511BootstrapProvider {
         };
 
         let api_client = Open511ApiClient::new(source_config)?;
-        let events = api_client.fetch_all_events(None).await?;
 
         let requested_nodes: HashSet<String> = request.node_labels.into_iter().collect();
         let requested_relations: HashSet<String> = request.relation_labels.into_iter().collect();
 
         let mut known_areas = HashSet::new();
         let mut sent = 0usize;
+        let mut offset = 0usize;
+        let page_size = self.config.page_size;
 
-        for event in events {
-            let changes = map_new_event(&event, &context.source_id, &mut known_areas);
-            for change in changes {
-                if !should_send_change(&change, &requested_nodes, &requested_relations) {
-                    continue;
+        loop {
+            let page = api_client
+                .fetch_events_page(offset, page_size, None)
+                .await?;
+            let page_count = page.events.len();
+
+            for event in page.events {
+                let changes = map_new_event(&event, &context.source_id, &mut known_areas);
+                for change in changes {
+                    if !should_send_change(&change, &requested_nodes, &requested_relations) {
+                        continue;
+                    }
+
+                    event_tx
+                        .send(BootstrapEvent {
+                            source_id: context.source_id.clone(),
+                            change,
+                            timestamp: Utc::now(),
+                            sequence: context.next_sequence(),
+                        })
+                        .await?;
+                    sent = sent.saturating_add(1);
                 }
-
-                event_tx
-                    .send(BootstrapEvent {
-                        source_id: context.source_id.clone(),
-                        change,
-                        timestamp: Utc::now(),
-                        sequence: context.next_sequence(),
-                    })
-                    .await?;
-                sent = sent.saturating_add(1);
             }
+
+            if page_count < page_size {
+                break;
+            }
+            offset = offset
+                .checked_add(page_size)
+                .ok_or_else(|| anyhow::anyhow!("Open511 pagination offset overflow"))?;
         }
 
         Ok(BootstrapResult {

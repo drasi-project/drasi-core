@@ -29,6 +29,8 @@ use log::info;
 
 use crate::config::KubernetesBootstrapConfig;
 
+const LIST_PAGE_SIZE: u32 = 500;
+
 pub struct KubernetesBootstrapProvider {
     source_config: KubernetesSourceConfig,
 }
@@ -109,7 +111,7 @@ impl BootstrapProvider for KubernetesBootstrapProvider {
                 None => Api::all_with(client.clone(), &api_resource),
             };
 
-            let mut list_params = ListParams::default();
+            let mut list_params = ListParams::default().limit(LIST_PAGE_SIZE);
             if let Some(label_selector) = &self.source_config.label_selector {
                 list_params = list_params.labels(label_selector);
             }
@@ -117,30 +119,36 @@ impl BootstrapProvider for KubernetesBootstrapProvider {
                 list_params = list_params.fields(field_selector);
             }
 
-            let list = api.list(&list_params).await?;
-            for obj in list.items {
-                let changes = build_insert_changes(
-                    &context.source_id,
-                    &target.resource.kind,
-                    &obj,
-                    &self.source_config,
-                )?;
-                for change in changes {
-                    if !matches_labels(&request, &change) {
-                        continue;
-                    }
+            loop {
+                let list = api.list(&list_params).await?;
+                for obj in list.items {
+                    let changes = build_insert_changes(
+                        &context.source_id,
+                        &target.resource.kind,
+                        &obj,
+                        &self.source_config,
+                    )?;
+                    for change in changes {
+                        if !matches_labels(&request, &change) {
+                            continue;
+                        }
 
-                    let event = BootstrapEvent {
-                        source_id: context.source_id.clone(),
-                        change,
-                        timestamp: chrono::Utc::now(),
-                        sequence: context.next_sequence(),
-                    };
-                    event_tx
-                        .send(event)
-                        .await
-                        .map_err(|e| anyhow!("Failed to send Kubernetes bootstrap event: {e}"))?;
-                    total_events += 1;
+                        let event = BootstrapEvent {
+                            source_id: context.source_id.clone(),
+                            change,
+                            timestamp: chrono::Utc::now(),
+                            sequence: context.next_sequence(),
+                        };
+                        event_tx.send(event).await.map_err(|e| {
+                            anyhow!("Failed to send Kubernetes bootstrap event: {e}")
+                        })?;
+                        total_events += 1;
+                    }
+                }
+
+                match next_continue_token(list.metadata.continue_.as_deref()) {
+                    Some(token) => list_params = list_params.continue_token(token),
+                    None => break,
                 }
             }
         }
@@ -180,6 +188,10 @@ fn build_bootstrap_targets(config: &KubernetesSourceConfig) -> Vec<BootstrapTarg
         }
     }
     targets
+}
+
+fn next_continue_token(continue_token: Option<&str>) -> Option<&str> {
+    continue_token.filter(|token| !token.is_empty())
 }
 
 fn matches_labels(request: &BootstrapRequest, change: &SourceChange) -> bool {
@@ -336,6 +348,13 @@ mod tests {
         assert_eq!(targets.len(), 2);
         assert!(targets[0].namespace.is_none()); // Node
         assert_eq!(targets[1].namespace, Some("default".to_string())); // Pod
+    }
+
+    #[test]
+    fn next_continue_token_skips_empty_and_missing() {
+        assert_eq!(next_continue_token(None), None);
+        assert_eq!(next_continue_token(Some("")), None);
+        assert_eq!(next_continue_token(Some("abc")), Some("abc"));
     }
 
     // --- matches_labels tests ---

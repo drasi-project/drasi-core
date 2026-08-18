@@ -20,7 +20,7 @@ use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChang
 use drasi_lib::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
 };
-use drasi_lib::channels::{BootstrapEvent, SourceChangeEvent};
+use drasi_lib::channels::BootstrapEvent;
 use drasi_oracle_common::{
     extract_row_properties, split_table_name, OracleConnection, OracleSourceConfig,
     PrimaryKeyCache, Scn, SslMode, TableKeyConfig, ORACLE_BOOTSTRAP_SCN_CONTEXT_PROPERTY,
@@ -56,23 +56,12 @@ impl BootstrapProvider for OracleBootstrapProvider {
             .get_typed_property::<u64>(ORACLE_BOOTSTRAP_SCN_CONTEXT_PROPERTY)?
             .map(Scn);
 
-        let events = tokio::task::spawn_blocking(move || {
+        let context = context.clone();
+        let count = tokio::task::spawn_blocking(move || {
             let mut handler = OracleBootstrapHandler::new(config, source_id, snapshot_scn);
-            handler.execute(&request)
+            handler.execute(&request, &context, &event_tx)
         })
         .await??;
-
-        let count = events.len();
-        for event in events {
-            event_tx
-                .send(BootstrapEvent {
-                    source_id: event.source_id,
-                    change: event.change,
-                    timestamp: event.timestamp,
-                    sequence: context.next_sequence(),
-                })
-                .await?;
-        }
 
         Ok(BootstrapResult {
             event_count: count,
@@ -173,13 +162,18 @@ impl OracleBootstrapHandler {
         }
     }
 
-    fn execute(&mut self, request: &BootstrapRequest) -> Result<Vec<SourceChangeEvent>> {
+    fn execute(
+        &mut self,
+        request: &BootstrapRequest,
+        context: &BootstrapContext,
+        event_tx: &drasi_lib::channels::BootstrapEventSender,
+    ) -> Result<usize> {
         let connection = OracleConnection::connect(&self.config)?;
         let conn = connection.inner();
         self.pk_cache.discover_keys(conn, &self.config)?;
 
         let tables = self.tables_for_request(request);
-        let mut events = Vec::new();
+        let mut count = 0usize;
 
         for table in tables {
             let (schema, table_name) = split_table_name(&table, &self.config.user)?;
@@ -208,16 +202,19 @@ impl OracleBootstrapHandler {
                     },
                     properties,
                 };
-                events.push(SourceChangeEvent {
-                    source_id: self.source_id.clone(),
-                    change: SourceChange::Insert { element },
-                    timestamp,
-                    sequence: None,
-                });
+                event_tx
+                    .blocking_send(BootstrapEvent {
+                        source_id: self.source_id.clone(),
+                        change: SourceChange::Insert { element },
+                        timestamp,
+                        sequence: context.next_sequence(),
+                    })
+                    .map_err(|e| anyhow::anyhow!("Failed to send Oracle bootstrap event: {e}"))?;
+                count += 1;
             }
         }
 
-        Ok(events)
+        Ok(count)
     }
 
     fn tables_for_request(&self, request: &BootstrapRequest) -> Vec<String> {

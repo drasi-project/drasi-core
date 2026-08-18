@@ -23,12 +23,14 @@ use drasi_core::models::{
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, NoTls, Row, Transaction};
+use tokio_stream::StreamExt;
 
 use drasi_lib::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
 };
-use drasi_lib::channels::SourceChangeEvent;
+use drasi_lib::channels::BootstrapEvent;
 
 pub use crate::config::{PostgresBootstrapConfig, SslMode, TableKeyConfig};
 
@@ -468,32 +470,29 @@ impl PostgresBootstrapHandler {
 
         // Quote table name to preserve case
         let query = format!("SELECT * FROM \"{}\"", table.replace('"', "\"\""));
-        let rows = transaction.query(&query, &[]).await?;
+        let rows = transaction
+            .query_raw(&query, std::iter::empty::<&(dyn ToSql + Sync)>())
+            .await?;
+        tokio::pin!(rows);
 
         let mut count = 0;
-        let mut batch = Vec::new();
-        let batch_size = 1000;
-
-        for row in rows {
+        while let Some(row) = rows.next().await {
+            let row = row?;
             let source_change = self.row_to_source_change(&row, table, &columns).await?;
-
-            batch.push(SourceChangeEvent {
-                source_id: self.source_id.clone(),
-                change: source_change,
-                timestamp: chrono::Utc::now(),
-                sequence: None,
-            });
-
-            if batch.len() >= batch_size {
-                self.send_batch(&mut batch, context, event_tx).await?;
-                count += batch_size;
-            }
-        }
-
-        // Send remaining batch
-        if !batch.is_empty() {
-            count += batch.len();
-            self.send_batch(&mut batch, context, event_tx).await?;
+            event_tx
+                .send(BootstrapEvent {
+                    source_id: self.source_id.clone(),
+                    change: source_change,
+                    timestamp: chrono::Utc::now(),
+                    sequence: context.next_sequence(),
+                })
+                .await
+                .map_err(|e| {
+                    anyhow!(
+                        "Failed to send bootstrap event to channel (channel may be closed): {e}"
+                    )
+                })?;
+            count += 1;
         }
 
         Ok(count)
@@ -752,30 +751,6 @@ impl PostgresBootstrapHandler {
         };
 
         Ok(SourceChange::Insert { element })
-    }
-
-    /// Send a batch of changes through the channel
-    async fn send_batch(
-        &self,
-        batch: &mut Vec<SourceChangeEvent>,
-        context: &BootstrapContext,
-        event_tx: &drasi_lib::channels::BootstrapEventSender,
-    ) -> Result<()> {
-        for event in batch.drain(..) {
-            // Get next sequence number for this bootstrap event
-            let sequence = context.next_sequence();
-
-            let bootstrap_event = drasi_lib::channels::BootstrapEvent {
-                source_id: event.source_id,
-                change: event.change,
-                timestamp: event.timestamp,
-                sequence,
-            };
-            event_tx.send(bootstrap_event).await.map_err(|e| {
-                anyhow!("Failed to send bootstrap event to channel (channel may be closed): {e}")
-            })?;
-        }
-        Ok(())
     }
 }
 
