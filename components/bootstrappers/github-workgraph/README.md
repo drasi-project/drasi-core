@@ -23,11 +23,12 @@ Every fetched object is reshaped into webhook JSON and passed through the same
 `mapping::Converter` used by live deliveries. Consequently bootstrap and live
 use identical:
 
-- `WorkGraphTask`, `WorkGraphTaskResult`, and `WorkGraphError` parsing;
+- `WorkGraphTask`, `WorkGraphTaskAssignment`, `WorkGraphTaskResult`,
+  `WorkGraphTaskResultAcceptance`, and `WorkGraphError` parsing;
 - node and relation IDs/directions;
 - generic open-only and task open/closed behavior;
 - repository allowlist decisions; and
-- strict raw task and Result wire formats.
+- strict task and specialized-comment wire formats.
 
 This includes `TASK_FOR:{child.databaseId}` relation identity. Bootstrap keeps
 the task/parent GraphQL node IDs as relation endpoints, exactly like live
@@ -119,5 +120,5 @@ make lint
 Wiremock tests assert the `filterBy.type` query/variable contract, exact-ID
 defense, initial and cursor pages (including more than 1,000 tasks), open generic
 and open/closed task selection, complete order-independent parent repositories,
-comments on closed tasks, strict task/Result errors, repository filtering,
+comments on closed tasks, strict task/specialized-comment errors, repository filtering,
 requested-label filtering, and live-converter parity.

@@ -56,9 +56,11 @@ Properties are camelCase.
 | `GitHubPullRequest` | PR node ID | open PR |
 | `GitHubIssueComment` / `GitHubPullRequestComment` | comment node ID | ordinary conversation comment |
 | `GitHubPullRequestReview` | review node ID | PR review |
-| `WorkGraphTask` | typed child Issue node ID | native Issue metadata plus strict Assignment fields |
+| `WorkGraphTask` | typed child Issue node ID | native Issue metadata plus strict work definition |
+| `WorkGraphTaskAssignment` | assignment comment node ID | selected supported agent profile |
 | `WorkGraphTaskResult` | result comment node ID | strict Result fields and comment provenance |
-| `WorkGraphError` | deterministic error ID | malformed task, malformed marked Result, or status conflict |
+| `WorkGraphTaskResultAcceptance` | acceptance comment node ID | accepted Result identity and body revision |
+| `WorkGraphError` | deterministic error ID | malformed task/comment or status conflict |
 
 A typed child is emitted only as `WorkGraphTask`; it is never also emitted as
 `GitHubIssue`.
@@ -68,8 +70,10 @@ A typed child is emitted only as `WorkGraphTask`; it is never also emitted as
 | `IN_ORGANIZATION` | repository → organization | `IN_ORGANIZATION:{repository}:{organization}` |
 | `IN_REPOSITORY` | Issue/PR/task → repository | `IN_REPOSITORY:{item}:{repository}` |
 | `TASK_FOR` | task → parent Issue | `TASK_FOR:{task.databaseId}` |
-| `COMMENT_ON` | ordinary comment/result → Issue/PR/task | `COMMENT_ON:{comment}:{parent}` |
+| `COMMENT_ON` | ordinary/specialized comment → Issue/PR/task | `COMMENT_ON:{comment}:{parent}` |
+| `ASSIGNMENT_FOR` | assignment → task | `ASSIGNMENT_FOR:{assignment}:{task}` |
 | `RESULT_FOR` | result → task | `RESULT_FOR:{comment}:{task}` |
+| `ACCEPTS_RESULT` | acceptance → result | `ACCEPTS_RESULT:{acceptance}:{result}` |
 | `REVIEW_OF` | review → PR | `REVIEW_OF:{review}:{pr}` |
 | `ERROR_ON` | comment/status error → subject | deterministic from source and subject IDs |
 
@@ -82,30 +86,29 @@ without a child object or cache. GitHub permits both `sub_issue` and
 no-op because no edge identity is derivable payload-only. Reparenting updates
 the same identity to the new parent endpoint.
 
-## Task and Result wire formats
+## Task and specialized comment wire formats
 
-A configured typed Issue body is exactly the existing strict
-WorkGraphAssignment JSON object serialized with two-space indentation. There is
-no marker, Markdown fence, details element, summary, surrounding prose, or final
-newline:
+A configured typed Issue body has an exact `WorkGraphTask/v1` marker and one
+fenced YAML document:
 
-```json
-{
-  "assignmentId": "fixture-701-validation",
-  "agentProfile": "issue-validator",
-  "priority": 10,
-  "taskType": "issue-validation",
-  "task": {
-    "validationProfile": "new-issue-default"
-  }
-}
+````text
+WorkGraphTask/v1
+
+```yaml
+taskType: validate-issue
+inputs:
+  validationProfile: new-issue-default
 ```
+````
 
-`taskType` is `issue-validation` or `issue-risk-profile`. Validation tasks
-require `task.validationProfile`. Risk tasks require `task.riskProfile` and a
-non-empty `task.dimensions` string list. Unknown fields, compact/reordered JSON,
-invalid values, whitespace outside the object, and all legacy comment envelopes
-are rejected. A malformed typed task emits `WorkGraphError`.
+The other supported definition is `request-info`, whose only input is a
+non-empty `validationResultCommentNodeId`. Unknown fields/types, assignment
+fields, malformed or multi-document YAML, prose, and envelope deviations are
+rejected. A malformed typed task emits `WorkGraphError`.
+
+An Assignment comment uses `WorkGraphTaskAssignment/v1` with canonical
+two-space JSON containing only a non-empty supported `agentProfile`. It emits a
+`WorkGraphTaskAssignment`, `COMMENT_ON`, and `ASSIGNMENT_FOR`.
 
 A task Result comment has exactly this grammar:
 
@@ -114,8 +117,7 @@ WorkGraphTaskResult/v1
 
 ```json
 {
-  "assignmentId": "fixture-701-validation",
-  "taskType": "issue-validation",
+  "taskType": "validate-issue",
   "outcome": "succeeded",
   "summary": "Validated the issue.",
   "result": {
@@ -137,6 +139,19 @@ wrapper, prose, or extra bytes are allowed. A marked malformed Result on a typed
 task emits `WorkGraphError`. The same marker on an ordinary Issue is an ordinary
 `GitHubIssueComment`. Unmarked task comments are also ordinary comments.
 Multiple valid Results are allowed.
+
+A Result Acceptance comment uses `WorkGraphTaskResultAcceptance/v1` with
+canonical two-space JSON containing exactly `resultCommentNodeId`,
+`resultBodyDigest`, and non-empty `summary`. The digest is
+`sha256:<64 lowercase hex>` over the exact accepted Result comment body. It
+emits `WorkGraphTaskResultAcceptance`, `COMMENT_ON`, and `ACCEPTS_RESULT`; the
+last edge targets the Result comment node ID. Result nodes expose their own
+`bodyDigest` so a query can reject stale acceptances.
+
+Assignment, Result, and Result Acceptance comments are mutually exclusive and
+are never also emitted as `GitHubIssueComment`. Malformed marked comments emit
+`WorkGraphError`. None of these comments closes or deletes a task; this Source
+is read-only.
 
 ## Live projection behavior
 
