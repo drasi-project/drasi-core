@@ -24,21 +24,27 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TASK_TYPE_ID: &str = "IT_test";
 const TASK_TYPE_NAME: &str = "WorkGraphTask";
-const TASK_BODY: &str = r#"{
-  "assignmentId": "bootstrap-task",
-  "agentProfile": "issue-validator",
-  "priority": 3,
-  "taskType": "issue-validation",
-  "task": {
-    "validationProfile": "default"
-  }
-}"#;
+const TASK_BODY: &str = r#"WorkGraphTask/v1
+
+```yaml
+taskType: validate-issue
+inputs:
+  validationProfile: new-issue-default
+```
+"#;
+const ASSIGNMENT_BODY: &str = r#"WorkGraphTaskAssignment/v1
+
+```json
+{
+  "agentProfile": "issue-validator"
+}
+```
+"#;
 const RESULT_BODY: &str = r#"WorkGraphTaskResult/v1
 
 ```json
 {
-  "assignmentId": "bootstrap-task",
-  "taskType": "issue-validation",
+  "taskType": "validate-issue",
   "outcome": "succeeded",
   "summary": "Bootstrap result.",
   "result": {
@@ -50,6 +56,16 @@ const RESULT_BODY: &str = r#"WorkGraphTaskResult/v1
       }
     ]
   }
+}
+```
+"#;
+const ACCEPTANCE_BODY: &str = r#"WorkGraphTaskResultAcceptance/v1
+
+```json
+{
+  "resultCommentNodeId": "IC_result",
+  "resultBodyDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "summary": "Accepted the result."
 }
 ```
 "#;
@@ -172,7 +188,7 @@ async fn mount_snapshot(server: &MockServer, task_body: &str, result_body: &str)
             "\"issueType\":\"WorkGraphTask\"",
         ],
         json!({"repository":{"issues":connection(
-            vec![task("I_task_open","OPEN",task_body,2)],false,None
+            vec![task("I_task_open","OPEN",task_body,4)],false,None
         )}}),
         Some(1),
     )
@@ -202,7 +218,9 @@ async fn mount_snapshot(server: &MockServer, task_body: &str, result_body: &str)
         &["... on Issue {", "\"id\":\"I_task_open\""],
         json!({"node":{"comments":connection(vec![
             comment("IC_plain","Ordinary task comment."),
-            comment("IC_result",result_body)
+            comment("IC_assignment",ASSIGNMENT_BODY),
+            comment("IC_result",result_body),
+            comment("IC_acceptance",ACCEPTANCE_BODY)
         ],false,None)}}),
         Some(1),
     )
@@ -319,6 +337,15 @@ async fn snapshots_generic_open_and_open_closed_tasks_with_parents_and_comments(
             .iter()
             .any(|event| id(event) == result_id && label(event) == "WorkGraphTaskResult"));
     }
+    assert!(events.iter().any(|event| {
+        id(event) == "IC_assignment" && label(event) == "WorkGraphTaskAssignment"
+    }));
+    assert!(events.iter().any(|event| {
+        id(event) == "IC_acceptance" && label(event) == "WorkGraphTaskResultAcceptance"
+    }));
+    for relation in ["ASSIGNMENT_FOR", "ACCEPTS_RESULT"] {
+        assert!(events.iter().any(|event| label(event) == relation));
+    }
     assert_eq!(
         events
             .iter()
@@ -362,6 +389,20 @@ async fn snapshots_generic_open_and_open_closed_tasks_with_parents_and_comments(
             .count(),
         2
     );
+    let acceptance = events
+        .iter()
+        .find(|event| label(event) == "ACCEPTS_RESULT")
+        .expect("acceptance relation");
+    let SourceChange::Insert {
+        element: Element::Relation {
+            in_node, out_node, ..
+        },
+    } = &acceptance.change
+    else {
+        panic!("bootstrap relations are inserts");
+    };
+    assert_eq!(in_node.element_id.as_ref(), "IC_acceptance");
+    assert_eq!(out_node.element_id.as_ref(), "IC_result");
 }
 
 #[tokio::test]

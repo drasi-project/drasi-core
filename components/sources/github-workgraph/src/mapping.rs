@@ -14,8 +14,8 @@
 
 use crate::config::{RepositoryFilter, TaskIssueType};
 use crate::workgraph::{
-    classify_result, classify_task_body, comment_error_element_id, status_error_element_id,
-    task_error_element_id, ResultClassification, TaskClassification,
+    classify_comment, classify_task_body, comment_error_element_id, status_error_element_id,
+    task_error_element_id, CommentClassification, TaskClassification,
 };
 use chrono::{DateTime, SecondsFormat};
 use drasi_core::models::{
@@ -43,7 +43,9 @@ labels!(
     NODE_PULL_REQUEST_COMMENT = "GitHubPullRequestComment",
     NODE_PULL_REQUEST_REVIEW = "GitHubPullRequestReview",
     NODE_WORKGRAPH_TASK = "WorkGraphTask",
+    NODE_WORKGRAPH_TASK_ASSIGNMENT = "WorkGraphTaskAssignment",
     NODE_WORKGRAPH_TASK_RESULT = "WorkGraphTaskResult",
+    NODE_WORKGRAPH_TASK_RESULT_ACCEPTANCE = "WorkGraphTaskResultAcceptance",
     NODE_WORKGRAPH_ERROR = "WorkGraphError",
 );
 
@@ -53,7 +55,9 @@ labels!(
     REL_IN_REPOSITORY = "IN_REPOSITORY",
     REL_COMMENT_ON = "COMMENT_ON",
     REL_REVIEW_OF = "REVIEW_OF",
+    REL_ASSIGNMENT_FOR = "ASSIGNMENT_FOR",
     REL_RESULT_FOR = "RESULT_FOR",
+    REL_ACCEPTS_RESULT = "ACCEPTS_RESULT",
     REL_TASK_FOR = "TASK_FOR",
     REL_ERROR_ON = "ERROR_ON",
 );
@@ -710,14 +714,14 @@ impl<'a> Converter<'a> {
                     prev.delete(cs, &comment_id, &parent);
                     current.insert(cs, &comment_id, &parent);
                 }
-                Some(prev) if prev.result_target != current.result_target => {
+                Some(prev) if prev.specialized_relation != current.specialized_relation => {
                     current.update(cs);
-                    if let Some(old) = &prev.result_target {
-                        cs.delete(&rel_id(REL_RESULT_FOR, &comment_id, old), REL_RESULT_FOR);
+                    if let Some((label, target)) = &prev.specialized_relation {
+                        cs.delete(&rel_id(label, &comment_id, target), label);
                     }
-                    if let Some(new) = &current.result_target {
-                        let id = rel_id(REL_RESULT_FOR, &comment_id, new);
-                        cs.relation(Insert, REL_RESULT_FOR, &id, &comment_id, new);
+                    if let Some((label, target)) = &current.specialized_relation {
+                        let id = rel_id(label, &comment_id, target);
+                        cs.relation(Insert, label, &id, &comment_id, target);
                     }
                 }
                 Some(_) => {
@@ -785,15 +789,7 @@ fn update_issue_from_task(
     repo_id: &str,
 ) -> Mapped {
     let mut props = work_item_props(issue, repo, NODE_ISSUE)?;
-    for key in [
-        "assignmentId",
-        "agentProfile",
-        "priority",
-        "taskType",
-        "task",
-        "issueTypeId",
-        "issueTypeName",
-    ] {
+    for key in ["taskType", "inputs", "issueTypeId", "issueTypeName"] {
         props.insert(key, ElementValue::Null);
     }
     cs.node(Update, issue_id, NODE_ISSUE, props);
@@ -810,7 +806,7 @@ fn upsert_task(
     issue_id: &str,
     repo_id: Option<&str>,
 ) -> Mapped {
-    let TaskClassification::Task(assignment) =
+    let TaskClassification::Task(task) =
         classify_task_body(issue.get("body").and_then(Value::as_str).unwrap_or(""))
     else {
         return Err(invalid(
@@ -818,13 +814,10 @@ fn upsert_task(
         ));
     };
     let mut props = work_item_props(issue, repo, NODE_WORKGRAPH_TASK)?;
-    props.text("assignmentId", &assignment.assignment_id);
-    props.text("agentProfile", &assignment.agent_profile);
-    props.insert("priority", ElementValue::Integer(assignment.priority));
-    props.text("taskType", assignment.task_type.as_str());
+    props.text("taskType", task.task_type.as_str());
     props.insert(
-        "task",
-        ElementValue::from(&serde_json::json!(assignment.task)),
+        "inputs",
+        ElementValue::from(&serde_json::json!(task.inputs)),
     );
     if let Some(issue_type) = issue.get("type") {
         props.copy("issueTypeId", issue_type.get("node_id"));
@@ -940,7 +933,7 @@ struct CommentNode {
     element_id: String,
     label: &'static str,
     properties: ElementPropertyMap,
-    result_target: Option<String>,
+    specialized_relation: Option<(&'static str, String)>,
     is_error: bool,
 }
 
@@ -958,12 +951,12 @@ impl CommentNode {
         props.table(comment, AUTHOR_PROPS);
         props.copy("repositoryNameWithOwner", full_name(repo));
         let classification = if on_task {
-            classify_result(body)
+            classify_comment(body)
         } else {
-            ResultClassification::Ordinary
+            CommentClassification::Ordinary
         };
-        let (element_id, label, result_target) = match classification {
-            ResultClassification::Ordinary => {
+        let (element_id, label, specialized_relation) = match classification {
+            CommentClassification::Ordinary => {
                 props.table(comment, COMMENT_PROPS);
                 let (created, updated) = (comment.get("created_at"), comment.get("updated_at"));
                 if let (Some(created), Some(updated)) = (created, updated) {
@@ -971,22 +964,51 @@ impl CommentNode {
                 }
                 (comment_id.to_string(), ordinary_label, None)
             }
-            ResultClassification::Result(r) => {
+            CommentClassification::Assignment(assignment) => {
                 props.table(comment, PROVENANCE_PROPS);
-                props.text("assignmentId", &r.assignment_id);
-                props.text("taskType", r.task_type.as_str());
-                props.text("outcome", r.outcome.as_str());
-                props.text("summary", &r.summary);
-                props.insert("result", ElementValue::from(&serde_json::json!(r.result)));
+                props.text("bodyDigest", &sha256_digest(body));
+                props.text("agentProfile", &assignment.agent_profile);
+                (
+                    comment_id.to_string(),
+                    NODE_WORKGRAPH_TASK_ASSIGNMENT,
+                    Some((REL_ASSIGNMENT_FOR, task_id.to_string())),
+                )
+            }
+            CommentClassification::Result(result) => {
+                props.table(comment, PROVENANCE_PROPS);
+                props.text("bodyDigest", &sha256_digest(body));
+                props.text("taskType", result.task_type.as_str());
+                props.text("outcome", result.outcome.as_str());
+                props.text("summary", &result.summary);
+                props.insert(
+                    "result",
+                    ElementValue::from(&serde_json::json!(result.result)),
+                );
                 (
                     comment_id.to_string(),
                     NODE_WORKGRAPH_TASK_RESULT,
-                    Some(task_id.to_string()),
+                    Some((REL_RESULT_FOR, task_id.to_string())),
                 )
             }
-            ResultClassification::Invalid(error) => {
+            CommentClassification::Acceptance(acceptance) => {
                 props.table(comment, PROVENANCE_PROPS);
-                props.text("errorKind", "invalid-workgraph-task-result");
+                props.text("bodyDigest", &sha256_digest(body));
+                props.text("resultCommentNodeId", &acceptance.result_comment_node_id);
+                props.text("resultBodyDigest", &acceptance.result_body_digest);
+                props.text("summary", &acceptance.summary);
+                (
+                    comment_id.to_string(),
+                    NODE_WORKGRAPH_TASK_RESULT_ACCEPTANCE,
+                    Some((
+                        REL_ACCEPTS_RESULT,
+                        acceptance.result_comment_node_id.clone(),
+                    )),
+                )
+            }
+            CommentClassification::Invalid(error) => {
+                props.table(comment, PROVENANCE_PROPS);
+                props.text("bodyDigest", &sha256_digest(body));
+                props.text("errorKind", "invalid-workgraph-task-comment");
                 props.text("errorCode", error.code);
                 props.text("errorMessage", &error.message);
                 props.text("sourceCommentBody", body);
@@ -998,7 +1020,7 @@ impl CommentNode {
             element_id,
             label,
             properties: props,
-            result_target,
+            specialized_relation,
             is_error: label == NODE_WORKGRAPH_ERROR,
         }
     }
@@ -1020,9 +1042,9 @@ impl CommentNode {
         let label = self.parent_relation();
         let id = rel_id(label, comment_id, parent);
         cs.relation(Insert, label, &id, &self.element_id, parent);
-        if let Some(target) = &self.result_target {
-            let id = rel_id(REL_RESULT_FOR, comment_id, target);
-            cs.relation(Insert, REL_RESULT_FOR, &id, comment_id, target);
+        if let Some((label, target)) = &self.specialized_relation {
+            let id = rel_id(label, comment_id, target);
+            cs.relation(Insert, label, &id, comment_id, target);
         }
     }
     fn update(&self, cs: &mut Changes) {
@@ -1034,8 +1056,8 @@ impl CommentNode {
         );
     }
     fn delete(&self, cs: &mut Changes, comment_id: &str, parent: &str) {
-        if let Some(target) = &self.result_target {
-            cs.delete(&rel_id(REL_RESULT_FOR, comment_id, target), REL_RESULT_FOR);
+        if let Some((label, target)) = &self.specialized_relation {
+            cs.delete(&rel_id(label, comment_id, target), label);
         }
         let label = self.parent_relation();
         cs.delete(&rel_id(label, comment_id, parent), label);
@@ -1224,6 +1246,10 @@ fn repository_props(repo: &Value) -> ElementPropertyMap {
     props
 }
 
+fn sha256_digest(body: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(body)))
+}
+
 fn work_item_props(
     item: &Value,
     repo: Option<&Value>,
@@ -1240,10 +1266,7 @@ fn work_item_props(
     };
     props.table(item, variant);
     let body = item.get("body").and_then(Value::as_str).unwrap_or("");
-    props.text(
-        "bodyDigest",
-        &format!("sha256:{}", hex::encode(Sha256::digest(body))),
-    );
+    props.text("bodyDigest", &sha256_digest(body));
     props.copy("repositoryNameWithOwner", full_name(repo));
     if let Some(assignees) = names(item, "assignees", "login") {
         props.insert("assignees", strings(assignees.into_iter()));

@@ -17,7 +17,7 @@ use crate::descriptor::GitHubWorkGraphSourceDescriptor;
 use crate::mapping::{Converter, NODE_LABELS, RELATION_LABELS};
 use crate::webhook::verify_signature;
 use crate::workgraph::{
-    classify_result, classify_task_body, error_code, ResultClassification, TaskClassification,
+    classify_comment, classify_task_body, error_code, CommentClassification, TaskClassification,
 };
 use drasi_core::evaluation::context::QueryPartEvaluationContext;
 use drasi_core::evaluation::functions::FunctionRegistry;
@@ -28,47 +28,40 @@ use drasi_lib::DurabilityConfig;
 use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
 use drasi_query_cypher::CypherParser;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 const TASK_TYPE_ID: &str = "IT_test";
 const TASK_TYPE_NAME: &str = "WorkGraphTask";
-const VALIDATION_TASK: &str = r#"{
-  "assignmentId": "assignment-validation-001",
-  "agentProfile": "issue-validator",
-  "priority": 10,
-  "taskType": "issue-validation",
-  "task": {
-    "validationProfile": "new-issue-default"
-  }
-}"#;
-const UPDATED_VALIDATION_TASK: &str = r#"{
-  "assignmentId": "assignment-validation-001",
-  "agentProfile": "issue-validator",
-  "priority": 11,
-  "taskType": "issue-validation",
-  "task": {
-    "validationProfile": "updated-default"
-  }
-}"#;
-const RISK_TASK: &str = r#"{
-  "assignmentId": "assignment-risk-001",
-  "agentProfile": "issue-risk-profiler",
-  "priority": 4,
-  "taskType": "issue-risk-profile",
-  "task": {
-    "riskProfile": "delivery",
-    "dimensions": [
-      "Security impact",
-      "Rollback complexity"
-    ]
-  }
-}"#;
+const VALIDATION_TASK: &str = r#"WorkGraphTask/v1
+
+```yaml
+taskType: validate-issue
+inputs:
+  validationProfile: new-issue-default
+```
+"#;
+const REQUEST_INFO_TASK: &str = r#"WorkGraphTask/v1
+
+```yaml
+taskType: request-info
+inputs:
+  validationResultCommentNodeId: IC_validation_result
+```
+"#;
+const ASSIGNMENT: &str = r#"WorkGraphTaskAssignment/v1
+
+```json
+{
+  "agentProfile": "issue-validator"
+}
+```
+"#;
 const RESULT: &str = r#"WorkGraphTaskResult/v1
 
 ```json
 {
-  "assignmentId": "assignment-validation-001",
-  "taskType": "issue-validation",
+  "taskType": "validate-issue",
   "outcome": "succeeded",
   "summary": "Validated the issue.",
   "result": {
@@ -83,26 +76,37 @@ const RESULT: &str = r#"WorkGraphTaskResult/v1
 }
 ```
 "#;
-const RISK_RESULT: &str = r#"WorkGraphTaskResult/v1
+const REQUEST_INFO_RESULT: &str = r#"WorkGraphTaskResult/v1
 
 ```json
 {
-  "assignmentId": "assignment-risk-001",
-  "taskType": "issue-risk-profile",
-  "outcome": "blocked",
-  "summary": "Scored delivery risk.",
+  "taskType": "request-info",
+  "outcome": "succeeded",
+  "summary": "Requested the missing information.",
   "result": {
-    "dimensions": [
-      {
-        "dimension": "Security impact",
-        "score": 100,
-        "rationale": "Authorization changes."
-      }
-    ]
+    "requestCommentNodeId": "IC_request"
   }
 }
 ```
 "#;
+const ACCEPTANCE: &str = r#"WorkGraphTaskResultAcceptance/v1
+
+```json
+{
+  "resultCommentNodeId": "IC_result",
+  "resultBodyDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "summary": "Accepted the current result revision."
+}
+```
+"#;
+
+fn acceptance_body(result_comment_node_id: &str, result_body_digest: &str) -> String {
+    format!(
+        "WorkGraphTaskResultAcceptance/v1\n\n```json\n{{\n  \"resultCommentNodeId\": \
+         \"{result_comment_node_id}\",\n  \"resultBodyDigest\": \"{result_body_digest}\",\n  \
+         \"summary\": \"Accepted the current result revision.\"\n}}\n```\n"
+    )
+}
 
 fn task_type() -> TaskIssueType {
     TaskIssueType {
@@ -202,6 +206,23 @@ async fn task_node_query() -> ContinuousQuery {
     let parser = Arc::new(CypherParser::new(registry.clone()));
     QueryBuilder::new(
         "MATCH (task:WorkGraphTask) RETURN task.nodeId AS taskId",
+        parser,
+    )
+    .with_function_registry(registry)
+    .build()
+    .await
+}
+
+async fn accepted_result_query() -> ContinuousQuery {
+    let registry = Arc::new(FunctionRegistry::new());
+    let parser = Arc::new(CypherParser::new(registry.clone()));
+    QueryBuilder::new(
+        "MATCH (assignment:WorkGraphTaskAssignment)-[:ASSIGNMENT_FOR]->\
+         (task:WorkGraphTask)<-[:RESULT_FOR]-(result:WorkGraphTaskResult)\
+         <-[:ACCEPTS_RESULT]-(acceptance:WorkGraphTaskResultAcceptance) \
+         WHERE acceptance.resultBodyDigest = result.bodyDigest \
+         RETURN task.nodeId AS taskId, assignment.agentProfile AS agentProfile, \
+         result.sourceCommentNodeId AS resultId, acceptance.sourceCommentNodeId AS acceptanceId",
         parser,
     )
     .with_function_registry(registry)
@@ -317,8 +338,8 @@ fn property<'a>(changes: &'a [SourceChange], node_label: &str, key: &str) -> &'a
 }
 
 #[test]
-fn raw_task_bodies_accept_both_strict_assignment_types() {
-    for body in [VALIDATION_TASK, RISK_TASK] {
+fn task_envelopes_accept_only_strict_work_definitions() {
+    for body in [VALIDATION_TASK, REQUEST_INFO_TASK] {
         assert!(matches!(
             classify_task_body(body),
             TaskClassification::Task(_)
@@ -326,8 +347,10 @@ fn raw_task_bodies_accept_both_strict_assignment_types() {
     }
     for body in [
         &format!("{VALIDATION_TASK}\n"),
-        r#"{"assignmentId":"compact"}"#,
-        "WorkGraphAssignment/v1\n{}",
+        "WorkGraphTask/v1\n\n```yaml\ntaskType: validate-issue\ninputs:\n  validationProfile: other\n```\n",
+        "WorkGraphTask/v1\n\n```yaml\ntaskType: validate-issue\nagentProfile: issue-validator\ninputs:\n  validationProfile: new-issue-default\n```\n",
+        "WorkGraphTask/v1\n\n```yaml\ntaskType: validate-issue\ninputs:\n  validationProfile: new-issue-default\n---\ntaskType: request-info\ninputs:\n  validationResultCommentNodeId: IC_result\n```\n",
+        "WorkGraphTask/v2\n\n```yaml\n{}\n```\n",
         "prose\n{}",
     ] {
         assert!(matches!(
@@ -338,26 +361,48 @@ fn raw_task_bodies_accept_both_strict_assignment_types() {
 }
 
 #[test]
-fn exact_result_grammar_accepts_both_result_types() {
+fn specialized_comment_grammars_are_mutually_exclusive() {
     assert!(matches!(
-        classify_result(RESULT),
-        ResultClassification::Result(_)
+        classify_comment(ASSIGNMENT),
+        CommentClassification::Assignment(_)
     ));
     assert!(matches!(
-        classify_result(RISK_RESULT),
-        ResultClassification::Result(_)
+        classify_comment(RESULT),
+        CommentClassification::Result(_)
     ));
     assert!(matches!(
-        classify_result("WorkGraphTaskResult/v1\n\n```json\n{}\n```"),
-        ResultClassification::Invalid(_)
+        classify_comment(REQUEST_INFO_RESULT),
+        CommentClassification::Result(_)
     ));
     assert!(matches!(
-        classify_result("WorkGraphTaskResult/v2\n\n```json\n{}\n```\n"),
-        ResultClassification::Invalid(error) if error.code == error_code::UNSUPPORTED_VERSION
+        classify_comment(ACCEPTANCE),
+        CommentClassification::Acceptance(_)
     ));
     assert!(matches!(
-        classify_result("prefix WorkGraphTaskResult/v1"),
-        ResultClassification::Ordinary
+        classify_comment("WorkGraphTaskResult/v1\n\n```json\n{}\n```"),
+        CommentClassification::Invalid(_)
+    ));
+    assert!(matches!(
+        classify_comment("WorkGraphTaskAssignment/v1\n\n```json\n{\"agentProfile\":\"issue-validator\"}\n```\n"),
+        CommentClassification::Invalid(error) if error.code == error_code::NON_CANONICAL_JSON
+    ));
+    assert!(matches!(
+        classify_comment("WorkGraphTaskAssignment/v1\n\n```json\n{\n  \"agentProfile\": \"issue-risk-profiler\"\n}\n```\n"),
+        CommentClassification::Invalid(error)
+            if error.code == error_code::INVALID_ASSIGNMENT_PAYLOAD
+    ));
+    assert!(matches!(
+        classify_comment("WorkGraphTaskResultAcceptance/v1\n\n```json\n{\n  \"resultCommentNodeId\": \"IC_result\",\n  \"resultBodyDigest\": \"sha256:ABC\",\n  \"summary\": \"Accepted.\"\n}\n```\n"),
+        CommentClassification::Invalid(error)
+            if error.code == error_code::INVALID_ACCEPTANCE_PAYLOAD
+    ));
+    assert!(matches!(
+        classify_comment("WorkGraphTaskResultAcceptance/v2\n\n```json\n{}\n```\n"),
+        CommentClassification::Invalid(error) if error.code == error_code::UNSUPPORTED_VERSION
+    ));
+    assert!(matches!(
+        classify_comment("prefix WorkGraphTaskResult/v1"),
+        CommentClassification::Ordinary
     ));
 }
 
@@ -377,8 +422,8 @@ fn typed_issue_emits_task_not_github_issue() {
     }));
     assert!(!changes.iter().any(|change| label(change) == "GitHubIssue"));
     assert_eq!(
-        property(&changes, "WorkGraphTask", "assignmentId"),
-        &ElementValue::from(&json!("assignment-validation-001"))
+        property(&changes, "WorkGraphTask", "taskType"),
+        &ElementValue::from(&json!("validate-issue"))
     );
 }
 
@@ -426,10 +471,7 @@ fn task_state_is_retained_on_close_and_reopen() {
 
 #[test]
 fn retained_task_edits_update_properties_and_repository_relation() {
-    let mut payload = issue_event(
-        "edited",
-        issue("I_task", UPDATED_VALIDATION_TASK, true, "open"),
-    );
+    let mut payload = issue_event("edited", issue("I_task", REQUEST_INFO_TASK, true, "open"));
     payload["changes"] = json!({"body":{"from":VALIDATION_TASK}});
     let changes = convert("issues", &payload);
     assert!(changes
@@ -441,8 +483,8 @@ fn retained_task_edits_update_properties_and_repository_relation() {
             && is_update(change)
     }));
     assert_eq!(
-        property(&changes, "WorkGraphTask", "priority"),
-        &ElementValue::Integer(11)
+        property(&changes, "WorkGraphTask", "taskType"),
+        &ElementValue::from(&json!("request-info"))
     );
 }
 
@@ -525,7 +567,7 @@ fn issue_type_transitions_replace_node_kinds() {
 
 #[tokio::test]
 async fn untyped_transition_nulls_all_task_only_properties() {
-    let query = generic_issue_query(Some("issue.assignmentId = 'assignment-validation-001'")).await;
+    let query = generic_issue_query(Some("issue.taskType = 'validate-issue'")).await;
     let generic_query = generic_issue_query(None).await;
     let task = issue_event("opened", issue("I_task", VALIDATION_TASK, true, "open"));
     process_changes(&query, convert("issues", &task)).await;
@@ -534,15 +576,7 @@ async fn untyped_transition_nulls_all_task_only_properties() {
     let mut untyped = issue_event("untyped", issue("I_task", "ordinary", false, "open"));
     untyped["type"] = json!({"node_id":TASK_TYPE_ID,"name":TASK_TYPE_NAME});
     let changes = convert("issues", &untyped);
-    for key in [
-        "assignmentId",
-        "agentProfile",
-        "priority",
-        "taskType",
-        "task",
-        "issueTypeId",
-        "issueTypeName",
-    ] {
+    for key in ["taskType", "inputs", "issueTypeId", "issueTypeName"] {
         assert_eq!(
             property(&changes, "GitHubIssue", key),
             &ElementValue::Null,
@@ -1154,6 +1188,120 @@ fn task_comments_continue_while_closed() {
             .any(|change| { label(change) == "WorkGraphTaskResult" && id(change) == "IC_result" }));
         assert!(result.iter().any(|change| label(change) == "COMMENT_ON"));
         assert!(result.iter().any(|change| label(change) == "RESULT_FOR"));
+        assert!(!result.iter().any(|change| label(change) == "WorkGraphTask"));
+    }
+}
+
+#[tokio::test]
+async fn task_assignment_result_acceptance_path_requires_matching_result_revision() {
+    let query = accepted_result_query().await;
+    let mut observed = Vec::new();
+    for (event, payload) in [
+        (
+            "issues",
+            issue_event("opened", issue("I_task", VALIDATION_TASK, true, "open")),
+        ),
+        (
+            "issue_comment",
+            comment_event("created", ASSIGNMENT, "open", true, "IC_assignment"),
+        ),
+        (
+            "issue_comment",
+            comment_event("created", RESULT, "open", true, "IC_result"),
+        ),
+        (
+            "issue_comment",
+            comment_event("created", ACCEPTANCE, "open", true, "IC_acceptance"),
+        ),
+    ] {
+        let changes = convert(event, &payload);
+        if event == "issue_comment" {
+            assert!(!changes
+                .iter()
+                .any(|change| label(change) == "GitHubIssueComment"));
+        }
+        observed.extend(process_changes(&query, changes).await);
+    }
+    assert_eq!(additions(&observed), 0, "stale digest must not match");
+
+    let result_digest = format!("sha256:{}", hex::encode(Sha256::digest(RESULT)));
+    let current_acceptance = acceptance_body("IC_result", &result_digest);
+    let mut edit = comment_event("edited", &current_acceptance, "open", true, "IC_acceptance");
+    edit["changes"] = json!({"body":{"from":ACCEPTANCE}});
+    let changes = convert("issue_comment", &edit);
+    assert!(changes
+        .iter()
+        .any(|change| { label(change) == "WorkGraphTaskResultAcceptance" && is_update(change) }));
+    assert_eq!(additions(&process_changes(&query, changes).await), 1);
+}
+
+#[test]
+fn specialized_comments_emit_only_their_node_and_relations() {
+    for state in ["open", "closed"] {
+        for (body, node_label, relation_label, id) in [
+            (
+                ASSIGNMENT,
+                "WorkGraphTaskAssignment",
+                "ASSIGNMENT_FOR",
+                "IC_assignment",
+            ),
+            (RESULT, "WorkGraphTaskResult", "RESULT_FOR", "IC_result"),
+            (
+                ACCEPTANCE,
+                "WorkGraphTaskResultAcceptance",
+                "ACCEPTS_RESULT",
+                "IC_acceptance",
+            ),
+        ] {
+            let changes = convert(
+                "issue_comment",
+                &comment_event("created", body, state, true, id),
+            );
+            assert!(changes
+                .iter()
+                .any(|change| label(change) == node_label && is_insert(change)));
+            assert!(changes
+                .iter()
+                .any(|change| label(change) == relation_label && is_insert(change)));
+            assert!(changes
+                .iter()
+                .any(|change| label(change) == "COMMENT_ON" && is_insert(change)));
+            assert!(!changes
+                .iter()
+                .any(|change| label(change) == "GitHubIssueComment"));
+            if node_label == "WorkGraphTaskResult" {
+                assert_eq!(
+                    property(&changes, node_label, "bodyDigest"),
+                    &ElementValue::from(&json!(format!(
+                        "sha256:{}",
+                        hex::encode(Sha256::digest(RESULT))
+                    )))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn specialized_markers_on_ordinary_issues_remain_generic_comments() {
+    for (body, id) in [
+        (ASSIGNMENT, "IC_assignment"),
+        (RESULT, "IC_result"),
+        (ACCEPTANCE, "IC_acceptance"),
+    ] {
+        let changes = convert(
+            "issue_comment",
+            &comment_event("created", body, "open", false, id),
+        );
+        assert!(changes
+            .iter()
+            .any(|change| label(change) == "GitHubIssueComment"));
+        assert!(!changes.iter().any(|change| {
+            matches!(
+                label(change),
+                "WorkGraphTaskAssignment" | "WorkGraphTaskResult" | "WorkGraphTaskResultAcceptance"
+            )
+        }));
     }
 }
 
@@ -1173,22 +1321,31 @@ fn result_marker_on_ordinary_issue_stays_ordinary() {
 
 #[test]
 fn malformed_marked_result_emits_error() {
-    let changes = convert(
-        "issue_comment",
-        &comment_event(
-            "created",
-            "WorkGraphTaskResult/v1\n\n```json\n{}\n```\n",
-            "closed",
-            true,
-            "IC_bad",
+    for (id, body) in [
+        (
+            "IC_bad_assignment",
+            "WorkGraphTaskAssignment/v1\n\n```json\n{}\n```\n",
         ),
-    );
-    assert!(changes
-        .iter()
-        .any(|change| label(change) == "WorkGraphError"));
-    assert!(!changes
-        .iter()
-        .any(|change| label(change) == "GitHubIssueComment"));
+        (
+            "IC_bad_result",
+            "WorkGraphTaskResult/v1\n\n```json\n{}\n```\n",
+        ),
+        (
+            "IC_bad_acceptance",
+            "WorkGraphTaskResultAcceptance/v1\n\n```json\n{}\n```\n",
+        ),
+    ] {
+        let changes = convert(
+            "issue_comment",
+            &comment_event("created", body, "closed", true, id),
+        );
+        assert!(changes
+            .iter()
+            .any(|change| label(change) == "WorkGraphError"));
+        assert!(!changes
+            .iter()
+            .any(|change| label(change) == "GitHubIssueComment"));
+    }
 }
 
 #[test]
@@ -1218,6 +1375,67 @@ fn comment_edits_replace_ordinary_result_and_error_nodes() {
     assert!(changes
         .iter()
         .any(|change| label(change) == "WorkGraphError" && is_insert(change)));
+}
+
+#[test]
+fn edits_reclassify_all_specialized_comment_kinds_and_delete_old_relations() {
+    for (from, to, old_label, old_relation, new_label, new_relation) in [
+        (
+            ASSIGNMENT,
+            RESULT,
+            "WorkGraphTaskAssignment",
+            "ASSIGNMENT_FOR",
+            "WorkGraphTaskResult",
+            "RESULT_FOR",
+        ),
+        (
+            RESULT,
+            ACCEPTANCE,
+            "WorkGraphTaskResult",
+            "RESULT_FOR",
+            "WorkGraphTaskResultAcceptance",
+            "ACCEPTS_RESULT",
+        ),
+    ] {
+        let mut edit = comment_event("edited", to, "closed", true, "IC_edit");
+        edit["changes"] = json!({"body":{"from":from}});
+        let changes = convert("issue_comment", &edit);
+        assert!(changes
+            .iter()
+            .any(|change| label(change) == old_label && is_delete(change)));
+        assert!(changes
+            .iter()
+            .any(|change| label(change) == old_relation && is_delete(change)));
+        assert!(changes
+            .iter()
+            .any(|change| label(change) == new_label && is_insert(change)));
+        assert!(changes
+            .iter()
+            .any(|change| label(change) == new_relation && is_insert(change)));
+        assert!(!changes
+            .iter()
+            .any(|change| label(change) == "GitHubIssueComment"));
+    }
+}
+
+#[test]
+fn deleting_acceptance_removes_target_and_task_relations_without_touching_task() {
+    let changes = convert(
+        "issue_comment",
+        &comment_event("deleted", ACCEPTANCE, "closed", true, "IC_acceptance"),
+    );
+    for expected in [
+        "ACCEPTS_RESULT",
+        "COMMENT_ON",
+        "WorkGraphTaskResultAcceptance",
+    ] {
+        assert!(changes
+            .iter()
+            .any(|change| label(change) == expected && is_delete(change)));
+    }
+    assert!(!changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphTask"));
 }
 
 #[test]
@@ -1384,8 +1602,12 @@ fn descriptor_exposes_task_type_and_graph_schema() {
     let schema = descriptor.config_schema_json();
     assert!(schema.contains("taskIssueType"));
     assert!(NODE_LABELS.contains(&"WorkGraphTask"));
+    assert!(NODE_LABELS.contains(&"WorkGraphTaskAssignment"));
     assert!(NODE_LABELS.contains(&"WorkGraphTaskResult"));
-    assert!(!NODE_LABELS.contains(&"WorkGraphAssignment"));
+    assert!(NODE_LABELS.contains(&"WorkGraphTaskResultAcceptance"));
+    assert!(RELATION_LABELS.contains(&"ASSIGNMENT_FOR"));
+    assert!(RELATION_LABELS.contains(&"RESULT_FOR"));
+    assert!(RELATION_LABELS.contains(&"ACCEPTS_RESULT"));
     assert!(RELATION_LABELS.contains(&"TASK_FOR"));
 }
 
