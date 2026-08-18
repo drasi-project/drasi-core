@@ -33,11 +33,15 @@ const LIST_PAGE_SIZE: u32 = 500;
 
 pub struct KubernetesBootstrapProvider {
     source_config: KubernetesSourceConfig,
+    list_page_size: u32,
 }
 
 impl KubernetesBootstrapProvider {
     pub fn new(source_config: KubernetesSourceConfig) -> Self {
-        Self { source_config }
+        Self {
+            source_config,
+            list_page_size: LIST_PAGE_SIZE,
+        }
     }
 
     pub fn builder() -> KubernetesBootstrapProviderBuilder {
@@ -48,6 +52,7 @@ impl KubernetesBootstrapProvider {
 pub struct KubernetesBootstrapProviderBuilder {
     config: KubernetesBootstrapConfig,
     source_config: Option<KubernetesSourceConfig>,
+    list_page_size: u32,
 }
 
 impl KubernetesBootstrapProviderBuilder {
@@ -55,6 +60,7 @@ impl KubernetesBootstrapProviderBuilder {
         Self {
             config: KubernetesBootstrapConfig::default(),
             source_config: None,
+            list_page_size: LIST_PAGE_SIZE,
         }
     }
 
@@ -68,12 +74,22 @@ impl KubernetesBootstrapProviderBuilder {
         self
     }
 
+    /// Override the Kubernetes list page size. Defaults to 500.
+    /// Tests use a small value so `continue_` pagination is exercised.
+    pub fn with_list_page_size(mut self, list_page_size: u32) -> Self {
+        self.list_page_size = list_page_size.max(1);
+        self
+    }
+
     pub fn build(self) -> Result<KubernetesBootstrapProvider> {
         let source_config = self
             .source_config
             .ok_or_else(|| anyhow!("Kubernetes source configuration is required for bootstrap"))?;
         source_config.validate()?;
-        Ok(KubernetesBootstrapProvider::new(source_config))
+        Ok(KubernetesBootstrapProvider {
+            source_config,
+            list_page_size: self.list_page_size,
+        })
     }
 }
 
@@ -111,7 +127,7 @@ impl BootstrapProvider for KubernetesBootstrapProvider {
                 None => Api::all_with(client.clone(), &api_resource),
             };
 
-            let mut list_params = ListParams::default().limit(LIST_PAGE_SIZE);
+            let mut list_params = ListParams::default().limit(self.list_page_size);
             if let Some(label_selector) = &self.source_config.label_selector {
                 list_params = list_params.labels(label_selector);
             }
