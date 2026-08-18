@@ -392,6 +392,69 @@ mod tests {
     }
 
     #[test]
+    fn stream_sqlite_tables_filters_labels_and_assigns_sequences() {
+        let path = std::env::temp_dir().join(format!(
+            "drasi-sqlite-stream-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let path_str = path.to_string_lossy().to_string();
+        let conn = Connection::open(&path).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE sensors (id INTEGER PRIMARY KEY, name TEXT);
+             INSERT INTO sensors VALUES (1, 'alpha');
+             INSERT INTO sensors VALUES (2, 'beta');
+             CREATE TABLE ignored (id INTEGER PRIMARY KEY, name TEXT);
+             INSERT INTO ignored VALUES (9, 'skip');",
+        )
+        .expect("setup");
+        drop(conn);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let context = BootstrapContext::new_minimal("server".to_string(), "src".to_string());
+        let request = BootstrapRequest {
+            query_id: "q1".to_string(),
+            node_labels: vec!["sensors".to_string()],
+            relation_labels: Vec::new(),
+            request_id: "req-1".to_string(),
+        };
+        let tables = vec!["sensors".to_string(), "ignored".to_string()];
+        let count = stream_sqlite_tables(&path_str, Some(&tables), &[], &request, &context, &tx)
+            .expect("stream");
+        drop(tx);
+
+        assert_eq!(count, 2, "only sensors rows should be streamed");
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].source_id, "src");
+        assert_eq!(events[0].sequence, 0);
+        assert_eq!(events[1].sequence, 1);
+
+        let names: Vec<String> = events
+            .iter()
+            .map(|event| match &event.change {
+                SourceChange::Insert { element } => match element {
+                    Element::Node { properties, .. } => match &properties["name"] {
+                        ElementValue::String(name) => name.to_string(),
+                        other => panic!("unexpected name value: {other:?}"),
+                    },
+                    other => panic!("expected node, got {other:?}"),
+                },
+                other => panic!("expected insert, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
     fn read_table_rows_returns_rows_with_rowid() {
         let conn = Connection::open_in_memory().expect("open");
         conn.execute_batch("CREATE TABLE items (name TEXT, value INTEGER); INSERT INTO items VALUES ('a', 1); INSERT INTO items VALUES ('b', 2);")

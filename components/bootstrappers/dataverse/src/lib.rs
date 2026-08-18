@@ -154,10 +154,12 @@ impl DataverseBootstrapProvider {
         }
     }
 
-    /// Fetch records from an entity set page-by-page and send each page immediately.
+    /// Fetch records from an entity set page-by-page and send each record immediately.
     ///
-    /// Mirrors the platform's `BootstrapHandler` which iterates through all
-    /// pages using `PagingCookie`, but never accumulates the full entity set.
+    /// Pages are requested via `@odata.nextLink` so only one OData page is held
+    /// at a time. Each record is converted and sent on `event_tx` before the
+    /// next record is processed, so the bounded bootstrap channel applies
+    /// backpressure. The full entity set is never accumulated.
     async fn bootstrap_entity(
         &self,
         http_client: &reqwest::Client,
