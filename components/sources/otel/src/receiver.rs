@@ -27,6 +27,7 @@ use axum::Router;
 use log::{debug, info, warn};
 use prost::Message;
 use tokio::sync::RwLock;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
@@ -390,14 +391,18 @@ pub async fn serve(
                 builder
                     .add_service(
                         MetricsServiceServer::new(svc.clone())
+                            .accept_compressed(CompressionEncoding::Gzip)
                             .max_decoding_message_size(max_request_bytes),
                     )
                     .add_service(
                         TraceServiceServer::new(svc.clone())
+                            .accept_compressed(CompressionEncoding::Gzip)
                             .max_decoding_message_size(max_request_bytes),
                     )
                     .add_service(
-                        LogsServiceServer::new(svc).max_decoding_message_size(max_request_bytes),
+                        LogsServiceServer::new(svc)
+                            .accept_compressed(CompressionEncoding::Gzip)
+                            .max_decoding_message_size(max_request_bytes),
                     )
                     .serve_with_incoming_shutdown(incoming, async move {
                         let _ = stop_rx.await;

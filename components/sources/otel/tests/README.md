@@ -10,14 +10,18 @@ Covers mapping, lifecycle Insert/Update/TTL, config validation, builder construc
 
 ## Integration test
 
+Requires Docker.
+
 ```bash
-cargo test -p drasi-source-otel -- --ignored --nocapture
+cargo test -p drasi-source-otel --test integration_test -- --ignored --nocapture
+# or
+make -C components/sources/otel integration-test
 ```
 
-Client harness (no Docker):
+Starts `otel/opentelemetry-collector:0.136.0` via testcontainers and sends OTLP to the Collector, which forwards to `drasi-source-otel`:
 
-1. Start `OtelSource` on ephemeral gRPC/HTTP ports
-2. Send an allowlisted OTLP gauge (`920`) and assert query **Add**
-3. Send an updated gauge (`700`) and assert **Update**
-4. Send a CLIENT span with `peer.service=payments` and assert **Add** on `DEPENDS_ON`
-5. Wait for `dependency_ttl_secs=2` and assert **Delete**
+1. Gauge `latency_p99_ms=920` → metric **Add**
+2. Gauge `latency_p99_ms=700` → metric **Update**
+3. CLIENT span `peer.service=payments` → `DEPENDS_ON` **Add**
+4. ERROR log `payment_failed` → `LogEvent` **Add**
+5. Wait for `dependencyTtlSecs=2` → `DEPENDS_ON` **Delete**

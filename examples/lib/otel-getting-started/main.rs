@@ -21,7 +21,7 @@ use drasi_source_otel::OtelSource;
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let bind = std::env::var("OTEL_GRPC_BIND").unwrap_or_else(|_| "127.0.0.1:4317".to_string());
+    let bind = std::env::var("OTEL_GRPC_BIND").unwrap_or_else(|_| "0.0.0.0:14317".to_string());
     let source = OtelSource::builder("otel")
         .with_grpc_bind(&bind)
         .with_metric_allowlist(["latency_p99_ms"])
@@ -51,7 +51,9 @@ async fn main() -> Result<()> {
         .await?;
 
     drasi.start().await?;
-    log::info!("Listening for OTLP on {bind}. Send a gauge with: cargo run --bin send-otlp");
+    log::info!(
+        "Listening for OTLP on {bind}. Send telemetry to the Collector at http://127.0.0.1:4317 (./test-updates.sh)"
+    );
     tokio::signal::ctrl_c().await?;
     drasi.stop().await?;
     Ok(())

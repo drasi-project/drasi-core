@@ -6,6 +6,7 @@ Receives OpenTelemetry Protocol (OTLP) data and projects an allowlisted subset i
 
 - Rust 1.95+
 - An OTLP exporter (OpenTelemetry Collector, SDK, or the client harness in tests)
+- For the getting-started example: Docker, so telemetry can go through a Collector container
 - `protoc` is **not** required; the crate vendors proto files and `protoc-bin-vendored`
 
 ## Configuration
@@ -39,7 +40,7 @@ cargo test -p drasi-source-otel -- --ignored --nocapture
 make -C components/sources/otel integration-test
 ```
 
-The test uses a tonic OTLP client harness (no Docker). It asserts metric CREATE/UPDATE and DEPENDS_ON CREATE/DELETE via TTL.
+The test starts an OpenTelemetry Collector with testcontainers and sends metrics, traces, and logs through it. It asserts metric CREATE/UPDATE, DEPENDS_ON CREATE/DELETE via TTL, and LogEvent CREATE.
 
 ## Operations
 
@@ -65,7 +66,8 @@ This is an **ingress** source. There is no upstream poller, so there is no recon
 
 | Symptom | Check |
 | --- | --- |
-| Connection refused | Source started? `grpcBind` port free? |
+| Connection refused | Source started? `grpcBind` port free? For the example, is the Collector up on 4317? |
+| Collector drops with gzip unsupported | Source gRPC accepts gzip; restart after upgrading this crate |
 | Bootstrap works but no metric updates | Metric name on `metricAllowlist`? Resource has `service.name`? |
 | No DEPENDS_ON | Span kind CLIENT? `peer.service` (or configured attribute) present? |
 | Edges never disappear | `dependencyTtlSecs` and sweeper; use a short TTL in tests |

@@ -82,8 +82,8 @@ fn gauge(value: f64) -> ExportMetricsServiceRequest {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let endpoint =
-        std::env::var("OTEL_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:4317".to_string());
+    let endpoint = std::env::var("OTEL_ENDPOINT")
+        .unwrap_or_else(|_| "http://127.0.0.1:4317".to_string());
     let value: f64 = std::env::args()
         .nth(1)
         .and_then(|s| s.parse().ok())
