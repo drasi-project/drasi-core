@@ -26,7 +26,7 @@ const ACCEPTANCE_PREFIX: &str = "WorkGraphTaskResultAcceptance/v1\n\n```json\n";
 const YAML_SUFFIX: &str = "\n```\n";
 const JSON_SUFFIX: &str = "\n```\n";
 const SUPPORTED_VERSION: &str = "v1";
-const SUPPORTED_AGENT_PROFILES: &[&str] = &["issue-validator"];
+const SUPPORTED_AGENT_PROFILES: &[&str] = &["issue-validator", "issue-info-requester"];
 
 pub mod error_code {
     pub const UNSUPPORTED_VERSION: &str = "unsupported-workgraph-version";
