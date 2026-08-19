@@ -14,6 +14,7 @@ on:
         type: string
   pull_request_target:
     types: [labeled]
+checkout: false
 if: inputs.pr_url != '' || github.event.label.name == 'review:prior-art'
 permissions:
   copilot-requests: write
@@ -31,7 +32,7 @@ tools:
   web-search:
 safe-outputs:
   github-app:
-    app-id: ${{ vars.DRASI_REVIEWER_APP_ID }}
+    client-id: ${{ vars.DRASI_REVIEWER_APP_ID }}
     private-key: ${{ secrets.DRASI_REVIEWER_APP_PRIVATE_KEY }}
     repositories: ["*"]
   create-pull-request-review-comment:
