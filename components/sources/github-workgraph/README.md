@@ -48,6 +48,17 @@ are ignored.
 All IDs are GitHub GraphQL node IDs from webhook payload `node_id` fields.
 Properties are camelCase.
 
+Every `GitHubIssue` retains its complete `labels` and `labelDetails` properties
+and additionally exposes ordered `statusLabels` and `workgraphLabels` arrays.
+These contain the original label names beginning with the exact, case-sensitive
+`status:` and `workgraph:` prefixes respectively, and are present as empty
+arrays when there are no matches. Existing single-value `status` and
+`statusLabel` properties remain available.
+
+Issue-derived `state` and string `stateReason` values are normalized to
+lowercase on `GitHubIssue` and `WorkGraphTask` nodes. A null or absent
+`stateReason` remains null or absent.
+
 | Node | ID | Notes |
 |---|---|---|
 | `GitHubOrganization` | organization node ID | organization metadata |
