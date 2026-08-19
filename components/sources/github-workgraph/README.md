@@ -53,11 +53,15 @@ and additionally exposes ordered `statusLabels` and `workgraphLabels` arrays.
 These contain the original label names beginning with the exact, case-sensitive
 `status:` and `workgraph:` prefixes respectively, and are present as empty
 arrays when there are no matches. Existing single-value `status` and
-`statusLabel` properties remain available.
+`statusLabel` properties remain available. `currentStatus` is always a string:
+`none` for zero status labels, the exact label for one, and `error` for more
+than one. `workgraphInclude` is always a boolean and is false exactly when
+`workgraphLabels` contains `workgraph:ignore` or `workgraph:error`.
 
 Issue-derived `state` and string `stateReason` values are normalized to
 lowercase on `GitHubIssue` and `WorkGraphTask` nodes. A null or absent
-`stateReason` remains null or absent.
+`stateReason` remains null or absent. The boolean `isOpen` is true exactly when
+normalized `state` is `open`; unknown and non-open states produce false.
 
 | Node | ID | Notes |
 |---|---|---|
