@@ -839,6 +839,7 @@ fn upsert_task(
 fn task_error_props(issue: &Value, repo: Option<&Value>, body: &str) -> ElementPropertyMap {
     let mut props = ElementPropertyMap::new();
     props.table(issue, WORK_ITEM_PROPS);
+    normalize_issue_state(&mut props, issue);
     props.table(issue, AUTHOR_PROPS);
     props.copy("repositoryNameWithOwner", full_name(repo));
     props.text("sourceTaskBody", body);
@@ -1102,8 +1103,8 @@ fn names<'a>(container: &'a Value, key: &str, field: &'a str) -> Option<Vec<&'a 
 
 fn item_is_open(item: &Value, path: &str) -> Result<bool, ConvertError> {
     match item.get("state").and_then(Value::as_str) {
-        Some("open") => Ok(true),
-        Some("closed") => Ok(false),
+        Some(state) if state.eq_ignore_ascii_case("open") => Ok(true),
+        Some(state) if state.eq_ignore_ascii_case("closed") => Ok(false),
         _ => Err(invalid(format!(
             "'{path}.state' must be either 'open' or 'closed'"
         ))),
@@ -1250,6 +1251,15 @@ fn sha256_digest(body: &str) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(body)))
 }
 
+fn normalize_issue_state(props: &mut ElementPropertyMap, issue: &Value) {
+    if let Some(state) = issue.get("state").and_then(Value::as_str) {
+        props.text("state", &state.to_ascii_lowercase());
+    }
+    if let Some(state_reason) = issue.get("state_reason").and_then(Value::as_str) {
+        props.text("stateReason", &state_reason.to_ascii_lowercase());
+    }
+}
+
 fn work_item_props(
     item: &Value,
     repo: Option<&Value>,
@@ -1265,9 +1275,16 @@ fn work_item_props(
         PULL_REQUEST_ONLY_PROPS
     };
     props.table(item, variant);
+    if is_issue {
+        normalize_issue_state(&mut props, item);
+    }
     let body = item.get("body").and_then(Value::as_str).unwrap_or("");
     props.text("bodyDigest", &sha256_digest(body));
     props.copy("repositoryNameWithOwner", full_name(repo));
+    if label == NODE_ISSUE {
+        props.insert("statusLabels", strings(std::iter::empty::<&str>()));
+        props.insert("workgraphLabels", strings(std::iter::empty::<&str>()));
+    }
     if let Some(assignees) = names(item, "assignees", "login") {
         props.insert("assignees", strings(assignees.into_iter()));
     }
@@ -1275,6 +1292,26 @@ fn work_item_props(
         props.insert("labelDetails", details);
         let labels =
             names(item, "labels", "name").expect("label details validate the labels array");
+        if label == NODE_ISSUE {
+            props.insert(
+                "statusLabels",
+                strings(
+                    labels
+                        .iter()
+                        .copied()
+                        .filter(|name| name.starts_with(STATUS_PREFIX)),
+                ),
+            );
+            props.insert(
+                "workgraphLabels",
+                strings(
+                    labels
+                        .iter()
+                        .copied()
+                        .filter(|name| name.starts_with("workgraph:")),
+                ),
+            );
+        }
         props.insert("labels", strings(labels.into_iter()));
         match if label == NODE_WORKGRAPH_TASK {
             Status::Zero
