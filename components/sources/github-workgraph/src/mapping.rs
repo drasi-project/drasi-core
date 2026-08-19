@@ -1252,12 +1252,46 @@ fn sha256_digest(body: &str) -> String {
 }
 
 fn normalize_issue_state(props: &mut ElementPropertyMap, issue: &Value) {
-    if let Some(state) = issue.get("state").and_then(Value::as_str) {
-        props.text("state", &state.to_ascii_lowercase());
+    let state = issue
+        .get("state")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    if let Some(state) = &state {
+        props.text("state", state);
     }
+    props.insert(
+        "isOpen",
+        ElementValue::Bool(state.as_deref() == Some("open")),
+    );
     if let Some(state_reason) = issue.get("state_reason").and_then(Value::as_str) {
         props.text("stateReason", &state_reason.to_ascii_lowercase());
     }
+}
+
+fn project_issue_labels(props: &mut ElementPropertyMap, labels: &[&str]) {
+    let status_labels: Vec<&str> = labels
+        .iter()
+        .copied()
+        .filter(|name| name.starts_with(STATUS_PREFIX))
+        .collect();
+    let current_status = match status_labels.as_slice() {
+        [] => "none",
+        [status] => status,
+        _ => "error",
+    };
+    props.insert("statusLabels", strings(status_labels.iter().copied()));
+    props.text("currentStatus", current_status);
+
+    let workgraph_labels: Vec<&str> = labels
+        .iter()
+        .copied()
+        .filter(|name| name.starts_with("workgraph:"))
+        .collect();
+    let workgraph_include = !workgraph_labels
+        .iter()
+        .any(|name| matches!(*name, "workgraph:ignore" | "workgraph:error"));
+    props.insert("workgraphLabels", strings(workgraph_labels.iter().copied()));
+    props.insert("workgraphInclude", ElementValue::Bool(workgraph_include));
 }
 
 fn work_item_props(
@@ -1282,8 +1316,7 @@ fn work_item_props(
     props.text("bodyDigest", &sha256_digest(body));
     props.copy("repositoryNameWithOwner", full_name(repo));
     if label == NODE_ISSUE {
-        props.insert("statusLabels", strings(std::iter::empty::<&str>()));
-        props.insert("workgraphLabels", strings(std::iter::empty::<&str>()));
+        project_issue_labels(&mut props, &[]);
     }
     if let Some(assignees) = names(item, "assignees", "login") {
         props.insert("assignees", strings(assignees.into_iter()));
@@ -1293,24 +1326,7 @@ fn work_item_props(
         let labels =
             names(item, "labels", "name").expect("label details validate the labels array");
         if label == NODE_ISSUE {
-            props.insert(
-                "statusLabels",
-                strings(
-                    labels
-                        .iter()
-                        .copied()
-                        .filter(|name| name.starts_with(STATUS_PREFIX)),
-                ),
-            );
-            props.insert(
-                "workgraphLabels",
-                strings(
-                    labels
-                        .iter()
-                        .copied()
-                        .filter(|name| name.starts_with("workgraph:")),
-                ),
-            );
+            project_issue_labels(&mut props, &labels);
         }
         props.insert("labels", strings(labels.into_iter()));
         match if label == NODE_WORKGRAPH_TASK {
