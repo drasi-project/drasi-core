@@ -19,14 +19,14 @@
 //! and lifecycle events into the DrasiLib systems that the REST API reads from.
 
 use std::ffi::c_void;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use drasi_lib::channels::events::{ComponentEvent, ComponentStatus, ComponentType};
 use drasi_lib::component_graph::{ComponentUpdate, ComponentUpdateSender};
 use drasi_lib::managers::{ComponentEventHistory, ComponentLogRegistry, LogLevel, LogMessage};
 use drasi_plugin_sdk::ffi::{
-    FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel, LifecycleCallbackFn,
-    LogCallbackFn,
+    FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel, FfiLogLevelFilter,
+    LifecycleCallbackFn, LogCallbackFn,
 };
 use tokio::sync::RwLock;
 
@@ -101,32 +101,56 @@ impl InstanceCallbackContext {
     }
 }
 
-/// A captured log entry from a plugin (for testing/diagnostics).
-#[derive(Debug, Clone)]
-pub struct CapturedLog {
-    pub level: FfiLogLevel,
-    pub plugin_id: String,
-    pub message: String,
-}
-
-/// A captured lifecycle event from a plugin (for testing/diagnostics).
-#[derive(Debug, Clone)]
-pub struct CapturedLifecycle {
-    pub component_id: String,
-    pub event_type: FfiLifecycleEventType,
-    pub message: String,
-}
-
-/// Access the global captured log store (for testing/diagnostics).
-pub fn captured_logs() -> &'static Mutex<Vec<CapturedLog>> {
-    static LOGS: OnceLock<Mutex<Vec<CapturedLog>>> = OnceLock::new();
-    LOGS.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-/// Access the global captured lifecycle event store (for testing/diagnostics).
-pub fn captured_lifecycles() -> &'static Mutex<Vec<CapturedLifecycle>> {
-    static EVENTS: OnceLock<Mutex<Vec<CapturedLifecycle>>> = OnceLock::new();
-    EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+/// Compute the host's effective log level for plugin log forwarding.
+///
+/// Passed to plugins at load time so they can drop filtered-out records
+/// before formatting them or crossing the FFI. Sources, in order:
+///
+/// 1. The tracing subscriber's max level, when a subscriber is installed.
+///    drasi-lib initializes tracing with an `EnvFilter`, so this reflects
+///    `RUST_LOG` (the `log` crate's max level does not: the LogTracer bridge
+///    pins it at `Trace`). `RUST_LOG=off` is honored: plugins are told `Off`
+///    and forward nothing.
+/// 2. The `log` crate's max level, when set to something other than `Off`
+///    (env_logger-style hosts; see the NOTE below on why `Off` cannot be
+///    honored from this source).
+/// 3. `Trace` when neither is configured (e.g. tests): forward everything.
+///
+/// The tracing max level collapses per-target directives to the most
+/// verbose one (`RUST_LOG=info,my_module=trace` reports `Trace`), so
+/// plugins may over-forward relative to the host filter but never
+/// under-forward.
+pub fn effective_host_log_level() -> FfiLogLevelFilter {
+    use tracing::level_filters::LevelFilter as TracingFilter;
+    // `LevelFilter::current()` alone cannot distinguish "no subscriber
+    // installed" from "subscriber installed with everything filtered off":
+    // both read OFF. Ask the dispatcher whether a real subscriber is active
+    // so a host configured for silence gets silence, not everything.
+    let tracing_installed =
+        tracing::dispatcher::get_default(|d| !d.is::<tracing::subscriber::NoSubscriber>());
+    if tracing_installed {
+        return match TracingFilter::current() {
+            TracingFilter::OFF => FfiLogLevelFilter::Off,
+            TracingFilter::ERROR => FfiLogLevelFilter::Error,
+            TracingFilter::WARN => FfiLogLevelFilter::Warn,
+            TracingFilter::INFO => FfiLogLevelFilter::Info,
+            TracingFilter::DEBUG => FfiLogLevelFilter::Debug,
+            _ => FfiLogLevelFilter::Trace,
+        };
+    }
+    let log_level = log::max_level();
+    if log_level != log::LevelFilter::Off {
+        return FfiLogLevelFilter::from_level_filter(log_level);
+    }
+    // NOTE: the `log` crate reads `Off` both when no logger was ever
+    // installed (the default) and when a pure-`log` host explicitly
+    // configured silence (e.g. env_logger with RUST_LOG=off); its public
+    // API cannot distinguish the two. We bias toward forwarding so
+    // unconfigured hosts and bare test binaries still see plugin logs. A
+    // `log`-only host that wants silence should call
+    // `LoadedPlugin::set_log_level(FfiLogLevelFilter::Off)` after its
+    // logging setup.
+    FfiLogLevelFilter::Trace
 }
 
 fn ffi_log_level_to_log_level(level: FfiLogLevel) -> LogLevel {
@@ -206,17 +230,6 @@ pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEnt
             message
         );
 
-        // Always capture for diagnostics (use `ok()` to avoid panicking in extern "C"
-        // if the Mutex was poisoned by a prior test/thread panic — a panic here would
-        // be a non-unwinding abort since this is an extern "C" function)
-        if let Ok(mut logs) = captured_logs().lock() {
-            logs.push(CapturedLog {
-                level,
-                plugin_id: plugin_id.clone(),
-                message: message.clone(),
-            });
-        }
-
         // Route into DrasiLib's ComponentLogRegistry if we have both context and instance info
         if !ctx.is_null() && !instance_id.is_empty() && !component_id.is_empty() {
             let context = unsafe { CallbackContext::from_raw_ref(ctx) };
@@ -251,15 +264,6 @@ pub extern "C" fn default_lifecycle_callback(ctx: *mut c_void, event: *const Ffi
         let event_type = event.event_type;
 
         log::debug!("Lifecycle: {component_id} ({component_type_str}) {event_type:?} {message}");
-
-        // Always capture for diagnostics (use `ok()` to avoid panicking in extern "C")
-        if let Ok(mut events) = captured_lifecycles().lock() {
-            events.push(CapturedLifecycle {
-                component_id: component_id.clone(),
-                event_type,
-                message: message.clone(),
-            });
-        }
 
         // Route into DrasiLib's ComponentEventHistory if context is available
         if !ctx.is_null() {
@@ -339,15 +343,6 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
             message
         );
 
-        // Capture for diagnostics (use `ok()` to avoid panicking in extern "C")
-        if let Ok(mut logs) = captured_logs().lock() {
-            logs.push(CapturedLog {
-                level,
-                plugin_id: plugin_id.clone(),
-                message: message.clone(),
-            });
-        }
-
         // Route into ComponentLogRegistry
         if !ctx.is_null() {
             let context = unsafe { InstanceCallbackContext::from_raw_ref(ctx) };
@@ -399,15 +394,6 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
         log::debug!(
             "Lifecycle [instance]: {component_id} ({component_type_str}) {event_type:?} {message}"
         );
-
-        // Capture for diagnostics (use `ok()` to avoid panicking in extern "C")
-        if let Ok(mut events) = captured_lifecycles().lock() {
-            events.push(CapturedLifecycle {
-                component_id: component_id.clone(),
-                event_type,
-                message: message.clone(),
-            });
-        }
 
         // Send through the component graph update channel
         if !ctx.is_null() {

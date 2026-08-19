@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-bootstrap-mysql"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "MySQL bootstrap provider for Drasi"
@@ -33,7 +33,7 @@ workspace = true
 drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
-drasi-mysql-common = { workspace = true }
+drasi-mysql-common = { workspace = true, features = ["api"] }
 utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
@@ -43,9 +43,16 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 ordered-float = "3.0"
-mysql_async = "0.37"
+mysql_async = { version = "0.37", features = ["rustls-tls", "ring", "tls12"] }
 mysql_common = "0.37"
 bytes = "1.0"
 
 [features]
 dynamic-plugin = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# native-tls uses OpenSSL only on Linux (Windows: SChannel, macOS: Secure
+# Transport). Vendor it there so the glibc-pinned cargo-zigbuild -gnu plugins
+# build without host OpenSSL headers; scoping it off Windows/macOS avoids
+# unnecessary and toolchain-sensitive OpenSSL-from-source builds.
+openssl = { version = "0.10", features = ["vendored"] }

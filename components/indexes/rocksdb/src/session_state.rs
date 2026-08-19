@@ -14,9 +14,10 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::IndexDb;
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, SessionControl};
-use rocksdb::{OptimisticTransactionDB, Transaction};
+use rocksdb::Transaction;
 
 /// Groups the active transaction and nesting depth under a single mutex.
 ///
@@ -27,13 +28,13 @@ use rocksdb::{OptimisticTransactionDB, Transaction};
 /// Fields are private; external access goes through `with_txn()` so crate-level
 /// code cannot desynchronize `depth` and `txn`.
 struct SessionInner {
-    txn: Option<Transaction<'static, OptimisticTransactionDB>>,
+    txn: Option<Transaction<'static, IndexDb>>,
     depth: u32,
 }
 
 /// Shared session state for RocksDB session-scoped transactions.
 ///
-/// Holds the shared `Arc<OptimisticTransactionDB>` and a `SessionInner` containing
+/// Holds the shared `Arc<IndexDb>` and a `SessionInner` containing
 /// the optional active `Transaction` and a nesting depth counter.
 /// All three RocksDB index types (element, result, future_queue) share a single
 /// `Arc<RocksDbSessionState>` so that a session transaction spans all indexes atomically.
@@ -51,23 +52,23 @@ struct SessionInner {
 ///
 /// # Safety
 ///
-/// The `SessionInner.txn` field stores a `Transaction<'static, OptimisticTransactionDB>`
+/// The `SessionInner.txn` field stores a `Transaction<'static, IndexDb>`
 /// where the lifetime has been transmuted from the DB borrow lifetime to `'static`.
 /// This is sound because:
 ///
-/// 1. The `Arc<OptimisticTransactionDB>` prevents the DB from being deallocated while
+/// 1. The `Arc<IndexDb>` prevents the DB from being deallocated while
 ///    any clone of the Arc exists.
 /// 2. The `Drop` impl on `RocksDbSessionState` clears the transaction before struct fields
 ///    are dropped, ensuring the transaction is released before the Arc can be decremented.
 /// 3. All holders of `Arc<RocksDbSessionState>` (the three index structs + `RocksDbSessionControl`)
 ///    are grouped in `IndexSet` and dropped together.
 pub struct RocksDbSessionState {
-    db: Arc<OptimisticTransactionDB>,
+    db: Arc<IndexDb>,
     inner: Mutex<SessionInner>,
 }
 
 impl RocksDbSessionState {
-    pub fn new(db: Arc<OptimisticTransactionDB>) -> Self {
+    pub fn new(db: Arc<IndexDb>) -> Self {
         Self {
             db,
             inner: Mutex::new(SessionInner {
@@ -80,7 +81,7 @@ impl RocksDbSessionState {
     /// Begin a new session-scoped transaction, or nest into an existing one.
     ///
     /// - If no transaction is active (depth == 0), creates a real
-    ///   `OptimisticTransactionDB::transaction()` and sets depth to 1.
+    ///   `IndexDb::transaction()` and sets depth to 1.
     /// - If a transaction is already active (depth > 0), increments depth
     ///   without creating a new transaction (nested no-op).
     pub(crate) fn begin(&self) -> Result<(), IndexError> {
@@ -101,11 +102,10 @@ impl RocksDbSessionState {
             "depth==0 but txn is Some — invariant violated"
         );
         let txn = self.db.transaction();
-        // SAFETY: The Arc<OptimisticTransactionDB> guarantees the DB outlives the
+        // SAFETY: The Arc<IndexDb> guarantees the DB outlives the
         // transaction. We clear the txn in Drop before the Arc is released.
         // See the safety comment on the struct.
-        let txn: Transaction<'static, OptimisticTransactionDB> =
-            unsafe { std::mem::transmute(txn) };
+        let txn: Transaction<'static, IndexDb> = unsafe { std::mem::transmute(txn) };
         guard.txn = Some(txn);
         guard.depth = 1;
         log::trace!("session begin: depth 1 (real transaction)");
@@ -183,7 +183,7 @@ impl RocksDbSessionState {
     /// Returns an error if no session is active.
     pub(crate) fn with_txn<R>(
         &self,
-        f: impl FnOnce(&Transaction<'_, OptimisticTransactionDB>) -> Result<R, IndexError>,
+        f: impl FnOnce(&Transaction<'_, IndexDb>) -> Result<R, IndexError>,
     ) -> Result<R, IndexError> {
         let guard = self.lock()?;
         match guard.txn.as_ref() {
@@ -201,8 +201,8 @@ impl RocksDbSessionState {
     /// session is active, yet still work at startup before any session exists.
     pub(crate) fn with_txn_or_db<R>(
         &self,
-        txn_fn: impl FnOnce(&Transaction<'_, OptimisticTransactionDB>) -> Result<R, IndexError>,
-        db_fn: impl FnOnce(&OptimisticTransactionDB) -> Result<R, IndexError>,
+        txn_fn: impl FnOnce(&Transaction<'_, IndexDb>) -> Result<R, IndexError>,
+        db_fn: impl FnOnce(&IndexDb) -> Result<R, IndexError>,
     ) -> Result<R, IndexError> {
         let guard = self.lock()?;
         match guard.txn.as_ref() {
@@ -307,7 +307,7 @@ mod tests {
     use crate::element_index::RocksIndexOptions;
     use crate::open_unified_db;
 
-    fn setup_test_db() -> (tempfile::TempDir, Arc<OptimisticTransactionDB>) {
+    fn setup_test_db() -> (tempfile::TempDir, Arc<IndexDb>) {
         let dir = tempfile::TempDir::new().expect("failed to create temp dir");
         let options = RocksIndexOptions {
             archive_enabled: false,

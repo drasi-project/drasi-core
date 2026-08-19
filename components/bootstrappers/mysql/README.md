@@ -26,6 +26,7 @@ let bootstrap = MySqlBootstrapProvider::builder()
 | `user` | `String` | **(Required)** | Database user with replication privileges |
 | `password` | `String` | `""` | Database password |
 | `tables` | `Vec<String>` | **(Required)** | Table allow-list; must contain at least one table |
+| `sslMode` | `SslMode` | `if_available` | SSL mode: `disabled`, `if_available`, `require`, `require_verify_ca`, `require_verify_full` (see [SSL Modes](#ssl-modes)) |
 | `tableKeys` | `Vec<TableKeyConfig>` | `[]` | Manual primary key configuration |
 
 ### TableKeyConfig
@@ -34,6 +35,23 @@ let bootstrap = MySqlBootstrapProvider::builder()
 |-------|------|-------------|
 | `table` | `String` | Table name |
 | `keyColumns` | `Vec<String>` | Column names to use as primary key |
+
+### SSL Modes
+
+TLS support (rustls) is always compiled in — there is no feature flag to enable.
+`sslMode` maps 1:1 to MySQL's `--ssl-mode`:
+
+| Value | MySQL `--ssl-mode` | TLS | Verifies |
+|-------|--------------------|-----|----------|
+| `disabled` | `DISABLED` | no | — |
+| `if_available` (default) | `PREFERRED` | opportunistic; falls back to plaintext | no |
+| `require` | `REQUIRED` | required | no (encrypt-only) |
+| `require_verify_ca` | `VERIFY_CA` | required | CA chain (skips hostname) |
+| `require_verify_full` | `VERIFY_IDENTITY` | required | CA chain + hostname |
+
+`if_available` and `require` skip certificate verification (matching MySQL), so they
+protect against passive eavesdropping but not an active man-in-the-middle. Use
+`require_verify_ca` or `require_verify_full` when server authenticity matters.
 
 ## Testing
 

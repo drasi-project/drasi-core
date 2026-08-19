@@ -225,21 +225,30 @@ pub type FfiResultPushCallbackFn =
     extern "C" fn(ctx: *mut c_void, result: *mut c_void) -> *mut c_void;
 
 // ============================================================================
-// Bootstrap sender — callback for sending bootstrap records from provider
+// Bootstrap stream — handles returned by a bootstrap provider vtable
 // ============================================================================
 
-/// FFI-safe callback for sending bootstrap records from a BootstrapProvider.
-/// The host creates this and passes it to the provider.
+/// Handles returned by `BootstrapProviderVtable::bootstrap_fn`.
+///
+/// `bootstrap_fn` starts the provider and returns immediately; events and the
+/// completion result are then delivered through these push-based receivers,
+/// the same pattern used for CDC (`FfiChangeReceiver`) and source-plugin
+/// bootstrap (`FfiSubscriptionResponse`). Backpressure propagates end to end:
+/// the consumer's bounded bridge blocks the push callback, which stalls the
+/// provider's bounded event channel.
+///
+/// Heap-allocated by the callee; the caller takes ownership of the envelope
+/// and both receiver pointers (freed via `Box::from_raw` + each `drop_fn`).
 #[repr(C)]
-pub struct FfiBootstrapSender {
-    pub state: *mut c_void,
-    /// Send a bootstrap record. Returns 0 on success, non-zero if channel closed.
-    pub send_fn: extern "C" fn(state: *mut c_void, event: *mut FfiBootstrapEvent) -> i32,
-    pub drop_fn: extern "C" fn(state: *mut c_void),
+pub struct FfiBootstrapStream {
+    /// Push-based finite stream of bootstrap events (null sentinel = end).
+    pub events: *mut FfiBootstrapReceiver,
+    /// Push-based delivery of the `FfiBootstrapResult` (null = no result).
+    pub result: *mut FfiBootstrapResultReceiver,
 }
 
-unsafe impl Send for FfiBootstrapSender {}
-unsafe impl Sync for FfiBootstrapSender {}
+unsafe impl Send for FfiBootstrapStream {}
+unsafe impl Sync for FfiBootstrapStream {}
 
 /// FFI-safe bootstrap result returned across the plugin boundary.
 ///
@@ -257,6 +266,14 @@ pub struct FfiBootstrapResult {
     /// Drop function for the source position allocation.
     /// Null if `source_position_ptr` is null.
     pub source_position_drop_fn: Option<extern "C" fn(*mut u8, usize)>,
+    /// UTF-8 provider error text (null if none). Only meaningful when
+    /// `event_count < 0`. Callee owns the allocation; caller must free via
+    /// `error_drop_fn`.
+    pub error_ptr: *const u8,
+    /// Length of the error text bytes (0 if ptr is null).
+    pub error_len: usize,
+    /// Drop function for the error text allocation. Null if `error_ptr` is null.
+    pub error_drop_fn: Option<extern "C" fn(*mut u8, usize)>,
 }
 
 unsafe impl Send for FfiBootstrapResult {}
@@ -518,10 +535,11 @@ drasi_ffi_primitives::ffi_vtable! {
     /// FFI-safe vtable for a BootstrapProvider.
     /// The bootstrap plugin creates this; the host wraps it and passes it to the source plugin.
     pub struct BootstrapProviderVtable {
-        /// Perform bootstrap. Sends records via the FfiBootstrapSender.
-        /// Returns a heap-allocated FfiBootstrapResult (caller must free via Box::from_raw),
-        /// or null on catastrophic failure.
-        fn bootstrap_fn(state: *mut, query_id: FfiStr, node_labels: *const FfiStr, node_labels_count: usize, relation_labels: *const FfiStr, relation_labels_count: usize, request_id: FfiStr, server_id: FfiStr, source_id: FfiStr, sender: *mut FfiBootstrapSender) -> *mut FfiBootstrapResult,
+        /// Start a bootstrap and return immediately with push-based handles.
+        /// Returns a heap-allocated FfiBootstrapStream (caller must free via
+        /// Box::from_raw and consume both receivers), or null if the bootstrap
+        /// could not be started.
+        fn bootstrap_fn(state: *mut, query_id: FfiStr, node_labels: *const FfiStr, node_labels_count: usize, relation_labels: *const FfiStr, relation_labels_count: usize, request_id: FfiStr, server_id: FfiStr, source_id: FfiStr) -> *mut FfiBootstrapStream,
     }
 }
 
@@ -807,4 +825,12 @@ pub struct FfiPluginRegistration {
     /// back through the host.
     pub set_config_resolver:
         extern "C" fn(ctx: *mut ::std::ffi::c_void, callback: super::callbacks::ConfigResolverFn),
+    /// Host calls this to report its effective log level. The plugin drops
+    /// records more verbose than this level before formatting them or
+    /// forwarding them across the FFI. Until called, the plugin forwards
+    /// everything (`Trace`).
+    ///
+    /// Appended for SDK 0.12.0; hosts must gate access on the plugin's
+    /// reported `sdk_version`.
+    pub set_log_level: extern "C" fn(level: super::callbacks::FfiLogLevelFilter),
 }

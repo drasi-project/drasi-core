@@ -16,6 +16,7 @@ on:
     types: [labeled]
 if: inputs.pr_url != '' || github.event.label.name == 'review:design'
 permissions:
+  copilot-requests: write
   contents: read
   pull-requests: read
 network:
