@@ -286,13 +286,14 @@ impl LifecycleState {
     }
 
     fn take_ttl_record(&mut self, id: &str) -> Option<TtlRecord> {
-        let expires_at = self.ttl_by_id.remove(id)?;
+        let expires_at = *self.ttl_by_id.get(id)?;
         let bucket = self.ttls.get_mut(&expires_at)?;
         let index = bucket.iter().position(|r| r.id == *id)?;
         let record = bucket.remove(index);
         if bucket.is_empty() {
             self.ttls.remove(&expires_at);
         }
+        self.ttl_by_id.remove(id);
         Some(record)
     }
 

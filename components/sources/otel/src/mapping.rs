@@ -219,11 +219,12 @@ pub fn map_logs(
                         group,
                     );
                     push_heartbeat(&mut out.elements, &service, observed, group);
-                    out.accepted += 1;
                 }
 
                 if rec.severity_number < min_severity {
-                    if !is_heartbeat {
+                    if is_heartbeat {
+                        out.accepted += 1;
+                    } else {
                         out.rejected += 1;
                     }
                     continue;
@@ -231,7 +232,9 @@ pub fn map_logs(
                 if !config.log_event_name_allowlist.is_empty()
                     && !allowlist_matches(&config.log_event_name_allowlist, &rec.event_name)
                 {
-                    if !is_heartbeat {
+                    if is_heartbeat {
+                        out.accepted += 1;
+                    } else {
                         out.rejected += 1;
                     }
                     continue;
@@ -319,10 +322,11 @@ fn project_number_metric(
     if is_heartbeat {
         push_service(&mut out.elements, service, resource, observed, group);
         push_heartbeat(&mut out.elements, service, observed, group);
-        out.accepted += 1;
     }
     if !allowlist_matches(&config.metric_allowlist, name) {
-        if !is_heartbeat {
+        if is_heartbeat {
+            out.accepted += 1;
+        } else {
             out.rejected += 1;
         }
         return;
@@ -1122,11 +1126,31 @@ mod tests {
             ..OtelSourceConfig::default()
         };
         let out = map_metrics(&gauge_named("health.heartbeat"), &config, 2_000);
-        assert!(out.accepted > 0);
+        assert_eq!(out.accepted, 1);
+        assert_eq!(out.rejected, 0);
         assert!(out
             .elements
             .iter()
             .any(|e| e.labels.iter().any(|l| l == "Heartbeat")));
+    }
+
+    #[test]
+    fn heartbeat_allowlisted_counts_once() {
+        let config = OtelSourceConfig {
+            metric_allowlist: vec!["health.heartbeat".to_string()],
+            heartbeat_metric: Some("health.heartbeat".to_string()),
+            ..OtelSourceConfig::default()
+        };
+        let out = map_metrics(&gauge_named("health.heartbeat"), &config, 2_000);
+        assert_eq!(out.accepted, 1);
+        assert!(out
+            .elements
+            .iter()
+            .any(|e| e.labels.iter().any(|l| l == "Heartbeat")));
+        assert!(out
+            .elements
+            .iter()
+            .any(|e| e.labels.iter().any(|l| l == "Metric")));
     }
 
     #[test]
