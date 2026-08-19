@@ -97,6 +97,15 @@ fn labels() -> Value {
     json!({"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]})
 }
 
+fn named_labels(names: &[&str]) -> Value {
+    json!({
+        "pageInfo":{"hasNextPage":false,"endCursor":null},
+        "nodes":names.iter().enumerate().map(|(index, name)| {
+            json!({"name":name,"node_id":format!("L_{index}")})
+        }).collect::<Vec<_>>()
+    })
+}
+
 fn fixture_database_id(id: &str) -> u64 {
     id.bytes().fold(0_u64, |value, byte| {
         value.wrapping_mul(31).wrapping_add(u64::from(byte))
@@ -174,9 +183,15 @@ async fn mount_snapshot(server: &MockServer, task_body: &str, result_body: &str)
     mount_query(
         server,
         &["states: [OPEN]", "type: issueType"],
-        json!({"repository":{"issues":connection(
-            vec![issue("I_generic","Generic body","OPEN",false,0)],false,None
-        )}}),
+        json!({"repository":{"issues":connection(vec![{
+            let mut issue = issue("I_generic","Generic body","OPEN",false,0);
+            issue["labels"] = named_labels(&[
+                "status:New",
+                "workgraph:error",
+                "status:Awaiting-Triage",
+            ]);
+            issue
+        }],false,None)}}),
         Some(1),
     )
     .await;
@@ -325,11 +340,19 @@ async fn snapshots_generic_open_and_open_closed_tasks_with_parents_and_comments(
         .any(|event| id(event) == "I_generic" && label(event) == "GitHubIssue"));
     assert_eq!(
         node_property(&events, "I_generic", "statusLabels"),
-        &ElementValue::from(&json!([]))
+        &ElementValue::from(&json!(["status:New", "status:Awaiting-Triage"]))
+    );
+    assert_eq!(
+        node_property(&events, "I_generic", "currentStatus"),
+        &ElementValue::String("error".into())
     );
     assert_eq!(
         node_property(&events, "I_generic", "workgraphLabels"),
-        &ElementValue::from(&json!([]))
+        &ElementValue::from(&json!(["workgraph:error"]))
+    );
+    assert_eq!(
+        node_property(&events, "I_generic", "workgraphInclude"),
+        &ElementValue::Bool(false)
     );
     assert_eq!(
         node_property(&events, "I_generic", "state"),
@@ -340,8 +363,16 @@ async fn snapshots_generic_open_and_open_closed_tasks_with_parents_and_comments(
         &ElementValue::Null
     );
     assert_eq!(
+        node_property(&events, "I_generic", "isOpen"),
+        &ElementValue::Bool(true)
+    );
+    assert_eq!(
         node_property(&events, "I_task_open", "state"),
         &ElementValue::from(&json!("open"))
+    );
+    assert_eq!(
+        node_property(&events, "I_task_open", "isOpen"),
+        &ElementValue::Bool(true)
     );
     assert_eq!(
         node_property(&events, "I_task_closed", "state"),
@@ -350,6 +381,10 @@ async fn snapshots_generic_open_and_open_closed_tasks_with_parents_and_comments(
     assert_eq!(
         node_property(&events, "I_task_closed", "stateReason"),
         &ElementValue::from(&json!("completed"))
+    );
+    assert_eq!(
+        node_property(&events, "I_task_closed", "isOpen"),
+        &ElementValue::Bool(false)
     );
     assert!(events
         .iter()
@@ -458,6 +493,10 @@ async fn malformed_task_and_marked_result_use_shared_error_conversion() {
     assert!(events.iter().any(|event| {
         id(event) == "workgraph-error:task:I_task_open" && label(event) == "WorkGraphError"
     }));
+    assert_eq!(
+        node_property(&events, "workgraph-error:task:I_task_open", "isOpen"),
+        &ElementValue::Bool(true)
+    );
     assert!(events.iter().any(|event| {
         id(event) == "workgraph-error:comment:IC_result" && label(event) == "WorkGraphError"
     }));

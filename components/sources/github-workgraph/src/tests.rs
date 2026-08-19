@@ -499,13 +499,21 @@ fn generic_issue_preserves_labels_and_projects_ordered_workgraph_namespaces() {
         &ElementValue::from(&json!(["status:New", "status:awaiting-Triage"]))
     );
     assert_eq!(
+        property(&changes, "GitHubIssue", "currentStatus"),
+        &ElementValue::String(Arc::from("error"))
+    );
+    assert_eq!(
         property(&changes, "GitHubIssue", "workgraphLabels"),
         &ElementValue::from(&json!(["workgraph:ignore", "workgraph:Error"]))
+    );
+    assert_eq!(
+        property(&changes, "GitHubIssue", "workgraphInclude"),
+        &ElementValue::Bool(false)
     );
 }
 
 #[test]
-fn generic_issue_always_has_empty_namespace_arrays_without_matching_labels() {
+fn generic_issue_current_status_covers_zero_and_one_status_label() {
     for labels in [json!([]), json!([{"name":"ordinary","node_id":"L_1"}])] {
         let mut item = issue("I_generic", "ordinary", false, "open");
         item["labels"] = labels;
@@ -517,6 +525,91 @@ fn generic_issue_always_has_empty_namespace_arrays_without_matching_labels() {
         assert_eq!(
             property(&changes, "GitHubIssue", "workgraphLabels"),
             &ElementValue::from(&json!([]))
+        );
+        assert_eq!(
+            property(&changes, "GitHubIssue", "currentStatus"),
+            &ElementValue::String(Arc::from("none"))
+        );
+        assert_eq!(
+            property(&changes, "GitHubIssue", "workgraphInclude"),
+            &ElementValue::Bool(true)
+        );
+    }
+
+    let mut item = issue("I_generic", "ordinary", false, "open");
+    item["labels"] = json!([
+        {"name":"ordinary","node_id":"L_1"},
+        {"name":"status:Awaiting-Triage","node_id":"L_2"}
+    ]);
+    let changes = convert("issues", &issue_event("opened", item));
+    assert_eq!(
+        property(&changes, "GitHubIssue", "statusLabels"),
+        &ElementValue::from(&json!(["status:Awaiting-Triage"]))
+    );
+    assert_eq!(
+        property(&changes, "GitHubIssue", "currentStatus"),
+        &ElementValue::String(Arc::from("status:Awaiting-Triage"))
+    );
+}
+
+#[test]
+fn generic_issue_workgraph_include_uses_only_exact_exclusion_labels() {
+    for (names, expected_labels, expected_include) in [
+        (vec![], vec![], true),
+        (vec!["workgraph:custom"], vec!["workgraph:custom"], true),
+        (vec!["workgraph:ignore"], vec!["workgraph:ignore"], false),
+        (vec!["workgraph:error"], vec!["workgraph:error"], false),
+        (
+            vec!["workgraph:ignore", "workgraph:error"],
+            vec!["workgraph:ignore", "workgraph:error"],
+            false,
+        ),
+    ] {
+        let mut item = issue("I_generic", "ordinary", false, "open");
+        item["labels"] = Value::Array(
+            names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| json!({"name":name,"node_id":format!("L_{index}")}))
+                .collect(),
+        );
+        let changes = convert("issues", &issue_event("opened", item));
+        assert_eq!(
+            property(&changes, "GitHubIssue", "workgraphLabels"),
+            &ElementValue::from(&json!(expected_labels))
+        );
+        assert_eq!(
+            property(&changes, "GitHubIssue", "workgraphInclude"),
+            &ElementValue::Bool(expected_include)
+        );
+    }
+}
+
+#[test]
+fn issue_derived_nodes_emit_boolean_is_open_from_normalized_state() {
+    for state in ["open", "OpEn", "OPEN"] {
+        let changes = convert(
+            "issues",
+            &issue_event("labeled", issue("I_generic", "ordinary", false, state)),
+        );
+        assert_eq!(
+            property(&changes, "GitHubIssue", "state"),
+            &ElementValue::String(Arc::from("open"))
+        );
+        assert_eq!(
+            property(&changes, "GitHubIssue", "isOpen"),
+            &ElementValue::Bool(true)
+        );
+    }
+
+    for (state, expected) in [("OPEN", true), ("closed", false), ("unknown", false)] {
+        let changes = convert(
+            "issues",
+            &issue_event("edited", issue("I_task", VALIDATION_TASK, true, state)),
+        );
+        assert_eq!(
+            property(&changes, "WorkGraphTask", "isOpen"),
+            &ElementValue::Bool(expected)
         );
     }
 }
@@ -749,6 +842,10 @@ fn body_edits_switch_between_task_and_error() {
     assert!(changes
         .iter()
         .any(|change| label(change) == "WorkGraphError"));
+    assert_eq!(
+        property(&changes, "WorkGraphError", "isOpen"),
+        &ElementValue::Bool(true)
+    );
 
     let mut repaired = issue_event("edited", issue("I_task", VALIDATION_TASK, true, "open"));
     repaired["changes"] = json!({"body":{"from":"{}"}});
