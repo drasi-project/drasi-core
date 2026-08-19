@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.9] - 2026-08-11
 
+### Bug Fixes
+
+- **mssql:** Unify bootstrap/CDC ElementValue conversion and preserve more SQL types ([#673](https://github.com/drasi-project/drasi-core/issues/673)) ([#674](https://github.com/drasi-project/drasi-core/issues/674))
+  - **BREAKING:** `datetime`/`datetime2`/`smalldatetime` now emit `LocalDateTime` (was formatted `String`)
+  - `datetimeoffset` emits `ZonedDateTime`
+  - `date`/`time` emit `String` (matching Postgres)
+  - `money`/`smallmoney` emit `Float` (tiberius decodes both as f64)
+
 ### Miscellaneous Tasks
 
 - End-to-end nightly build (drasi-core producer + release tooling refactor) ([#615](https://github.com/drasi-project/drasi-core/issues/615))
