@@ -26,9 +26,11 @@
 //! - `grpc_bind`: OTLP/gRPC listen address. Default: `0.0.0.0:4317`. Empty disables gRPC.
 //! - `http_bind`: (Optional) OTLP/HTTP protobuf listen address (`/v1/traces|metrics|logs`)
 //! - `metric_allowlist`: accepted metric names. Empty rejects all. `*` allows all.
+//!   Only `*` wildcards are supported (`latency_*`); `?` and `**` are not.
 //! - `destination_attributes`: span attributes used as the callee. Default: `peer.service`
-//! - `dependency_ttl_secs`: `DEPENDS_ON` expiry unless refreshed. Default: `300`
-//! - `log_event_ttl_secs`: `LogEvent` expiry. Default: `60`
+//! - `dependency_ttl_secs`: `DEPENDS_ON` expiry from receipt time. Default: `300`
+//! - `log_event_ttl_secs`: `LogEvent` expiry from receipt time. Default: `60`
+//! - `max_request_bytes`: maximum decoded OTLP request size. Default: 4 MiB
 //! - `auth_token`: (Optional) inbound bearer token
 //! - `durability`: (Optional) WAL replay of projected changes
 //!
@@ -251,6 +253,7 @@ impl Source for OtelSource {
             max_dependencies: ConfigValue::Static(self.config.max_dependencies),
             max_log_events: ConfigValue::Static(self.config.max_log_events),
             reject_derived: ConfigValue::Static(self.config.reject_derived),
+            max_request_bytes: ConfigValue::Static(self.config.max_request_bytes),
             durability: self.config.durability.clone(),
         };
         self.base.properties_or_serialize(&dto)
@@ -304,7 +307,9 @@ impl Source for OtelSource {
             wal.register(&self.base.id, wal_config.clone())
                 .await
                 .with_context(|| format!("Failed to register WAL for source '{}'", self.base.id))?;
-            let head = wal.head_sequence(&self.base.id).await.unwrap_or(0);
+            let head = wal.head_sequence(&self.base.id).await.with_context(|| {
+                format!("Failed to read WAL head for source '{}'", self.base.id)
+            })?;
             if head > 0 {
                 self.base.set_next_sequence(head);
             }
@@ -337,6 +342,7 @@ impl Source for OtelSource {
             lifecycle: self.lifecycle.clone(),
             counters: self.counters.clone(),
             wal: wal_ref.clone(),
+            last_persist: Arc::new(tokio::sync::Mutex::new(None)),
         };
 
         let reporter = self.base.status_handle();
@@ -576,6 +582,12 @@ impl OtelSourceBuilder {
     /// How long `LogEvent` nodes live before the sweeper deletes them.
     pub fn with_log_event_ttl_secs(mut self, secs: u64) -> Self {
         self.config.log_event_ttl_secs = secs;
+        self
+    }
+
+    /// Maximum decoded OTLP request size in bytes. Default: 4 MiB.
+    pub fn with_max_request_bytes(mut self, bytes: usize) -> Self {
+        self.config.max_request_bytes = bytes;
         self
     }
 

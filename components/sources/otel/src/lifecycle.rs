@@ -57,6 +57,8 @@ pub struct ProjectedElement {
     pub effective_from: u64,
     pub category: ElementCategory,
     pub ttl_secs: Option<u64>,
+    /// Elements that share a group are admitted or dropped together.
+    pub group: u32,
 }
 
 /// Node vs relation payload.
@@ -83,45 +85,80 @@ pub struct LifecycleState {
 }
 
 impl LifecycleState {
-    /// Apply projected elements, returning graph changes and how many were dropped.
+    /// Apply projected elements, returning graph changes and how many groups were dropped.
+    ///
+    /// TTL is scheduled from `received_at_millis` so late OTLP event timestamps do not
+    /// expire edges immediately. `registeredAt` is set only on Service insert.
     pub fn apply(
         &mut self,
         source_id: &str,
         config: &OtelSourceConfig,
         projected: Vec<ProjectedElement>,
+        received_at_millis: u64,
     ) -> (Vec<SourceChange>, usize) {
+        let mut order = Vec::new();
+        let mut groups: HashMap<u32, Vec<ProjectedElement>> = HashMap::new();
+        for item in projected {
+            groups
+                .entry(item.group)
+                .or_insert_with(|| {
+                    order.push(item.group);
+                    Vec::new()
+                })
+                .push(item);
+        }
+
         let mut changes = Vec::new();
         let mut dropped = 0usize;
 
-        for item in projected {
-            if !self.seen.contains(&item.id) {
-                if let Some(cap) = item.category.cap(config) {
-                    let current = self.counts.get(&item.category).copied().unwrap_or(0);
-                    if current >= cap {
-                        dropped += 1;
-                        continue;
+        for group_id in order {
+            let Some(group) = groups.remove(&group_id) else {
+                continue;
+            };
+            if self.group_exceeds_caps(config, &group) {
+                dropped += 1;
+                continue;
+            }
+            for mut item in group {
+                let is_insert = self.seen.insert(item.id.clone());
+                if is_insert {
+                    *self.counts.entry(item.category).or_insert(0) += 1;
+                    if item.category == ElementCategory::Service {
+                        stamp_registered_at(&mut item);
                     }
                 }
-            }
-
-            let is_insert = self.seen.insert(item.id.clone());
-            if is_insert {
-                *self.counts.entry(item.category).or_insert(0) += 1;
-            }
-
-            if let Some(ttl_secs) = item.ttl_secs {
-                self.schedule_ttl(&item, ttl_secs);
-            }
-
-            let element = item.into_element(source_id);
-            if is_insert {
-                changes.push(SourceChange::Insert { element });
-            } else {
-                changes.push(SourceChange::Update { element });
+                if let Some(ttl_secs) = item.ttl_secs {
+                    self.schedule_ttl(&item, ttl_secs, received_at_millis);
+                }
+                let element = item.into_element(source_id);
+                if is_insert {
+                    changes.push(SourceChange::Insert { element });
+                } else {
+                    changes.push(SourceChange::Update { element });
+                }
             }
         }
 
         (changes, dropped)
+    }
+
+    fn group_exceeds_caps(&self, config: &OtelSourceConfig, group: &[ProjectedElement]) -> bool {
+        let mut extra: HashMap<ElementCategory, usize> = HashMap::new();
+        for item in group {
+            if self.seen.contains(&item.id) {
+                continue;
+            }
+            let Some(cap) = item.category.cap(config) else {
+                continue;
+            };
+            let current = self.counts.get(&item.category).copied().unwrap_or(0)
+                + extra.get(&item.category).copied().unwrap_or(0);
+            if current >= cap {
+                return true;
+            }
+            *extra.entry(item.category).or_insert(0) += 1;
+        }
+        false
     }
 
     /// Delete elements whose TTL has elapsed at `now_millis`.
@@ -172,10 +209,8 @@ impl LifecycleState {
         changes
     }
 
-    fn schedule_ttl(&mut self, item: &ProjectedElement, ttl_secs: u64) {
-        let expires_at = item
-            .effective_from
-            .saturating_add(ttl_secs.saturating_mul(1000));
+    fn schedule_ttl(&mut self, item: &ProjectedElement, ttl_secs: u64, received_at_millis: u64) {
+        let expires_at = received_at_millis.saturating_add(ttl_secs.saturating_mul(1000));
         if let Some(previous) = self.ttl_by_id.insert(item.id.clone(), expires_at) {
             if let Some(bucket) = self.ttls.get_mut(&previous) {
                 bucket.retain(|r| r.id != item.id);
@@ -242,6 +277,15 @@ fn decrement(counts: &mut HashMap<ElementCategory, usize>, category: ElementCate
     }
 }
 
+fn stamp_registered_at(item: &mut ProjectedElement) {
+    if item.properties.get("registeredAt").is_some() {
+        return;
+    }
+    if let Some(last_seen) = item.properties.get("lastSeen").cloned() {
+        item.properties.insert("registeredAt", last_seen);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +300,7 @@ mod tests {
             effective_from: 1_000,
             category,
             ttl_secs: ttl,
+            group: 0,
         }
     }
 
@@ -267,6 +312,7 @@ mod tests {
             "s",
             &config,
             vec![node("svc:a", ElementCategory::Service, None)],
+            1_000,
         );
         assert_eq!(dropped, 0);
         assert!(matches!(first[0], SourceChange::Insert { .. }));
@@ -274,6 +320,7 @@ mod tests {
             "s",
             &config,
             vec![node("svc:a", ElementCategory::Service, None)],
+            1_000,
         );
         assert!(matches!(second[0], SourceChange::Update { .. }));
     }
@@ -289,11 +336,13 @@ mod tests {
             "s",
             &config,
             vec![node("svc:a", ElementCategory::Service, None)],
+            1_000,
         );
         let (changes, dropped) = state.apply(
             "s",
             &config,
             vec![node("svc:b", ElementCategory::Service, None)],
+            1_000,
         );
         assert!(changes.is_empty());
         assert_eq!(dropped, 1);
@@ -305,11 +354,47 @@ mod tests {
         let config = OtelSourceConfig::default();
         let mut item = node("dep:a:b", ElementCategory::DependsOn, Some(1));
         item.labels = vec!["DEPENDS_ON".to_string()];
-        item.effective_from = 1_000;
-        let _ = state.apply("s", &config, vec![item]);
+        item.effective_from = 1;
+        let _ = state.apply("s", &config, vec![item], 1_000);
         assert!(state.expire("s", 1_500).is_empty());
         let expired = state.expire("s", 2_100);
         assert_eq!(expired.len(), 1);
         assert!(matches!(expired[0], SourceChange::Delete { .. }));
+    }
+
+    #[test]
+    fn late_event_time_does_not_expire_immediately() {
+        let mut state = LifecycleState::default();
+        let config = OtelSourceConfig::default();
+        let mut item = node("dep:a:b", ElementCategory::DependsOn, Some(5));
+        item.labels = vec!["DEPENDS_ON".to_string()];
+        item.effective_from = 1;
+        let received_at = 10_000;
+        let _ = state.apply("s", &config, vec![item], received_at);
+        assert!(state.expire("s", received_at + 1_000).is_empty());
+        let expired = state.expire("s", received_at + 5_000);
+        assert_eq!(expired.len(), 1);
+    }
+
+    #[test]
+    fn group_is_dropped_together_at_cap() {
+        let mut state = LifecycleState::default();
+        let config = OtelSourceConfig {
+            max_services: 1,
+            ..OtelSourceConfig::default()
+        };
+        let _ = state.apply(
+            "s",
+            &config,
+            vec![node("svc:a", ElementCategory::Service, None)],
+            1_000,
+        );
+        let mut service = node("svc:b", ElementCategory::Service, None);
+        let mut metric = node("metric:b", ElementCategory::Metric, None);
+        service.group = 7;
+        metric.group = 7;
+        let (changes, dropped) = state.apply("s", &config, vec![service, metric], 1_000);
+        assert!(changes.is_empty());
+        assert_eq!(dropped, 1);
     }
 }

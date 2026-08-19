@@ -252,14 +252,13 @@ async fn test_change_detection_with_client_harness() {
         .header("Content-Type", "application/x-protobuf")
         .body(body)
         .send()
-        .await;
-    if let Ok(response) = response {
-        assert!(
-            response.status().is_success(),
-            "HTTP OTLP rejected: {}",
-            response.status()
-        );
-    }
+        .await
+        .expect("HTTP OTLP request failed");
+    assert!(
+        response.status().is_success(),
+        "HTTP OTLP rejected: {}",
+        response.status()
+    );
 
     drasi.stop().await.unwrap();
 }

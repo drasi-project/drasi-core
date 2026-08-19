@@ -17,7 +17,7 @@ The source flattens Resource attributes onto `Service`. It does not emit Resourc
 | --- | --- | --- | --- | --- |
 | `REPORTS` | Service | Metric | `reports:{metricId}` | Upsert |
 | `HEARTBEAT` | Service | Heartbeat | `rel-hb:{serviceId}` | Upsert |
-| `DEPENDS_ON` | Service | Service | `dep:{from}:{to}` | Refresh + TTL delete |
-| `EMITS` | Service | LogEvent | `emits:{logId}` | Insert + TTL delete |
+| `DEPENDS_ON` | Service | Service | `dep:{from}:{to}` | Refresh + TTL delete (receipt time) |
+| `EMITS` | Service | LogEvent | `emits:{logId}` | Insert + TTL delete (receipt time) |
 
 Cross-source joins such as `RUNS` (Deployment.name → Service.name) and `GOVERNED_BY` (Service.name → policy) are query metadata, not emitted by this source.

@@ -78,6 +78,10 @@ fn default_reject_derived() -> bool {
     true
 }
 
+fn default_max_request_bytes() -> usize {
+    4 * 1024 * 1024
+}
+
 /// OpenTelemetry source configuration.
 ///
 /// Configures inbound OTLP listeners, admission filters, TTL, and optional WAL
@@ -109,8 +113,8 @@ pub struct OtelSourceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
 
-    /// Accepted metric names. Empty rejects every metric. `*` allows all;
-    /// `latency_*` / `*_p99` are glob patterns (`*` = any sequence).
+    /// Accepted metric names. Empty rejects every metric. `*` allows all.
+    /// Only `*` wildcards are supported (`latency_*`, `*_p99`); `?` and `**` are not.
     #[serde(default)]
     pub metric_allowlist: Vec<String>,
 
@@ -139,6 +143,7 @@ pub struct OtelSourceConfig {
     pub log_min_severity: String,
 
     /// If non-empty, only these log `event_name` values become LogEvent nodes.
+    /// Same `*` glob rules as `metric_allowlist`; `?` and `**` are not supported.
     #[serde(default)]
     pub log_event_name_allowlist: Vec<String>,
 
@@ -169,6 +174,10 @@ pub struct OtelSourceConfig {
     /// Drop records whose `drasi.source.origin` is `derived`.
     #[serde(default = "default_reject_derived")]
     pub reject_derived: bool,
+
+    /// Maximum decoded OTLP request size in bytes for gRPC and HTTP. Default: 4 MiB.
+    #[serde(default = "default_max_request_bytes")]
+    pub max_request_bytes: usize,
 
     /// Optional WAL durability for projected SourceChanges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,6 +214,7 @@ impl std::fmt::Debug for OtelSourceConfig {
             .field("max_dependencies", &self.max_dependencies)
             .field("max_log_events", &self.max_log_events)
             .field("reject_derived", &self.reject_derived)
+            .field("max_request_bytes", &self.max_request_bytes)
             .field("durability", &self.durability)
             .finish()
     }
@@ -234,6 +244,7 @@ impl Default for OtelSourceConfig {
             max_dependencies: default_max_dependencies(),
             max_log_events: default_max_log_events(),
             reject_derived: default_reject_derived(),
+            max_request_bytes: default_max_request_bytes(),
             durability: None,
         }
     }
@@ -267,6 +278,9 @@ impl OtelSourceConfig {
         }
         if self.dependency_ttl_secs == 0 {
             return Err(anyhow::anyhow!("dependency_ttl_secs cannot be 0"));
+        }
+        if self.max_request_bytes == 0 {
+            return Err(anyhow::anyhow!("max_request_bytes cannot be 0"));
         }
         match (&self.tls_cert_path, &self.tls_key_path) {
             (None, None) => {}

@@ -24,7 +24,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::Router;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use prost::Message;
 use tokio::sync::RwLock;
 use tonic::transport::server::TcpIncoming;
@@ -43,15 +43,15 @@ use crate::lifecycle::LifecycleState;
 use crate::mapping::{map_logs, map_metrics, map_traces};
 use crate::otlp::proto::collector::logs::v1::{
     logs_service_server::{LogsService, LogsServiceServer},
-    ExportLogsServiceRequest, ExportLogsServiceResponse,
+    ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse,
 };
 use crate::otlp::proto::collector::metrics::v1::{
     metrics_service_server::{MetricsService, MetricsServiceServer},
-    ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+    ExportMetricsPartialSuccess, ExportMetricsServiceRequest, ExportMetricsServiceResponse,
 };
 use crate::otlp::proto::collector::trace::v1::{
     trace_service_server::{TraceService, TraceServiceServer},
-    ExportTraceServiceRequest, ExportTraceServiceResponse,
+    ExportTracePartialSuccess, ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
 
 /// Shared runtime used by both transports and the TTL sweeper.
@@ -62,6 +62,7 @@ pub struct OtelRuntime {
     pub lifecycle: Arc<RwLock<LifecycleState>>,
     pub counters: Arc<OtelCounters>,
     pub wal: Option<Arc<dyn WalProvider>>,
+    pub last_persist: Arc<tokio::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 impl Clone for OtelRuntime {
@@ -73,105 +74,165 @@ impl Clone for OtelRuntime {
             lifecycle: self.lifecycle.clone(),
             counters: self.counters.clone(),
             wal: self.wal.clone(),
+            last_persist: self.last_persist.clone(),
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CommitStats {
+    pub rejected: u64,
+    pub dropped: u64,
+}
+
 impl OtelRuntime {
-    pub async fn handle_metrics(&self, request: ExportMetricsServiceRequest) -> anyhow::Result<()> {
+    pub async fn handle_metrics(
+        &self,
+        request: ExportMetricsServiceRequest,
+    ) -> anyhow::Result<CommitStats> {
         let now = now_millis();
         let mapped = map_metrics(&request, &self.config, now);
         self.commit(mapped, now).await
     }
 
-    pub async fn handle_traces(&self, request: ExportTraceServiceRequest) -> anyhow::Result<()> {
+    pub async fn handle_traces(
+        &self,
+        request: ExportTraceServiceRequest,
+    ) -> anyhow::Result<CommitStats> {
         let now = now_millis();
         let mapped = map_traces(&request, &self.config, now);
         self.commit(mapped, now).await
     }
 
-    pub async fn handle_logs(&self, request: ExportLogsServiceRequest) -> anyhow::Result<()> {
+    pub async fn handle_logs(
+        &self,
+        request: ExportLogsServiceRequest,
+    ) -> anyhow::Result<CommitStats> {
         let now = now_millis();
         let mapped = map_logs(&request, &self.config, now);
         self.commit(mapped, now).await
     }
 
-    async fn commit(&self, mapped: crate::mapping::MapOutcome, now: u64) -> anyhow::Result<()> {
+    async fn commit(
+        &self,
+        mapped: crate::mapping::MapOutcome,
+        now: u64,
+    ) -> anyhow::Result<CommitStats> {
         self.counters
             .rejected
             .fetch_add(mapped.rejected, Ordering::Relaxed);
-        if mapped.elements.is_empty() {
-            return Ok(());
-        }
-        let (changes, dropped) = {
-            let mut lifecycle = self.lifecycle.write().await;
-            lifecycle.apply(&self.source_id, &self.config, mapped.elements)
+        let stats = CommitStats {
+            rejected: mapped.rejected,
+            dropped: 0,
         };
+        if mapped.elements.is_empty() {
+            return Ok(stats);
+        }
+
+        let mut lifecycle = self.lifecycle.write().await;
+        let mut planned = lifecycle.clone();
+        let (changes, dropped) = planned.apply(&self.source_id, &self.config, mapped.elements, now);
         self.counters
             .dropped
             .fetch_add(dropped as u64, Ordering::Relaxed);
-        if !changes.is_empty() {
-            self.counters
-                .accepted
-                .fetch_add(mapped.accepted.max(1), Ordering::Relaxed);
-            self.emit(changes).await?;
-            self.persist_lifecycle().await;
+        let stats = CommitStats {
+            rejected: mapped.rejected,
+            dropped: dropped as u64,
+        };
+        if changes.is_empty() {
+            return Ok(stats);
         }
-        let _ = now;
-        Ok(())
+
+        let mut seqs = Vec::with_capacity(changes.len());
+        for change in &changes {
+            seqs.push(self.wal_append(change).await?);
+        }
+        *lifecycle = planned;
+        drop(lifecycle);
+
+        self.counters
+            .accepted
+            .fetch_add(mapped.accepted, Ordering::Relaxed);
+        for (change, seq) in changes.into_iter().zip(seqs) {
+            self.dispatch_change(change, seq).await?;
+        }
+        self.persist_lifecycle(false).await;
+        Ok(stats)
     }
 
     pub async fn expire_due(&self) -> anyhow::Result<()> {
         let now = now_millis();
-        let changes = {
-            let mut lifecycle = self.lifecycle.write().await;
-            lifecycle.expire(&self.source_id, now)
+        let mut lifecycle = self.lifecycle.write().await;
+        let mut planned = lifecycle.clone();
+        let changes = planned.expire(&self.source_id, now);
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let mut seqs = Vec::with_capacity(changes.len());
+        for change in &changes {
+            seqs.push(self.wal_append(change).await?);
+        }
+        *lifecycle = planned;
+        drop(lifecycle);
+        self.counters
+            .expired
+            .fetch_add(changes.len() as u64, Ordering::Relaxed);
+        for (change, seq) in changes.into_iter().zip(seqs) {
+            self.dispatch_change(change, seq).await?;
+        }
+        self.persist_lifecycle(true).await;
+        Ok(())
+    }
+
+    async fn wal_append(&self, change: &SourceChange) -> anyhow::Result<Option<u64>> {
+        let Some(wal) = &self.wal else {
+            return Ok(None);
         };
-        if !changes.is_empty() {
-            self.counters
-                .expired
-                .fetch_add(changes.len() as u64, Ordering::Relaxed);
-            self.emit(changes).await?;
-            self.persist_lifecycle().await;
-        }
-        Ok(())
-    }
-
-    async fn emit(&self, changes: Vec<SourceChange>) -> anyhow::Result<()> {
-        for change in changes {
-            let wal_seq = if let Some(wal) = &self.wal {
-                match wal.append(&self.source_id, &change).await {
-                    Ok(seq) => Some(seq),
-                    Err(WalError::CapacityExhausted(msg)) => {
-                        return Err(anyhow::anyhow!("WAL capacity exhausted: {msg}"));
-                    }
-                    Err(e) => return Err(anyhow::anyhow!("WAL append failed: {e}")),
-                }
-            } else {
-                None
-            };
-
-            let mut wrapper = SourceEventWrapper::new(
-                self.source_id.clone(),
-                SourceEvent::Change(change),
-                chrono::Utc::now(),
-            );
-            if let Some(seq) = wal_seq {
-                wrapper.sequence = Some(seq);
-                wrapper.set_source_position(bytes::Bytes::copy_from_slice(&seq.to_be_bytes()));
+        match wal.append(&self.source_id, change).await {
+            Ok(seq) => Ok(Some(seq)),
+            Err(WalError::CapacityExhausted(msg)) => {
+                Err(anyhow::anyhow!("WAL capacity exhausted: {msg}"))
             }
-            self.base
-                .dispatch_event(wrapper)
-                .await
-                .context("dispatch projected OTLP change")?;
+            Err(e) => Err(anyhow::anyhow!("WAL append failed: {e}")),
         }
-        Ok(())
     }
 
-    async fn persist_lifecycle(&self) {
+    async fn dispatch_change(
+        &self,
+        change: SourceChange,
+        wal_seq: Option<u64>,
+    ) -> anyhow::Result<()> {
+        let mut wrapper = SourceEventWrapper::new(
+            self.source_id.clone(),
+            SourceEvent::Change(change),
+            chrono::Utc::now(),
+        );
+        if let Some(seq) = wal_seq {
+            wrapper.sequence = Some(seq);
+            wrapper.set_source_position(bytes::Bytes::copy_from_slice(&seq.to_be_bytes()));
+        }
+        self.base
+            .dispatch_event(wrapper)
+            .await
+            .context("dispatch projected OTLP change")
+    }
+
+    pub async fn persist_lifecycle(&self, force: bool) {
         let Some(store) = self.base.state_store().await else {
             return;
         };
+        {
+            let mut last = self.last_persist.lock().await;
+            let now = std::time::Instant::now();
+            if !force {
+                if let Some(prev) = *last {
+                    if now.duration_since(prev) < Duration::from_secs(1) {
+                        return;
+                    }
+                }
+            }
+            *last = Some(now);
+        }
         let bytes = {
             let lifecycle = self.lifecycle.read().await;
             match lifecycle.to_bytes() {
@@ -187,12 +248,12 @@ impl OtelRuntime {
         }
     }
 
-    pub async fn expected_auth(&self) -> Option<ExpectedAuth> {
+    pub async fn expected_auth(&self) -> Result<Option<ExpectedAuth>, Status> {
         match expected_credentials(self.base.identity_provider().await, &self.config).await {
-            Ok(value) => value,
+            Ok(value) => Ok(value),
             Err(e) => {
                 warn!("[{}] identity provider error: {e}", self.source_id);
-                None
+                Err(Status::unauthenticated("identity provider failed"))
             }
         }
     }
@@ -209,15 +270,14 @@ impl MetricsService for OtlpGrpcService {
         &self,
         request: Request<ExportMetricsServiceRequest>,
     ) -> Result<Response<ExportMetricsServiceResponse>, Status> {
-        let auth = self.runtime.expected_auth().await;
+        let auth = self.runtime.expected_auth().await?;
         authorize_grpc(&request, auth.as_ref())?;
-        self.runtime
+        let stats = self
+            .runtime
             .handle_metrics(request.into_inner())
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        Ok(Response::new(ExportMetricsServiceResponse {
-            partial_success: None,
-        }))
+        Ok(Response::new(metrics_partial(stats)))
     }
 }
 
@@ -227,15 +287,14 @@ impl TraceService for OtlpGrpcService {
         &self,
         request: Request<ExportTraceServiceRequest>,
     ) -> Result<Response<ExportTraceServiceResponse>, Status> {
-        let auth = self.runtime.expected_auth().await;
+        let auth = self.runtime.expected_auth().await?;
         authorize_grpc(&request, auth.as_ref())?;
-        self.runtime
+        let stats = self
+            .runtime
             .handle_traces(request.into_inner())
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        Ok(Response::new(ExportTraceServiceResponse {
-            partial_success: None,
-        }))
+        Ok(Response::new(traces_partial(stats)))
     }
 }
 
@@ -245,15 +304,14 @@ impl LogsService for OtlpGrpcService {
         &self,
         request: Request<ExportLogsServiceRequest>,
     ) -> Result<Response<ExportLogsServiceResponse>, Status> {
-        let auth = self.runtime.expected_auth().await;
+        let auth = self.runtime.expected_auth().await?;
         authorize_grpc(&request, auth.as_ref())?;
-        self.runtime
+        let stats = self
+            .runtime
             .handle_logs(request.into_inner())
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        Ok(Response::new(ExportLogsServiceResponse {
-            partial_success: None,
-        }))
+        Ok(Response::new(logs_partial(stats)))
     }
 }
 
@@ -302,6 +360,7 @@ pub async fn serve(
             runtime: runtime.clone(),
         };
         let mut builder = Server::builder();
+        let max_request_bytes = runtime.config.max_request_bytes;
         if let (Some(cert), Some(key)) = (
             runtime.config.tls_cert_path.as_ref(),
             runtime.config.tls_key_path.as_ref(),
@@ -328,17 +387,23 @@ pub async fn serve(
         grpc_task = Some((
             stop_tx,
             tokio::spawn(async move {
-                if let Err(e) = builder
-                    .add_service(MetricsServiceServer::new(svc.clone()))
-                    .add_service(TraceServiceServer::new(svc.clone()))
-                    .add_service(LogsServiceServer::new(svc))
+                builder
+                    .add_service(
+                        MetricsServiceServer::new(svc.clone())
+                            .max_decoding_message_size(max_request_bytes),
+                    )
+                    .add_service(
+                        TraceServiceServer::new(svc.clone())
+                            .max_decoding_message_size(max_request_bytes),
+                    )
+                    .add_service(
+                        LogsServiceServer::new(svc).max_decoding_message_size(max_request_bytes),
+                    )
                     .serve_with_incoming_shutdown(incoming, async move {
                         let _ = stop_rx.await;
                     })
                     .await
-                {
-                    error!("OTLP/gRPC server error: {e}");
-                }
+                    .map_err(|e| anyhow::anyhow!("OTLP/gRPC server error: {e}"))
             }),
         ));
     }
@@ -356,40 +421,68 @@ pub async fn serve(
         http_task = Some((
             stop_tx,
             tokio::spawn(async move {
-                if let Err(e) = axum::serve(listener, app)
+                axum::serve(listener, app)
                     .with_graceful_shutdown(async move {
                         let _ = stop_rx.await;
                     })
                     .await
-                {
-                    error!("OTLP/HTTP server error: {e}");
-                }
+                    .map_err(|e| anyhow::anyhow!("OTLP/HTTP server error: {e}"))
             }),
         ));
     }
 
     let sweeper_runtime = runtime.clone();
     let mut interval = tokio::time::interval(Duration::from_secs(1));
-    loop {
+    let unexpected = loop {
         tokio::select! {
-            _ = &mut shutdown => break,
+            _ = &mut shutdown => break None,
+            result = wait_server_task(&mut grpc_task) => {
+                break Some(result.context("OTLP/gRPC server exited unexpectedly"));
+            }
+            result = wait_server_task(&mut http_task) => {
+                break Some(result.context("OTLP/HTTP server exited unexpectedly"));
+            }
             _ = interval.tick() => {
                 if let Err(e) = sweeper_runtime.expire_due().await {
                     debug!("[{}] TTL sweep failed: {e}", sweeper_runtime.source_id);
                 }
             }
         }
-    }
+    };
 
-    if let Some((tx, handle)) = grpc_task {
+    if let Some((tx, handle)) = grpc_task.take() {
         let _ = tx.send(());
         let _ = handle.await;
     }
-    if let Some((tx, handle)) = http_task {
+    if let Some((tx, handle)) = http_task.take() {
         let _ = tx.send(());
         let _ = handle.await;
     }
-    Ok(())
+    match unexpected {
+        Some(Err(e)) => Err(e),
+        Some(Ok(())) => Err(anyhow::anyhow!(
+            "OTLP listener exited while the source was still running"
+        )),
+        None => Ok(()),
+    }
+}
+
+async fn wait_server_task(
+    task: &mut Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<anyhow::Result<()>>,
+    )>,
+) -> anyhow::Result<()> {
+    let Some((_, handle)) = task.as_mut() else {
+        std::future::pending::<()>().await;
+        return Ok(());
+    };
+    // Await in place so the shutdown sender is not dropped (that would stop the server).
+    match handle.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(anyhow::anyhow!("OTLP server task panicked: {e}")),
+    }
 }
 
 async fn http_metrics(
@@ -397,14 +490,7 @@ async fn http_metrics(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    if !authorize_http(
-        headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok()),
-        runtime.expected_auth().await.as_ref(),
-    ) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    authorize_http_request(&runtime, &headers, &body).await?;
     let request =
         ExportMetricsServiceRequest::decode(body.as_ref()).map_err(|_| StatusCode::BAD_REQUEST)?;
     runtime
@@ -419,14 +505,7 @@ async fn http_traces(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    if !authorize_http(
-        headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok()),
-        runtime.expected_auth().await.as_ref(),
-    ) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    authorize_http_request(&runtime, &headers, &body).await?;
     let request =
         ExportTraceServiceRequest::decode(body.as_ref()).map_err(|_| StatusCode::BAD_REQUEST)?;
     runtime
@@ -441,14 +520,7 @@ async fn http_logs(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    if !authorize_http(
-        headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok()),
-        runtime.expected_auth().await.as_ref(),
-    ) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    authorize_http_request(&runtime, &headers, &body).await?;
     let request =
         ExportLogsServiceRequest::decode(body.as_ref()).map_err(|_| StatusCode::BAD_REQUEST)?;
     runtime
@@ -456,6 +528,81 @@ async fn http_logs(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
+}
+
+async fn authorize_http_request(
+    runtime: &OtelRuntime,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<(), StatusCode> {
+    if body.len() > runtime.config.max_request_bytes {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let auth = runtime
+        .expected_auth()
+        .await
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    if !authorize_http(
+        headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok()),
+        auth.as_ref(),
+    ) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(())
+}
+
+fn metrics_partial(stats: CommitStats) -> ExportMetricsServiceResponse {
+    let rejected = rejected_count(stats);
+    if rejected == 0 {
+        return ExportMetricsServiceResponse {
+            partial_success: None,
+        };
+    }
+    ExportMetricsServiceResponse {
+        partial_success: Some(ExportMetricsPartialSuccess {
+            rejected_data_points: rejected,
+            error_message: "some metrics were rejected or dropped".to_string(),
+        }),
+    }
+}
+
+fn traces_partial(stats: CommitStats) -> ExportTraceServiceResponse {
+    let rejected = rejected_count(stats);
+    if rejected == 0 {
+        return ExportTraceServiceResponse {
+            partial_success: None,
+        };
+    }
+    ExportTraceServiceResponse {
+        partial_success: Some(ExportTracePartialSuccess {
+            rejected_spans: rejected,
+            error_message: "some spans were rejected or dropped".to_string(),
+        }),
+    }
+}
+
+fn logs_partial(stats: CommitStats) -> ExportLogsServiceResponse {
+    let rejected = rejected_count(stats);
+    if rejected == 0 {
+        return ExportLogsServiceResponse {
+            partial_success: None,
+        };
+    }
+    ExportLogsServiceResponse {
+        partial_success: Some(ExportLogsPartialSuccess {
+            rejected_log_records: rejected,
+            error_message: "some log records were rejected or dropped".to_string(),
+        }),
+    }
+}
+
+fn rejected_count(stats: CommitStats) -> i64 {
+    stats
+        .rejected
+        .saturating_add(stats.dropped)
+        .min(i64::MAX as u64) as i64
 }
 
 fn now_millis() -> u64 {

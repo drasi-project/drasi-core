@@ -65,6 +65,8 @@ pub struct OtelSourceConfigDto {
     pub max_log_events: ConfigValue<usize>,
     #[serde(default = "default_reject_derived")]
     pub reject_derived: ConfigValue<bool>,
+    #[serde(default = "default_max_request_bytes")]
+    pub max_request_bytes: ConfigValue<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durability: Option<drasi_lib::DurabilityConfig>,
 }
@@ -111,6 +113,10 @@ fn default_max_log_events() -> ConfigValue<usize> {
 
 fn default_reject_derived() -> ConfigValue<bool> {
     ConfigValue::Static(true)
+}
+
+fn default_max_request_bytes() -> ConfigValue<usize> {
+    ConfigValue::Static(4 * 1024 * 1024)
 }
 
 #[derive(OpenApi)]
@@ -176,6 +182,7 @@ impl SourcePluginDescriptor for OtelSourceDescriptor {
             max_dependencies: mapper.resolve_typed(&dto.max_dependencies).await?,
             max_log_events: mapper.resolve_typed(&dto.max_log_events).await?,
             reject_derived: mapper.resolve_typed(&dto.reject_derived).await?,
+            max_request_bytes: mapper.resolve_typed(&dto.max_request_bytes).await?,
             durability: dto.durability.clone(),
         };
 

@@ -18,10 +18,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         protoc_bin_vendored::protoc_bin_path().expect("vendored protoc"),
     );
     println!("cargo:rerun-if-changed=proto");
+    // Proto comments include JSON examples that rustdoc tries to compile as doctests.
+    let mut prost_config = prost_build::Config::new();
+    prost_config.disable_comments(["."]);
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile(
+        .compile_with_config(
+            prost_config,
             &[
                 "proto/opentelemetry/proto/collector/trace/v1/trace_service.proto",
                 "proto/opentelemetry/proto/collector/metrics/v1/metrics_service.proto",

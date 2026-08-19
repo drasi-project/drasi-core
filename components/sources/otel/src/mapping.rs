@@ -14,9 +14,6 @@
 
 //! Project allowlisted OTLP records into bounded graph elements.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
 use drasi_core::models::{ElementPropertyMap, ElementValue};
 use ordered_float::OrderedFloat;
 
@@ -56,13 +53,14 @@ pub fn map_metrics(
     received_at_millis: u64,
 ) -> MapOutcome {
     let mut out = MapOutcome::default();
+    let mut next_group = 0u32;
     for rm in &request.resource_metrics {
         if reject_derived(config, rm.resource.as_ref(), &[]) {
-            out.rejected += 1;
+            out.rejected += metric_point_count(rm).max(1);
             continue;
         }
         let Some(service) = service_from_resource(rm.resource.as_ref()) else {
-            out.rejected += 1;
+            out.rejected += metric_point_count(rm).max(1);
             continue;
         };
         for sm in &rm.scope_metrics {
@@ -70,6 +68,8 @@ pub fn map_metrics(
                 match metric.data.as_ref() {
                     Some(metric::Data::Gauge(gauge)) => {
                         for dp in &gauge.data_points {
+                            let group = next_group;
+                            next_group += 1;
                             project_number_metric(
                                 &mut out,
                                 config,
@@ -81,11 +81,14 @@ pub fn map_metrics(
                                 dp.time_unix_nano,
                                 &dp.attributes,
                                 received_at_millis,
+                                group,
                             );
                         }
                     }
                     Some(metric::Data::Sum(sum)) => {
                         for dp in &sum.data_points {
+                            let group = next_group;
+                            next_group += 1;
                             project_number_metric(
                                 &mut out,
                                 config,
@@ -97,6 +100,7 @@ pub fn map_metrics(
                                 dp.time_unix_nano,
                                 &dp.attributes,
                                 received_at_millis,
+                                group,
                             );
                         }
                     }
@@ -117,13 +121,14 @@ pub fn map_traces(
 ) -> MapOutcome {
     let mut out = MapOutcome::default();
     let allowed_kinds = allowed_span_kinds(config);
+    let mut next_group = 0u32;
     for rs in &request.resource_spans {
         if reject_derived(config, rs.resource.as_ref(), &[]) {
-            out.rejected += 1;
+            out.rejected += span_count(rs).max(1);
             continue;
         }
         let Some(caller) = service_from_resource(rs.resource.as_ref()) else {
-            out.rejected += 1;
+            out.rejected += span_count(rs).max(1);
             continue;
         };
         for ss in &rs.scope_spans {
@@ -140,10 +145,18 @@ pub fn map_traces(
                     out.rejected += 1;
                     continue;
                 };
-                let dest = ServiceIdentity::from_name(&dest_name);
+                let dest = ServiceIdentity::from_destination(&dest_name, &caller);
                 let observed = effective_time(span.start_time_unix_nano, received_at_millis);
-                push_service(&mut out.elements, &caller, rs.resource.as_ref(), observed);
-                push_service(&mut out.elements, &dest, None, observed);
+                let group = next_group;
+                next_group += 1;
+                push_service(
+                    &mut out.elements,
+                    &caller,
+                    rs.resource.as_ref(),
+                    observed,
+                    group,
+                );
+                push_service(&mut out.elements, &dest, None, observed, group);
                 let mut props = ElementPropertyMap::new();
                 insert_string(&mut props, "lastSeen", &millis_iso(observed));
                 out.elements.push(ProjectedElement {
@@ -157,6 +170,7 @@ pub fn map_traces(
                     effective_from: observed,
                     category: ElementCategory::DependsOn,
                     ttl_secs: Some(config.dependency_ttl_secs),
+                    group,
                 });
                 out.accepted += 1;
             }
@@ -172,13 +186,14 @@ pub fn map_logs(
 ) -> MapOutcome {
     let mut out = MapOutcome::default();
     let min_severity = parse_min_severity(&config.log_min_severity);
+    let mut next_group = 0u32;
     for rl in &request.resource_logs {
         if reject_derived(config, rl.resource.as_ref(), &[]) {
-            out.rejected += 1;
+            out.rejected += log_count(rl).max(1);
             continue;
         }
         let Some(service) = service_from_resource(rl.resource.as_ref()) else {
-            out.rejected += 1;
+            out.rejected += log_count(rl).max(1);
             continue;
         };
         for sl in &rl.scope_logs {
@@ -188,13 +203,21 @@ pub fn map_logs(
                     continue;
                 }
                 let observed = effective_time(rec.time_unix_nano, received_at_millis);
+                let group = next_group;
+                next_group += 1;
                 let is_heartbeat = config
                     .heartbeat_event_name
                     .as_ref()
                     .is_some_and(|name| rec.event_name == *name);
                 if is_heartbeat {
-                    push_service(&mut out.elements, &service, rl.resource.as_ref(), observed);
-                    push_heartbeat(&mut out.elements, &service, observed);
+                    push_service(
+                        &mut out.elements,
+                        &service,
+                        rl.resource.as_ref(),
+                        observed,
+                        group,
+                    );
+                    push_heartbeat(&mut out.elements, &service, observed, group);
                     out.accepted += 1;
                 }
 
@@ -220,7 +243,13 @@ pub fn map_logs(
                     rec.event_name.clone()
                 };
                 let log_id = format!("log:{}:{}:{}", service.id, key_part, rec.time_unix_nano);
-                push_service(&mut out.elements, &service, rl.resource.as_ref(), observed);
+                push_service(
+                    &mut out.elements,
+                    &service,
+                    rl.resource.as_ref(),
+                    observed,
+                    group,
+                );
                 let mut props = ElementPropertyMap::new();
                 insert_string(&mut props, "service", &service.name);
                 insert_string(&mut props, "severity", &rec.severity_text);
@@ -237,6 +266,7 @@ pub fn map_logs(
                     effective_from: observed,
                     category: ElementCategory::LogEvent,
                     ttl_secs: Some(config.log_event_ttl_secs),
+                    group,
                 });
                 out.elements.push(ProjectedElement {
                     id: format!("emits:{log_id}"),
@@ -249,6 +279,7 @@ pub fn map_logs(
                     effective_from: observed,
                     category: ElementCategory::Emits,
                     ttl_secs: Some(config.log_event_ttl_secs),
+                    group,
                 });
                 out.accepted += 1;
             }
@@ -269,6 +300,7 @@ fn project_number_metric(
     time_unix_nano: u64,
     attributes: &[KeyValue],
     received_at_millis: u64,
+    group: u32,
 ) {
     if reject_derived(config, None, attributes) {
         out.rejected += 1;
@@ -284,8 +316,8 @@ fn project_number_metric(
         .as_ref()
         .is_some_and(|hb| hb == name);
     if is_heartbeat {
-        push_service(&mut out.elements, service, resource, observed);
-        push_heartbeat(&mut out.elements, service, observed);
+        push_service(&mut out.elements, service, resource, observed, group);
+        push_heartbeat(&mut out.elements, service, observed, group);
         out.accepted += 1;
     }
     if !allowlist_matches(&config.metric_allowlist, name) {
@@ -297,7 +329,7 @@ fn project_number_metric(
 
     let identity_suffix = metric_identity_suffix(config, attributes);
     let metric_id = format!("metric:{}:{name}{identity_suffix}", service.id);
-    push_service(&mut out.elements, service, resource, observed);
+    push_service(&mut out.elements, service, resource, observed, group);
     let mut props = ElementPropertyMap::new();
     insert_string(&mut props, "name", name);
     insert_string(&mut props, "unit", unit);
@@ -312,6 +344,7 @@ fn project_number_metric(
         effective_from: observed,
         category: ElementCategory::Metric,
         ttl_secs: None,
+        group,
     });
     out.elements.push(ProjectedElement {
         id: format!("reports:{metric_id}"),
@@ -324,6 +357,7 @@ fn project_number_metric(
         effective_from: observed,
         category: ElementCategory::Reports,
         ttl_secs: None,
+        group,
     });
     out.accepted += 1;
 }
@@ -346,6 +380,33 @@ impl ServiceIdentity {
             environment: None,
             instance_id: None,
         }
+    }
+
+    fn from_destination(name: &str, caller: &ServiceIdentity) -> Self {
+        if name.contains('/') {
+            let (namespace, short) = name.split_once('/').unwrap_or(("", name));
+            return Self {
+                id: format!("svc:{name}"),
+                name: short.to_string(),
+                namespace: if namespace.is_empty() {
+                    None
+                } else {
+                    Some(namespace.to_string())
+                },
+                environment: None,
+                instance_id: None,
+            };
+        }
+        if let Some(ns) = &caller.namespace {
+            return Self {
+                id: format!("svc:{ns}/{name}"),
+                name: name.to_string(),
+                namespace: Some(ns.clone()),
+                environment: None,
+                instance_id: None,
+            };
+        }
+        Self::from_name(name)
     }
 }
 
@@ -372,6 +433,7 @@ fn push_service(
     service: &ServiceIdentity,
     resource: Option<&Resource>,
     observed: u64,
+    group: u32,
 ) {
     if elements.iter().any(|e| e.id == service.id) {
         return;
@@ -392,7 +454,6 @@ fn push_service(
             insert_string(&mut props, "version", &version);
         }
     }
-    insert_string(&mut props, "registeredAt", &millis_iso(observed));
     insert_string(&mut props, "lastSeen", &millis_iso(observed));
     elements.push(ProjectedElement {
         id: service.id.clone(),
@@ -402,10 +463,16 @@ fn push_service(
         effective_from: observed,
         category: ElementCategory::Service,
         ttl_secs: None,
+        group,
     });
 }
 
-fn push_heartbeat(elements: &mut Vec<ProjectedElement>, service: &ServiceIdentity, observed: u64) {
+fn push_heartbeat(
+    elements: &mut Vec<ProjectedElement>,
+    service: &ServiceIdentity,
+    observed: u64,
+    group: u32,
+) {
     let hb_id = format!("hb:{}", service.id);
     let mut props = ElementPropertyMap::new();
     insert_string(&mut props, "lastSeen", &millis_iso(observed));
@@ -417,6 +484,7 @@ fn push_heartbeat(elements: &mut Vec<ProjectedElement>, service: &ServiceIdentit
         effective_from: observed,
         category: ElementCategory::Heartbeat,
         ttl_secs: None,
+        group,
     });
     elements.push(ProjectedElement {
         id: format!("rel-hb:{}", service.id),
@@ -429,6 +497,7 @@ fn push_heartbeat(elements: &mut Vec<ProjectedElement>, service: &ServiceIdentit
         effective_from: observed,
         category: ElementCategory::HeartbeatRel,
         ttl_secs: None,
+        group,
     });
 }
 
@@ -539,9 +608,38 @@ fn millis_iso(millis: u64) -> String {
 }
 
 fn hash_text(text: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    text.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn metric_point_count(rm: &crate::otlp::proto::metrics::v1::ResourceMetrics) -> u64 {
+    rm.scope_metrics
+        .iter()
+        .flat_map(|sm| sm.metrics.iter())
+        .map(|metric| match metric.data.as_ref() {
+            Some(metric::Data::Gauge(g)) => g.data_points.len(),
+            Some(metric::Data::Sum(s)) => s.data_points.len(),
+            _ => 1,
+        })
+        .sum::<usize>() as u64
+}
+
+fn span_count(rs: &crate::otlp::proto::trace::v1::ResourceSpans) -> u64 {
+    rs.scope_spans
+        .iter()
+        .map(|ss| ss.spans.len())
+        .sum::<usize>() as u64
+}
+
+fn log_count(rl: &crate::otlp::proto::logs::v1::ResourceLogs) -> u64 {
+    rl.scope_logs
+        .iter()
+        .map(|sl| sl.log_records.len())
+        .sum::<usize>() as u64
 }
 
 /// `*` matches any sequence. Empty allowlist matches nothing.
@@ -767,6 +865,52 @@ mod tests {
             .elements
             .iter()
             .any(|e| e.id == "dep:svc:checkout:svc:payments"));
+    }
+
+    #[test]
+    fn namespaced_caller_prefixes_bare_destination() {
+        let mut resource = checkout_resource();
+        resource.attributes.push(kv("service.namespace", "shop"));
+        let request = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(resource),
+                scope_spans: vec![ScopeSpans {
+                    scope: None,
+                    spans: vec![Span {
+                        trace_id: vec![1; 16],
+                        span_id: vec![2; 8],
+                        trace_state: String::new(),
+                        parent_span_id: vec![],
+                        flags: 0,
+                        name: "call".to_string(),
+                        kind: span::SpanKind::Client as i32,
+                        start_time_unix_nano: 1_713_456_789_000_000_000,
+                        end_time_unix_nano: 0,
+                        attributes: vec![kv("peer.service", "payments")],
+                        dropped_attributes_count: 0,
+                        events: vec![],
+                        dropped_events_count: 0,
+                        links: vec![],
+                        dropped_links_count: 0,
+                        status: None,
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+        let out = map_traces(&request, &OtelSourceConfig::default(), 2_000);
+        assert!(out
+            .elements
+            .iter()
+            .any(|e| e.id == "dep:svc:shop/checkout:svc:shop/payments"));
+        assert!(out.elements.iter().any(|e| e.id == "svc:shop/payments"));
+    }
+
+    #[test]
+    fn log_body_hash_is_stable() {
+        assert_eq!(hash_text("payment refused"), hash_text("payment refused"));
+        assert_ne!(hash_text("payment refused"), hash_text("payment accepted"));
     }
 
     fn gauge_named(name: &str) -> ExportMetricsServiceRequest {

@@ -16,15 +16,16 @@ Receives OpenTelemetry Protocol (OTLP) data and projects an allowlisted subset i
 | `httpBind` | unset | Optional OTLP/HTTP protobuf listen address (`/v1/traces`, `/v1/metrics`, `/v1/logs`) |
 | `tlsCertPath` / `tlsKeyPath` | unset | TLS. Unset is the documented local-demo plaintext exception. |
 | `authToken` | unset | Static bearer token. An identity provider Token/Basic credential wins if set. |
-| `metricAllowlist` | `[]` | Accepted metric names. Empty rejects all. `*` allows all. Globs like `latency_*` work. |
+| `metricAllowlist` | `[]` | Accepted metric names. Empty rejects all. `*` allows all. Only `*` globs (`latency_*`, `*_p99`); `?` and `**` are not supported. |
 | `destinationAttributes` | `["peer.service"]` | Client-span attributes used as the callee service |
 | `heartbeatMetric` | unset | Metric name that refreshes `Heartbeat.lastSeen` |
-| `dependencyTtlSecs` | `300` | `DEPENDS_ON` expiry unless refreshed |
-| `logEventTtlSecs` | `60` | `LogEvent` expiry |
+| `dependencyTtlSecs` | `300` | `DEPENDS_ON` expiry unless refreshed. TTL is measured from **receipt time**, not OTLP event time. |
+| `logEventTtlSecs` | `60` | `LogEvent` expiry from receipt time |
 | `rejectDerived` | `true` | Drop `drasi.source.origin=derived` |
+| `maxRequestBytes` | `4194304` (4 MiB) | Maximum decoded OTLP request size for gRPC and HTTP |
 | `durability` | off | Optional WAL replay of **projected** changes |
 
-OTLP timestamps are nanoseconds and are converted to millisecond `effective_from` values.
+OTLP timestamps are nanoseconds and are converted to millisecond `effective_from` values. TTL expiry uses the wall-clock time the export was received so late Collector batches are not deleted immediately.
 
 ## Data mapping
 

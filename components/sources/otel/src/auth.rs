@@ -99,10 +99,12 @@ pub fn authorize_http(header: Option<&str>, expected: Option<&ExpectedAuth>) -> 
 fn header_matches(header: &str, expected: &ExpectedAuth) -> bool {
     match expected {
         ExpectedAuth::Bearer(token) => {
-            let value = header
+            let Some(value) = header
                 .strip_prefix("Bearer ")
                 .or_else(|| header.strip_prefix("bearer "))
-                .unwrap_or(header);
+            else {
+                return false;
+            };
             constant_time_eq(value.as_bytes(), token.as_bytes())
         }
         ExpectedAuth::Basic { username, password } => {
@@ -141,5 +143,11 @@ mod tests {
     fn debug_redacts_secrets() {
         let token = ExpectedAuth::Bearer("super-s3cret".to_string());
         assert!(!format!("{token:?}").contains("super-s3cret"));
+    }
+
+    #[test]
+    fn bearer_rejects_token_without_prefix() {
+        let expected = ExpectedAuth::Bearer("s3cret".to_string());
+        assert!(!header_matches("s3cret", &expected));
     }
 }

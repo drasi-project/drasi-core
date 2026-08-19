@@ -12,7 +12,7 @@ This example starts `drasi-source-otel` on `127.0.0.1:4317` and logs query resul
 
 | Script | Purpose |
 | --- | --- |
-| `setup.sh` | Build the example (60s retry) |
+| `setup.sh` | Build the example (up to 60 attempts, 2s apart) |
 | `quickstart.sh` | Build and run the listener |
 | `diagnose.sh` | Check that port 4317 is open |
 | `test-updates.sh` | Send CREATE/UPDATE gauge and a client span |
