@@ -14,7 +14,7 @@
 
 use crate::client::GitHubGraphQLClient;
 use crate::GitHubWorkGraphBootstrapProvider;
-use drasi_core::models::{Element, SourceChange};
+use drasi_core::models::{Element, ElementValue, SourceChange};
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use drasi_lib::channels::BootstrapEvent;
 use drasi_source_github_workgraph::config::TaskIssueType;
@@ -289,6 +289,18 @@ fn id(event: &BootstrapEvent) -> &str {
     &event.change.get_reference().element_id
 }
 
+fn node_property<'a>(events: &'a [BootstrapEvent], node_id: &str, key: &str) -> &'a ElementValue {
+    events
+        .iter()
+        .find_map(|event| match &event.change {
+            SourceChange::Insert {
+                element: Element::Node { properties, .. },
+            } if id(event) == node_id => properties.get(key),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing {node_id}.{key}"))
+}
+
 #[tokio::test]
 async fn snapshots_generic_open_and_open_closed_tasks_with_parents_and_comments() {
     let server = MockServer::start().await;
@@ -311,6 +323,34 @@ async fn snapshots_generic_open_and_open_closed_tasks_with_parents_and_comments(
     assert!(events
         .iter()
         .any(|event| id(event) == "I_generic" && label(event) == "GitHubIssue"));
+    assert_eq!(
+        node_property(&events, "I_generic", "statusLabels"),
+        &ElementValue::from(&json!([]))
+    );
+    assert_eq!(
+        node_property(&events, "I_generic", "workgraphLabels"),
+        &ElementValue::from(&json!([]))
+    );
+    assert_eq!(
+        node_property(&events, "I_generic", "state"),
+        &ElementValue::from(&json!("open"))
+    );
+    assert_eq!(
+        node_property(&events, "I_generic", "stateReason"),
+        &ElementValue::Null
+    );
+    assert_eq!(
+        node_property(&events, "I_task_open", "state"),
+        &ElementValue::from(&json!("open"))
+    );
+    assert_eq!(
+        node_property(&events, "I_task_closed", "state"),
+        &ElementValue::from(&json!("closed"))
+    );
+    assert_eq!(
+        node_property(&events, "I_task_closed", "stateReason"),
+        &ElementValue::from(&json!("completed"))
+    );
     assert!(events
         .iter()
         .any(|event| id(event) == "I_parent" && label(event) == "GitHubIssue"));

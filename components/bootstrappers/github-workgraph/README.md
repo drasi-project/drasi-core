@@ -27,6 +27,7 @@ use identical:
   `WorkGraphTaskResultAcceptance`, and `WorkGraphError` parsing;
 - node and relation IDs/directions;
 - generic open-only and task open/closed behavior;
+- ordered `statusLabels`/`workgraphLabels` arrays and lowercase issue/task state;
 - repository allowlist decisions; and
 - strict task and specialized-comment wire formats.
 

@@ -345,6 +345,26 @@ fn property<'a>(changes: &'a [SourceChange], node_label: &str, key: &str) -> &'a
         .unwrap_or_else(|| panic!("missing {node_label}.{key}"))
 }
 
+fn has_property(changes: &[SourceChange], node_label: &str, key: &str) -> bool {
+    changes.iter().any(|change| match change {
+        SourceChange::Insert {
+            element:
+                Element::Node {
+                    metadata,
+                    properties,
+                },
+        }
+        | SourceChange::Update {
+            element:
+                Element::Node {
+                    metadata,
+                    properties,
+                },
+        } if metadata.labels[0].as_ref() == node_label => properties.get(key).is_some(),
+        _ => false,
+    })
+}
+
 #[test]
 fn task_envelopes_accept_only_strict_work_definitions() {
     for body in [VALIDATION_TASK, REQUEST_INFO_TASK] {
@@ -440,11 +460,101 @@ fn typed_issue_emits_task_not_github_issue() {
 }
 
 #[test]
-fn task_state_is_retained_on_close_and_reopen() {
-    let closed = convert(
-        "issues",
-        &issue_event("closed", issue("I_task", VALIDATION_TASK, true, "closed")),
+fn generic_issue_preserves_labels_and_projects_ordered_workgraph_namespaces() {
+    let mut item = issue("I_generic", "ordinary", false, "OpEn");
+    item["labels"] = json!([
+        {"name":"status:New","node_id":"L_1"},
+        {"name":"ordinary","node_id":"L_2"},
+        {"name":"workgraph:ignore","node_id":"L_3"},
+        {"name":"Status:not-matched","node_id":"L_4"},
+        {"name":"status:awaiting-Triage","node_id":"L_5"},
+        {"name":"workgraph:Error","node_id":"L_6"}
+    ]);
+    let changes = convert("issues", &issue_event("opened", item));
+
+    assert_eq!(
+        property(&changes, "GitHubIssue", "labels"),
+        &ElementValue::from(&json!([
+            "status:New",
+            "ordinary",
+            "workgraph:ignore",
+            "Status:not-matched",
+            "status:awaiting-Triage",
+            "workgraph:Error"
+        ]))
     );
+    assert_eq!(
+        property(&changes, "GitHubIssue", "labelDetails"),
+        &ElementValue::from(&json!([
+            {"name":"status:New","nodeId":"L_1"},
+            {"name":"ordinary","nodeId":"L_2"},
+            {"name":"workgraph:ignore","nodeId":"L_3"},
+            {"name":"Status:not-matched","nodeId":"L_4"},
+            {"name":"status:awaiting-Triage","nodeId":"L_5"},
+            {"name":"workgraph:Error","nodeId":"L_6"}
+        ]))
+    );
+    assert_eq!(
+        property(&changes, "GitHubIssue", "statusLabels"),
+        &ElementValue::from(&json!(["status:New", "status:awaiting-Triage"]))
+    );
+    assert_eq!(
+        property(&changes, "GitHubIssue", "workgraphLabels"),
+        &ElementValue::from(&json!(["workgraph:ignore", "workgraph:Error"]))
+    );
+}
+
+#[test]
+fn generic_issue_always_has_empty_namespace_arrays_without_matching_labels() {
+    for labels in [json!([]), json!([{"name":"ordinary","node_id":"L_1"}])] {
+        let mut item = issue("I_generic", "ordinary", false, "open");
+        item["labels"] = labels;
+        let changes = convert("issues", &issue_event("opened", item));
+        assert_eq!(
+            property(&changes, "GitHubIssue", "statusLabels"),
+            &ElementValue::from(&json!([]))
+        );
+        assert_eq!(
+            property(&changes, "GitHubIssue", "workgraphLabels"),
+            &ElementValue::from(&json!([]))
+        );
+    }
+}
+
+#[test]
+fn issue_state_and_state_reason_are_lowercase_without_inventing_reason() {
+    let mut item = issue("I_generic", "ordinary", false, "open");
+    item["state"] = json!("OpEn");
+    item["state_reason"] = json!("NoT_PlAnNeD");
+    let changes = convert("issues", &issue_event("opened", item));
+    assert_eq!(
+        property(&changes, "GitHubIssue", "state"),
+        &ElementValue::from(&json!("open"))
+    );
+    assert_eq!(
+        property(&changes, "GitHubIssue", "stateReason"),
+        &ElementValue::from(&json!("not_planned"))
+    );
+
+    let mut absent = issue("I_absent", "ordinary", false, "open");
+    absent.as_object_mut().unwrap().remove("state_reason");
+    let changes = convert("issues", &issue_event("opened", absent));
+    assert!(!has_property(&changes, "GitHubIssue", "stateReason"));
+
+    let null = issue("I_null", "ordinary", false, "open");
+    let changes = convert("issues", &issue_event("opened", null));
+    assert_eq!(
+        property(&changes, "GitHubIssue", "stateReason"),
+        &ElementValue::Null
+    );
+}
+
+#[test]
+fn task_state_is_retained_on_close_and_reopen() {
+    let mut closed_task = issue("I_task", VALIDATION_TASK, true, "closed");
+    closed_task["state"] = json!("CLOSED");
+    closed_task["state_reason"] = json!("COMPLETED");
+    let closed = convert("issues", &issue_event("closed", closed_task));
     assert!(closed
         .iter()
         .any(|change| label(change) == "WorkGraphTask" && is_update(change)));
