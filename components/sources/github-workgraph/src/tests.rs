@@ -57,6 +57,14 @@ const ASSIGNMENT: &str = r#"WorkGraphTaskAssignment/v1
 }
 ```
 "#;
+const INFO_REQUEST_ASSIGNMENT: &str = r#"WorkGraphTaskAssignment/v1
+
+```json
+{
+  "agentProfile": "issue-info-requester"
+}
+```
+"#;
 const RESULT: &str = r#"WorkGraphTaskResult/v1
 
 ```json
@@ -364,6 +372,10 @@ fn task_envelopes_accept_only_strict_work_definitions() {
 fn specialized_comment_grammars_are_mutually_exclusive() {
     assert!(matches!(
         classify_comment(ASSIGNMENT),
+        CommentClassification::Assignment(_)
+    ));
+    assert!(matches!(
+        classify_comment(INFO_REQUEST_ASSIGNMENT),
         CommentClassification::Assignment(_)
     ));
     assert!(matches!(
@@ -1279,6 +1291,30 @@ fn specialized_comments_emit_only_their_node_and_relations() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn supported_assignment_profiles_map_exactly() {
+    for (body, expected_profile, id) in [
+        (ASSIGNMENT, "issue-validator", "IC_validator_assignment"),
+        (
+            INFO_REQUEST_ASSIGNMENT,
+            "issue-info-requester",
+            "IC_info_assignment",
+        ),
+    ] {
+        let changes = convert(
+            "issue_comment",
+            &comment_event("created", body, "open", true, id),
+        );
+        assert_eq!(
+            property(&changes, "WorkGraphTaskAssignment", "agentProfile"),
+            &ElementValue::from(&json!(expected_profile))
+        );
+        assert!(changes
+            .iter()
+            .any(|change| label(change) == "ASSIGNMENT_FOR" && is_insert(change)));
     }
 }
 
