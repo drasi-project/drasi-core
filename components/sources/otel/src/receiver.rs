@@ -64,6 +64,7 @@ pub struct OtelRuntime {
     pub counters: Arc<OtelCounters>,
     pub wal: Option<Arc<dyn WalProvider>>,
     pub last_persist: Arc<tokio::sync::Mutex<Option<std::time::Instant>>>,
+    pub commit_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Clone for OtelRuntime {
@@ -76,6 +77,7 @@ impl Clone for OtelRuntime {
             counters: self.counters.clone(),
             wal: self.wal.clone(),
             last_persist: self.last_persist.clone(),
+            commit_gate: self.commit_gate.clone(),
         }
     }
 }
@@ -130,9 +132,11 @@ impl OtelRuntime {
             return Ok(stats);
         }
 
-        let mut lifecycle = self.lifecycle.write().await;
-        let mut planned = lifecycle.clone();
-        let (changes, dropped) = planned.apply(&self.source_id, &self.config, mapped.elements, now);
+        let _gate = self.commit_gate.lock().await;
+        let (changes, dropped, undo) = {
+            let mut lifecycle = self.lifecycle.write().await;
+            lifecycle.apply(&self.source_id, &self.config, mapped.elements, now)
+        };
         self.counters
             .dropped
             .fetch_add(dropped as u64, Ordering::Relaxed);
@@ -146,10 +150,15 @@ impl OtelRuntime {
 
         let mut seqs = Vec::with_capacity(changes.len());
         for change in &changes {
-            seqs.push(self.wal_append(change).await?);
+            match self.wal_append(change).await {
+                Ok(seq) => seqs.push(seq),
+                Err(e) => {
+                    let mut lifecycle = self.lifecycle.write().await;
+                    lifecycle.revert_apply(undo);
+                    return Err(e);
+                }
+            }
         }
-        *lifecycle = planned;
-        drop(lifecycle);
 
         self.counters
             .accepted
@@ -163,9 +172,11 @@ impl OtelRuntime {
 
     pub async fn expire_due(&self) -> anyhow::Result<()> {
         let now = now_millis();
-        let mut lifecycle = self.lifecycle.write().await;
-        let mut planned = lifecycle.clone();
-        let changes = planned.expire(&self.source_id, now);
+        let _gate = self.commit_gate.lock().await;
+        let changes = {
+            let lifecycle = self.lifecycle.read().await;
+            lifecycle.preview_expire(&self.source_id, now)
+        };
         if changes.is_empty() {
             return Ok(());
         }
@@ -173,8 +184,10 @@ impl OtelRuntime {
         for change in &changes {
             seqs.push(self.wal_append(change).await?);
         }
-        *lifecycle = planned;
-        drop(lifecycle);
+        {
+            let mut lifecycle = self.lifecycle.write().await;
+            let _ = lifecycle.expire(&self.source_id, now);
+        }
         self.counters
             .expired
             .fetch_add(changes.len() as u64, Ordering::Relaxed);
@@ -612,4 +625,92 @@ fn rejected_count(stats: CommitStats) -> i64 {
 
 fn now_millis() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::otlp::proto::metrics::v1::{
+        metric, number_data_point, Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
+    };
+    use crate::otlp::proto::resource::v1::Resource;
+    use drasi_lib::sources::base::SourceBaseParams;
+
+    fn runtime(config: OtelSourceConfig) -> OtelRuntime {
+        let base = SourceBase::new(SourceBaseParams::new("otel")).unwrap();
+        OtelRuntime {
+            source_id: "otel".to_string(),
+            config: Arc::new(config),
+            base,
+            lifecycle: Arc::new(RwLock::new(LifecycleState::default())),
+            counters: Arc::new(OtelCounters::default()),
+            wal: None,
+            last_persist: Arc::new(tokio::sync::Mutex::new(None)),
+            commit_gate: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    fn gauge_request() -> ExportMetricsServiceRequest {
+        use crate::otlp::proto::common::v1::{any_value, AnyValue, KeyValue};
+        ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(Resource {
+                    attributes: vec![KeyValue {
+                        key: "service.name".to_string(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue("checkout".to_string())),
+                        }),
+                    }],
+                    dropped_attributes_count: 0,
+                }),
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![Metric {
+                        name: "latency_p99_ms".to_string(),
+                        description: String::new(),
+                        unit: "ms".to_string(),
+                        data: Some(metric::Data::Gauge(Gauge {
+                            data_points: vec![NumberDataPoint {
+                                attributes: vec![],
+                                start_time_unix_nano: 0,
+                                time_unix_nano: 1_713_456_789_000_000_000,
+                                exemplars: vec![],
+                                flags: 0,
+                                value: Some(number_data_point::Value::AsDouble(920.0)),
+                            }],
+                        })),
+                        metadata: vec![],
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_http_body_is_rejected() {
+        let config = OtelSourceConfig {
+            max_request_bytes: 8,
+            ..OtelSourceConfig::default()
+        };
+        let runtime = runtime(config);
+        let err = authorize_http_request(&runtime, &HeaderMap::new(), &Bytes::from(vec![0u8; 16]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn commit_accepts_allowlisted_gauge() {
+        let config = OtelSourceConfig {
+            metric_allowlist: vec!["latency_p99_ms".to_string()],
+            ..OtelSourceConfig::default()
+        };
+        let runtime = runtime(config);
+        let stats = runtime.handle_metrics(gauge_request()).await.unwrap();
+        assert_eq!(stats.rejected, 0);
+        assert_eq!(stats.dropped, 0);
+        assert_eq!(runtime.counters.snapshot().accepted, 1);
+    }
 }

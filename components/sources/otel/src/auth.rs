@@ -150,4 +150,18 @@ mod tests {
         let expected = ExpectedAuth::Bearer("s3cret".to_string());
         assert!(!header_matches("s3cret", &expected));
     }
+
+    #[test]
+    fn authorize_http_allows_when_no_auth_configured() {
+        assert!(authorize_http(None, None));
+        assert!(authorize_http(Some("Bearer s3cret"), None));
+    }
+
+    #[test]
+    fn authorize_http_requires_matching_bearer() {
+        let expected = ExpectedAuth::Bearer("s3cret".to_string());
+        assert!(authorize_http(Some("Bearer s3cret"), Some(&expected)));
+        assert!(!authorize_http(None, Some(&expected)));
+        assert!(!authorize_http(Some("Bearer other"), Some(&expected)));
+    }
 }

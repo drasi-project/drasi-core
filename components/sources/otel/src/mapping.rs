@@ -15,6 +15,7 @@
 //! Project allowlisted OTLP records into bounded graph elements.
 
 use drasi_core::models::{ElementPropertyMap, ElementValue};
+use drasi_lib::sources::{SOURCE_ORIGIN_ATTRIBUTE, SOURCE_ORIGIN_DERIVED};
 use ordered_float::OrderedFloat;
 
 use crate::config::OtelSourceConfig;
@@ -36,9 +37,6 @@ pub struct MapOutcome {
     pub rejected: u64,
 }
 
-const ORIGIN_ATTR: &str = "drasi.source.origin";
-const ORIGIN_DERIVED: &str = "derived";
-
 /// Convert an OTLP unix-nano timestamp to Drasi millisecond `effective_from`.
 pub fn nanos_to_millis(nanos: u64) -> u64 {
     if nanos == 0 {
@@ -47,6 +45,7 @@ pub fn nanos_to_millis(nanos: u64) -> u64 {
     nanos / 1_000_000
 }
 
+/// Project allowlisted gauge/sum data points. Histogram and summary metrics are rejected.
 pub fn map_metrics(
     request: &ExportMetricsServiceRequest,
     config: &OtelSourceConfig,
@@ -114,6 +113,7 @@ pub fn map_metrics(
     out
 }
 
+/// Project CLIENT (by default) spans that name a destination service as `DEPENDS_ON`.
 pub fn map_traces(
     request: &ExportTraceServiceRequest,
     config: &OtelSourceConfig,
@@ -179,6 +179,7 @@ pub fn map_traces(
     out
 }
 
+/// Project log records at or above `log_min_severity`, optionally filtered by event-name allowlist.
 pub fn map_logs(
     request: &ExportLogsServiceRequest,
     config: &OtelSourceConfig,
@@ -510,11 +511,13 @@ fn reject_derived(
         return false;
     }
     if let Some(resource) = resource {
-        if attr_string(&resource.attributes, ORIGIN_ATTR).as_deref() == Some(ORIGIN_DERIVED) {
+        if attr_string(&resource.attributes, SOURCE_ORIGIN_ATTRIBUTE).as_deref()
+            == Some(SOURCE_ORIGIN_DERIVED)
+        {
             return true;
         }
     }
-    attr_string(extra, ORIGIN_ATTR).as_deref() == Some(ORIGIN_DERIVED)
+    attr_string(extra, SOURCE_ORIGIN_ATTRIBUTE).as_deref() == Some(SOURCE_ORIGIN_DERIVED)
 }
 
 fn destination_service(config: &OtelSourceConfig, attrs: &[KeyValue]) -> Option<String> {
@@ -707,6 +710,7 @@ mod tests {
     };
     use crate::otlp::proto::resource::v1::Resource;
     use crate::otlp::proto::trace::v1::{ResourceSpans, ScopeSpans, Span};
+    use drasi_lib::sources::{SOURCE_ORIGIN_ATTRIBUTE, SOURCE_ORIGIN_DERIVED};
 
     fn kv(key: &str, value: &str) -> KeyValue {
         KeyValue {
@@ -822,7 +826,7 @@ mod tests {
             .unwrap()
             .attributes = vec![
             kv("service.name", "checkout"),
-            kv(ORIGIN_ATTR, ORIGIN_DERIVED),
+            kv(SOURCE_ORIGIN_ATTRIBUTE, SOURCE_ORIGIN_DERIVED),
         ];
         let rejected = map_metrics(&request, &allowlist_config(), 2_000);
         assert!(rejected.rejected > 0);
@@ -984,5 +988,181 @@ mod tests {
         let out = map_metrics(&request, &allowlist_config(), 2_000);
         assert!(out.rejected > 0);
         assert!(out.elements.is_empty());
+    }
+
+    #[test]
+    fn sum_projects_like_gauge() {
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(checkout_resource()),
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![Metric {
+                        name: "latency_p99_ms".to_string(),
+                        description: String::new(),
+                        unit: "ms".to_string(),
+                        data: Some(metric::Data::Sum(crate::otlp::proto::metrics::v1::Sum {
+                            data_points: vec![NumberDataPoint {
+                                attributes: vec![],
+                                start_time_unix_nano: 0,
+                                time_unix_nano: 1_713_456_789_000_000_000,
+                                exemplars: vec![],
+                                flags: 0,
+                                value: Some(number_data_point::Value::AsDouble(3.0)),
+                            }],
+                            aggregation_temporality: 0,
+                            is_monotonic: false,
+                        })),
+                        metadata: vec![],
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+        let out = map_metrics(&request, &allowlist_config(), 2_000);
+        assert_eq!(out.accepted, 1);
+        assert_eq!(out.rejected, 0);
+    }
+
+    #[test]
+    fn histogram_is_rejected() {
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(checkout_resource()),
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![Metric {
+                        name: "latency_p99_ms".to_string(),
+                        description: String::new(),
+                        unit: "ms".to_string(),
+                        data: Some(metric::Data::Histogram(
+                            crate::otlp::proto::metrics::v1::Histogram {
+                                data_points: vec![],
+                                aggregation_temporality: 0,
+                            },
+                        )),
+                        metadata: vec![],
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+        let out = map_metrics(&request, &allowlist_config(), 2_000);
+        assert_eq!(out.accepted, 0);
+        assert!(out.rejected > 0);
+    }
+
+    fn error_log(event: &str, severity: SeverityNumber) -> ExportLogsServiceRequest {
+        use crate::otlp::proto::collector::logs::v1::ExportLogsServiceRequest;
+        use crate::otlp::proto::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
+        ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(checkout_resource()),
+                scope_logs: vec![ScopeLogs {
+                    scope: None,
+                    log_records: vec![LogRecord {
+                        time_unix_nano: 1_713_456_789_000_000_000,
+                        observed_time_unix_nano: 0,
+                        severity_number: severity as i32,
+                        severity_text: "ERROR".to_string(),
+                        body: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue("card declined".to_string())),
+                        }),
+                        attributes: vec![],
+                        dropped_attributes_count: 0,
+                        flags: 0,
+                        trace_id: vec![],
+                        span_id: vec![],
+                        event_name: event.to_string(),
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn error_log_projects_log_event() {
+        use crate::otlp::proto::logs::v1::SeverityNumber;
+        let out = map_logs(
+            &error_log("payment_failed", SeverityNumber::Error),
+            &OtelSourceConfig::default(),
+            2_000,
+        );
+        assert_eq!(out.accepted, 1);
+        assert!(out
+            .elements
+            .iter()
+            .any(|e| e.labels.iter().any(|l| l == "LogEvent")));
+        assert!(out
+            .elements
+            .iter()
+            .any(|e| e.labels.iter().any(|l| l == "EMITS")));
+    }
+
+    #[test]
+    fn info_log_is_rejected_by_default_min_severity() {
+        use crate::otlp::proto::logs::v1::SeverityNumber;
+        let out = map_logs(
+            &error_log("payment_failed", SeverityNumber::Info),
+            &OtelSourceConfig::default(),
+            2_000,
+        );
+        assert_eq!(out.accepted, 0);
+        assert!(out.rejected > 0);
+    }
+
+    #[test]
+    fn heartbeat_metric_projects_heartbeat() {
+        let config = OtelSourceConfig {
+            heartbeat_metric: Some("health.heartbeat".to_string()),
+            ..OtelSourceConfig::default()
+        };
+        let out = map_metrics(&gauge_named("health.heartbeat"), &config, 2_000);
+        assert!(out.accepted > 0);
+        assert!(out
+            .elements
+            .iter()
+            .any(|e| e.labels.iter().any(|l| l == "Heartbeat")));
+    }
+
+    #[test]
+    fn server_span_is_rejected_by_default() {
+        let mut request = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(checkout_resource()),
+                scope_spans: vec![ScopeSpans {
+                    scope: None,
+                    spans: vec![Span {
+                        trace_id: vec![1; 16],
+                        span_id: vec![2; 8],
+                        trace_state: String::new(),
+                        parent_span_id: vec![],
+                        flags: 0,
+                        name: "serve".to_string(),
+                        kind: span::SpanKind::Server as i32,
+                        start_time_unix_nano: 1,
+                        end_time_unix_nano: 0,
+                        attributes: vec![kv("peer.service", "payments")],
+                        dropped_attributes_count: 0,
+                        events: vec![],
+                        dropped_events_count: 0,
+                        links: vec![],
+                        dropped_links_count: 0,
+                        status: None,
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+        let out = map_traces(&request, &OtelSourceConfig::default(), 2_000);
+        assert_eq!(out.accepted, 0);
+        request.resource_spans[0].scope_spans[0].spans[0].kind = span::SpanKind::Client as i32;
+        let accepted = map_traces(&request, &OtelSourceConfig::default(), 2_000);
+        assert_eq!(accepted.accepted, 1);
     }
 }

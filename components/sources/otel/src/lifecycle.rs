@@ -45,6 +45,13 @@ impl ElementCategory {
             Self::Heartbeat | Self::Reports | Self::HeartbeatRel | Self::Emits => None,
         }
     }
+
+    fn is_capped(self) -> bool {
+        matches!(
+            self,
+            Self::Service | Self::Metric | Self::DependsOn | Self::LogEvent
+        )
+    }
 }
 
 /// A mapped graph element before Insert vs Update is decided.
@@ -73,6 +80,15 @@ struct TtlRecord {
     id: String,
     labels: Vec<String>,
     expires_at: u64,
+    #[serde(default)]
+    category: Option<ElementCategory>,
+}
+
+/// Mutations that can be rolled back if WAL append fails after apply.
+#[derive(Debug, Default)]
+pub struct ApplyUndo {
+    inserted: Vec<(String, ElementCategory)>,
+    ttl_previous: Vec<(String, Option<TtlRecord>)>,
 }
 
 /// Source-internal lifecycle store. Not a bootstrap snapshot.
@@ -95,7 +111,7 @@ impl LifecycleState {
         config: &OtelSourceConfig,
         projected: Vec<ProjectedElement>,
         received_at_millis: u64,
-    ) -> (Vec<SourceChange>, usize) {
+    ) -> (Vec<SourceChange>, usize, ApplyUndo) {
         let mut order = Vec::new();
         let mut groups: HashMap<u32, Vec<ProjectedElement>> = HashMap::new();
         for item in projected {
@@ -110,6 +126,7 @@ impl LifecycleState {
 
         let mut changes = Vec::new();
         let mut dropped = 0usize;
+        let mut undo = ApplyUndo::default();
 
         for group_id in order {
             let Some(group) = groups.remove(&group_id) else {
@@ -123,11 +140,14 @@ impl LifecycleState {
                 let is_insert = self.seen.insert(item.id.clone());
                 if is_insert {
                     *self.counts.entry(item.category).or_insert(0) += 1;
+                    undo.inserted.push((item.id.clone(), item.category));
                     if item.category == ElementCategory::Service {
                         stamp_registered_at(&mut item);
                     }
                 }
                 if let Some(ttl_secs) = item.ttl_secs {
+                    let previous = self.take_ttl_record(&item.id);
+                    undo.ttl_previous.push((item.id.clone(), previous));
                     self.schedule_ttl(&item, ttl_secs, received_at_millis);
                 }
                 let element = item.into_element(source_id);
@@ -139,7 +159,23 @@ impl LifecycleState {
             }
         }
 
-        (changes, dropped)
+        (changes, dropped, undo)
+    }
+
+    /// Roll back [`Self::apply`] after a failed WAL append.
+    pub fn revert_apply(&mut self, undo: ApplyUndo) {
+        for (id, previous) in undo.ttl_previous.into_iter().rev() {
+            self.clear_ttl(&id);
+            if let Some(record) = previous {
+                self.ttl_by_id.insert(record.id.clone(), record.expires_at);
+                self.ttls.entry(record.expires_at).or_default().push(record);
+            }
+        }
+        for (id, category) in undo.inserted {
+            if self.seen.remove(&id) {
+                decrement(&mut self.counts, category);
+            }
+        }
     }
 
     fn group_exceeds_caps(&self, config: &OtelSourceConfig, group: &[ProjectedElement]) -> bool {
@@ -161,6 +197,29 @@ impl LifecycleState {
         false
     }
 
+    /// Graph deletes that would be emitted by [`Self::expire`] without mutating state.
+    pub fn preview_expire(&self, source_id: &str, now_millis: u64) -> Vec<SourceChange> {
+        self.due_records(now_millis)
+            .into_iter()
+            .map(|record| delete_change(source_id, &record, now_millis))
+            .collect()
+    }
+
+    fn due_records(&self, now_millis: u64) -> Vec<TtlRecord> {
+        let mut due = Vec::new();
+        for (expires, records) in &self.ttls {
+            if *expires > now_millis {
+                break;
+            }
+            for record in records {
+                if self.ttl_by_id.get(&record.id) == Some(expires) {
+                    due.push(record.clone());
+                }
+            }
+        }
+        due
+    }
+
     /// Delete elements whose TTL has elapsed at `now_millis`.
     pub fn expire(&mut self, source_id: &str, now_millis: u64) -> Vec<SourceChange> {
         let due: Vec<u64> = self
@@ -179,12 +238,11 @@ impl LifecycleState {
                     }
                     self.ttl_by_id.remove(&record.id);
                     if self.seen.remove(&record.id) {
-                        if record.labels.iter().any(|l| l == "DEPENDS_ON") {
-                            decrement(&mut self.counts, ElementCategory::DependsOn);
-                        } else if record.labels.iter().any(|l| l == "LogEvent") {
-                            decrement(&mut self.counts, ElementCategory::LogEvent);
-                        } else if record.labels.iter().any(|l| l == "EMITS") {
-                            decrement(&mut self.counts, ElementCategory::Emits);
+                        let category = record
+                            .category
+                            .or_else(|| category_from_labels(&record.labels));
+                        if let Some(category) = category.filter(|c| c.is_capped()) {
+                            decrement(&mut self.counts, category);
                         }
                     }
                     changes.push(SourceChange::Delete {
@@ -223,7 +281,23 @@ impl LifecycleState {
             id: item.id.clone(),
             labels: item.labels.clone(),
             expires_at,
+            category: Some(item.category),
         });
+    }
+
+    fn take_ttl_record(&mut self, id: &str) -> Option<TtlRecord> {
+        let expires_at = self.ttl_by_id.remove(id)?;
+        let bucket = self.ttls.get_mut(&expires_at)?;
+        let index = bucket.iter().position(|r| r.id == *id)?;
+        let record = bucket.remove(index);
+        if bucket.is_empty() {
+            self.ttls.remove(&expires_at);
+        }
+        Some(record)
+    }
+
+    fn clear_ttl(&mut self, id: &str) {
+        let _ = self.take_ttl_record(id);
     }
 
     pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
@@ -277,6 +351,39 @@ fn decrement(counts: &mut HashMap<ElementCategory, usize>, category: ElementCate
     }
 }
 
+fn category_from_labels(labels: &[String]) -> Option<ElementCategory> {
+    labels.iter().find_map(|label| match label.as_str() {
+        "Service" => Some(ElementCategory::Service),
+        "Metric" => Some(ElementCategory::Metric),
+        "Heartbeat" => Some(ElementCategory::Heartbeat),
+        "LogEvent" => Some(ElementCategory::LogEvent),
+        "REPORTS" => Some(ElementCategory::Reports),
+        "HEARTBEAT" => Some(ElementCategory::HeartbeatRel),
+        "DEPENDS_ON" => Some(ElementCategory::DependsOn),
+        "EMITS" => Some(ElementCategory::Emits),
+        _ => None,
+    })
+}
+
+fn delete_change(source_id: &str, record: &TtlRecord, now_millis: u64) -> SourceChange {
+    SourceChange::Delete {
+        metadata: ElementMetadata {
+            reference: ElementReference {
+                source_id: Arc::from(source_id),
+                element_id: Arc::from(record.id.as_str()),
+            },
+            labels: Arc::from(
+                record
+                    .labels
+                    .iter()
+                    .map(|l| Arc::from(l.as_str()))
+                    .collect::<Vec<_>>(),
+            ),
+            effective_from: now_millis,
+        },
+    }
+}
+
 fn stamp_registered_at(item: &mut ProjectedElement) {
     if item.properties.get("registeredAt").is_some() {
         return;
@@ -308,7 +415,7 @@ mod tests {
     fn first_observation_is_insert_second_is_update() {
         let mut state = LifecycleState::default();
         let config = OtelSourceConfig::default();
-        let (first, dropped) = state.apply(
+        let (first, dropped, _) = state.apply(
             "s",
             &config,
             vec![node("svc:a", ElementCategory::Service, None)],
@@ -316,7 +423,7 @@ mod tests {
         );
         assert_eq!(dropped, 0);
         assert!(matches!(first[0], SourceChange::Insert { .. }));
-        let (second, _) = state.apply(
+        let (second, _, _) = state.apply(
             "s",
             &config,
             vec![node("svc:a", ElementCategory::Service, None)],
@@ -338,7 +445,7 @@ mod tests {
             vec![node("svc:a", ElementCategory::Service, None)],
             1_000,
         );
-        let (changes, dropped) = state.apply(
+        let (changes, dropped, _) = state.apply(
             "s",
             &config,
             vec![node("svc:b", ElementCategory::Service, None)],
@@ -393,8 +500,31 @@ mod tests {
         let mut metric = node("metric:b", ElementCategory::Metric, None);
         service.group = 7;
         metric.group = 7;
-        let (changes, dropped) = state.apply("s", &config, vec![service, metric], 1_000);
+        let (changes, dropped, _) = state.apply("s", &config, vec![service, metric], 1_000);
         assert!(changes.is_empty());
         assert_eq!(dropped, 1);
+    }
+
+    #[test]
+    fn revert_apply_restores_seen_and_counts() {
+        let mut state = LifecycleState::default();
+        let config = OtelSourceConfig::default();
+        let (_, _, undo) = state.apply(
+            "s",
+            &config,
+            vec![node("svc:a", ElementCategory::Service, None)],
+            1_000,
+        );
+        assert!(state.seen.contains("svc:a"));
+        state.revert_apply(undo);
+        assert!(!state.seen.contains("svc:a"));
+        assert_eq!(
+            state
+                .counts
+                .get(&ElementCategory::Service)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
     }
 }

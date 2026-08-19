@@ -6,7 +6,7 @@ The source flattens Resource attributes onto `Service`. It does not emit Resourc
 
 | Label | Identity | Properties | Lifecycle |
 | --- | --- | --- | --- |
-| `Service` | `svc:{namespace}/{name}` or `svc:{name}` | `name`, `namespace?`, `environment?`, `instanceId?`, `registeredAt`, `lastSeen` | Upsert |
+| `Service` | `svc:{namespace}/{name}` or `svc:{name}` | `name`, `namespace?` (`service.namespace`), `environment?`, `instanceId?` (`service.instance.id`), `registeredAt`, `lastSeen` | Upsert |
 | `Metric` | `metric:{serviceId}:{metric.name}` | `name`, `unit`, `value`, `observedAt`, `receivedAt` | Upsert current value |
 | `Heartbeat` | `hb:{serviceId}` | `lastSeen` | Upsert |
 | `LogEvent` | `log:{serviceId}:{eventName\|hash}:{nanos}` | `service`, `severity`, `body`, `eventName?`, `observedAt` | Insert + TTL delete |

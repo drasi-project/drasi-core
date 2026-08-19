@@ -76,47 +76,47 @@ fn default_grpc_bind() -> ConfigValue<String> {
 }
 
 fn default_destination_attributes() -> Vec<String> {
-    vec!["peer.service".to_string()]
+    crate::config::default_destination_attributes()
 }
 
 fn default_span_kinds() -> Vec<String> {
-    vec!["CLIENT".to_string()]
+    crate::config::default_span_kinds()
 }
 
 fn default_log_min_severity() -> ConfigValue<String> {
-    ConfigValue::Static("ERROR".to_string())
+    ConfigValue::Static(crate::config::default_log_min_severity())
 }
 
 fn default_log_event_ttl_secs() -> ConfigValue<u64> {
-    ConfigValue::Static(60)
+    ConfigValue::Static(crate::config::default_log_event_ttl_secs())
 }
 
 fn default_dependency_ttl_secs() -> ConfigValue<u64> {
-    ConfigValue::Static(300)
+    ConfigValue::Static(crate::config::default_dependency_ttl_secs())
 }
 
 fn default_max_services() -> ConfigValue<usize> {
-    ConfigValue::Static(1000)
+    ConfigValue::Static(crate::config::default_max_services())
 }
 
 fn default_max_metrics() -> ConfigValue<usize> {
-    ConfigValue::Static(2000)
+    ConfigValue::Static(crate::config::default_max_metrics())
 }
 
 fn default_max_dependencies() -> ConfigValue<usize> {
-    ConfigValue::Static(5000)
+    ConfigValue::Static(crate::config::default_max_dependencies())
 }
 
 fn default_max_log_events() -> ConfigValue<usize> {
-    ConfigValue::Static(5000)
+    ConfigValue::Static(crate::config::default_max_log_events())
 }
 
 fn default_reject_derived() -> ConfigValue<bool> {
-    ConfigValue::Static(true)
+    ConfigValue::Static(crate::config::default_reject_derived())
 }
 
 fn default_max_request_bytes() -> ConfigValue<usize> {
-    ConfigValue::Static(4 * 1024 * 1024)
+    ConfigValue::Static(crate::config::default_max_request_bytes())
 }
 
 #[derive(OpenApi)]
@@ -192,5 +192,34 @@ impl SourcePluginDescriptor for OtelSourceDescriptor {
             .build()?;
         source.base_mut().set_raw_config(config_json.clone());
         Ok(Box::new(source))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_lib::Source;
+
+    #[tokio::test]
+    async fn create_source_from_json() {
+        let json = serde_json::json!({
+            "grpcBind": "127.0.0.1:0",
+            "metricAllowlist": ["latency_p99_ms"]
+        });
+        let source = OtelSourceDescriptor
+            .create_source("otel", &json, false)
+            .await
+            .unwrap();
+        assert_eq!(source.id(), "otel");
+        assert_eq!(source.type_name(), "otel");
+    }
+
+    #[tokio::test]
+    async fn create_source_rejects_unknown_field() {
+        let json = serde_json::json!({ "notAField": true });
+        assert!(OtelSourceDescriptor
+            .create_source("otel", &json, false)
+            .await
+            .is_err());
     }
 }

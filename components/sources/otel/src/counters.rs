@@ -48,3 +48,26 @@ pub struct OtelCounterSnapshot {
     pub dropped: u64,
     pub expired: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_reads_atomics() {
+        let counters = OtelCounters::default();
+        counters.accepted.fetch_add(1, Ordering::Relaxed);
+        counters.rejected.fetch_add(2, Ordering::Relaxed);
+        counters.dropped.fetch_add(3, Ordering::Relaxed);
+        counters.expired.fetch_add(4, Ordering::Relaxed);
+        assert_eq!(
+            counters.snapshot(),
+            OtelCounterSnapshot {
+                accepted: 1,
+                rejected: 2,
+                dropped: 3,
+                expired: 4,
+            }
+        );
+    }
+}

@@ -38,47 +38,47 @@ pub fn default_grpc_bind() -> String {
     "0.0.0.0:4317".to_string()
 }
 
-fn default_destination_attributes() -> Vec<String> {
+pub fn default_destination_attributes() -> Vec<String> {
     vec!["peer.service".to_string()]
 }
 
-fn default_span_kinds() -> Vec<String> {
+pub fn default_span_kinds() -> Vec<String> {
     vec!["CLIENT".to_string()]
 }
 
-fn default_log_min_severity() -> String {
+pub fn default_log_min_severity() -> String {
     "ERROR".to_string()
 }
 
-fn default_log_event_ttl_secs() -> u64 {
+pub fn default_log_event_ttl_secs() -> u64 {
     60
 }
 
-fn default_dependency_ttl_secs() -> u64 {
+pub fn default_dependency_ttl_secs() -> u64 {
     300
 }
 
-fn default_max_services() -> usize {
+pub fn default_max_services() -> usize {
     1000
 }
 
-fn default_max_metrics() -> usize {
+pub fn default_max_metrics() -> usize {
     2000
 }
 
-fn default_max_dependencies() -> usize {
+pub fn default_max_dependencies() -> usize {
     5000
 }
 
-fn default_max_log_events() -> usize {
+pub fn default_max_log_events() -> usize {
     5000
 }
 
-fn default_reject_derived() -> bool {
+pub fn default_reject_derived() -> bool {
     true
 }
 
-fn default_max_request_bytes() -> usize {
+pub fn default_max_request_bytes() -> usize {
     4 * 1024 * 1024
 }
 
@@ -118,7 +118,8 @@ pub struct OtelSourceConfig {
     #[serde(default)]
     pub metric_allowlist: Vec<String>,
 
-    /// Extra data-point attributes that extend metric identity. Default-deny.
+    /// Extra data-point attributes that extend metric identity.
+    /// Unlisted attributes are ignored and do not change the Metric id.
     #[serde(default)]
     pub metric_identity_attributes: Vec<String>,
 
@@ -179,7 +180,7 @@ pub struct OtelSourceConfig {
     #[serde(default = "default_max_request_bytes")]
     pub max_request_bytes: usize,
 
-    /// Optional WAL durability for projected SourceChanges.
+    /// Optional WAL durability for projected SourceChanges. Default: off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durability: Option<DurabilityConfig>,
 }
@@ -316,4 +317,78 @@ impl OtelSourceConfig {
 pub fn parse_bind(bind: &str) -> anyhow::Result<std::net::SocketAddr> {
     bind.parse()
         .with_context(|| format!("bind address '{bind}' is not a valid host:port"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_binds_are_rejected() {
+        let config = OtelSourceConfig {
+            grpc_bind: String::new(),
+            http_bind: None,
+            ..OtelSourceConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn zero_ttl_is_rejected() {
+        let config = OtelSourceConfig {
+            log_event_ttl_secs: 0,
+            ..OtelSourceConfig::default()
+        };
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("log_event_ttl"));
+        let config = OtelSourceConfig {
+            dependency_ttl_secs: 0,
+            ..OtelSourceConfig::default()
+        };
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("dependency_ttl"));
+    }
+
+    #[test]
+    fn zero_max_request_bytes_is_rejected() {
+        let config = OtelSourceConfig {
+            max_request_bytes: 0,
+            ..OtelSourceConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn tls_paths_must_be_paired() {
+        let config = OtelSourceConfig {
+            tls_cert_path: Some("/tmp/missing-cert.pem".to_string()),
+            tls_key_path: None,
+            ..OtelSourceConfig::default()
+        };
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("together"));
+    }
+
+    #[test]
+    fn invalid_bind_is_rejected() {
+        let config = OtelSourceConfig {
+            grpc_bind: "not-a-bind".to_string(),
+            ..OtelSourceConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn default_config_is_valid() {
+        assert!(OtelSourceConfig::default().validate().is_ok());
+    }
 }

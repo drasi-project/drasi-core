@@ -343,6 +343,7 @@ impl Source for OtelSource {
             counters: self.counters.clone(),
             wal: wal_ref.clone(),
             last_persist: Arc::new(tokio::sync::Mutex::new(None)),
+            commit_gate: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         let reporter = self.base.status_handle();

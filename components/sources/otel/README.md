@@ -14,17 +14,24 @@ Receives OpenTelemetry Protocol (OTLP) data and projects an allowlisted subset i
 | Field | Default | Description |
 | --- | --- | --- |
 | `grpcBind` | `0.0.0.0:4317` | OTLP/gRPC listen address. Empty disables gRPC. |
-| `httpBind` | unset | Optional OTLP/HTTP protobuf listen address (`/v1/traces`, `/v1/metrics`, `/v1/logs`) |
+| `httpBind` | unset | Optional OTLP/HTTP protobuf listen address (`/v1/traces`, `/v1/metrics`, `/v1/logs`). |
 | `tlsCertPath` / `tlsKeyPath` | unset | TLS. Unset is the documented local-demo plaintext exception. |
+| `tlsClientCaPath` | unset | Optional client CA for mTLS. |
 | `authToken` | unset | Static bearer token. An identity provider Token/Basic credential wins if set. |
 | `metricAllowlist` | `[]` | Accepted metric names. Empty rejects all. `*` allows all. Only `*` globs (`latency_*`, `*_p99`); `?` and `**` are not supported. |
-| `destinationAttributes` | `["peer.service"]` | Client-span attributes used as the callee service |
-| `heartbeatMetric` | unset | Metric name that refreshes `Heartbeat.lastSeen` |
+| `metricIdentityAttributes` | `[]` | Extra data-point attributes that extend Metric identity. Unlisted attributes are ignored. |
+| `destinationAttributes` | `["peer.service"]` | Client-span attributes used as the callee service. |
+| `spanKinds` | `["CLIENT"]` | Accepted span kinds (`CLIENT`, `SERVER`, `PRODUCER`, `CONSUMER`, `INTERNAL`). |
+| `heartbeatMetric` | unset | Metric name that refreshes `Heartbeat.lastSeen`. |
+| `heartbeatEventName` | unset | Log `event_name` that refreshes `Heartbeat.lastSeen`. |
+| `logMinSeverity` | `ERROR` | Minimum log severity for LogEvent admission. |
+| `logEventNameAllowlist` | `[]` | If non-empty, only matching log `event_name` values become LogEvent nodes. |
 | `dependencyTtlSecs` | `300` | `DEPENDS_ON` expiry unless refreshed. TTL is measured from **receipt time**, not OTLP event time. |
-| `logEventTtlSecs` | `60` | `LogEvent` expiry from receipt time |
-| `rejectDerived` | `true` | Drop `drasi.source.origin=derived` |
-| `maxRequestBytes` | `4194304` (4 MiB) | Maximum decoded OTLP request size for gRPC and HTTP |
-| `durability` | off | Optional WAL replay of **projected** changes |
+| `logEventTtlSecs` | `60` | `LogEvent` expiry from receipt time. |
+| `maxServices` / `maxMetrics` / `maxDependencies` / `maxLogEvents` | `1000` / `2000` / `5000` / `5000` | Cardinality caps. |
+| `rejectDerived` | `true` | Drop `drasi.source.origin=derived`. |
+| `maxRequestBytes` | `4194304` (4 MiB) | Maximum decoded OTLP request size for gRPC and HTTP. |
+| `durability` | off | Optional WAL replay of **projected** changes. |
 
 OTLP timestamps are nanoseconds and are converted to millisecond `effective_from` values. TTL expiry uses the wall-clock time the export was received so late Collector batches are not deleted immediately.
 
@@ -68,7 +75,7 @@ This is an **ingress** source. There is no upstream poller, so there is no recon
 | --- | --- |
 | Connection refused | Source started? `grpcBind` port free? For the example, is the Collector up on 4317? |
 | Collector drops with gzip unsupported | Source gRPC accepts gzip; restart after upgrading this crate |
-| Bootstrap works but no metric updates | Metric name on `metricAllowlist`? Resource has `service.name`? |
+| Source is running but no metric updates | Metric name on `metricAllowlist`? Resource has `service.name`? |
 | No DEPENDS_ON | Span kind CLIENT? `peer.service` (or configured attribute) present? |
 | Edges never disappear | `dependencyTtlSecs` and sweeper; use a short TTL in tests |
 | `effective_from` rejected | Source must convert nanos to millis (already done in mapping) |
