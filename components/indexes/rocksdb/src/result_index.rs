@@ -32,11 +32,11 @@ use prost::{
     bytes::{Bytes, BytesMut},
     Message,
 };
-use rocksdb::{Direction, IteratorMode, MergeOperands, Options, SliceTransform};
+use rocksdb::{Cache, Direction, IteratorMode, MergeOperands, Options, SliceTransform};
 use tokio::task;
 
 use crate::storage_models::{StoredValueAccumulator, StoredValueAccumulatorContainer};
-use crate::RocksDbSessionState;
+use crate::{RocksDbSessionState, RocksIndexOptions};
 
 /// RocksDB accumulator index store
 ///
@@ -46,25 +46,28 @@ use crate::RocksDbSessionState;
 pub struct RocksDbResultIndex {
     db: Arc<IndexDb>,
     session_state: Arc<RocksDbSessionState>,
+    options: RocksIndexOptions,
 }
 
 const VALUES_CF: &str = "values";
 const SETS_CF: &str = "sorted-sets";
 const METADATA_CF: &str = "metadata";
-/// Block cache capacity for `values` (aggregation accumulators).
-const VALUES_BLOCK_CACHE_BYTES: usize = 32 * 1024 * 1024;
-
-/// Block cache capacity for `metadata`, which holds a single result-sequence
-/// record and needs no more than one block.
-const METADATA_BLOCK_CACHE_BYTES: usize = 1024 * 1024;
 
 impl RocksDbResultIndex {
     /// Create a new RocksDbResultIndex from a shared database handle.
     ///
     /// The database must already have the required column families created.
     /// Use `open_unified_db()` to open a database with all required CFs.
-    pub fn new(db: Arc<IndexDb>, session_state: Arc<RocksDbSessionState>) -> Self {
-        RocksDbResultIndex { db, session_state }
+    pub fn new(
+        db: Arc<IndexDb>,
+        session_state: Arc<RocksDbSessionState>,
+        options: RocksIndexOptions,
+    ) -> Self {
+        RocksDbResultIndex {
+            db,
+            session_state,
+            options,
+        }
     }
 }
 
@@ -144,12 +147,14 @@ impl AccumulatorIndex for RocksDbResultIndex {
 
     async fn clear(&self) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let options = self.options.clone();
         let task = task::spawn_blocking(move || {
+            let block_cache = options.memory_budget().block_cache();
             if let Err(err) = db.drop_cf(VALUES_CF) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(VALUES_CF, &get_value_cf_options()) {
+            if let Err(err) = db.create_cf(VALUES_CF, &get_value_cf_options(block_cache)) {
                 return Err(IndexError::other(err));
             }
 
@@ -157,7 +162,7 @@ impl AccumulatorIndex for RocksDbResultIndex {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(SETS_CF, &get_lss_cf_options()) {
+            if let Err(err) = db.create_cf(SETS_CF, &get_lss_cf_options(block_cache)) {
                 return Err(IndexError::other(err));
             }
             Ok(())
@@ -368,34 +373,28 @@ impl ResultSequenceCounter for RocksDbResultIndex {
     }
 }
 
-pub(crate) fn get_lss_cf_options() -> Options {
-    let mut lss_opts = Options::default();
-    crate::bound_write_buffer_history(&mut lss_opts);
+pub(crate) fn get_lss_cf_options(block_cache: &Cache) -> Options {
+    let mut lss_opts = crate::cf_options::base_cf_options(block_cache);
     lss_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
     lss_opts.set_merge_operator_associative("increment", increment_merge);
     lss_opts.set_compaction_filter("remove0", compact);
     lss_opts
 }
 
-pub(crate) fn get_value_cf_options() -> Options {
-    let mut values_opts = crate::point_lookup::point_lookup_cf_options(VALUES_BLOCK_CACHE_BYTES);
-    crate::bound_write_buffer_history(&mut values_opts);
-    values_opts
+pub(crate) fn get_value_cf_options(block_cache: &Cache) -> Options {
+    crate::point_lookup::point_lookup_cf_options(block_cache)
 }
 
-pub(crate) fn get_metadata_cf_options() -> Options {
-    let mut metadata_opts =
-        crate::point_lookup::point_lookup_cf_options(METADATA_BLOCK_CACHE_BYTES);
-    crate::bound_write_buffer_history(&mut metadata_opts);
-    metadata_opts
+pub(crate) fn get_metadata_cf_options(block_cache: &Cache) -> Options {
+    crate::point_lookup::point_lookup_cf_options(block_cache)
 }
 
 /// Collect all column family descriptors needed by the result index.
-pub(crate) fn result_cf_descriptors() -> Vec<rocksdb::ColumnFamilyDescriptor> {
+pub(crate) fn result_cf_descriptors(block_cache: &Cache) -> Vec<rocksdb::ColumnFamilyDescriptor> {
     vec![
-        rocksdb::ColumnFamilyDescriptor::new(VALUES_CF, get_value_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(SETS_CF, get_lss_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(METADATA_CF, get_metadata_cf_options()),
+        rocksdb::ColumnFamilyDescriptor::new(VALUES_CF, get_value_cf_options(block_cache)),
+        rocksdb::ColumnFamilyDescriptor::new(SETS_CF, get_lss_cf_options(block_cache)),
+        rocksdb::ColumnFamilyDescriptor::new(METADATA_CF, get_metadata_cf_options(block_cache)),
     ]
 }
 

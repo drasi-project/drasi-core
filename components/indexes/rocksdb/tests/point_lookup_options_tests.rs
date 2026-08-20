@@ -33,8 +33,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use drasi_index_rocksdb::element_index::RocksIndexOptions;
-use drasi_index_rocksdb::open_unified_db;
+use drasi_index_rocksdb::{open_unified_db, RocksDbMemoryBudget, RocksIndexOptions};
 
 /// Column families read only by exact key, which must carry the full
 /// point-lookup policy.
@@ -44,6 +43,24 @@ const POINT_LOOKUP_CFS: &[&str] = &["elements", "slots", "values", "metadata"];
 /// negative control: without them a test that asserted the policy everywhere,
 /// or nowhere, would still pass.
 const SCAN_CFS: &[&str] = &["inbound", "partial", "sorted-sets"];
+
+const ALL_CFS: &[&str] = &[
+    "default",
+    "elements",
+    "slots",
+    "inbound",
+    "outbound",
+    "partial",
+    "archive",
+    "values",
+    "sorted-sets",
+    "metadata",
+    "fqueue",
+    "findex",
+    "stream_state",
+    "outbox",
+    "live_results",
+];
 
 /// `section -> key -> value` from the newest OPTIONS-* file of the DB at
 /// `db_dir`. Sections are kept verbatim, e.g. `[CFOptions "elements"]` and
@@ -90,10 +107,7 @@ fn value<'a>(
 }
 
 fn open_and_parse(dir: &tempfile::TempDir, name: &str) -> HashMap<String, HashMap<String, String>> {
-    let options = RocksIndexOptions {
-        archive_enabled: true,
-        direct_io: false,
-    };
+    let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
     let db = open_unified_db(dir.path().to_str().expect("utf-8 path"), name, &options)
         .expect("open unified db");
     let sections = parse_options_file(&dir.path().join(name));
@@ -200,6 +214,25 @@ fn scan_cfs_do_not_carry_the_point_lookup_policy() {
             ),
             "nullptr",
             "CF '{cf}' unexpectedly has an SST bloom filter"
+        );
+    }
+}
+
+#[test]
+fn every_cf_charges_index_and_filter_blocks_to_the_shared_cache() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sections = open_and_parse(&dir, "metadata-cache-test");
+
+    for cf in ALL_CFS {
+        assert_eq!(
+            value(
+                &sections,
+                "TableOptions/BlockBasedTable",
+                cf,
+                "cache_index_and_filter_blocks"
+            ),
+            "true",
+            "CF '{cf}' leaves index/filter blocks outside the shared cache"
         );
     }
 }
