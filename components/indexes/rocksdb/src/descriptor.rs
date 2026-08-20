@@ -26,7 +26,7 @@ use drasi_core::interface::IndexBackendPlugin;
 use drasi_plugin_sdk::prelude::*;
 use utoipa::OpenApi;
 
-use crate::RocksDbIndexProvider;
+use crate::{RocksDbIndexProvider, RocksDbMemoryBudget};
 
 fn default_false() -> ConfigValueBool {
     ConfigValue::Static(false)
@@ -34,7 +34,7 @@ fn default_false() -> ConfigValueBool {
 
 /// Configuration DTO for the RocksDB index backend plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RocksDbIndexConfigDto {
     /// Base directory for RocksDB data files.
     #[schema(value_type = ConfigValueString)]
@@ -49,6 +49,11 @@ pub struct RocksDbIndexConfigDto {
     #[serde(default = "default_false")]
     #[schema(value_type = ConfigValueBool)]
     pub direct_io: ConfigValue<bool>,
+
+    /// Combined capacity for cached blocks and memtable reservations, in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<ConfigValueUsize>)]
+    pub memory_budget_bytes: Option<ConfigValue<usize>>,
 }
 
 #[derive(utoipa::OpenApi)]
@@ -58,6 +63,62 @@ struct RocksDbIndexSchemas;
 /// Descriptor for the RocksDB index backend plugin.
 pub struct RocksDbIndexDescriptor;
 
+impl RocksDbIndexDescriptor {
+    async fn create_provider(
+        &self,
+        config_json: &serde_json::Value,
+    ) -> anyhow::Result<RocksDbIndexProvider> {
+        let dto: RocksDbIndexConfigDto = serde_json::from_value(config_json.clone())
+            .context("Failed to deserialize RocksDB index backend configuration")?;
+
+        let mapper = DtoMapper::new();
+        let path = mapper
+            .resolve_string(&dto.path)
+            .await
+            .context("Failed to resolve RocksDB index 'path'")?;
+        let enable_archive = mapper
+            .resolve_typed(&dto.enable_archive)
+            .await
+            .context("Failed to resolve RocksDB index 'enableArchive'")?;
+        let direct_io = mapper
+            .resolve_typed(&dto.direct_io)
+            .await
+            .context("Failed to resolve RocksDB index 'directIo'")?;
+        let memory_budget_bytes = mapper
+            .resolve_optional(&dto.memory_budget_bytes)
+            .await
+            .context("Failed to resolve RocksDB index 'memoryBudgetBytes'")?;
+
+        if path.trim().is_empty() {
+            anyhow::bail!("RocksDB index 'path' must not be empty");
+        }
+
+        // Relative paths are intentionally supported (resolved against the
+        // process working directory), but parent-directory (`..`) components are
+        // rejected so a configured path cannot escape upward out of its intended
+        // storage root.
+        if std::path::Path::new(&path)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            anyhow::bail!(
+                "RocksDB index 'path' must not contain parent directory ('..') components, got: {path}"
+            );
+        }
+
+        let provider = RocksDbIndexProvider::new(path, enable_archive, direct_io);
+        match memory_budget_bytes {
+            Some(total_budget_bytes) => {
+                let memory_budget =
+                    RocksDbMemoryBudget::from_total_budget_bytes(total_budget_bytes)
+                        .context("Invalid RocksDB index memory budget")?;
+                Ok(provider.with_memory_budget(memory_budget))
+            }
+            None => Ok(provider),
+        }
+    }
+}
+
 #[async_trait]
 impl IndexBackendPluginDescriptor for RocksDbIndexDescriptor {
     fn kind(&self) -> &str {
@@ -65,7 +126,7 @@ impl IndexBackendPluginDescriptor for RocksDbIndexDescriptor {
     }
 
     fn config_version(&self) -> &str {
-        "1.0.0"
+        "1.1.0"
     }
 
     fn config_schema_json(&self) -> String {
@@ -95,60 +156,45 @@ impl IndexBackendPluginDescriptor for RocksDbIndexDescriptor {
         &self,
         config_json: &serde_json::Value,
     ) -> anyhow::Result<Arc<dyn IndexBackendPlugin>> {
-        let dto: RocksDbIndexConfigDto = serde_json::from_value(config_json.clone())
-            .context("Failed to deserialize RocksDB index backend configuration")?;
-
-        let mapper = DtoMapper::new();
-        let path = mapper
-            .resolve_string(&dto.path)
-            .await
-            .context("Failed to resolve RocksDB index 'path'")?;
-        let enable_archive = mapper
-            .resolve_typed(&dto.enable_archive)
-            .await
-            .context("Failed to resolve RocksDB index 'enableArchive'")?;
-        let direct_io = mapper
-            .resolve_typed(&dto.direct_io)
-            .await
-            .context("Failed to resolve RocksDB index 'directIo'")?;
-
-        if path.trim().is_empty() {
-            anyhow::bail!("RocksDB index 'path' must not be empty");
-        }
-
-        // Relative paths are intentionally supported (resolved against the
-        // process working directory), but parent-directory (`..`) components are
-        // rejected so a configured path cannot escape upward out of its intended
-        // storage root.
-        if std::path::Path::new(&path)
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            anyhow::bail!(
-                "RocksDB index 'path' must not contain parent directory ('..') components, got: {path}"
-            );
-        }
-
-        Ok(Arc::new(RocksDbIndexProvider::new(
-            path,
-            enable_archive,
-            direct_io,
-        )))
+        Ok(Arc::new(self.create_provider(config_json).await?))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DEFAULT_BLOCK_CACHE_CAPACITY_BYTES, DEFAULT_WRITE_BUFFER_BUDGET_BYTES};
+
+    const CUSTOM_MEMORY_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+    const CUSTOM_WRITE_BUFFER_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+
+    fn assert_memory_budget(
+        provider: &RocksDbIndexProvider,
+        block_cache_capacity_bytes: usize,
+        write_buffer_budget_bytes: usize,
+    ) {
+        assert_eq!(
+            provider.memory_budget().block_cache_capacity_bytes(),
+            block_cache_capacity_bytes
+        );
+        assert_eq!(
+            provider
+                .memory_budget()
+                .write_buffer_manager()
+                .get_buffer_size(),
+            write_buffer_budget_bytes
+        );
+    }
 
     #[test]
     fn test_descriptor_metadata() {
         let d = RocksDbIndexDescriptor;
         assert_eq!(d.kind(), "rocksdb");
-        assert_eq!(d.config_version(), "1.0.0");
+        assert_eq!(d.config_version(), "1.1.0");
         assert_eq!(d.config_schema_name(), "index.rocksdb.RocksDbIndexConfig");
         let schema = d.config_schema_json();
         assert!(schema.contains("RocksDbIndexConfigDto"));
+        assert!(schema.contains("memoryBudgetBytes"));
     }
 
     #[test]
@@ -157,35 +203,99 @@ mod tests {
         let dto: RocksDbIndexConfigDto = serde_json::from_value(json).expect("deserialize");
         assert!(matches!(dto.enable_archive, ConfigValue::Static(false)));
         assert!(matches!(dto.direct_io, ConfigValue::Static(false)));
+        assert!(dto.memory_budget_bytes.is_none());
     }
 
     #[tokio::test]
-    async fn test_create_with_static_values() {
+    async fn test_create_uses_default_memory_budget() {
+        let json = serde_json::json!({ "path": "/tmp/drasi-rocks-test" });
+        let provider = RocksDbIndexDescriptor
+            .create_provider(&json)
+            .await
+            .expect("create");
+        assert_memory_budget(
+            &provider,
+            DEFAULT_BLOCK_CACHE_CAPACITY_BYTES,
+            DEFAULT_WRITE_BUFFER_BUDGET_BYTES,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_with_custom_memory_budget() {
         let json = serde_json::json!({
             "path": "/tmp/drasi-rocks-test",
             "enableArchive": true,
-            "directIo": false
+            "directIo": false,
+            "memoryBudgetBytes": CUSTOM_MEMORY_BUDGET_BYTES
         });
         let provider = RocksDbIndexDescriptor
-            .create_index_backend(&json)
+            .create_provider(&json)
             .await
             .expect("create");
         assert!(!provider.is_volatile());
+        assert_memory_budget(
+            &provider,
+            CUSTOM_MEMORY_BUDGET_BYTES,
+            CUSTOM_WRITE_BUFFER_BUDGET_BYTES,
+        );
     }
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn test_create_with_env_var_path() {
+    async fn test_create_with_env_var_values() {
         std::env::set_var("TEST_ROCKSDB_PATH", "/tmp/drasi-rocks-env");
+        std::env::set_var(
+            "TEST_ROCKSDB_MEMORY_BUDGET",
+            CUSTOM_MEMORY_BUDGET_BYTES.to_string(),
+        );
         let json = serde_json::json!({
-            "path": { "kind": "EnvironmentVariable", "name": "TEST_ROCKSDB_PATH" }
+            "path": { "kind": "EnvironmentVariable", "name": "TEST_ROCKSDB_PATH" },
+            "memoryBudgetBytes": {
+                "kind": "EnvironmentVariable",
+                "name": "TEST_ROCKSDB_MEMORY_BUDGET"
+            }
         });
         let provider = RocksDbIndexDescriptor
-            .create_index_backend(&json)
+            .create_provider(&json)
             .await
             .expect("create");
         assert!(!provider.is_volatile());
+        assert_memory_budget(
+            &provider,
+            CUSTOM_MEMORY_BUDGET_BYTES,
+            CUSTOM_WRITE_BUFFER_BUDGET_BYTES,
+        );
         std::env::remove_var("TEST_ROCKSDB_PATH");
+        std::env::remove_var("TEST_ROCKSDB_MEMORY_BUDGET");
+    }
+
+    #[tokio::test]
+    async fn test_create_rejects_invalid_memory_budget() {
+        let json = serde_json::json!({
+            "path": "/tmp/drasi-rocks-test",
+            "memoryBudgetBytes": 1
+        });
+        let err = match RocksDbIndexDescriptor.create_provider(&json).await {
+            Ok(_) => panic!("should reject invalid memory budget"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("memory budget"));
+    }
+
+    #[tokio::test]
+    async fn test_create_rejects_unknown_fields() {
+        let json = serde_json::json!({
+            "path": "/tmp/drasi-rocks-test",
+            "memoryBudget": CUSTOM_MEMORY_BUDGET_BYTES
+        });
+        let err = match RocksDbIndexDescriptor.create_provider(&json).await {
+            Ok(_) => panic!("should reject unknown fields"),
+            Err(err) => err,
+        };
+        assert!(
+            format!("{err:#}").contains("unknown field"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[tokio::test]
@@ -211,9 +321,9 @@ mod tests {
     #[tokio::test]
     async fn test_create_rejects_parent_dir_traversal() {
         let json = serde_json::json!({ "path": "../../secrets" });
-        let err = match RocksDbIndexDescriptor.create_index_backend(&json).await {
+        let err = match RocksDbIndexDescriptor.create_provider(&json).await {
             Ok(_) => panic!("should reject parent-directory traversal"),
-            Err(e) => e,
+            Err(err) => err,
         };
         assert!(
             err.to_string().contains("parent directory"),

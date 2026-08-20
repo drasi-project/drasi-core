@@ -25,16 +25,15 @@ use std::sync::Arc;
 use crate::IndexDb;
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, LiveResultsWriter, RowMutation};
-use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options, WriteBatchWithTransaction};
+use rocksdb::{ColumnFamilyDescriptor, IteratorMode, WriteBatchWithTransaction};
 use tokio::task;
 
 /// Column family name for live results data.
 pub(crate) const LIVE_RESULTS_CF: &str = "live_results";
 
 /// Returns the column family descriptor for the live_results CF.
-pub(crate) fn live_results_cf_descriptor() -> ColumnFamilyDescriptor {
-    let mut opts = Options::default();
-    crate::bound_write_buffer_history(&mut opts);
+pub(crate) fn live_results_cf_descriptor(block_cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+    let opts = crate::cf_options::base_cf_options(block_cache);
     ColumnFamilyDescriptor::new(LIVE_RESULTS_CF, opts)
 }
 

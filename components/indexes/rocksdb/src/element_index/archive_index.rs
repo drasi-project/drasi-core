@@ -21,7 +21,7 @@ use drasi_core::{
     models::{Element, ElementReference, ElementTimestamp, TimestampBound, TimestampRange},
 };
 use prost::{bytes::Bytes, Message};
-use rocksdb::{Options, SliceTransform, Transaction};
+use rocksdb::{Cache, Options, SliceTransform, Transaction};
 use tokio::task;
 
 use crate::{
@@ -40,7 +40,7 @@ impl ElementArchiveIndex for RocksDbElementIndex {
         element_ref: &ElementReference,
         time: ElementTimestamp,
     ) -> Result<Option<Arc<Element>>, IndexError> {
-        if !self.context.options.archive_enabled {
+        if !self.context.options.archive_enabled() {
             return Err(IndexError::ArchiveNotEnabled);
         }
         let context = self.context.clone();
@@ -95,7 +95,7 @@ impl ElementArchiveIndex for RocksDbElementIndex {
         element_ref: &ElementReference,
         range: TimestampRange<ElementTimestamp>,
     ) -> Result<ElementStream, IndexError> {
-        if !self.context.options.archive_enabled {
+        if !self.context.options.archive_enabled() {
             return Err(IndexError::ArchiveNotEnabled);
         }
         let context = self.context.clone();
@@ -213,6 +213,7 @@ impl ElementArchiveIndex for RocksDbElementIndex {
         let context = self.context.clone();
 
         let task = task::spawn_blocking(move || {
+            let block_cache = context.options.memory_budget().block_cache();
             match context.db.drop_cf(ARCHIVE_CF) {
                 Ok(()) => {}
                 Err(err) => {
@@ -224,7 +225,10 @@ impl ElementArchiveIndex for RocksDbElementIndex {
                     return Err(IndexError::other(err));
                 }
             }
-            if let Err(err) = context.db.create_cf(ARCHIVE_CF, &get_archive_cf_options()) {
+            if let Err(err) = context
+                .db
+                .create_cf(ARCHIVE_CF, &get_archive_cf_options(block_cache))
+            {
                 return Err(IndexError::other(err));
             }
             Ok(())
@@ -253,9 +257,8 @@ pub fn insert_archive(
     }
 }
 
-pub(crate) fn get_archive_cf_options() -> Options {
-    let mut opts = Options::default();
-    crate::bound_write_buffer_history(&mut opts);
+pub(crate) fn get_archive_cf_options(block_cache: &Cache) -> Options {
+    let mut opts = crate::cf_options::base_cf_options(block_cache);
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
     opts
 }
