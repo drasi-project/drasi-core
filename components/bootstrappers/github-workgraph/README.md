@@ -5,6 +5,12 @@
 
 ## Snapshot scope
 
+When `workerConfig` is set, bootstrap first reads and validates the worker-queue
+configuration file and projects its `WorkGraphWorker`, `WorkGraphWorkerSlot`,
+and `HAS_SLOT` elements **before** any Issue or task artifact, so a capacity
+query always sees workers and slots ahead of the Assignments and Leases that
+reference them.
+
 For every repository allowed by the Source configuration, bootstrap retrieves:
 
 - open generic Issues, excluding the configured exact task Issue Type;
@@ -23,8 +29,12 @@ Every fetched object is reshaped into webhook JSON and passed through the same
 `mapping::Converter` used by live deliveries. Consequently bootstrap and live
 use identical:
 
-- `WorkGraphTask`, `WorkGraphTaskAssignment`, `WorkGraphTaskResult`,
-  `WorkGraphTaskResultAcceptance`, and `WorkGraphError` parsing;
+- `WorkGraphTask`, `WorkGraphTaskAssignment` (v1 and v2),
+  `WorkGraphTaskResult` (v1 and v2), `WorkGraphTaskResultAcceptance`,
+  `WorkGraphTaskLease`, `WorkGraphTaskLeaseExpiration`, and `WorkGraphError`
+  parsing;
+- worker file validation and worker/slot projection, which come from the same
+  `workers` and `mapping` code the live Source uses;
 - node and relation IDs/directions;
 - generic open-only and task open/closed behavior;
 - ordered `statusLabels`/`workgraphLabels` arrays, derived `currentStatus` and
@@ -78,8 +88,32 @@ sources:
 | `apiBaseUrl` | GraphQL endpoint; defaults to `https://api.github.com/graphql` |
 | `maxConcurrency` | Bound for request and repository concurrency; defaults to 4 |
 
-The token needs read access for Issues, Pull Requests, and repository metadata.
-The provider never writes to GitHub.
+The worker file location and the lease trust configuration are **not** bootstrap
+fields. Like organization, repository allowlist, and task Issue Type, they are
+inherited from the parent Source's `workerConfig` (`repository`, `ref`, `path`)
+and `leaseTrust` (`dispatchers`, `reporters`), so bootstrap and streaming can
+never disagree about which file is authoritative or which producers are
+trusted. Only the read credential and endpoint above are the bootstrapper's own.
+
+The token needs read access for Issues, Pull Requests, and repository metadata,
+plus repository contents when `workerConfig` is set. The worker file is read
+with this same token and `apiBaseUrl` — no separate credential, endpoint, or
+service. The provider never writes to GitHub.
+
+The Source's `workerConfig` is optional; omitting it snapshots no worker or slot
+elements.
+When present, a file that cannot be **read** (transport, authentication, or a
+5xx) fails the bootstrap outright, because claiming an empty worker pool would
+silently stop every dispatch. A file that *is* read but is deterministically
+**invalid** — missing at the configured path, non-text, oversized, or failing
+the strict `version: 1` grammar — snapshots a single `WorkGraphError` node with
+the stable ID `workgraph-error:worker-config`, projects no worker, and lets the
+rest of the snapshot complete.
+
+A bootstrap builds a fresh snapshot, so it has no prior projection to retire
+slots against: it projects exactly the configured slots, all `enabled`. Slot
+retirement after a live capacity reduction is Source-local; see the Source
+README's *Capacity changes and their bounded limitation*.
 
 Use a top-level provider and string reference. The Source owns organization,
 repository, and task Issue Type scope; the bootstrap descriptor reads those
@@ -100,9 +134,35 @@ emitted once and never as generic Issues.
 Parent identity and repository are selected with each task rather than inferred
 from repository iteration. Embedded parent repositories select and reshape the
 same default branch, topics, and metadata as organization repository
-enumeration, so first-wins snapshot dedup is complete regardless of concurrent
-repository completion order. Repository processing and HTTP requests are
-independently bounded by `maxConcurrency`.
+enumeration. Repository processing and HTTP requests are independently bounded
+by `maxConcurrency`.
+
+Repository tasks complete in arbitrary order, so their results are reassembled
+by repository index before the snapshot is folded; the emitted snapshot never
+depends on scheduling.
+
+## Snapshot folding
+
+The shared converter emits an ordered stream of creates, convergent updates, and
+defensive deletes. A snapshot is that stream's *final* state, so bootstrap
+replays it rather than approximating it: a repeated element converges by merging
+exactly as Drasi merges an `Update` at query time, a `Delete` removes an element
+the stream had already produced (and is a no-op otherwise), and first-appearance
+order is preserved.
+
+This is what keeps a repeatedly observed element — a repository reached both
+directly and as a task parent, for example — in exactly the state the live
+Source converges to.
+
+Separately, the lease lifecycle is not folded this way at all: bootstrap builds
+the same `(task, leaseId)` ledger the live Source keeps durably, from the
+current task comments it fetched, and then projects each
+`WorkGraphTaskLeaseAnchor` from the artifacts that survive. A snapshot therefore
+reflects current state — a lease whose completing Result no longer exists is
+active again — and matches a live delivery stream exactly. Bootstrap also reads
+GitHub's `editor` on every comment so it applies the same editor-trust rule the
+webhook applies via `sender`. See the Source README's *Lease trust* and *Lease
+lifecycle and active-lease counting*.
 
 GitHub does not offer a transaction spanning these queries. Bootstrap fails on
 any repository task error rather than intentionally returning a partial
@@ -124,3 +184,15 @@ defense, initial and cursor pages (including more than 1,000 tasks), open generi
 and open/closed task selection, complete order-independent parent repositories,
 comments on closed tasks, strict task/specialized-comment errors, repository filtering,
 requested-label filtering, and live-converter parity.
+
+Worker-queue tests additionally assert the folded lease lifecycle (ended,
+reactivated when the end is gone, conflicting acquisitions, and an end with no
+acquisition), that neither an untrusted author nor an untrusted editor can forge
+lease state in a snapshot, bootstrap/live lifecycle parity, worker/slot snapshot
+ordering ahead of
+every task artifact, malformed and missing worker files becoming an explicit
+error with no worker pool, oversized/truncated/binary and non-Blob rejections,
+an unreadable file failing the bootstrap, omitted `workerConfig` projecting
+nothing, requested-label filtering of worker elements, the folded
+Assignment/v2 → Lease/v1 → Result/v2 lifecycle, bootstrap/live worker parity,
+and byte-identical repeated snapshots.

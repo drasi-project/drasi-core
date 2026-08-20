@@ -257,6 +257,8 @@ query($id: ID!, $cursor: String, $pageSize: Int!) {
           html_url: url
           author_association: authorAssociation
           user: author { login type: __typename ... on Node { node_id: id } ... on Bot { id: databaseId } ... on Mannequin { id: databaseId } ... on Organization { id: databaseId } ... on User { id: databaseId } }
+          last_edited_at: lastEditedAt
+          editor { login ... on Node { node_id: id } }
         }
       }
     }
@@ -279,6 +281,8 @@ query($id: ID!, $cursor: String, $pageSize: Int!) {
           html_url: url
           author_association: authorAssociation
           user: author { login type: __typename ... on Node { node_id: id } ... on Bot { id: databaseId } ... on Mannequin { id: databaseId } ... on Organization { id: databaseId } ... on User { id: databaseId } }
+          last_edited_at: lastEditedAt
+          editor { login ... on Node { node_id: id } }
         }
       }
     }
@@ -306,6 +310,8 @@ query($id: ID!, $cursor: String, $pageSize: Int!) {
           html_url: url
           author_association: authorAssociation
           user: author { login type: __typename ... on Node { node_id: id } ... on Bot { id: databaseId } ... on Mannequin { id: databaseId } ... on Organization { id: databaseId } ... on User { id: databaseId } }
+          last_edited_at: lastEditedAt
+          editor { login ... on Node { node_id: id } }
         }
       }
     }

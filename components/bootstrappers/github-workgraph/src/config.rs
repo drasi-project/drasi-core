@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use drasi_source_github_workgraph::config::{RepositoryFilter, TaskIssueType};
+use drasi_source_github_workgraph::config::{LeaseTrust, RepositoryFilter, TaskIssueType};
 use serde::{Deserialize, Serialize};
+
+pub use drasi_source_github_workgraph::workers::WorkerFileLocation;
 
 /// Default GitHub GraphQL API endpoint (github.com; override for GHE).
 pub const DEFAULT_API_BASE_URL: &str = "https://api.github.com/graphql";
@@ -25,10 +27,10 @@ pub const DEFAULT_PAGE_SIZE: u32 = 100;
 /// Configuration for [`crate::GitHubWorkGraphBootstrapProvider`].
 ///
 /// This bootstrapper owns all GitHub API access; the streaming
-/// `drasi-source-github-workgraph` source is payload-only and never calls the
-/// GitHub API. The `token` MUST be a read-only credential (a fine-grained PAT
-/// with only `Issues: Read`, `Pull requests: Read`, and `Metadata: Read`
-/// suffices) — this bootstrapper never writes to GitHub.
+/// `drasi-source-github-workgraph` source reads only the worker file. The
+/// `token` MUST be a read-only credential (a fine-grained PAT with only
+/// `Issues: Read`, `Pull requests: Read`, `Contents: Read`, and
+/// `Metadata: Read` suffices) — this bootstrapper never writes to GitHub.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GitHubWorkGraphBootstrapConfig {
@@ -38,6 +40,19 @@ pub struct GitHubWorkGraphBootstrapConfig {
     /// Canonical lowercase repository names to include. Empty means all.
     #[serde(default)]
     pub repositories: Vec<String>,
+    /// Location of the worker-queue configuration file. It is read with the
+    /// same `token` and `api_base_url` as every other GitHub read, before any
+    /// task artifact is projected.
+    ///
+    /// Optional: a deployment that does not run the worker queue omits it and
+    /// snapshots no worker or slot nodes. When present, a malformed or
+    /// unreadable file is an explicit failure, never an empty worker pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_config: Option<WorkerFileLocation>,
+    /// Identities allowed to author lease lifecycle artifacts. Inherited from
+    /// the Source so bootstrap and streaming trust exactly the same producers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_trust: Option<LeaseTrust>,
     /// A read-only GitHub token (PAT or GitHub App installation token).
     pub token: String,
     /// GraphQL API endpoint. Override for GitHub Enterprise Server.
@@ -53,6 +68,8 @@ impl Default for GitHubWorkGraphBootstrapConfig {
             organization: String::new(),
             task_issue_type: TaskIssueType::default(),
             repositories: Vec::new(),
+            worker_config: None,
+            lease_trust: None,
             token: String::new(),
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
@@ -77,6 +94,12 @@ impl GitHubWorkGraphBootstrapConfig {
         );
         anyhow::ensure!(self.max_concurrency > 0, "max_concurrency must be > 0");
         self.task_issue_type.validate()?;
+        if let Some(worker_config) = &self.worker_config {
+            worker_config.validate()?;
+        }
+        if let Some(lease_trust) = &self.lease_trust {
+            lease_trust.validate()?;
+        }
         RepositoryFilter::new(&self.organization, &self.repositories)?;
         Ok(())
     }
