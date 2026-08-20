@@ -41,8 +41,9 @@ tracing = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tonic = { version = "0.11", features = ["tls", "gzip"] }
-prost = "0.12"
+tonic = { version = "0.14", features = ["transport", "tls-ring", "gzip"] }
+tonic-prost = "0.14"
+prost = "0.14"
 axum = "0.7"
 bytes = "1"
 chrono = "0.4"
@@ -51,8 +52,8 @@ base64 = "0.22"
 subtle = "2"
 
 [build-dependencies]
-tonic-build = "0.11"
-prost-build = "0.12"
+tonic-prost-build = "0.14"
+prost-build = "0.14"
 protoc-bin-vendored = "3"
 
 [dev-dependencies]

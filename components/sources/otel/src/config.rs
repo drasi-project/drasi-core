@@ -17,11 +17,12 @@
 //! # Example Configuration (YAML)
 //!
 //! ```yaml
-//! source_type: otel
+//! kind: otel
 //! properties:
 //!   grpcBind: "0.0.0.0:4317"
 //!   httpBind: "0.0.0.0:4318"
 //!   metricAllowlist: ["latency_p99_ms"]
+//!   destinationAttributes: ["peer.service"]
 //!   heartbeatMetric: "health.heartbeat"
 //!   dependencyTtlSecs: 300
 //!   logEventTtlSecs: 60
@@ -89,90 +90,99 @@ pub fn default_max_request_bytes() -> usize {
 /// does this automatically.
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct OtelSourceConfig {
-    /// OTLP/gRPC listen address (`host:port`). Empty disables gRPC.
+    /// OTLP/gRPC listen address (`host:port`). Default: `0.0.0.0:4317`.
+    /// Empty string disables gRPC. At least one of this or [`Self::http_bind`] must be set.
     #[serde(default = "default_grpc_bind")]
     pub grpc_bind: String,
 
     /// Optional OTLP/HTTP protobuf listen address (`host:port`).
+    /// Serves `POST /v1/traces|metrics|logs`. Unset disables HTTP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_bind: Option<String>,
 
-    /// PEM server certificate path. Unset = plaintext (local-demo exception).
+    /// PEM server certificate path. Must be paired with [`Self::tls_key_path`].
+    /// Unset = plaintext (local-demo exception).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_cert_path: Option<String>,
 
-    /// PEM server private key path.
+    /// PEM server private key path. Must be paired with [`Self::tls_cert_path`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_key_path: Option<String>,
 
-    /// Optional client CA for mTLS.
+    /// Optional PEM client CA for mTLS. Requires the server cert/key pair.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_ca_path: Option<String>,
 
-    /// Static bearer token. Identity provider Token credentials take precedence.
+    /// Static inbound bearer token (`Authorization: Bearer ...`).
+    /// An identity provider Token/Basic credential takes precedence if set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<String>,
 
-    /// Accepted metric names. Empty rejects every metric. `*` allows all.
+    /// Metric names that become `Metric` nodes. Empty rejects every metric. `*` allows all.
     /// Only `*` wildcards are supported (`latency_*`, `*_p99`); `?` and `**` are not.
     #[serde(default)]
     pub metric_allowlist: Vec<String>,
 
-    /// Extra data-point attributes that extend metric identity.
-    /// Unlisted attributes are ignored and do not change the Metric id.
+    /// Data-point attribute keys appended to the Metric id (sorted `key=value`).
+    /// Unlisted attributes are ignored and do not split series.
     #[serde(default)]
     pub metric_identity_attributes: Vec<String>,
 
-    /// Span attributes tried in order for the destination service name.
+    /// Span attribute keys tried in order to name the **callee** of a CLIENT span.
+    /// First non-empty value becomes the destination `Service` for `DEPENDS_ON`.
+    /// Default: `["peer.service"]`. If none match, the span is dropped.
     #[serde(default = "default_destination_attributes")]
     pub destination_attributes: Vec<String>,
 
-    /// Accepted span kinds (`CLIENT`, `SERVER`, `PRODUCER`, `CONSUMER`, `INTERNAL`).
+    /// Span kinds that may create `DEPENDS_ON`. Default: `["CLIENT"]`.
+    /// Values: `CLIENT`, `SERVER`, `PRODUCER`, `CONSUMER`, `INTERNAL`.
     #[serde(default = "default_span_kinds")]
     pub span_kinds: Vec<String>,
 
-    /// Metric name that refreshes a service Heartbeat.
+    /// Metric name that upserts `(:Service)-[:HEARTBEAT]->(:Heartbeat)`.
+    /// Need not be on [`Self::metric_allowlist`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_metric: Option<String>,
 
-    /// Log `event_name` that refreshes a service Heartbeat.
+    /// Log `event_name` that refreshes the same Heartbeat node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_event_name: Option<String>,
 
-    /// Minimum log severity for LogEvent admission (`INFO`, `WARN`, `ERROR`, …).
+    /// Minimum log severity for LogEvent admission. Default: `ERROR`.
+    /// `TRACE`, `DEBUG`, `INFO`, `WARN`/`WARNING`, `ERROR`, `FATAL`.
     #[serde(default = "default_log_min_severity")]
     pub log_min_severity: String,
 
-    /// If non-empty, only these log `event_name` values become LogEvent nodes.
-    /// Same `*` glob rules as `metric_allowlist`; `?` and `**` are not supported.
+    /// If non-empty, only matching log `event_name` values become LogEvent nodes.
+    /// Same `*` glob rules as [`Self::metric_allowlist`]. Empty = any event name.
     #[serde(default)]
     pub log_event_name_allowlist: Vec<String>,
 
-    /// How long LogEvent nodes live before the sweeper deletes them.
+    /// LogEvent / EMITS lifetime in seconds from receipt time. Default: 60. Must be > 0.
     #[serde(default = "default_log_event_ttl_secs")]
     pub log_event_ttl_secs: u64,
 
-    /// How long a DEPENDS_ON edge lives without a refreshing client span.
+    /// DEPENDS_ON lifetime in seconds from receipt time. Default: 300. Must be > 0.
     #[serde(default = "default_dependency_ttl_secs")]
     pub dependency_ttl_secs: u64,
 
-    /// Maximum distinct Service nodes.
+    /// Maximum distinct Service nodes. Default: 1000.
     #[serde(default = "default_max_services")]
     pub max_services: usize,
 
-    /// Maximum distinct Metric nodes.
+    /// Maximum distinct Metric nodes. Default: 2000.
     #[serde(default = "default_max_metrics")]
     pub max_metrics: usize,
 
-    /// Maximum DEPENDS_ON edges.
+    /// Maximum DEPENDS_ON edges. Default: 5000.
     #[serde(default = "default_max_dependencies")]
     pub max_dependencies: usize,
 
-    /// Maximum live LogEvent nodes.
+    /// Maximum live LogEvent nodes. Default: 5000.
     #[serde(default = "default_max_log_events")]
     pub max_log_events: usize,
 
-    /// Drop records whose `drasi.source.origin` is `derived`.
+    /// Drop records with `drasi.source.origin=derived`. Default: true.
     #[serde(default = "default_reject_derived")]
     pub reject_derived: bool,
 
@@ -180,7 +190,7 @@ pub struct OtelSourceConfig {
     #[serde(default = "default_max_request_bytes")]
     pub max_request_bytes: usize,
 
-    /// Optional WAL durability for projected SourceChanges. Default: off.
+    /// Optional WAL of projected SourceChanges (not raw OTLP). Default: off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durability: Option<DurabilityConfig>,
 }

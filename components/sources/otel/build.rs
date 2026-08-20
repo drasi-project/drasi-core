@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Proto comments include JSON examples that rustdoc tries to compile as doctests.
     let mut prost_config = prost_build::Config::new();
     prost_config.disable_comments(["."]);
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
         .compile_with_config(

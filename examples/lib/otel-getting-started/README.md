@@ -8,6 +8,8 @@ send-otlp  -->  Collector :4317  -->  Drasi source :14317  -->  log reaction
 
 The Collector is the OTLP endpoint you send to. It forwards traces, metrics, and logs to `drasi-source-otel`, which projects allowlisted telemetry into the live graph.
 
+Config keys are documented in [`components/sources/otel/README.md`](../../../components/sources/otel/README.md).
+
 ## Prerequisites
 
 - Docker + Docker Compose

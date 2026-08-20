@@ -21,26 +21,27 @@
 //!
 //! # Configuration
 //!
-//! The source is configured via [`OtelSourceConfig`]. Key options:
+//! See the crate README for a full key-by-key reference. The source is
+//! configured via [`OtelSourceConfig`]:
 //!
 //! - `grpc_bind`: OTLP/gRPC listen address. Default: `0.0.0.0:4317`. Empty disables gRPC.
-//! - `http_bind`: (Optional) OTLP/HTTP protobuf listen address (`/v1/traces|metrics|logs`)
-//! - `metric_allowlist`: accepted metric names. Empty rejects all. `*` allows all.
-//!   Only `*` wildcards are supported (`latency_*`); `?` and `**` are not.
-//! - `destination_attributes`: span attributes used as the callee. Default: `peer.service`
-//! - `dependency_ttl_secs`: `DEPENDS_ON` expiry from receipt time. Default: `300`
-//! - `log_event_ttl_secs`: `LogEvent` expiry from receipt time. Default: `60`
-//! - `max_request_bytes`: maximum decoded OTLP request size. Default: 4 MiB
-//! - `auth_token`: (Optional) inbound bearer token
+//! - `http_bind`: (Optional) OTLP/HTTP protobuf (`/v1/traces|metrics|logs`)
+//! - `metric_allowlist`: metric names to project. Empty rejects all. `*` allows all.
+//! - `destination_attributes`: span attribute keys naming the callee for `DEPENDS_ON`.
+//!   Default: `peer.service`. First non-empty value wins.
+//! - `span_kinds`: which span kinds create edges. Default: `CLIENT`
+//! - `dependency_ttl_secs` / `log_event_ttl_secs`: receipt-time TTL (not OTLP event time)
+//! - `auth_token`: (Optional) inbound `Authorization: Bearer` token
 //! - `durability`: (Optional) WAL replay of projected changes
 //!
 //! # Example Configuration (YAML)
 //!
 //! ```yaml
-//! source_type: otel
+//! kind: otel
 //! properties:
 //!   grpcBind: "0.0.0.0:4317"
 //!   metricAllowlist: ["latency_p99_ms", "*_p99"]
+//!   destinationAttributes: ["peer.service", "server.address"]
 //!   heartbeatMetric: "health.heartbeat"
 //!   dependencyTtlSecs: 300
 //! ```
@@ -64,7 +65,8 @@
 //!
 //! ## Client span (upsert + TTL)
 //!
-//! A `SPAN_KIND_CLIENT` span with `peer.service=payments` upserts
+//! A `SPAN_KIND_CLIENT` span with `peer.service=payments` (or the first
+//! matching [`OtelSourceConfig::destination_attributes`] key) upserts
 //! `(:Service {name: "checkout"})-[:DEPENDS_ON]->(:Service {name: "payments"})`.
 //! The edge is deleted if it is not refreshed within `dependency_ttl_secs`.
 //!

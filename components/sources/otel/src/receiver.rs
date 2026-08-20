@@ -395,8 +395,7 @@ pub async fn serve(
             builder = builder.tls_config(tls).context("configure OTLP TLS")?;
         }
         info!("[{}] OTLP/gRPC listening on {addr}", runtime.source_id);
-        let incoming = TcpIncoming::from_listener(listener, true, None)
-            .map_err(|e| anyhow::anyhow!("OTLP/gRPC incoming: {e}"))?;
+        let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
         grpc_task = Some((
             stop_tx,
