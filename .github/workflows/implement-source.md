@@ -5,9 +5,9 @@ on:
     events: [pull_request, pull_request_comment]
 imports:
   - ../agents/source-plan-executor.md
+model: gpt-5.2-codex 
 engine:
   id: copilot
-  model: gpt-5.2-codex 
 permissions:
   copilot-requests: write
   contents: read
@@ -20,11 +20,11 @@ tools:
 safe-outputs:
   create-pull-request:
     draft: true
-    expires: 14
+    expires: 14d
 ---
 
 # source-implementor
 
 Implement the plan to create a new source as specified in the planning PR.
 
-Context: "${{ needs.activation.outputs.text }}"
+Context: "${{ steps.sanitized.outputs.text }}"
