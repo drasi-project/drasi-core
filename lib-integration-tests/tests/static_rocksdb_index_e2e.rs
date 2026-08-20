@@ -29,18 +29,120 @@
 //! `Arc<dyn IndexBackendPlugin>` (defined in `drasi-core`) is shared directly
 //! between the backend crate and `drasi-lib`.
 
-mod mock_source;
-
 use anyhow::Result;
+use async_trait::async_trait;
+use drasi_core::models::{
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use drasi_index_rocksdb::RocksDbIndexDescriptor;
-use drasi_lib::{ComponentStatus, DrasiLib, Query, StorageBackendRef};
+use drasi_lib::{
+    ComponentStatus, DispatchMode, DrasiLib, Query, Source, SourceBase, SourceBaseParams,
+    SourceRuntimeContext, SourceSubscriptionSettings, StorageBackendRef, SubscriptionResponse,
+};
 use drasi_plugin_sdk::IndexBackendPluginDescriptor;
-use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
+use drasi_source_application::PropertyMapBuilder;
 use serde_json::json;
 use tempfile::TempDir;
+
+#[derive(Clone)]
+struct TestSourceHandle {
+    base: Arc<SourceBase>,
+}
+
+impl TestSourceHandle {
+    async fn send_node_insert(
+        &self,
+        element_id: impl Into<Arc<str>>,
+        labels: Vec<impl Into<Arc<str>>>,
+        properties: ElementPropertyMap,
+    ) -> Result<()> {
+        let element = Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference {
+                    source_id: Arc::from(self.base.get_id()),
+                    element_id: element_id.into(),
+                },
+                labels: Arc::from(labels.into_iter().map(Into::into).collect::<Vec<_>>()),
+                effective_from: chrono::Utc::now().timestamp_millis() as u64,
+            },
+            properties,
+        };
+        self.base
+            .dispatch_source_change(SourceChange::Insert { element })
+            .await
+    }
+}
+
+struct TestSource {
+    base: Arc<SourceBase>,
+}
+
+impl TestSource {
+    fn new(id: &str) -> Result<(Self, TestSourceHandle)> {
+        let base = Arc::new(SourceBase::new(SourceBaseParams::new(id))?);
+        let handle = TestSourceHandle { base: base.clone() };
+        Ok((Self { base }, handle))
+    }
+}
+
+#[async_trait]
+impl Source for TestSource {
+    fn id(&self) -> &str {
+        self.base.get_id()
+    }
+
+    fn type_name(&self) -> &str {
+        "test"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        HashMap::new()
+    }
+
+    fn auto_start(&self) -> bool {
+        self.base.get_auto_start()
+    }
+
+    async fn start(&self) -> Result<()> {
+        self.base
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.base.stop_common().await
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.base.get_status().await
+    }
+
+    async fn subscribe(
+        &self,
+        settings: SourceSubscriptionSettings,
+    ) -> Result<SubscriptionResponse> {
+        self.base
+            .subscribe_with_bootstrap(&settings, self.type_name())
+            .await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn initialize(&self, context: SourceRuntimeContext) {
+        self.base.initialize(context).await;
+    }
+
+    fn dispatch_mode(&self) -> DispatchMode {
+        DispatchMode::Channel
+    }
+}
 
 /// Build a RocksDB-backed index provider the way `drasi-server` would: from a
 /// JSON storage-backend config, via the statically-linked descriptor.
@@ -68,7 +170,11 @@ async fn build_provider_from_config(
         .expect("descriptor should build a RocksDB index backend from config")
 }
 
-async fn insert_person(handle: &MockSourceHandle, id: &str, name: &str, age: i64) -> Result<()> {
+fn test_source(id: &str) -> Result<(TestSource, TestSourceHandle)> {
+    TestSource::new(id)
+}
+
+async fn insert_person(handle: &TestSourceHandle, id: &str, name: &str, age: i64) -> Result<()> {
     let props = PropertyMapBuilder::new()
         .with_string("name", name)
         .with_integer("age", age)
@@ -137,7 +243,7 @@ async fn static_rocksdb_descriptor_drives_query() -> Result<()> {
 
     let provider = build_provider_from_config(&backend_config).await;
 
-    let (source, handle) = MockSource::new("people-src")?;
+    let (source, handle) = test_source("people-src")?;
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -186,7 +292,7 @@ async fn static_rocksdb_index_persists_across_restart() -> Result<()> {
     });
 
     let provider = build_provider_from_config(&backend_config).await;
-    let (source, handle) = MockSource::new("people-src")?;
+    let (source, handle) = test_source("people-src")?;
     let core = Arc::new(
         DrasiLib::builder()
             .with_id("static-rocksdb")
@@ -267,7 +373,7 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
 
     // ---- First engine: ingest rows, then shut down permanently. ----
     let provider1 = build_provider_from_config(&backend_config).await;
-    let (source1, handle1) = MockSource::new("people-src")?;
+    let (source1, handle1) = test_source("people-src")?;
     let core1 = Arc::new(
         DrasiLib::builder()
             .with_id("static-rocksdb-1")
@@ -304,7 +410,7 @@ async fn static_rocksdb_shutdown_releases_lock_for_same_process_reopen() -> Resu
     // A fresh provider on the same on-disk path; this open acquires the RocksDB
     // LOCK, which only succeeds if the first engine's `shutdown()` released it.
     let provider2 = build_provider_from_config(&backend_config).await;
-    let (source2, _handle2) = MockSource::new("people-src")?;
+    let (source2, _handle2) = test_source("people-src")?;
     let core2 = Arc::new(
         DrasiLib::builder()
             .with_id("static-rocksdb-2")
@@ -365,7 +471,7 @@ async fn static_rocksdb_default_provider_backs_unspecified_query() -> Result<()>
     });
 
     let provider = build_provider_from_config(&backend_config).await;
-    let (source, handle) = MockSource::new("people-src")?;
+    let (source, handle) = test_source("people-src")?;
     let core = Arc::new(
         DrasiLib::builder()
             .with_id("static-rocksdb")

@@ -15,7 +15,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -41,6 +41,18 @@ struct Package {
     description: Option<String>,
     #[serde(default)]
     license: Option<String>,
+    #[serde(default)]
+    publish: Option<Vec<String>>,
+    #[serde(default)]
+    dependencies: Vec<Dependency>,
+}
+
+#[derive(Deserialize, Clone)]
+struct Dependency {
+    name: String,
+    req: String,
+    kind: Option<String>,
+    path: Option<PathBuf>,
 }
 
 struct DiscoveryResult {
@@ -124,19 +136,25 @@ fn extract_os(triple: &str) -> &str {
     "unknown"
 }
 
-fn discover_dynamic_plugins() -> DiscoveryResult {
-    let output = Command::new("cargo")
-        .args(["metadata", "--format-version", "1"])
-        .output()
-        .expect("failed to run cargo metadata");
+fn load_cargo_metadata(no_deps: bool) -> CargoMetadata {
+    let mut command = Command::new("cargo");
+    command.args(["metadata", "--format-version", "1"]);
+    if no_deps {
+        command.arg("--no-deps");
+    }
+
+    let output = command.output().expect("failed to run cargo metadata");
 
     if !output.status.success() {
         eprintln!("{}", String::from_utf8_lossy(&output.stderr));
         std::process::exit(1);
     }
 
-    let metadata: CargoMetadata =
-        serde_json::from_slice(&output.stdout).expect("failed to parse cargo metadata");
+    serde_json::from_slice(&output.stdout).expect("failed to parse cargo metadata")
+}
+
+fn discover_dynamic_plugins() -> DiscoveryResult {
+    let metadata = load_cargo_metadata(false);
 
     let sdk_version = metadata
         .packages
@@ -180,6 +198,123 @@ fn discover_dynamic_plugins() -> DiscoveryResult {
     }
 }
 
+fn is_publishable(package: &Package) -> bool {
+    match &package.publish {
+        Some(registries) => !registries.is_empty(),
+        None => true,
+    }
+}
+
+fn find_dependency_path(
+    graph: &BTreeMap<String, BTreeSet<String>>,
+    start: &str,
+    target: &str,
+) -> Option<Vec<String>> {
+    let mut pending = vec![(start.to_string(), vec![start.to_string()])];
+    let mut visited = BTreeSet::new();
+
+    while let Some((current, path)) = pending.pop() {
+        if current == target {
+            return Some(path);
+        }
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+
+        if let Some(dependencies) = graph.get(&current) {
+            for dependency in dependencies.iter().rev() {
+                let mut next_path = path.clone();
+                next_path.push(dependency.clone());
+                pending.push((dependency.clone(), next_path));
+            }
+        }
+    }
+
+    None
+}
+
+fn versioned_dev_dependency_cycles(packages: &[Package]) -> Vec<String> {
+    let publishable: BTreeSet<String> = packages
+        .iter()
+        .filter(|package| is_publishable(package))
+        .map(|package| package.name.clone())
+        .collect();
+
+    let mut normal_graph: BTreeMap<String, BTreeSet<String>> = publishable
+        .iter()
+        .map(|name| (name.clone(), BTreeSet::new()))
+        .collect();
+
+    for package in packages
+        .iter()
+        .filter(|package| publishable.contains(&package.name))
+    {
+        let dependencies = normal_graph
+            .get_mut(&package.name)
+            .expect("publishable package should be in dependency graph");
+        for dependency in &package.dependencies {
+            if dependency.path.is_some()
+                && publishable.contains(&dependency.name)
+                && matches!(
+                    dependency.kind.as_deref(),
+                    None | Some("normal") | Some("build")
+                )
+            {
+                dependencies.insert(dependency.name.clone());
+            }
+        }
+    }
+
+    let mut cycles = Vec::new();
+    for package in packages
+        .iter()
+        .filter(|package| publishable.contains(&package.name))
+    {
+        for dependency in &package.dependencies {
+            if dependency.kind.as_deref() != Some("dev")
+                || dependency.path.is_none()
+                || dependency.req == "*"
+                || !publishable.contains(&dependency.name)
+            {
+                continue;
+            }
+
+            if let Some(return_path) =
+                find_dependency_path(&normal_graph, &dependency.name, &package.name)
+            {
+                cycles.push(format!(
+                    "{} --dev {}--> {}",
+                    package.name,
+                    dependency.req,
+                    return_path.join(" -> ")
+                ));
+            }
+        }
+    }
+
+    cycles.sort();
+    cycles.dedup();
+    cycles
+}
+
+fn check_publish_dependency_cycles() {
+    let metadata = load_cargo_metadata(true);
+    let cycles = versioned_dev_dependency_cycles(&metadata.packages);
+    if cycles.is_empty() {
+        println!("No versioned dev-dependency cycles found in publishable packages.");
+        return;
+    }
+
+    eprintln!("Versioned dev-dependency cycles found in publishable packages:");
+    for cycle in cycles {
+        eprintln!("  {cycle}");
+    }
+    eprintln!(
+        "Move cross-crate tests to a publish-false test crate or use a path-only dev-dependency."
+    );
+    std::process::exit(1);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -187,6 +322,7 @@ fn main() {
 
     match subcommand {
         Some("build-plugins") => build_plugins(&args[2..]),
+        Some("check-publish-dependency-cycles") => check_publish_dependency_cycles(),
         Some("list-plugins") => list_plugins(),
         Some("publish-plugins") => publish_plugins(&args[2..]),
         _ => {
@@ -195,6 +331,9 @@ fn main() {
             eprintln!("Commands:");
             eprintln!(
                 "  build-plugins [OPTIONS]    Build all dynamic plugins as cdylib shared libraries"
+            );
+            eprintln!(
+                "  check-publish-dependency-cycles  Check publishable packages for dev-dependency cycles"
             );
             eprintln!("  list-plugins               List all discovered dynamic plugin crates");
             eprintln!("  publish-plugins [OPTIONS]   Publish built plugins as OCI artifacts");
@@ -1164,6 +1303,125 @@ fn triple_to_arch_suffix(triple: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn package(name: &str, publishable: bool, dependencies: Vec<Dependency>) -> Package {
+        Package {
+            name: name.to_string(),
+            version: "0.1.0".to_string(),
+            manifest_path: PathBuf::from(format!("{name}/Cargo.toml")),
+            features: std::collections::HashMap::new(),
+            description: None,
+            license: None,
+            publish: if publishable { None } else { Some(Vec::new()) },
+            dependencies,
+        }
+    }
+
+    fn dependency(name: &str, req: &str, kind: Option<&str>) -> Dependency {
+        Dependency {
+            name: name.to_string(),
+            req: req.to_string(),
+            kind: kind.map(str::to_string),
+            path: Some(PathBuf::from(name)),
+        }
+    }
+
+    #[test]
+    fn detects_versioned_dev_dependency_cycle() {
+        let packages = vec![
+            package(
+                "drasi-lib",
+                true,
+                vec![dependency("drasi-plugin-sdk", "^0.11.0", Some("dev"))],
+            ),
+            package(
+                "drasi-plugin-sdk",
+                true,
+                vec![dependency("drasi-lib", "^0.9.0", None)],
+            ),
+        ];
+
+        assert_eq!(
+            versioned_dev_dependency_cycles(&packages),
+            ["drasi-lib --dev ^0.11.0--> drasi-plugin-sdk -> drasi-lib"]
+        );
+    }
+
+    #[test]
+    fn ignores_path_only_dev_dependency_cycle() {
+        let packages = vec![
+            package(
+                "drasi-lib",
+                true,
+                vec![dependency("drasi-plugin-sdk", "*", Some("dev"))],
+            ),
+            package(
+                "drasi-plugin-sdk",
+                true,
+                vec![dependency("drasi-lib", "^0.9.0", None)],
+            ),
+        ];
+
+        assert!(versioned_dev_dependency_cycles(&packages).is_empty());
+    }
+
+    #[test]
+    fn ignores_cycles_between_unpublished_packages() {
+        let packages = vec![
+            package(
+                "drasi-source-open511",
+                false,
+                vec![dependency("drasi-bootstrap-open511", "^0.1.0", Some("dev"))],
+            ),
+            package(
+                "drasi-bootstrap-open511",
+                false,
+                vec![dependency("drasi-source-open511", "^0.1.1", None)],
+            ),
+        ];
+
+        assert!(versioned_dev_dependency_cycles(&packages).is_empty());
+    }
+
+    #[test]
+    fn ignores_acyclic_versioned_dev_dependency() {
+        let packages = vec![
+            package(
+                "drasi-source",
+                true,
+                vec![dependency("drasi-bootstrap", "^0.1.0", Some("dev"))],
+            ),
+            package("drasi-bootstrap", true, Vec::new()),
+        ];
+
+        assert!(versioned_dev_dependency_cycles(&packages).is_empty());
+    }
+
+    #[test]
+    fn detects_return_path_through_build_dependency() {
+        let packages = vec![
+            package(
+                "drasi-lib",
+                true,
+                vec![dependency("drasi-plugin-sdk", "^0.11.0", Some("dev"))],
+            ),
+            package(
+                "drasi-plugin-sdk",
+                true,
+                vec![dependency("codegen", "^1.0.0", Some("build"))],
+            ),
+            package(
+                "codegen",
+                true,
+                vec![dependency("drasi-lib", "^0.9.0", None)],
+            ),
+        ];
+
+        assert_eq!(
+            versioned_dev_dependency_cycles(&packages),
+            ["drasi-lib --dev ^0.11.0--> drasi-plugin-sdk -> codegen -> drasi-lib"]
+        );
+    }
 
     #[test]
     fn strips_glibc_suffix_from_gnu_triples() {
