@@ -31,12 +31,20 @@
 //! webhook delivery would have (see [`client`] module docs), then hand that
 //! envelope to `Converter` unchanged.
 //!
+//! The worker queue follows the same rule: the worker file is read with
+//! [`drasi_source_github_workgraph::worker_client::WorkerFileClient`],
+//! validated with [`drasi_source_github_workgraph::workers::parse_worker_file`],
+//! and projected with
+//! [`drasi_source_github_workgraph::mapping::worker_changes`] — the same three
+//! pieces the live Source uses when a `push` touches the configured file.
+//!
 //! # Scope (prototype)
 //!
 //! - One configured organization; all repositories the token can see by
 //!   default, or the Source's normalized repository allowlist.
 //! - Open generic Issues and Pull Requests.
 //! - Open and closed configured WorkGraph task Issues and all task comments.
+//! - The configured worker-queue file, projected before every task artifact.
 //! - Generic Issue/PR conversation comments and PR reviews.
 //! - Excluded: Projects, Project Items, inline diff comments, closed-item
 //!   non-task closed history, reactions, and workflow-run execution state.
@@ -56,22 +64,30 @@ pub mod descriptor;
 #[cfg(test)]
 mod tests;
 
-pub use config::GitHubWorkGraphBootstrapConfig;
+pub use config::{GitHubWorkGraphBootstrapConfig, WorkerFileLocation};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use client::GitHubGraphQLClient;
-use drasi_core::models::SourceChange;
+use drasi_core::models::{Element, SourceChange};
 use drasi_lib::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
 };
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
-use drasi_source_github_workgraph::config::{RepositoryFilter, TaskIssueType};
-use drasi_source_github_workgraph::mapping::{Converter, NODE_LABELS, RELATION_LABELS};
+use drasi_source_github_workgraph::config::{LeaseTrust, RepositoryFilter, TaskIssueType};
+use drasi_source_github_workgraph::lease_ledger::{LeaseLedger, LifecycleIntent};
+use drasi_source_github_workgraph::mapping::Conversion;
+use drasi_source_github_workgraph::mapping::{
+    anchor_changes, worker_changes, Converter, WorkerProjection, NODE_LABELS, RELATION_LABELS,
+};
+use drasi_source_github_workgraph::worker_client::{WorkerFileClient, WorkerFileError};
+use drasi_source_github_workgraph::workers::parse_worker_file;
+use drasi_source_github_workgraph::workgraph::WorkGraphError;
 use log::{info, warn};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -84,6 +100,79 @@ pub struct GitHubWorkGraphBootstrapProvider {
 impl GitHubWorkGraphBootstrapProvider {
     pub fn builder() -> GitHubWorkGraphBootstrapProviderBuilder {
         GitHubWorkGraphBootstrapProviderBuilder::new()
+    }
+
+    /// Fetch, validate, and project the configured worker file.
+    ///
+    /// The worker file is read with the same credential and endpoint as every
+    /// other GitHub read here, and validated by exactly the same code the
+    /// streaming Source uses, so the two can never disagree about a file.
+    ///
+    /// A file that cannot be *read* fails the bootstrap: nothing is known about
+    /// configured capacity, and claiming an empty worker pool would silently
+    /// stop every dispatch. A file that is read but deterministically
+    /// *invalid* becomes an explicit `WorkGraphError` node instead, which is
+    /// visible to queries and to an operator.
+    async fn worker_changes(&self, source_id: &str) -> Result<Vec<SourceChange>> {
+        let Some(location) = &self.config.worker_config else {
+            return Ok(Vec::new());
+        };
+        let client = WorkerFileClient::new(&self.config.token, &self.config.api_base_url)
+            .context("failed to build the GitHub worker file client")?;
+        let effective_from = Utc::now().timestamp_millis().max(0) as u64;
+
+        let rejected = |error: &WorkGraphError| {
+            warn!(
+                "[{source_id}] worker file at '{}' ref '{}' path '{}' rejected [{}]: {}",
+                location.repository, location.r#ref, location.path, error.code, error.message
+            );
+            worker_changes(
+                source_id,
+                effective_from,
+                location,
+                &WorkerProjection::Rejected(error),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+            )
+        };
+
+        let content = match client.fetch(location).await {
+            Ok(content) => content,
+            Err(WorkerFileError::Rejected(error)) => return Ok(rejected(&error)),
+            Err(WorkerFileError::Unavailable(error)) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to read the configured worker file '{}' at '{}' ref '{}'",
+                        location.path, location.repository, location.r#ref
+                    )
+                })
+            }
+        };
+        let file = match parse_worker_file(&content.text) {
+            Ok(file) => file,
+            Err(error) => return Ok(rejected(&error)),
+        };
+        info!(
+            "[{source_id}] GitHub WorkGraph bootstrap: {} configured worker(s) from '{}' ref '{}' \
+             path '{}'",
+            file.workers.len(),
+            location.repository,
+            location.r#ref,
+            location.path
+        );
+        Ok(worker_changes(
+            source_id,
+            effective_from,
+            location,
+            &WorkerProjection::Loaded {
+                file: &file,
+                content: &content,
+            },
+            // A bootstrap builds a fresh snapshot, so it has no prior
+            // projection to retire slots against and nothing to remove.
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        ))
     }
 }
 
@@ -129,6 +218,16 @@ impl GitHubWorkGraphBootstrapProviderBuilder {
         self
     }
 
+    pub fn with_worker_config(mut self, worker_config: WorkerFileLocation) -> Self {
+        self.config.worker_config = Some(worker_config);
+        self
+    }
+
+    pub fn with_lease_trust(mut self, lease_trust: LeaseTrust) -> Self {
+        self.config.lease_trust = Some(lease_trust);
+        self
+    }
+
     pub fn build(self) -> Result<GitHubWorkGraphBootstrapProvider> {
         let config = self.config.normalized()?;
         let repository_filter = RepositoryFilter::new(&config.organization, &config.repositories)?;
@@ -159,6 +258,12 @@ impl BootstrapProvider for GitHubWorkGraphBootstrapProvider {
             self.config.max_concurrency,
         )?;
 
+        // The configured worker file is fetched, validated, and projected
+        // before any Issue or task artifact, so a query that bootstraps
+        // capacity always sees the worker/slot graph ahead of the Assignments
+        // and Leases that reference it.
+        let mut all_changes: Vec<SourceChange> = self.worker_changes(&context.source_id).await?;
+
         let org_value = client.fetch_organization(&self.config.organization).await?;
         let repos = client.fetch_repositories(&self.config.organization).await?;
         let mut selected_repos = Vec::new();
@@ -186,7 +291,7 @@ impl BootstrapProvider for GitHubWorkGraphBootstrapProvider {
         // in sequence (issues, PRs, then per-item comments/reviews).
         let semaphore = Arc::new(Semaphore::new(self.config.max_concurrency.max(1)));
         let mut join_set = JoinSet::new();
-        for repo in selected_repos {
+        for (index, repo) in selected_repos.into_iter().enumerate() {
             let client = client.clone();
             let organization = self.config.organization.clone();
             let source_id = context.source_id.clone();
@@ -194,29 +299,33 @@ impl BootstrapProvider for GitHubWorkGraphBootstrapProvider {
             let semaphore = semaphore.clone();
             let task_issue_type = self.config.task_issue_type.clone();
             let repository_filter = self.repository_filter.clone();
+            let lease_trust = self.config.lease_trust.clone();
             join_set.spawn(async move {
                 let _permit = semaphore
                     .acquire_owned()
                     .await
                     .map_err(|_| anyhow!("bootstrap concurrency semaphore closed"))?;
-                process_repository(
-                    &client,
-                    &organization,
-                    &source_id,
-                    &org_value,
-                    repo,
-                    &task_issue_type,
-                    &repository_filter,
-                )
-                .await
+                let scope = ConversionScope {
+                    organization: &organization,
+                    task_issue_type: &task_issue_type,
+                    repository_filter: &repository_filter,
+                    lease_trust: lease_trust.as_ref(),
+                };
+                let changes =
+                    process_repository(&client, &scope, &source_id, &org_value, repo).await?;
+                Ok::<_, anyhow::Error>((index, changes))
             });
         }
 
-        let mut all_changes: Vec<SourceChange> = Vec::new();
+        // Repository tasks finish in arbitrary order, so their results are
+        // reassembled by the deterministic repository index before folding.
+        // The projected snapshot must not depend on scheduling.
+        type RepoOutput = (usize, (Vec<SourceChange>, Vec<LifecycleIntent>));
+        let mut repo_changes: Vec<RepoOutput> = Vec::new();
         let mut repo_errors = Vec::new();
         while let Some(joined) = join_set.join_next().await {
             match joined {
-                Ok(Ok(changes)) => all_changes.extend(changes),
+                Ok(Ok(changes)) => repo_changes.push(changes),
                 Ok(Err(err)) => {
                     repo_errors.push(format!("{err:#}"));
                     warn!(
@@ -240,24 +349,34 @@ impl BootstrapProvider for GitHubWorkGraphBootstrapProvider {
                 repo_errors.len()
             ));
         }
+        repo_changes.sort_by_key(|(index, _)| *index);
+        // Fold every task comment's current lease-lifecycle contribution, then
+        // project each anchor from the artifacts that survive. This is the same
+        // fold the live Source keeps in its durable ledger, so the same set of
+        // current comments produces the same anchors either way.
+        let mut ledger = LeaseLedger::new();
+        for (_, (changes, lifecycle)) in repo_changes {
+            all_changes.extend(changes);
+            for intent in &lifecycle {
+                ledger.apply(intent);
+            }
+        }
+        let effective_from = Utc::now().timestamp_millis().max(0) as u64;
+        all_changes.extend(anchor_changes(
+            &context.source_id,
+            effective_from,
+            &ledger,
+            ledger.anchor_ids(),
+        ));
 
-        // Filtering, dedup, and event sending happen sequentially here (after
-        // all concurrent fetches have completed) so `event_count` and the
-        // dedup/"first occurrence becomes Insert" logic below stay simple and
-        // deterministic without needing a shared, lock-protected `HashSet`
-        // across tasks.
-        let mut sent_ids: HashSet<String> = HashSet::new();
+        // Folding, filtering, and event sending happen sequentially here
+        // (after all concurrent fetches have completed) so `event_count` and
+        // the snapshot fold below stay simple and deterministic without a
+        // shared, lock-protected accumulator across tasks.
         let mut event_count = 0usize;
-        for change in all_changes {
-            event_count += send_if_requested(
-                change,
-                &request,
-                &context.source_id,
-                &event_tx,
-                context,
-                &mut sent_ids,
-            )
-            .await?;
+        for change in fold_snapshot(all_changes) {
+            event_count +=
+                send_if_requested(change, &request, &context.source_id, &event_tx, context).await?;
         }
 
         info!(
@@ -278,15 +397,24 @@ impl BootstrapProvider for GitHubWorkGraphBootstrapProvider {
 /// [`Converter`] (this function only assembles the synthetic webhook-shaped
 /// JSON envelopes `Converter` expects; it never inspects or derives any
 /// WorkGraph node/relation/status semantics itself).
+/// The Source-owned scope every conversion needs: which organization, task
+/// Issue Type, repositories, and lease-lifecycle producers are in play.
+struct ConversionScope<'a> {
+    organization: &'a str,
+    task_issue_type: &'a TaskIssueType,
+    repository_filter: &'a RepositoryFilter,
+    lease_trust: Option<&'a LeaseTrust>,
+}
+
 async fn process_repository(
     client: &GitHubGraphQLClient,
-    organization: &str,
+    scope: &ConversionScope<'_>,
     source_id: &str,
     org_value: &Value,
     repo_value: Value,
-    task_issue_type: &TaskIssueType,
-    repository_filter: &RepositoryFilter,
-) -> Result<Vec<SourceChange>> {
+) -> Result<(Vec<SourceChange>, Vec<LifecycleIntent>)> {
+    let (task_issue_type, repository_filter) = (scope.task_issue_type, scope.repository_filter);
+    let mut lifecycle = Vec::new();
     let owner = repo_value
         .pointer("/owner/login")
         .and_then(Value::as_str)
@@ -300,15 +428,16 @@ async fn process_repository(
 
     let mut changes = Vec::new();
 
-    changes.extend(convert(
-        source_id,
-        organization,
-        "repository",
-        "created",
-        json!({ "organization": org_value, "repository": repo_value }),
-        task_issue_type,
-        repository_filter,
-    )?);
+    changes.extend(collect(
+        &mut lifecycle,
+        convert(
+            source_id,
+            scope,
+            "repository",
+            "created",
+            json!({ "organization": org_value, "repository": repo_value }),
+        )?,
+    ));
 
     let issues = client
         .fetch_issues(&owner, &name)
@@ -319,19 +448,20 @@ async fn process_repository(
             continue;
         }
         let issue_node_id = required_node_id(&issue)?;
-        changes.extend(convert(
-            source_id,
-            organization,
-            "issues",
-            "opened",
-            json!({
-                "organization": org_value,
-                "repository": repo_value,
-                "issue": issue,
-            }),
-            task_issue_type,
-            repository_filter,
-        )?);
+        changes.extend(collect(
+            &mut lifecycle,
+            convert(
+                source_id,
+                scope,
+                "issues",
+                "opened",
+                json!({
+                    "organization": org_value,
+                    "repository": repo_value,
+                    "issue": issue,
+                }),
+            )?,
+        ));
 
         if client::item_comment_count(&issue) > 0 {
             let comments = client
@@ -341,20 +471,21 @@ async fn process_repository(
                     format!("failed to fetch comments for issue {owner}/{name}#{issue_node_id}")
                 })?;
             for comment in comments {
-                changes.extend(convert(
-                    source_id,
-                    organization,
-                    "issue_comment",
-                    "created",
-                    json!({
-                        "organization": org_value,
-                        "repository": repo_value,
-                        "issue": { "node_id": issue_node_id, "state": "open" },
-                        "comment": comment,
-                    }),
-                    task_issue_type,
-                    repository_filter,
-                )?);
+                changes.extend(collect(
+                    &mut lifecycle,
+                    convert(
+                        source_id,
+                        scope,
+                        "issue_comment",
+                        "created",
+                        json!({
+                            "organization": org_value,
+                            "repository": repo_value,
+                            "issue": { "node_id": issue_node_id, "state": "open" },
+                            "comment": comment,
+                        }),
+                    )?,
+                ));
             }
         }
     }
@@ -370,19 +501,20 @@ async fn process_repository(
         } else {
             "opened"
         };
-        changes.extend(convert(
-            source_id,
-            organization,
-            "issues",
-            action,
-            json!({
-                "organization": org_value,
-                "repository": repo_value,
-                "issue": task,
-            }),
-            task_issue_type,
-            repository_filter,
-        )?);
+        changes.extend(collect(
+            &mut lifecycle,
+            convert(
+                source_id,
+                scope,
+                "issues",
+                action,
+                json!({
+                    "organization": org_value,
+                    "repository": repo_value,
+                    "issue": task,
+                }),
+            )?,
+        ));
 
         if let Some(parent) = task.get("parent").filter(|parent| !parent.is_null()) {
             let parent_repo = parent
@@ -392,35 +524,37 @@ async fn process_repository(
                 .includes_repository(parent_repo)
                 .context("task parent repository cannot be matched against repositories filter")?
             {
-                changes.extend(convert(
+                changes.extend(collect(
+                    &mut lifecycle,
+                    convert(
+                        source_id,
+                        scope,
+                        "repository",
+                        "created",
+                        json!({
+                            "organization": org_value,
+                            "repository": parent_repo,
+                        }),
+                    )?,
+                ));
+            }
+            changes.extend(collect(
+                &mut lifecycle,
+                convert(
                     source_id,
-                    organization,
-                    "repository",
-                    "created",
+                    scope,
+                    "sub_issues",
+                    "sub_issue_added",
                     json!({
                         "organization": org_value,
                         "repository": parent_repo,
+                        "parent_issue": parent,
+                        "parent_issue_repo": parent_repo,
+                        "sub_issue": task,
+                        "sub_issue_repo": repo_value,
                     }),
-                    task_issue_type,
-                    repository_filter,
-                )?);
-            }
-            changes.extend(convert(
-                source_id,
-                organization,
-                "sub_issues",
-                "sub_issue_added",
-                json!({
-                    "organization": org_value,
-                    "repository": parent_repo,
-                    "parent_issue": parent,
-                    "parent_issue_repo": parent_repo,
-                    "sub_issue": task,
-                    "sub_issue_repo": repo_value,
-                }),
-                task_issue_type,
-                repository_filter,
-            )?);
+                )?,
+            ));
         }
 
         if client::item_comment_count(&task) > 0 {
@@ -431,20 +565,21 @@ async fn process_repository(
                     format!("failed to fetch comments for task {owner}/{name}#{task_node_id}")
                 })?;
             for comment in comments {
-                changes.extend(convert(
-                    source_id,
-                    organization,
-                    "issue_comment",
-                    "created",
-                    json!({
-                        "organization": org_value,
-                        "repository": repo_value,
-                        "issue": task,
-                        "comment": comment,
-                    }),
-                    task_issue_type,
-                    repository_filter,
-                )?);
+                changes.extend(collect(
+                    &mut lifecycle,
+                    convert(
+                        source_id,
+                        scope,
+                        "issue_comment",
+                        "created",
+                        json!({
+                            "organization": org_value,
+                            "repository": repo_value,
+                            "issue": task,
+                            "comment": comment,
+                        }),
+                    )?,
+                ));
             }
         }
     }
@@ -455,19 +590,20 @@ async fn process_repository(
         .with_context(|| format!("failed to fetch pull requests for {owner}/{name}"))?;
     for pr in pull_requests {
         let pr_node_id = required_node_id(&pr)?;
-        changes.extend(convert(
-            source_id,
-            organization,
-            "pull_request",
-            "opened",
-            json!({
-                "organization": org_value,
-                "repository": repo_value,
-                "pull_request": pr,
-            }),
-            task_issue_type,
-            repository_filter,
-        )?);
+        changes.extend(collect(
+            &mut lifecycle,
+            convert(
+                source_id,
+                scope,
+                "pull_request",
+                "opened",
+                json!({
+                    "organization": org_value,
+                    "repository": repo_value,
+                    "pull_request": pr,
+                }),
+            )?,
+        ));
 
         if client::item_comment_count(&pr) > 0 {
             let comments = client
@@ -477,27 +613,28 @@ async fn process_repository(
                     format!("failed to fetch comments for pull request {owner}/{name}#{pr_node_id}")
                 })?;
             for comment in comments {
-                changes.extend(convert(
-                    source_id,
-                    organization,
-                    "issue_comment",
-                    "created",
-                    json!({
-                        "organization": org_value,
-                        "repository": repo_value,
-                        // `pull_request` present (even empty) is exactly the
-                        // discriminator `mapping::comment_event` checks via
-                        // `issue.get("pull_request").is_some()`.
-                        "issue": {
-                            "node_id": pr_node_id,
-                            "state": "open",
-                            "pull_request": {}
-                        },
-                        "comment": comment,
-                    }),
-                    task_issue_type,
-                    repository_filter,
-                )?);
+                changes.extend(collect(
+                    &mut lifecycle,
+                    convert(
+                        source_id,
+                        scope,
+                        "issue_comment",
+                        "created",
+                        json!({
+                            "organization": org_value,
+                            "repository": repo_value,
+                            // `pull_request` present (even empty) is exactly the
+                            // discriminator `mapping::comment_event` checks via
+                            // `issue.get("pull_request").is_some()`.
+                            "issue": {
+                                "node_id": pr_node_id,
+                                "state": "open",
+                                "pull_request": {}
+                            },
+                            "comment": comment,
+                        }),
+                    )?,
+                ));
             }
         }
 
@@ -509,25 +646,32 @@ async fn process_repository(
                     format!("failed to fetch reviews for pull request {owner}/{name}#{pr_node_id}")
                 })?;
             for review in reviews {
-                changes.extend(convert(
-                    source_id,
-                    organization,
-                    "pull_request_review",
-                    "submitted",
-                    json!({
-                        "organization": org_value,
-                        "repository": repo_value,
-                        "pull_request": { "node_id": pr_node_id, "state": "open" },
-                        "review": review,
-                    }),
-                    task_issue_type,
-                    repository_filter,
-                )?);
+                changes.extend(collect(
+                    &mut lifecycle,
+                    convert(
+                        source_id,
+                        scope,
+                        "pull_request_review",
+                        "submitted",
+                        json!({
+                            "organization": org_value,
+                            "repository": repo_value,
+                            "pull_request": { "node_id": pr_node_id, "state": "open" },
+                            "review": review,
+                        }),
+                    )?,
+                ));
             }
         }
     }
 
-    Ok(changes)
+    Ok((changes, lifecycle))
+}
+
+/// Split a conversion, accumulating its lease-lifecycle contributions.
+fn collect(lifecycle: &mut Vec<LifecycleIntent>, conversion: Conversion) -> Vec<SourceChange> {
+    lifecycle.extend(conversion.lifecycle);
+    conversion.changes
 }
 
 fn required_node_id(value: &Value) -> Result<String> {
@@ -544,39 +688,93 @@ fn required_node_id(value: &Value) -> Result<String> {
 /// `drasi-source-github-workgraph`'s webhook ingress).
 fn convert(
     source_id: &str,
-    organization: &str,
+    scope: &ConversionScope<'_>,
     event_type: &str,
     action: &str,
     mut payload: Value,
-    task_issue_type: &TaskIssueType,
-    repository_filter: &RepositoryFilter,
-) -> Result<Vec<SourceChange>> {
+) -> Result<Conversion> {
     if let Value::Object(map) = &mut payload {
         map.insert("action".to_string(), json!(action));
     }
     let effective_from = Utc::now().timestamp_millis().max(0) as u64;
-    let converter = Converter::new(source_id, organization, task_issue_type, effective_from)
-        .with_repository_filter(repository_filter);
+    let converter = Converter::new(
+        source_id,
+        scope.organization,
+        scope.task_issue_type,
+        effective_from,
+    )
+    .with_repository_filter(scope.repository_filter);
+    let converter = match scope.lease_trust {
+        Some(lease_trust) => converter.with_lease_trust(lease_trust),
+        None => converter,
+    };
     match converter.convert(event_type, &payload) {
-        Ok(Some(changes)) => Ok(changes),
-        Ok(None) => Ok(Vec::new()),
+        Ok(Some(conversion)) => Ok(conversion),
+        Ok(None) => Ok(Conversion {
+            changes: Vec::new(),
+            lifecycle: Vec::new(),
+            lifecycle_scope: None,
+            lifecycle_anchors: Vec::new(),
+        }),
         Err(err) => Err(anyhow!(
             "GitHub WorkGraph mapping failed for '{event_type}'/'{action}': {err:?}"
         )),
     }
 }
 
-/// Normalize streaming changes into snapshot state. Existing elements become
-/// inserts, while defensive deletes emitted by the shared converter (for
-/// example, clearing a prior status error on an opened issue) do not represent
-/// current graph state and must not be sent during bootstrap.
-fn into_snapshot_insert(change: SourceChange) -> Option<SourceChange> {
-    match change {
-        SourceChange::Insert { element } | SourceChange::Update { element } => {
-            Some(SourceChange::Insert { element })
+/// Fold the converted change stream into snapshot state.
+///
+/// The streaming converter emits an ordered stream of creates, convergent
+/// updates, and defensive deletes. A snapshot is that stream's *final* state,
+/// so it is replayed here rather than approximated:
+///
+/// * a repeated element converges — a later `Update` merges over the earlier
+///   element exactly as [`drasi_core`] merges it at query time, so an entity
+///   observed more than once (a repository reached both directly and as a task
+///   parent, for example) lands in the same state the live Source reaches;
+/// * a `Delete` removes an element the stream had already produced, and is a
+///   no-op for an element that was never produced (the common case for the
+///   converter's defensive deletes);
+/// * first-appearance order is preserved so the emitted snapshot is stable.
+fn fold_snapshot(changes: Vec<SourceChange>) -> Vec<SourceChange> {
+    let mut order: Vec<Arc<str>> = Vec::new();
+    let mut elements: HashMap<Arc<str>, Element> = HashMap::new();
+    for change in changes {
+        match change {
+            SourceChange::Insert { element } | SourceChange::Update { element } => {
+                let id = element.get_reference().element_id.clone();
+                match elements.entry(id.clone()) {
+                    Entry::Occupied(mut occupied) => {
+                        let mut merged = element;
+                        // Node and relation IDs are namespaced by construction,
+                        // so a type change cannot happen; skip rather than
+                        // panic if one ever does.
+                        if std::mem::discriminant(&merged) == std::mem::discriminant(occupied.get())
+                        {
+                            merged.merge_missing_properties(occupied.get());
+                        }
+                        occupied.insert(merged);
+                    }
+                    Entry::Vacant(vacant) => {
+                        order.push(id);
+                        vacant.insert(element);
+                    }
+                }
+            }
+            SourceChange::Delete { metadata } => {
+                let id = &metadata.reference.element_id;
+                if elements.remove(id).is_some() {
+                    order.retain(|entry| entry != id);
+                }
+            }
+            SourceChange::Future { .. } => {}
         }
-        SourceChange::Delete { .. } | SourceChange::Future { .. } => None,
     }
+    order
+        .into_iter()
+        .filter_map(|id| elements.remove(&id))
+        .map(|element| SourceChange::Insert { element })
+        .collect()
 }
 
 fn source_change_label(change: &SourceChange) -> Option<Arc<str>> {
@@ -612,11 +810,7 @@ async fn send_if_requested(
     source_id: &str,
     event_tx: &BootstrapEventSender,
     context: &BootstrapContext,
-    sent_ids: &mut HashSet<String>,
 ) -> Result<usize> {
-    let Some(change) = into_snapshot_insert(change) else {
-        return Ok(0);
-    };
     let Some(label) = source_change_label(&change) else {
         return Ok(0);
     };
@@ -629,10 +823,6 @@ async fn send_if_requested(
         return Ok(0);
     }
     if !label_requested(request, label.as_ref(), is_node) {
-        return Ok(0);
-    }
-    let key = format!("{source_id}:{}", change.get_reference().element_id);
-    if !sent_ids.insert(key) {
         return Ok(0);
     }
     let sequence = context.next_sequence();

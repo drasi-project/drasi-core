@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use crate::config::{
-    GitHubWorkGraphSourceConfig, TaskIssueType, WebhookConfig, DEFAULT_BODY_LIMIT_BYTES,
+    GitHubWorkGraphSourceConfig, LeaseTrust, TaskIssueType, TrustedIdentity, WebhookConfig,
+    WorkerConfig, DEFAULT_BODY_LIMIT_BYTES, DEFAULT_WORKER_API_BASE_URL,
 };
 use crate::GitHubWorkGraphSourceBuilder;
 use anyhow::{anyhow, Context};
@@ -30,10 +31,49 @@ pub struct GitHubWorkGraphSourceConfigDto {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schema(value_type = Vec<ConfigValueString>)]
     pub repositories: Vec<ConfigValueString>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_config: Option<WorkerConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_trust: Option<LeaseTrustDto>,
     pub webhook: WebhookConfigDto,
     #[serde(default, with = "crate::config::DurabilityConfigDef")]
     #[schema(value_type = DurabilityConfigSchema)]
     pub durability: drasi_lib::DurabilityConfig,
+}
+
+/// Identities allowed to author lease lifecycle artifacts.
+#[derive(Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LeaseTrustDto {
+    pub dispatchers: Vec<TrustedIdentityDto>,
+    pub reporters: Vec<TrustedIdentityDto>,
+}
+
+/// One trusted GitHub identity, matched on both node ID and login.
+#[derive(Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TrustedIdentityDto {
+    #[schema(value_type = ConfigValueString)]
+    pub id: ConfigValueString,
+    #[schema(value_type = ConfigValueString)]
+    pub login: ConfigValueString,
+}
+
+/// Location and read-only credential of the worker-queue configuration file.
+#[derive(Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkerConfigDto {
+    #[schema(value_type = ConfigValueString)]
+    pub repository: ConfigValueString,
+    #[schema(value_type = ConfigValueString)]
+    pub r#ref: ConfigValueString,
+    #[schema(value_type = ConfigValueString)]
+    pub path: ConfigValueString,
+    #[schema(value_type = ConfigValueString)]
+    pub token: ConfigValueString,
+    #[serde(default = "default_worker_api_base_url")]
+    #[schema(value_type = ConfigValueString)]
+    pub api_base_url: ConfigValueString,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
@@ -89,11 +129,17 @@ fn default_path() -> ConfigValueString {
 fn default_body_limit() -> ConfigValueUsize {
     ConfigValue::Static(DEFAULT_BODY_LIMIT_BYTES)
 }
+fn default_worker_api_base_url() -> ConfigValueString {
+    ConfigValue::Static(DEFAULT_WORKER_API_BASE_URL.to_string())
+}
 
 #[derive(OpenApi)]
 #[openapi(components(schemas(
     GitHubWorkGraphSourceConfigDto,
     TaskIssueTypeDto,
+    WorkerConfigDto,
+    LeaseTrustDto,
+    TrustedIdentityDto,
     WebhookConfigDto,
     ConfigValueStringSchema,
     ConfigValueU16Schema,
@@ -137,6 +183,47 @@ impl SourcePluginDescriptor for GitHubWorkGraphSourceDescriptor {
         }
         let mapper = DtoMapper::new();
         let repositories = mapper.resolve_string_vec(&dto.repositories).await?;
+        let worker_config = match &dto.worker_config {
+            Some(worker) => {
+                match &worker.token {
+                    ConfigValue::Secret { name } if !name.trim().is_empty() => {}
+                    ConfigValue::Secret { .. } => {
+                        anyhow::bail!("'workerConfig.token' name cannot be empty")
+                    }
+                    _ => anyhow::bail!("'workerConfig.token' must use SecretReference"),
+                }
+                Some(WorkerConfig {
+                    repository: mapper.resolve_string(&worker.repository).await?,
+                    r#ref: mapper.resolve_string(&worker.r#ref).await?,
+                    path: mapper.resolve_string(&worker.path).await?,
+                    token: mapper.resolve_string(&worker.token).await?,
+                    api_base_url: mapper.resolve_string(&worker.api_base_url).await?,
+                })
+            }
+            None => None,
+        };
+        let lease_trust = match &dto.lease_trust {
+            Some(trust) => {
+                let mut resolved = Vec::new();
+                for identities in [&trust.dispatchers, &trust.reporters] {
+                    let mut out = Vec::with_capacity(identities.len());
+                    for identity in identities {
+                        out.push(TrustedIdentity {
+                            id: mapper.resolve_string(&identity.id).await?,
+                            login: mapper.resolve_string(&identity.login).await?,
+                        });
+                    }
+                    resolved.push(out);
+                }
+                let reporters = resolved.pop().unwrap_or_default();
+                let dispatchers = resolved.pop().unwrap_or_default();
+                Some(LeaseTrust {
+                    dispatchers,
+                    reporters,
+                })
+            }
+            None => None,
+        };
         let config = GitHubWorkGraphSourceConfig {
             organization: mapper.resolve_string(&dto.organization).await?,
             task_issue_type: TaskIssueType {
@@ -144,6 +231,8 @@ impl SourcePluginDescriptor for GitHubWorkGraphSourceDescriptor {
                 name: mapper.resolve_string(&dto.task_issue_type.name).await?,
             },
             repositories,
+            worker_config,
+            lease_trust,
             webhook: WebhookConfig {
                 host: mapper.resolve_string(&dto.webhook.host).await?,
                 port: mapper.resolve_typed(&dto.webhook.port).await?,
