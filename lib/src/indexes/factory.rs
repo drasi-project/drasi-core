@@ -356,7 +356,7 @@ mod tests {
                 id: "rocks_test".to_string(),
                 spec: StorageBackendSpec::Plugin {
                     kind: "rocksdb".to_string(),
-                    config: serde_json::json!({ "path": "/tmp/test" }),
+                    config: serde_json::json!({}),
                 },
             },
         ];
@@ -420,7 +420,7 @@ mod tests {
             id: "rocks".to_string(),
             spec: StorageBackendSpec::Plugin {
                 kind: "rocksdb".to_string(),
-                config: serde_json::json!({ "path": "/data/test" }),
+                config: serde_json::json!({}),
             },
         }];
         let factory = IndexFactory::new(backends, HashMap::new());
@@ -453,7 +453,7 @@ mod tests {
         let factory = IndexFactory::new(vec![], providers_with("rocks", false));
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Plugin {
             kind: "rocksdb".to_string(),
-            config: serde_json::json!({ "path": "/data/test" }),
+            config: serde_json::json!({}),
         });
         let result = factory.build(&backend_ref, "test_query").await;
 
@@ -497,7 +497,7 @@ mod tests {
             id: "rocks".to_string(),
             spec: StorageBackendSpec::Plugin {
                 kind: "rocksdb".to_string(),
-                config: serde_json::json!({ "path": "/data/test" }),
+                config: serde_json::json!({}),
             },
         }];
         let factory = IndexFactory::new(backends, HashMap::new());
@@ -516,7 +516,7 @@ mod tests {
 
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Plugin {
             kind: "rocksdb".to_string(),
-            config: serde_json::json!({ "path": "/data/test" }),
+            config: serde_json::json!({}),
         });
         assert!(!factory.is_volatile(&backend_ref));
     }

@@ -26,13 +26,11 @@ pub struct StorageBackendConfig {
 
 /// Storage backend specification defining the type and parameters.
 ///
-/// In-memory storage is handled natively by drasi-lib. All persistent backends
-/// (e.g. `rocksdb`, `redis`) are first-class config plugins: drasi-lib does not
-/// carry backend-specific serialization for them. Instead a persistent backend is
-/// declared generically by its `kind` plus an opaque `config` payload, and the
-/// concrete provider is supplied at runtime via
-/// `DrasiLibBuilder::with_index_provider(name, provider)` (the provider name must
-/// match the backend id / referenced name).
+/// In-memory storage is handled natively by drasi-lib. Persistent backends
+/// (e.g. `rocksdb`, `redis`) are declared by `kind`, then supplied as configured
+/// provider instances through `DrasiLibBuilder::with_index_provider(name, provider)`.
+/// Backend-specific settings belong to the provider constructor, not this
+/// specification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
 pub enum StorageBackendSpec {
@@ -53,21 +51,22 @@ pub enum StorageBackendSpec {
     /// A pluggable persistent storage backend identified by `kind`
     /// (e.g. `rocksdb`, `redis`).
     ///
-    /// The `config` payload is opaque to drasi-lib and is interpreted by the
-    /// backend's config plugin / injected provider. In embedded mode the backend
-    /// is satisfied by a named provider injected via `with_index_provider`.
+    /// In embedded mode the backend is satisfied by a named provider injected via
+    /// `with_index_provider`. Additional configuration properties are rejected
+    /// because drasi-lib cannot apply them to an already-constructed provider.
     ///
     /// # Example
     /// ```yaml
     /// kind: rocksdb
-    /// path: /data/drasi
-    /// enableArchive: true
     /// ```
     #[serde(untagged)]
     Plugin {
         /// Backend kind discriminator (e.g. "rocksdb", "redis")
         kind: String,
-        /// Opaque, backend-specific configuration payload
+        /// Flattened backend properties retained for serialization compatibility.
+        ///
+        /// This must be empty in embedded mode. Configure the injected provider
+        /// directly instead.
         #[serde(flatten)]
         config: serde_json::Value,
     },
@@ -88,9 +87,17 @@ impl StorageBackendSpec {
     pub fn validate(&self) -> Result<(), String> {
         match self {
             StorageBackendSpec::Memory { .. } => Ok(()),
-            StorageBackendSpec::Plugin { kind, .. } => {
+            StorageBackendSpec::Plugin { kind, config } => {
                 if kind.trim().is_empty() {
                     return Err("Storage backend 'kind' must not be empty".to_string());
+                }
+                if !matches!(config, serde_json::Value::Null)
+                    && !config.as_object().is_some_and(serde_json::Map::is_empty)
+                {
+                    return Err(format!(
+                        "Storage backend kind '{kind}' includes backend-specific properties that \
+                         are ignored in embedded mode; configure the injected provider directly"
+                    ));
                 }
                 Ok(())
             }
@@ -205,6 +212,19 @@ directIo: false
     }
 
     #[test]
+    fn test_plugin_without_config_serde() {
+        let spec: StorageBackendSpec = serde_yaml::from_str("kind: rocksdb").unwrap();
+        match &spec {
+            StorageBackendSpec::Plugin { kind, config } => {
+                assert_eq!(kind, "rocksdb");
+                assert_eq!(config, &serde_json::json!({}));
+            }
+            _ => panic!("Expected Plugin variant"),
+        }
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
     fn test_plugin_redis_serde() {
         let yaml = r#"
 kind: redis
@@ -296,12 +316,23 @@ enableArchive: false
     }
 
     #[test]
-    fn test_validate_plugin_ok() {
+    fn test_validate_plugin_without_config() {
+        let spec = StorageBackendSpec::Plugin {
+            kind: "rocksdb".to_string(),
+            config: serde_json::json!({}),
+        };
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_plugin_rejects_ignored_config() {
         let spec = StorageBackendSpec::Plugin {
             kind: "rocksdb".to_string(),
             config: serde_json::json!({ "path": "/data/drasi" }),
         };
-        assert!(spec.validate().is_ok());
+        let err = spec.validate().unwrap_err();
+        assert!(err.contains("ignored in embedded mode"));
+        assert!(err.contains("configure the injected provider directly"));
     }
 
     #[test]
