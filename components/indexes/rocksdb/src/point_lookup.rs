@@ -28,15 +28,15 @@
 //! injected through it (see #634).
 //!
 //! The settings below mirror `ColumnFamilyOptions::OptimizeForPointLookup`
-//! in RocksDB 8.1.1 (`options/options.cc:609`), which is the version pinned
-//! by `librocksdb-sys 0.11.0+8.1.1`:
+//! in RocksDB 8.10.0 (`options/options.cc:629`), which is the version pinned
+//! by `librocksdb-sys 0.16.0+8.10.0`:
 //!
 //! | `OptimizeForPointLookup(mb)` | Here |
 //! |---|---|
 //! | `data_block_index_type = kDataBlockBinaryAndHash` | [`DataBlockIndexType::BinaryAndHash`] |
 //! | `data_block_hash_table_util_ratio = 0.75` | [`DATA_BLOCK_HASH_RATIO`] |
 //! | `filter_policy = NewBloomFilterPolicy(10)` | [`BLOOM_BITS_PER_KEY`] |
-//! | `block_cache = NewLRUCache(mb * 1024 * 1024)` | `block_cache_bytes` argument |
+//! | `block_cache = NewLRUCache(mb * 1024 * 1024)` | injected shared cache |
 //! | `memtable_prefix_bloom_size_ratio = 0.02` | [`MEMTABLE_BLOOM_RATIO`] |
 //! | `memtable_whole_key_filtering = true` | set unconditionally |
 //!
@@ -53,7 +53,7 @@
 //! wrapper's name omits the parameters), and the block cache is not
 //! serialized at all.
 
-use rocksdb::{BlockBasedOptions, Cache, DataBlockIndexType, Options};
+use rocksdb::{Cache, DataBlockIndexType, Options};
 
 /// Bits per key for the SST bloom filter, matching `NewBloomFilterPolicy(10)`.
 const BLOOM_BITS_PER_KEY: f64 = 10.0;
@@ -66,29 +66,16 @@ const MEMTABLE_BLOOM_RATIO: f64 = 0.02;
 const DATA_BLOCK_HASH_RATIO: f64 = 0.75;
 
 /// Options for a column family read only by exact key.
-///
-/// `block_cache_bytes` is in **bytes**, unlike the megabytes taken by the
-/// `optimize_for_point_lookup` preset this replaces.
-///
-/// Each call constructs its own [`Cache`], so two column families built from
-/// this function get independent caches of the given size, matching the
-/// per-call cache the preset created. #634 replaces this with one shared
-/// handle passed in; until then, hoisting a single `Cache` into a shared
-/// value here would quietly halve the capacity available to `elements` and
-/// `slots`, and nothing in the OPTIONS file would show it.
-pub(crate) fn point_lookup_cf_options(block_cache_bytes: usize) -> Options {
-    let mut opts = Options::default();
-
-    let mut table_opts = BlockBasedOptions::default();
+pub(crate) fn point_lookup_cf_options(block_cache: &Cache) -> Options {
+    let mut table_opts = crate::cf_options::shared_block_based_options(block_cache);
     table_opts.set_data_block_index_type(DataBlockIndexType::BinaryAndHash);
     table_opts.set_data_block_hash_ratio(DATA_BLOCK_HASH_RATIO);
-    // `false` selects the full-filter builder. On RocksDB 8.1.1 the flag is
+    // `false` selects the full-filter builder. On RocksDB 8.10.0 the flag is
     // ignored (`NewBloomFilterPolicy`'s second parameter is named
     // `IGNORED_use_block_based_builder`), but the block-based builder is the
     // one that would be wrong if it were ever honoured again.
     table_opts.set_bloom_filter(BLOOM_BITS_PER_KEY, false);
-    table_opts.set_block_cache(&Cache::new_lru_cache(block_cache_bytes));
-    opts.set_block_based_table_factory(&table_opts);
+    let mut opts = crate::cf_options::options_with_table(&table_opts);
 
     opts.set_memtable_prefix_bloom_ratio(MEMTABLE_BLOOM_RATIO);
     opts.set_memtable_whole_key_filtering(true);

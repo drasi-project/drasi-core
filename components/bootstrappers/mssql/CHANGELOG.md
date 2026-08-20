@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.11] - 2026-08-11
 
+### Bug Fixes
+
+- **mssql:** Bootstrap now uses shared `extract_column_value`, fixing Null snapshots for `DECIMAL`/`UNIQUEIDENTIFIER`/`VARBINARY` and aligning datetime values with CDC ([#673](https://github.com/drasi-project/drasi-core/issues/673)) ([#674](https://github.com/drasi-project/drasi-core/issues/674))
+
 ### Miscellaneous Tasks
 
 - End-to-end nightly build (drasi-core producer + release tooling refactor) ([#615](https://github.com/drasi-project/drasi-core/issues/615))
