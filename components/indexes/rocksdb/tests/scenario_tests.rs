@@ -25,8 +25,8 @@ use uuid::Uuid;
 
 use drasi_index_rocksdb::{
     element_index::RocksDbElementIndex, future_queue::RocksDbFutureQueue, open_unified_db,
-    result_index::RocksDbResultIndex, RocksDbSessionControl, RocksDbSessionState,
-    RocksIndexOptions,
+    result_index::RocksDbResultIndex, RocksDbMemoryBudget, RocksDbSessionControl,
+    RocksDbSessionState, RocksIndexOptions,
 };
 
 struct RocksDbQueryConfig {
@@ -53,7 +53,7 @@ impl RocksDbQueryConfig {
         RocksDbFutureQueue,
         Arc<dyn drasi_core::interface::SessionControl>,
     ) {
-        let options = RocksIndexOptions::new(true, false);
+        let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
         let db = open_unified_db(&self.url, query_id, &options).unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
@@ -78,13 +78,14 @@ impl QueryTestConfig for RocksDbQueryConfig {
         log::info!("using in RocksDb indexes");
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let options = RocksIndexOptions::new(true, false);
+        let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
 
         let db = open_unified_db(&self.url, &query_id, &options).unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
 
-        let element_index = RocksDbElementIndex::new(db.clone(), options, session_state.clone());
-        let ari = RocksDbResultIndex::new(db.clone(), session_state.clone(), options);
+        let element_index =
+            RocksDbElementIndex::new(db.clone(), options.clone(), session_state.clone());
+        let ari = RocksDbResultIndex::new(db.clone(), session_state.clone(), options.clone());
         let fqi = RocksDbFutureQueue::new(db, session_state.clone(), options);
         let session_control = Arc::new(RocksDbSessionControl::new(session_state));
 
@@ -407,8 +408,8 @@ mod session {
     };
     use drasi_index_rocksdb::{
         element_index::RocksDbElementIndex, future_queue::RocksDbFutureQueue, open_unified_db,
-        result_index::RocksDbResultIndex, RocksDbSessionControl, RocksDbSessionState,
-        RocksIndexOptions,
+        result_index::RocksDbResultIndex, RocksDbMemoryBudget, RocksDbSessionControl,
+        RocksDbSessionState, RocksIndexOptions,
     };
     use serial_test::serial;
     use uuid::Uuid;
@@ -419,11 +420,13 @@ mod session {
     async fn session_rollback_discards_writes() {
         let url = format!("test-data/{}", Uuid::new_v4());
         let query_id = format!("test-{}", Uuid::new_v4());
-        let options = RocksIndexOptions::new(true, false);
+        let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
         let db = open_unified_db(&url, &query_id, &options).unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
-        let element_index = RocksDbElementIndex::new(db.clone(), options, session_state.clone());
-        let result_index = RocksDbResultIndex::new(db.clone(), session_state.clone(), options);
+        let element_index =
+            RocksDbElementIndex::new(db.clone(), options.clone(), session_state.clone());
+        let result_index =
+            RocksDbResultIndex::new(db.clone(), session_state.clone(), options.clone());
         let future_queue = RocksDbFutureQueue::new(db, session_state.clone(), options);
         let session_control = RocksDbSessionControl::new(session_state);
 
@@ -488,11 +491,13 @@ mod session {
     async fn session_commit_persists_writes() {
         let url = format!("test-data/{}", Uuid::new_v4());
         let query_id = format!("test-{}", Uuid::new_v4());
-        let options = RocksIndexOptions::new(true, false);
+        let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
         let db = open_unified_db(&url, &query_id, &options).unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
-        let element_index = RocksDbElementIndex::new(db.clone(), options, session_state.clone());
-        let result_index = RocksDbResultIndex::new(db.clone(), session_state.clone(), options);
+        let element_index =
+            RocksDbElementIndex::new(db.clone(), options.clone(), session_state.clone());
+        let result_index =
+            RocksDbResultIndex::new(db.clone(), session_state.clone(), options.clone());
         let future_queue = RocksDbFutureQueue::new(db, session_state.clone(), options);
         let session_control = RocksDbSessionControl::new(session_state);
 
@@ -609,7 +614,7 @@ mod checkpoint_tests {
     async fn sequence_counter() {
         let config = RocksDbQueryConfig::new();
         let query_id = format!("test-{}", Uuid::new_v4());
-        let options = RocksIndexOptions::new(false, false);
+        let options = RocksIndexOptions::new(false, false, RocksDbMemoryBudget::default());
         let db = open_unified_db(&config.url, &query_id, &options).unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
@@ -624,7 +629,7 @@ mod checkpoint_tests {
     async fn checkpoint_round_trip() {
         let config = RocksDbQueryConfig::new();
         let query_id = format!("test-{}", Uuid::new_v4());
-        let options = RocksIndexOptions::new(false, false);
+        let options = RocksIndexOptions::new(false, false, RocksDbMemoryBudget::default());
         let db = open_unified_db(&config.url, &query_id, &options).unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
@@ -639,7 +644,7 @@ mod checkpoint_tests {
     async fn result_sequence_counter() {
         let config = RocksDbQueryConfig::new();
         let query_id = format!("test-{}", Uuid::new_v4());
-        let options = RocksIndexOptions::new(false, false);
+        let options = RocksIndexOptions::new(false, false, RocksDbMemoryBudget::default());
         let db = open_unified_db(&config.url, &query_id, &options).unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
@@ -660,7 +665,7 @@ mod checkpoint_tests {
 
         let config = RocksDbQueryConfig::new();
         let query_id = format!("test-{}", Uuid::new_v4());
-        let options = RocksIndexOptions::new(false, false);
+        let options = RocksIndexOptions::new(false, false, RocksDbMemoryBudget::default());
         let db = open_unified_db(&config.url, &query_id, &options).unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
@@ -732,7 +737,7 @@ mod checkpoint_tests {
 
         let config = RocksDbQueryConfig::new();
         let query_id = format!("test-{}", Uuid::new_v4());
-        let options = RocksIndexOptions::new(false, false);
+        let options = RocksIndexOptions::new(false, false, RocksDbMemoryBudget::default());
         let db = open_unified_db(&config.url, &query_id, &options).unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
         let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));

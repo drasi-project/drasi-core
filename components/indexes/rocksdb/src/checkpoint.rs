@@ -33,7 +33,7 @@ use crate::IndexDb;
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
-use rocksdb::{ColumnFamilyDescriptor, Options};
+use rocksdb::ColumnFamilyDescriptor;
 use tokio::task;
 
 use crate::RocksDbSessionState;
@@ -50,7 +50,8 @@ const RESULT_SEQUENCE_PREFIX: &str = "result_sequence:";
 pub(crate) fn stream_state_cf_descriptor(
     options: &crate::RocksIndexOptions,
 ) -> ColumnFamilyDescriptor {
-    let mut opts = Options::default();
+    let block_cache = options.memory_budget().block_cache();
+    let mut opts = crate::cf_options::base_cf_options(block_cache);
     opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(16));
     crate::sizing::descriptor(STREAM_STATE_CF, opts, options)
 }

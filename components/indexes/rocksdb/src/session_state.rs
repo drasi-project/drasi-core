@@ -309,7 +309,7 @@ mod tests {
 
     fn setup_test_db() -> (tempfile::TempDir, Arc<IndexDb>) {
         let dir = tempfile::TempDir::new().expect("failed to create temp dir");
-        let options = RocksIndexOptions::new(false, false);
+        let options = RocksIndexOptions::new(false, false, crate::RocksDbMemoryBudget::default());
         let db = open_unified_db(dir.path().to_str().expect("path"), "test", &options)
             .expect("failed to open db");
         (dir, db)

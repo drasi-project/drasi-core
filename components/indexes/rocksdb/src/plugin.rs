@@ -24,7 +24,8 @@
 //! use drasi_lib::DrasiLib;
 //! use std::sync::Arc;
 //!
-//! let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
+//! let provider = RocksDbIndexProvider::new("/data/drasi", true, false)
+//!     .with_memory_budget_bytes(512 << 20)?;
 //! let drasi = DrasiLib::builder()
 //!     .with_index_provider("rocksdb", Arc::new(provider))
 //!     .build()?;
@@ -33,7 +34,6 @@
 use crate::IndexDb;
 use async_trait::async_trait;
 use drasi_core::interface::{CreatedIndexes, IndexBackendPlugin, IndexError, IndexSet};
-use rocksdb::Options;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -43,8 +43,10 @@ use crate::future_queue::{self, RocksDbFutureQueue};
 use crate::live_results::{self, RocksDbLiveResultsWriter};
 use crate::outbox::{self, RocksDbOutboxWriter};
 use crate::result_index::{self, RocksDbResultIndex};
-use crate::RocksIndexOptions;
-use crate::{RocksDbSessionControl, RocksDbSessionState};
+use crate::{
+    RocksDbMemoryBudget, RocksDbMemoryBudgetError, RocksDbSessionControl, RocksDbSessionState,
+    RocksIndexOptions,
+};
 
 /// Open a unified RocksDB database with all column families needed for a query.
 ///
@@ -55,7 +57,7 @@ use crate::{RocksDbSessionControl, RocksDbSessionState};
 ///
 /// * `path` - Base directory for RocksDB data files
 /// * `query_id` - Unique identifier for the query
-/// * `options` - RocksDB index options (archive, direct I/O)
+/// * `options` - RocksDB index options and shared memory budget
 ///
 /// # Directory Structure
 ///
@@ -81,13 +83,13 @@ pub fn open_unified_db(
         )));
     }
 
-    let mut db_opts = Options::default();
+    let block_cache = options.memory_budget().block_cache();
+    let mut db_opts = rocksdb::Options::default();
     db_opts.create_if_missing(true);
     db_opts.create_missing_column_families(true);
-    db_opts.set_db_write_buffer_size(128 * 1024 * 1024);
-    crate::bound_write_buffer_history(&mut db_opts);
-    db_opts.set_use_direct_reads(options.direct_io);
-    db_opts.set_use_direct_io_for_flush_and_compaction(options.direct_io);
+    db_opts.set_write_buffer_manager(options.memory_budget().write_buffer_manager());
+    db_opts.set_use_direct_reads(options.direct_io());
+    db_opts.set_use_direct_io_for_flush_and_compaction(options.direct_io());
 
     let db_path = PathBuf::from(path).join(query_id);
     let db_path = match db_path.to_str() {
@@ -104,11 +106,11 @@ pub fn open_unified_db(
 
     // The default CF is not covered by db_opts: rust-rocksdb opens it with
     // fresh Options unless a descriptor is supplied, so it goes through the
-    // same sizing policy (small buffer, derived arena, retention bound) as every
-    // other CF (caught by retention_bound_tests and cf_sizing_tests).
+    // same shared-cache, sizing, and history policies as every other CF.
+    let default_cf_opts = crate::cf_options::base_cf_options(block_cache);
     cfs.push(crate::sizing::descriptor(
         rocksdb::DEFAULT_COLUMN_FAMILY_NAME,
-        Options::default(),
+        default_cf_opts,
         options,
     ));
 
@@ -129,6 +131,7 @@ pub fn open_unified_db(
 /// - `path`: Base directory for RocksDB data files
 /// - `enable_archive`: Enable archive index for `past()` function support
 /// - `direct_io`: Use direct I/O for better performance on SSDs
+/// - `memory_budget`: Shared block cache and write-buffer manager
 ///
 /// # Directory Structure
 ///
@@ -139,7 +142,9 @@ pub fn open_unified_db(
 /// ```
 pub struct RocksDbIndexProvider {
     path: PathBuf,
-    options: RocksIndexOptions,
+    enable_archive: bool,
+    direct_io: bool,
+    memory_budget: RocksDbMemoryBudget,
 }
 
 impl RocksDbIndexProvider {
@@ -159,8 +164,37 @@ impl RocksDbIndexProvider {
     pub fn new<P: Into<PathBuf>>(path: P, enable_archive: bool, direct_io: bool) -> Self {
         Self {
             path: path.into(),
-            options: RocksIndexOptions::new(enable_archive, direct_io),
+            enable_archive,
+            direct_io,
+            memory_budget: RocksDbMemoryBudget::default(),
         }
+    }
+
+    /// Set the provider-wide combined memory budget using the standard policy.
+    ///
+    /// Half of the capacity is available to memtables. Memtable reservations
+    /// are charged to the same cache, so the two capacities are not additive.
+    pub fn with_memory_budget_bytes(
+        mut self,
+        total_budget_bytes: usize,
+    ) -> Result<Self, RocksDbMemoryBudgetError> {
+        self.memory_budget = RocksDbMemoryBudget::from_total_budget_bytes(total_budget_bytes)?;
+        Ok(self)
+    }
+
+    /// Inject provider-wide memory resources using a custom policy.
+    ///
+    /// This expert API supports custom cache/write-buffer splits, stall
+    /// behavior, and sharing one budget across multiple providers. Prefer
+    /// [`Self::with_memory_budget_bytes`] for standard configuration.
+    pub fn with_memory_budget(mut self, memory_budget: RocksDbMemoryBudget) -> Self {
+        self.memory_budget = memory_budget;
+        self
+    }
+
+    /// Shared memory resources used by this provider's query databases.
+    pub fn memory_budget(&self) -> &RocksDbMemoryBudget {
+        &self.memory_budget
     }
 
     /// Get the configured path.
@@ -170,12 +204,12 @@ impl RocksDbIndexProvider {
 
     /// Check if archive is enabled.
     pub fn is_archive_enabled(&self) -> bool {
-        self.options.archive_enabled
+        self.enable_archive
     }
 
     /// Check if direct I/O is enabled.
     pub fn is_direct_io_enabled(&self) -> bool {
-        self.options.direct_io
+        self.direct_io
     }
 }
 
@@ -183,7 +217,11 @@ impl RocksDbIndexProvider {
 impl IndexBackendPlugin for RocksDbIndexProvider {
     async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
         let path = self.path.to_string_lossy().to_string();
-        let options = self.options;
+        let options = RocksIndexOptions::new(
+            self.enable_archive,
+            self.direct_io,
+            self.memory_budget.clone(),
+        );
 
         let db = open_unified_db(&path, query_id, &options).map_err(|e| {
             log::error!(
@@ -197,13 +235,13 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
 
         let element_index = Arc::new(RocksDbElementIndex::new(
             db.clone(),
-            options,
+            options.clone(),
             session_state.clone(),
         ));
         let result_index = Arc::new(RocksDbResultIndex::new(
             db.clone(),
             session_state.clone(),
-            options,
+            options.clone(),
         ));
         let future_queue = Arc::new(RocksDbFutureQueue::new(
             db.clone(),
@@ -244,6 +282,13 @@ mod tests {
         assert_eq!(provider.path(), &PathBuf::from("/data/drasi"));
         assert!(provider.is_archive_enabled());
         assert!(!provider.is_direct_io_enabled());
+        assert_eq!(
+            provider
+                .memory_budget()
+                .write_buffer_manager()
+                .get_buffer_size(),
+            crate::DEFAULT_WRITE_BUFFER_BUDGET_BYTES
+        );
     }
 
     #[test]
@@ -253,6 +298,53 @@ mod tests {
         assert_eq!(provider.path(), &PathBuf::from("/var/lib/drasi"));
         assert!(!provider.is_archive_enabled());
         assert!(provider.is_direct_io_enabled());
+    }
+
+    #[test]
+    fn test_rocksdb_index_provider_total_memory_budget() {
+        let provider = RocksDbIndexProvider::new("/data/drasi", false, false)
+            .with_memory_budget_bytes(64 * 1024 * 1024)
+            .expect("valid total budget");
+
+        assert_eq!(
+            provider.memory_budget().block_cache_capacity_bytes(),
+            64 * 1024 * 1024
+        );
+        assert_eq!(
+            provider
+                .memory_budget()
+                .write_buffer_manager()
+                .get_buffer_size(),
+            32 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn test_rocksdb_index_provider_rejects_invalid_total_memory_budget() {
+        assert!(matches!(
+            RocksDbIndexProvider::new("/data/drasi", false, false).with_memory_budget_bytes(1),
+            Err(RocksDbMemoryBudgetError::ZeroWriteBufferBudget)
+        ));
+    }
+
+    #[test]
+    fn test_rocksdb_index_provider_custom_memory_budget() {
+        let budget = RocksDbMemoryBudget::new(32 * 1024 * 1024, 8 * 1024 * 1024, false)
+            .expect("valid budget");
+        let provider =
+            RocksDbIndexProvider::new("/data/drasi", false, false).with_memory_budget(budget);
+
+        assert_eq!(
+            provider.memory_budget().block_cache_capacity_bytes(),
+            32 * 1024 * 1024
+        );
+        assert_eq!(
+            provider
+                .memory_budget()
+                .write_buffer_manager()
+                .get_buffer_size(),
+            8 * 1024 * 1024
+        );
     }
 
     #[test]
@@ -301,7 +393,7 @@ mod tests {
     #[test]
     fn test_open_unified_db() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let options = RocksIndexOptions::new(true, false);
+        let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
 
         let path = temp_dir.path().to_string_lossy().to_string();
         let result = open_unified_db(&path, "test_query", &options);
@@ -311,7 +403,7 @@ mod tests {
     #[test]
     fn test_open_unified_db_rejects_unsafe_query_id() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let options = RocksIndexOptions::new(true, false);
+        let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
         let path = temp_dir.path().to_string_lossy().to_string();
 
         for bad in ["", ".", "..", "a/b", "../escape", "a\\b", "with\0nul"] {

@@ -12,47 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// Options controlling how the unified query index DB is opened.
-///
-/// Marked `#[non_exhaustive]` so new fields can be added without a breaking
-/// change. Construct via [`RocksIndexOptions::new`] or
-/// [`RocksIndexOptions::default`].
-#[non_exhaustive]
-#[derive(Clone, Copy)]
+use crate::RocksDbMemoryBudget;
+
+#[derive(Clone)]
 pub struct RocksIndexOptions {
-    /// Create the archive column family for `past()` support.
-    pub archive_enabled: bool,
-    /// Use direct I/O for SST reads and flush/compaction.
-    pub direct_io: bool,
-    /// `write_buffer_size` for high byte-volume column families.
-    /// The arena block size is derived from it (`write_buffer_size / 64`,
-    /// clamped to `[64 KiB, 1 MiB]`).
+    archive_enabled: bool,
+    direct_io: bool,
+    memory_budget: RocksDbMemoryBudget,
     pub(crate) large_write_buffer_size: usize,
-    /// `write_buffer_size` for the remaining column families.
-    /// The arena block size is derived from it (`write_buffer_size / 64`,
-    /// clamped to `[64 KiB, 1 MiB]`).
     pub(crate) small_write_buffer_size: usize,
 }
 
-impl Default for RocksIndexOptions {
-    fn default() -> Self {
+impl RocksIndexOptions {
+    /// Create options with the memory resources used to open and maintain the index.
+    pub fn new(archive_enabled: bool, direct_io: bool, memory_budget: RocksDbMemoryBudget) -> Self {
         Self {
-            archive_enabled: false,
-            direct_io: false,
+            archive_enabled,
+            direct_io,
+            memory_budget,
             large_write_buffer_size: crate::sizing::DEFAULT_LARGE_WRITE_BUFFER_SIZE,
             small_write_buffer_size: crate::sizing::DEFAULT_SMALL_WRITE_BUFFER_SIZE,
         }
     }
-}
 
-impl RocksIndexOptions {
-    /// Options with the given archive/direct-I/O flags and the internal
-    /// per-column-family sizing policy.
-    pub fn new(archive_enabled: bool, direct_io: bool) -> Self {
-        Self {
-            archive_enabled,
-            direct_io,
-            ..Self::default()
-        }
+    /// Whether historical element versions are retained.
+    pub fn archive_enabled(&self) -> bool {
+        self.archive_enabled
+    }
+
+    /// Whether RocksDB uses direct I/O.
+    pub fn direct_io(&self) -> bool {
+        self.direct_io
+    }
+
+    /// Memory resources shared by the query databases opened with these options.
+    pub fn memory_budget(&self) -> &RocksDbMemoryBudget {
+        &self.memory_budget
     }
 }

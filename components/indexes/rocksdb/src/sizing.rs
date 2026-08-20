@@ -47,11 +47,10 @@
 //! memtable bloom filters) bypass the block pool as exact-size allocations,
 //! so small blocks waste nothing.
 //!
-//! The flushed-memtable history bound (see [`crate::bound_write_buffer_history`])
-//! is applied here too, so this module is the single place that owns per-CF
-//! option policy. The DB-level `db_write_buffer_size` cap in
-//! [`crate::open_unified_db`] is intentionally untouched: with right-sized
-//! buffers it acts as a backstop rather than the flush scheduler.
+//! Shared cache/table configuration and the flushed-memtable history bound are
+//! applied by [`crate::cf_options`] before this module overlays the per-CF
+//! write-buffer and arena sizing. The provider-wide write-buffer manager
+//! remains the aggregate backstop across query databases.
 
 use rocksdb::{ColumnFamilyDescriptor, Options};
 
@@ -86,8 +85,8 @@ fn arena_block_size_for(write_buffer_size: usize) -> usize {
     (write_buffer_size / 64).clamp(64 * 1024, 1024 * 1024)
 }
 
-/// Apply the per-CF sizing policy (write buffer, arena block, history bound)
-/// to `opts` for the column family named `cf_name`, then return `opts`.
+/// Apply the per-CF write-buffer and arena sizing to `opts` for the column
+/// family named `cf_name`, then return `opts`.
 ///
 /// Use this wherever a column family's options are materialized, both the
 /// open-time descriptors and the drop/re-create paths, so no CF can be
@@ -100,7 +99,6 @@ pub(crate) fn sized(cf_name: &str, mut opts: Options, index_opts: &RocksIndexOpt
     };
     opts.set_write_buffer_size(write_buffer_size);
     opts.set_arena_block_size(arena_block_size_for(write_buffer_size));
-    crate::bound_write_buffer_history(&mut opts);
     opts
 }
 

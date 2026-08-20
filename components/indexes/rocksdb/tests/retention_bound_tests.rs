@@ -22,13 +22,12 @@
 //! both a reintroduced zero and a column family the bound was never applied
 //! to.
 
-use drasi_index_rocksdb::open_unified_db;
-use drasi_index_rocksdb::RocksIndexOptions;
+use drasi_index_rocksdb::{open_unified_db, RocksDbMemoryBudget, RocksIndexOptions};
 
 #[test]
 fn effective_retention_is_the_explicit_bound_on_every_cf() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let options = RocksIndexOptions::new(true, false);
+    let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
     let db =
         open_unified_db(dir.path().to_str().unwrap(), "retention-test", &options).expect("open db");
 

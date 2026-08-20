@@ -25,7 +25,7 @@ use std::sync::Arc;
 use crate::IndexDb;
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, OutboxWriter};
-use rocksdb::{ColumnFamilyDescriptor, IteratorMode, Options};
+use rocksdb::{ColumnFamilyDescriptor, IteratorMode};
 use tokio::task;
 
 /// Column family name for outbox data.
@@ -33,7 +33,9 @@ pub(crate) const OUTBOX_CF: &str = "outbox";
 
 /// Returns the column family descriptor for the outbox CF.
 pub(crate) fn outbox_cf_descriptor(options: &crate::RocksIndexOptions) -> ColumnFamilyDescriptor {
-    crate::sizing::descriptor(OUTBOX_CF, Options::default(), options)
+    let block_cache = options.memory_budget().block_cache();
+    let opts = crate::cf_options::base_cf_options(block_cache);
+    crate::sizing::descriptor(OUTBOX_CF, opts, options)
 }
 
 /// Build the outbox key: `{query_id}\x00{sequence_be_bytes}`.

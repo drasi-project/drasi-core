@@ -23,13 +23,14 @@ use std::sync::Arc;
 
 use drasi_core::interface::{LiveResultsWriter, OutboxWriter, RowMutation};
 use drasi_index_rocksdb::{
-    open_unified_db, RocksDbLiveResultsWriter, RocksDbOutboxWriter, RocksIndexOptions,
+    open_unified_db, RocksDbLiveResultsWriter, RocksDbMemoryBudget, RocksDbOutboxWriter,
+    RocksIndexOptions,
 };
 use tempfile::TempDir;
 
 /// Helper: open a RocksDB database at the given path with a test query ID.
 fn open_db(path: &str, query_id: &str) -> Arc<drasi_index_rocksdb::IndexDb> {
-    let options = RocksIndexOptions::new(false, false);
+    let options = RocksIndexOptions::new(false, false, RocksDbMemoryBudget::default());
     open_unified_db(path, query_id, &options).expect("Failed to open RocksDB")
 }
 

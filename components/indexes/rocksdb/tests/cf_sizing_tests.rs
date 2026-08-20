@@ -33,9 +33,9 @@ use drasi_index_rocksdb::element_index::RocksDbElementIndex;
 use drasi_index_rocksdb::future_queue::RocksDbFutureQueue;
 use drasi_index_rocksdb::open_unified_db;
 use drasi_index_rocksdb::result_index::RocksDbResultIndex;
-use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_index_rocksdb::RocksDbSessionState;
 use drasi_index_rocksdb::RocksIndexOptions;
+use drasi_index_rocksdb::{RocksDbIndexProvider, RocksDbMemoryBudget};
 
 const LARGE_BUFFER_CFS: &[&str] = &[
     "elements",
@@ -97,7 +97,7 @@ fn effective_sizes(db_dir: &std::path::Path) -> HashMap<String, (u64, u64, u64)>
 #[test]
 fn effective_sizes_match_the_tier_policy_on_every_cf() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let options = RocksIndexOptions::new(true, false);
+    let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
     let db = open_unified_db(dir.path().to_str().unwrap(), "sizing-test", &options).expect("open");
 
     let sizes = effective_sizes(&dir.path().join("sizing-test"));
@@ -167,12 +167,13 @@ async fn provider_applies_the_internal_tier_policy() {
 #[tokio::test]
 async fn clear_recreates_cfs_with_the_sizing_policy() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let options = RocksIndexOptions::new(true, false);
+    let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
     let db = open_unified_db(dir.path().to_str().unwrap(), "clear-test", &options).expect("open");
 
     let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
-    let element_index = RocksDbElementIndex::new(db.clone(), options, session_state.clone());
-    let result_index = RocksDbResultIndex::new(db.clone(), session_state.clone(), options);
+    let element_index =
+        RocksDbElementIndex::new(db.clone(), options.clone(), session_state.clone());
+    let result_index = RocksDbResultIndex::new(db.clone(), session_state.clone(), options.clone());
     let future_queue = RocksDbFutureQueue::new(db.clone(), session_state.clone(), options);
 
     // RocksDbElementIndex implements both ElementIndex and ElementArchiveIndex
