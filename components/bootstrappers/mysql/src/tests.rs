@@ -23,6 +23,7 @@ mod tests {
             user: "user".to_string(),
             password: String::new(),
             tables: vec!["users".to_string()],
+            ssl_mode: SslMode::default(),
             table_keys: vec![],
         };
         assert!(config.validate().is_err());
@@ -37,6 +38,7 @@ mod tests {
             user: "user".to_string(),
             password: String::new(),
             tables: vec![],
+            ssl_mode: SslMode::default(),
             table_keys: vec![],
         };
         assert!(config.validate().is_err());
@@ -51,6 +53,7 @@ mod tests {
             user: "user".to_string(),
             password: String::new(),
             tables: vec!["users;drop".to_string()],
+            ssl_mode: SslMode::default(),
             table_keys: vec![],
         };
         assert!(config.validate().is_err());

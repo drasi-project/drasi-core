@@ -17,27 +17,7 @@
 //! This source monitors MySQL databases using binlog replication to stream
 //! data changes as they occur.
 
-pub use drasi_mysql_common::{is_valid_identifier, TableKeyConfig};
-
-// =============================================================================
-// SSL Configuration
-// =============================================================================
-
-/// SSL mode for MySQL connections
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SslMode {
-    /// Disable SSL encryption
-    Disabled,
-    /// Try SSL but allow unencrypted connections.
-    #[default]
-    IfAvailable,
-    /// Require SSL encryption.
-    Require,
-    /// Require SSL with CA verification.
-    RequireVerifyCa,
-    /// Require SSL with CA and hostname verification.
-    RequireVerifyFull,
-}
+pub use drasi_mysql_common::{is_valid_identifier, SslMode, TableKeyConfig};
 
 // =============================================================================
 // Database Table Configuration

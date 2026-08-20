@@ -669,8 +669,18 @@ async fn prepare_types_database(config: &MssqlConfig) -> Result<MssqlConfig> {
             FloatVal FLOAT NOT NULL,
             RealVal REAL NOT NULL,
             DecimalVal DECIMAL(10,2) NOT NULL,
+            MoneyVal MONEY NOT NULL,
+            SmallMoneyVal SMALLMONEY NOT NULL,
             VarcharVal VARCHAR(100) NOT NULL,
-            NVarcharVal NVARCHAR(100) NOT NULL
+            NVarcharVal NVARCHAR(100) NOT NULL,
+            GuidVal UNIQUEIDENTIFIER NOT NULL,
+            BinaryVal VARBINARY(16) NOT NULL,
+            DateTimeVal DATETIME NOT NULL,
+            DateTime2Val DATETIME2(7) NOT NULL,
+            SmallDateTimeVal SMALLDATETIME NOT NULL,
+            DateVal DATE NOT NULL,
+            TimeVal TIME(7) NOT NULL,
+            DateTimeOffsetVal DATETIMEOFFSET NOT NULL
         );",
     )
     .await?;
@@ -726,13 +736,12 @@ async fn prepare_types_database(config: &MssqlConfig) -> Result<MssqlConfig> {
 /// booleans, and strings should be strings — not everything coerced to string.
 #[tokio::test]
 #[ignore]
-#[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_column_type_mapping() -> Result<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .is_test(true)
         .try_init();
 
-    let result = tokio::time::timeout(Duration::from_secs(300), async {
+    let result = tokio::time::timeout(Duration::from_secs(900), async {
         let mssql = setup_mssql()
             .await
             .context("Failed to start MSSQL container")?;
@@ -765,6 +774,26 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
             .build()
             .context("Failed to build MSSQL source")?;
 
+        // Seed a row before start so bootstrap snapshot is exercised, then
+        // update it via CDC and assert the same property shapes/values.
+        let mut seed_client = db_config.connect().await?;
+        execute_sql(
+            &mut seed_client,
+            "INSERT INTO dbo.TypesTest (
+                Id, IntVal, BigIntVal, SmallIntVal, TinyIntVal, BitVal,
+                FloatVal, RealVal, DecimalVal, MoneyVal, SmallMoneyVal, VarcharVal, NVarcharVal,
+                GuidVal, BinaryVal, DateTimeVal, DateTime2Val, SmallDateTimeVal,
+                DateVal, TimeVal, DateTimeOffsetVal
+             ) VALUES (
+                1, 42, 9876543210, 256, 7, 1,
+                3.15, 2.5, 99.95, 12.3400, 9.9900, 'hello', N'world',
+                '550e8400-e29b-41d4-a716-446655440000', 0xDEADBEEF,
+                '2024-06-15T10:30:45.123', '2024-06-15T10:30:45.1234567', '2024-06-15T10:30:00',
+                '2024-06-15', '10:30:45.1234567', '2024-06-15T10:30:45.1234567+05:00'
+             );",
+        )
+        .await?;
+
         let query = Query::cypher(TYPES_QUERY_ID)
             .query(
                 r#"
@@ -778,8 +807,18 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
                        t.FloatVal AS float_val,
                        t.RealVal AS real_val,
                        t.DecimalVal AS decimal_val,
+                       t.MoneyVal AS money_val,
+                       t.SmallMoneyVal AS smallmoney_val,
                        t.VarcharVal AS varchar_val,
-                       t.NVarcharVal AS nvarchar_val
+                       t.NVarcharVal AS nvarchar_val,
+                       t.GuidVal AS guid_val,
+                       t.BinaryVal AS binary_val,
+                       t.DateTimeVal AS datetime_val,
+                       t.DateTime2Val AS datetime2_val,
+                       t.SmallDateTimeVal AS smalldatetime_val,
+                       t.DateVal AS date_val,
+                       t.TimeVal AS time_val,
+                       t.DateTimeOffsetVal AS datetimeoffset_val
             "#,
             )
             .from_source(TYPES_SOURCE_ID)
@@ -809,120 +848,61 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
             .await
             .context("Failed to create subscription")?;
 
-        sleep(Duration::from_secs(2)).await;
-
-        let mut client = db_config.connect().await?;
-        execute_sql(
-            &mut client,
-            "INSERT INTO dbo.TypesTest (Id, IntVal, BigIntVal, SmallIntVal, TinyIntVal, BitVal, FloatVal, RealVal, DecimalVal, VarcharVal, NVarcharVal) \
-             VALUES (1, 42, 9876543210, 256, 7, 1, 3.15, 2.5, 99.95, 'hello', N'world');",
-        )
-        .await?;
-
-        let change = wait_for_change(&mut subscription, 10, |entry| {
+        // Bootstrap ADD for the seeded row.
+        let bootstrap_change = wait_for_change(&mut subscription, 20, |entry| {
             matches_change(entry, "ADD", &[("id", "1")])
         })
         .await
-        .context("Did not observe INSERT change for types test")?;
+        .context("Did not observe bootstrap ADD for types test")?;
 
-        if let ResultDiff::Add { data, .. } = &change {
-            // Integers should be JSON numbers, not strings
-            assert!(
-                data.get("int_val").unwrap().is_number(),
-                "INT should be a number, got: {}",
-                data.get("int_val").unwrap()
-            );
-            assert_eq!(data.get("int_val").unwrap().as_i64().unwrap(), 42);
+        let bootstrap_data = match &bootstrap_change {
+            ResultDiff::Add { data, .. } => data.clone(),
+            _ => anyhow::bail!("Expected bootstrap ADD change"),
+        };
+        assert_types_test_row(&bootstrap_data, "bootstrap")?;
 
-            assert!(
-                data.get("bigint_val").unwrap().is_number(),
-                "BIGINT should be a number, got: {}",
-                data.get("bigint_val").unwrap()
-            );
-            assert_eq!(
-                data.get("bigint_val").unwrap().as_i64().unwrap(),
-                9876543210
-            );
+        sleep(Duration::from_secs(2)).await;
 
-            assert!(
-                data.get("smallint_val").unwrap().is_number(),
-                "SMALLINT should be a number, got: {}",
-                data.get("smallint_val").unwrap()
-            );
-            assert_eq!(data.get("smallint_val").unwrap().as_i64().unwrap(), 256);
+        let mut client = db_config.connect().await?;
+        // Touch the row so CDC emits an update using the shared converter.
+        execute_sql(
+            &mut client,
+            "UPDATE dbo.TypesTest SET VarcharVal = 'hello-cdc' WHERE Id = 1;",
+        )
+        .await?;
 
-            assert!(
-                data.get("tinyint_val").unwrap().is_number(),
-                "TINYINT should be a number, got: {}",
-                data.get("tinyint_val").unwrap()
-            );
-            assert_eq!(data.get("tinyint_val").unwrap().as_i64().unwrap(), 7);
+        let cdc_change = wait_for_change(&mut subscription, 20, |entry| {
+            matches_update(
+                entry,
+                &[("id", "1"), ("varchar_val", "hello")],
+                &[("id", "1"), ("varchar_val", "hello-cdc")],
+            )
+        })
+        .await
+        .context("Did not observe CDC UPDATE for types test")?;
 
-            // Boolean
-            assert!(
-                data.get("bit_val").unwrap().is_boolean(),
-                "BIT should be a boolean, got: {}",
-                data.get("bit_val").unwrap()
+        let cdc_data = match &cdc_change {
+            ResultDiff::Update { after, .. } => after.clone(),
+            _ => anyhow::bail!("Expected CDC UPDATE change"),
+        };
+        // Same type mapping as bootstrap, with the updated varchar.
+        assert_eq!(
+            cdc_data.get("varchar_val").and_then(|v| v.as_str()),
+            Some("hello-cdc")
+        );
+        let mut cdc_for_assert = cdc_data.clone();
+        if let Some(obj) = cdc_for_assert.as_object_mut() {
+            obj.insert(
+                "varchar_val".to_string(),
+                Value::String("hello".to_string()),
             );
-            assert!(data.get("bit_val").unwrap().as_bool().unwrap());
-
-            // Floats should be JSON numbers
-            assert!(
-                data.get("float_val").unwrap().is_number(),
-                "FLOAT should be a number, got: {}",
-                data.get("float_val").unwrap()
-            );
-            let float_val = data.get("float_val").unwrap().as_f64().unwrap();
-            assert!(
-                (float_val - 3.15).abs() < 0.001,
-                "FLOAT value should be ~3.15, got: {float_val}"
-            );
-
-            assert!(
-                data.get("real_val").unwrap().is_number(),
-                "REAL should be a number, got: {}",
-                data.get("real_val").unwrap()
-            );
-            let real_val = data.get("real_val").unwrap().as_f64().unwrap();
-            assert!(
-                (real_val - 2.5).abs() < 0.01,
-                "REAL value should be ~2.5, got: {real_val}"
-            );
-
-            assert!(
-                data.get("decimal_val").unwrap().is_number(),
-                "DECIMAL should be a number, got: {}",
-                data.get("decimal_val").unwrap()
-            );
-            let decimal_val = data.get("decimal_val").unwrap().as_f64().unwrap();
-            assert!(
-                (decimal_val - 99.95).abs() < 0.01,
-                "DECIMAL value should be ~99.95, got: {decimal_val}"
-            );
-
-            // Strings should be JSON strings
-            assert!(
-                data.get("varchar_val").unwrap().is_string(),
-                "VARCHAR should be a string, got: {}",
-                data.get("varchar_val").unwrap()
-            );
-            assert_eq!(
-                data.get("varchar_val").unwrap().as_str().unwrap(),
-                "hello"
-            );
-
-            assert!(
-                data.get("nvarchar_val").unwrap().is_string(),
-                "NVARCHAR should be a string, got: {}",
-                data.get("nvarchar_val").unwrap()
-            );
-            assert_eq!(
-                data.get("nvarchar_val").unwrap().as_str().unwrap(),
-                "world"
-            );
-        } else {
-            anyhow::bail!("Expected ADD change");
         }
+        // Pin bootstrap ↔ CDC parity directly (the invariant this PR targets).
+        assert_eq!(
+            bootstrap_data, cdc_for_assert,
+            "bootstrap and CDC type mappings diverged"
+        );
+        assert_types_test_row(&cdc_for_assert, "cdc")?;
 
         core.stop().await.context("Failed to stop DrasiLib")?;
         mssql.cleanup().await;
@@ -933,9 +913,173 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
 
     match result {
         Ok(inner) => inner?,
-        Err(_) => anyhow::bail!("Integration test timed out after 300 seconds"),
+        Err(_) => anyhow::bail!("Integration test timed out after 900 seconds"),
     }
 
+    Ok(())
+}
+
+/// Assert shared bootstrap/CDC type mapping for the TypesTest fixture row.
+fn assert_types_test_row(data: &Value, path: &str) -> Result<()> {
+    let i64_field = |field: &str| -> Result<i64> {
+        data.get(field).and_then(|v| v.as_i64()).with_context(|| {
+            format!(
+                "{path}.{field}: expected integer, got {:?}",
+                data.get(field)
+            )
+        })
+    };
+    let f64_field = |field: &str| -> Result<f64> {
+        data.get(field)
+            .and_then(|v| v.as_f64())
+            .with_context(|| format!("{path}.{field}: expected number, got {:?}", data.get(field)))
+    };
+    let str_field = |field: &str| -> Result<&str> {
+        data.get(field)
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("{path}.{field}: expected string, got {:?}", data.get(field)))
+    };
+    let bool_field = |field: &str| -> Result<bool> {
+        data.get(field).and_then(|v| v.as_bool()).with_context(|| {
+            format!(
+                "{path}.{field}: expected boolean, got {:?}",
+                data.get(field)
+            )
+        })
+    };
+
+    anyhow::ensure!(i64_field("int_val")? == 42, "{path}.int_val mismatch");
+    anyhow::ensure!(
+        i64_field("bigint_val")? == 9876543210,
+        "{path}.bigint_val mismatch"
+    );
+    anyhow::ensure!(
+        i64_field("smallint_val")? == 256,
+        "{path}.smallint_val mismatch"
+    );
+    anyhow::ensure!(
+        i64_field("tinyint_val")? == 7,
+        "{path}.tinyint_val mismatch"
+    );
+    anyhow::ensure!(bool_field("bit_val")?, "{path}.bit_val should be true");
+
+    let float_val = f64_field("float_val")?;
+    anyhow::ensure!(
+        (float_val - 3.15).abs() < 0.001,
+        "{path}.float_val should be ~3.15, got: {float_val}"
+    );
+    let real_val = f64_field("real_val")?;
+    anyhow::ensure!(
+        (real_val - 2.5).abs() < 0.01,
+        "{path}.real_val should be ~2.5, got: {real_val}"
+    );
+    let decimal_val = f64_field("decimal_val")?;
+    anyhow::ensure!(
+        (decimal_val - 99.95).abs() < 0.01,
+        "{path}.decimal_val should be ~99.95, got: {decimal_val}"
+    );
+    let money_val = f64_field("money_val")?;
+    anyhow::ensure!(
+        (money_val - 12.34).abs() < 0.01,
+        "{path}.money_val should be ~12.34, got: {money_val}"
+    );
+    let smallmoney_val = f64_field("smallmoney_val")?;
+    anyhow::ensure!(
+        (smallmoney_val - 9.99).abs() < 0.01,
+        "{path}.smallmoney_val should be ~9.99, got: {smallmoney_val}"
+    );
+
+    anyhow::ensure!(
+        str_field("varchar_val")? == "hello",
+        "{path}.varchar_val mismatch"
+    );
+    anyhow::ensure!(
+        str_field("nvarchar_val")? == "world",
+        "{path}.nvarchar_val mismatch"
+    );
+    anyhow::ensure!(
+        str_field("guid_val")? == "550e8400-e29b-41d4-a716-446655440000",
+        "{path}.guid_val mismatch"
+    );
+
+    let binary = str_field("binary_val")?;
+    anyhow::ensure!(
+        binary.eq_ignore_ascii_case("0xdeadbeef"),
+        "{path}.binary_val hex mismatch: {binary}"
+    );
+
+    assert_local_datetime_field(data, "datetime_val", path, "10:30:45")?;
+    assert_local_datetime_field(data, "datetime2_val", path, "10:30:45")?;
+    // SMALLDATETIME has minute precision (seconds always 00).
+    assert_local_datetime_field(data, "smalldatetime_val", path, "10:30:00")?;
+
+    anyhow::ensure!(
+        str_field("date_val")? == "2024-06-15",
+        "{path}.date_val mismatch"
+    );
+
+    let time_val = str_field("time_val")?;
+    anyhow::ensure!(
+        time_val.starts_with("10:30:45"),
+        "{path}.time_val should start with 10:30:45, got: {time_val}"
+    );
+
+    assert_zoned_datetime_field(data, "datetimeoffset_val", path)?;
+    Ok(())
+}
+
+/// ApplicationReaction serializes query results via `VariableValue` → JSON.
+/// `VariableValue::LocalDateTime` becomes a plain string using chrono's Display
+/// format (`YYYY-MM-DD HH:MM:SS[.f]` with a space, not `T`). That is distinct
+/// from the old CDC path which emitted ISO strings with `T`
+/// (`%Y-%m-%dT%H:%M:%S%.3f`). The `__drasi_v1_type__` envelope is only used by
+/// direct `ElementValue` serde and is not visible on this path.
+fn assert_local_datetime_field(
+    data: &Value,
+    field: &str,
+    path: &str,
+    expected_time: &str,
+) -> Result<()> {
+    let value = data
+        .get(field)
+        .with_context(|| format!("{path}.{field}: missing field"))?;
+    let raw = value.as_str().with_context(|| {
+        format!(
+            "{path}.{field}: expected LocalDateTime Display string from ApplicationReaction, got: {value}"
+        )
+    })?;
+    // Reject old CDC ISO-with-T format and bare non-temporal values.
+    anyhow::ensure!(
+        !raw.contains('T'),
+        "{path}.{field}: got ISO-with-T string (old CDC String mapping), expected LocalDateTime Display: {raw}"
+    );
+    anyhow::ensure!(
+        raw.starts_with("2024-06-15 ") && raw.contains(expected_time),
+        "{path}.{field}: unexpected LocalDateTime Display value: {raw}"
+    );
+    Ok(())
+}
+
+/// Same ApplicationReaction path as LocalDateTime: ZonedDateTime is stringified
+/// via chrono Display (not the ElementValue `__drasi_v1_type__` envelope).
+fn assert_zoned_datetime_field(data: &Value, field: &str, path: &str) -> Result<()> {
+    let value = data
+        .get(field)
+        .with_context(|| format!("{path}.{field}: missing field"))?;
+    let raw = value.as_str().with_context(|| {
+        format!(
+            "{path}.{field}: expected ZonedDateTime Display string from ApplicationReaction, got: {value}"
+        )
+    })?;
+    anyhow::ensure!(
+        raw.contains("2024-06-15") && raw.contains("10:30:45"),
+        "{path}.{field}: unexpected ZonedDateTime Display value: {raw}"
+    );
+    // Offset should be present (+05:00 / +0500 depending on chrono Display).
+    anyhow::ensure!(
+        raw.contains('+') || raw.contains('Z'),
+        "{path}.{field}: expected timezone offset in ZonedDateTime Display: {raw}"
+    );
     Ok(())
 }
 

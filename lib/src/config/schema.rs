@@ -143,8 +143,8 @@ pub struct SourceSubscriptionConfig {
 /// - **source_id**: ID of the source
 /// - **enable_bootstrap**: Whether to request initial data
 /// - **query_id**: ID of the subscribing query
-/// - **nodes**: Set of node labels the query is interested in from this source
-/// - **relations**: Set of relation labels the query is interested in from this source
+/// - **nodes**: Set of node labels the query is interested in
+/// - **relations**: Set of physical relation labels the query is interested in
 ///
 /// # Example
 ///
@@ -167,7 +167,13 @@ pub struct SourceSubscriptionSettings {
     pub source_id: String,
     pub enable_bootstrap: bool,
     pub query_id: String,
+    /// Node labels the query is interested in. Explicit mappings are exclusive to their
+    /// configured source; unmapped labels are sent to every source, which must filter out
+    /// labels it does not own.
     pub nodes: HashSet<String>,
+    /// Physical relation labels the query is interested in. Explicit mappings are exclusive
+    /// to their configured source; unmapped labels are sent to every source, which must filter
+    /// out labels it does not own.
     pub relations: HashSet<String>,
     /// If set, the subscribing query requests events replayed from this source position.
     /// Contains the opaque position bytes that the source interprets to seek its change stream.

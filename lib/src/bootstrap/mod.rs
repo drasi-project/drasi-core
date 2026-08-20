@@ -39,7 +39,11 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootstrapRequest {
     pub query_id: String,
+    /// Node labels requested by the query. Unmapped labels are sent to every source;
+    /// providers must filter out labels they do not own.
     pub node_labels: Vec<String>,
+    /// Physical relation labels requested by the query. Unmapped labels are sent to
+    /// every source; providers must filter out labels they do not own.
     pub relation_labels: Vec<String>,
     pub request_id: String,
 }

@@ -141,9 +141,11 @@ Contains the query's data requirements:
 pub struct BootstrapRequest {
     /// ID of the query requesting bootstrap
     pub query_id: String,
-    /// Node labels the query is interested in (from this source)
+    /// Node labels requested by the query. Unmapped labels are sent to every source;
+    /// providers must filter out labels they do not own.
     pub node_labels: Vec<String>,
-    /// Relation labels the query is interested in (from this source)
+    /// Physical relation labels requested by the query. Unmapped labels are sent to
+    /// every source; providers must filter out labels they do not own.
     pub relation_labels: Vec<String>,
     /// Unique request identifier (query_id + UUID)
     pub request_id: String,

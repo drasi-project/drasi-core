@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-identity-aws"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "AWS identity provider plugin for Drasi"
@@ -40,8 +40,15 @@ tokio = { version = "1.0", features = ["rt-multi-thread", "sync"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 aws-config = "1.8"
-aws-sdk-rds = "1.133"
-aws-sdk-sts = "1.104"
+aws-sdk-rds = { version = "1.133", default-features = false, features = [
+    "default-https-client",
+    "rt-tokio",
+] }
+aws-sdk-sts = { version = "1.104", default-features = false, features = [
+    "default-https-client",
+    "rt-tokio",
+    "sigv4a",
+] }
 
 [features]
 dynamic-plugin = []

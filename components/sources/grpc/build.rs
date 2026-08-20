@@ -13,10 +13,10 @@
 // limitations under the License.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .build_server(true)
         .build_client(false)
-        .compile(
+        .compile_protos(
             &["proto/drasi/v1/source.proto", "proto/drasi/v1/common.proto"],
             &["proto"],
         )?;
