@@ -31,6 +31,13 @@ fn task(number: u64, node_id: &str) -> Value {
     task_in_scope(number, node_id, "queue-owner", "queue-repo", "worker-a")
 }
 
+fn ordered_task(number: u64, node_id: &str, priority: i64, created_at: &str) -> Value {
+    let mut task = task(number, node_id);
+    task["queuePriority"] = json!(priority);
+    task["assignmentCreatedAt"] = json!(created_at);
+    task
+}
+
 fn task_in_scope(
     number: u64,
     node_id: &str,
@@ -45,6 +52,8 @@ fn task_in_scope(
         "repositoryName": repository_name,
         "assignmentCommentNodeId": format!("IC-{node_id}"),
         "workerId": worker_id,
+        "queuePriority": 0,
+        "assignmentCreatedAt": "2026-08-19T22:00:00Z",
         "unusedMetadata": {"ignored": true}
     })
 }
@@ -114,6 +123,11 @@ fn canonical_comment_body_is_exact() {
         repository_name: "widgets".into(),
         assignment_comment_node_id: "IC_assignment".into(),
         worker_id: "validator-1".into(),
+        queue_priority: 0,
+        assignment_created_at: Utc
+            .with_ymd_and_hms(2026, 8, 19, 21, 0, 0)
+            .single()
+            .unwrap(),
     };
     let acquired = Utc
         .with_ymd_and_hms(2026, 8, 19, 22, 0, 0)
@@ -139,11 +153,11 @@ fn canonical_comment_body_is_exact() {
 }
 
 #[tokio::test]
-async fn pairs_in_supplied_order_and_sends_exact_request_shape() {
+async fn pairs_in_deterministic_order_and_sends_exact_request_shape() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(201))
-        .expect(2)
+        .expect(4)
         .mount(&server)
         .await;
     let mut engine = engine(&server);
@@ -151,22 +165,25 @@ async fn pairs_in_supplied_order_and_sends_exact_request_shape() {
     engine
         .process_query_result(&result(row(
             &[],
-            &["worker-a/2", "worker-a/1", "worker-a/3"],
-            vec![task(22, "I_second"), task(11, "I_first")],
+            &["worker-a/10", "worker-a/3", "worker-a/1", "worker-a/2"],
+            vec![
+                ordered_task(40, "I_priority_late", 1, "2026-08-19T21:00:00Z"),
+                ordered_task(30, "I_time_late", 0, "2026-08-19T23:00:00Z"),
+                ordered_task(20, "I_node_b", 0, "2026-08-19T22:00:00Z"),
+                ordered_task(10, "I_node_a", 0, "2026-08-19T22:00:00Z"),
+            ],
         )))
         .await
         .unwrap();
 
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests[0].url.path(),
-        "/repos/queue-owner/queue-repo/issues/22/comments"
-    );
-    assert_eq!(
-        requests[1].url.path(),
-        "/repos/queue-owner/queue-repo/issues/11/comments"
-    );
+    assert_eq!(requests.len(), 4);
+    for (request, task_number) in requests.iter().zip([10, 20, 30, 40]) {
+        assert_eq!(
+            request.url.path(),
+            format!("/repos/queue-owner/queue-repo/issues/{task_number}/comments")
+        );
+    }
     assert_eq!(
         requests[0]
             .headers
@@ -182,8 +199,8 @@ async fn pairs_in_supplied_order_and_sends_exact_request_shape() {
     );
     let first: Value = serde_json::from_slice(&requests[0].body).unwrap();
     let first_body = first["body"].as_str().unwrap();
-    assert!(first_body.contains("\"slotId\": \"worker-a/2\""));
-    assert!(first_body.contains("\"assignmentCommentNodeId\": \"IC-I_second\""));
+    assert!(first_body.contains("\"slotId\": \"worker-a/1\""));
+    assert!(first_body.contains("\"assignmentCommentNodeId\": \"IC-I_node_a\""));
     assert!(first_body.starts_with("WorkGraphTaskLease/v1\n\n```json\n"));
     assert!(first_body.ends_with("\n```\n"));
 }
@@ -276,6 +293,30 @@ async fn malformed_rows_and_http_errors_surface_without_pending_entries() {
         .unwrap_err();
     assert!(error.to_string().contains("malformed capacity row"));
     assert!(engine.pending().is_empty());
+
+    let error = engine
+        .process_query_result(&result(row(
+            &[],
+            &["worker-a/not-a-number"],
+            vec![task(42, "I_task")],
+        )))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("numeric slot suffix"));
+
+    let error = engine
+        .process_query_result(&result(row(&[], &["worker-b/1"], vec![task(42, "I_task")])))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("worker prefix"));
+
+    let mut invalid_timestamp = task(42, "I_task");
+    invalid_timestamp["assignmentCreatedAt"] = json!("not-a-timestamp");
+    let error = engine
+        .process_query_result(&result(row(&[], &["worker-a/1"], vec![invalid_timestamp])))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("malformed capacity row"));
 
     let error = engine
         .process_query_result(&result(row(

@@ -37,6 +37,8 @@ pub(crate) struct DispatchableTask {
     pub repository_name: String,
     pub assignment_comment_node_id: String,
     pub worker_id: String,
+    pub queue_priority: i64,
+    pub assignment_created_at: DateTime<Utc>,
 }
 
 #[derive(Clone, PartialEq, Eq)]

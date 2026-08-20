@@ -117,7 +117,7 @@ impl DispatcherEngine {
             pending.scope != scope || !active.contains(lease_id.as_str())
         });
 
-        let slots: Vec<String> = row
+        let mut slots: Vec<(u64, String)> = row
             .free_slot_ids
             .iter()
             .filter(|slot_id| {
@@ -126,9 +126,31 @@ impl DispatcherEngine {
                     .values()
                     .any(|pending| pending.slot_id == slot_id.as_str())
             })
-            .cloned()
-            .collect();
-        let tasks: Vec<DispatchableTask> = row
+            .map(|slot_id| {
+                let (worker_id, suffix) = slot_id
+                    .rsplit_once('/')
+                    .context("free slot ID must end with a numeric slot suffix")?;
+                ensure!(
+                    !worker_id.is_empty(),
+                    "free slot ID must include a worker ID"
+                );
+                ensure!(
+                    worker_id == row.worker_id,
+                    "free slot ID worker prefix does not match capacity row workerId"
+                );
+                let slot_number = suffix
+                    .parse::<u64>()
+                    .context("free slot ID must end with a numeric slot suffix")?;
+                ensure!(slot_number > 0, "free slot ID suffix must be positive");
+                Ok((slot_number, slot_id.clone()))
+            })
+            .collect::<Result<_>>()?;
+        slots.sort_by(|(left_number, left_id), (right_number, right_id)| {
+            left_number
+                .cmp(right_number)
+                .then_with(|| left_id.cmp(right_id))
+        });
+        let mut tasks: Vec<DispatchableTask> = row
             .dispatchable_tasks
             .iter()
             .filter(|task| {
@@ -139,8 +161,14 @@ impl DispatcherEngine {
             })
             .cloned()
             .collect();
+        tasks.sort_by(|left, right| {
+            left.queue_priority
+                .cmp(&right.queue_priority)
+                .then_with(|| left.assignment_created_at.cmp(&right.assignment_created_at))
+                .then_with(|| left.task_node_id.cmp(&right.task_node_id))
+        });
 
-        for (slot_id, task) in slots.iter().zip(tasks.iter()) {
+        for ((_, slot_id), task) in slots.iter().zip(tasks.iter()) {
             ensure!(
                 task.worker_id == row.worker_id,
                 "dispatchable task workerId does not match capacity row workerId"

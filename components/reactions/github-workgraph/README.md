@@ -1,7 +1,7 @@
 # GitHub WorkGraph Dispatcher Reaction
 
 The GitHub WorkGraph reaction dispatches tasks from one capacity query to free
-worker slots. It preserves the query's ordering and writes the canonical
+worker slots. It orders capacity deterministically and writes the canonical
 `WorkGraphTaskLease/v1` mapping as a GitHub issue comment.
 
 ## Configuration
@@ -47,17 +47,19 @@ The query may return additional fields, but every current row must contain:
       "repositoryOwner": "acme",
       "repositoryName": "tasks",
       "assignmentCommentNodeId": "IC_kwDOAssignment1",
-      "workerId": "validator-1"
+      "workerId": "validator-1",
+      "queuePriority": 0,
+      "assignmentCreatedAt": "2026-08-19T22:00:00Z"
     }
   ]
 }
 ```
 
 The reaction filters slots and tasks already held by its short-lived in-process
-pending map, then pairs the remaining `freeSlotIds` and `dispatchableTasks`
-positionally without sorting. A pending entry is removed only when a later row
-for the same repository and worker includes its exact lease ID in
-`activeLeaseIds`.
+pending map, orders slots by numeric slot suffix and full slot ID, orders tasks
+by `queuePriority`, `assignmentCreatedAt`, and `taskNodeId`, then pairs them
+positionally. A pending entry is removed only when a later row for the same
+repository and worker includes its exact lease ID in `activeLeaseIds`.
 
 After a successful issue-comment request, the pending entry prevents a repeated
 capacity row from assigning either the same slot or the same task again while
