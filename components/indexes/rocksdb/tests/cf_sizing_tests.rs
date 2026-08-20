@@ -56,8 +56,9 @@ const SMALL_BUFFER_CFS: &[&str] = &[
     "findex",
     "stream_state",
 ];
-const LARGE_WRITE_BUFFER_SIZE: u64 = 16 * 1024 * 1024;
-const SMALL_WRITE_BUFFER_SIZE: u64 = 8 * 1024 * 1024;
+const MIB: usize = 1024 * 1024;
+const DEFAULT_LARGE_WRITE_BUFFER_SIZE: u64 = 16 * MIB as u64;
+const DEFAULT_SMALL_WRITE_BUFFER_SIZE: u64 = 8 * MIB as u64;
 
 /// 1 MiB flushed-memtable history bound (WRITE_BUFFER_HISTORY_BYTES, kept
 /// crate-private; update both together if the bound ever changes).
@@ -94,13 +95,11 @@ fn effective_sizes(db_dir: &std::path::Path) -> HashMap<String, (u64, u64, u64)>
     sizes
 }
 
-#[test]
-fn effective_sizes_match_the_tier_policy_on_every_cf() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
-    let db = open_unified_db(dir.path().to_str().unwrap(), "sizing-test", &options).expect("open");
-
-    let sizes = effective_sizes(&dir.path().join("sizing-test"));
+fn assert_tier_sizes(
+    sizes: &HashMap<String, (u64, u64, u64)>,
+    large_write_buffer_size: u64,
+    small_write_buffer_size: u64,
+) {
     assert_eq!(
         sizes.len(),
         LARGE_BUFFER_CFS.len() + SMALL_BUFFER_CFS.len(),
@@ -112,8 +111,8 @@ fn effective_sizes_match_the_tier_policy_on_every_cf() {
         assert_eq!(
             sizes[*cf],
             (
-                LARGE_WRITE_BUFFER_SIZE,
-                LARGE_WRITE_BUFFER_SIZE / 64,
+                large_write_buffer_size,
+                large_write_buffer_size / 64,
                 HISTORY_BYTES
             ),
             "CF '{cf}'"
@@ -123,51 +122,68 @@ fn effective_sizes_match_the_tier_policy_on_every_cf() {
         assert_eq!(
             sizes[*cf],
             (
-                SMALL_WRITE_BUFFER_SIZE,
-                SMALL_WRITE_BUFFER_SIZE / 64,
+                small_write_buffer_size,
+                small_write_buffer_size / 64,
                 HISTORY_BYTES
             ),
             "CF '{cf}'"
         );
     }
+}
+
+#[test]
+fn effective_sizes_match_the_tier_policy_on_every_cf() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
+    let db = open_unified_db(dir.path().to_str().unwrap(), "sizing-test", &options).expect("open");
+
+    let sizes = effective_sizes(&dir.path().join("sizing-test"));
+    assert_tier_sizes(
+        &sizes,
+        DEFAULT_LARGE_WRITE_BUFFER_SIZE,
+        DEFAULT_SMALL_WRITE_BUFFER_SIZE,
+    );
 
     drop(db);
 }
 
 #[tokio::test]
-async fn provider_applies_the_internal_tier_policy() {
+async fn provider_derives_tier_sizes_from_its_memory_budget() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = RocksDbIndexProvider::new(dir.path(), true, false);
+    let provider = RocksDbIndexProvider::new(dir.path(), true, false)
+        .with_memory_budget_bytes(512 * MIB)
+        .expect("valid memory budget");
     let created = provider
         .create_indexes("provider-test")
         .await
         .expect("create indexes");
 
     let sizes = effective_sizes(&dir.path().join("provider-test"));
-    assert_eq!(
-        sizes["elements"],
-        (
-            LARGE_WRITE_BUFFER_SIZE,
-            LARGE_WRITE_BUFFER_SIZE / 64,
-            HISTORY_BYTES
-        )
-    );
-    assert_eq!(
-        sizes["stream_state"],
-        (
-            SMALL_WRITE_BUFFER_SIZE,
-            SMALL_WRITE_BUFFER_SIZE / 64,
-            HISTORY_BYTES
-        )
-    );
+    assert_tier_sizes(&sizes, 32 * MIB as u64, 16 * MIB as u64);
 
     drop(created);
+}
+
+#[test]
+fn effective_sizes_cap_at_the_maximum_tier_sizes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let budget =
+        RocksDbMemoryBudget::new(1024 * MIB, 1024 * MIB, false).expect("valid memory budget");
+    let options = RocksIndexOptions::new(true, false, budget);
+    let db = open_unified_db(dir.path().to_str().unwrap(), "cap-test", &options).expect("open");
+
+    let sizes = effective_sizes(&dir.path().join("cap-test"));
+    assert_tier_sizes(&sizes, 64 * MIB as u64, 32 * MIB as u64);
+
+    drop(db);
 }
 
 #[tokio::test]
 async fn clear_recreates_cfs_with_the_sizing_policy() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
+    let budget =
+        RocksDbMemoryBudget::new(256 * MIB, 256 * MIB, false).expect("valid memory budget");
+    let options = RocksIndexOptions::new(true, false, budget);
     let db = open_unified_db(dir.path().to_str().unwrap(), "clear-test", &options).expect("open");
 
     let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
@@ -190,16 +206,8 @@ async fn clear_recreates_cfs_with_the_sizing_policy() {
 
     // create_cf persists a fresh OPTIONS file; the recreated CFs must retain
     // the internal tier sizing and history bound rather than RocksDB defaults.
-    let large = (
-        LARGE_WRITE_BUFFER_SIZE,
-        LARGE_WRITE_BUFFER_SIZE / 64,
-        HISTORY_BYTES,
-    );
-    let small = (
-        SMALL_WRITE_BUFFER_SIZE,
-        SMALL_WRITE_BUFFER_SIZE / 64,
-        HISTORY_BYTES,
-    );
+    let large = (32 * MIB as u64, 32 * MIB as u64 / 64, HISTORY_BYTES);
+    let small = (16 * MIB as u64, 16 * MIB as u64 / 64, HISTORY_BYTES);
     let sizes = effective_sizes(&dir.path().join("clear-test"));
     for cf in ["elements", "inbound", "outbound", "values", "archive"] {
         assert_eq!(sizes[cf], large, "CF '{cf}'");
