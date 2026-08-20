@@ -15,9 +15,13 @@
 
 pub mod config;
 pub mod descriptor;
+pub mod lease_ledger;
 pub mod mapping;
 pub mod source;
 pub mod webhook;
+pub mod worker_client;
+pub mod worker_sync;
+pub mod workers;
 pub mod workgraph;
 
 pub use config::GitHubWorkGraphSourceConfig;

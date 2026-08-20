@@ -15,6 +15,8 @@
 use crate::config::{GitHubWorkGraphSourceConfig, RepositoryFilter};
 use crate::mapping::{NODE_LABELS, RELATION_LABELS};
 use crate::webhook::{serve, IngressParams};
+use crate::worker_client::WorkerFileClient;
+use crate::worker_sync::WorkerSync;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -47,6 +49,7 @@ pub struct GitHubWorkGraphSource {
     config: GitHubWorkGraphSourceConfig,
     repository_filter: RepositoryFilter,
     wal: Arc<RwLock<Option<Arc<dyn WalProvider>>>>,
+    worker_sync: Arc<RwLock<Option<Arc<WorkerSync>>>>,
     notify: Arc<Notify>,
     replay_gate: Arc<Mutex<()>>,
 }
@@ -65,6 +68,14 @@ impl Source for GitHubWorkGraphSource {
         if let Some(webhook) = properties.get_mut("webhook").and_then(Value::as_object_mut) {
             if webhook.get("secret").is_some_and(Value::is_string) {
                 webhook.insert("secret".to_string(), serde_json::json!("[REDACTED]"));
+            }
+        }
+        if let Some(worker) = properties
+            .get_mut("workerConfig")
+            .and_then(Value::as_object_mut)
+        {
+            if worker.get("token").is_some_and(Value::is_string) {
+                worker.insert("token".to_string(), serde_json::json!("[REDACTED]"));
             }
         }
         properties
@@ -125,6 +136,35 @@ impl Source for GitHubWorkGraphSource {
         self.base.set_next_sequence(head);
         *self.wal.write().await = Some(wal.clone());
 
+        // The worker file is converged once at start-up, before any delivery is
+        // accepted, so a Source that missed `push` deliveries while stopped
+        // still re-states the configured capacity, and so the retirement ledger
+        // reflects what is actually in the graph.
+        let worker_sync = match &self.config.worker_config {
+            Some(worker_config) => {
+                let sync = Arc::new(
+                    WorkerSync::new(
+                        self.base.id.clone(),
+                        worker_config,
+                        state_store.clone(),
+                        wal.clone(),
+                    )
+                    .context("Failed to build the worker file client")?,
+                );
+                sync.converge().await.map_err(|error| {
+                    anyhow!(
+                        "Failed to load the configured worker file '{}' at '{}' ref '{}': {error}",
+                        worker_config.path,
+                        worker_config.repository,
+                        worker_config.r#ref
+                    )
+                })?;
+                *self.worker_sync.write().await = Some(sync.clone());
+                Some(sync)
+            }
+            None => None,
+        };
+
         let (base_tx, base_rx) = tokio::sync::oneshot::channel();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         self.base.set_shutdown_tx(base_tx).await;
@@ -142,11 +182,23 @@ impl Source for GitHubWorkGraphSource {
             organization: self.config.organization.clone(),
             repository_filter: self.repository_filter.clone(),
             task_issue_type: self.config.task_issue_type.clone(),
+            lease_trust: self.config.lease_trust.clone(),
+            // The same credential and endpoint that read the worker file also
+            // reconcile a task's current lifecycle comments; config validation
+            // requires `workerConfig` whenever `leaseTrust` is set.
+            worker_client: match &self.config.worker_config {
+                Some(worker_config) => Some(Arc::new(
+                    WorkerFileClient::new(&worker_config.token, &worker_config.api_base_url)
+                        .context("Failed to build the GitHub lifecycle client")?,
+                )),
+                None => None,
+            },
             path: self.config.webhook.path.clone(),
             secret: self.config.webhook.secret.clone(),
             body_limit_bytes: self.config.webhook.body_limit_bytes,
             wal: wal.clone(),
             state_store: state_store.clone(),
+            worker_sync,
             notify: self.notify.clone(),
             shutdown: shutdown_rx.clone(),
         };
@@ -408,6 +460,7 @@ impl GitHubWorkGraphSourceBuilder {
             config,
             repository_filter,
             wal: Arc::new(RwLock::new(None)),
+            worker_sync: Arc::new(RwLock::new(None)),
             notify: Arc::new(Notify::new()),
             replay_gate: Arc::new(Mutex::new(())),
         })

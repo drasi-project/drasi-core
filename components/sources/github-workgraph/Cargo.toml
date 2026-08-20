@@ -17,7 +17,7 @@ name = "drasi-source-github-workgraph"
 version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "GitHub WorkGraph source plugin for Drasi (payload-only organization webhook)"
+description = "GitHub WorkGraph source plugin for Drasi (organization webhook and worker queue configuration)"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi", "plugin", "github", "source"]
@@ -42,6 +42,7 @@ chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 hmac = "0.12"
 log = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
@@ -50,11 +51,12 @@ subtle = "2"
 tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+drasi-functions-cypher.workspace = true
 drasi-query-cypher.workspace = true
 drasi-state-store-redb = { path = "../../state_stores/redb" }
 drasi-wal-redb = { path = "../../wals/redb" }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tempfile = "3"
+wiremock = "0.6"
 
 [features]
 dynamic-plugin = []
