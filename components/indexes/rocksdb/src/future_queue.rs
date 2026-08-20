@@ -271,7 +271,10 @@ impl FutureQueue for RocksDbFutureQueue {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(QUEUE_CF, &get_fqueue_cf_options(block_cache)) {
+            if let Err(err) = db.create_cf(
+                QUEUE_CF,
+                &crate::sizing::sized(QUEUE_CF, get_fqueue_cf_options(block_cache), &options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
@@ -279,7 +282,10 @@ impl FutureQueue for RocksDbFutureQueue {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(INDEX_CF, &get_findex_cf_options(block_cache)) {
+            if let Err(err) = db.create_cf(
+                INDEX_CF,
+                &crate::sizing::sized(INDEX_CF, get_findex_cf_options(block_cache), &options),
+            ) {
                 return Err(IndexError::other(err));
             }
             Ok(())
@@ -366,10 +372,11 @@ pub(crate) fn get_findex_cf_options(block_cache: &Cache) -> Options {
 
 /// Collect all column family descriptors needed by the future queue.
 pub(crate) fn future_queue_cf_descriptors(
-    block_cache: &Cache,
+    options: &crate::RocksIndexOptions,
 ) -> Vec<rocksdb::ColumnFamilyDescriptor> {
+    let block_cache = options.memory_budget().block_cache();
     vec![
-        rocksdb::ColumnFamilyDescriptor::new(QUEUE_CF, get_fqueue_cf_options(block_cache)),
-        rocksdb::ColumnFamilyDescriptor::new(INDEX_CF, get_findex_cf_options(block_cache)),
+        crate::sizing::descriptor(QUEUE_CF, get_fqueue_cf_options(block_cache), options),
+        crate::sizing::descriptor(INDEX_CF, get_findex_cf_options(block_cache), options),
     ]
 }

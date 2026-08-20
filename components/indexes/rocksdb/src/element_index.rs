@@ -302,7 +302,8 @@ impl ElementIndex for RocksDbElementIndex {
         let context = self.context.clone();
 
         let task = task::spawn_blocking(move || {
-            let block_cache = context.options.memory_budget().block_cache();
+            let options = &context.options;
+            let block_cache = options.memory_budget().block_cache();
             if let Err(err) = context.db.drop_cf(ELEMENTS_CF) {
                 return Err(IndexError::other(err));
             }
@@ -319,38 +320,42 @@ impl ElementIndex for RocksDbElementIndex {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context
-                .db
-                .create_cf(ELEMENTS_CF, &get_elements_cf_options(block_cache))
-            {
+            if let Err(err) = context.db.create_cf(
+                ELEMENTS_CF,
+                &crate::sizing::sized(ELEMENTS_CF, get_elements_cf_options(block_cache), options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context
-                .db
-                .create_cf(SLOT_CF, &get_elements_cf_options(block_cache))
-            {
+            if let Err(err) = context.db.create_cf(
+                SLOT_CF,
+                &crate::sizing::sized(SLOT_CF, get_elements_cf_options(block_cache), options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context
-                .db
-                .create_cf(INBOUND_CF, &get_inout_index_cf_options(block_cache))
-            {
+            if let Err(err) = context.db.create_cf(
+                INBOUND_CF,
+                &crate::sizing::sized(INBOUND_CF, get_inout_index_cf_options(block_cache), options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context
-                .db
-                .create_cf(OUTBOUND_CF, &get_inout_index_cf_options(block_cache))
-            {
+            if let Err(err) = context.db.create_cf(
+                OUTBOUND_CF,
+                &crate::sizing::sized(
+                    OUTBOUND_CF,
+                    get_inout_index_cf_options(block_cache),
+                    options,
+                ),
+            ) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = context
-                .db
-                .create_cf(PARTIAL_CF, &get_partial_cf_options(block_cache))
-            {
+            if let Err(err) = context.db.create_cf(
+                PARTIAL_CF,
+                &crate::sizing::sized(PARTIAL_CF, get_partial_cf_options(block_cache), options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
@@ -393,17 +398,22 @@ pub(crate) fn element_cf_descriptors(
 ) -> Vec<rocksdb::ColumnFamilyDescriptor> {
     let block_cache = options.memory_budget().block_cache();
     let mut cfs = vec![
-        rocksdb::ColumnFamilyDescriptor::new(ELEMENTS_CF, get_elements_cf_options(block_cache)),
-        rocksdb::ColumnFamilyDescriptor::new(SLOT_CF, get_elements_cf_options(block_cache)),
-        rocksdb::ColumnFamilyDescriptor::new(INBOUND_CF, get_inout_index_cf_options(block_cache)),
-        rocksdb::ColumnFamilyDescriptor::new(OUTBOUND_CF, get_inout_index_cf_options(block_cache)),
-        rocksdb::ColumnFamilyDescriptor::new(PARTIAL_CF, get_partial_cf_options(block_cache)),
+        crate::sizing::descriptor(ELEMENTS_CF, get_elements_cf_options(block_cache), options),
+        crate::sizing::descriptor(SLOT_CF, get_elements_cf_options(block_cache), options),
+        crate::sizing::descriptor(INBOUND_CF, get_inout_index_cf_options(block_cache), options),
+        crate::sizing::descriptor(
+            OUTBOUND_CF,
+            get_inout_index_cf_options(block_cache),
+            options,
+        ),
+        crate::sizing::descriptor(PARTIAL_CF, get_partial_cf_options(block_cache), options),
     ];
 
     if options.archive_enabled() {
-        cfs.push(rocksdb::ColumnFamilyDescriptor::new(
+        cfs.push(crate::sizing::descriptor(
             archive_index::ARCHIVE_CF,
             archive_index::get_archive_cf_options(block_cache),
+            options,
         ));
     }
 

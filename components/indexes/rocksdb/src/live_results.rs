@@ -32,9 +32,12 @@ use tokio::task;
 pub(crate) const LIVE_RESULTS_CF: &str = "live_results";
 
 /// Returns the column family descriptor for the live_results CF.
-pub(crate) fn live_results_cf_descriptor(block_cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+pub(crate) fn live_results_cf_descriptor(
+    options: &crate::RocksIndexOptions,
+) -> ColumnFamilyDescriptor {
+    let block_cache = options.memory_budget().block_cache();
     let opts = crate::cf_options::base_cf_options(block_cache);
-    ColumnFamilyDescriptor::new(LIVE_RESULTS_CF, opts)
+    crate::sizing::descriptor(LIVE_RESULTS_CF, opts, options)
 }
 
 /// Build the live results key: `{query_id}\x00{row_signature_be_bytes}`.

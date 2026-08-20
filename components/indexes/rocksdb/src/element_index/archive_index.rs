@@ -213,7 +213,8 @@ impl ElementArchiveIndex for RocksDbElementIndex {
         let context = self.context.clone();
 
         let task = task::spawn_blocking(move || {
-            let block_cache = context.options.memory_budget().block_cache();
+            let options = &context.options;
+            let block_cache = options.memory_budget().block_cache();
             match context.db.drop_cf(ARCHIVE_CF) {
                 Ok(()) => {}
                 Err(err) => {
@@ -225,10 +226,10 @@ impl ElementArchiveIndex for RocksDbElementIndex {
                     return Err(IndexError::other(err));
                 }
             }
-            if let Err(err) = context
-                .db
-                .create_cf(ARCHIVE_CF, &get_archive_cf_options(block_cache))
-            {
+            if let Err(err) = context.db.create_cf(
+                ARCHIVE_CF,
+                &crate::sizing::sized(ARCHIVE_CF, get_archive_cf_options(block_cache), options),
+            ) {
                 return Err(IndexError::other(err));
             }
             Ok(())
