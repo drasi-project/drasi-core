@@ -98,19 +98,20 @@ pub fn open_unified_db(
     };
 
     let mut cfs = element_index::element_cf_descriptors(options);
-    cfs.extend(result_index::result_cf_descriptors(block_cache));
-    cfs.extend(future_queue::future_queue_cf_descriptors(block_cache));
-    cfs.push(checkpoint::stream_state_cf_descriptor(block_cache));
-    cfs.push(outbox::outbox_cf_descriptor(block_cache));
-    cfs.push(live_results::live_results_cf_descriptor(block_cache));
+    cfs.extend(result_index::result_cf_descriptors(options));
+    cfs.extend(future_queue::future_queue_cf_descriptors(options));
+    cfs.push(checkpoint::stream_state_cf_descriptor(options));
+    cfs.push(outbox::outbox_cf_descriptor(options));
+    cfs.push(live_results::live_results_cf_descriptor(options));
 
     // The default CF is not covered by db_opts: rust-rocksdb opens it with
-    // fresh Options unless a descriptor is supplied, and an unset retention
-    // bound is sanitized to 128 MiB (caught by retention_bound_tests).
+    // fresh Options unless a descriptor is supplied, so it goes through the
+    // same shared-cache, sizing, and history policies as every other CF.
     let default_cf_opts = crate::cf_options::base_cf_options(block_cache);
-    cfs.push(rocksdb::ColumnFamilyDescriptor::new(
+    cfs.push(crate::sizing::descriptor(
         rocksdb::DEFAULT_COLUMN_FAMILY_NAME,
         default_cf_opts,
+        options,
     ));
 
     let txn_db_opts = rocksdb::TransactionDBOptions::default();

@@ -19,6 +19,8 @@ pub struct RocksIndexOptions {
     archive_enabled: bool,
     direct_io: bool,
     memory_budget: RocksDbMemoryBudget,
+    pub(crate) large_write_buffer_size: usize,
+    pub(crate) small_write_buffer_size: usize,
 }
 
 impl RocksIndexOptions {
@@ -28,6 +30,8 @@ impl RocksIndexOptions {
             archive_enabled,
             direct_io,
             memory_budget,
+            large_write_buffer_size: crate::sizing::DEFAULT_LARGE_WRITE_BUFFER_SIZE,
+            small_write_buffer_size: crate::sizing::DEFAULT_SMALL_WRITE_BUFFER_SIZE,
         }
     }
 

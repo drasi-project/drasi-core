@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.11] - 2026-08-11
 
+### Bug Fixes
+
+- Snapshot uuid/date/time/json/jsonb/bytea/array columns with real values instead of Null ([#670](https://github.com/drasi-project/drasi-core/issues/670))
+- Use shared `PostgresValue::to_element_value` so bootstrap matches CDC ElementValues ([#672](https://github.com/drasi-project/drasi-core/issues/672))
+- Read accurate type OIDs from `pg_attribute.atttypid` (arrays, time, bytea, char, …)
+- Resolve domain columns via `pg_type.typbasetype` so domain-over-integer bootstraps as Integer
+- Read array columns with `Vec<Option<T>>` so NULL elements are preserved
+
+### Features
+
+- Depend on `drasi-postgres-common` for canonical type mapping shared with the Postgres source
+
 ### Miscellaneous Tasks
 
 - Updated the following local packages: drasi-core, drasi-lib, drasi-plugin-sdk

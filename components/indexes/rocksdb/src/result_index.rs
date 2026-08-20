@@ -154,7 +154,10 @@ impl AccumulatorIndex for RocksDbResultIndex {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(VALUES_CF, &get_value_cf_options(block_cache)) {
+            if let Err(err) = db.create_cf(
+                VALUES_CF,
+                &crate::sizing::sized(VALUES_CF, get_value_cf_options(block_cache), &options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
@@ -162,7 +165,10 @@ impl AccumulatorIndex for RocksDbResultIndex {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(SETS_CF, &get_lss_cf_options(block_cache)) {
+            if let Err(err) = db.create_cf(
+                SETS_CF,
+                &crate::sizing::sized(SETS_CF, get_lss_cf_options(block_cache), &options),
+            ) {
                 return Err(IndexError::other(err));
             }
             Ok(())
@@ -390,11 +396,14 @@ pub(crate) fn get_metadata_cf_options(block_cache: &Cache) -> Options {
 }
 
 /// Collect all column family descriptors needed by the result index.
-pub(crate) fn result_cf_descriptors(block_cache: &Cache) -> Vec<rocksdb::ColumnFamilyDescriptor> {
+pub(crate) fn result_cf_descriptors(
+    options: &crate::RocksIndexOptions,
+) -> Vec<rocksdb::ColumnFamilyDescriptor> {
+    let block_cache = options.memory_budget().block_cache();
     vec![
-        rocksdb::ColumnFamilyDescriptor::new(VALUES_CF, get_value_cf_options(block_cache)),
-        rocksdb::ColumnFamilyDescriptor::new(SETS_CF, get_lss_cf_options(block_cache)),
-        rocksdb::ColumnFamilyDescriptor::new(METADATA_CF, get_metadata_cf_options(block_cache)),
+        crate::sizing::descriptor(VALUES_CF, get_value_cf_options(block_cache), options),
+        crate::sizing::descriptor(SETS_CF, get_lss_cf_options(block_cache), options),
+        crate::sizing::descriptor(METADATA_CF, get_metadata_cf_options(block_cache), options),
     ]
 }
 

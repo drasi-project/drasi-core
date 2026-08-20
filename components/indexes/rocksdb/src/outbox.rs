@@ -32,9 +32,10 @@ use tokio::task;
 pub(crate) const OUTBOX_CF: &str = "outbox";
 
 /// Returns the column family descriptor for the outbox CF.
-pub(crate) fn outbox_cf_descriptor(block_cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+pub(crate) fn outbox_cf_descriptor(options: &crate::RocksIndexOptions) -> ColumnFamilyDescriptor {
+    let block_cache = options.memory_budget().block_cache();
     let opts = crate::cf_options::base_cf_options(block_cache);
-    ColumnFamilyDescriptor::new(OUTBOX_CF, opts)
+    crate::sizing::descriptor(OUTBOX_CF, opts, options)
 }
 
 /// Build the outbox key: `{query_id}\x00{sequence_be_bytes}`.

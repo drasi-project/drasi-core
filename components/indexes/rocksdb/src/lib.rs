@@ -74,6 +74,7 @@ mod plugin;
 mod point_lookup;
 pub mod result_index;
 mod session_state;
+mod sizing;
 mod storage_models;
 
 // Re-export the plugin provider and unified DB opener for easy access
