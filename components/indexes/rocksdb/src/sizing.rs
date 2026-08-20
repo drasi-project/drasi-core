@@ -59,11 +59,11 @@ use crate::RocksIndexOptions;
 
 /// Default `write_buffer_size` for column families with high byte volume per
 /// source change.
-pub const DEFAULT_LARGE_WRITE_BUFFER_SIZE: usize = 16 * 1024 * 1024;
+pub(crate) const DEFAULT_LARGE_WRITE_BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
 /// Default `write_buffer_size` for the remaining column families: quiet ones,
 /// and ones written often but with tiny values.
-pub const DEFAULT_SMALL_WRITE_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+pub(crate) const DEFAULT_SMALL_WRITE_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 
 /// Column families that get the large write buffer. Everything not listed here
 /// (including the mandatory `default` CF) gets the small one. Names must

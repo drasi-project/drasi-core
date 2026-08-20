@@ -163,17 +163,6 @@ impl RocksDbIndexProvider {
         }
     }
 
-    /// Override the large and small write buffer sizes applied to the column
-    /// families (defaults: [`crate::DEFAULT_LARGE_WRITE_BUFFER_SIZE`],
-    /// [`crate::DEFAULT_SMALL_WRITE_BUFFER_SIZE`]). Arena block sizes are
-    /// derived from the buffer size (`write_buffer_size / 64`, clamped to
-    /// `[64 KiB, 1 MiB]`).
-    pub fn with_write_buffer_sizes(mut self, large: usize, small: usize) -> Self {
-        self.options.large_write_buffer_size = large;
-        self.options.small_write_buffer_size = small;
-        self
-    }
-
     /// Get the configured path.
     pub fn path(&self) -> &PathBuf {
         &self.path

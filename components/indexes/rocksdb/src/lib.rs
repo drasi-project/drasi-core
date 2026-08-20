@@ -81,7 +81,6 @@ pub use options::RocksIndexOptions;
 pub use outbox::RocksDbOutboxWriter;
 pub use plugin::open_unified_db;
 pub use plugin::RocksDbIndexProvider;
-pub use sizing::{DEFAULT_LARGE_WRITE_BUFFER_SIZE, DEFAULT_SMALL_WRITE_BUFFER_SIZE};
 
 #[cfg(feature = "plugin-descriptor")]
 pub use descriptor::{RocksDbIndexConfigDto, RocksDbIndexDescriptor};

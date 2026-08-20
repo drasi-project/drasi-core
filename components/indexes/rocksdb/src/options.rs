@@ -15,8 +15,8 @@
 /// Options controlling how the unified query index DB is opened.
 ///
 /// Marked `#[non_exhaustive]` so new fields can be added without a breaking
-/// change: construct via [`RocksIndexOptions::new`] or
-/// [`RocksIndexOptions::default`], then set fields individually.
+/// change. Construct via [`RocksIndexOptions::new`] or
+/// [`RocksIndexOptions::default`].
 #[non_exhaustive]
 #[derive(Clone, Copy)]
 pub struct RocksIndexOptions {
@@ -27,11 +27,11 @@ pub struct RocksIndexOptions {
     /// `write_buffer_size` for high byte-volume column families.
     /// The arena block size is derived from it (`write_buffer_size / 64`,
     /// clamped to `[64 KiB, 1 MiB]`).
-    pub large_write_buffer_size: usize,
+    pub(crate) large_write_buffer_size: usize,
     /// `write_buffer_size` for the remaining column families.
     /// The arena block size is derived from it (`write_buffer_size / 64`,
     /// clamped to `[64 KiB, 1 MiB]`).
-    pub small_write_buffer_size: usize,
+    pub(crate) small_write_buffer_size: usize,
 }
 
 impl Default for RocksIndexOptions {
@@ -46,9 +46,8 @@ impl Default for RocksIndexOptions {
 }
 
 impl RocksIndexOptions {
-    /// Options with the given archive/direct-I/O flags and default buffer
-    /// sizes ([`crate::DEFAULT_LARGE_WRITE_BUFFER_SIZE`] /
-    /// [`crate::DEFAULT_SMALL_WRITE_BUFFER_SIZE`]).
+    /// Options with the given archive/direct-I/O flags and the internal
+    /// per-column-family sizing policy.
     pub fn new(archive_enabled: bool, direct_io: bool) -> Self {
         Self {
             archive_enabled,
