@@ -1000,7 +1000,7 @@ async fn emit_mesh_tick(
         return;
     }
 
-    if seq % 7 == 0 {
+    if seq.is_multiple_of(7) {
         if let Some(idx) = state
             .edges
             .iter()
@@ -1062,7 +1062,7 @@ async fn emit_mesh_tick(
         }
     }
 
-    if seq % 3 == 0 {
+    if seq.is_multiple_of(3) {
         let idx = (seq as usize) % state.edges.len();
         let edge = state.edges[idx].clone();
         drop(state);
