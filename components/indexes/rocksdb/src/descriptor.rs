@@ -26,7 +26,7 @@ use drasi_core::interface::IndexBackendPlugin;
 use drasi_plugin_sdk::prelude::*;
 use utoipa::OpenApi;
 
-use crate::{RocksDbIndexProvider, RocksDbMemoryBudget};
+use crate::RocksDbIndexProvider;
 
 fn default_false() -> ConfigValueBool {
     ConfigValue::Static(false)
@@ -108,12 +108,9 @@ impl RocksDbIndexDescriptor {
 
         let provider = RocksDbIndexProvider::new(path, enable_archive, direct_io);
         match memory_budget_bytes {
-            Some(total_budget_bytes) => {
-                let memory_budget =
-                    RocksDbMemoryBudget::from_total_budget_bytes(total_budget_bytes)
-                        .context("Invalid RocksDB index memory budget")?;
-                Ok(provider.with_memory_budget(memory_budget))
-            }
+            Some(total_budget_bytes) => provider
+                .with_memory_budget_bytes(total_budget_bytes)
+                .context("Invalid RocksDB index memory budget"),
             None => Ok(provider),
         }
     }

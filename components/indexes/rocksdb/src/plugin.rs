@@ -20,13 +20,12 @@
 //! # Example
 //!
 //! ```ignore
-//! use drasi_index_rocksdb::{RocksDbIndexProvider, RocksDbMemoryBudget};
+//! use drasi_index_rocksdb::RocksDbIndexProvider;
 //! use drasi_lib::DrasiLib;
 //! use std::sync::Arc;
 //!
-//! let memory = RocksDbMemoryBudget::new(256 << 20, 128 << 20, false)?;
 //! let provider = RocksDbIndexProvider::new("/data/drasi", true, false)
-//!     .with_memory_budget(memory);
+//!     .with_memory_budget_bytes(512 << 20)?;
 //! let drasi = DrasiLib::builder()
 //!     .with_index_provider("rocksdb", Arc::new(provider))
 //!     .build()?;
@@ -44,7 +43,10 @@ use crate::future_queue::{self, RocksDbFutureQueue};
 use crate::live_results::{self, RocksDbLiveResultsWriter};
 use crate::outbox::{self, RocksDbOutboxWriter};
 use crate::result_index::{self, RocksDbResultIndex};
-use crate::{RocksDbMemoryBudget, RocksDbSessionControl, RocksDbSessionState, RocksIndexOptions};
+use crate::{
+    RocksDbMemoryBudget, RocksDbMemoryBudgetError, RocksDbSessionControl, RocksDbSessionState,
+    RocksIndexOptions,
+};
 
 /// Open a unified RocksDB database with all column families needed for a query.
 ///
@@ -167,7 +169,23 @@ impl RocksDbIndexProvider {
         }
     }
 
-    /// Replace the provider-wide default memory budget.
+    /// Set the provider-wide combined memory budget using the standard policy.
+    ///
+    /// Half of the capacity is available to memtables. Memtable reservations
+    /// are charged to the same cache, so the two capacities are not additive.
+    pub fn with_memory_budget_bytes(
+        mut self,
+        total_budget_bytes: usize,
+    ) -> Result<Self, RocksDbMemoryBudgetError> {
+        self.memory_budget = RocksDbMemoryBudget::from_total_budget_bytes(total_budget_bytes)?;
+        Ok(self)
+    }
+
+    /// Inject provider-wide memory resources using a custom policy.
+    ///
+    /// This expert API supports custom cache/write-buffer splits, stall
+    /// behavior, and sharing one budget across multiple providers. Prefer
+    /// [`Self::with_memory_budget_bytes`] for standard configuration.
     pub fn with_memory_budget(mut self, memory_budget: RocksDbMemoryBudget) -> Self {
         self.memory_budget = memory_budget;
         self
@@ -282,18 +300,49 @@ mod tests {
     }
 
     #[test]
-    fn test_rocksdb_index_provider_custom_memory_budget() {
-        let budget = RocksDbMemoryBudget::new(32 * 1024 * 1024, 16 * 1024 * 1024, false)
-            .expect("valid budget");
-        let provider =
-            RocksDbIndexProvider::new("/data/drasi", false, false).with_memory_budget(budget);
+    fn test_rocksdb_index_provider_total_memory_budget() {
+        let provider = RocksDbIndexProvider::new("/data/drasi", false, false)
+            .with_memory_budget_bytes(64 * 1024 * 1024)
+            .expect("valid total budget");
 
+        assert_eq!(
+            provider.memory_budget().block_cache_capacity_bytes(),
+            64 * 1024 * 1024
+        );
         assert_eq!(
             provider
                 .memory_budget()
                 .write_buffer_manager()
                 .get_buffer_size(),
-            16 * 1024 * 1024
+            32 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn test_rocksdb_index_provider_rejects_invalid_total_memory_budget() {
+        assert!(matches!(
+            RocksDbIndexProvider::new("/data/drasi", false, false).with_memory_budget_bytes(1),
+            Err(RocksDbMemoryBudgetError::ZeroWriteBufferBudget)
+        ));
+    }
+
+    #[test]
+    fn test_rocksdb_index_provider_custom_memory_budget() {
+        let budget = RocksDbMemoryBudget::new(32 * 1024 * 1024, 8 * 1024 * 1024, false)
+            .expect("valid budget");
+        let provider =
+            RocksDbIndexProvider::new("/data/drasi", false, false).with_memory_budget(budget);
+
+        assert_eq!(
+            provider.memory_budget().block_cache_capacity_bytes(),
+            32 * 1024 * 1024
+        );
+        assert_eq!(
+            provider
+                .memory_budget()
+                .write_buffer_manager()
+                .get_buffer_size(),
+            8 * 1024 * 1024
         );
     }
 

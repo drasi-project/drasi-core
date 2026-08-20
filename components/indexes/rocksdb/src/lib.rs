@@ -21,13 +21,12 @@
 //! # Usage
 //!
 //! ```ignore
-//! use drasi_index_rocksdb::{RocksDbIndexProvider, RocksDbMemoryBudget};
+//! use drasi_index_rocksdb::RocksDbIndexProvider;
 //! use drasi_lib::DrasiLib;
 //! use std::sync::Arc;
 //!
-//! let memory = RocksDbMemoryBudget::new(256 << 20, 128 << 20, false)?;
 //! let provider = RocksDbIndexProvider::new("/data/drasi", true, false)
-//!     .with_memory_budget(memory);
+//!     .with_memory_budget_bytes(512 << 20)?;
 //! let drasi = DrasiLib::builder()
 //!     .with_index_provider("rocksdb", Arc::new(provider))
 //!     .build()?;
