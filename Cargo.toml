@@ -84,6 +84,7 @@ members = [
   "components/reactions/storedproc-mysql",
   "components/reactions/storedproc-postgres",
   "components/reactions/snapshot-test",
+  "components/reactions/github-workgraph",
 
   # Identity Provider Plugins
   "components/identity/azure",
@@ -185,6 +186,7 @@ drasi-reaction-http = { version = "0.3.2", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.4.2", path = "components/reactions/grpc" }
 drasi-reaction-file = { version = "0.1.3", path = "components/reactions/file" }
 drasi-reaction-eventgrid = { version = "0.1.0", path = "components/reactions/eventgrid" }
+drasi-reaction-github-workgraph = { version = "0.1.0", path = "components/reactions/github-workgraph" }
 drasi-reaction-aws-sqs = { version = "0.1.3", path = "components/reactions/aws-sqs" }
 drasi-mssql-common = { version = "0.2.9", path = "components/mssql-common" }
 drasi-mysql-common = { version = "0.2.7", path = "components/mysql-common" }
