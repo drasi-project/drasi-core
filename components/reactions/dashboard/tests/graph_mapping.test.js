@@ -32,6 +32,7 @@ const strippedSource = widgetsSource
 vm.runInNewContext(strippedSource, widgetsSandbox, { filename: "widgets.js" });
 
 const rowsToGraph = widgetsSandbox.rowsToGraph;
+const describeGraphRow = widgetsSandbox.describeGraphRow;
 const layoutGraphNodes = widgetsSandbox.layoutGraphNodes;
 const asCoord = widgetsSandbox.asCoord;
 
@@ -62,6 +63,42 @@ function assertDeepEqual(actual, expected, message) {
   }
 }
 
+console.log("\n=== describeGraphRow: plain-language mapping ===");
+
+{
+  const desc = describeGraphRow(
+    { source: "sensor_0", target: "sensor_3", weight: 0.82, sourceTemp: 24.1 },
+    { nodeField: "source", connectsToField: "target", valueField: "weight" },
+  );
+  assertEqual(desc.ok, true, "maps a complete row");
+  assertEqual(desc.kind, "edge", "both ends make a connection");
+  assertEqual(desc.fromId, "sensor_0", "from id is the node column");
+  assertEqual(desc.toId, "sensor_3", "to id is the connects-to column");
+  assertEqual(desc.fromLabel, "sensor_0", "label defaults to the node id");
+  assertEqual(desc.weight, 0.82, "weight comes from valueField");
+  assertEqual(desc.edgeLabel, null, "no edge label when unset");
+}
+
+{
+  const desc = describeGraphRow(
+    { from: "n1", to: "n2", fromName: "Alpha" },
+    { nodeField: "from", connectsToField: "to", nodeLabelField: "fromName" },
+  );
+  assertEqual(desc.fromLabel, "Alpha", "custom from label is used");
+  assertEqual(desc.toLabel, "n2", "missing to label falls back to id");
+}
+
+{
+  const desc = describeGraphRow(
+    { source: "sensor_0", target: null },
+    { nodeField: "source", connectsToField: "target" },
+  );
+  assertEqual(desc.ok, true, "missing to-node is still a node");
+  assertEqual(desc.kind, "node", "row without a neighbor is isolated");
+  assertEqual(desc.fromId, "sensor_0", "isolated node keeps its id");
+  assertEqual(desc.toId, null, "isolated node has no target");
+}
+
 console.log("\n=== rowsToGraph: node inference ===");
 
 {
@@ -70,13 +107,13 @@ console.log("\n=== rowsToGraph: node inference ===");
       { source: "a", target: "b" },
       { source: "b", target: "c" },
     ],
-    { sourceField: "source", targetField: "target" },
+    { nodeField: "source", connectsToField: "target" },
   );
   assertEqual(graph.nodes.length, 3, "infers three unique nodes from two edges");
   assertDeepEqual(
     graph.nodes.map((n) => n.id).sort(),
     ["a", "b", "c"],
-    "node ids are source/target values",
+    "node ids are node/connects-to values",
   );
   assertEqual(graph.links.length, 2, "one link per row");
   assertEqual(graph.links[0].source, "a", "first link source");
@@ -87,10 +124,10 @@ console.log("\n=== rowsToGraph: node inference ===");
   const graph = rowsToGraph(
     [{ from: "n1", to: "n2", fromName: "Alpha", toName: "Beta", weight: 12 }],
     {
-      sourceField: "from",
-      targetField: "to",
-      sourceLabelField: "fromName",
-      targetLabelField: "toName",
+      nodeField: "from",
+      connectsToField: "to",
+      nodeLabelField: "fromName",
+      connectsToLabelField: "toName",
       valueField: "weight",
     },
   );
@@ -108,10 +145,10 @@ console.log("\n=== rowsToGraph: node inference ===");
       { source: "b", target: "c", srcCat: "cold", tgtCat: "warm" },
     ],
     {
-      sourceField: "source",
-      targetField: "target",
-      sourceCategoryField: "srcCat",
-      targetCategoryField: "tgtCat",
+      nodeField: "source",
+      connectsToField: "target",
+      nodeCategoryField: "srcCat",
+      connectsToCategoryField: "tgtCat",
     },
   );
   assertDeepEqual(
@@ -127,7 +164,7 @@ console.log("\n=== rowsToGraph: node inference ===");
 {
   const graph = rowsToGraph(
     [{ source: "a", target: "b", kind: "CONNECTED_TO" }],
-    { sourceField: "source", targetField: "target", edgeLabelField: "kind" },
+    { nodeField: "source", connectsToField: "target", edgeLabelField: "kind" },
   );
   assertEqual(graph.links[0].label.formatter, "CONNECTED_TO", "edge label is set");
 }
@@ -139,10 +176,47 @@ console.log("\n=== rowsToGraph: node inference ===");
       { source: "", target: "c" },
       { source: "d", target: null },
     ],
-    { sourceField: "source", targetField: "target" },
+    { nodeField: "source", connectsToField: "target" },
   );
-  assertEqual(graph.links.length, 1, "skips rows missing an endpoint");
-  assertEqual(graph.nodes.length, 2, "does not create nodes for skipped rows");
+  assertEqual(graph.links.length, 1, "only complete pairs become connections");
+  assertEqual(graph.nodes.length, 4, "rows missing a neighbor still add isolated nodes");
+  assertDeepEqual(
+    graph.nodes.map((n) => n.id).sort(),
+    ["a", "b", "c", "d"],
+    "isolated c and d appear as nodes",
+  );
+}
+
+{
+  const graph = rowsToGraph(
+    [
+      { source: "sensor_0", target: null },
+      { source: "sensor_1", target: "sensor_2" },
+    ],
+    { nodeField: "source", connectsToField: "target" },
+  );
+  assertEqual(graph.nodes.length, 3, "optional neighbor leaves disconnected nodes visible");
+  assertEqual(graph.links.length, 1, "only the connected row draws an arrow");
+}
+
+{
+  const graph = rowsToGraph(
+    [
+      {
+        a: { sensor_id: "sensor_0", $metadata: "(sensors:sensor_0, [SensorReading], 1)" },
+        r: null,
+        b: null,
+      },
+      {
+        a: { sensor_id: "sensor_1", $metadata: "(sensors:sensor_1, [SensorReading], 1)" },
+        r: { strength: 0.4, $in_node: "sensors:sensor_1", $out_node: "sensors:sensor_2" },
+        b: { sensor_id: "sensor_2", $metadata: "(sensors:sensor_2, [SensorReading], 1)" },
+      },
+    ],
+    { nodeField: "missing", connectsToField: "missing" },
+  );
+  assertEqual(graph.nodes.length, 3, "node objects become circles without field mapping");
+  assertEqual(graph.links.length, 1, "relation objects become arrows");
 }
 
 {
@@ -151,13 +225,22 @@ console.log("\n=== rowsToGraph: node inference ===");
       { source: "a", target: "b" },
       { source: "a", target: "c" },
     ],
-    { sourceField: "source", targetField: "target" },
+    { nodeField: "source", connectsToField: "target" },
   );
   assertEqual(graph.nodes.length, 3, "shared source node is not duplicated");
 }
 
 {
-  const graph = rowsToGraph([], { sourceField: "source", targetField: "target" });
+  const graph = rowsToGraph(
+    [{ source: "a", target: "b" }],
+    { sourceField: "source", targetField: "target" },
+  );
+  assertEqual(graph.links.length, 1, "legacy sourceField/targetField still map");
+  assertEqual(graph.links[0].source, "a", "legacy sourceField is the node");
+}
+
+{
+  const graph = rowsToGraph([], { nodeField: "source", connectsToField: "target" });
   assertEqual(graph.nodes.length, 0, "empty rows produce no nodes");
   assertEqual(graph.links.length, 0, "empty rows produce no links");
 }

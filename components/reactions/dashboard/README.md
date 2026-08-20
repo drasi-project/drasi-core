@@ -94,9 +94,31 @@ let reaction = DashboardReaction::builder("my-dashboard")
 | KPI | `"kpi"` | `queryId`, `valueField`, `aggregation`, `label` |
 | Markdown | `"text"` | `queryId`, `template` (Handlebars + Markdown) |
 | Map | `"map"` | `queryId`, `latField`, `lngField`, `valueField` |
-| Graph | `"graph"` | `queryId`, `sourceField`, `targetField` |
+| Graph | `"graph"` | `queryId`, `nodeField`, `connectsToField` |
 
-Each graph row is one edge. Nodes are inferred from unique `sourceField` / `targetField` values. Optional fields: `sourceLabelField`, `targetLabelField`, `sourceCategoryField`, `targetCategoryField`, `edgeLabelField`, `valueField` (node/edge size), `layout` (`"force"` or `"circular"`). Isolated nodes (no incident edge) are not shown.
+**Every query row adds a node.** If the Connects-to column has a value, that row also draws an arrow. Isolated nodes stay on the graph.
+
+```cypher
+MATCH (a:SensorReading)
+OPTIONAL MATCH (a)-[r:CONNECTED_TO]->(b:SensorReading)
+RETURN a.sensor_id AS node,
+       b.sensor_id AS connects_to,
+       r.strength AS weight
+```
+
+```json
+{
+  "queryId": "sensor-mesh",
+  "nodeField": "node",
+  "connectsToField": "connects_to",
+  "valueField": "weight",
+  "layout": "force"
+}
+```
+
+`nodeField` is the node. `connectsToField` is the optional neighbor (omit or null = disconnected node). The same name in two rows is one circle.
+
+Optional: `nodeLabelField` / `connectsToLabelField` (display name), `nodeCategoryField` / `connectsToCategoryField` (color group), `edgeLabelField` (text on the line), `valueField` (size / weight), `layout` (`"force"` or `"circular"`).
 
 ### Aggregation Modes (KPI & Gauge)
 

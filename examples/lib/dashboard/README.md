@@ -96,15 +96,16 @@ RETURN s.sensor_id AS sensor_id,
 ```
 
 ### sensor-mesh
-Live `CONNECTED_TO` edges — **Graph** widget. Each row is one edge; nodes are
-inferred from `source` / `target`. `weight` sizes the links; mesh topology
-changes as MockSource updates `strength` and rewires chords.
+Every sensor is a node; `OPTIONAL MATCH` keeps disconnected sensors on the
+**Graph** widget. A row with `connects_to` set also draws an arrow. `weight`
+sizes the links; mesh topology changes as MockSource updates `strength` and
+rewires chords.
 
 ```cypher
-MATCH (a:SensorReading)-[r:CONNECTED_TO]->(b:SensorReading)
-RETURN a.sensor_id AS source,
-       b.sensor_id AS target,
-       a.temperature AS sourceTemp,
+MATCH (a:SensorReading)
+OPTIONAL MATCH (a)-[r:CONNECTED_TO]->(b:SensorReading)
+RETURN a.sensor_id AS node,
+       b.sensor_id AS connects_to,
        r.strength AS weight
 ```
 

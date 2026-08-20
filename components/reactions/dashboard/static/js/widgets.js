@@ -278,7 +278,7 @@ export const WIDGET_TYPE_META = {
   },
   graph: {
     name: "Graph",
-    description: "Node-link diagram from relationship rows",
+    description: "Nodes from query rows; arrows when a neighbor is present",
     icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="7" r="3"/><circle cx="8" cy="18" r="3"/><circle cx="18" cy="17" r="3"/><line x1="8.7" y1="7.5" x2="15.3" y2="7.5"/><line x1="7.2" y1="8.8" x2="8.8" y2="15.2"/><line x1="16.5" y1="9.6" x2="17.2" y2="14.2"/><line x1="10.8" y1="17.4" x2="15.2" y2="17.2"/></svg>`,
     color: "#fb923c",
   },
@@ -298,12 +298,12 @@ export function getDefaultConfig(widgetType) {
     case "map": return { ...base, latField: "lat", lngField: "lng", valueField: "value" };
     case "graph": return {
       ...base,
-      sourceField: "source",
-      targetField: "target",
-      sourceLabelField: "",
-      targetLabelField: "",
-      sourceCategoryField: "",
-      targetCategoryField: "",
+      nodeField: "node",
+      connectsToField: "connects_to",
+      nodeLabelField: "",
+      connectsToLabelField: "",
+      nodeCategoryField: "",
+      connectsToCategoryField: "",
       edgeLabelField: "",
       valueField: "",
       layout: "force",
@@ -838,21 +838,190 @@ function nodeSymbolSize(value) {
   return Math.max(16, Math.min(48, 16 + value));
 }
 
+function isPlainObject(value) {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isRelationCell(value) {
+  return isPlainObject(value) && (value.$in_node != null || value.$out_node != null);
+}
+
+function isNodeCell(value) {
+  return isPlainObject(value) && value.$metadata != null && !isRelationCell(value);
+}
+
+function idFromRef(ref) {
+  if (ref == null) return null;
+  const text = String(ref).replace(/^\(/, "").split(",")[0].trim();
+  if (!text) return null;
+  const colon = text.lastIndexOf(":");
+  return colon >= 0 ? text.slice(colon + 1).trim() : text;
+}
+
+function scalarId(value) {
+  if (value == null || value === "") return null;
+  if (isRelationCell(value)) return null;
+  if (isNodeCell(value)) {
+    return value.sensor_id ?? value.id ?? value.name ?? idFromRef(value.$metadata);
+  }
+  if (isPlainObject(value)) {
+    const nested = value.sensor_id ?? value.id ?? value.name;
+    return nested == null || nested === "" ? null : String(nested);
+  }
+  return String(value);
+}
+
+function cellLabel(value, fallbackId) {
+  if (isNodeCell(value) || isPlainObject(value)) {
+    const label = value.name ?? value.sensor_id ?? value.id;
+    if (label != null && String(label) !== "") return String(label);
+  }
+  return fallbackId != null ? String(fallbackId) : "";
+}
+
+function numericCell(value) {
+  if (value == null) return null;
+  if (isPlainObject(value)) {
+    const nested = value.strength ?? value.weight ?? value.value;
+    return Number.isFinite(Number(nested)) ? Number(nested) : null;
+  }
+  return Number.isFinite(Number(value)) ? Number(value) : null;
+}
+
+function graphMapping(config = {}) {
+  return {
+    nodeField: config.nodeField ?? config.sourceField ?? "",
+    connectsToField: config.connectsToField ?? config.targetField ?? "",
+    nodeLabelField: config.nodeLabelField ?? config.sourceLabelField ?? "",
+    connectsToLabelField: config.connectsToLabelField ?? config.targetLabelField ?? "",
+    nodeCategoryField: config.nodeCategoryField ?? config.sourceCategoryField ?? "",
+    connectsToCategoryField: config.connectsToCategoryField ?? config.targetCategoryField ?? "",
+    edgeLabelField: config.edgeLabelField || "",
+    valueField: config.valueField || "",
+  };
+}
+
+function fieldsForRow(row, config = {}) {
+  const mapping = graphMapping(config);
+  if (mapping.nodeField || mapping.connectsToField) {
+    return {
+      nodeField: mapping.nodeField,
+      connectsToField: mapping.connectsToField,
+    };
+  }
+  if (!row || typeof row !== "object") return { nodeField: "", connectsToField: "" };
+  const values = Object.values(row);
+  if (values.some((value) => isNodeCell(value) || isRelationCell(value))) {
+    return { nodeField: "", connectsToField: "" };
+  }
+  const keys = Object.keys(row);
+  if (keys.includes("node") || keys.includes("connects_to")) {
+    return {
+      nodeField: keys.includes("node") ? "node" : "",
+      connectsToField: keys.includes("connects_to") ? "connects_to" : "",
+    };
+  }
+  if (keys.includes("source") || keys.includes("target")) {
+    return {
+      nodeField: keys.includes("source") ? "source" : "",
+      connectsToField: keys.includes("target") ? "target" : "",
+    };
+  }
+  if (keys.includes("from") || keys.includes("to")) {
+    return {
+      nodeField: keys.includes("from") ? "from" : "",
+      connectsToField: keys.includes("to") ? "to" : "",
+    };
+  }
+  return { nodeField: "", connectsToField: "" };
+}
+
+/**
+ * Describe how one query row becomes a node and optional connection.
+ */
+export function describeGraphRow(row, config = {}) {
+  const mapping = graphMapping(config);
+  const { nodeField, connectsToField } = fieldsForRow(row, config);
+  const nodeLabelField = fieldOr(mapping.nodeLabelField, nodeField);
+  const connectsToLabelField = fieldOr(mapping.connectsToLabelField, connectsToField);
+  const edgeLabelField = mapping.edgeLabelField;
+  const valueField = mapping.valueField;
+
+  let fromId = nodeField ? scalarId(row?.[nodeField]) : null;
+  let toId = connectsToField ? scalarId(row?.[connectsToField]) : null;
+
+  if (!fromId && !toId && row && typeof row === "object") {
+    let rel = null;
+    const nodes = [];
+    for (const value of Object.values(row)) {
+      if (isRelationCell(value)) rel = value;
+      else if (isNodeCell(value)) nodes.push(value);
+    }
+    if (rel) {
+      fromId = idFromRef(rel.$in_node);
+      toId = idFromRef(rel.$out_node);
+    } else if (nodes[0]) {
+      fromId = scalarId(nodes[0]);
+    }
+  }
+
+  if (!fromId && !toId) return { ok: false, reason: "missing-node" };
+
+  let weight = null;
+  if (valueField) weight = numericCell(row?.[valueField]);
+  const edgeLabel = edgeLabelField && row?.[edgeLabelField] != null
+    ? String(row[edgeLabelField])
+    : null;
+
+  if (fromId && toId) {
+    return {
+      ok: true,
+      kind: "edge",
+      fromId,
+      toId,
+      fromLabel: String(row?.[nodeLabelField] != null && row[nodeLabelField] !== ""
+        ? (isPlainObject(row[nodeLabelField]) ? cellLabel(row[nodeLabelField], fromId) : row[nodeLabelField])
+        : fromId),
+      toLabel: String(row?.[connectsToLabelField] != null && row[connectsToLabelField] !== ""
+        ? (isPlainObject(row[connectsToLabelField]) ? cellLabel(row[connectsToLabelField], toId) : row[connectsToLabelField])
+        : toId),
+      weight,
+      edgeLabel,
+    };
+  }
+
+  const onlyId = fromId || toId;
+  const onlyLabelField = fromId ? nodeLabelField : connectsToLabelField;
+  const rawLabel = row?.[onlyLabelField];
+  return {
+    ok: true,
+    kind: "node",
+    fromId: onlyId,
+    toId: null,
+    fromLabel: String(rawLabel != null && rawLabel !== ""
+      ? (isPlainObject(rawLabel) ? cellLabel(rawLabel, onlyId) : rawLabel)
+      : onlyId),
+    toLabel: "",
+    weight,
+    edgeLabel: null,
+  };
+}
+
 /**
  * Map query result rows to an ECharts graph model.
- * Each row is one edge; nodes are inferred from unique source/target ids.
+ * Each row adds a node. A connection is added only when both ends are present.
+ * Isolated nodes (no neighbor) stay on the graph.
  */
 export function rowsToGraph(rows, config = {}) {
-  const sourceField = config.sourceField || "source";
-  const targetField = config.targetField || "target";
-  const sourceLabelField = fieldOr(config.sourceLabelField, sourceField);
-  const targetLabelField = fieldOr(config.targetLabelField, targetField);
-  const sourceCategoryField = config.sourceCategoryField || "";
-  const targetCategoryField = config.targetCategoryField || "";
-  const edgeLabelField = config.edgeLabelField || "";
-  const valueField = config.valueField || "";
+  const mapping = graphMapping(config);
+  const nodeCategoryField = mapping.nodeCategoryField;
+  const connectsToCategoryField = mapping.connectsToCategoryField;
+  const edgeLabelField = mapping.edgeLabelField;
+  const valueField = mapping.valueField;
 
   const nodes = new Map();
+  const linkKeys = new Set();
+  const links = [];
 
   function upsertNode(id, label, category, value) {
     if (id == null || String(id) === "") return null;
@@ -865,35 +1034,68 @@ export function rowsToGraph(rows, config = {}) {
     return key;
   }
 
-  const links = [];
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const rawSource = row?.[sourceField];
-    const rawTarget = row?.[targetField];
-    if (rawSource == null || String(rawSource) === "" || rawTarget == null || String(rawTarget) === "") {
-      continue;
-    }
-    const sourceId = upsertNode(
-      rawSource,
-      row?.[sourceLabelField],
-      sourceCategoryField ? row?.[sourceCategoryField] : undefined,
-      valueField ? row?.[valueField] : undefined,
-    );
-    const targetId = upsertNode(
-      rawTarget,
-      row?.[targetLabelField],
-      targetCategoryField ? row?.[targetCategoryField] : undefined,
-      valueField ? row?.[valueField] : undefined,
-    );
-    if (!sourceId || !targetId) continue;
-
+  function addLink(sourceId, targetId, edgeLabel, value) {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+    const key = `${sourceId}\0${targetId}\0${edgeLabel ?? ""}`;
+    if (linkKeys.has(key)) return;
+    linkKeys.add(key);
     const link = { source: sourceId, target: targetId };
-    if (edgeLabelField && row?.[edgeLabelField] != null) {
-      link.label = { show: true, formatter: String(row[edgeLabelField]) };
+    if (edgeLabel != null && edgeLabel !== "") {
+      link.label = { show: true, formatter: String(edgeLabel) };
     }
-    if (valueField && Number.isFinite(Number(row?.[valueField]))) {
-      link.value = Number(row[valueField]);
-    }
+    if (value != null && Number.isFinite(Number(value))) link.value = Number(value);
     links.push(link);
+  }
+
+  function ingestElementCell(value) {
+    if (isRelationCell(value)) {
+      const fromId = idFromRef(value.$in_node);
+      const toId = idFromRef(value.$out_node);
+      const weight = numericCell(value);
+      upsertNode(fromId);
+      upsertNode(toId);
+      addLink(fromId, toId, null, weight);
+      return;
+    }
+    if (isNodeCell(value)) {
+      upsertNode(scalarId(value), cellLabel(value), Array.isArray(value.labels) ? value.labels[0] : undefined);
+    }
+  }
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row || typeof row !== "object") continue;
+
+    for (const value of Object.values(row)) ingestElementCell(value);
+
+    const { nodeField, connectsToField } = fieldsForRow(row, config);
+    const nodeLabelField = fieldOr(mapping.nodeLabelField, nodeField);
+    const connectsToLabelField = fieldOr(mapping.connectsToLabelField, connectsToField);
+    const rawNode = nodeField ? row[nodeField] : undefined;
+    const rawConnectsTo = connectsToField ? row[connectsToField] : undefined;
+    const nodeId = scalarId(rawNode);
+    const connectsToId = scalarId(rawConnectsTo);
+    const value = valueField ? numericCell(row[valueField]) : undefined;
+    const edgeLabel = edgeLabelField && row[edgeLabelField] != null
+      ? String(row[edgeLabelField])
+      : undefined;
+
+    if (nodeId) {
+      upsertNode(
+        nodeId,
+        isPlainObject(row[nodeLabelField]) ? cellLabel(row[nodeLabelField], nodeId) : row[nodeLabelField],
+        nodeCategoryField ? row[nodeCategoryField] : undefined,
+        value,
+      );
+    }
+    if (connectsToId) {
+      upsertNode(
+        connectsToId,
+        isPlainObject(row[connectsToLabelField]) ? cellLabel(row[connectsToLabelField], connectsToId) : row[connectsToLabelField],
+        connectsToCategoryField ? row[connectsToCategoryField] : undefined,
+        value,
+      );
+    }
+    if (nodeId && connectsToId) addLink(nodeId, connectsToId, edgeLabel, value);
   }
 
   const categories = [];

@@ -129,14 +129,14 @@ async fn main() -> Result<()> {
         .auto_start(true)
         .build();
 
-    // Query 5: Sensor Mesh — CONNECTED_TO edges for the graph widget
+    // Query 5: every sensor is a node; OPTIONAL MATCH keeps disconnected sensors
     let sensor_mesh = Query::cypher("sensor-mesh")
         .query(
             r#"
-            MATCH (a:SensorReading)-[r:CONNECTED_TO]->(b:SensorReading)
-            RETURN a.sensor_id AS source,
-                   b.sensor_id AS target,
-                   a.temperature AS sourceTemp,
+            MATCH (a:SensorReading)
+            OPTIONAL MATCH (a)-[r:CONNECTED_TO]->(b:SensorReading)
+            RETURN a.sensor_id AS node,
+                   b.sensor_id AS connects_to,
                    r.strength AS weight
         "#,
         )
@@ -292,10 +292,8 @@ async fn main() -> Result<()> {
                 },
                 config: serde_json::json!({
                     "queryId": "sensor-mesh",
-                    "sourceField": "source",
-                    "targetField": "target",
-                    "sourceLabelField": "source",
-                    "targetLabelField": "target",
+                    "nodeField": "node",
+                    "connectsToField": "connects_to",
                     "valueField": "weight",
                     "layout": "force"
                 }),

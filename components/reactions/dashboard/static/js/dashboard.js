@@ -4,6 +4,7 @@ import {
   createWidgetRuntime,
   renderWidget,
   detectFields,
+  describeGraphRow,
   WIDGET_TYPE_META,
   getDefaultConfig,
   AGGREGATION_MODES,
@@ -153,15 +154,25 @@ export class DashboardDesigner {
       const opts = fields.length > 0 ? fields : ["(type data first)"];
       form.querySelectorAll("select.field-select").forEach((sel) => {
         const current = sel.value;
+        const emptyLabel = sel.dataset.emptyLabel;
         sel.innerHTML = "";
+        if (emptyLabel != null) {
+          const blank = document.createElement("option");
+          blank.value = "";
+          blank.textContent = emptyLabel;
+          sel.appendChild(blank);
+        }
         for (const f of opts) {
+          if (f === "") continue;
           const opt = document.createElement("option");
           opt.value = f;
           opt.textContent = f;
-          if (f === current) opt.selected = true;
           sel.appendChild(opt);
         }
+        const values = [...sel.options].map((o) => o.value);
+        sel.value = values.includes(current) ? current : (values[0] ?? "");
       });
+      form.__refreshGraphPreview?.();
     };
 
     const fetchFieldsForQuery = async (queryId) => {
@@ -170,13 +181,16 @@ export class DashboardDesigner {
         const resp = await fetch(`/api/queries/${encodeURIComponent(queryId)}/snapshot`);
         if (!resp.ok) return;
         const snapshot = await resp.json();
-        const rows = Array.isArray(snapshot.rows) ? snapshot.rows : [];
+        const rows = (Array.isArray(snapshot.rows) ? snapshot.rows : [])
+          .map((entry) => snapshotRowToAddDiff(entry).data)
+          .filter((row) => row && typeof row === "object");
+        form.__sampleRows = rows;
         if (rows.length > 0) {
-          const fields = Object.keys(rows[0]).sort();
-          updateFieldSelects(fields);
+          updateFieldSelects(Object.keys(rows[0]).sort());
         } else if (snapshot.aggregation && typeof snapshot.aggregation === "object") {
-          const fields = Object.keys(snapshot.aggregation).sort();
-          updateFieldSelects(fields);
+          updateFieldSelects(Object.keys(snapshot.aggregation).sort());
+        } else {
+          form.__refreshGraphPreview?.();
         }
       } catch (_) { /* ignore */ }
     };
@@ -184,8 +198,8 @@ export class DashboardDesigner {
     // Listen for query changes to re-detect fields
     querySelect.addEventListener("change", () => fetchFieldsForQuery(querySelect.value));
 
-    // On open, if no fields detected yet, fetch from snapshot
-    if (detectedFields.length === 0) {
+    // Graph widgets always fetch a sample row so the mapping preview can show a real example.
+    if (detectedFields.length === 0 || widgetType === "graph") {
       const initialQuery = config.queryId || this.queryIds[0] || "";
       fetchFieldsForQuery(initialQuery);
     }
@@ -349,28 +363,95 @@ export class DashboardDesigner {
         break;
       }
       case "graph": {
-        const optionalFields = ["", ...fieldOpts];
-        const ends = document.createElement("div");
-        ends.className = "form-row";
-        ends.appendChild(this._formGroup("Source Field", this._fieldSelect("cfg-sourceField", fieldOpts, config.sourceField)));
-        ends.appendChild(this._formGroup("Target Field", this._fieldSelect("cfg-targetField", fieldOpts, config.targetField)));
-        form.appendChild(ends);
+        const hint = document.createElement("p");
+        hint.className = "form-help";
+        hint.textContent = "Every row adds a node. If Connects to has a value, we also draw an arrow. Rows with no neighbor stay on the graph.";
+        form.appendChild(hint);
+
+        const connector = document.createElement("div");
+        connector.className = "graph-connector";
+        connector.appendChild(this._formGroup("Node", this._fieldSelect(
+          "cfg-nodeField",
+          fieldOpts,
+          config.nodeField || config.sourceField || "node",
+        )));
+        const arrow = document.createElement("div");
+        arrow.className = "graph-connector-arrow";
+        arrow.setAttribute("aria-hidden", "true");
+        arrow.textContent = "→";
+        connector.appendChild(arrow);
+        connector.appendChild(this._formGroup(
+          "Connects to",
+          this._optionalFieldSelect(
+            "cfg-connectsToField",
+            fieldOpts,
+            config.connectsToField ?? config.targetField ?? "connects_to",
+            "(none)",
+          ),
+        ));
+        form.appendChild(connector);
+
+        const preview = document.createElement("div");
+        preview.className = "graph-mapping-preview";
+        preview.id = "cfg-graph-preview";
+        form.appendChild(preview);
+
+        const extras = document.createElement("details");
+        extras.className = "template-help";
+        const summary = document.createElement("summary");
+        summary.textContent = "Labels, colors, and size";
+        extras.appendChild(summary);
+        const extraBody = document.createElement("div");
+        extraBody.className = "template-help-body";
         const labels = document.createElement("div");
         labels.className = "form-row";
-        labels.appendChild(this._formGroup("Source Label Field", this._fieldSelect("cfg-sourceLabelField", optionalFields, config.sourceLabelField ?? "")));
-        labels.appendChild(this._formGroup("Target Label Field", this._fieldSelect("cfg-targetLabelField", optionalFields, config.targetLabelField ?? "")));
-        form.appendChild(labels);
+        labels.appendChild(this._formGroup("Node label", this._optionalFieldSelect(
+          "cfg-nodeLabelField",
+          fieldOpts,
+          config.nodeLabelField ?? config.sourceLabelField ?? "",
+          "(same as node)",
+        )));
+        labels.appendChild(this._formGroup("Connects-to label", this._optionalFieldSelect(
+          "cfg-connectsToLabelField",
+          fieldOpts,
+          config.connectsToLabelField ?? config.targetLabelField ?? "",
+          "(same as node)",
+        )));
+        extraBody.appendChild(labels);
         const cats = document.createElement("div");
         cats.className = "form-row";
-        cats.appendChild(this._formGroup("Source Category Field", this._fieldSelect("cfg-sourceCategoryField", optionalFields, config.sourceCategoryField ?? "")));
-        cats.appendChild(this._formGroup("Target Category Field", this._fieldSelect("cfg-targetCategoryField", optionalFields, config.targetCategoryField ?? "")));
-        form.appendChild(cats);
-        const extras = document.createElement("div");
-        extras.className = "form-row";
-        extras.appendChild(this._formGroup("Edge Label Field", this._fieldSelect("cfg-edgeLabelField", optionalFields, config.edgeLabelField ?? "")));
-        extras.appendChild(this._formGroup("Value Field", this._fieldSelect("cfg-valField", optionalFields, config.valueField ?? "")));
+        cats.appendChild(this._formGroup("Node color group", this._optionalFieldSelect(
+          "cfg-nodeCategoryField",
+          fieldOpts,
+          config.nodeCategoryField ?? config.sourceCategoryField ?? "",
+          "(none)",
+        )));
+        cats.appendChild(this._formGroup("Connects-to color group", this._optionalFieldSelect(
+          "cfg-connectsToCategoryField",
+          fieldOpts,
+          config.connectsToCategoryField ?? config.targetCategoryField ?? "",
+          "(none)",
+        )));
+        extraBody.appendChild(cats);
+        const more = document.createElement("div");
+        more.className = "form-row";
+        more.appendChild(this._formGroup("Connection label", this._optionalFieldSelect("cfg-edgeLabelField", fieldOpts, config.edgeLabelField ?? "", "(none)")));
+        more.appendChild(this._formGroup("Size / weight", this._optionalFieldSelect("cfg-valField", fieldOpts, config.valueField ?? "", "(none)")));
+        extraBody.appendChild(more);
+        extraBody.appendChild(this._formGroup("Layout", this._labeledSelect("cfg-layout", [
+          ["force", "Spread out"],
+          ["circular", "Circle"],
+        ], config.layout ?? "force")));
+        extras.appendChild(extraBody);
         form.appendChild(extras);
-        form.appendChild(this._formGroup("Layout", this._selectInput("cfg-layout", ["force", "circular"], config.layout ?? "force")));
+
+        form.__refreshGraphPreview = () => {
+          this._paintGraphPreview(preview, form.__sampleRows || [], this._readGraphMapping(form));
+        };
+        form.querySelectorAll("select").forEach((sel) => {
+          sel.addEventListener("change", () => form.__refreshGraphPreview?.());
+        });
+        form.__refreshGraphPreview();
         break;
       }
     }
@@ -389,18 +470,7 @@ export class DashboardDesigner {
       case "kpi": return { ...base, valueField: val("cfg-valField"), label: val("cfg-label") || "KPI", aggregation: val("cfg-aggregation") || "last", filterField: val("cfg-filterField"), filterValue: val("cfg-filterValue") };
       case "text": return { ...base, template: val("cfg-template") };
       case "map": return { ...base, latField: val("cfg-latField"), lngField: val("cfg-lngField"), valueField: val("cfg-valField") };
-      case "graph": return {
-        ...base,
-        sourceField: val("cfg-sourceField") || "source",
-        targetField: val("cfg-targetField") || "target",
-        sourceLabelField: val("cfg-sourceLabelField"),
-        targetLabelField: val("cfg-targetLabelField"),
-        sourceCategoryField: val("cfg-sourceCategoryField"),
-        targetCategoryField: val("cfg-targetCategoryField"),
-        edgeLabelField: val("cfg-edgeLabelField"),
-        valueField: val("cfg-valField"),
-        layout: val("cfg-layout") || "force",
-      };
+      case "graph": return { ...base, ...this._readGraphMapping(form) };
       default: return base;
     }
   }
@@ -462,6 +532,93 @@ export class DashboardDesigner {
     const el = this._selectInput(id, fields, selected);
     el.classList.add("field-select");
     return el;
+  }
+
+  _optionalFieldSelect(id, fields, selected = "", emptyLabel = "(none)") {
+    const el = this._fieldSelect(id, ["", ...fields.filter(Boolean)], selected ?? "");
+    el.dataset.emptyLabel = emptyLabel;
+    const blank = [...el.options].find((o) => o.value === "");
+    if (blank) blank.textContent = emptyLabel;
+    return el;
+  }
+
+  _labeledSelect(id, options, selected = "") {
+    const select = document.createElement("select");
+    select.id = id;
+    select.className = "form-select";
+    for (const [value, label] of options) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      if (value === selected) option.selected = true;
+      select.appendChild(option);
+    }
+    return select;
+  }
+
+  _readGraphMapping(form) {
+    const val = (id) => form.querySelector(`#${id}`)?.value ?? "";
+    return {
+      nodeField: val("cfg-nodeField") || "node",
+      connectsToField: val("cfg-connectsToField") || "",
+      nodeLabelField: val("cfg-nodeLabelField"),
+      connectsToLabelField: val("cfg-connectsToLabelField"),
+      nodeCategoryField: val("cfg-nodeCategoryField"),
+      connectsToCategoryField: val("cfg-connectsToCategoryField"),
+      edgeLabelField: val("cfg-edgeLabelField"),
+      valueField: val("cfg-valField"),
+      layout: val("cfg-layout") || "force",
+    };
+  }
+
+  _paintGraphPreview(el, rows, config) {
+    el.replaceChildren();
+    const caption = document.createElement("div");
+    caption.className = "graph-mapping-preview-caption";
+    const sample = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+    const desc = sample ? describeGraphRow(sample, config) : null;
+
+    if (!sample) {
+      caption.textContent = "Every row adds a node. Use OPTIONAL MATCH so sensors without a neighbor still appear:";
+      const code = document.createElement("code");
+      code.textContent = "MATCH (a) OPTIONAL MATCH (a)-[r]->(b) RETURN a.id AS node, b.id AS connects_to";
+      el.append(caption, code);
+      return;
+    }
+    if (!desc.ok) {
+      caption.textContent = "This query row has no node id. Choose the Node column.";
+      el.append(caption);
+      return;
+    }
+
+    const path = document.createElement("div");
+    path.className = "graph-mapping-path";
+    const from = document.createElement("span");
+    from.className = "graph-mapping-node";
+    from.textContent = desc.fromLabel;
+    path.append(from);
+
+    if (desc.kind === "edge") {
+      caption.textContent = rows.length === 1
+        ? "This query row becomes a connection:"
+        : `First of ${rows.length} rows — this one is a connection:`;
+      const link = document.createElement("span");
+      link.className = "graph-mapping-link";
+      link.textContent = desc.edgeLabel ?? (desc.weight != null ? String(desc.weight) : "connects to");
+      const to = document.createElement("span");
+      to.className = "graph-mapping-node";
+      to.textContent = desc.toLabel;
+      path.append(link, to);
+    } else {
+      caption.textContent = rows.length === 1
+        ? "This query row becomes a disconnected node:"
+        : `First of ${rows.length} rows — this one is a disconnected node:`;
+    }
+
+    const note = document.createElement("div");
+    note.className = "graph-mapping-note";
+    note.textContent = "The same name is the same circle. A missing Connects to value leaves the node on the graph.";
+    el.append(caption, path, note);
   }
 
   _aggregationGroup(config, fieldOpts) {
