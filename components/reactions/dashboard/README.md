@@ -3,7 +3,7 @@
 `drasi-reaction-dashboard` serves an embeddable web dashboard UI from a Drasi reaction. It provides:
 
 - Drag-and-drop visual dashboard layout (Gridstack.js)
-- Chart/table/KPI/gauge/text/map widgets (ECharts + HTML widgets)
+- Chart/table/KPI/gauge/text/map/graph widgets (ECharts + HTML widgets)
 - Real-time query-result updates over WebSocket
 - Dashboard configuration CRUD via REST API
 - Persistence through DrasiLib `StateStoreProvider`
@@ -94,6 +94,31 @@ let reaction = DashboardReaction::builder("my-dashboard")
 | KPI | `"kpi"` | `queryId`, `valueField`, `aggregation`, `label` |
 | Markdown | `"text"` | `queryId`, `template` (Handlebars + Markdown) |
 | Map | `"map"` | `queryId`, `latField`, `lngField`, `valueField` |
+| Graph | `"graph"` | `queryId`, `nodeField`, `connectsToField` |
+
+**Every query row adds a node.** If the Connects-to column has a value, that row also draws an arrow. Isolated nodes stay on the graph.
+
+```cypher
+MATCH (a:SensorReading)
+OPTIONAL MATCH (a)-[r:CONNECTED_TO]->(b:SensorReading)
+RETURN a.sensor_id AS node,
+       b.sensor_id AS connects_to,
+       r.strength AS weight
+```
+
+```json
+{
+  "queryId": "sensor-mesh",
+  "nodeField": "node",
+  "connectsToField": "connects_to",
+  "valueField": "weight",
+  "layout": "force"
+}
+```
+
+`nodeField` is the node. `connectsToField` is the optional neighbor (omit or null = disconnected node). The same name in two rows is one circle.
+
+Optional: `nodeLabelField` / `connectsToLabelField` (display name), `nodeCategoryField` / `connectsToCategoryField` (color group), `edgeLabelField` (text on the line), `valueField` (size / weight), `layout` (`"force"` or `"circular"`).
 
 ### Aggregation Modes (KPI & Gauge)
 

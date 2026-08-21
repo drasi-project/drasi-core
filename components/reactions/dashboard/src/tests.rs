@@ -545,6 +545,7 @@ fn test_widget_type_enum_serializes_to_snake_case() {
         (WidgetTypeDto::Kpi, "kpi"),
         (WidgetTypeDto::Text, "text"),
         (WidgetTypeDto::Map, "map"),
+        (WidgetTypeDto::Graph, "graph"),
     ];
 
     for (variant, expected) in &cases {
@@ -564,6 +565,7 @@ fn test_widget_type_enum_deserializes_from_snake_case() {
         "kpi",
         "text",
         "map",
+        "graph",
     ] {
         let json = serde_json::Value::String(name.to_string());
         let result: Result<WidgetTypeDto, _> = serde_json::from_value(json);
@@ -641,6 +643,7 @@ fn test_schema_widget_type_is_enum_with_all_variants() {
         "kpi",
         "text",
         "map",
+        "graph",
     ];
     let actual: Vec<&str> = enum_values.iter().filter_map(|v| v.as_str()).collect();
     for e in &expected {

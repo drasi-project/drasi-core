@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
-use drasi_lib::schema::{NodeSchema, PropertySchema, PropertyType, SourceSchema};
+use drasi_lib::schema::{NodeSchema, PropertySchema, PropertyType, RelationSchema, SourceSchema};
 use log::{debug, info};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -58,6 +58,9 @@ pub struct MockSource {
     /// Tracks sensor IDs that have been seen for INSERT vs UPDATE logic.
     /// Only used when `config.data_type` is `SensorReading`.
     seen_sensors: Arc<RwLock<HashSet<u32>>>,
+
+    /// Live mesh of CONNECTED_TO edges when SensorReading.mesh is enabled.
+    mesh_state: Arc<RwLock<MeshState>>,
 }
 
 impl MockSource {
@@ -102,6 +105,7 @@ impl MockSource {
             base: SourceBase::new(params)?,
             config,
             seen_sensors: Arc::new(RwLock::new(HashSet::new())),
+            mesh_state: Arc::new(RwLock::new(MeshState::default())),
         })
     }
 
@@ -141,6 +145,7 @@ impl MockSource {
             base: SourceBase::new(params)?,
             config,
             seen_sensors: Arc::new(RwLock::new(HashSet::new())),
+            mesh_state: Arc::new(RwLock::new(MeshState::default())),
         })
     }
 }
@@ -163,8 +168,9 @@ impl Source for MockSource {
 
         let data_type_dto = match &self.config.data_type {
             DataType::Counter => DataTypeDto::Counter,
-            DataType::SensorReading { sensor_count } => DataTypeDto::SensorReading {
+            DataType::SensorReading { sensor_count, mesh } => DataTypeDto::SensorReading {
                 sensor_count: *sensor_count,
+                mesh: *mesh,
             },
             DataType::Generic => DataTypeDto::Generic,
         };
@@ -245,12 +251,26 @@ impl Source for MockSource {
             ),
         };
 
+        let relations = match &self.config.data_type {
+            DataType::SensorReading { mesh: true, .. } => vec![RelationSchema {
+                label: "CONNECTED_TO".to_string(),
+                from: Some("SensorReading".to_string()),
+                to: Some("SensorReading".to_string()),
+                properties: vec![PropertySchema {
+                    name: "strength".to_string(),
+                    data_type: Some(PropertyType::Float),
+                    description: Some("Link strength in the sensor mesh".to_string()),
+                }],
+            }],
+            _ => Vec::new(),
+        };
+
         Some(SourceSchema {
             nodes: vec![NodeSchema {
                 label: label.to_string(),
                 properties,
             }],
-            relations: Vec::new(),
+            relations,
         })
     }
 
@@ -272,11 +292,9 @@ impl Source for MockSource {
         let data_type = self.config.data_type.clone();
         let interval_ms = self.config.interval_ms;
 
-        // Clone seen_sensors for the task
+        // Clone seen_sensors / mesh state for the task
         let seen_sensors = Arc::clone(&self.seen_sensors);
-
-        // Clone seen_sensors for the task
-        let seen_sensors = Arc::clone(&self.seen_sensors);
+        let mesh_state = Arc::clone(&self.mesh_state);
 
         // Get instance_id from context for log routing isolation
         let instance_id = self
@@ -322,7 +340,7 @@ impl Source for MockSource {
                     seq += 1;
 
                     // Generate data based on type
-                    let source_change = match data_type {
+                    let source_change = match &data_type {
                         DataType::Counter => {
                             let element_id = format!("counter_{seq}");
                             let reference = ElementReference::new(&source_name, &element_id);
@@ -360,9 +378,17 @@ impl Source for MockSource {
 
                             SourceChange::Insert { element }
                         }
-                        DataType::SensorReading { sensor_count } => {
-                            // Constrain sensor_id to the configured number of sensors
-                            let sensor_id = rand::random::<u32>() % sensor_count;
+                        DataType::SensorReading { sensor_count, mesh } => {
+                            // When mesh is on, insert sensors 0..n-1 first so the graph
+                            // can appear as soon as every node exists.
+                            let sensor_id = if *mesh {
+                                let seen = seen_sensors.read().await;
+                                (0..*sensor_count)
+                                    .find(|id| !seen.contains(id))
+                                    .unwrap_or_else(|| rand::random::<u32>() % *sensor_count)
+                            } else {
+                                rand::random::<u32>() % *sensor_count
+                            };
                             // Use sensor_id as the element_id for stable identity
                             let element_id = format!("sensor_{sensor_id}");
                             let reference = ElementReference::new(&source_name, &element_id);
@@ -501,6 +527,23 @@ impl Source for MockSource {
                     .await
                     {
                         debug!("Failed to dispatch change: {e}");
+                    }
+
+                    if let DataType::SensorReading {
+                        sensor_count,
+                        mesh: true,
+                    } = &data_type
+                    {
+                        emit_mesh_tick(
+                            Arc::clone(&mesh_state),
+                            Arc::clone(&seen_sensors),
+                            *sensor_count,
+                            &source_name,
+                            &source_id,
+                            seq,
+                            base_dispatchers.clone(),
+                        )
+                        .await;
                     }
                 }
 
@@ -789,6 +832,7 @@ impl MockSourceBuilder {
             base: SourceBase::new(params)?,
             config,
             seen_sensors: Arc::new(RwLock::new(HashSet::new())),
+            mesh_state: Arc::new(RwLock::new(MeshState::default())),
         })
     }
 }
@@ -812,5 +856,223 @@ impl MockSource {
     /// ```
     pub fn builder(id: impl Into<String>) -> MockSourceBuilder {
         MockSourceBuilder::new(id)
+    }
+}
+
+type DispatcherList = Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>;
+
+#[derive(Debug, Clone)]
+struct MeshEdge {
+    from: u32,
+    to: u32,
+    id: String,
+    is_chord: bool,
+}
+
+#[derive(Debug, Default)]
+struct MeshState {
+    seeded: bool,
+    edges: Vec<MeshEdge>,
+    next_chord: u32,
+}
+
+fn random_strength() -> f64 {
+    0.3 + rand::random::<f64>() * 0.7
+}
+
+fn initial_mesh_edges(sensor_count: u32) -> Vec<MeshEdge> {
+    let mut edges = Vec::new();
+    if sensor_count < 2 {
+        return edges;
+    }
+
+    for i in 0..sensor_count {
+        let to = (i + 1) % sensor_count;
+        edges.push(MeshEdge {
+            from: i,
+            to,
+            id: format!("mesh_ring_{i}"),
+            is_chord: false,
+        });
+    }
+
+    let chord_count = ((sensor_count / 3).max(1)).min(sensor_count.saturating_sub(1));
+    for k in 0..chord_count {
+        let from = (k * 2) % sensor_count;
+        let span = (sensor_count / 2).max(2);
+        let to = (from + span) % sensor_count;
+        if from == to {
+            continue;
+        }
+        if to == (from + 1) % sensor_count || from == (to + 1) % sensor_count {
+            continue;
+        }
+        edges.push(MeshEdge {
+            from,
+            to,
+            id: format!("mesh_chord_{k}"),
+            is_chord: true,
+        });
+    }
+    edges
+}
+
+fn connected_to_element(source_name: &str, edge: &MeshEdge, strength: f64) -> Element {
+    let mut properties = ElementPropertyMap::new();
+    properties.insert(
+        "strength",
+        crate::conversion::json_to_element_value_or_default(
+            &Value::Number(
+                serde_json::Number::from_f64(strength).unwrap_or(serde_json::Number::from(1)),
+            ),
+            drasi_core::models::ElementValue::Null,
+        ),
+    );
+
+    Element::Relation {
+        metadata: ElementMetadata {
+            reference: ElementReference::new(source_name, &edge.id),
+            labels: Arc::from(vec![Arc::from("CONNECTED_TO")]),
+            effective_from: crate::time::get_system_time_millis().unwrap_or_else(|e| {
+                log::warn!("Failed to get timestamp for mesh edge: {e}");
+                chrono::Utc::now().timestamp_millis() as u64
+            }),
+        },
+        properties,
+        in_node: ElementReference::new(source_name, &format!("sensor_{}", edge.from)),
+        out_node: ElementReference::new(source_name, &format!("sensor_{}", edge.to)),
+    }
+}
+
+async fn dispatch_generated_change(
+    base_dispatchers: DispatcherList,
+    source_id: &str,
+    source_change: SourceChange,
+) {
+    let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
+    profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
+    let wrapper = SourceEventWrapper::with_profiling(
+        source_id.to_string(),
+        SourceEvent::Change(source_change),
+        chrono::Utc::now(),
+        profiling,
+    );
+    if let Err(e) = SourceBase::dispatch_from_task(base_dispatchers, wrapper, source_id).await {
+        debug!("Failed to dispatch mesh change: {e}");
+    }
+}
+
+async fn emit_mesh_tick(
+    mesh_state: Arc<RwLock<MeshState>>,
+    seen_sensors: Arc<RwLock<HashSet<u32>>>,
+    sensor_count: u32,
+    source_name: &str,
+    source_id: &str,
+    seq: u64,
+    base_dispatchers: DispatcherList,
+) {
+    let seen_count = seen_sensors.read().await.len() as u32;
+    if seen_count < sensor_count || sensor_count < 2 {
+        return;
+    }
+
+    let mut state = mesh_state.write().await;
+    if !state.seeded {
+        state.edges = initial_mesh_edges(sensor_count);
+        state.next_chord = state.edges.iter().filter(|e| e.is_chord).count() as u32;
+        let edges = state.edges.clone();
+        state.seeded = true;
+        drop(state);
+        for edge in edges {
+            dispatch_generated_change(
+                base_dispatchers.clone(),
+                source_id,
+                SourceChange::Insert {
+                    element: connected_to_element(source_name, &edge, random_strength()),
+                },
+            )
+            .await;
+        }
+        return;
+    }
+
+    if state.edges.is_empty() {
+        return;
+    }
+
+    if seq.is_multiple_of(7) {
+        if let Some(idx) = state
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.is_chord)
+            .map(|(i, _)| i)
+            .next()
+        {
+            let old = state.edges.remove(idx);
+            let existing: HashSet<(u32, u32)> =
+                state.edges.iter().map(|e| (e.from, e.to)).collect();
+            let mut replacement = None;
+            for _ in 0..16 {
+                let from = rand::random::<u32>() % sensor_count;
+                let to = rand::random::<u32>() % sensor_count;
+                if from == to || existing.contains(&(from, to)) {
+                    continue;
+                }
+                replacement = Some(MeshEdge {
+                    from,
+                    to,
+                    id: format!("mesh_chord_{}", state.next_chord),
+                    is_chord: true,
+                });
+                state.next_chord += 1;
+                break;
+            }
+            let new_edge = replacement;
+            drop(state);
+
+            dispatch_generated_change(
+                base_dispatchers.clone(),
+                source_id,
+                SourceChange::Delete {
+                    metadata: ElementMetadata {
+                        reference: ElementReference::new(source_name, &old.id),
+                        labels: Arc::from(vec![Arc::from("CONNECTED_TO")]),
+                        effective_from: crate::time::get_system_time_millis().unwrap_or(0),
+                    },
+                },
+            )
+            .await;
+
+            if let Some(edge) = new_edge {
+                {
+                    let mut state = mesh_state.write().await;
+                    state.edges.push(edge.clone());
+                }
+                dispatch_generated_change(
+                    base_dispatchers,
+                    source_id,
+                    SourceChange::Insert {
+                        element: connected_to_element(source_name, &edge, random_strength()),
+                    },
+                )
+                .await;
+            }
+            return;
+        }
+    }
+
+    if seq.is_multiple_of(3) {
+        let idx = (seq as usize) % state.edges.len();
+        let edge = state.edges[idx].clone();
+        drop(state);
+        dispatch_generated_change(
+            base_dispatchers,
+            source_id,
+            SourceChange::Update {
+                element: connected_to_element(source_name, &edge, random_strength()),
+            },
+        )
+        .await;
     }
 }
