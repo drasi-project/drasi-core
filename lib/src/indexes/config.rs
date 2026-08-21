@@ -26,15 +26,13 @@ pub struct StorageBackendConfig {
 
 /// Storage backend specification defining the type and parameters.
 ///
-/// In-memory storage is handled natively by drasi-lib. All persistent backends
-/// (e.g. `rocksdb`, `redis`) are first-class config plugins: drasi-lib does not
-/// carry backend-specific serialization for them. Instead a persistent backend is
-/// declared generically by its `kind` plus an opaque `config` payload, and the
-/// concrete provider is supplied at runtime via
-/// `DrasiLibBuilder::with_index_provider(name, provider)` (the provider name must
-/// match the backend id / referenced name).
+/// In-memory storage is handled natively by drasi-lib. Persistent backends
+/// (e.g. `rocksdb`, `redis`) are declared by `kind`, then supplied as configured
+/// provider instances through `DrasiLibBuilder::with_index_provider(name, provider)`.
+/// Backend-specific settings belong to the provider constructor, not this
+/// specification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all_fields = "camelCase")]
+#[serde(tag = "kind", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum StorageBackendSpec {
     /// In-memory storage backend (volatile, fast, no persistence)
     ///
@@ -53,23 +51,18 @@ pub enum StorageBackendSpec {
     /// A pluggable persistent storage backend identified by `kind`
     /// (e.g. `rocksdb`, `redis`).
     ///
-    /// The `config` payload is opaque to drasi-lib and is interpreted by the
-    /// backend's config plugin / injected provider. In embedded mode the backend
-    /// is satisfied by a named provider injected via `with_index_provider`.
+    /// In embedded mode the backend is satisfied by a named provider injected via
+    /// `with_index_provider`. Additional configuration properties are rejected
+    /// because drasi-lib cannot apply them to an already-constructed provider.
     ///
     /// # Example
     /// ```yaml
     /// kind: rocksdb
-    /// path: /data/drasi
-    /// enableArchive: true
     /// ```
     #[serde(untagged)]
     Plugin {
         /// Backend kind discriminator (e.g. "rocksdb", "redis")
         kind: String,
-        /// Opaque, backend-specific configuration payload
-        #[serde(flatten)]
-        config: serde_json::Value,
     },
 }
 
@@ -88,9 +81,15 @@ impl StorageBackendSpec {
     pub fn validate(&self) -> Result<(), String> {
         match self {
             StorageBackendSpec::Memory { .. } => Ok(()),
-            StorageBackendSpec::Plugin { kind, .. } => {
+            StorageBackendSpec::Plugin { kind } => {
                 if kind.trim().is_empty() {
                     return Err("Storage backend 'kind' must not be empty".to_string());
+                }
+                if kind.trim() == "memory" {
+                    return Err(
+                        "Storage backend kind 'memory' is reserved for the in-memory backend"
+                            .to_string(),
+                    );
                 }
                 Ok(())
             }
@@ -130,20 +129,11 @@ mod tests {
 
         let plugin = StorageBackendSpec::Plugin {
             kind: "rocksdb".to_string(),
-            config: serde_json::json!({
-                "path": "/data/drasi",
-                "enableArchive": true,
-            }),
         };
         let plugin_value = serde_json::to_value(&plugin).unwrap();
-        assert_eq!(plugin_value["kind"], "rocksdb");
-        assert_eq!(plugin_value["path"], "/data/drasi");
+        assert_eq!(plugin_value, serde_json::json!({ "kind": "rocksdb" }));
         match serde_json::from_value::<StorageBackendSpec>(plugin_value).unwrap() {
-            StorageBackendSpec::Plugin { kind, config } => {
-                assert_eq!(kind, "rocksdb");
-                assert_eq!(config["path"], "/data/drasi");
-                assert_eq!(config["enableArchive"], true);
-            }
+            StorageBackendSpec::Plugin { kind } => assert_eq!(kind, "rocksdb"),
             _ => panic!("Expected Plugin variant after JSON round-trip"),
         }
     }
@@ -174,52 +164,32 @@ enableArchive: true
     }
 
     #[test]
-    fn test_plugin_rocksdb_serde() {
+    fn test_plugin_properties_rejected() {
         let yaml = r#"
+id: rocks
 kind: rocksdb
 path: /data/drasi
 enableArchive: true
 directIo: false
 "#;
-        let spec: StorageBackendSpec = serde_yaml::from_str(yaml).unwrap();
-        match &spec {
-            StorageBackendSpec::Plugin { kind, config } => {
-                assert_eq!(kind, "rocksdb");
-                assert_eq!(config["path"], "/data/drasi");
-                assert_eq!(config["enableArchive"], true);
-                assert_eq!(config["directIo"], false);
-            }
-            _ => panic!("Expected Plugin variant"),
-        }
+        assert!(serde_yaml::from_str::<StorageBackendConfig>(yaml).is_err());
 
-        // Round-trip: Plugin variant preserves kind + opaque config
-        let serialized = serde_yaml::to_string(&spec).unwrap();
-        let deserialized: StorageBackendSpec = serde_yaml::from_str(&serialized).unwrap();
-        match deserialized {
-            StorageBackendSpec::Plugin { kind, config } => {
-                assert_eq!(kind, "rocksdb");
-                assert_eq!(config["path"], "/data/drasi");
-            }
-            _ => panic!("Expected Plugin variant after round-trip"),
-        }
+        let json = serde_json::json!({
+            "id": "rocks",
+            "kind": "rocksdb",
+            "path": "/data/drasi"
+        });
+        assert!(serde_json::from_value::<StorageBackendConfig>(json).is_err());
     }
 
     #[test]
-    fn test_plugin_redis_serde() {
-        let yaml = r#"
-kind: redis
-connectionString: "redis://localhost:6379"
-cacheSize: 10000
-"#;
-        let spec: StorageBackendSpec = serde_yaml::from_str(yaml).unwrap();
-        match spec {
-            StorageBackendSpec::Plugin { kind, config } => {
-                assert_eq!(kind, "redis");
-                assert_eq!(config["connectionString"], "redis://localhost:6379");
-                assert_eq!(config["cacheSize"], 10000);
-            }
+    fn test_plugin_without_config_serde() {
+        let spec: StorageBackendSpec = serde_yaml::from_str("kind: rocksdb").unwrap();
+        match &spec {
+            StorageBackendSpec::Plugin { kind } => assert_eq!(kind, "rocksdb"),
             _ => panic!("Expected Plugin variant"),
         }
+        assert!(spec.validate().is_ok());
     }
 
     #[test]
@@ -227,17 +197,11 @@ cacheSize: 10000
         let yaml = r#"
 id: rocks_persistent
 kind: rocksdb
-path: /data/drasi
-enableArchive: true
 "#;
         let config: StorageBackendConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.id, "rocks_persistent");
         match config.spec {
-            StorageBackendSpec::Plugin { kind, config } => {
-                assert_eq!(kind, "rocksdb");
-                assert_eq!(config["path"], "/data/drasi");
-                assert_eq!(config["enableArchive"], true);
-            }
+            StorageBackendSpec::Plugin { kind } => assert_eq!(kind, "rocksdb"),
             _ => panic!("Expected Plugin variant"),
         }
     }
@@ -296,19 +260,26 @@ enableArchive: false
     }
 
     #[test]
-    fn test_validate_plugin_ok() {
+    fn test_validate_plugin_without_config() {
         let spec = StorageBackendSpec::Plugin {
             kind: "rocksdb".to_string(),
-            config: serde_json::json!({ "path": "/data/drasi" }),
         };
         assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_plugin_memory_kind() {
+        let spec = StorageBackendSpec::Plugin {
+            kind: "memory".to_string(),
+        };
+        let err = spec.validate().unwrap_err();
+        assert!(err.contains("reserved"));
     }
 
     #[test]
     fn test_validate_plugin_empty_kind() {
         let spec = StorageBackendSpec::Plugin {
             kind: "   ".to_string(),
-            config: serde_json::json!({}),
         };
         assert!(spec.validate().is_err());
         let err = spec.validate().unwrap_err();
@@ -321,10 +292,8 @@ enableArchive: false
             enable_archive: false,
         };
         assert!(memory_spec.is_volatile());
-
         let plugin_spec = StorageBackendSpec::Plugin {
             kind: "rocksdb".to_string(),
-            config: serde_json::json!({ "path": "/data/drasi" }),
         };
         assert!(!plugin_spec.is_volatile());
     }
