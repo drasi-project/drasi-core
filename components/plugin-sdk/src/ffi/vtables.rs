@@ -667,6 +667,10 @@ pub struct StateStoreVtable {
     pub sync_fn: extern "C" fn(state: *mut c_void) -> FfiResult,
     // Cleanup
     pub drop_fn: extern "C" fn(state: *mut c_void),
+    /// Whether the host provider persists state durably across restarts.
+    ///
+    /// Appended in SDK 0.14.0. A missing callback is treated as non-durable.
+    pub is_durable_fn: Option<extern "C" fn(state: *mut c_void) -> bool>,
 }
 
 unsafe impl Send for StateStoreVtable {}
