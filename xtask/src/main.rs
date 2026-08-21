@@ -107,6 +107,11 @@ fn parse_plugin_type_kind(crate_name: &str) -> Option<(String, String)> {
     None
 }
 
+fn is_dynamic_plugin(package: &Package) -> bool {
+    package.features.contains_key("dynamic-plugin")
+        && parse_plugin_type_kind(&package.name).is_some()
+}
+
 fn host_target_triple() -> String {
     let output = Command::new("rustc")
         .args(["-vV"])
@@ -177,8 +182,7 @@ fn discover_dynamic_plugins() -> DiscoveryResult {
     let plugin_names: BTreeSet<String> = metadata
         .packages
         .iter()
-        .filter(|p| p.features.contains_key("dynamic-plugin"))
-        .filter(|p| parse_plugin_type_kind(&p.name).is_some())
+        .filter(|p| is_dynamic_plugin(p))
         .map(|p| p.name.clone())
         .collect();
     let build_batches = plugin_build_batches(&metadata.packages, &plugin_names);
@@ -186,7 +190,7 @@ fn discover_dynamic_plugins() -> DiscoveryResult {
     let plugins = metadata
         .packages
         .into_iter()
-        .filter(|p| p.features.contains_key("dynamic-plugin"))
+        .filter(is_dynamic_plugin)
         .filter_map(|p| {
             let (plugin_type, kind) = parse_plugin_type_kind(&p.name)?;
             Some(PluginInfo {
@@ -243,6 +247,12 @@ fn find_dependency_path(
     None
 }
 
+/// Groups plugins that can share a Cargo invocation without duplicate FFI exports.
+///
+/// Cargo unifies features across a build graph. If dependency-connected plugins
+/// enable `dynamic-plugin` together, both can export the same `drasi_plugin_*`
+/// symbols. Normal and build dependency paths therefore split batches; dev
+/// dependencies do not participate in `cargo build --lib` and are ignored.
 fn plugin_build_batches(packages: &[Package], plugin_names: &BTreeSet<String>) -> Vec<Vec<String>> {
     let mut graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for package in packages {
@@ -1601,6 +1611,73 @@ mod tests {
                     "drasi-reaction-example".to_string(),
                 ],
                 vec!["drasi-source-example".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn plugin_build_batches_ignore_dev_dependencies() {
+        let packages = vec![
+            package(
+                "drasi-bootstrap-example",
+                true,
+                vec![dependency("drasi-source-example", "*", Some("dev"))],
+            ),
+            package("drasi-source-example", true, Vec::new()),
+        ];
+        let plugin_names = BTreeSet::from([
+            "drasi-bootstrap-example".to_string(),
+            "drasi-source-example".to_string(),
+        ]);
+
+        assert_eq!(
+            plugin_build_batches(&packages, &plugin_names),
+            [vec![
+                "drasi-bootstrap-example".to_string(),
+                "drasi-source-example".to_string(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn plugin_build_batches_support_three_conflict_groups() {
+        let packages = vec![
+            package(
+                "drasi-bootstrap-a",
+                true,
+                vec![
+                    dependency("drasi-bootstrap-b", "*", None),
+                    dependency("drasi-bootstrap-c", "*", None),
+                ],
+            ),
+            package(
+                "drasi-bootstrap-b",
+                true,
+                vec![dependency("drasi-bootstrap-d", "*", None)],
+            ),
+            package(
+                "drasi-bootstrap-c",
+                true,
+                vec![dependency("drasi-bootstrap-d", "*", None)],
+            ),
+            package("drasi-bootstrap-d", true, Vec::new()),
+        ];
+        let plugin_names = BTreeSet::from([
+            "drasi-bootstrap-a".to_string(),
+            "drasi-bootstrap-b".to_string(),
+            "drasi-bootstrap-c".to_string(),
+            "drasi-bootstrap-d".to_string(),
+        ]);
+
+        assert_eq!(
+            plugin_build_batches(&packages, &plugin_names),
+            [
+                vec!["drasi-bootstrap-a".to_string()],
+                vec![
+                    "drasi-bootstrap-b".to_string(),
+                    "drasi-bootstrap-c".to_string(),
+                ],
+                vec!["drasi-bootstrap-d".to_string()],
             ]
         );
     }
