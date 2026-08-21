@@ -19,15 +19,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 
 #[derive(Deserialize)]
 struct CargoMetadata {
     packages: Vec<Package>,
     target_directory: PathBuf,
-    #[allow(dead_code)]
     workspace_root: PathBuf,
 }
 
@@ -57,7 +54,9 @@ struct Dependency {
 
 struct DiscoveryResult {
     plugins: Vec<PluginInfo>,
+    build_batches: Vec<Vec<String>>,
     target_directory: PathBuf,
+    workspace_root: PathBuf,
     sdk_version: String,
     core_version: String,
     lib_version: String,
@@ -175,6 +174,15 @@ fn discover_dynamic_plugins() -> DiscoveryResult {
         .map(|p| p.version.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
+    let plugin_names: BTreeSet<String> = metadata
+        .packages
+        .iter()
+        .filter(|p| p.features.contains_key("dynamic-plugin"))
+        .filter(|p| parse_plugin_type_kind(&p.name).is_some())
+        .map(|p| p.name.clone())
+        .collect();
+    let build_batches = plugin_build_batches(&metadata.packages, &plugin_names);
+
     let plugins = metadata
         .packages
         .into_iter()
@@ -191,7 +199,9 @@ fn discover_dynamic_plugins() -> DiscoveryResult {
 
     DiscoveryResult {
         plugins,
+        build_batches,
         target_directory: metadata.target_directory,
+        workspace_root: metadata.workspace_root,
         sdk_version,
         core_version,
         lib_version,
@@ -231,6 +241,44 @@ fn find_dependency_path(
     }
 
     None
+}
+
+fn plugin_build_batches(packages: &[Package], plugin_names: &BTreeSet<String>) -> Vec<Vec<String>> {
+    let mut graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for package in packages {
+        let dependencies = graph.entry(package.name.clone()).or_default();
+        dependencies.extend(
+            package
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency.path.is_some())
+                .filter(|dependency| {
+                    matches!(
+                        dependency.kind.as_deref(),
+                        None | Some("normal") | Some("build")
+                    )
+                })
+                .map(|dependency| dependency.name.clone()),
+        );
+    }
+
+    let conflicts = |left: &str, right: &str| {
+        find_dependency_path(&graph, left, right).is_some()
+            || find_dependency_path(&graph, right, left).is_some()
+    };
+
+    let mut batches: Vec<Vec<String>> = Vec::new();
+    for plugin in plugin_names {
+        if let Some(batch) = batches
+            .iter_mut()
+            .find(|batch| batch.iter().all(|other| !conflicts(plugin, other)))
+        {
+            batch.push(plugin.clone());
+        } else {
+            batches.push(vec![plugin.clone()]);
+        }
+    }
+    batches
 }
 
 fn versioned_dev_dependency_cycles(packages: &[Package]) -> Vec<String> {
@@ -479,6 +527,52 @@ fn build_command(build_tool: &str) -> Command {
     cmd
 }
 
+struct PluginBuildOptions<'a> {
+    build_tool: &'a str,
+    use_zigbuild: bool,
+    workspace_root: &'a Path,
+    target_directory: &'a Path,
+    plugins: &'a [String],
+    target: Option<&'a str>,
+    release: bool,
+    jobs: usize,
+}
+
+fn plugin_build_command(options: PluginBuildOptions<'_>) -> Command {
+    let mut cmd = build_command(options.build_tool);
+    cmd.current_dir(options.workspace_root);
+    if !options.use_zigbuild {
+        cmd.arg("build");
+    }
+    cmd.arg("--lib");
+    for plugin in options.plugins {
+        cmd.args(["-p", plugin]);
+    }
+
+    let features = options
+        .plugins
+        .iter()
+        .map(|name| format!("{name}/dynamic-plugin"))
+        .collect::<Vec<_>>()
+        .join(",");
+    cmd.args(["--features", &features]);
+
+    let target_directory = options
+        .target_directory
+        .strip_prefix(options.workspace_root)
+        .unwrap_or(options.target_directory);
+    cmd.arg("--target-dir").arg(target_directory);
+
+    if let Some(target) = options.target {
+        cmd.args(["--target", target]);
+    }
+    if options.release {
+        cmd.arg("--release");
+    }
+    cmd.args(["--jobs", &options.jobs.to_string()]);
+    cmd
+}
+
 fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
     for (i, arg) in args.iter().enumerate() {
         if arg == flag {
@@ -511,13 +605,16 @@ fn build_plugins(args: &[String]) {
     }
 
     let mode = if release { "release" } else { "debug" };
-    let target_dir = result.target_directory;
+    let target_dir = result.target_directory.clone();
 
     let build_dir = match &target {
         Some(t) => target_dir.join(t).join(mode),
         None => target_dir.join(mode),
     };
     let plugins_dir = build_dir.join("plugins");
+    if plugins_dir.exists() {
+        fs::remove_dir_all(&plugins_dir).expect("failed to clear plugins directory");
+    }
 
     let target_triple = target.clone().unwrap_or_else(host_target_triple);
 
@@ -583,114 +680,34 @@ fn build_plugins(args: &[String]) {
         jobs
     );
 
-    let failed = Arc::new(AtomicBool::new(false));
-    let target_dir = Arc::new(target_dir);
-    let target = Arc::new(target);
     // The value passed to `--target` on the build command. For zigbuild this is
     // the glibc-suffixed triple; otherwise it matches the canonical `target`.
-    let cmd_target = Arc::new(build_target.clone().or_else(|| (*target).clone()));
-    let build_tool_str = build_tool.to_string();
-    let plugins: Vec<_> = result
-        .plugins
-        .iter()
-        .map(|p| (p.package.name.clone(), p.package.manifest_path.clone()))
-        .collect();
-
-    if use_cross {
-        // cross must run from workspace root using -p, and sequentially
-        // (each invocation starts a Docker container)
-        for (name, _manifest) in &plugins {
-            if failed.load(Ordering::Relaxed) {
-                break;
-            }
-            println!("  Building {name}...");
-
-            let feature_flag = format!("{name}/dynamic-plugin");
-            let mut cmd = build_command(&build_tool_str);
-            cmd.args(["build", "--lib", "-p", name, "--features", &feature_flag]);
-
-            if let Some(t) = cmd_target.as_ref() {
-                cmd.args(["--target", t]);
-            }
-            if release {
-                cmd.arg("--release");
-            }
-
-            let status = cmd.status().expect("failed to run cross build");
-            if !status.success() {
-                eprintln!("Failed to build {name}");
-                failed.store(true, Ordering::Relaxed);
-            } else {
-                println!("  Built {name}");
-            }
+    let cmd_target = build_target.clone().or_else(|| target.clone());
+    println!(
+        "=== Split into {} dependency-safe Cargo batches ===",
+        result.build_batches.len()
+    );
+    for (index, batch) in result.build_batches.iter().enumerate() {
+        println!(
+            "=== Building batch {}/{} ({} plugins) ===",
+            index + 1,
+            result.build_batches.len(),
+            batch.len()
+        );
+        let mut cmd = plugin_build_command(PluginBuildOptions {
+            build_tool,
+            use_zigbuild,
+            workspace_root: &result.workspace_root,
+            target_directory: &result.target_directory,
+            plugins: batch,
+            target: cmd_target.as_deref(),
+            release,
+            jobs,
+        });
+        if !cmd.status().expect("failed to run plugin build").success() {
+            eprintln!("=== Plugin build failed in batch {} ===", index + 1);
+            std::process::exit(1);
         }
-    } else {
-        // cargo / cargo zigbuild: parallel builds with --manifest-path
-        let build_tool = Arc::new(build_tool_str);
-
-        for chunk in plugins.chunks(jobs) {
-            if failed.load(Ordering::Relaxed) {
-                break;
-            }
-
-            let handles: Vec<_> = chunk
-                .iter()
-                .map(|(name, manifest)| {
-                    let name = name.clone();
-                    let manifest = manifest.clone();
-                    let failed = Arc::clone(&failed);
-                    let target_dir = Arc::clone(&target_dir);
-                    let cmd_target = Arc::clone(&cmd_target);
-                    let build_tool = Arc::clone(&build_tool);
-
-                    thread::spawn(move || {
-                        println!("  Building {name}...");
-
-                        let mut cmd = build_command(build_tool.as_str());
-                        // `cargo zigbuild` is itself the build subcommand
-                        // (equivalent to `cargo build`), so only plain `cargo`
-                        // needs an explicit `build` here.
-                        if !use_zigbuild {
-                            cmd.arg("build");
-                        }
-                        cmd.args([
-                            "--lib",
-                            "--manifest-path",
-                            manifest.to_str().expect("invalid manifest path"),
-                            "--target-dir",
-                            target_dir.to_str().expect("invalid target dir"),
-                            "--features",
-                            "dynamic-plugin",
-                        ]);
-
-                        if let Some(t) = cmd_target.as_ref() {
-                            cmd.args(["--target", t]);
-                        }
-
-                        if release {
-                            cmd.arg("--release");
-                        }
-
-                        let status = cmd.status().expect("failed to run build command");
-                        if !status.success() {
-                            eprintln!("Failed to build {name}");
-                            failed.store(true, Ordering::Relaxed);
-                        } else {
-                            println!("  Built {name}");
-                        }
-                    })
-                })
-                .collect();
-
-            for h in handles {
-                h.join().expect("build thread panicked");
-            }
-        }
-    }
-
-    if failed.load(Ordering::Relaxed) {
-        eprintln!("=== Plugin build failed ===");
-        std::process::exit(1);
     }
 
     // Move plugin shared libraries to plugins/ subdirectory and generate metadata
@@ -1469,6 +1486,123 @@ mod tests {
         assert_eq!(zig.get_program(), "cargo");
         let args: Vec<_> = zig.get_args().collect();
         assert_eq!(args, ["zigbuild"]);
+    }
+
+    #[test]
+    fn plugin_build_command_batches_packages_and_features() {
+        let plugins = vec![
+            "drasi-source-http".to_string(),
+            "drasi-reaction-http".to_string(),
+        ];
+        let command = plugin_build_command(PluginBuildOptions {
+            build_tool: "cargo zigbuild",
+            use_zigbuild: true,
+            workspace_root: Path::new("/workspace"),
+            target_directory: Path::new("/workspace/target"),
+            plugins: &plugins,
+            target: Some("x86_64-unknown-linux-gnu.2.28"),
+            release: true,
+            jobs: 8,
+        });
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            args,
+            [
+                "zigbuild",
+                "--lib",
+                "-p",
+                "drasi-source-http",
+                "-p",
+                "drasi-reaction-http",
+                "--features",
+                "drasi-source-http/dynamic-plugin,drasi-reaction-http/dynamic-plugin",
+                "--target-dir",
+                "target",
+                "--target",
+                "x86_64-unknown-linux-gnu.2.28",
+                "--release",
+                "--jobs",
+                "8",
+            ]
+        );
+        assert_eq!(command.get_current_dir(), Some(Path::new("/workspace")));
+    }
+
+    #[test]
+    fn plugin_build_command_supports_plain_cargo_and_cross() {
+        let plugins = vec!["drasi-source-http".to_string()];
+        for build_tool in ["cargo", "cross"] {
+            let command = plugin_build_command(PluginBuildOptions {
+                build_tool,
+                use_zigbuild: false,
+                workspace_root: Path::new("/workspace"),
+                target_directory: Path::new("/cache/drasi-target"),
+                plugins: &plugins,
+                target: None,
+                release: false,
+                jobs: 4,
+            });
+            let args: Vec<_> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+
+            assert_eq!(command.get_program(), build_tool);
+            assert_eq!(
+                args,
+                [
+                    "build",
+                    "--lib",
+                    "-p",
+                    "drasi-source-http",
+                    "--features",
+                    "drasi-source-http/dynamic-plugin",
+                    "--target-dir",
+                    "/cache/drasi-target",
+                    "--jobs",
+                    "4",
+                ]
+            );
+            assert_eq!(command.get_current_dir(), Some(Path::new("/workspace")));
+        }
+    }
+
+    #[test]
+    fn plugin_build_batches_separate_transitive_plugin_dependencies() {
+        let packages = vec![
+            package(
+                "drasi-bootstrap-example",
+                true,
+                vec![dependency("example-common", "*", None)],
+            ),
+            package(
+                "example-common",
+                true,
+                vec![dependency("drasi-source-example", "*", Some("build"))],
+            ),
+            package("drasi-source-example", true, Vec::new()),
+            package("drasi-reaction-example", true, Vec::new()),
+        ];
+        let plugin_names = BTreeSet::from([
+            "drasi-bootstrap-example".to_string(),
+            "drasi-reaction-example".to_string(),
+            "drasi-source-example".to_string(),
+        ]);
+
+        assert_eq!(
+            plugin_build_batches(&packages, &plugin_names),
+            [
+                vec![
+                    "drasi-bootstrap-example".to_string(),
+                    "drasi-reaction-example".to_string(),
+                ],
+                vec!["drasi-source-example".to_string()],
+            ]
+        );
     }
 
     #[test]
