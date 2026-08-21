@@ -518,7 +518,7 @@ impl DrasiLibBuilder {
                     StorageBackendSpec::Memory { .. } => {
                         declared_memory.insert(b.id.as_str());
                     }
-                    StorageBackendSpec::Plugin { kind, .. } => {
+                    StorageBackendSpec::Plugin { kind } => {
                         declared_plugin.insert(b.id.as_str(), kind.as_str());
                     }
                 }
@@ -559,9 +559,7 @@ impl DrasiLibBuilder {
                             )));
                         }
                     }
-                    Some(StorageBackendRef::Inline(StorageBackendSpec::Plugin {
-                        kind, ..
-                    })) => {
+                    Some(StorageBackendRef::Inline(StorageBackendSpec::Plugin { kind })) => {
                         return Err(DrasiError::validation(format!(
                             "Query '{}' uses an inline '{}' storage backend, which is not \
                              supported in embedded mode. Declare a named storage backend and \
@@ -1330,7 +1328,6 @@ mod tests {
             id: "rocks".to_string(),
             spec: StorageBackendSpec::Plugin {
                 kind: "rocksdb".to_string(),
-                config: serde_json::json!({}),
             },
         };
         let query = Query::cypher("q")
@@ -1348,26 +1345,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_rejects_ignored_plugin_config() {
-        use crate::indexes::config::{StorageBackendConfig, StorageBackendSpec};
-
-        let backend = StorageBackendConfig {
-            id: "rocks".to_string(),
-            spec: StorageBackendSpec::Plugin {
-                kind: "rocksdb".to_string(),
-                config: serde_json::json!({ "path": "/data/drasi" }),
-            },
-        };
-        let err = DrasiLibBuilder::new()
-            .add_storage_backend(backend)
-            .build()
-            .await
-            .map(|_| ())
-            .expect_err("ignored plugin configuration should fail validation");
-        assert!(err.to_string().contains("ignored in embedded mode"));
-    }
-
-    #[tokio::test]
     async fn test_builder_inline_plugin_backend_errors() {
         use crate::indexes::config::{StorageBackendRef, StorageBackendSpec};
 
@@ -1375,7 +1352,6 @@ mod tests {
             .query("MATCH (n) RETURN n")
             .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::Plugin {
                 kind: "rocksdb".to_string(),
-                config: serde_json::json!({}),
             }))
             .build();
         let err = DrasiLibBuilder::new()

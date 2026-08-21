@@ -541,9 +541,10 @@ By default, query indexes are held in memory. For persistent state that survives
 Persistent backends are **named bindings to injected providers**: you construct the
 provider (e.g. `RocksDbIndexProvider` from the `drasi-index-rocksdb` crate), register
 it under a name with `with_index_provider`, and reference that name from queries.
-The registration name must match the backend id or `StorageBackendRef::Named` value
-(such as `rocks` below); it does not need to match the provider kind (`rocksdb`).
-Inline specs are supported for the in-memory backend only.
+A separate backend declaration is optional. When present, its id, the provider
+registration name, and the `StorageBackendRef::Named` value must match (such as
+`rocks` below); none needs to match the provider kind (`rocksdb`). Only in-memory
+backends can be configured inline.
 
 ```rust
 use drasi_index_rocksdb::RocksDbIndexProvider;
@@ -575,7 +576,7 @@ let core = DrasiLib::builder()
 | Variant | Fields | Notes |
 |---------|--------|-------|
 | `Memory` | `enable_archive: bool` | Default. Volatile — data lost on restart. Usable inline or named. |
-| `Plugin` | `kind: String` | Optional declaration for a persistent backend (`rocksdb`, `redis`). The injected provider's registration name must match the declaration id/query reference, not `kind`. Inline plugin specs and backend-specific properties are rejected in embedded mode. |
+| `Plugin` | `kind: String` | Declares a named persistent backend (`rocksdb`, `redis`) by kind. The declaration is optional when the provider is registered directly. When present, its id must match the provider registration name and query reference, not `kind`. Plugin backends cannot be configured inline. |
 
 The provider crates define their own construction options (for RocksDB:
 data path, archive on/off, direct I/O, and a shared memory budget). Apply those
