@@ -26,9 +26,9 @@ pub struct RocksIndexOptions {
 impl RocksIndexOptions {
     /// Create options with the memory resources used to open and maintain the index.
     ///
-    /// Per-column-family write-buffer sizes are captured from the shared
-    /// manager's current budget and remain fixed for the lifetime of these
-    /// options.
+    /// Per-column-family write-buffer sizes are computed once from the shared
+    /// manager's budget when `new` is called. They remain fixed for the
+    /// lifetime of these options, even if the manager's budget changes later.
     pub fn new(archive_enabled: bool, direct_io: bool, memory_budget: RocksDbMemoryBudget) -> Self {
         let (large_write_buffer_size, small_write_buffer_size) =
             crate::sizing::write_buffer_sizes_for_budget(
