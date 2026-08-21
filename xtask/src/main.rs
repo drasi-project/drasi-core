@@ -622,9 +622,6 @@ fn build_plugins(args: &[String]) {
         None => target_dir.join(mode),
     };
     let plugins_dir = build_dir.join("plugins");
-    if plugins_dir.exists() {
-        fs::remove_dir_all(&plugins_dir).expect("failed to clear plugins directory");
-    }
 
     let target_triple = target.clone().unwrap_or_else(host_target_triple);
 
