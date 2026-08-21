@@ -57,6 +57,7 @@ impl fmt::Display for RocksDbMemoryBudgetError {
 impl std::error::Error for RocksDbMemoryBudgetError {}
 
 struct RocksDbMemoryBudgetInner {
+    // Keeps the worker alive until the final shared budget owner is dropped.
     _monitor: BudgetMonitor,
     block_cache: Cache,
     block_cache_capacity_bytes: usize,
@@ -70,6 +71,9 @@ struct RocksDbMemoryBudgetInner {
 /// memtable reservations compete with data, index, and filter blocks under one
 /// cache capacity. Sustained write pressure therefore reduces block-cache
 /// headroom rather than exceeding the combined bound.
+///
+/// Each independently constructed budget owns one monitoring thread. Clones
+/// share that monitor along with the cache and write-buffer manager.
 #[derive(Clone)]
 pub struct RocksDbMemoryBudget {
     inner: Arc<RocksDbMemoryBudgetInner>,

@@ -28,6 +28,7 @@ const SATURATED_LOG_INTERVAL: Duration = Duration::from_secs(30);
 // only total usage, which is always at least the mutable usage.
 const SATURATION_NUMERATOR: usize = 7;
 const SATURATION_DENOMINATOR: usize = 8;
+// Recover one eighth below the saturation threshold to prevent log flapping.
 const RECOVERY_NUMERATOR: usize = 3;
 const RECOVERY_DENOMINATOR: usize = 4;
 
@@ -181,14 +182,21 @@ fn log_event(event: SaturationEvent) {
     log::log!(event.kind.log_level(), "{event}");
 }
 
+/// Owns the worker that logs shared memory-budget pressure.
+///
+/// Dropping the monitor stops and joins the worker.
 pub(crate) struct BudgetMonitor {
     shutdown: Option<Sender<()>>,
-    // The worker is private and exposes no state that can be observed after
-    // unwinding; preserve the public budget types' existing unwind-safety.
+    // JoinHandle is not RefUnwindSafe. The worker state is never observed
+    // after a panic, so wrapping it preserves the public types' unwind safety.
     worker: Option<AssertUnwindSafe<JoinHandle<()>>>,
 }
 
 impl BudgetMonitor {
+    /// Starts a worker that samples usage every [`POLL_INTERVAL`].
+    ///
+    /// If thread creation fails, logs the error and returns an inactive monitor
+    /// so diagnostics cannot prevent the index from starting.
     pub(crate) fn start(write_buffer_manager: WriteBufferManager, block_cache: Cache) -> Self {
         match spawn_worker(
             POLL_INTERVAL,
@@ -217,6 +225,8 @@ impl Drop for BudgetMonitor {
             let _ = shutdown.send(());
         }
         if let Some(AssertUnwindSafe(worker)) = self.worker.take() {
+            // Production never moves the monitor onto its worker, but avoid a
+            // self-join deadlock if that ownership changes.
             if worker.thread().id() == thread::current().id() {
                 return;
             }
