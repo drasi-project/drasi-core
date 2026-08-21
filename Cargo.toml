@@ -62,6 +62,7 @@ members = [
   "components/sources/cloudflare-radar",
   "components/sources/neo4j",
   "components/sources/kafka",
+  "components/sources/otel",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -201,6 +202,7 @@ drasi-oracle-common = { version = "0.1.7", path = "components/oracle-common" }
 drasi-postgres-common = { version = "0.1.0", path = "components/postgres-common" }
 drasi-source-mapping = { version = "0.1.5", path = "components/sources/mapping" }
 drasi-source-kafka = { version = "0.1.5", path = "components/sources/kafka" }
+drasi-source-otel = { version = "0.1.0", path = "components/sources/otel", default-features = false }
 drasi-bootstrap-kafka = { version = "0.1.5", path = "components/bootstrappers/kafka" }
 drasi-source-gtfs-rt = { version = "0.1.6", path = "components/sources/gtfs-rt" }
 drasi-bootstrap-gtfs-rt = { version = "0.1.6", path = "components/bootstrappers/gtfs-rt" }
