@@ -3825,3 +3825,26 @@ async fn test_bootstrap_plugin_backpressure_across_cdylib() {
     assert_eq!(result.event_count, N);
     assert_eq!(drained, N, "all events must arrive after the stall");
 }
+
+/// Verify that `on_subscriptions_complete()` is wired through FFI and returns
+/// without error.  The mock source uses the default no-op, so this test
+/// confirms the new vtable slot is present and reachable; it is paired with
+/// the unit tests in `plugin-sdk/src/ffi/vtable_gen.rs` that verify exact
+/// one-call routing and panic capture on the non-cdylib path.
+#[tokio::test]
+#[serial]
+#[ignore = "requires cdylib: cargo build --lib -p drasi-source-mock --features dynamic-plugin"]
+async fn test_ffi_on_subscriptions_complete() {
+    if !plugin_exists("drasi-source-mock") {
+        panic!("SKIP: drasi-source-mock not built as cdylib");
+    }
+    let (_plugin, source, _rx) = create_started_mock_source("subscriptions-complete-test").await;
+
+    // Must complete without panicking or returning an FFI error.
+    source
+        .on_subscriptions_complete()
+        .await
+        .expect("on_subscriptions_complete must succeed");
+
+    source.stop().await.expect("Should stop");
+}

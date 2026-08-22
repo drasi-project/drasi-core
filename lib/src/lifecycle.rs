@@ -132,7 +132,7 @@ impl LifecycleManager {
         // Notify sources that all initial subscriptions are done. Sources that
         // held back upstream feedback (e.g., Postgres flush-fence) can now
         // resume normal advancement based on the min-watermark of all handles.
-        self.source_manager.subscriptions_complete().await;
+        self.source_manager.subscriptions_complete().await?;
 
         // Start reactions last — queries are running so snapshot fetching works.
         // The reaction subscribes to the query outbox and catches up on any

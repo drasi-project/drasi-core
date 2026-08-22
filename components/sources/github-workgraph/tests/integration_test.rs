@@ -16,7 +16,7 @@
 
 use async_trait::async_trait;
 use drasi_core::models::{
-    Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
 use drasi_lib::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
@@ -32,20 +32,27 @@ use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::wal::{CapacityPolicy, WalProvider};
 use drasi_lib::{DurabilityConfig, Source};
 use drasi_source_github_workgraph::config::{
-    GitHubWorkGraphSourceConfig, LeaseTrust, TaskIssueType, TrustedIdentity, WebhookConfig,
-    WorkerConfig,
+    AgentConfig, GitHubWorkGraphSourceConfig, LeaseTrust, TaskIssueType, TrustedIdentity,
+    WebhookConfig,
 };
+use drasi_source_github_workgraph::lease_ledger::{AllocationArtifact, AllocationEvent};
+use drasi_source_github_workgraph::mapping::Converter;
 use drasi_source_github_workgraph::source::{GitHubWorkGraphSource, GitHubWorkGraphSourceBuilder};
 use drasi_state_store_redb::RedbStateStoreProvider;
 use drasi_wal_redb::RedbWalProvider;
 use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
-use sha2::Sha256;
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::HashSet,
+    sync::{atomic::Ordering, Arc},
+    time::Duration,
+};
 use tempfile::TempDir;
 
 const ID: &str = "gh-workgraph-it";
 const SECRET: &str = "webhook-secret";
+const VALIDATION_TOKEN: &str = "lease-validation-token";
 const PER_ISSUE: usize = 4;
 
 struct Harness {
@@ -86,12 +93,13 @@ impl Harness {
                 name: "WorkGraphTask".into(),
             },
             repositories: Vec::new(),
-            worker_config: None,
+            agent_config: None,
             lease_trust: None,
             webhook: WebhookConfig {
                 host: "127.0.0.1".into(),
                 port,
                 secret: SECRET.into(),
+                lease_validation_token: VALIDATION_TOKEN.into(),
                 ..WebhookConfig::default()
             },
             durability: DurabilityConfig {
@@ -340,20 +348,20 @@ async fn u64_replay_pruning_restart_and_external_bootstrap_handoff_work() {
 }
 
 // ---------------------------------------------------------------------------
-// Worker queue convergence over a live webhook `push` delivery.
+// Agent capacity convergence over a live webhook `push` delivery.
 // ---------------------------------------------------------------------------
 
-const WORKER_PATH: &str = ".github/workgraph/workers.yaml";
+const AGENT_PATH: &str = ".github/workgraph/agents.yaml";
 
-fn worker_file(slots: u32) -> String {
+fn agent_file(slots: u32) -> String {
     format!(
-        "version: 1\nworkers:\n  - workerId: validator-1\n    agentProfile: issue-validator\n    \
+        "version: 1\nagents:\n  - agentId: issue-validator\n    \
          slots: {slots}\n    leaseDuration: PT15M\n"
     )
 }
 
-/// Mount the worker-file blob query so every fetch returns `text`.
-async fn mount_worker_blob(server: &wiremock::MockServer, text: &str) {
+/// Mount the agent-file blob query so every fetch returns `text`.
+async fn mount_agent_blob(server: &wiremock::MockServer, text: &str) {
     server.reset().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/graphql"))
@@ -382,7 +390,7 @@ fn push(git_ref: &str, repository: &str, touched: &str) -> Value {
     })
 }
 
-async fn worker_harness(server: &wiremock::MockServer) -> Harness {
+async fn agent_harness(server: &wiremock::MockServer) -> Harness {
     let tmp = TempDir::new().unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -397,11 +405,20 @@ async fn worker_harness(server: &wiremock::MockServer) -> Harness {
             name: "WorkGraphTask".into(),
         },
         repositories: Vec::new(),
-        lease_trust: None,
-        worker_config: Some(WorkerConfig {
+        lease_trust: Some(LeaseTrust {
+            dispatchers: vec![TrustedIdentity {
+                id: "U_assigner".into(),
+                login: "assigner".into(),
+            }],
+            reporters: vec![TrustedIdentity {
+                id: "U_reporter".into(),
+                login: "reporter".into(),
+            }],
+        }),
+        agent_config: Some(AgentConfig {
             repository: "acme/w".into(),
             r#ref: "main".into(),
-            path: WORKER_PATH.into(),
+            path: AGENT_PATH.into(),
             token: "read-only-token".into(),
             api_base_url: format!("{}/graphql", server.uri()),
         }),
@@ -409,6 +426,7 @@ async fn worker_harness(server: &wiremock::MockServer) -> Harness {
             host: "127.0.0.1".into(),
             port,
             secret: SECRET.into(),
+            lease_validation_token: VALIDATION_TOKEN.into(),
             ..WebhookConfig::default()
         },
         durability: DurabilityConfig {
@@ -444,30 +462,735 @@ async fn wal_ids(harness: &Harness, from: u64) -> Vec<String> {
         .collect()
 }
 
+async fn wal_changes(harness: &Harness, from: u64) -> Vec<SourceChange> {
+    harness
+        .wal
+        .read_from(ID, from)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, change)| change)
+        .collect()
+}
+
+fn change_label(change: &SourceChange) -> &str {
+    let metadata = match change {
+        SourceChange::Delete { metadata } => metadata,
+        SourceChange::Insert { element } | SourceChange::Update { element } => {
+            element.get_metadata()
+        }
+        SourceChange::Future { .. } => panic!("unexpected future change"),
+    };
+    &metadata.labels[0]
+}
+
+fn change_id(change: &SourceChange) -> &str {
+    change.get_reference().element_id.as_ref()
+}
+
+fn node_property<'a>(
+    changes: &'a [SourceChange],
+    node_id: &str,
+    key: &str,
+) -> Option<&'a ElementValue> {
+    changes.iter().rev().find_map(|change| match change {
+        SourceChange::Insert {
+            element:
+                Element::Node {
+                    metadata,
+                    properties,
+                },
+        }
+        | SourceChange::Update {
+            element:
+                Element::Node {
+                    metadata,
+                    properties,
+                },
+        } if metadata.reference.element_id.as_ref() == node_id => properties.get(key),
+        _ => None,
+    })
+}
+
+fn assignment_body(agent_id: &str) -> String {
+    format!("WorkGraphTaskAssignment/v1\n\n```json\n{{\n  \"agentId\": \"{agent_id}\"\n}}\n```\n")
+}
+
+fn result_body(task_type: &str, lease_id: &str) -> String {
+    match task_type {
+        "validate-issue" => format!(
+            "WorkGraphTaskResult/v1\n\n```json\n{{\n  \"taskType\": \"validate-issue\",\n  \
+             \"leaseId\": \"{lease_id}\",\n  \"outcome\": \"succeeded\",\n  \"summary\": \
+             \"Validated the issue.\",\n  \"result\": {{\n    \"criteria\": [\n      {{\n        \
+             \"criterion\": \"Acceptance criteria\",\n        \"passed\": true,\n        \
+             \"evidence\": \"Present.\"\n      }}\n    ]\n  }}\n}}\n```\n"
+        ),
+        "request-info" => format!(
+            "WorkGraphTaskResult/v1\n\n```json\n{{\n  \"taskType\": \"request-info\",\n  \
+             \"leaseId\": \"{lease_id}\",\n  \"outcome\": \"succeeded\",\n  \"summary\": \
+             \"Requested information.\",\n  \"result\": {{\n    \"requestCommentNodeId\": \
+             \"IC_request\"\n  }}\n}}\n```\n"
+        ),
+        _ => panic!("unsupported task type"),
+    }
+}
+
+fn task_comment(
+    task_id: &str,
+    task_state: &str,
+    comment_id: &str,
+    body: &str,
+    author_login: &str,
+    author_id: &str,
+) -> Value {
+    let task_body = r#"WorkGraphTask/v1
+
+```yaml
+taskType: validate-issue
+inputs:
+  validationProfile: new-issue-default
+```
+"#;
+    json!({
+        "action": "created",
+        "organization": {"login": "acme", "node_id": "O_1"},
+        "repository": {
+            "node_id": "R_7", "name": "w", "full_name": "acme/w",
+            "owner": {"login": "acme"}
+        },
+        "issue": {
+            "node_id": task_id, "id": 1, "number": 1, "title": "t",
+            "body": task_body,
+            "state": task_state, "labels": [],
+            "type": {"node_id": "IT_test", "name": "WorkGraphTask"},
+            "user": {"login": "ada", "node_id": "U_1", "id": 1, "type": "User"}
+        },
+        "comment": {
+            "node_id": comment_id, "id": 9, "body": body,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "html_url": format!("https://github.com/acme/w/issues/1#{comment_id}"),
+            "user": {
+                "login": author_login, "node_id": author_id, "id": 2, "type": "User"
+            }
+        }
+    })
+}
+
+fn assert_agent_counts(
+    changes: &[SourceChange],
+    queue_depth: i64,
+    active_lease_count: i64,
+    available_slot_count: i64,
+) {
+    let agent = "workgraph-agent:issue-validator";
+    assert_eq!(
+        node_property(changes, agent, "queueDepth"),
+        Some(&ElementValue::Integer(queue_depth))
+    );
+    assert_eq!(
+        node_property(changes, agent, "activeLeaseCount"),
+        Some(&ElementValue::Integer(active_lease_count))
+    );
+    assert_eq!(
+        node_property(changes, agent, "availableSlotCount"),
+        Some(&ElementValue::Integer(available_slot_count))
+    );
+}
+
+async fn validate_lease(harness: &Harness, request: &Value) -> u16 {
+    reqwest::Client::new()
+        .post(format!("{}/lease/validate", harness.url))
+        .bearer_auth(VALIDATION_TOKEN)
+        .json(request)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+#[tokio::test]
+async fn signed_source_contract_capacity_gates_leases_not_queue() {
+    let server = wiremock::MockServer::start().await;
+    mount_agent_blob(&server, &agent_file(1)).await;
+    let harness = agent_harness(&server).await;
+
+    let assignment_a = task_comment(
+        "I_A",
+        "open",
+        "IC_A",
+        &assignment_body("issue-validator"),
+        "assigner",
+        "U_assigner",
+    );
+    let before_a = harness.wal.head_sequence(ID).await.unwrap();
+    assert_eq!(
+        harness
+            .post("issue_comment", "assignment-a", &assignment_a)
+            .await,
+        202
+    );
+    let changes_a = wal_changes(&harness, before_a + 1).await;
+    assert_eq!(
+        node_property(&changes_a, "IC_A", "trusted"),
+        Some(&ElementValue::Bool(true))
+    );
+    let lease_a = hex::encode(Sha256::digest(b"I_A\0IC_A\0\x31"));
+    assert!(changes_a.iter().any(|change| {
+        change_id(change) == format!("workgraph-lease:I_A:{lease_a}")
+            && change_label(change) == "WorkGraphTaskLease"
+    }));
+    assert_agent_counts(&changes_a, 0, 1, 0);
+
+    let assignment_b = task_comment(
+        "I_B",
+        "open",
+        "IC_B",
+        &assignment_body("issue-validator"),
+        "assigner",
+        "U_assigner",
+    );
+    let before_b = harness.wal.head_sequence(ID).await.unwrap();
+    assert_eq!(
+        harness
+            .post("issue_comment", "assignment-b", &assignment_b)
+            .await,
+        202
+    );
+    let changes_b = wal_changes(&harness, before_b + 1).await;
+    assert!(!changes_b.iter().any(|change| {
+        change_label(change) == "WorkGraphTaskLease"
+            && matches!(
+                change,
+                SourceChange::Insert { .. } | SourceChange::Update { .. }
+            )
+    }));
+    assert_agent_counts(&changes_b, 1, 1, 0);
+
+    let untrusted = task_comment(
+        "I_untrusted",
+        "open",
+        "IC_untrusted",
+        &assignment_body("issue-validator"),
+        "mallory",
+        "U_mallory",
+    );
+    let before = harness.wal.head_sequence(ID).await.unwrap();
+    assert_eq!(
+        harness
+            .post("issue_comment", "assignment-untrusted", &untrusted)
+            .await,
+        202
+    );
+    let changes = wal_changes(&harness, before + 1).await;
+    assert_eq!(
+        node_property(&changes, "IC_untrusted", "trusted"),
+        Some(&ElementValue::Bool(false))
+    );
+    assert!(!changes
+        .iter()
+        .any(|change| change_label(change) == "WorkGraphTaskLease"));
+
+    let malformed = task_comment(
+        "I_malformed",
+        "open",
+        "IC_malformed",
+        "WorkGraphTaskAssignment/v1\n\n```json\n{}\n```\n",
+        "assigner",
+        "U_assigner",
+    );
+    let before = harness.wal.head_sequence(ID).await.unwrap();
+    assert_eq!(
+        harness
+            .post("issue_comment", "assignment-malformed", &malformed)
+            .await,
+        202
+    );
+    let changes = wal_changes(&harness, before + 1).await;
+    assert!(changes
+        .iter()
+        .any(|change| change_label(change) == "WorkGraphError"));
+    assert!(!changes
+        .iter()
+        .any(|change| change_label(change) == "WorkGraphTaskLease"));
+
+    let unknown = task_comment(
+        "I_unknown",
+        "open",
+        "IC_unknown",
+        &assignment_body("issue-risk-profiler"),
+        "assigner",
+        "U_assigner",
+    );
+    let before = harness.wal.head_sequence(ID).await.unwrap();
+    assert_eq!(
+        harness
+            .post("issue_comment", "assignment-unknown", &unknown)
+            .await,
+        202
+    );
+    let changes = wal_changes(&harness, before + 1).await;
+    assert_eq!(
+        node_property(&changes, "IC_unknown", "trusted"),
+        Some(&ElementValue::Bool(false))
+    );
+    assert!(changes.iter().any(|change| {
+        change_label(change) == "ASSIGNED_TO"
+            && change_id(change) == "ASSIGNED_TO:IC_unknown:workgraph-agent:issue-risk-profiler"
+    }));
+    assert!(!changes
+        .iter()
+        .any(|change| change_label(change) == "WorkGraphTaskLease"));
+    let stored = harness
+        .store
+        .get(ID, "allocator:state")
+        .await
+        .unwrap()
+        .unwrap();
+    let state: Value = serde_json::from_slice(&stored).unwrap();
+    assert_eq!(state["queue"].as_object().unwrap().len(), 2);
+    assert!(state["queue"].get("IC_unknown").is_none());
+    assert!(state["comments"].get("IC_unknown").is_none());
+    assert_eq!(state["active"].as_object().unwrap().len(), 1);
+    let unknown_lease = hex::encode(Sha256::digest(b"I_unknown\0IC_unknown\0\x31"));
+    assert_eq!(
+        validate_lease(
+            &harness,
+            &json!({
+                "taskNodeId": "I_unknown",
+                "leaseId": unknown_lease,
+                "assignmentCommentNodeId": "IC_unknown",
+                "agentId": "issue-risk-profiler",
+                "slotId": "issue-risk-profiler/1"
+            }),
+        )
+        .await,
+        409
+    );
+
+    let closed = task_comment(
+        "I_closed",
+        "closed",
+        "IC_closed",
+        &assignment_body("issue-validator"),
+        "assigner",
+        "U_assigner",
+    );
+    let before = harness.wal.head_sequence(ID).await.unwrap();
+    assert_eq!(
+        harness
+            .post("issue_comment", "assignment-closed", &closed)
+            .await,
+        202
+    );
+    let changes = wal_changes(&harness, before + 1).await;
+    assert_eq!(
+        node_property(&changes, "IC_closed", "trusted"),
+        Some(&ElementValue::Bool(false))
+    );
+    assert!(!changes
+        .iter()
+        .any(|change| change_label(change) == "WorkGraphTaskLease"));
+
+    harness.source.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn signed_source_contract_exact_result_releases_and_refills() {
+    let server = wiremock::MockServer::start().await;
+    mount_agent_blob(&server, &agent_file(1)).await;
+    let harness = agent_harness(&server).await;
+    for (delivery, task, comment) in [
+        ("assignment-a", "I_A", "IC_A"),
+        ("assignment-b", "I_B", "IC_B"),
+    ] {
+        let payload = task_comment(
+            task,
+            "open",
+            comment,
+            &assignment_body("issue-validator"),
+            "assigner",
+            "U_assigner",
+        );
+        assert_eq!(harness.post("issue_comment", delivery, &payload).await, 202);
+    }
+    let old_lease = hex::encode(Sha256::digest(b"I_A\0IC_A\0\x31"));
+    let old_request = json!({
+        "taskNodeId": "I_A",
+        "leaseId": old_lease.clone(),
+        "assignmentCommentNodeId": "IC_A",
+        "agentId": "issue-validator",
+        "slotId": "issue-validator/1"
+    });
+
+    let rejected = [
+        (
+            "untrusted-result",
+            task_comment(
+                "I_A",
+                "open",
+                "IC_untrusted_result",
+                &result_body("validate-issue", &old_lease),
+                "mallory",
+                "U_mallory",
+            ),
+        ),
+        (
+            "wrong-lease-result",
+            task_comment(
+                "I_A",
+                "open",
+                "IC_wrong_lease",
+                &result_body("validate-issue", "wrong-lease"),
+                "reporter",
+                "U_reporter",
+            ),
+        ),
+        (
+            "wrong-task-result",
+            task_comment(
+                "I_other",
+                "open",
+                "IC_wrong_task",
+                &result_body("validate-issue", &old_lease),
+                "reporter",
+                "U_reporter",
+            ),
+        ),
+        (
+            "wrong-type-result",
+            task_comment(
+                "I_A",
+                "open",
+                "IC_wrong_type",
+                &result_body("request-info", &old_lease),
+                "reporter",
+                "U_reporter",
+            ),
+        ),
+    ];
+    for (delivery, payload) in rejected {
+        let before = harness.wal.head_sequence(ID).await.unwrap();
+        assert_eq!(harness.post("issue_comment", delivery, &payload).await, 202);
+        let changes = wal_changes(&harness, before + 1).await;
+        let result_id = payload["comment"]["node_id"].as_str().unwrap();
+        assert_eq!(
+            node_property(&changes, result_id, "trusted"),
+            Some(&ElementValue::Bool(false))
+        );
+        assert!(!changes.iter().any(|change| {
+            change_label(change) == "WorkGraphTaskLease"
+                && matches!(change, SourceChange::Delete { .. })
+        }));
+        assert_eq!(validate_lease(&harness, &old_request).await, 200);
+    }
+
+    let exact = task_comment(
+        "I_A",
+        "open",
+        "IC_result",
+        &result_body("validate-issue", &old_lease),
+        "reporter",
+        "U_reporter",
+    );
+    let before = harness.wal.head_sequence(ID).await.unwrap();
+    assert_eq!(
+        harness.post("issue_comment", "exact-result", &exact).await,
+        202
+    );
+    let changes = wal_changes(&harness, before + 1).await;
+    assert_eq!(
+        node_property(&changes, "IC_result", "trusted"),
+        Some(&ElementValue::Bool(true))
+    );
+    assert_eq!(
+        changes
+            .iter()
+            .map(|change| {
+                (
+                    change_label(change),
+                    matches!(change, SourceChange::Delete { .. }),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            ("WorkGraphTaskResult", false),
+            ("COMMENT_ON", false),
+            ("RESULT_FOR", false),
+            ("LEASE_FOR", true),
+            ("LEASES_SLOT", true),
+            ("WorkGraphTaskLease", true),
+            ("WorkGraphTaskLease", false),
+            ("LEASE_FOR", false),
+            ("LEASES_SLOT", false),
+            ("WorkGraphAgent", false),
+        ]
+    );
+    assert_agent_counts(&changes, 0, 1, 0);
+    let new_lease = hex::encode(Sha256::digest(b"I_B\0IC_B\0\x31"));
+    let new_request = json!({
+        "taskNodeId": "I_B",
+        "leaseId": new_lease,
+        "assignmentCommentNodeId": "IC_B",
+        "agentId": "issue-validator",
+        "slotId": "issue-validator/1"
+    });
+    assert_eq!(validate_lease(&harness, &old_request).await, 409);
+    assert_eq!(validate_lease(&harness, &new_request).await, 200);
+
+    let late = task_comment(
+        "I_A",
+        "open",
+        "IC_late",
+        &result_body("validate-issue", &old_lease),
+        "reporter",
+        "U_reporter",
+    );
+    let before = harness.wal.head_sequence(ID).await.unwrap();
+    assert_eq!(
+        harness.post("issue_comment", "late-result", &late).await,
+        202
+    );
+    let changes = wal_changes(&harness, before + 1).await;
+    assert_eq!(
+        node_property(&changes, "IC_late", "trusted"),
+        Some(&ElementValue::Bool(false))
+    );
+    assert!(!changes.iter().any(|change| {
+        change_label(change) == "WorkGraphTaskLease"
+            && matches!(change, SourceChange::Delete { .. })
+    }));
+    assert_eq!(validate_lease(&harness, &new_request).await, 200);
+
+    harness.source.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn restart_pruning_waits_for_all_startup_subscriptions() {
+    let h = Harness::new(10_000).await;
+    for n in 0..3 {
+        assert_eq!(
+            h.post("issues", &format!("startup-{n}"), &issue(&format!("I_{n}")))
+                .await,
+            202
+        );
+    }
+    let head = h.wal.head_sequence(ID).await.unwrap();
+    assert_eq!(head, 3 * PER_ISSUE as u64);
+    h.source.stop().await.unwrap();
+
+    let restarted = Harness::build(10_000, h.port);
+    h.initialize(&restarted).await;
+    restarted.start().await.unwrap();
+
+    // The first query registers its durable position and catches up completely.
+    let mut early = restarted
+        .subscribe(settings("early", Some(0), false))
+        .await
+        .unwrap();
+    let early_position = early.position_handle.take().unwrap();
+    let early_replay = drain(&mut early.receiver, head as usize).await;
+    assert_eq!(
+        early_replay.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+        (1..=head).collect::<Vec<_>>()
+    );
+    early_position.store(head, Ordering::Release);
+
+    // More than one dispatch tick passes before the next query registers. The
+    // startup fence must retain the WAL despite the early query reaching head.
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    assert_eq!(h.wal.event_count(ID).await.unwrap(), head);
+
+    let mut late = restarted
+        .subscribe(settings("late", Some(0), false))
+        .await
+        .expect("late startup subscriber must still be able to replay");
+    let late_position = late.position_handle.take().unwrap();
+
+    // The lifecycle opens pruning only after every startup query has subscribed.
+    restarted
+        .on_subscriptions_complete()
+        .await
+        .expect("on_subscriptions_complete must succeed");
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        h.wal.event_count(ID).await.unwrap(),
+        head,
+        "the late subscriber's old watermark must protect its replay"
+    );
+
+    let late_replay = drain(&mut late.receiver, head as usize).await;
+    assert_eq!(
+        late_replay.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+        (1..=head).collect::<Vec<_>>()
+    );
+    late_position.store(head, Ordering::Release);
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if h.wal.event_count(ID).await.unwrap() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("WAL should prune after every startup subscriber reaches head");
+
+    restarted.stop().await.unwrap();
+}
+
+/// Dynamic proxy variant of `restart_pruning_waits_for_all_startup_subscriptions`:
+/// verifies that calling `on_subscriptions_complete` **through the plugin-sdk vtable**
+/// (the ABI path used when the source is loaded as a dynamic plugin) releases the
+/// startup pruning fence exactly as the direct call does.
+///
+/// Subscriptions are made on the concrete source before wrapping to keep the test
+/// focused on the vtable slot for `on_subscriptions_complete`; all other pruning
+/// logic is unchanged from the static test.
+#[tokio::test]
+async fn restart_pruning_released_via_vtable_on_subscriptions_complete() {
+    // ---- vtable helpers (no-op stubs for the unused FFI slots) ----
+    extern "C" fn noop_executor(_: *mut std::ffi::c_void) -> *mut std::ffi::c_void {
+        std::ptr::null_mut()
+    }
+    fn noop_lifecycle(
+        _id: &str,
+        _ev: drasi_plugin_sdk::ffi::FfiLifecycleEventType,
+        _details: &str,
+    ) {
+    }
+    fn vtable_rt() -> &'static tokio::runtime::Runtime {
+        static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RT.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("vtable test runtime")
+        })
+    }
+
+    // ---- Phase 1: seed WAL ----
+    let h = Harness::new(10_000).await;
+    for n in 0..3 {
+        assert_eq!(
+            h.post(
+                "issues",
+                &format!("dyn-startup-{n}"),
+                &issue(&format!("DI_{n}"))
+            )
+            .await,
+            202
+        );
+    }
+    let head = h.wal.head_sequence(ID).await.unwrap();
+    assert_eq!(head, 3 * PER_ISSUE as u64);
+    h.source.stop().await.unwrap();
+
+    // ---- Phase 2: restart with the same persistent store/WAL ----
+    let restarted = Harness::build(10_000, h.port);
+    h.initialize(&restarted).await;
+    restarted.start().await.unwrap();
+
+    // Early query subscribes and catches up completely.
+    let mut early = restarted
+        .subscribe(settings("dyn-early", Some(0), false))
+        .await
+        .unwrap();
+    let early_position = early.position_handle.take().unwrap();
+    let early_replay = drain(&mut early.receiver, head as usize).await;
+    assert_eq!(
+        early_replay.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+        (1..=head).collect::<Vec<_>>()
+    );
+    early_position.store(head, Ordering::Release);
+
+    // Wait a full dispatch tick — startup fence must still hold the WAL.
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    assert_eq!(h.wal.event_count(ID).await.unwrap(), head);
+
+    // Late query subscribes before the fence is lifted.
+    let mut late = restarted
+        .subscribe(settings("dyn-late", Some(0), false))
+        .await
+        .expect("late startup subscriber must still be able to replay");
+    let late_position = late.position_handle.take().unwrap();
+
+    // ---- Key assertion: release the fence through the vtable, not directly ----
+    // Wrap the source in a plugin-sdk SourceVtable (the ABI used by dynamic plugins)
+    // and call on_subscriptions_complete via the vtable fn pointer.
+    let vtable = drasi_plugin_sdk::ffi::vtable_gen::build_source_vtable(
+        restarted,
+        noop_executor,
+        noop_lifecycle,
+        vtable_rt,
+    );
+    let state = drasi_plugin_sdk::ffi::SendMutPtr(vtable.state);
+    let complete_fn = vtable.on_subscriptions_complete_fn;
+    let drop_fn = vtable.drop_fn;
+    let result = std::thread::spawn(move || (complete_fn)(state.as_ptr()))
+        .join()
+        .expect("vtable thread must not abort");
+    let ok: Result<(), String> = unsafe { result.into_result() };
+    assert!(
+        ok.is_ok(),
+        "on_subscriptions_complete via vtable must succeed: {ok:?}"
+    );
+    // Explicitly free the vtable state (no Drop impl on SourceVtable).
+    (drop_fn)(vtable.state);
+
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        h.wal.event_count(ID).await.unwrap(),
+        head,
+        "late subscriber's old watermark must protect its replay"
+    );
+
+    let late_replay = drain(&mut late.receiver, head as usize).await;
+    assert_eq!(
+        late_replay.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+        (1..=head).collect::<Vec<_>>()
+    );
+    late_position.store(head, Ordering::Release);
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if h.wal.event_count(ID).await.unwrap() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("WAL should prune after every startup subscriber reaches head (vtable path)");
+}
+
 #[tokio::test]
 #[ignore]
-async fn push_delivery_converges_worker_capacity_and_retires_excess_slots() {
+async fn push_delivery_converges_agent_capacity_and_retires_excess_slots() {
     let server = wiremock::MockServer::start().await;
-    mount_worker_blob(&server, &worker_file(2)).await;
+    mount_agent_blob(&server, &agent_file(2)).await;
 
-    // Starting the Source converges the configured worker file once, so a
+    // Starting the Source converges the configured agent file once, so a
     // restart re-states capacity even if pushes were missed while it was down.
-    let harness = worker_harness(&server).await;
+    let harness = agent_harness(&server).await;
     let start_ids = wal_ids(&harness, 1).await;
-    assert!(start_ids.contains(&"workgraph-worker:validator-1".to_string()));
-    assert!(start_ids.contains(&"workgraph-worker-slot:validator-1/1".to_string()));
-    assert!(start_ids.contains(&"workgraph-worker-slot:validator-1/2".to_string()));
+    assert!(start_ids.contains(&"workgraph-agent:issue-validator".to_string()));
+    assert!(start_ids.contains(&"workgraph-agent-slot:issue-validator/1".to_string()));
+    assert!(start_ids.contains(&"workgraph-agent-slot:issue-validator/2".to_string()));
     let after_start = harness.wal.head_sequence(ID).await.unwrap();
 
     // A push on another repository, another ref, or another path is ignored.
     for (delivery, payload) in [
         (
             "d-other-repo",
-            push("refs/heads/main", "acme/other", WORKER_PATH),
+            push("refs/heads/main", "acme/other", AGENT_PATH),
         ),
         (
             "d-other-ref",
-            push("refs/heads/release", "acme/w", WORKER_PATH),
+            push("refs/heads/release", "acme/w", AGENT_PATH),
         ),
         (
             "d-other-path",
@@ -480,19 +1203,19 @@ async fn push_delivery_converges_worker_capacity_and_retires_excess_slots() {
 
     // Reducing capacity retires the excess slot instead of deleting it, so an
     // in-flight Lease keeps a valid LEASES_SLOT target.
-    mount_worker_blob(&server, &worker_file(1)).await;
+    mount_agent_blob(&server, &agent_file(1)).await;
     assert_eq!(
         harness
             .post(
                 "push",
                 "d-reduce",
-                &push("refs/heads/main", "acme/w", WORKER_PATH)
+                &push("refs/heads/main", "acme/w", AGENT_PATH)
             )
             .await,
         202
     );
     let reduced = wal_ids(&harness, after_start + 1).await;
-    assert!(reduced.contains(&"workgraph-worker-slot:validator-1/2".to_string()));
+    assert!(reduced.contains(&"workgraph-agent-slot:issue-validator/2".to_string()));
     let retired = harness
         .wal
         .read_from(ID, after_start + 1)
@@ -514,7 +1237,7 @@ async fn push_delivery_converges_worker_capacity_and_retires_excess_slots() {
                         properties,
                     },
             } if metadata.reference.element_id.as_ref()
-                == "workgraph-worker-slot:validator-1/2" =>
+                == "workgraph-agent-slot:issue-validator/2" =>
             {
                 properties.get("retiring").cloned()
             }
@@ -530,7 +1253,7 @@ async fn push_delivery_converges_worker_capacity_and_retires_excess_slots() {
         .into_iter()
         .any(
             |(_, change)| matches!(change, SourceChange::Delete { ref metadata }
-            if metadata.reference.element_id.as_ref() == "workgraph-worker-slot:validator-1/2")
+            if metadata.reference.element_id.as_ref() == "workgraph-agent-slot:issue-validator/2")
         ));
 
     // Redelivery of the same push is absorbed by the delivery marker.
@@ -540,7 +1263,7 @@ async fn push_delivery_converges_worker_capacity_and_retires_excess_slots() {
             .post(
                 "push",
                 "d-reduce",
-                &push("refs/heads/main", "acme/w", WORKER_PATH)
+                &push("refs/heads/main", "acme/w", AGENT_PATH)
             )
             .await,
         202
@@ -555,30 +1278,30 @@ async fn push_delivery_converges_worker_capacity_and_retires_excess_slots() {
 
 #[tokio::test]
 #[ignore]
-async fn push_delivery_reports_malformed_and_unreadable_worker_files_distinctly() {
+async fn push_delivery_reports_malformed_and_unreadable_agent_files_distinctly() {
     let server = wiremock::MockServer::start().await;
-    mount_worker_blob(&server, &worker_file(1)).await;
-    let harness = worker_harness(&server).await;
+    mount_agent_blob(&server, &agent_file(1)).await;
+    let harness = agent_harness(&server).await;
     let after_start = harness.wal.head_sequence(ID).await.unwrap();
 
     // A readable but invalid file is a deterministic configuration error: it
-    // becomes an explicit WorkGraphError and never an empty worker pool.
-    mount_worker_blob(&server, "version: 1\nworkers: []\n").await;
+    // becomes an explicit WorkGraphError and never an empty agent pool.
+    mount_agent_blob(&server, "version: 1\nagents: []\n").await;
     assert_eq!(
         harness
             .post(
                 "push",
                 "d-malformed",
-                &push("refs/heads/main", "acme/w", WORKER_PATH)
+                &push("refs/heads/main", "acme/w", AGENT_PATH)
             )
             .await,
         202
     );
     let malformed = wal_ids(&harness, after_start + 1).await;
-    assert_eq!(malformed, vec!["workgraph-error:worker-config".to_string()]);
+    assert_eq!(malformed, vec!["workgraph-error:agent-config".to_string()]);
 
     // An unreadable file proves nothing, so the delivery is retryable and no
-    // worker state is asserted.
+    // agent state is asserted.
     let after_malformed = harness.wal.head_sequence(ID).await.unwrap();
     server.reset().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
@@ -591,7 +1314,7 @@ async fn push_delivery_reports_malformed_and_unreadable_worker_files_distinctly(
             .post(
                 "push",
                 "d-unreadable",
-                &push("refs/heads/main", "acme/w", WORKER_PATH)
+                &push("refs/heads/main", "acme/w", AGENT_PATH)
             )
             .await,
         503
@@ -602,27 +1325,27 @@ async fn push_delivery_reports_malformed_and_unreadable_worker_files_distinctly(
     );
 
     // Repairing the file converges the pool again and clears the error.
-    mount_worker_blob(&server, &worker_file(1)).await;
+    mount_agent_blob(&server, &agent_file(1)).await;
     assert_eq!(
         harness
             .post(
                 "push",
                 "d-repair",
-                &push("refs/heads/main", "acme/w", WORKER_PATH)
+                &push("refs/heads/main", "acme/w", AGENT_PATH)
             )
             .await,
         202
     );
     let repaired = wal_ids(&harness, after_malformed + 1).await;
-    assert!(repaired.contains(&"workgraph-error:worker-config".to_string()));
-    assert!(repaired.contains(&"workgraph-worker:validator-1".to_string()));
+    assert!(repaired.contains(&"workgraph-error:agent-config".to_string()));
+    assert!(repaired.contains(&"workgraph-agent:issue-validator".to_string()));
 
     harness.source.stop().await.unwrap();
 }
 
 #[tokio::test]
 #[ignore]
-async fn source_start_fails_when_the_configured_worker_file_cannot_be_read() {
+async fn source_start_fails_when_the_configured_agent_file_cannot_be_read() {
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/graphql"))
@@ -645,10 +1368,10 @@ async fn source_start_fails_when_the_configured_worker_file_cannot_be_read() {
         },
         repositories: Vec::new(),
         lease_trust: None,
-        worker_config: Some(WorkerConfig {
+        agent_config: Some(AgentConfig {
             repository: "acme/w".into(),
             r#ref: "main".into(),
-            path: WORKER_PATH.into(),
+            path: AGENT_PATH.into(),
             token: "read-only-token".into(),
             api_base_url: format!("{}/graphql", server.uri()),
         }),
@@ -656,6 +1379,7 @@ async fn source_start_fails_when_the_configured_worker_file_cannot_be_read() {
             host: "127.0.0.1".into(),
             port,
             secret: SECRET.into(),
+            lease_validation_token: VALIDATION_TOKEN.into(),
             ..WebhookConfig::default()
         },
         durability: DurabilityConfig {
@@ -676,25 +1400,25 @@ async fn source_start_fails_when_the_configured_worker_file_cannot_be_read() {
     let error = source
         .start()
         .await
-        .expect_err("an unreadable required worker file must fail start");
+        .expect_err("an unreadable required agent file must fail start");
     assert!(
-        format!("{error:#}").contains("worker file"),
+        format!("{error:#}").contains("agent file"),
         "unexpected error: {error:#}"
     );
 }
 
 #[tokio::test]
 #[ignore]
-async fn a_slow_worker_file_fetch_does_not_block_other_deliveries() {
+async fn a_slow_agent_file_fetch_does_not_block_other_deliveries() {
     // Regression: the shared ingress gate must not be held across the remote
-    // GitHub read, or one slow worker-file fetch stalls every other delivery.
+    // GitHub read, or one slow agent-file fetch stalls every other delivery.
     let server = wiremock::MockServer::start().await;
-    mount_worker_blob(&server, &worker_file(1)).await;
-    let harness = worker_harness(&server).await;
+    mount_agent_blob(&server, &agent_file(1)).await;
+    let harness = agent_harness(&server).await;
 
-    // Make the next worker-file fetch slow.
+    // Make the next agent-file fetch slow.
     server.reset().await;
-    let text = worker_file(2);
+    let text = agent_file(2);
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/graphql"))
         .respond_with(
@@ -711,7 +1435,7 @@ async fn a_slow_worker_file_fetch_does_not_block_other_deliveries() {
         .await;
 
     let url = harness.url.clone();
-    let push_body = push("refs/heads/main", "acme/w", WORKER_PATH).to_string();
+    let push_body = push("refs/heads/main", "acme/w", AGENT_PATH).to_string();
     let slow = tokio::spawn(async move {
         let client = reqwest::Client::new();
         let mut mac = Hmac::<Sha256>::new_from_slice(SECRET.as_bytes()).unwrap();
@@ -744,864 +1468,183 @@ async fn a_slow_worker_file_fetch_does_not_block_other_deliveries() {
     assert_eq!(status, 202);
     assert!(
         elapsed < Duration::from_millis(1500),
-        "an ordinary delivery waited {elapsed:?} behind a slow worker-file fetch"
+        "an ordinary delivery waited {elapsed:?} behind a slow agent-file fetch"
     );
     assert_eq!(slow.await.unwrap(), 202);
 
     harness.source.stop().await.unwrap();
 }
 
-// ---------------------------------------------------------------------------
-// Durable lease ledger: redelivery and restart converge on current state.
-// ---------------------------------------------------------------------------
-
-const LEASE_TRUST_LOGIN: &str = "reporter";
-
-fn task_comment(comment_id: &str, body: &str, login: &str) -> Value {
-    json!({
-        "action": "created",
-        "organization": {"login": "acme", "node_id": "O_1"},
-        "repository": {
-            "node_id": "R_7", "name": "w", "full_name": "acme/w", "owner": {"login": "acme"}
-        },
-        "issue": {
-            "node_id": "I_task", "id": 1, "number": 1, "title": "t", "state": "open",
-            "labels": [], "type": {"node_id": "IT_test", "name": "WorkGraphTask"},
-            "user": {"login": "ada", "node_id": "U_1", "id": 1, "type": "User"}
-        },
-        "comment": {
-            "node_id": comment_id, "id": 9001, "body": body,
-            "created_at": "2026-08-19T22:05:00Z", "updated_at": "2026-08-19T22:05:00Z",
-            "html_url": "https://github.com/acme/w/issues/1#issuecomment-9001",
-            "user": {"login": login, "node_id": format!("U_{login}"), "id": 7, "type": "User"}
-        }
-    })
-}
-
-const IT_LEASE: &str = r#"WorkGraphTaskLease/v1
-
-```json
-{
-  "leaseId": "0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21",
-  "assignmentCommentNodeId": "IC_assignment",
-  "workerId": "validator-1",
-  "slotId": "validator-1/1",
-  "acquiredAt": "2026-08-19T22:00:00Z",
-  "expiresAt": "2026-08-19T22:15:00Z"
-}
-```
-"#;
-
-const IT_RESULT_V2: &str = r#"WorkGraphTaskResult/v2
-
-```json
-{
-  "taskType": "validate-issue",
-  "leaseId": "0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21",
-  "outcome": "succeeded",
-  "summary": "Validated the issue.",
-  "result": {
-    "criteria": [
-      {
-        "criterion": "Acceptance criteria",
-        "passed": true,
-        "evidence": "Present."
-      }
-    ]
-  }
-}
-```
-"#;
-
-const IT_ANCHOR: &str = "workgraph-lease:I_task:0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21";
-
-async fn anchor_is_active(harness: &Harness, from: u64) -> Option<bool> {
-    harness
-        .wal
-        .read_from(ID, from)
-        .await
-        .unwrap()
-        .into_iter()
-        .rev()
-        .find_map(|(_, change)| match change {
-            SourceChange::Insert {
-                element:
-                    Element::Node {
-                        metadata,
-                        properties,
-                    },
-            }
-            | SourceChange::Update {
-                element:
-                    Element::Node {
-                        metadata,
-                        properties,
-                    },
-            } if metadata.reference.element_id.as_ref() == IT_ANCHOR => {
-                match properties.get("isActive") {
-                    Some(drasi_core::models::ElementValue::Bool(value)) => Some(*value),
-                    _ => None,
-                }
-            }
-            _ => None,
-        })
-}
-
 #[tokio::test]
-#[ignore]
-async fn the_durable_lease_ledger_converges_across_redelivery_and_restart() {
+async fn lease_validation_endpoint_requires_auth_and_matches_exact_active_state() {
     let server = wiremock::MockServer::start().await;
-    mount_lifecycle_api(
-        &server,
-        vec![
-            graphql_comment("IC_lease", IT_LEASE, "dispatcher"),
-            graphql_comment("IC_result", IT_RESULT_V2, LEASE_TRUST_LOGIN),
-        ],
-    )
-    .await;
-    let tmp = TempDir::new().unwrap();
-    let wal: Arc<dyn WalProvider> = Arc::new(RedbWalProvider::new(tmp.path().join("wal")));
-    let harness = lifecycle_harness(&server, wal).await;
-
-    assert_eq!(
-        harness
-            .post(
-                "issue_comment",
-                "d1",
-                &task_comment("IC_lease", IT_LEASE, "dispatcher")
-            )
-            .await,
-        202
+    mount_agent_blob(&server, &agent_file(1)).await;
+    let harness = agent_harness(&server).await;
+    let payload = task_comment(
+        "I_task",
+        "open",
+        "IC_assignment",
+        &assignment_body("issue-validator"),
+        "assigner",
+        "U_assigner",
     );
-    let after_lease = harness.wal.head_sequence(ID).await.unwrap();
-
-    assert_eq!(
-        harness
-            .post(
-                "issue_comment",
-                "d2",
-                &task_comment("IC_result", IT_RESULT_V2, LEASE_TRUST_LOGIN)
-            )
-            .await,
-        202
-    );
-    assert_eq!(
-        anchor_is_active(&harness, after_lease + 1).await,
-        Some(false)
-    );
-    let after_result = harness.wal.head_sequence(ID).await.unwrap();
-
-    // Re-observing the acquisition must not resurrect the ended lease. A fresh
-    // delivery ID bypasses the dedupe marker, exercising the ledger itself.
-    let mut replay = task_comment("IC_lease", IT_LEASE, "dispatcher");
-    replay["action"] = json!("pinned");
-    assert_eq!(harness.post("issue_comment", "d3", &replay).await, 202);
-    assert_eq!(
-        anchor_is_active(&harness, after_result + 1).await,
-        Some(false),
-        "re-observing the acquisition resurrected an ended lease"
-    );
-    let after_replay = harness.wal.head_sequence(ID).await.unwrap();
-
-    // Restart: the ledger is durable, so deleting the completion reactivates
-    // from the surviving artifacts rather than from an empty ledger.
-    harness.source.stop().await.unwrap();
-    let restarted = GitHubWorkGraphSourceBuilder::new(ID)
-        .with_config(lifecycle_config(
-            harness.port,
-            &format!("{}/graphql", server.uri()),
-        ))
-        .build()
-        .unwrap();
-    harness.start(&restarted).await;
-
-    mount_lifecycle_api(
-        &server,
-        vec![graphql_comment("IC_lease", IT_LEASE, "dispatcher")],
-    )
-    .await;
-    let mut deleted = task_comment("IC_result", IT_RESULT_V2, LEASE_TRUST_LOGIN);
-    deleted["action"] = json!("deleted");
-    assert_eq!(harness.post("issue_comment", "d4", &deleted).await, 202);
-    assert_eq!(
-        anchor_is_active(&harness, after_replay + 1).await,
-        Some(true),
-        "removing the only end must reactivate the lease after a restart"
-    );
-
-    restarted.stop().await.unwrap();
-}
-
-// ---------------------------------------------------------------------------
-// Ledger durability under append failure, and reconciliation of a task whose
-// lifecycle predates this Source's ledger.
-// ---------------------------------------------------------------------------
-
-/// A WAL that fails every append once armed, so a test can prove the ledger is
-/// only persisted after the changes it implies are durable.
-struct FailOnceWal {
-    inner: Arc<dyn WalProvider>,
-    fail: Arc<std::sync::atomic::AtomicBool>,
-}
-
-#[async_trait]
-impl WalProvider for FailOnceWal {
-    async fn register(
-        &self,
-        source_id: &str,
-        config: drasi_lib::wal::WriteAheadLogConfig,
-    ) -> Result<(), drasi_lib::wal::WalError> {
-        self.inner.register(source_id, config).await
-    }
-    async fn append(
-        &self,
-        source_id: &str,
-        event: &SourceChange,
-    ) -> Result<u64, drasi_lib::wal::WalError> {
-        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(drasi_lib::wal::WalError::CapacityExhausted(
-                "injected failure".to_string(),
-            ));
-        }
-        self.inner.append(source_id, event).await
-    }
-    async fn read_from(
-        &self,
-        source_id: &str,
-        sequence: u64,
-    ) -> Result<Vec<(u64, SourceChange)>, drasi_lib::wal::WalError> {
-        self.inner.read_from(source_id, sequence).await
-    }
-    async fn prune_up_to(
-        &self,
-        source_id: &str,
-        sequence: u64,
-    ) -> Result<u64, drasi_lib::wal::WalError> {
-        self.inner.prune_up_to(source_id, sequence).await
-    }
-    async fn head_sequence(&self, source_id: &str) -> Result<u64, drasi_lib::wal::WalError> {
-        self.inner.head_sequence(source_id).await
-    }
-    async fn oldest_sequence(
-        &self,
-        source_id: &str,
-    ) -> Result<Option<u64>, drasi_lib::wal::WalError> {
-        self.inner.oldest_sequence(source_id).await
-    }
-    async fn event_count(&self, source_id: &str) -> Result<u64, drasi_lib::wal::WalError> {
-        self.inner.event_count(source_id).await
-    }
-    async fn delete_wal(&self, source_id: &str) -> Result<(), drasi_lib::wal::WalError> {
-        self.inner.delete_wal(source_id).await
-    }
-}
-
-fn lifecycle_config(port: u16, api: &str) -> GitHubWorkGraphSourceConfig {
-    GitHubWorkGraphSourceConfig {
-        organization: "acme".into(),
-        task_issue_type: TaskIssueType {
-            id: "IT_test".into(),
-            name: "WorkGraphTask".into(),
-        },
-        repositories: Vec::new(),
-        worker_config: Some(WorkerConfig {
-            repository: "acme/w".into(),
-            r#ref: "main".into(),
-            path: WORKER_PATH.into(),
-            token: "read-only-token".into(),
-            api_base_url: api.to_string(),
-        }),
-        lease_trust: Some(LeaseTrust {
-            dispatchers: vec![TrustedIdentity {
-                id: "U_dispatcher".into(),
-                login: "dispatcher".into(),
-            }],
-            reporters: vec![TrustedIdentity {
-                id: format!("U_{LEASE_TRUST_LOGIN}"),
-                login: LEASE_TRUST_LOGIN.into(),
-            }],
-        }),
-        webhook: WebhookConfig {
-            host: "127.0.0.1".into(),
-            port,
-            secret: SECRET.into(),
-            ..WebhookConfig::default()
-        },
-        durability: DurabilityConfig {
-            enabled: true,
-            max_events: 4096,
-            capacity_policy: CapacityPolicy::RejectIncoming,
-        },
-    }
-}
-
-fn graphql_comment(node_id: &str, body: &str, login: &str) -> Value {
-    json!({
-        "node_id": node_id, "id": 9100, "body": body,
-        "created_at": "2026-08-19T22:05:00Z", "updated_at": "2026-08-19T22:05:00Z",
-        "last_edited_at": Value::Null,
-        "html_url": "https://github.com/acme/w/issues/1",
-        "user": {"login": login, "node_id": format!("U_{login}"), "type": "User"},
-        "editor": Value::Null
-    })
-}
-
-/// Serve the worker file and one task's current comments.
-async fn mount_lifecycle_api(server: &wiremock::MockServer, comments: Vec<Value>) {
-    server.reset().await;
-    let text = worker_file(1);
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/graphql"))
-        .and(wiremock::matchers::body_string_contains(
-            "object(expression",
-        ))
-        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
-            "data": { "repository": { "object": {
-                "__typename": "Blob", "oid": "o", "text": text,
-                "byteSize": text.len(), "isTruncated": false, "isBinary": false,
-            }}}
-        })))
-        .mount(server)
-        .await;
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/graphql"))
-        .and(wiremock::matchers::body_string_contains(
-            "issue(number: $number)",
-        ))
-        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
-            "data": { "repository": { "issue": { "comments": {
-                "pageInfo": {"hasNextPage": false, "endCursor": Value::Null},
-                "nodes": comments
-            }}}}
-        })))
-        .mount(server)
-        .await;
-}
-
-async fn lifecycle_harness(server: &wiremock::MockServer, wal: Arc<dyn WalProvider>) -> Harness {
-    let tmp = TempDir::new().unwrap();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let store: Arc<dyn StateStoreProvider> =
-        Arc::new(RedbStateStoreProvider::new(tmp.path().join("state")).unwrap());
-    let harness = Harness {
-        _tmp: tmp,
-        source: GitHubWorkGraphSourceBuilder::new(ID)
-            .with_config(lifecycle_config(port, &format!("{}/graphql", server.uri())))
-            .build()
-            .unwrap(),
-        wal,
-        store,
-        url: format!("http://127.0.0.1:{port}/webhook"),
-        port,
+    let trust = LeaseTrust {
+        dispatchers: vec![TrustedIdentity {
+            id: "U_assigner".into(),
+            login: "assigner".into(),
+        }],
+        reporters: vec![TrustedIdentity {
+            id: "U_reporter".into(),
+            login: "reporter".into(),
+        }],
     };
-    harness.initialize(&harness.source).await;
-    harness.source.start().await.unwrap();
-    harness
-}
-
-#[tokio::test]
-#[ignore]
-async fn a_failed_append_never_advances_the_ledger_past_the_graph() {
-    // Deleting and rekeying both touch two anchors. If the ledger were
-    // persisted before the append, a failed append would leave the ledger
-    // advanced and the redelivery would compute a smaller affected set,
-    // permanently losing the old anchor's change.
-    for (scenario, second) in [
-        ("delete", None),
-        (
-            "rekey",
-            Some(IT_LEASE.replace(
-                "0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21",
-                "0198d8c4-7c28-7d43-a8dd-000000000000",
-            )),
-        ),
-    ] {
-        let server = wiremock::MockServer::start().await;
-        mount_lifecycle_api(
-            &server,
-            vec![graphql_comment("IC_lease", IT_LEASE, "dispatcher")],
-        )
-        .await;
-        let tmp = TempDir::new().unwrap();
-        let inner: Arc<dyn WalProvider> = Arc::new(RedbWalProvider::new(tmp.path().join("wal")));
-        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let wal: Arc<dyn WalProvider> = Arc::new(FailOnceWal {
-            inner: inner.clone(),
-            fail: fail.clone(),
-        });
-        let harness = lifecycle_harness(&server, wal).await;
-
-        harness
-            .post(
-                "issue_comment",
-                "d1",
-                &task_comment("IC_lease", IT_LEASE, "dispatcher"),
-            )
-            .await;
-        assert_eq!(
-            anchor_is_active(&harness, 1).await,
-            Some(true),
-            "{scenario}"
-        );
-        let before = harness.wal.head_sequence(ID).await.unwrap();
-
-        // The second delivery removes the acquisition from the original anchor.
-        let mut event = match &second {
-            None => task_comment("IC_lease", IT_LEASE, "dispatcher"),
-            Some(body) => task_comment("IC_lease", body, "dispatcher"),
-        };
-        event["action"] = json!(if second.is_none() {
-            "deleted"
-        } else {
-            "edited"
-        });
-        if second.is_some() {
-            event["changes"] = json!({ "body": { "from": IT_LEASE } });
-            event["sender"] = json!({"login": "dispatcher", "node_id": "U_dispatcher"});
-        }
-
-        // First attempt fails inside the append loop.
-        fail.store(true, std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(
-            harness.post("issue_comment", "d2", &event).await,
-            503,
-            "{scenario}"
-        );
-        assert_eq!(
-            harness.wal.head_sequence(ID).await.unwrap(),
-            before,
-            "{scenario}"
-        );
-
-        // Redelivery must recompute and re-emit the *old* anchor's change.
-        fail.store(false, std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(
-            harness.post("issue_comment", "d2", &event).await,
-            202,
-            "{scenario}"
-        );
-        let emitted: Vec<String> = harness
-            .wal
-            .read_from(ID, before + 1)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|(_, change)| change.get_reference().element_id.to_string())
-            .collect();
-        assert!(
-            emitted.iter().any(|id| id == IT_ANCHOR),
-            "{scenario}: redelivery lost the original anchor change; emitted {emitted:?}"
-        );
-        if second.is_some() {
-            assert!(
-                emitted
-                    .iter()
-                    .any(|id| id == "workgraph-lease:I_task:0198d8c4-7c28-7d43-a8dd-000000000000"),
-                "{scenario}: redelivery lost the new anchor change"
-            );
-        }
-        harness.source.stop().await.unwrap();
-    }
-}
-
-#[tokio::test]
-#[ignore]
-async fn a_lifecycle_delivery_reconciles_a_task_the_ledger_has_never_seen() {
-    // After a clean bootstrap the Source's ledger is empty while GitHub already
-    // holds a historical Lease. A live Result must end that lease rather than
-    // delete an anchor it thinks was never acquired.
-    let server = wiremock::MockServer::start().await;
-    mount_lifecycle_api(
-        &server,
-        vec![
-            graphql_comment("IC_lease", IT_LEASE, "dispatcher"),
-            graphql_comment("IC_result", IT_RESULT_V2, LEASE_TRUST_LOGIN),
-        ],
-    )
-    .await;
-    let tmp = TempDir::new().unwrap();
-    let wal: Arc<dyn WalProvider> = Arc::new(RedbWalProvider::new(tmp.path().join("wal")));
-    let harness = lifecycle_harness(&server, wal).await;
-
+    let task_type = TaskIssueType {
+        id: "IT_test".into(),
+        name: "WorkGraphTask".into(),
+    };
+    assert!(trust.is_assigner(payload.pointer("/comment/user")));
+    let direct = Converter::new(ID, "acme", &task_type, 1)
+        .with_lease_trust(&trust)
+        .convert("issue_comment", &payload)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        direct.allocation,
+        Some(AllocationEvent::Comment {
+            artifact: Some(AllocationArtifact::Assignment { trusted: true, .. }),
+            ..
+        })
+    ));
     assert_eq!(
         harness
-            .post(
-                "issue_comment",
-                "d1",
-                &task_comment("IC_result", IT_RESULT_V2, LEASE_TRUST_LOGIN)
-            )
+            .post("issue_comment", "assignment-delivery", &payload)
             .await,
         202
     );
-    assert_eq!(
-        anchor_is_active(&harness, 1).await,
-        Some(false),
-        "the historical lease must be ended, not deleted"
-    );
 
-    // Deleting the Result reconciles current GitHub state, which no longer
-    // contains it, and returns the historical lease to active.
-    mount_lifecycle_api(
-        &server,
-        vec![graphql_comment("IC_lease", IT_LEASE, "dispatcher")],
-    )
-    .await;
-    let head = harness.wal.head_sequence(ID).await.unwrap();
-    let mut deleted = task_comment("IC_result", IT_RESULT_V2, LEASE_TRUST_LOGIN);
-    deleted["action"] = json!("deleted");
-    assert_eq!(harness.post("issue_comment", "d2", &deleted).await, 202);
-    assert_eq!(anchor_is_active(&harness, head + 1).await, Some(true));
-
-    harness.source.stop().await.unwrap();
-}
-
-#[tokio::test]
-#[ignore]
-async fn reconciliation_detects_a_historical_duplicate_acquisition() {
-    // Two historical trusted Lease comments share one leaseId. A live delivery
-    // must discover the conflict from GitHub rather than from its empty ledger.
-    let second = IT_LEASE.replace("validator-1/1", "validator-1/2");
-    let server = wiremock::MockServer::start().await;
-    mount_lifecycle_api(
-        &server,
-        vec![
-            graphql_comment("IC_lease_1", IT_LEASE, "dispatcher"),
-            graphql_comment("IC_lease_2", &second, "dispatcher"),
-        ],
-    )
-    .await;
-    let tmp = TempDir::new().unwrap();
-    let wal: Arc<dyn WalProvider> = Arc::new(RedbWalProvider::new(tmp.path().join("wal")));
-    let harness = lifecycle_harness(&server, wal).await;
-
-    let mut expiry = task_comment("IC_expiry", IT_LEASE, "dispatcher");
-    expiry["comment"]["body"] = json!(IT_EXPIRATION);
-    expiry["comment"]["user"] = json!({"login": LEASE_TRUST_LOGIN, "node_id": format!("U_{LEASE_TRUST_LOGIN}"), "type": "User"});
-    assert_eq!(harness.post("issue_comment", "d1", &expiry).await, 202);
-
-    let reason = harness
-        .wal
-        .read_from(ID, 1)
+    let lease_id = hex::encode(Sha256::digest(b"I_task\0IC_assignment\0\x31"));
+    let stored = harness
+        .store
+        .get(ID, "allocator:state")
         .await
         .unwrap()
-        .into_iter()
-        .rev()
-        .find_map(|(_, change)| match change {
-            SourceChange::Insert {
-                element:
-                    Element::Node {
-                        metadata,
-                        properties,
-                    },
-            }
-            | SourceChange::Update {
-                element:
-                    Element::Node {
-                        metadata,
-                        properties,
-                    },
-            } if metadata.reference.element_id.as_ref() == IT_ANCHOR => {
-                properties.get("endReason").cloned()
-            }
-            _ => None,
-        })
-        .expect("the anchor is projected");
-    assert_eq!(
-        reason,
-        drasi_core::models::ElementValue::String("conflict".into()),
-        "a historical duplicate acquisition must be discovered by reconciliation"
+        .unwrap();
+    let allocator_state: Value = serde_json::from_slice(&stored).unwrap();
+    assert!(
+        allocator_state["active"].get(&lease_id).is_some(),
+        "unexpected allocator state: {allocator_state:#}"
     );
-
-    harness.source.stop().await.unwrap();
-}
-
-const IT_EXPIRATION: &str = r#"WorkGraphTaskLeaseExpiration/v1
-
-```json
-{
-  "leaseCommentNodeId": "IC_lease",
-  "leaseId": "0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21",
-  "expiredAt": "2026-08-19T22:15:00Z",
-  "reason": "deadline-reached"
-}
-```
-"#;
-
-#[tokio::test]
-#[ignore]
-async fn a_slow_task_comment_fetch_does_not_block_other_deliveries() {
-    // Reconciliation reads GitHub, so it must not be performed while holding
-    // the shared ingress gate — the same rule the worker-file push path
-    // follows.
-    let server = wiremock::MockServer::start().await;
-    let text = worker_file(1);
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/graphql"))
-        .and(wiremock::matchers::body_string_contains(
-            "object(expression",
-        ))
-        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
-            "data": { "repository": { "object": {
-                "__typename": "Blob", "oid": "o", "text": text,
-                "byteSize": text.len(), "isTruncated": false, "isBinary": false,
-            }}}
-        })))
-        .mount(&server)
-        .await;
-    // The task-comment read is slow; the worker-file read above is not.
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path("/graphql"))
-        .and(wiremock::matchers::body_string_contains(
-            "issue(number: $number)",
-        ))
-        .respond_with(
-            wiremock::ResponseTemplate::new(200)
-                .set_delay(Duration::from_secs(3))
-                .set_body_json(json!({
-                    "data": { "repository": { "issue": { "comments": {
-                        "pageInfo": {"hasNextPage": false, "endCursor": Value::Null},
-                        "nodes": [graphql_comment("IC_lease", IT_LEASE, "dispatcher")]
-                    }}}}
-                })),
-        )
-        .mount(&server)
-        .await;
-
-    let tmp = TempDir::new().unwrap();
-    let wal: Arc<dyn WalProvider> = Arc::new(RedbWalProvider::new(tmp.path().join("wal")));
-    let harness = lifecycle_harness(&server, wal).await;
-
-    // This delivery reconciles an unseen task, so it waits on the slow read.
-    let url = harness.url.clone();
-    let body = task_comment("IC_result", IT_RESULT_V2, LEASE_TRUST_LOGIN).to_string();
-    let slow = tokio::spawn(async move {
-        let client = reqwest::Client::new();
-        let mut mac = Hmac::<Sha256>::new_from_slice(SECRET.as_bytes()).unwrap();
-        mac.update(body.as_bytes());
+    let request = json!({
+        "taskNodeId": "I_task",
+        "leaseId": lease_id.clone(),
+        "assignmentCommentNodeId": "IC_assignment",
+        "agentId": "issue-validator",
+        "slotId": "issue-validator/1"
+    });
+    let client = reqwest::Client::new();
+    let url = format!("{}/lease/validate", harness.url);
+    assert_eq!(
         client
             .post(&url)
-            .header("x-github-event", "issue_comment")
-            .header("x-github-delivery", "d-slow")
-            .header(
-                "x-hub-signature-256",
-                format!("sha256={}", hex::encode(mac.finalize().into_bytes())),
-            )
-            .body(body)
+            .json(&request)
             .send()
             .await
             .unwrap()
             .status()
-            .as_u16()
-    });
-
-    // Give the reconciliation time to reach the slow read, then require an
-    // unrelated delivery to complete well before that read finishes.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let started = std::time::Instant::now();
-    let status = harness
-        .post("issues", "d-issue", &issue("I_unblocked"))
-        .await;
-    let elapsed = started.elapsed();
-
-    assert_eq!(status, 202);
-    assert!(
-        elapsed < Duration::from_millis(1500),
-        "an ordinary delivery waited {elapsed:?} behind a slow task-comment fetch"
+            .as_u16(),
+        401
     );
-    assert_eq!(slow.await.unwrap(), 202);
+    assert_eq!(
+        client
+            .post(&url)
+            .body("{")
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        401
+    );
+    assert_eq!(
+        client
+            .post(&url)
+            .bearer_auth("wrong")
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        401
+    );
+    let response = client
+        .post(&url)
+        .bearer_auth(VALIDATION_TOKEN)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let active: Value = response.json().await.unwrap();
+    assert_eq!(active["leaseId"], request["leaseId"]);
+    assert_eq!(active["assignmentCommentNodeId"], "IC_assignment");
+    assert_eq!(active["agentId"], "issue-validator");
+    assert_eq!(active["slotId"], "issue-validator/1");
 
-    // The reconciled lifecycle is still correct.
-    assert_eq!(anchor_is_active(&harness, 1).await, Some(false));
-
-    harness.source.stop().await.unwrap();
-}
-
-/// The most recent value of `key` on `element` in the WAL from `from`.
-async fn wal_property(
-    harness: &Harness,
-    from: u64,
-    element: &str,
-    key: &str,
-) -> Option<drasi_core::models::ElementValue> {
-    harness
-        .wal
-        .read_from(ID, from)
+    for (field, value) in [
+        ("taskNodeId", "I_other"),
+        ("leaseId", "wrong-lease"),
+        ("assignmentCommentNodeId", "IC_other"),
+        ("agentId", "validator-2"),
+        ("slotId", "issue-validator/2"),
+    ] {
+        let mut mismatch = request.clone();
+        mismatch[field] = json!(value);
+        assert_eq!(
+            client
+                .post(&url)
+                .bearer_auth(VALIDATION_TOKEN)
+                .json(&mismatch)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16(),
+            409,
+            "field {field} must be exact"
+        );
+    }
+    let stored = harness
+        .store
+        .get(ID, "allocator:state")
         .await
         .unwrap()
-        .into_iter()
-        .rev()
-        .find_map(|(_, change)| match change {
-            SourceChange::Insert {
-                element:
-                    Element::Node {
-                        metadata,
-                        properties,
-                    },
-            }
-            | SourceChange::Update {
-                element:
-                    Element::Node {
-                        metadata,
-                        properties,
-                    },
-            } if metadata.reference.element_id.as_ref() == element => properties.get(key).cloned(),
-            _ => None,
-        })
-}
-
-#[tokio::test]
-#[ignore]
-async fn editing_a_bootstrapped_lifecycle_comment_away_reconciles_the_historical_anchor() {
-    // The delivery that edits a bootstrapped Result into ordinary content emits
-    // only a Retract. Without scope derived from the *previous* body the Source
-    // would never reconcile the task, apply that Retract to an empty ledger,
-    // and leave the historical anchor permanently ended.
-    for (previous, ordinary) in [
-        (IT_RESULT_V2, "just an ordinary note"),
-        // A v1 Result is valid but carries no leaseId, so it is equally an
-        // "edit away" from the lifecycle.
-        (IT_RESULT_V2, IT_RESULT_V1),
-        // Invalid content leaves a WorkGraphError, and must still reconcile.
-        (IT_RESULT_V2, "WorkGraphTaskResult/v2\n\n```json\n{}\n```\n"),
-    ] {
-        let server = wiremock::MockServer::start().await;
-        // GitHub's *current* state: the Lease survives, the Result no longer
-        // parses as a v2 completion.
-        mount_lifecycle_api(
-            &server,
-            vec![
-                graphql_comment("IC_lease", IT_LEASE, "dispatcher"),
-                graphql_comment("IC_result", ordinary, LEASE_TRUST_LOGIN),
-            ],
-        )
-        .await;
-        let tmp = TempDir::new().unwrap();
-        let wal: Arc<dyn WalProvider> = Arc::new(RedbWalProvider::new(tmp.path().join("wal")));
-        let harness = lifecycle_harness(&server, wal).await;
-
-        let mut edited = task_comment("IC_result", ordinary, LEASE_TRUST_LOGIN);
-        edited["action"] = json!("edited");
-        edited["changes"] = json!({ "body": { "from": previous } });
-        edited["sender"] =
-            json!({"login": LEASE_TRUST_LOGIN, "node_id": format!("U_{LEASE_TRUST_LOGIN}")});
-
-        assert_eq!(harness.post("issue_comment", "d1", &edited).await, 202);
-        assert_eq!(
-            anchor_is_active(&harness, 1).await,
-            Some(true),
-            "editing the completion away must return the historical lease to active"
-        );
-        harness.source.stop().await.unwrap();
-    }
-
-    // Deleting a bootstrapped Lease removes the historical anchor entirely.
-    let server = wiremock::MockServer::start().await;
-    mount_lifecycle_api(&server, vec![]).await;
-    let tmp = TempDir::new().unwrap();
-    let wal: Arc<dyn WalProvider> = Arc::new(RedbWalProvider::new(tmp.path().join("wal")));
-    let harness = lifecycle_harness(&server, wal).await;
-
-    let mut deleted = task_comment("IC_lease", IT_LEASE, "dispatcher");
-    deleted["action"] = json!("deleted");
-    assert_eq!(harness.post("issue_comment", "d1", &deleted).await, 202);
-    let anchor_deleted =
-        harness
-            .wal
-            .read_from(ID, 1)
+        .unwrap();
+    let mut expired: Value = serde_json::from_slice(&stored).unwrap();
+    expired["active"][lease_id.as_str()]["acquiredAt"] = json!("2000-01-01T00:00:00.000Z");
+    expired["active"][lease_id.as_str()]["expiresAt"] = json!("2000-01-01T00:01:00.000Z");
+    harness
+        .store
+        .set(ID, "allocator:state", serde_json::to_vec(&expired).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(validate_lease(&harness, &request).await, 409);
+    harness
+        .store
+        .set(ID, "allocator:state", b"{corrupt".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .post(&url)
+            .bearer_auth(VALIDATION_TOKEN)
+            .json(&request)
+            .send()
             .await
             .unwrap()
-            .into_iter()
-            .any(|(_, change)| {
-                matches!(change, SourceChange::Delete { ref metadata }
-            if metadata.reference.element_id.as_ref() == IT_ANCHOR)
-            });
-    assert!(
-        anchor_deleted,
-        "deleting a bootstrapped Lease must remove the historical anchor"
+            .status()
+            .as_u16(),
+        503
     );
     harness.source.stop().await.unwrap();
 }
-
-#[tokio::test]
-#[ignore]
-async fn lifecycle_comments_project_normally_when_the_queue_is_not_configured() {
-    // A Source with neither `workerConfig` nor `leaseTrust` runs no worker
-    // queue. A lifecycle-shaped comment must still be projected as an ordinary
-    // untrusted artifact rather than failing the delivery by reaching for an
-    // API client that was never configured.
-    let harness = Harness::new(4096).await;
-
-    for (comment_id, body, node_label) in [
-        ("IC_lease", IT_LEASE, "WorkGraphTaskLease"),
-        ("IC_result", IT_RESULT_V2, "WorkGraphTaskResult"),
-        ("IC_expiry", IT_EXPIRATION, "WorkGraphTaskLeaseExpiration"),
-    ] {
-        let before = harness.wal.head_sequence(ID).await.unwrap();
-        let delivery = format!("d-{comment_id}");
-        assert_eq!(
-            harness
-                .post(
-                    "issue_comment",
-                    &delivery,
-                    &task_comment(comment_id, body, "anyone")
-                )
-                .await,
-            202,
-            "{node_label} must not fail the delivery"
-        );
-
-        assert_eq!(
-            wal_property(&harness, before + 1, comment_id, "trusted").await,
-            Some(drasi_core::models::ElementValue::Bool(false)),
-            "{node_label} must be projected as untrusted"
-        );
-        let labels: Vec<String> = harness
-            .wal
-            .read_from(ID, before + 1)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|(_, change)| match change {
-                SourceChange::Insert { ref element } | SourceChange::Update { ref element } => {
-                    element.get_metadata().labels[0].to_string()
-                }
-                SourceChange::Delete { ref metadata } => metadata.labels[0].to_string(),
-                SourceChange::Future { .. } => String::new(),
-            })
-            .collect();
-        assert!(
-            labels.iter().any(|label| label == node_label),
-            "{node_label} was not projected; saw {labels:?}"
-        );
-        assert!(
-            !labels
-                .iter()
-                .any(|label| label == "WorkGraphTaskLeaseAnchor"),
-            "{node_label} must not produce an anchor without a configured queue"
-        );
-    }
-
-    harness.source.stop().await.unwrap();
-}
-
-const IT_RESULT_V1: &str = r#"WorkGraphTaskResult/v1
-
-```json
-{
-  "taskType": "validate-issue",
-  "outcome": "succeeded",
-  "summary": "Validated the issue.",
-  "result": {
-    "criteria": [
-      {
-        "criterion": "Acceptance criteria",
-        "passed": true,
-        "evidence": "Present."
-      }
-    ]
-  }
-}
-```
-"#;

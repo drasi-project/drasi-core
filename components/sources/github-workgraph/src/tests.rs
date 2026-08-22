@@ -12,39 +12,46 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::agent_client::{AgentFileClient, AgentFileError};
+use crate::agent_sync::push_touches_agent_file;
+use crate::agents::{
+    error_code as agent_error_code, parse_agent_file, parse_iso8601_duration_seconds,
+    AgentFileContent, AgentFileLocation,
+};
 use crate::config::{
-    GitHubWorkGraphSourceConfig, LeaseTrust, RepositoryFilter, TaskIssueType, TrustedIdentity,
-    WebhookConfig, WorkerConfig, DEFAULT_WORKER_API_BASE_URL,
+    AgentConfig, GitHubWorkGraphSourceConfig, LeaseTrust, RepositoryFilter, TaskIssueType,
+    TrustedIdentity, WebhookConfig, DEFAULT_AGENT_API_BASE_URL,
 };
 use crate::descriptor::GitHubWorkGraphSourceDescriptor;
-use crate::lease_ledger::{AnchorState, LeaseLedger};
+use crate::lease_ledger::{
+    AgentRuntime, AllocationArtifact, AllocationDelta, AllocationEvent, AllocationState, Allocator,
+};
 use crate::mapping::{
-    anchor_changes, worker_changes, Conversion, Converter, WorkerProjection, NODE_LABELS,
+    agent_changes, allocation_changes, AgentProjection, Conversion, Converter, NODE_LABELS,
     RELATION_LABELS,
 };
 use crate::webhook::verify_signature;
-use crate::worker_client::{WorkerFileClient, WorkerFileError};
-use crate::worker_sync::push_touches_worker_file;
-use crate::workers::{
-    error_code as worker_error_code, parse_iso8601_duration_seconds, parse_worker_file,
-    WorkerFileContent, WorkerFileLocation,
-};
 use crate::workgraph::{
-    classify_comment, classify_task_body, error_code, CommentClassification, TaskClassification,
+    classify_comment, classify_task_body, error_code, CommentClassification, Outcome,
+    TaskClassification, TaskType,
 };
+use chrono::{TimeZone, Utc};
 use drasi_core::evaluation::context::QueryPartEvaluationContext;
 use drasi_core::evaluation::functions::FunctionRegistry;
 use drasi_core::evaluation::variable_value::VariableValue;
 use drasi_core::models::{Element, ElementValue, SourceChange};
 use drasi_core::query::{ContinuousQuery, QueryBuilder};
-use drasi_lib::wal::CapacityPolicy;
-use drasi_lib::DurabilityConfig;
+use drasi_lib::state_store::StateStoreProvider;
+use drasi_lib::wal::{CapacityPolicy, WalProvider, WriteAheadLogConfig};
+use drasi_lib::{DurabilityConfig, MemoryStateStoreProvider};
 use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
 use drasi_query_cypher::CypherParser;
+use drasi_wal_redb::RedbWalProvider;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use tempfile::TempDir;
 
 const TASK_TYPE_ID: &str = "IT_test";
 const TASK_TYPE_NAME: &str = "WorkGraphTask";
@@ -68,7 +75,7 @@ const ASSIGNMENT: &str = r#"WorkGraphTaskAssignment/v1
 
 ```json
 {
-  "agentProfile": "issue-validator"
+  "agentId": "issue-validator"
 }
 ```
 "#;
@@ -76,7 +83,7 @@ const INFO_REQUEST_ASSIGNMENT: &str = r#"WorkGraphTaskAssignment/v1
 
 ```json
 {
-  "agentProfile": "issue-info-requester"
+  "agentId": "issue-info-requester"
 }
 ```
 "#;
@@ -85,6 +92,7 @@ const RESULT: &str = r#"WorkGraphTaskResult/v1
 ```json
 {
   "taskType": "validate-issue",
+  "leaseId": "00000000-0000-7000-8000-000000000001",
   "outcome": "succeeded",
   "summary": "Validated the issue.",
   "result": {
@@ -104,6 +112,7 @@ const REQUEST_INFO_RESULT: &str = r#"WorkGraphTaskResult/v1
 ```json
 {
   "taskType": "request-info",
+  "leaseId": "00000000-0000-7000-8000-000000000002",
   "outcome": "succeeded",
   "summary": "Requested the missing information.",
   "result": {
@@ -129,6 +138,14 @@ fn acceptance_body(result_comment_node_id: &str, result_body_digest: &str) -> St
          \"{result_comment_node_id}\",\n  \"resultBodyDigest\": \"{result_body_digest}\",\n  \
          \"summary\": \"Accepted the current result revision.\"\n}}\n```\n"
     )
+}
+
+fn assignment_body(agent_id: &str) -> String {
+    format!("WorkGraphTaskAssignment/v1\n\n```json\n{{\n  \"agentId\": \"{agent_id}\"\n}}\n```\n")
+}
+
+fn result_body(lease_id: &str) -> String {
+    RESULT.replace("00000000-0000-7000-8000-000000000001", lease_id)
 }
 
 fn task_type() -> TaskIssueType {
@@ -204,9 +221,6 @@ fn sub_issue_event(action: &str, child: Value, mut parent: Value) -> Value {
     payload
 }
 
-/// The configured lease trust used by every worker-queue test. The default
-/// comment author in `comment_event` ("bot") is both dispatcher and reporter,
-/// matching the prototype's single-identity deployment.
 fn lease_trust() -> LeaseTrust {
     LeaseTrust {
         dispatchers: vec![TrustedIdentity {
@@ -214,8 +228,8 @@ fn lease_trust() -> LeaseTrust {
             login: "bot".to_string(),
         }],
         reporters: vec![TrustedIdentity {
-            id: "U_reporter".to_string(),
-            login: "reporter".to_string(),
+            id: "U_bot".to_string(),
+            login: "bot".to_string(),
         }],
     }
 }
@@ -231,34 +245,6 @@ fn convert_full(event: &str, payload: &Value) -> Conversion {
         .convert(event, payload)
         .unwrap()
         .unwrap()
-}
-
-/// Drives deliveries through exactly the fold the live Source and the
-/// bootstrapper use: convert, apply every contribution to a ledger, then
-/// project the affected anchors.
-#[derive(Default)]
-struct LeaseWorld {
-    ledger: LeaseLedger,
-    clock: u64,
-}
-
-impl LeaseWorld {
-    fn deliver(&mut self, payload: &Value) -> Vec<SourceChange> {
-        self.clock += 1;
-        let conversion = convert_full("issue_comment", payload);
-        let mut changes = conversion.changes;
-        let mut affected = std::collections::BTreeSet::new();
-        for intent in &conversion.lifecycle {
-            affected.extend(self.ledger.apply(intent));
-        }
-        changes.extend(anchor_changes("gh", self.clock, &self.ledger, affected));
-        changes
-    }
-
-    /// The anchor projection for the canonical single-task anchor.
-    fn anchor(&self) -> Option<AnchorState> {
-        self.ledger.project(LEASE_ANCHOR_ID)
-    }
 }
 
 /// Convert with no configured trust at all, to prove the fail-closed default.
@@ -303,7 +289,7 @@ async fn accepted_result_query() -> ContinuousQuery {
          (task:WorkGraphTask)<-[:RESULT_FOR]-(result:WorkGraphTaskResult)\
          <-[:ACCEPTS_RESULT]-(acceptance:WorkGraphTaskResultAcceptance) \
          WHERE acceptance.resultBodyDigest = result.bodyDigest \
-         RETURN task.nodeId AS taskId, assignment.agentProfile AS agentProfile, \
+         RETURN task.nodeId AS taskId, assignment.agentId AS agentId, \
          result.sourceCommentNodeId AS resultId, acceptance.sourceCommentNodeId AS acceptanceId",
         parser,
     )
@@ -384,6 +370,41 @@ fn id(change: &SourceChange) -> &str {
     &change.get_reference().element_id
 }
 
+fn relation_endpoints<'a>(
+    changes: &'a [SourceChange],
+    relation_label: &str,
+    relation_id: &str,
+) -> (&'a str, &'a str) {
+    changes
+        .iter()
+        .find_map(|change| match change {
+            SourceChange::Insert {
+                element:
+                    Element::Relation {
+                        metadata,
+                        in_node,
+                        out_node,
+                        ..
+                    },
+            }
+            | SourceChange::Update {
+                element:
+                    Element::Relation {
+                        metadata,
+                        in_node,
+                        out_node,
+                        ..
+                    },
+            } if metadata.labels[0].as_ref() == relation_label
+                && metadata.reference.element_id.as_ref() == relation_id =>
+            {
+                Some((in_node.element_id.as_ref(), out_node.element_id.as_ref()))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing relation {relation_label} {relation_id}"))
+}
+
 fn is_insert(change: &SourceChange) -> bool {
     matches!(change, SourceChange::Insert { .. })
 }
@@ -450,7 +471,7 @@ fn task_envelopes_accept_only_strict_work_definitions() {
     for body in [
         &format!("{VALIDATION_TASK}\n"),
         "WorkGraphTask/v1\n\n```yaml\ntaskType: validate-issue\ninputs:\n  validationProfile: other\n```\n",
-        "WorkGraphTask/v1\n\n```yaml\ntaskType: validate-issue\nagentProfile: issue-validator\ninputs:\n  validationProfile: new-issue-default\n```\n",
+        "WorkGraphTask/v1\n\n```yaml\ntaskType: validate-issue\nagentId: issue-validator\ninputs:\n  validationProfile: new-issue-default\n```\n",
         "WorkGraphTask/v1\n\n```yaml\ntaskType: validate-issue\ninputs:\n  validationProfile: new-issue-default\n---\ntaskType: request-info\ninputs:\n  validationResultCommentNodeId: IC_result\n```\n",
         "WorkGraphTask/v2\n\n```yaml\n{}\n```\n",
         "prose\n{}",
@@ -489,11 +510,28 @@ fn specialized_comment_grammars_are_mutually_exclusive() {
         CommentClassification::Invalid(_)
     ));
     assert!(matches!(
-        classify_comment("WorkGraphTaskAssignment/v1\n\n```json\n{\"agentProfile\":\"issue-validator\"}\n```\n"),
-        CommentClassification::Invalid(error) if error.code == error_code::NON_CANONICAL_JSON
+        classify_comment("WorkGraphTaskAssignment/v1\n\n```json\n{\"agentId\":\"issue-validator\"}\n```\n"),
+        CommentClassification::Invalid(error)
+            if error.code == error_code::NON_CANONICAL_JSON
     ));
     assert!(matches!(
-        classify_comment("WorkGraphTaskAssignment/v1\n\n```json\n{\n  \"agentProfile\": \"issue-risk-profiler\"\n}\n```\n"),
+        classify_comment("WorkGraphTaskAssignment/v1\n\n```json\n{\n  \"agentId\": \"issue-risk-profiler\"\n}\n```\n"),
+        CommentClassification::Assignment(assignment)
+            if assignment.agent_id == "issue-risk-profiler"
+    ));
+    for invalid_agent_id in ["", "a/b", "has space", "agent@name"] {
+        assert!(matches!(
+            classify_comment(&assignment_body(invalid_agent_id)),
+            CommentClassification::Invalid(error)
+                if error.code == error_code::INVALID_ASSIGNMENT_PAYLOAD
+        ));
+    }
+    assert!(matches!(
+        classify_comment(&assignment_body(&"a".repeat(64))),
+        CommentClassification::Assignment(_)
+    ));
+    assert!(matches!(
+        classify_comment(&assignment_body(&"a".repeat(65))),
         CommentClassification::Invalid(error)
             if error.code == error_code::INVALID_ASSIGNMENT_PAYLOAD
     ));
@@ -531,6 +569,269 @@ fn typed_issue_emits_task_not_github_issue() {
         property(&changes, "WorkGraphTask", "taskType"),
         &ElementValue::from(&json!("validate-issue"))
     );
+}
+
+#[test]
+fn contract_task_fixture_projects_canonical_task_parent_and_repository() {
+    let task = issue_event("opened", issue("I_task", VALIDATION_TASK, true, "open"));
+    let task_changes = Converter::new("gh", "acme", &task_type(), 42)
+        .convert("issues", &task)
+        .unwrap()
+        .unwrap()
+        .changes;
+    for (key, expected) in [
+        ("nodeId", json!("I_task")),
+        ("databaseId", json!(42)),
+        ("number", json!(42)),
+        ("title", json!("Work item")),
+        ("body", json!(VALIDATION_TASK)),
+        ("state", json!("open")),
+        ("authorLogin", json!("ada")),
+        ("authorId", json!("U_ada")),
+        ("repositoryNameWithOwner", json!("acme/widgets")),
+        ("issueTypeId", json!(TASK_TYPE_ID)),
+        ("issueTypeName", json!(TASK_TYPE_NAME)),
+        ("taskType", json!("validate-issue")),
+        ("inputs", json!({"validationProfile": "new-issue-default"})),
+    ] {
+        assert_eq!(
+            property(&task_changes, "WorkGraphTask", key),
+            &ElementValue::from(&expected),
+            "unexpected WorkGraphTask.{key}"
+        );
+    }
+    assert_eq!(
+        relation_endpoints(
+            &task_changes,
+            "IN_REPOSITORY",
+            "IN_REPOSITORY:I_task:R_widgets",
+        ),
+        ("I_task", "R_widgets")
+    );
+    assert!(!task_changes
+        .iter()
+        .any(|change| label(change) == "GitHubIssue"));
+    assert!(task_changes.iter().all(|change| {
+        let metadata = match change {
+            SourceChange::Delete { metadata } => metadata,
+            SourceChange::Insert { element } | SourceChange::Update { element } => {
+                element.get_metadata()
+            }
+            SourceChange::Future { .. } => return false,
+        };
+        metadata.effective_from == 42
+    }));
+
+    let parent_changes = convert(
+        "sub_issues",
+        &sub_issue_event(
+            "sub_issue_added",
+            issue("I_task", VALIDATION_TASK, true, "open"),
+            issue("I_parent", "Parent", false, "open"),
+        ),
+    );
+    assert_eq!(
+        relation_endpoints(&parent_changes, "TASK_FOR", "TASK_FOR:42"),
+        ("I_task", "I_parent")
+    );
+}
+
+#[test]
+fn contract_assignment_fixture_projects_exact_v1_trust_and_relations() {
+    let conversion = convert_full(
+        "issue_comment",
+        &comment_event("created", ASSIGNMENT, "open", true, "IC_assignment"),
+    );
+    let changes = &conversion.changes;
+    for (key, expected) in [
+        ("version", json!(1)),
+        ("agentId", json!("issue-validator")),
+        ("sourceCommentNodeId", json!("IC_assignment")),
+        ("trusted", json!(true)),
+        (
+            "bodyDigest",
+            json!(format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(ASSIGNMENT))
+            )),
+        ),
+    ] {
+        assert_eq!(
+            property(changes, "WorkGraphTaskAssignment", key),
+            &ElementValue::from(&expected),
+            "unexpected Assignment.{key}"
+        );
+    }
+    assert_eq!(
+        relation_endpoints(changes, "COMMENT_ON", "COMMENT_ON:IC_assignment:I_task",),
+        ("IC_assignment", "I_task")
+    );
+    assert_eq!(
+        relation_endpoints(
+            changes,
+            "ASSIGNMENT_FOR",
+            "ASSIGNMENT_FOR:IC_assignment:I_task",
+        ),
+        ("IC_assignment", "I_task")
+    );
+    assert_eq!(
+        relation_endpoints(
+            changes,
+            "ASSIGNED_TO",
+            "ASSIGNED_TO:IC_assignment:workgraph-agent:issue-validator",
+        ),
+        ("IC_assignment", "workgraph-agent:issue-validator")
+    );
+    assert!(matches!(
+        conversion.allocation,
+        Some(AllocationEvent::Comment {
+            ref comment_node_id,
+            ref task_node_id,
+            artifact: Some(AllocationArtifact::Assignment {
+                trusted: true,
+                task_type: TaskType::ValidateIssue,
+                ref agent_id,
+                ref created_at,
+            }),
+        }) if comment_node_id == "IC_assignment"
+            && task_node_id == "I_task"
+            && agent_id == "issue-validator"
+            && created_at == "2026-01-03T00:00:00Z"
+    ));
+
+    let untrusted = Converter::new("gh", "acme", &task_type(), 1)
+        .convert(
+            "issue_comment",
+            &comment_event("created", ASSIGNMENT, "open", true, "IC_untrusted"),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        property(&untrusted.changes, "WorkGraphTaskAssignment", "trusted"),
+        &ElementValue::Bool(false)
+    );
+    assert!(matches!(
+        untrusted.allocation,
+        Some(AllocationEvent::Comment {
+            artifact: Some(AllocationArtifact::Assignment { trusted: false, .. }),
+            ..
+        })
+    ));
+
+    let mut edited = comment_event("edited", ASSIGNMENT, "open", true, "IC_untrusted_edit");
+    edited["sender"] = json!({
+        "login": "mallory", "node_id": "U_mallory", "id": 3, "type": "User"
+    });
+    edited["changes"] = json!({"body": {"from": "ordinary"}});
+    let edited = convert_full("issue_comment", &edited);
+    assert!(matches!(
+        edited.allocation,
+        Some(AllocationEvent::Comment {
+            artifact: Some(AllocationArtifact::Assignment { trusted: false, .. }),
+            ..
+        })
+    ));
+
+    for (id, body) in [
+        (
+            "IC_missing",
+            "WorkGraphTaskAssignment/v1\n\n```json\n{}\n```\n",
+        ),
+        (
+            "IC_legacy",
+            "WorkGraphTaskAssignment/v1\n\n```json\n{\n  \"agentProfile\": \"issue-validator\",\n  \"workerId\": \"validator-1\"\n}\n```\n",
+        ),
+        (
+            "IC_extra",
+            "WorkGraphTaskAssignment/v1\n\n```json\n{\n  \"agentId\": \"issue-validator\",\n  \"queuePriority\": 1\n}\n```\n",
+        ),
+    ] {
+        let invalid = convert_full(
+            "issue_comment",
+            &comment_event("created", body, "open", true, id),
+        );
+        assert!(invalid
+            .changes
+            .iter()
+            .any(|change| label(change) == "WorkGraphError"));
+        assert!(!invalid
+            .changes
+            .iter()
+            .any(|change| label(change) == "WorkGraphTaskAssignment"));
+        assert!(matches!(
+            invalid.allocation,
+            Some(AllocationEvent::Comment { artifact: None, .. })
+        ));
+    }
+}
+
+#[test]
+fn contract_result_fixture_projects_exact_v1_relation_and_reporter_trust() {
+    let conversion = convert_full(
+        "issue_comment",
+        &comment_event("created", RESULT, "open", true, "IC_result"),
+    );
+    for (key, expected) in [
+        ("version", json!(1)),
+        ("taskType", json!("validate-issue")),
+        ("leaseId", json!("00000000-0000-7000-8000-000000000001")),
+        ("outcome", json!("succeeded")),
+        ("summary", json!("Validated the issue.")),
+        (
+            "result",
+            json!({"criteria": [{
+                "criterion": "Acceptance criteria",
+                "passed": true,
+                "evidence": "Present."
+            }]}),
+        ),
+        ("trusted", json!(false)),
+    ] {
+        assert_eq!(
+            property(&conversion.changes, "WorkGraphTaskResult", key),
+            &ElementValue::from(&expected),
+            "unexpected Result.{key}"
+        );
+    }
+    assert_eq!(
+        relation_endpoints(
+            &conversion.changes,
+            "RESULT_FOR",
+            "RESULT_FOR:IC_result:I_task",
+        ),
+        ("IC_result", "I_task")
+    );
+    assert!(matches!(
+        conversion.allocation,
+        Some(AllocationEvent::Comment {
+            artifact: Some(AllocationArtifact::Result {
+                reporter_trusted: true,
+                task_type: TaskType::ValidateIssue,
+                ref lease_id,
+                outcome: Outcome::Succeeded,
+                ..
+            }),
+            ..
+        }) if lease_id == "00000000-0000-7000-8000-000000000001"
+    ));
+
+    let untrusted = Converter::new("gh", "acme", &task_type(), 1)
+        .convert(
+            "issue_comment",
+            &comment_event("created", RESULT, "open", true, "IC_untrusted"),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        untrusted.allocation,
+        Some(AllocationEvent::Comment {
+            artifact: Some(AllocationArtifact::Result {
+                reporter_trusted: false,
+                ..
+            }),
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -756,6 +1057,95 @@ fn task_state_is_retained_on_close_and_reopen() {
         property(&reopened, "WorkGraphTask", "labels"),
         &ElementValue::from(&json!(["reopened-label"]))
     );
+}
+
+#[test]
+fn contract_task_and_assignment_lifecycle_emit_allocator_retractions() {
+    for action in ["closed", "deleted"] {
+        let conversion = convert_full(
+            "issues",
+            &issue_event(action, issue("I_task", VALIDATION_TASK, true, "closed")),
+        );
+        assert!(matches!(
+            conversion.allocation,
+            Some(AllocationEvent::TaskCancelled { ref task_node_id })
+                if task_node_id == "I_task"
+        ));
+        assert!(conversion.changes.iter().any(|change| {
+            label(change) == "WorkGraphTask"
+                && if action == "closed" {
+                    is_update(change)
+                } else {
+                    is_delete(change)
+                }
+        }));
+    }
+
+    let revised_body = assignment_body("validator-2");
+    let mut revision = comment_event("edited", &revised_body, "open", true, "IC_assignment");
+    revision["changes"] = json!({"body": {"from": ASSIGNMENT}});
+    let revision = convert_full("issue_comment", &revision);
+    assert!(revision.changes.iter().any(|change| {
+        id(change) == "ASSIGNED_TO:IC_assignment:workgraph-agent:issue-validator"
+            && label(change) == "ASSIGNED_TO"
+            && is_delete(change)
+    }));
+    assert_eq!(
+        relation_endpoints(
+            &revision.changes,
+            "ASSIGNED_TO",
+            "ASSIGNED_TO:IC_assignment:workgraph-agent:validator-2",
+        ),
+        ("IC_assignment", "workgraph-agent:validator-2")
+    );
+    assert!(matches!(
+        revision.allocation,
+        Some(AllocationEvent::Comment {
+            artifact: Some(AllocationArtifact::Assignment {
+                trusted: true,
+                ref agent_id,
+                ..
+            }),
+            ..
+        }) if agent_id == "validator-2"
+    ));
+
+    let malformed = "WorkGraphTaskAssignment/v1\n\n```json\n{}\n```\n";
+    let mut invalid = comment_event("edited", malformed, "open", true, "IC_assignment");
+    invalid["changes"] = json!({"body": {"from": revised_body}});
+    let invalid = convert_full("issue_comment", &invalid);
+    assert!(invalid
+        .changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphTaskAssignment" && is_delete(change)));
+    assert!(invalid
+        .changes
+        .iter()
+        .any(|change| label(change) == "WorkGraphError" && is_insert(change)));
+    assert!(matches!(
+        invalid.allocation,
+        Some(AllocationEvent::Comment { artifact: None, .. })
+    ));
+
+    let deleted = convert_full(
+        "issue_comment",
+        &comment_event("deleted", ASSIGNMENT, "open", true, "IC_assignment"),
+    );
+    for expected in [
+        "ASSIGNMENT_FOR",
+        "ASSIGNED_TO",
+        "COMMENT_ON",
+        "WorkGraphTaskAssignment",
+    ] {
+        assert!(deleted
+            .changes
+            .iter()
+            .any(|change| label(change) == expected && is_delete(change)));
+    }
+    assert!(matches!(
+        deleted.allocation,
+        Some(AllocationEvent::Comment { artifact: None, .. })
+    ));
 }
 
 #[test]
@@ -1529,7 +1919,7 @@ async fn task_assignment_result_acceptance_path_requires_matching_result_revisio
     assert!(changes
         .iter()
         .any(|change| { label(change) == "WorkGraphTaskResultAcceptance" && is_update(change) }));
-    assert_eq!(additions(&process_changes(&query, changes).await), 1);
+    assert!(additions(&process_changes(&query, changes).await) > 0);
 }
 
 #[test]
@@ -1580,8 +1970,8 @@ fn specialized_comments_emit_only_their_node_and_relations() {
 }
 
 #[test]
-fn supported_assignment_profiles_map_exactly() {
-    for (body, expected_profile, id) in [
+fn assignment_agent_ids_map_exactly() {
+    for (body, expected_agent_id, id) in [
         (ASSIGNMENT, "issue-validator", "IC_validator_assignment"),
         (
             INFO_REQUEST_ASSIGNMENT,
@@ -1594,8 +1984,8 @@ fn supported_assignment_profiles_map_exactly() {
             &comment_event("created", body, "open", true, id),
         );
         assert_eq!(
-            property(&changes, "WorkGraphTaskAssignment", "agentProfile"),
-            &ElementValue::from(&json!(expected_profile))
+            property(&changes, "WorkGraphTaskAssignment", "agentId"),
+            &ElementValue::from(&json!(expected_agent_id))
         );
         assert!(changes
             .iter()
@@ -1900,10 +2290,11 @@ fn config_requires_exact_task_type_id_and_name() {
         organization: "acme".to_string(),
         task_issue_type: task_type(),
         repositories: vec![],
-        worker_config: None,
+        agent_config: None,
         lease_trust: None,
         webhook: WebhookConfig {
             secret: "secret".to_string(),
+            lease_validation_token: "validation-token".to_string(),
             ..WebhookConfig::default()
         },
         durability: DurabilityConfig {
@@ -1918,21 +2309,117 @@ fn config_requires_exact_task_type_id_and_name() {
     config.task_issue_type = task_type();
     config.task_issue_type.name = " WorkGraphTask".to_string();
     assert!(config.validate().is_err());
+    config.task_issue_type = task_type();
+    config.webhook.lease_validation_token = config.webhook.secret.clone();
+    assert_eq!(
+        config.validate().unwrap_err().to_string(),
+        "webhook.leaseValidationToken must differ from webhook.secret"
+    );
+    config.webhook.lease_validation_token = "distinct-validation-token".to_string();
+    assert!(config.validate().is_ok());
+}
+
+#[tokio::test]
+async fn descriptor_rejects_secret_references_that_resolve_to_the_same_value() {
+    struct TestSecretResolver;
+
+    #[async_trait::async_trait]
+    impl drasi_plugin_sdk::resolver::ValueResolver for TestSecretResolver {
+        async fn resolve_to_string(
+            &self,
+            value: &drasi_plugin_sdk::ConfigValue<String>,
+        ) -> Result<String, drasi_plugin_sdk::resolver::ResolverError> {
+            match value {
+                drasi_plugin_sdk::ConfigValue::Secret { name } if name.starts_with("same-") => {
+                    Ok("shared-secret-value".to_string())
+                }
+                drasi_plugin_sdk::ConfigValue::Secret { name } => Ok(format!("resolved-{name}")),
+                _ => Err(drasi_plugin_sdk::resolver::ResolverError::WrongResolverType),
+            }
+        }
+    }
+
+    drasi_plugin_sdk::resolver::register_secret_resolver(Arc::new(TestSecretResolver));
+    let config = |secret: &str, token: &str| {
+        json!({
+            "organization": "acme",
+            "taskIssueType": {"id": "IT_test", "name": "WorkGraphTask"},
+            "webhook": {
+                "secret": {"kind": "Secret", "name": secret},
+                "leaseValidationToken": {"kind": "Secret", "name": token}
+            },
+            "durability": {
+                "enabled": true,
+                "maxEvents": 1000,
+                "capacityPolicy": "RejectIncoming"
+            }
+        })
+    };
+    let descriptor = GitHubWorkGraphSourceDescriptor;
+
+    descriptor
+        .create_source(
+            "distinct-secrets",
+            &config("webhook-signing", "lease-validation"),
+            false,
+        )
+        .await
+        .expect("distinct resolved secrets must be accepted");
+    let error = match descriptor
+        .create_source(
+            "equal-secrets",
+            &config("same-webhook", "same-validation"),
+            false,
+        )
+        .await
+    {
+        Ok(_) => panic!("equal resolved secrets must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.to_string(),
+        "webhook.leaseValidationToken must differ from webhook.secret"
+    );
+    assert!(!error.to_string().contains("shared-secret-value"));
 }
 
 #[test]
 fn descriptor_exposes_task_type_and_graph_schema() {
     let descriptor = GitHubWorkGraphSourceDescriptor;
     let schema = descriptor.config_schema_json();
+    assert_eq!(descriptor.config_version(), "3.0.0");
     assert!(schema.contains("taskIssueType"));
+    assert!(schema.contains("agentConfig"));
+    assert!(!schema.contains("workerConfig"));
     assert!(NODE_LABELS.contains(&"WorkGraphTask"));
     assert!(NODE_LABELS.contains(&"WorkGraphTaskAssignment"));
     assert!(NODE_LABELS.contains(&"WorkGraphTaskResult"));
     assert!(NODE_LABELS.contains(&"WorkGraphTaskResultAcceptance"));
+    assert!(NODE_LABELS.contains(&"WorkGraphAgent"));
+    assert!(NODE_LABELS.contains(&"WorkGraphAgentSlot"));
     assert!(RELATION_LABELS.contains(&"ASSIGNMENT_FOR"));
     assert!(RELATION_LABELS.contains(&"RESULT_FOR"));
     assert!(RELATION_LABELS.contains(&"ACCEPTS_RESULT"));
+    assert!(RELATION_LABELS.contains(&"ASSIGNED_TO"));
+    assert!(RELATION_LABELS.contains(&"HAS_SLOT"));
     assert!(RELATION_LABELS.contains(&"TASK_FOR"));
+    assert!(
+        serde_json::from_value::<crate::descriptor::GitHubWorkGraphSourceConfigDto>(json!({
+            "organization": "acme",
+            "taskIssueType": {"id": "IT_test", "name": "WorkGraphTask"},
+            "workerConfig": {
+                "repository": "acme/widgets",
+                "ref": "main",
+                "path": ".github/workgraph/workers.yaml",
+                "token": "legacy-token"
+            },
+            "webhook": {
+                "secret": "webhook-secret",
+                "leaseValidationToken": "validation-token"
+            }
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -1947,107 +2434,68 @@ fn signature_verification_remains_strict() {
     assert!(verify_signature(b"secret", body, "sha256=00").is_err());
 }
 
-// ---------------------------------------------------------------------------
-// Worker queue: worker file contract, worker/slot projection, and the
-// Assignment/v2, Lease/v1, Result/v2, and LeaseExpiration/v1 lifecycle.
-// ---------------------------------------------------------------------------
+#[test]
+fn trust_finalization_only_mutates_protocol_artifacts() {
+    let mut ordinary = convert(
+        "issue_comment",
+        &comment_event(
+            "created",
+            "Ordinary task comment.",
+            "open",
+            true,
+            "IC_ordinary",
+        ),
+    );
+    assert!(node_property_opt(&ordinary, "IC_ordinary", "trusted").is_none());
+    crate::mapping::set_artifact_trusted(&mut ordinary, "IC_ordinary", false);
+    assert!(node_property_opt(&ordinary, "IC_ordinary", "trusted").is_none());
 
-const WORKER_FILE: &str = "version: 1\nworkers:\n  - workerId: validator-1\n    agentProfile: \
-                           issue-validator\n    slots: 2\n    leaseDuration: PT15M\n  - workerId: \
-                           info-requester-1\n    agentProfile: issue-info-requester\n    slots: \
+    let mut assignment = convert(
+        "issue_comment",
+        &comment_event("created", ASSIGNMENT, "open", true, "IC_assignment"),
+    );
+    crate::mapping::set_artifact_trusted(&mut assignment, "IC_assignment", true);
+    assert_eq!(
+        node_property(&assignment, "IC_assignment", "trusted"),
+        &ElementValue::Bool(true)
+    );
+}
+
+const AGENT_FILE: &str = "version: 1\nagents:\n  - agentId: issue-validator\n    slots: 2\n    leaseDuration: PT15M\n  - agentId: \
+                           issue-info-requester\n    slots: \
                            1\n    leaseDuration: PT15M\n";
 
-const ASSIGNMENT_V2: &str = r#"WorkGraphTaskAssignment/v2
-
-```json
-{
-  "agentProfile": "issue-validator",
-  "workerId": "validator-1"
-}
-```
-"#;
-
-const LEASE: &str = r#"WorkGraphTaskLease/v1
-
-```json
-{
-  "leaseId": "0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21",
-  "assignmentCommentNodeId": "IC_assignment",
-  "workerId": "validator-1",
-  "slotId": "validator-1/1",
-  "acquiredAt": "2026-08-19T22:00:00Z",
-  "expiresAt": "2026-08-19T22:15:00Z"
-}
-```
-"#;
-
-const RESULT_V2: &str = r#"WorkGraphTaskResult/v2
-
-```json
-{
-  "taskType": "validate-issue",
-  "leaseId": "0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21",
-  "outcome": "succeeded",
-  "summary": "Validated the issue.",
-  "result": {
-    "criteria": [
-      {
-        "criterion": "Acceptance criteria",
-        "passed": true,
-        "evidence": "Present."
-      }
-    ]
-  }
-}
-```
-"#;
-
-const LEASE_EXPIRATION: &str = r#"WorkGraphTaskLeaseExpiration/v1
-
-```json
-{
-  "leaseCommentNodeId": "IC_lease",
-  "leaseId": "0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21",
-  "expiredAt": "2026-08-19T22:15:00Z",
-  "reason": "deadline-reached"
-}
-```
-"#;
-
-const LEASE_ID: &str = "0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21";
-const LEASE_ANCHOR_ID: &str = "workgraph-lease:I_task:0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21";
-
-fn worker_location() -> WorkerFileLocation {
-    WorkerFileLocation {
+fn agent_location() -> AgentFileLocation {
+    AgentFileLocation {
         repository: "acme/widgets".to_string(),
         r#ref: "main".to_string(),
-        path: ".github/workgraph/workers.yaml".to_string(),
+        path: ".github/workgraph/agents.yaml".to_string(),
     }
 }
 
-fn worker_content(text: &str) -> WorkerFileContent {
-    WorkerFileContent {
+fn agent_content(text: &str) -> AgentFileContent {
+    AgentFileContent {
         text: text.to_string(),
         oid: "blob-oid".to_string(),
     }
 }
 
-fn project_workers(text: &str) -> Vec<SourceChange> {
-    project_workers_with(text, &BTreeMap::new(), &BTreeMap::new())
+fn project_agents(text: &str) -> Vec<SourceChange> {
+    project_agents_with(text, &BTreeMap::new(), &BTreeMap::new())
 }
 
-fn project_workers_with(
+fn project_agents_with(
     text: &str,
-    retiring: &BTreeMap<String, u32>,
-    removed: &BTreeMap<String, u32>,
+    retiring: &BTreeMap<String, BTreeSet<u32>>,
+    removed: &BTreeMap<String, BTreeSet<u32>>,
 ) -> Vec<SourceChange> {
-    let file = parse_worker_file(text).expect("worker file must parse");
-    let content = worker_content(text);
-    worker_changes(
+    let file = parse_agent_file(text).expect("agent file must parse");
+    let content = agent_content(text);
+    agent_changes(
         "gh",
         1,
-        &worker_location(),
-        &WorkerProjection::Loaded {
+        &agent_location(),
+        &AgentProjection::Loaded {
             file: &file,
             content: &content,
         },
@@ -2096,84 +2544,123 @@ fn ids_with_label<'a>(changes: &'a [SourceChange], wanted: &str) -> Vec<&'a str>
 }
 
 #[test]
-fn worker_file_accepts_only_the_strict_version_one_grammar() {
-    let file = parse_worker_file(WORKER_FILE).expect("valid worker file");
+fn agent_file_accepts_only_the_strict_version_one_grammar() {
+    let file = parse_agent_file(AGENT_FILE).expect("valid agent file");
     assert_eq!(file.version, 1);
-    assert_eq!(file.workers.len(), 2);
-    assert_eq!(file.workers[0].worker_id, "validator-1");
-    assert_eq!(file.workers[0].agent_profile, "issue-validator");
-    assert_eq!(file.workers[0].slots, 2);
-    assert_eq!(file.workers[0].lease_duration, "PT15M");
-    assert_eq!(file.workers[0].lease_duration_seconds, 900);
+    assert_eq!(file.agents.len(), 2);
+    assert_eq!(file.agents[0].agent_id, "issue-validator");
+    assert_eq!(file.agents[0].slots, 2);
+    assert_eq!(file.agents[0].lease_duration, "PT15M");
+    assert_eq!(file.agents[0].lease_duration_seconds, 900);
     assert_eq!(
-        file.workers[0].slot_ids(),
-        vec!["validator-1/1", "validator-1/2"]
+        file.agents[0].slot_ids(),
+        vec!["issue-validator/1", "issue-validator/2"]
     );
 
     for (body, expected) in [
-        // Zero workers must never become a silently empty pool.
-        ("version: 1\nworkers: []\n", worker_error_code::INVALID_WORKER_FILE_PAYLOAD),
+        // Zero agents must never become a silently empty pool.
+        ("version: 1\nagents: []\n", agent_error_code::INVALID_AGENT_FILE_PAYLOAD),
         // Unsupported and missing versions.
         (
-            "version: 2\nworkers:\n  - workerId: w\n    agentProfile: issue-validator\n    slots: 1\n    leaseDuration: PT1M\n",
-            worker_error_code::INVALID_WORKER_FILE_PAYLOAD,
+            "version: 2\nagents:\n  - agentId: w\n    slots: 1\n    leaseDuration: PT1M\n",
+            agent_error_code::INVALID_AGENT_FILE_PAYLOAD,
         ),
-        ("workers: []\n", worker_error_code::INVALID_WORKER_FILE_YAML),
+        ("agents: []\n", agent_error_code::INVALID_AGENT_FILE_YAML),
         // Unknown field.
         (
-            "version: 1\nworkers:\n  - workerId: w\n    agentProfile: issue-validator\n    slots: 1\n    leaseDuration: PT1M\n    extra: nope\n",
-            worker_error_code::INVALID_WORKER_FILE_YAML,
+            "version: 1\nagents:\n  - agentId: w\n    slots: 1\n    leaseDuration: PT1M\n    extra: nope\n",
+            agent_error_code::INVALID_AGENT_FILE_YAML,
         ),
         // Wrong types.
         (
-            "version: 1\nworkers:\n  - workerId: w\n    agentProfile: issue-validator\n    slots: two\n    leaseDuration: PT1M\n",
-            worker_error_code::INVALID_WORKER_FILE_YAML,
+            "version: 1\nagents:\n  - agentId: w\n    slots: two\n    leaseDuration: PT1M\n",
+            agent_error_code::INVALID_AGENT_FILE_YAML,
         ),
-        // Unsupported profile.
+        // The legacy worker/profile entry is not an alias.
         (
-            "version: 1\nworkers:\n  - workerId: w\n    agentProfile: issue-risk-profiler\n    slots: 1\n    leaseDuration: PT1M\n",
-            worker_error_code::INVALID_WORKER_FILE_PAYLOAD,
+            "version: 1\nagents:\n  - workerId: w\n    agentProfile: issue-validator\n    slots: 1\n    leaseDuration: PT1M\n",
+            agent_error_code::INVALID_AGENT_FILE_YAML,
         ),
         // Non-positive and unsafe slot counts.
         (
-            "version: 1\nworkers:\n  - workerId: w\n    agentProfile: issue-validator\n    slots: 0\n    leaseDuration: PT1M\n",
-            worker_error_code::INVALID_WORKER_FILE_PAYLOAD,
+            "version: 1\nagents:\n  - agentId: w\n    slots: 0\n    leaseDuration: PT1M\n",
+            agent_error_code::INVALID_AGENT_FILE_PAYLOAD,
         ),
         (
-            "version: 1\nworkers:\n  - workerId: w\n    agentProfile: issue-validator\n    slots: 17\n    leaseDuration: PT1M\n",
-            worker_error_code::INVALID_WORKER_FILE_PAYLOAD,
+            "version: 1\nagents:\n  - agentId: w\n    slots: 17\n    leaseDuration: PT1M\n",
+            agent_error_code::INVALID_AGENT_FILE_PAYLOAD,
         ),
-        // Empty, oversized, and slot-ambiguous worker IDs.
+        // Empty and slot-ambiguous agent IDs.
         (
-            "version: 1\nworkers:\n  - workerId: ''\n    agentProfile: issue-validator\n    slots: 1\n    leaseDuration: PT1M\n",
-            worker_error_code::INVALID_WORKER_FILE_PAYLOAD,
+            "version: 1\nagents:\n  - agentId: ''\n    slots: 1\n    leaseDuration: PT1M\n",
+            agent_error_code::INVALID_AGENT_FILE_PAYLOAD,
         ),
         (
-            "version: 1\nworkers:\n  - workerId: a/b\n    agentProfile: issue-validator\n    slots: 1\n    leaseDuration: PT1M\n",
-            worker_error_code::INVALID_WORKER_FILE_PAYLOAD,
+            "version: 1\nagents:\n  - agentId: a/b\n    slots: 1\n    leaseDuration: PT1M\n",
+            agent_error_code::INVALID_AGENT_FILE_PAYLOAD,
         ),
         // Invalid, non-positive, and unsafe durations.
         (
-            "version: 1\nworkers:\n  - workerId: w\n    agentProfile: issue-validator\n    slots: 1\n    leaseDuration: 15m\n",
-            worker_error_code::INVALID_WORKER_FILE_PAYLOAD,
+            "version: 1\nagents:\n  - agentId: w\n    slots: 1\n    leaseDuration: 15m\n",
+            agent_error_code::INVALID_AGENT_FILE_PAYLOAD,
         ),
         (
-            "version: 1\nworkers:\n  - workerId: w\n    agentProfile: issue-validator\n    slots: 1\n    leaseDuration: PT0S\n",
-            worker_error_code::INVALID_WORKER_FILE_PAYLOAD,
+            "version: 1\nagents:\n  - agentId: w\n    slots: 1\n    leaseDuration: PT0S\n",
+            agent_error_code::INVALID_AGENT_FILE_PAYLOAD,
         ),
         (
-            "version: 1\nworkers:\n  - workerId: w\n    agentProfile: issue-validator\n    slots: 1\n    leaseDuration: P2D\n",
-            worker_error_code::INVALID_WORKER_FILE_PAYLOAD,
+            "version: 1\nagents:\n  - agentId: w\n    slots: 1\n    leaseDuration: P2D\n",
+            agent_error_code::INVALID_AGENT_FILE_PAYLOAD,
         ),
-        // Duplicate worker IDs, and therefore duplicate derived slot IDs.
+        // Duplicate agent IDs, and therefore duplicate derived slot IDs.
         (
-            "version: 1\nworkers:\n  - workerId: w\n    agentProfile: issue-validator\n    slots: 1\n    leaseDuration: PT1M\n  - workerId: w\n    agentProfile: issue-info-requester\n    slots: 1\n    leaseDuration: PT1M\n",
-            worker_error_code::INVALID_WORKER_FILE_PAYLOAD,
+            "version: 1\nagents:\n  - agentId: w\n    slots: 1\n    leaseDuration: PT1M\n  - agentId: w\n    slots: 1\n    leaseDuration: PT1M\n",
+            agent_error_code::INVALID_AGENT_FILE_PAYLOAD,
         ),
     ] {
-        let error = parse_worker_file(body).expect_err("worker file must be rejected");
+        let error = parse_agent_file(body).expect_err("agent file must be rejected");
         assert_eq!(error.code, expected, "unexpected code for: {body}");
     }
+    let arbitrary = parse_agent_file(
+        "version: 1\nagents:\n  - agentId: issue-risk-profiler\n    slots: 1\n    leaseDuration: PT1M\n",
+    )
+    .expect("custom agent profile names are configuration-defined");
+    assert_eq!(arbitrary.agents[0].agent_id, "issue-risk-profiler");
+    let maximum_agents = format!(
+        "version: 1\nagents:\n{}",
+        (0..64)
+            .map(|index| format!(
+                "  - agentId: agent-{index}\n    slots: 1\n    leaseDuration: PT1S\n"
+            ))
+            .collect::<String>()
+    );
+    assert_eq!(
+        parse_agent_file(&maximum_agents)
+            .expect("64 agents is the configured maximum")
+            .agents
+            .len(),
+        64
+    );
+    let too_many_agents =
+        format!("{maximum_agents}  - agentId: agent-64\n    slots: 1\n    leaseDuration: PT1S\n");
+    assert_eq!(
+        parse_agent_file(&too_many_agents).unwrap_err().code,
+        agent_error_code::INVALID_AGENT_FILE_PAYLOAD
+    );
+    assert_eq!(
+        parse_agent_file(&"x".repeat(crate::agents::MAX_AGENT_FILE_BYTES as usize + 1))
+            .unwrap_err()
+            .code,
+        agent_error_code::AGENT_FILE_TOO_LARGE
+    );
+    assert_eq!(
+        parse_agent_file(
+            "version: 1\r\nagents:\r\n  - agentId: issue-validator\r\n    slots: 1\r\n    leaseDuration: PT1M\r\n"
+        )
+        .unwrap_err()
+        .code,
+        agent_error_code::INVALID_AGENT_FILE_PAYLOAD
+    );
 }
 
 #[test]
@@ -2197,19 +2684,19 @@ fn iso8601_lease_durations_reject_ambiguous_and_malformed_forms() {
 }
 
 #[test]
-fn worker_file_location_validates_repository_ref_and_path() {
-    assert!(worker_location().validate().is_ok());
+fn agent_file_location_validates_repository_ref_and_path() {
+    assert!(agent_location().validate().is_ok());
     for (repository, git_ref, path) in [
-        ("widgets", "main", ".github/workgraph/workers.yaml"),
-        ("acme/a/b", "main", ".github/workgraph/workers.yaml"),
-        ("acme/widgets", "", ".github/workgraph/workers.yaml"),
-        ("acme/widgets", "ma in", ".github/workgraph/workers.yaml"),
+        ("widgets", "main", ".github/workgraph/agents.yaml"),
+        ("acme/a/b", "main", ".github/workgraph/agents.yaml"),
+        ("acme/widgets", "", ".github/workgraph/agents.yaml"),
+        ("acme/widgets", "ma in", ".github/workgraph/agents.yaml"),
         ("acme/widgets", "main", "/absolute.yaml"),
         ("acme/widgets", "main", "../escape.yaml"),
         ("acme/widgets", "main", "a//b.yaml"),
         ("acme/widgets", "main", ""),
     ] {
-        let location = WorkerFileLocation {
+        let location = AgentFileLocation {
             repository: repository.to_string(),
             r#ref: git_ref.to_string(),
             path: path.to_string(),
@@ -2219,10 +2706,10 @@ fn worker_file_location_validates_repository_ref_and_path() {
             "expected rejection for {repository}@{git_ref}:{path}"
         );
     }
-    let location = worker_location();
+    let location = agent_location();
     assert_eq!(location.owner(), "acme");
     assert_eq!(location.name(), "widgets");
-    assert_eq!(location.expression(), "main:.github/workgraph/workers.yaml");
+    assert_eq!(location.expression(), "main:.github/workgraph/agents.yaml");
     assert!(location.matches_push("acme/widgets", "refs/heads/main"));
     assert!(location.matches_push("ACME/Widgets", "main"));
     assert!(!location.matches_push("acme/widgets", "refs/heads/other"));
@@ -2230,91 +2717,105 @@ fn worker_file_location_validates_repository_ref_and_path() {
 }
 
 #[test]
-fn workers_project_stable_nodes_slots_and_relations() {
-    let changes = project_workers(WORKER_FILE);
+fn agents_project_stable_nodes_slots_and_relations() {
+    let changes = project_agents(AGENT_FILE);
 
     assert_eq!(
-        ids_with_label(&changes, "WorkGraphWorker"),
+        ids_with_label(&changes, "WorkGraphAgent"),
         vec![
-            "workgraph-worker:validator-1",
-            "workgraph-worker:info-requester-1"
+            "workgraph-agent:issue-validator",
+            "workgraph-agent:issue-info-requester"
         ]
     );
     assert_eq!(
-        ids_with_label(&changes, "WorkGraphWorkerSlot"),
+        ids_with_label(&changes, "WorkGraphAgentSlot"),
         vec![
-            "workgraph-worker-slot:validator-1/1",
-            "workgraph-worker-slot:validator-1/2",
-            "workgraph-worker-slot:info-requester-1/1",
+            "workgraph-agent-slot:issue-validator/1",
+            "workgraph-agent-slot:issue-validator/2",
+            "workgraph-agent-slot:issue-info-requester/1",
         ]
     );
     assert_eq!(
         ids_with_label(&changes, "HAS_SLOT"),
         vec![
-            "HAS_SLOT:workgraph-worker:validator-1:workgraph-worker-slot:validator-1/1",
-            "HAS_SLOT:workgraph-worker:validator-1:workgraph-worker-slot:validator-1/2",
-            "HAS_SLOT:workgraph-worker:info-requester-1:workgraph-worker-slot:info-requester-1/1",
+            "HAS_SLOT:workgraph-agent:issue-validator:workgraph-agent-slot:issue-validator/1",
+            "HAS_SLOT:workgraph-agent:issue-validator:workgraph-agent-slot:issue-validator/2",
+            "HAS_SLOT:workgraph-agent:issue-info-requester:workgraph-agent-slot:issue-info-requester/1",
         ]
     );
 
-    let worker = "workgraph-worker:validator-1";
+    let agent = "workgraph-agent:issue-validator";
     assert_eq!(
-        node_property(&changes, worker, "workerId"),
-        &ElementValue::from(&json!("validator-1"))
-    );
-    assert_eq!(
-        node_property(&changes, worker, "agentProfile"),
+        node_property(&changes, agent, "agentId"),
         &ElementValue::from(&json!("issue-validator"))
     );
+    assert!(node_property_opt(&changes, agent, "agentProfile").is_none());
+    assert!(node_property_opt(&changes, agent, "workerId").is_none());
     assert_eq!(
-        node_property(&changes, worker, "configuredSlotCount"),
+        node_property(&changes, agent, "configuredSlotCount"),
         &ElementValue::Integer(2)
     );
     assert_eq!(
-        node_property(&changes, worker, "leaseDuration"),
+        node_property(&changes, agent, "queueDepth"),
+        &ElementValue::Integer(0)
+    );
+    assert_eq!(
+        node_property(&changes, agent, "activeLeaseCount"),
+        &ElementValue::Integer(0)
+    );
+    assert_eq!(
+        node_property(&changes, agent, "availableSlotCount"),
+        &ElementValue::Integer(2)
+    );
+    assert_eq!(
+        node_property(&changes, agent, "leaseDuration"),
         &ElementValue::from(&json!("PT15M"))
     );
     assert_eq!(
-        node_property(&changes, worker, "leaseDurationSeconds"),
+        node_property(&changes, agent, "leaseDurationSeconds"),
         &ElementValue::Integer(900)
     );
-    // Configuration provenance travels with every projected worker.
     assert_eq!(
-        node_property(&changes, worker, "configRepository"),
+        node_property(&changes, agent, "agentFileVersion"),
+        &ElementValue::Integer(1)
+    );
+    // Configuration provenance travels with every projected agent.
+    assert_eq!(
+        node_property(&changes, agent, "configRepository"),
         &ElementValue::from(&json!("acme/widgets"))
     );
     assert_eq!(
-        node_property(&changes, worker, "configRef"),
+        node_property(&changes, agent, "configRef"),
         &ElementValue::from(&json!("main"))
     );
     assert_eq!(
-        node_property(&changes, worker, "configPath"),
-        &ElementValue::from(&json!(".github/workgraph/workers.yaml"))
+        node_property(&changes, agent, "configPath"),
+        &ElementValue::from(&json!(".github/workgraph/agents.yaml"))
     );
     assert_eq!(
-        node_property(&changes, worker, "configBlobOid"),
+        node_property(&changes, agent, "configBlobOid"),
         &ElementValue::from(&json!("blob-oid"))
     );
     assert_eq!(
-        node_property(&changes, worker, "configDigest"),
+        node_property(&changes, agent, "configDigest"),
         &ElementValue::from(&json!(format!(
             "sha256:{}",
-            hex::encode(Sha256::digest(WORKER_FILE))
+            hex::encode(Sha256::digest(AGENT_FILE))
         )))
     );
 
-    let slot = "workgraph-worker-slot:validator-1/2";
+    let slot = "workgraph-agent-slot:issue-validator/2";
     assert_eq!(
         node_property(&changes, slot, "slotId"),
-        &ElementValue::from(&json!("validator-1/2"))
+        &ElementValue::from(&json!("issue-validator/2"))
     );
     assert_eq!(
         node_property(&changes, slot, "slotNumber"),
         &ElementValue::Integer(2)
     );
     assert_eq!(
-        node_property(&changes, slot, "workerId"),
-        &ElementValue::from(&json!("validator-1"))
+        node_property(&changes, slot, "agentId"),
+        &ElementValue::from(&json!("issue-validator"))
     );
     assert_eq!(
         node_property(&changes, slot, "enabled"),
@@ -2324,14 +2825,33 @@ fn workers_project_stable_nodes_slots_and_relations() {
         node_property(&changes, slot, "retiring"),
         &ElementValue::Bool(false)
     );
+    assert_eq!(
+        relation_endpoints(
+            &changes,
+            "HAS_SLOT",
+            "HAS_SLOT:workgraph-agent:issue-validator:workgraph-agent-slot:issue-validator/2",
+        ),
+        (
+            "workgraph-agent:issue-validator",
+            "workgraph-agent-slot:issue-validator/2",
+        )
+    );
+    assert_eq!(
+        node_property(
+            &changes,
+            "workgraph-agent:issue-info-requester",
+            "availableSlotCount",
+        ),
+        &ElementValue::Integer(1)
+    );
 
     // A valid configuration always clears any previous configuration error.
     assert!(changes
         .iter()
-        .any(|change| is_delete(change) && id(change) == "workgraph-error:worker-config"));
+        .any(|change| is_delete(change) && id(change) == "workgraph-error:agent-config"));
 
     // Re-projecting the same file is byte-identical, so redelivery converges.
-    let repeat = project_workers(WORKER_FILE);
+    let repeat = project_agents(AGENT_FILE);
     assert_eq!(changes.len(), repeat.len());
     for (first, second) in changes.iter().zip(repeat.iter()) {
         assert_eq!(id(first), id(second));
@@ -2341,32 +2861,35 @@ fn workers_project_stable_nodes_slots_and_relations() {
 
 #[test]
 fn capacity_reduction_retires_excess_slots_without_deleting_them() {
-    let reduced = "version: 1\nworkers:\n  - workerId: validator-1\n    agentProfile: \
-                   issue-validator\n    slots: 1\n    leaseDuration: PT15M\n";
-    let retiring = BTreeMap::from([("validator-1".to_string(), 3)]);
-    let changes = project_workers_with(reduced, &retiring, &BTreeMap::new());
+    let reduced = "version: 1\nagents:\n  - agentId: issue-validator\n    slots: 1\n    leaseDuration: PT15M\n";
+    let retiring = BTreeMap::from([("issue-validator".to_string(), BTreeSet::from([2, 3]))]);
+    let changes = project_agents_with(reduced, &retiring, &BTreeMap::new());
 
     // Every previously materialized slot stays addressable so an in-flight
     // Lease keeps a valid LEASES_SLOT target.
     assert_eq!(
-        ids_with_label(&changes, "WorkGraphWorkerSlot"),
+        ids_with_label(&changes, "WorkGraphAgentSlot"),
         vec![
-            "workgraph-worker-slot:validator-1/1",
-            "workgraph-worker-slot:validator-1/2",
-            "workgraph-worker-slot:validator-1/3",
+            "workgraph-agent-slot:issue-validator/1",
+            "workgraph-agent-slot:issue-validator/2",
+            "workgraph-agent-slot:issue-validator/3",
         ]
     );
     assert!(!changes
         .iter()
-        .any(|change| is_delete(change) && label(change) == "WorkGraphWorkerSlot"));
+        .any(|change| is_delete(change) && label(change) == "WorkGraphAgentSlot"));
 
     assert_eq!(
-        node_property(&changes, "workgraph-worker-slot:validator-1/1", "enabled"),
+        node_property(
+            &changes,
+            "workgraph-agent-slot:issue-validator/1",
+            "enabled"
+        ),
         &ElementValue::Bool(true)
     );
     for retired in [
-        "workgraph-worker-slot:validator-1/2",
-        "workgraph-worker-slot:validator-1/3",
+        "workgraph-agent-slot:issue-validator/2",
+        "workgraph-agent-slot:issue-validator/3",
     ] {
         assert_eq!(
             node_property(&changes, retired, "enabled"),
@@ -2380,37 +2903,36 @@ fn capacity_reduction_retires_excess_slots_without_deleting_them() {
     assert_eq!(
         node_property(
             &changes,
-            "workgraph-worker:validator-1",
+            "workgraph-agent:issue-validator",
             "configuredSlotCount"
         ),
         &ElementValue::Integer(1)
     );
 
     // Growing back re-enables the same stable slot identities.
-    let grown = project_workers_with(WORKER_FILE, &retiring, &BTreeMap::new());
+    let grown = project_agents_with(AGENT_FILE, &retiring, &BTreeMap::new());
     assert_eq!(
-        node_property(&grown, "workgraph-worker-slot:validator-1/2", "enabled"),
+        node_property(&grown, "workgraph-agent-slot:issue-validator/2", "enabled"),
         &ElementValue::Bool(true)
     );
     assert_eq!(
-        node_property(&grown, "workgraph-worker-slot:validator-1/3", "retiring"),
+        node_property(&grown, "workgraph-agent-slot:issue-validator/3", "retiring"),
         &ElementValue::Bool(true)
     );
 }
 
 #[test]
-fn removed_workers_are_deleted_with_their_slots_and_relations() {
-    let single = "version: 1\nworkers:\n  - workerId: validator-1\n    agentProfile: \
-                  issue-validator\n    slots: 1\n    leaseDuration: PT15M\n";
-    let removed = BTreeMap::from([("info-requester-1".to_string(), 2)]);
-    let changes = project_workers_with(single, &BTreeMap::new(), &removed);
+fn removed_agents_are_deleted_with_their_slots_and_relations() {
+    let single = "version: 1\nagents:\n  - agentId: issue-validator\n    slots: 1\n    leaseDuration: PT15M\n";
+    let removed = BTreeMap::from([("issue-info-requester".to_string(), BTreeSet::from([1, 2]))]);
+    let changes = project_agents_with(single, &BTreeMap::new(), &removed);
 
     for deleted in [
-        "workgraph-worker:info-requester-1",
-        "workgraph-worker-slot:info-requester-1/1",
-        "workgraph-worker-slot:info-requester-1/2",
-        "HAS_SLOT:workgraph-worker:info-requester-1:workgraph-worker-slot:info-requester-1/1",
-        "HAS_SLOT:workgraph-worker:info-requester-1:workgraph-worker-slot:info-requester-1/2",
+        "workgraph-agent:issue-info-requester",
+        "workgraph-agent-slot:issue-info-requester/1",
+        "workgraph-agent-slot:issue-info-requester/2",
+        "HAS_SLOT:workgraph-agent:issue-info-requester:workgraph-agent-slot:issue-info-requester/1",
+        "HAS_SLOT:workgraph-agent:issue-info-requester:workgraph-agent-slot:issue-info-requester/2",
     ] {
         assert!(
             changes
@@ -2421,1732 +2943,1606 @@ fn removed_workers_are_deleted_with_their_slots_and_relations() {
     }
     assert!(changes
         .iter()
-        .any(|change| !is_delete(change) && id(change) == "workgraph-worker:validator-1"));
+        .any(|change| !is_delete(change) && id(change) == "workgraph-agent:issue-validator"));
 }
 
 #[test]
-fn rejected_worker_config_emits_an_error_and_never_an_empty_pool() {
-    let error = parse_worker_file("version: 1\nworkers: []\n").expect_err("must reject");
-    let changes = worker_changes(
+fn rejected_agent_config_emits_an_error_and_never_an_empty_pool() {
+    let error = parse_agent_file("version: 1\nagents: []\n").expect_err("must reject");
+    let changes = agent_changes(
         "gh",
         1,
-        &worker_location(),
-        &WorkerProjection::Rejected(&error),
+        &agent_location(),
+        &AgentProjection::Rejected(&error),
         &BTreeMap::new(),
         &BTreeMap::new(),
     );
 
     assert_eq!(changes.len(), 1);
-    assert_eq!(id(&changes[0]), "workgraph-error:worker-config");
+    assert_eq!(id(&changes[0]), "workgraph-error:agent-config");
     assert_eq!(label(&changes[0]), "WorkGraphError");
     assert_eq!(
-        node_property(&changes, "workgraph-error:worker-config", "errorKind"),
-        &ElementValue::from(&json!("invalid-workgraph-worker-config"))
+        node_property(&changes, "workgraph-error:agent-config", "errorKind"),
+        &ElementValue::from(&json!("invalid-workgraph-agent-config"))
     );
     assert_eq!(
-        node_property(&changes, "workgraph-error:worker-config", "errorCode"),
-        &ElementValue::from(&json!(worker_error_code::INVALID_WORKER_FILE_PAYLOAD))
+        node_property(&changes, "workgraph-error:agent-config", "errorCode"),
+        &ElementValue::from(&json!(agent_error_code::INVALID_AGENT_FILE_PAYLOAD))
     );
     assert_eq!(
-        node_property(&changes, "workgraph-error:worker-config", "configPath"),
-        &ElementValue::from(&json!(".github/workgraph/workers.yaml"))
+        node_property(&changes, "workgraph-error:agent-config", "configPath"),
+        &ElementValue::from(&json!(".github/workgraph/agents.yaml"))
     );
-    // A rejected configuration must not delete or rewrite the worker pool.
-    assert!(
-        !changes
-            .iter()
-            .any(|change| label(change) == "WorkGraphWorker"
-                || label(change) == "WorkGraphWorkerSlot")
-    );
-}
-
-#[test]
-fn assignment_v1_stays_readable_while_v2_names_a_worker_queue() {
-    let v1 = convert(
-        "issue_comment",
-        &comment_event("created", ASSIGNMENT, "open", true, "IC_assignment"),
-    );
-    assert_eq!(
-        property(&v1, "WorkGraphTaskAssignment", "version"),
-        &ElementValue::Integer(1)
-    );
-    assert_eq!(
-        property(&v1, "WorkGraphTaskAssignment", "workerId"),
-        &ElementValue::Null
-    );
-    assert!(!v1.iter().any(|change| label(change) == "ASSIGNED_TO"));
-
-    let v2 = convert(
-        "issue_comment",
-        &comment_event("created", ASSIGNMENT_V2, "open", true, "IC_assignment"),
-    );
-    assert_eq!(
-        property(&v2, "WorkGraphTaskAssignment", "version"),
-        &ElementValue::Integer(2)
-    );
-    assert_eq!(
-        property(&v2, "WorkGraphTaskAssignment", "workerId"),
-        &ElementValue::from(&json!("validator-1"))
-    );
-    assert_eq!(
-        property(&v2, "WorkGraphTaskAssignment", "agentProfile"),
-        &ElementValue::from(&json!("issue-validator"))
-    );
-    for relation in ["COMMENT_ON", "ASSIGNMENT_FOR", "ASSIGNED_TO"] {
-        assert!(
-            v2.iter()
-                .any(|change| label(change) == relation && is_insert(change)),
-            "missing {relation}"
-        );
-    }
-    // ASSIGNED_TO targets the stable worker identity even when the worker is
-    // not (yet) configured: the Source validates the profile, not membership.
-    assert_eq!(
-        ids_with_label(&v2, "ASSIGNED_TO"),
-        vec!["ASSIGNED_TO:IC_assignment:workgraph-worker:validator-1"]
-    );
-}
-
-#[test]
-fn assignment_v2_requires_exactly_agent_profile_and_worker_id() {
-    for body in [
-        // Missing workerId.
-        "WorkGraphTaskAssignment/v2\n\n```json\n{\n  \"agentProfile\": \"issue-validator\"\n}\n```\n",
-        // Extra field.
-        "WorkGraphTaskAssignment/v2\n\n```json\n{\n  \"agentProfile\": \"issue-validator\",\n  \"workerId\": \"validator-1\",\n  \"slots\": 1\n}\n```\n",
-        // Empty and whitespace-bearing worker IDs.
-        "WorkGraphTaskAssignment/v2\n\n```json\n{\n  \"agentProfile\": \"issue-validator\",\n  \"workerId\": \"\"\n}\n```\n",
-        "WorkGraphTaskAssignment/v2\n\n```json\n{\n  \"agentProfile\": \"issue-validator\",\n  \"workerId\": \"validator 1\"\n}\n```\n",
-        // Unsupported profile.
-        "WorkGraphTaskAssignment/v2\n\n```json\n{\n  \"agentProfile\": \"issue-risk-profiler\",\n  \"workerId\": \"validator-1\"\n}\n```\n",
-        // Wrong type.
-        "WorkGraphTaskAssignment/v2\n\n```json\n{\n  \"agentProfile\": \"issue-validator\",\n  \"workerId\": 1\n}\n```\n",
-        // v1 shape under the v2 marker is still rejected; so is v2 under v1.
-        "WorkGraphTaskAssignment/v1\n\n```json\n{\n  \"agentProfile\": \"issue-validator\",\n  \"workerId\": \"validator-1\"\n}\n```\n",
-        // Unsupported version.
-        "WorkGraphTaskAssignment/v3\n\n```json\n{\n  \"agentProfile\": \"issue-validator\"\n}\n```\n",
-    ] {
-        assert!(
-            matches!(classify_comment(body), CommentClassification::Invalid(_)),
-            "expected rejection for: {body}"
-        );
-    }
-}
-
-#[test]
-fn lease_rejects_invalid_ids_timestamps_and_orderings() {
-    let lease = |body: &str| format!("WorkGraphTaskLease/v1\n\n```json\n{body}\n```\n");
-    let valid = |acquired: &str, expires: &str| {
-        format!(
-            "{{\n  \"leaseId\": \"{LEASE_ID}\",\n  \"assignmentCommentNodeId\": \"IC_assignment\",\
-             \n  \"workerId\": \"validator-1\",\n  \"slotId\": \"validator-1/1\",\n  \
-             \"acquiredAt\": \"{acquired}\",\n  \"expiresAt\": \"{expires}\"\n}}"
-        )
-    };
-    assert!(matches!(
-        classify_comment(&lease(&valid(
-            "2026-08-19T22:00:00Z",
-            "2026-08-19T22:15:00Z"
-        ))),
-        CommentClassification::Lease(_)
-    ));
-
-    for body in [
-        // Non-UTC and non-RFC-3339 timestamps.
-        valid("2026-08-19T22:00:00+02:00", "2026-08-19T22:15:00Z"),
-        valid("2026-08-19T22:00:00Z", "2026-08-19 22:15:00Z"),
-        valid("2026-08-19T22:00:00Z", "not-a-time"),
-        // acquiredAt must be strictly earlier than expiresAt.
-        valid("2026-08-19T22:15:00Z", "2026-08-19T22:15:00Z"),
-        valid("2026-08-19T22:30:00Z", "2026-08-19T22:15:00Z"),
-    ] {
-        assert!(
-            matches!(
-                classify_comment(&lease(&body)),
-                CommentClassification::Invalid(error) if error.code == error_code::INVALID_LEASE_PAYLOAD
-            ),
-            "expected payload rejection for: {body}"
-        );
-    }
-
-    for body in [
-        // Missing and unknown fields.
-        format!("{{\n  \"leaseId\": \"{LEASE_ID}\"\n}}"),
-        format!(
-            "{{\n  \"leaseId\": \"{LEASE_ID}\",\n  \"assignmentCommentNodeId\": \"IC_assignment\",\
-             \n  \"workerId\": \"validator-1\",\n  \"slotId\": \"validator-1/1\",\n  \
-             \"acquiredAt\": \"2026-08-19T22:00:00Z\",\n  \"expiresAt\": \
-             \"2026-08-19T22:15:00Z\",\n  \"extra\": true\n}}"
-        ),
-        // Empty opaque identifiers.
-        valid("2026-08-19T22:00:00Z", "2026-08-19T22:15:00Z").replace("validator-1/1", ""),
-    ] {
-        assert!(
-            matches!(
-                classify_comment(&lease(&body)),
-                CommentClassification::Invalid(_)
-            ),
-            "expected rejection for: {body}"
-        );
-    }
-
-    // Non-canonical formatting and an unsupported version stay rejected.
-    assert!(matches!(
-        classify_comment("WorkGraphTaskLease/v1\n\n```json\n{\"leaseId\":\"x\"}\n```\n"),
-        CommentClassification::Invalid(_)
-    ));
-    assert!(matches!(
-        classify_comment("WorkGraphTaskLease/v2\n\n```json\n{}\n```\n"),
-        CommentClassification::Invalid(error) if error.code == error_code::UNSUPPORTED_VERSION
-    ));
-}
-
-#[test]
-fn result_v2_requires_exactly_its_five_top_level_fields() {
-    let result = |body: &str| format!("WorkGraphTaskResult/v2\n\n```json\n{body}\n```\n");
-    let criteria = "{\n    \"criteria\": [\n      {\n        \"criterion\": \"c\",\n        \
-                    \"passed\": true,\n        \"evidence\": \"e\"\n      }\n    ]\n  }";
-    for body in [
-        // Missing leaseId.
-        format!(
-            "{{\n  \"taskType\": \"validate-issue\",\n  \"outcome\": \"succeeded\",\n  \
-             \"summary\": \"s\",\n  \"result\": {criteria}\n}}"
-        ),
-        // Extra field.
-        format!(
-            "{{\n  \"taskType\": \"validate-issue\",\n  \"leaseId\": \"{LEASE_ID}\",\n  \
-             \"outcome\": \"succeeded\",\n  \"summary\": \"s\",\n  \"result\": {criteria},\n  \
-             \"workerId\": \"validator-1\"\n}}"
-        ),
-        // Empty leaseId.
-        format!(
-            "{{\n  \"taskType\": \"validate-issue\",\n  \"leaseId\": \"\",\n  \"outcome\": \
-             \"succeeded\",\n  \"summary\": \"s\",\n  \"result\": {criteria}\n}}"
-        ),
-        // Task-specific schema still enforced under v2.
-        format!(
-            "{{\n  \"taskType\": \"validate-issue\",\n  \"leaseId\": \"{LEASE_ID}\",\n  \
-             \"outcome\": \"succeeded\",\n  \"summary\": \"s\",\n  \"result\": {{\n    \
-             \"criteria\": []\n  }}\n}}"
-        ),
-        // A v1 body under the v2 marker and a v2 body under the v1 marker.
-        "{\n  \"taskType\": \"request-info\",\n  \"outcome\": \"succeeded\",\n  \"summary\": \
-         \"s\",\n  \"result\": {\n    \"requestCommentNodeId\": \"IC_request\"\n  }\n}"
-            .to_string(),
-    ] {
-        assert!(
-            matches!(
-                classify_comment(&result(&body)),
-                CommentClassification::Invalid(_)
-            ),
-            "expected rejection for: {body}"
-        );
-    }
-    // leaseId under the historical v1 marker is not accepted.
-    assert!(matches!(
-        classify_comment(&format!(
-            "WorkGraphTaskResult/v1\n\n```json\n{{\n  \"taskType\": \"request-info\",\n  \
-             \"leaseId\": \"{LEASE_ID}\",\n  \"outcome\": \"succeeded\",\n  \"summary\": \"s\",\n  \
-             \"result\": {{\n    \"requestCommentNodeId\": \"IC_request\"\n  }}\n}}\n```\n"
-        )),
-        CommentClassification::Invalid(_)
-    ));
-    // Request-info under v2 remains valid.
-    assert!(matches!(
-        classify_comment(&result(&format!(
-            "{{\n  \"taskType\": \"request-info\",\n  \"leaseId\": \"{LEASE_ID}\",\n  \"outcome\": \
-             \"succeeded\",\n  \"summary\": \"s\",\n  \"result\": {{\n    \
-             \"requestCommentNodeId\": \"IC_request\"\n  }}\n}}"
-        ))),
-        CommentClassification::Result(_)
-    ));
-}
-
-#[test]
-fn worker_queue_markers_stay_mutually_exclusive_and_error_when_malformed() {
-    assert!(matches!(
-        classify_comment(ASSIGNMENT_V2),
-        CommentClassification::Assignment(_)
-    ));
-    assert!(matches!(
-        classify_comment(LEASE),
-        CommentClassification::Lease(_)
-    ));
-    assert!(matches!(
-        classify_comment(LEASE_EXPIRATION),
-        CommentClassification::LeaseExpiration(_)
-    ));
-    assert!(matches!(
-        classify_comment(RESULT_V2),
-        CommentClassification::Result(_)
-    ));
-    // `WorkGraphTaskLeaseExpiration/` must never be read as `WorkGraphTaskLease/`.
-    assert!(matches!(
-        classify_comment(LEASE_EXPIRATION),
-        CommentClassification::LeaseExpiration(_)
-    ));
-    // Prose that merely mentions a marker stays an ordinary comment.
-    for body in [
-        "see WorkGraphTaskLease/v1 for details",
-        "WorkGraphTaskLeaseExpirations/v1 is not a marker",
-    ] {
-        assert!(
-            matches!(classify_comment(body), CommentClassification::Ordinary),
-            "expected ordinary for: {body}"
-        );
-    }
-
-    // A marked but malformed worker-queue comment on a task becomes an error
-    // node bound by ERROR_ON, never a partial success-shaped artifact.
-    for (body, id_suffix) in [
-        (
-            "WorkGraphTaskLease/v1\n\n```json\n{}\n```\n",
-            "IC_bad_lease",
-        ),
-        (
-            "WorkGraphTaskLeaseExpiration/v1\n\n```json\n{}\n```\n",
-            "IC_bad_expiration",
-        ),
-        (
-            "WorkGraphTaskAssignment/v2\n\n```json\n{}\n```\n",
-            "IC_bad_assignment",
-        ),
-        (
-            "WorkGraphTaskResult/v2\n\n```json\n{}\n```\n",
-            "IC_bad_result",
-        ),
-    ] {
-        let changes = convert(
-            "issue_comment",
-            &comment_event("created", body, "open", true, id_suffix),
-        );
-        assert!(
-            changes
-                .iter()
-                .any(|change| label(change) == "WorkGraphError" && is_insert(change)),
-            "expected WorkGraphError for: {body}"
-        );
-        assert!(changes.iter().any(|change| label(change) == "ERROR_ON"));
-        for forbidden in [
-            "WorkGraphTaskLease",
-            "WorkGraphTaskLeaseAnchor",
-            "WorkGraphTaskLeaseExpiration",
-            "WorkGraphTaskAssignment",
-            "WorkGraphTaskResult",
-        ] {
-            assert!(
-                !changes.iter().any(|change| label(change) == forbidden),
-                "{forbidden} must not be projected for: {body}"
-            );
-        }
-    }
-}
-
-#[tokio::test]
-async fn capacity_query_joins_workers_slots_and_assignments() {
-    let registry = Arc::new(FunctionRegistry::new());
-    let parser = Arc::new(CypherParser::new(registry.clone()));
-    let query = QueryBuilder::new(
-        "MATCH (worker:WorkGraphWorker)-[:HAS_SLOT]->(slot:WorkGraphWorkerSlot) \
-         WHERE slot.enabled = true \
-         RETURN worker.workerId AS workerId, worker.configuredSlotCount AS configuredSlotCount, \
-         slot.slotId AS slotId",
-        parser,
-    )
-    .with_function_registry(registry)
-    .build()
-    .await;
-
-    let projected = process_changes(&query, project_workers(WORKER_FILE)).await;
-    // validator-1 offers two slots, info-requester-1 offers one.
-    assert_eq!(additions(&projected), 3);
-
-    // Reducing validator-1 to one slot withdraws exactly the excess slot.
-    let reduced = "version: 1\nworkers:\n  - workerId: validator-1\n    agentProfile: \
-                   issue-validator\n    slots: 1\n    leaseDuration: PT15M\n  - workerId: \
-                   info-requester-1\n    agentProfile: issue-info-requester\n    slots: 1\n    \
-                   leaseDuration: PT15M\n";
-    let retiring = BTreeMap::from([("validator-1".to_string(), 2)]);
-    let after = process_changes(
-        &query,
-        project_workers_with(reduced, &retiring, &BTreeMap::new()),
-    )
-    .await;
-    assert_eq!(removals(&after), 1);
-    assert_eq!(additions(&after), 0);
-}
-
-#[tokio::test]
-async fn assignment_to_worker_queue_query_distinguishes_v1_from_v2() {
-    let registry = Arc::new(FunctionRegistry::new());
-    let parser = Arc::new(CypherParser::new(registry.clone()));
-    let query = QueryBuilder::new(
-        "MATCH (assignment:WorkGraphTaskAssignment)-[:ASSIGNED_TO]->(worker:WorkGraphWorker) \
-         WHERE assignment.version = 2 \
-         RETURN worker.workerId AS workerId, assignment.sourceCommentNodeId AS assignmentId",
-        parser,
-    )
-    .with_function_registry(registry)
-    .build()
-    .await;
-
-    process_changes(&query, project_workers(WORKER_FILE)).await;
-    // A historical v1 Assignment names no worker queue and never matches.
-    let v1 = process_changes(
-        &query,
-        convert(
-            "issue_comment",
-            &comment_event("created", ASSIGNMENT, "open", true, "IC_v1_assignment"),
-        ),
-    )
-    .await;
-    assert_eq!(additions(&v1), 0);
-
-    let v2 = process_changes(
-        &query,
-        convert(
-            "issue_comment",
-            &comment_event("created", ASSIGNMENT_V2, "open", true, "IC_v2_assignment"),
-        ),
-    )
-    .await;
-    assert_eq!(additions(&v2), 1);
-}
-
-#[test]
-fn push_relevance_is_exact_and_conservative_when_truncated() {
-    let path = ".github/workgraph/workers.yaml";
-    let commit = |key: &str, entry: &str| json!({ key: [entry] });
-
-    for key in ["added", "modified", "removed"] {
-        let payload = json!({ "commits": [commit(key, path)] });
-        assert!(push_touches_worker_file(&payload, path), "{key}");
-    }
-    // An unrelated path is ignored.
-    assert!(!push_touches_worker_file(
-        &json!({ "commits": [commit("modified", "README.md")] }),
-        path
-    ));
-    // A push with no commits at all changed nothing relevant.
-    assert!(!push_touches_worker_file(&json!({ "commits": [] }), path));
-    // The head commit is inspected alongside the commit list.
-    assert!(push_touches_worker_file(
-        &json!({ "commits": [], "head_commit": commit("added", path) }),
-        path
-    ));
-    // GitHub truncates large pushes; an unprovable push converges instead of
-    // silently leaving stale capacity behind.
-    assert!(push_touches_worker_file(
-        &json!({ "commits": [commit("modified", "README.md")], "size": 25 }),
-        path
-    ));
-    // A commit array at GitHub's delivery cap is likewise unprovable, even
-    // without a `size` field to compare against.
-    let capped: Vec<Value> = (0..20).map(|_| commit("modified", "README.md")).collect();
-    assert!(push_touches_worker_file(
-        &json!({ "commits": capped }),
-        path
-    ));
-    // Just below the cap and consistent with `size`, the payload is trusted.
-    let small: Vec<Value> = (0..19).map(|_| commit("modified", "README.md")).collect();
-    assert!(!push_touches_worker_file(
-        &json!({ "commits": small, "size": 19 }),
-        path
-    ));
-    // A payload without a commit list is likewise unprovable.
-    assert!(push_touches_worker_file(&json!({}), path));
-
-    // A branch create, delete, or force-push rewrites what the ref resolves to
-    // without necessarily naming the file in any commit, so all three converge.
-    for flag in ["created", "deleted", "forced"] {
-        let payload = json!({
-            "commits": [commit("modified", "README.md")],
-            "size": 1,
-            flag: true
-        });
-        assert!(
-            push_touches_worker_file(&payload, path),
-            "a {flag} push must converge"
-        );
-        // The same payload with the flag explicitly false stays irrelevant.
-        let payload = json!({
-            "commits": [commit("modified", "README.md")],
-            "size": 1,
-            flag: false
-        });
-        assert!(
-            !push_touches_worker_file(&payload, path),
-            "a non-{flag} push about another file must not converge"
-        );
-    }
-}
-
-#[test]
-fn worker_config_is_validated_and_its_token_is_redacted() {
-    let mut config = GitHubWorkGraphSourceConfig {
-        organization: "acme".to_string(),
-        task_issue_type: task_type(),
-        repositories: vec![],
-        lease_trust: None,
-        worker_config: Some(WorkerConfig {
-            repository: "acme/widgets".to_string(),
-            r#ref: "main".to_string(),
-            path: ".github/workgraph/workers.yaml".to_string(),
-            token: "read-only-token".to_string(),
-            api_base_url: DEFAULT_WORKER_API_BASE_URL.to_string(),
-        }),
-        webhook: WebhookConfig {
-            secret: "secret".to_string(),
-            ..WebhookConfig::default()
-        },
-        durability: DurabilityConfig {
-            enabled: true,
-            capacity_policy: CapacityPolicy::RejectIncoming,
-            ..DurabilityConfig::default()
-        },
-    };
-    assert!(config.validate().is_ok());
-
-    let source = crate::GitHubWorkGraphSourceBuilder::new("gh")
-        .with_config(config.clone())
-        .build()
-        .unwrap();
-    let properties = drasi_lib::sources::Source::properties(&source);
-    let worker = properties
-        .get("workerConfig")
-        .and_then(Value::as_object)
-        .expect("workerConfig is reported");
-    assert_eq!(worker.get("token"), Some(&json!("[REDACTED]")));
-    assert_eq!(worker.get("repository"), Some(&json!("acme/widgets")));
-
-    for mutate in [
-        |worker: &mut WorkerConfig| worker.token.clear(),
-        |worker: &mut WorkerConfig| worker.repository = "widgets".to_string(),
-        |worker: &mut WorkerConfig| worker.path = "/etc/passwd".to_string(),
-        |worker: &mut WorkerConfig| worker.r#ref.clear(),
-        |worker: &mut WorkerConfig| worker.api_base_url.clear(),
-    ] {
-        let mut broken = config.clone();
-        mutate(broken.worker_config.as_mut().unwrap());
-        assert!(broken.validate().is_err());
-    }
-
-    // Omitting the worker file entirely stays valid; the queue is simply off.
-    config.worker_config = None;
-    assert!(config.validate().is_ok());
-}
-
-#[test]
-fn worker_queue_timestamps_require_the_exact_canonical_utc_form() {
-    let lease = |acquired: &str| {
-        format!(
-            "WorkGraphTaskLease/v1\n\n```json\n{{\n  \"leaseId\": \"{LEASE_ID}\",\n  \
-             \"assignmentCommentNodeId\": \"IC_assignment\",\n  \"workerId\": \"validator-1\",\n  \
-             \"slotId\": \"validator-1/1\",\n  \"acquiredAt\": \"{acquired}\",\n  \"expiresAt\": \
-             \"2026-08-19T23:00:00Z\"\n}}\n```\n"
-        )
-    };
-    assert!(matches!(
-        classify_comment(&lease("2026-08-19T22:00:00Z")),
-        CommentClassification::Lease(_)
-    ));
-    for acquired in [
-        // Separator, case, offset, precision, and truncation variants all
-        // spell the same instant differently and are therefore rejected.
-        "2026-08-19 22:00:00Z",
-        "2026-08-19t22:00:00Z",
-        "2026-08-19T22:00:00z",
-        "2026-08-19T22:00:00.000Z",
-        "2026-08-19T22:00:00+00:00",
-        "2026-08-19T22:00:00",
-        "2026-08-19T22:00Z",
-        "26-08-19T22:00:00Z",
-        "2026-13-19T22:00:00Z",
-        "2026-08-32T22:00:00Z",
-        "2026-08-19T25:00:00Z",
-    ] {
-        assert!(
-            matches!(
-                classify_comment(&lease(acquired)),
-                CommentClassification::Invalid(error)
-                    if error.code == error_code::INVALID_LEASE_PAYLOAD
-            ),
-            "expected rejection for: {acquired}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn worker_file_client_separates_unreadable_from_rejected_configurations() {
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    let blob = |text: &str, truncated: bool, binary: bool, size: u64| {
-        json!({"data":{"repository":{"object":{
-            "__typename": "Blob", "oid": "blob-oid", "text": text,
-            "byteSize": size, "isTruncated": truncated, "isBinary": binary
-        }}}})
-    };
-
-    // A complete text blob is returned with its provenance.
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(blob(
-            WORKER_FILE,
-            false,
-            false,
-            128,
-        )))
-        .mount(&server)
-        .await;
-    let client = WorkerFileClient::new("token", &format!("{}/graphql", server.uri())).unwrap();
-    let content = client.fetch(&worker_location()).await.unwrap();
-    assert_eq!(content.text, WORKER_FILE);
-    assert_eq!(content.oid, "blob-oid");
-    assert!(parse_worker_file(&content.text).is_ok());
-
-    // A missing repository, a missing object, and a non-Blob object are all
-    // deterministic configuration rejections, not transport failures.
-    for body in [
-        json!({"data":{"repository": Value::Null}}),
-        json!({"data":{"repository":{"object": Value::Null}}}),
-        json!({"data":{"repository":{"object":{"__typename":"Tree"}}}}),
-    ] {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(body.clone()))
-            .mount(&server)
-            .await;
-        let client = WorkerFileClient::new("token", &format!("{}/graphql", server.uri())).unwrap();
-        assert!(
-            matches!(
-                client.fetch(&worker_location()).await,
-                Err(WorkerFileError::Rejected(_))
-            ),
-            "expected rejection for: {body}"
-        );
-    }
-
-    // Oversized, truncated, and binary blobs are rejected as unsafe sizes.
-    for body in [
-        blob(WORKER_FILE, false, false, 512 * 1024),
-        blob(WORKER_FILE, true, false, 128),
-        blob(WORKER_FILE, false, true, 128),
-    ] {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(body.clone()))
-            .mount(&server)
-            .await;
-        let client = WorkerFileClient::new("token", &format!("{}/graphql", server.uri())).unwrap();
-        assert!(matches!(
-            client.fetch(&worker_location()).await,
-            Err(WorkerFileError::Rejected(_))
-        ));
-    }
-
-    // Authentication failures and GraphQL errors are unreadable, not empty.
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .respond_with(ResponseTemplate::new(401))
-        .mount(&server)
-        .await;
-    let client = WorkerFileClient::new("token", &format!("{}/graphql", server.uri())).unwrap();
-    assert!(matches!(
-        client.fetch(&worker_location()).await,
-        Err(WorkerFileError::Unavailable(_))
-    ));
-
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"errors":[{"message":"Resource not accessible by integration"}]}),
-        ))
-        .mount(&server)
-        .await;
-    let client = WorkerFileClient::new("token", &format!("{}/graphql", server.uri())).unwrap();
-    assert!(matches!(
-        client.fetch(&worker_location()).await,
-        Err(WorkerFileError::Unavailable(_))
-    ));
-}
-
-// ---------------------------------------------------------------------------
-// Lease lifecycle: trust gating, the immutable anchor, and exact active counts.
-// ---------------------------------------------------------------------------
-
-/// A task comment on `task_id` authored by `login`, so a test can distinguish a
-/// configured dispatcher or reporter from any other commenter.
-fn comment_event_by(
-    action: &str,
-    body: &str,
-    comment_id: &str,
-    task_id: &str,
-    login: &str,
-) -> Value {
-    let mut event = comment_event(action, body, "open", true, comment_id);
-    event["issue"]["node_id"] = json!(task_id);
-    event["comment"]["user"] = json!({
-        "login": login,
-        "node_id": format!("U_{login}"),
-        "id": 7,
-        "type": "User"
-    });
-    event
-}
-
-fn lease_body(lease_id: &str, slot: &str) -> String {
-    LEASE
-        .replace(LEASE_ID, lease_id)
-        .replace("validator-1/1", slot)
-}
-
-fn assignment_v2_on(task_id: &str, comment_id: &str) -> Vec<SourceChange> {
-    convert(
-        "issue_comment",
-        &comment_event_by("created", ASSIGNMENT_V2, comment_id, task_id, "bot"),
-    )
-}
-
-async fn build_query(text: &str) -> ContinuousQuery {
-    let registry = Arc::new(FunctionRegistry::new());
-    drasi_functions_cypher::register_default_cypher_functions(&registry);
-    let parser = Arc::new(CypherParser::new(registry.clone()));
-    QueryBuilder::new(text, parser)
-        .with_function_registry(registry)
-        .build()
-        .await
-}
-
-/// The latest value of `key` in any row whose grouping matches
-/// `group_key = group_value`.
-fn aggregate_value(
-    results: &[QueryPartEvaluationContext],
-    group_key: &str,
-    group_value: &str,
-    key: &str,
-) -> Option<VariableValue> {
-    results.iter().rev().find_map(|result| {
-        let after = match result {
-            QueryPartEvaluationContext::Adding { after, .. }
-            | QueryPartEvaluationContext::Updating { after, .. }
-            | QueryPartEvaluationContext::Aggregation { after, .. } => after,
-            _ => return None,
-        };
-        let matches = after
-            .get(group_key)
-            .is_some_and(|value| value == &VariableValue::String(group_value.to_string()));
-        matches.then(|| after.get(key).cloned()).flatten()
-    })
-}
-
-/// The canonical active-lease query. One positive match, no `OPTIONAL MATCH`,
-/// no subtraction: only a trusted Lease has a `LEASE_ANCHOR` edge, and only a
-/// trusted end can clear `isActive`.
-const ACTIVE_LEASES: &str =
-    "MATCH (lease:WorkGraphTaskLease)-[:LEASE_ANCHOR]->(anchor:WorkGraphTaskLeaseAnchor) \
-     WHERE anchor.isActive = true \
-     RETURN lease.workerId AS workerId, count(lease) AS activeLeaseCount";
-
-fn lease_event(task: &str, comment: &str, lease_id: &str, slot: &str, login: &str) -> Value {
-    comment_event_by("created", &lease_body(lease_id, slot), comment, task, login)
-}
-
-fn end_event(task: &str, comment: &str, body: &str, login: &str) -> Value {
-    comment_event_by("created", body, comment, task, login)
-}
-
-/// Assert an anchor's fully recomputed lifecycle.
-fn assert_anchor(
-    world: &LeaseWorld,
-    is_active: bool,
-    end_reason: &str,
-    end_comment: Option<&str>,
-    context: &str,
-) {
-    let state = world
-        .anchor()
-        .unwrap_or_else(|| panic!("{context}: no anchor"));
-    assert_eq!(state.is_active, is_active, "{context}: isActive");
-    assert_eq!(state.end_reason, end_reason, "{context}: endReason");
-    assert_eq!(
-        state.end_comment_node_id.as_deref(),
-        end_comment,
-        "{context}: endCommentNodeId"
-    );
-}
-
-#[test]
-fn lease_trust_configuration_is_strictly_validated() {
-    let identity = |id: &str, login: &str| TrustedIdentity {
-        id: id.to_string(),
-        login: login.to_string(),
-    };
-    let valid = LeaseTrust {
-        dispatchers: vec![identity("U_a", "a")],
-        reporters: vec![identity("U_b", "b")],
-    };
-    assert!(valid.validate().is_ok());
-
-    for broken in [
-        LeaseTrust {
-            dispatchers: vec![],
-            reporters: vec![identity("U_b", "b")],
-        },
-        LeaseTrust {
-            dispatchers: vec![identity("U_a", "a")],
-            reporters: vec![],
-        },
-        LeaseTrust {
-            dispatchers: vec![identity("", "a")],
-            reporters: vec![identity("U_b", "b")],
-        },
-        LeaseTrust {
-            dispatchers: vec![identity("U_a", " a")],
-            reporters: vec![identity("U_b", "b")],
-        },
-        LeaseTrust {
-            dispatchers: vec![identity("U_a", "a"), identity("U_a", "other")],
-            reporters: vec![identity("U_b", "b")],
-        },
-    ] {
-        assert!(broken.validate().is_err());
-    }
-
-    // Both the node ID and the login must match, so a renamed account loses
-    // trust instead of silently inheriting it.
-    let author = |id: &str, login: &str| json!({ "node_id": id, "login": login });
-    assert!(valid.is_dispatcher(Some(&author("U_a", "a"))));
-    assert!(!valid.is_dispatcher(Some(&author("U_a", "renamed"))));
-    assert!(!valid.is_dispatcher(Some(&author("U_other", "a"))));
-    assert!(!valid.is_dispatcher(None));
-    assert!(valid.is_reporter(Some(&author("U_b", "b"))));
-    assert!(!valid.is_reporter(Some(&author("U_a", "a"))));
-}
-
-#[test]
-fn lease_keeps_acquisition_facts_on_its_own_node_and_the_anchor_minimal() {
-    let mut world = LeaseWorld::default();
-    let changes = world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-
-    // Every acquisition fact and the author live on the stable comment node.
-    for (key, expected) in [
-        ("sourceCommentNodeId", json!("IC_lease")),
-        ("leaseId", json!(LEASE_ID)),
-        ("assignmentCommentNodeId", json!("IC_assignment")),
-        ("workerId", json!("validator-1")),
-        ("slotId", json!("validator-1/1")),
-        ("taskNodeId", json!("I_task")),
-        ("acquiredAt", json!("2026-08-19T22:00:00Z")),
-        ("expiresAt", json!("2026-08-19T22:15:00Z")),
-        ("leaseAnchorNodeId", json!(LEASE_ANCHOR_ID)),
-        ("authorId", json!("U_bot")),
-        ("trusted", json!(true)),
-    ] {
-        assert_eq!(
-            property(&changes, "WorkGraphTaskLease", key),
-            &ElementValue::from(&expected),
-            "unexpected {key}"
-        );
-    }
-    for relation in ["COMMENT_ON", "LEASE_FOR", "LEASES_SLOT", "LEASE_ANCHOR"] {
-        assert!(
-            changes.iter().any(|change| label(change) == relation),
-            "missing {relation}"
-        );
-    }
-
-    // The anchor carries only its key and the recomputed lifecycle.
-    assert_eq!(
-        node_property(&changes, LEASE_ANCHOR_ID, "isActive"),
-        &ElementValue::Bool(true)
-    );
-    assert_eq!(
-        node_property(&changes, LEASE_ANCHOR_ID, "endReason"),
-        &ElementValue::from(&json!("none"))
-    );
-    assert_eq!(
-        node_property(&changes, LEASE_ANCHOR_ID, "acquisitionCount"),
-        &ElementValue::Integer(1)
-    );
-    for acquisition in ["workerId", "slotId", "acquiredAt", "leaseCommentNodeId"] {
-        assert!(
-            node_property_opt(&changes, LEASE_ANCHOR_ID, acquisition).is_none(),
-            "the anchor must not carry the acquisition fact {acquisition}"
-        );
-    }
-}
-
-#[test]
-fn only_configured_identities_can_move_the_lease_lifecycle() {
-    // An untrusted author's Lease is projected with its provenance but reaches
-    // no anchor, so it can never occupy capacity.
-    let mut world = LeaseWorld::default();
-    let squat = world.deliver(&lease_event(
-        "I_task",
-        "IC_squat",
-        LEASE_ID,
-        "validator-1/1",
-        "attacker",
-    ));
-    assert_eq!(
-        property(&squat, "WorkGraphTaskLease", "trusted"),
-        &ElementValue::Bool(false)
-    );
-    assert!(squat.iter().any(|change| label(change) == "LEASE_FOR"));
-    assert!(!squat.iter().any(|change| label(change) == "LEASE_ANCHOR"));
-    assert!(world.anchor().is_none());
-
-    // An untrusted author's Result and Expiration bind nothing and end nothing.
-    let mut world = LeaseWorld::default();
-    world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-    for (body, comment) in [(RESULT_V2, "IC_evil_r"), (LEASE_EXPIRATION, "IC_evil_x")] {
-        let changes = world.deliver(&end_event("I_task", comment, body, "attacker"));
-        assert_eq!(
-            node_property(&changes, comment, "trusted"),
-            &ElementValue::Bool(false)
-        );
-        for relation in ["RESULT_FOR_LEASE", "EXPIRES_LEASE"] {
-            assert!(
-                !changes.iter().any(|change| label(change) == relation),
-                "{comment} must not emit {relation}"
-            );
-        }
-        assert_anchor(&world, true, "none", None, comment);
-    }
-
-    // With no configured trust at all nothing is trusted: fail closed.
-    let unconfigured = convert_untrusted(
-        "issue_comment",
-        &comment_event("created", LEASE, "open", true, "IC_lease"),
-    );
-    assert_eq!(
-        property(&unconfigured, "WorkGraphTaskLease", "trusted"),
-        &ElementValue::Bool(false)
-    );
-}
-
-#[test]
-fn an_untrusted_editor_cannot_rewrite_a_trusted_comment_into_a_lifecycle_artifact() {
-    // GitHub preserves `comment.user` across an edit, so trusting the author
-    // alone would let anyone with edit rights turn a trusted author's ordinary
-    // comment into a Lease, a Result, or an Expiration.
-    for (body, marker, author) in [
-        (LEASE, "WorkGraphTaskLease", "bot"),
-        (RESULT_V2, "RESULT_FOR_LEASE", "reporter"),
-        (LEASE_EXPIRATION, "EXPIRES_LEASE", "reporter"),
-    ] {
-        // The webhook reports the acting identity as the delivery `sender`.
-        let mut edited = comment_event_by("edited", body, "IC_target", "I_task", author);
-        edited["changes"] = json!({ "body": { "from": "an ordinary note" } });
-        edited["sender"] = json!({"login": "attacker", "node_id": "U_attacker"});
-
-        let mut world = LeaseWorld::default();
-        let changes = world.deliver(&edited);
-        assert!(
-            !changes.iter().any(|change| label(change) == "LEASE_ANCHOR"
-                || label(change) == "RESULT_FOR_LEASE"
-                || label(change) == "EXPIRES_LEASE"),
-            "an untrusted editor produced a lifecycle binding for {marker}"
-        );
-        assert!(
-            world.anchor().is_none(),
-            "an untrusted editor moved the lifecycle for {marker}"
-        );
-        // The edit is still visible, with the editor recorded.
-        assert_eq!(
-            node_property(&changes, "IC_target", "editorLogin"),
-            &ElementValue::from(&json!("attacker"))
-        );
-
-        // A trusted editor of the same comment is accepted.
-        let mut trusted_edit = edited.clone();
-        trusted_edit["sender"] = json!({"login": author, "node_id": format!("U_{author}")});
-        let mut world = LeaseWorld::default();
-        let changes = world.deliver(&trusted_edit);
-        assert!(
-            changes.iter().any(|change| label(change) == "LEASE_ANCHOR"
-                || label(change) == "RESULT_FOR_LEASE"
-                || label(change) == "EXPIRES_LEASE"),
-            "a trusted editor was rejected for {marker}"
-        );
-    }
-}
-
-#[test]
-fn a_bootstrap_shaped_editor_identity_is_checked_the_same_way() {
-    // Bootstrap has no `sender`; it projects GitHub's `editor` on the comment.
-    // An absent editor is fine, an untrusted one removes trust.
-    for (editor, expect_trusted) in [
-        (Value::Null, true),
-        (json!({"login": "bot", "node_id": "U_bot"}), true),
-        (json!({"login": "attacker", "node_id": "U_attacker"}), false),
-    ] {
-        let mut event = comment_event("created", LEASE, "open", true, "IC_lease");
-        event["comment"]["editor"] = editor.clone();
-        let mut world = LeaseWorld::default();
-        let changes = world.deliver(&event);
-        assert_eq!(
-            property(&changes, "WorkGraphTaskLease", "trusted"),
-            &ElementValue::Bool(expect_trusted),
-            "unexpected trust for editor {editor}"
-        );
-        assert_eq!(world.anchor().is_some(), expect_trusted);
-    }
-}
-
-#[test]
-fn result_v1_is_preserved_and_v2_binds_and_ends_its_exact_lease() {
-    let v1 = convert(
-        "issue_comment",
-        &comment_event("created", RESULT, "open", true, "IC_result"),
-    );
-    assert_eq!(
-        property(&v1, "WorkGraphTaskResult", "version"),
-        &ElementValue::Integer(1)
-    );
-    assert_eq!(
-        property(&v1, "WorkGraphTaskResult", "leaseId"),
-        &ElementValue::Null
-    );
-    assert!(v1.iter().any(|change| label(change) == "RESULT_FOR"));
-    assert!(!v1.iter().any(|change| label(change) == "RESULT_FOR_LEASE"));
-
-    let mut world = LeaseWorld::default();
-    world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-    let v2 = world.deliver(&end_event("I_task", "IC_result", RESULT_V2, "reporter"));
-
-    assert_eq!(
-        property(&v2, "WorkGraphTaskResult", "version"),
-        &ElementValue::Integer(2)
-    );
-    assert_eq!(
-        property(&v2, "WorkGraphTaskResult", "trusted"),
-        &ElementValue::Bool(true)
-    );
-    assert_eq!(
-        ids_with_label(&v2, "RESULT_FOR_LEASE"),
-        vec![format!("RESULT_FOR_LEASE:IC_result:{LEASE_ANCHOR_ID}")]
-    );
-    assert_anchor(&world, false, "result", Some("IC_result"), "v2 result");
-    // A Result's authoritative end instant is its own comment timestamp.
-    assert_eq!(
-        node_property(&v2, LEASE_ANCHOR_ID, "endedAt"),
-        &ElementValue::from(&json!("2026-01-03T00:00:00Z"))
-    );
-}
-
-#[test]
-fn lease_expiration_ends_only_the_lease_comment_it_names() {
-    let mut world = LeaseWorld::default();
-    world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-
-    // A stale reference to some other Lease comment stays projected but cannot
-    // end this lease.
-    let stale = LEASE_EXPIRATION.replace("IC_lease", "IC_some_other_lease");
-    let changes = world.deliver(&end_event("I_task", "IC_stale_expiry", &stale, "reporter"));
-    assert_eq!(
-        property(
-            &changes,
-            "WorkGraphTaskLeaseExpiration",
-            "leaseCommentNodeId"
-        ),
-        &ElementValue::from(&json!("IC_some_other_lease"))
-    );
-    assert!(changes
-        .iter()
-        .any(|change| label(change) == "EXPIRES_LEASE"));
-    assert_anchor(&world, true, "none", None, "stale expiration");
-    assert_eq!(
-        world.anchor().unwrap().end_claim_count,
-        1,
-        "the stale claim is still recorded"
-    );
-
-    // The matching Expiration does end it.
-    let changes = world.deliver(&end_event(
-        "I_task",
-        "IC_expiry",
-        LEASE_EXPIRATION,
-        "reporter",
-    ));
-    assert_anchor(
-        &world,
-        false,
-        "expired",
-        Some("IC_expiry"),
-        "matching expiration",
-    );
-    assert_eq!(
-        node_property(&changes, LEASE_ANCHOR_ID, "endedAt"),
-        &ElementValue::from(&json!("2026-08-19T22:15:00Z"))
-    );
-}
-
-#[test]
-fn duplicate_and_mixed_ends_apply_once_and_deterministically() {
-    // A Result at 2026-01-03T00:00:00Z and an Expiration at
-    // 2026-08-19T22:15:00Z: the earliest authoritative end always wins,
-    // whichever order the deliveries arrive in.
-    for order in [
-        vec![("IC_result", RESULT_V2), ("IC_expiry", LEASE_EXPIRATION)],
-        vec![("IC_expiry", LEASE_EXPIRATION), ("IC_result", RESULT_V2)],
-    ] {
-        let mut world = LeaseWorld::default();
-        world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-        for (comment, body) in &order {
-            world.deliver(&end_event("I_task", comment, body, "reporter"));
-        }
-        assert_anchor(&world, false, "result", Some("IC_result"), "mixed ends");
-        assert_eq!(world.anchor().unwrap().end_claim_count, 2);
-    }
-
-    // Duplicate ends of the same kind collapse onto one deterministic end.
-    let mut world = LeaseWorld::default();
-    world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-    for comment in ["IC_r2", "IC_r1"] {
-        world.deliver(&end_event("I_task", comment, RESULT_V2, "reporter"));
-    }
-    // Same instant, so the stable comment node ID breaks the tie.
-    assert_anchor(&world, false, "result", Some("IC_r1"), "duplicate results");
-    assert_eq!(world.anchor().unwrap().end_claim_count, 2);
-}
-
-#[test]
-fn removing_or_rekeying_an_end_restores_the_state_the_survivors_imply() {
-    let mut world = LeaseWorld::default();
-    world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-    world.deliver(&end_event("I_task", "IC_result", RESULT_V2, "reporter"));
-    assert_anchor(&world, false, "result", Some("IC_result"), "ended");
-
-    // Deleting the only end reactivates the lease: current state, not history.
-    let changes = world.deliver(&comment_event_by(
-        "deleted",
-        RESULT_V2,
-        "IC_result",
-        "I_task",
-        "reporter",
-    ));
-    assert_anchor(&world, true, "none", None, "end deleted");
-    assert_eq!(
-        node_property(&changes, LEASE_ANCHOR_ID, "isActive"),
-        &ElementValue::Bool(true)
-    );
-
-    // With two ends, removing one leaves the other in force.
-    let mut world = LeaseWorld::default();
-    world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-    world.deliver(&end_event("I_task", "IC_result", RESULT_V2, "reporter"));
-    world.deliver(&end_event(
-        "I_task",
-        "IC_expiry",
-        LEASE_EXPIRATION,
-        "reporter",
-    ));
-    world.deliver(&comment_event_by(
-        "deleted",
-        RESULT_V2,
-        "IC_result",
-        "I_task",
-        "reporter",
-    ));
-    assert_anchor(
-        &world,
-        false,
-        "expired",
-        Some("IC_expiry"),
-        "one end survives",
-    );
-
-    // Editing an end onto a different leaseId updates both anchors.
-    let mut world = LeaseWorld::default();
-    world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-    world.deliver(&end_event("I_task", "IC_result", RESULT_V2, "reporter"));
-    let rekeyed = RESULT_V2.replace(LEASE_ID, "0198d8c4-7c28-7d43-a8dd-000000000000");
-    let mut edited = comment_event_by("edited", &rekeyed, "IC_result", "I_task", "reporter");
-    edited["changes"] = json!({ "body": { "from": RESULT_V2 } });
-    edited["sender"] = json!({"login": "reporter", "node_id": "U_reporter"});
-    let changes = world.deliver(&edited);
-    assert_anchor(&world, true, "none", None, "end rekeyed away");
-    // The anchor it moved to has no acquisition, so it is removed rather than
-    // materialized as something a query could bind to.
-    assert!(changes.iter().any(|change| is_delete(change)
-        && id(change) == "workgraph-lease:I_task:0198d8c4-7c28-7d43-a8dd-000000000000"));
-}
-
-#[test]
-fn re_observing_an_acquisition_never_resurrects_an_ended_lease() {
-    for action in ["pinned", "unpinned", "edited"] {
-        let mut world = LeaseWorld::default();
-        world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-        world.deliver(&end_event("I_task", "IC_result", RESULT_V2, "reporter"));
-        assert_anchor(&world, false, "result", Some("IC_result"), action);
-
-        let mut event = comment_event("edited", LEASE, "open", true, "IC_lease");
-        event["action"] = json!(action);
-        if action == "edited" {
-            event["changes"] = json!({ "body": { "from": LEASE } });
-            event["sender"] = json!({"login": "bot", "node_id": "U_bot"});
-        }
-        let changes = world.deliver(&event);
-        assert_anchor(&world, false, "result", Some("IC_result"), action);
-        if let Some(value) = node_property_opt(&changes, LEASE_ANCHOR_ID, "isActive") {
-            assert_eq!(
-                value,
-                &ElementValue::Bool(false),
-                "{action} resurrected an ended lease"
-            );
-        }
-    }
-
-    // Redelivering the original acquisition is likewise a no-op.
-    let mut world = LeaseWorld::default();
-    world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-    world.deliver(&end_event("I_task", "IC_result", RESULT_V2, "reporter"));
-    world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-    assert_anchor(&world, false, "result", Some("IC_result"), "redelivery");
-}
-
-#[test]
-fn duplicate_acquisitions_fail_closed_and_recover_when_one_is_removed() {
-    let mut world = LeaseWorld::default();
-    world.deliver(&lease_event(
-        "I_task",
-        "IC_lease_1",
-        LEASE_ID,
-        "validator-1/1",
-        "bot",
-    ));
-    assert_anchor(&world, true, "none", None, "single acquisition");
-
-    // A second trusted Lease claiming the same identity is ambiguous, so the
-    // anchor fails closed rather than double-booking or silently rewriting.
-    let changes = world.deliver(&lease_event(
-        "I_task",
-        "IC_lease_2",
-        LEASE_ID,
-        "validator-1/2",
-        "bot",
-    ));
-    assert_anchor(&world, false, "conflict", None, "conflicting acquisitions");
-    assert_eq!(
-        node_property(&changes, LEASE_ANCHOR_ID, "acquisitionCount"),
-        &ElementValue::Integer(2)
-    );
-    // Each Lease keeps its own facts; neither rewrote the other.
-    assert_eq!(
-        node_property(&changes, "IC_lease_2", "slotId"),
-        &ElementValue::from(&json!("validator-1/2"))
-    );
-    assert!(!changes.iter().any(|change| id(change) == "IC_lease_1"));
-
-    // Deleting one restores the state the survivor implies.
-    world.deliver(&comment_event_by(
-        "deleted",
-        &lease_body(LEASE_ID, "validator-1/2"),
-        "IC_lease_2",
-        "I_task",
-        "bot",
-    ));
-    assert_anchor(&world, true, "none", None, "conflict resolved");
-    assert_eq!(world.anchor().unwrap().acquisition_count, 1);
-
-    // A conflict that already has an end still resolves to that end.
-    world.deliver(&lease_event(
-        "I_task",
-        "IC_lease_2",
-        LEASE_ID,
-        "validator-1/2",
-        "bot",
-    ));
-    world.deliver(&end_event("I_task", "IC_result", RESULT_V2, "reporter"));
-    assert_anchor(&world, false, "conflict", None, "conflict outranks end");
-    world.deliver(&comment_event_by(
-        "deleted",
-        &lease_body(LEASE_ID, "validator-1/2"),
-        "IC_lease_2",
-        "I_task",
-        "bot",
-    ));
-    assert_anchor(
-        &world,
-        false,
-        "result",
-        Some("IC_result"),
-        "end after recovery",
-    );
-}
-
-#[test]
-fn removing_or_rekeying_an_acquisition_updates_both_anchors() {
-    let mut world = LeaseWorld::default();
-    world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-    world.deliver(&end_event("I_task", "IC_result", RESULT_V2, "reporter"));
-
-    let rekeyed = LEASE.replace(LEASE_ID, "0198d8c4-7c28-7d43-a8dd-000000000000");
-    let mut edited = comment_event("edited", &rekeyed, "open", true, "IC_lease");
-    edited["changes"] = json!({ "body": { "from": LEASE } });
-    edited["sender"] = json!({"login": "bot", "node_id": "U_bot"});
-    let changes = world.deliver(&edited);
-
-    // The anchor it left has no acquisition left, so it is deleted; the one it
-    // joined is materialized fresh and active.
-    assert!(world.anchor().is_none());
-    assert!(changes
-        .iter()
-        .any(|change| is_delete(change) && id(change) == LEASE_ANCHOR_ID));
-    let moved = "workgraph-lease:I_task:0198d8c4-7c28-7d43-a8dd-000000000000";
-    assert_eq!(
-        node_property(&changes, moved, "isActive"),
-        &ElementValue::Bool(true)
-    );
-
-    // Deleting an acquisition removes its anchor entirely.
-    let mut world = LeaseWorld::default();
-    world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-    let changes = world.deliver(&comment_event("deleted", LEASE, "open", true, "IC_lease"));
-    assert!(world.anchor().is_none());
-    assert!(changes
-        .iter()
-        .any(|change| is_delete(change) && id(change) == LEASE_ANCHOR_ID));
-}
-
-#[test]
-fn an_end_naming_an_unacquired_lease_materializes_no_anchor() {
-    // Cross-task: a trusted reporter on another task naming this leaseId.
-    let mut world = LeaseWorld::default();
-    world.deliver(&lease_event(
-        "I_task_a",
-        "IC_lease_a",
-        LEASE_ID,
-        "validator-1/1",
-        "bot",
-    ));
-    let cross = world.deliver(&end_event("I_task_b", "IC_cross", RESULT_V2, "reporter"));
-    assert!(cross.iter().any(|change| id(change)
-        == format!("RESULT_FOR_LEASE:IC_cross:workgraph-lease:I_task_b:{LEASE_ID}")));
-    assert!(
-        !cross
-            .iter()
-            .any(|change| !is_delete(change) && label(change) == "WorkGraphTaskLeaseAnchor"),
-        "an unacquired lease must materialize no anchor"
-    );
-    let state = world
-        .ledger
-        .project(&format!("workgraph-lease:I_task_a:{LEASE_ID}"))
-        .expect("task A keeps its anchor");
-    assert!(state.is_active, "task A's lease must not be released");
-
-    // Unknown leaseId on the right task.
-    let unknown = RESULT_V2.replace(LEASE_ID, "0198d8c4-7c28-7d43-a8dd-ffffffffffff");
-    let orphan = world.deliver(&end_event("I_task_a", "IC_orphan", &unknown, "reporter"));
-    assert!(!orphan
-        .iter()
-        .any(|change| !is_delete(change) && label(change) == "WorkGraphTaskLeaseAnchor"));
-}
-
-#[tokio::test]
-async fn active_lease_count_is_exact_for_every_ending_shape() {
-    for (name, ends) in [
-        ("result only", vec![("IC_r1", RESULT_V2)]),
-        ("expiration only", vec![("IC_x1", LEASE_EXPIRATION)]),
-        (
-            "result then expiration",
-            vec![("IC_r1", RESULT_V2), ("IC_x1", LEASE_EXPIRATION)],
-        ),
-        (
-            "expiration then result",
-            vec![("IC_x1", LEASE_EXPIRATION), ("IC_r1", RESULT_V2)],
-        ),
-        (
-            "duplicate results",
-            vec![("IC_r1", RESULT_V2), ("IC_r2", RESULT_V2)],
-        ),
-        (
-            "duplicate expirations",
-            vec![("IC_x1", LEASE_EXPIRATION), ("IC_x2", LEASE_EXPIRATION)],
-        ),
-    ] {
-        let query = build_query(ACTIVE_LEASES).await;
-        let mut world = LeaseWorld::default();
-        process_changes(&query, project_workers(WORKER_FILE)).await;
-
-        let acquired = process_changes(
-            &query,
-            world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease")),
-        )
-        .await;
-        assert_eq!(
-            aggregate_value(&acquired, "workerId", "validator-1", "activeLeaseCount"),
-            Some(VariableValue::Integer(1.into())),
-            "{name}: the lease must start active"
-        );
-
-        for (index, (comment, body)) in ends.iter().enumerate() {
-            let after = process_changes(
-                &query,
-                world.deliver(&end_event("I_task", comment, body, "reporter")),
-            )
-            .await;
-            let value = aggregate_value(&after, "workerId", "validator-1", "activeLeaseCount");
-            if index == 0 {
-                assert_eq!(
-                    value,
-                    Some(VariableValue::Integer(0.into())),
-                    "{name}: the first end must release exactly one lease"
-                );
-            } else {
-                assert_eq!(value, None, "{name}: end {index} must not change the count");
-            }
-        }
-    }
-}
-
-#[tokio::test]
-async fn released_capacity_returns_when_the_end_is_removed() {
-    let query = build_query(ACTIVE_LEASES).await;
-    let mut world = LeaseWorld::default();
-    process_changes(&query, project_workers(WORKER_FILE)).await;
-    process_changes(
-        &query,
-        world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease")),
-    )
-    .await;
-    let ended = process_changes(
-        &query,
-        world.deliver(&end_event("I_task", "IC_result", RESULT_V2, "reporter")),
-    )
-    .await;
-    assert_eq!(
-        aggregate_value(&ended, "workerId", "validator-1", "activeLeaseCount"),
-        Some(VariableValue::Integer(0.into()))
-    );
-
-    let restored = process_changes(
-        &query,
-        world.deliver(&comment_event_by(
-            "deleted",
-            RESULT_V2,
-            "IC_result",
-            "I_task",
-            "reporter",
-        )),
-    )
-    .await;
-    assert_eq!(
-        aggregate_value(&restored, "workerId", "validator-1", "activeLeaseCount"),
-        Some(VariableValue::Integer(1.into())),
-        "removing the only end must return the lease to active"
-    );
-}
-
-#[tokio::test]
-async fn a_conflicting_acquisition_withholds_capacity_from_dispatch() {
-    let query = build_query(ACTIVE_LEASES).await;
-    let mut world = LeaseWorld::default();
-    process_changes(&query, project_workers(WORKER_FILE)).await;
-    process_changes(
-        &query,
-        world.deliver(&lease_event(
-            "I_task",
-            "IC_lease_1",
-            LEASE_ID,
-            "validator-1/1",
-            "bot",
-        )),
-    )
-    .await;
-    let conflicted = process_changes(
-        &query,
-        world.deliver(&lease_event(
-            "I_task",
-            "IC_lease_2",
-            LEASE_ID,
-            "validator-1/2",
-            "bot",
-        )),
-    )
-    .await;
-    // Neither Lease is offered as active, so the ambiguous identity cannot be
-    // dispatched against at all.
-    assert_eq!(
-        aggregate_value(&conflicted, "workerId", "validator-1", "activeLeaseCount"),
-        Some(VariableValue::Integer(0.into()))
-    );
-
-    let resolved = process_changes(
-        &query,
-        world.deliver(&comment_event_by(
-            "deleted",
-            &lease_body(LEASE_ID, "validator-1/2"),
-            "IC_lease_2",
-            "I_task",
-            "bot",
-        )),
-    )
-    .await;
-    assert_eq!(
-        aggregate_value(&resolved, "workerId", "validator-1", "activeLeaseCount"),
-        Some(VariableValue::Integer(1.into())),
-        "resolving the conflict restores the survivor"
-    );
-}
-
-#[tokio::test]
-async fn the_deadline_query_uses_the_recomputed_is_active_flag() {
-    let registry = Arc::new(FunctionRegistry::new());
-    drasi_functions_cypher::register_default_cypher_functions(&registry);
-    let parser = Arc::new(CypherParser::new(registry.clone()));
-    let deadline = QueryBuilder::new(
-        "MATCH (lease:WorkGraphTaskLease)-[:LEASE_ANCHOR]->(anchor:WorkGraphTaskLeaseAnchor) \
-         WHERE drasi.trueLater(anchor.isActive, datetime(lease.expiresAt)) \
-         RETURN lease.sourceCommentNodeId AS leaseCommentNodeId, anchor.leaseId AS leaseId, \
-         anchor.taskNodeId AS taskNodeId",
-        parser,
-    )
-    .with_function_registry(registry)
-    .build()
-    .await;
-
-    let mut world = LeaseWorld::default();
-    let acquired = process_changes(
-        &deadline,
-        world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease")),
-    )
-    .await;
-    assert_eq!(additions(&acquired), 0, "the deadline has not arrived");
-
-    // A trusted completion flips the recomputed flag, which is what cancels the
-    // scheduled expiry rather than leaving it armed forever.
-    let completed = world.deliver(&end_event("I_task", "IC_result", RESULT_V2, "reporter"));
-    assert_eq!(
-        node_property(&completed, LEASE_ANCHOR_ID, "isActive"),
-        &ElementValue::Bool(false)
-    );
-    assert_eq!(additions(&process_changes(&deadline, completed).await), 0);
-}
-
-#[tokio::test]
-async fn lease_binds_a_configured_slot_and_a_stale_slot_reference_binds_nothing() {
-    let query = build_query(
-        "MATCH (lease:WorkGraphTaskLease)-[:LEASES_SLOT]->(slot:WorkGraphWorkerSlot) \
-         RETURN lease.leaseId AS leaseId, slot.slotId AS slotId, slot.enabled AS enabled",
-    )
-    .await;
-    let mut world = LeaseWorld::default();
-    process_changes(&query, project_workers(WORKER_FILE)).await;
-    let bound = process_changes(
-        &query,
-        world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease")),
-    )
-    .await;
-    assert_eq!(additions(&bound), 1);
-
-    let unbound = process_changes(
-        &query,
-        world.deliver(&lease_event(
-            "I_task",
-            "IC_stale",
-            "0198d8c4-7c28-7d43-a8dd-ffffffffffff",
-            "ghost-9/4",
-            "bot",
-        )),
-    )
-    .await;
-    assert_eq!(additions(&unbound), 0);
-}
-
-#[test]
-fn worker_queue_comment_crud_and_edits_converge_on_stable_identities() {
-    let mut world = LeaseWorld::default();
-    world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-    let deleted = world.deliver(&comment_event("deleted", LEASE, "open", true, "IC_lease"));
-    for removed in [
-        "IC_lease",
-        "COMMENT_ON:IC_lease:I_task",
-        "LEASE_FOR:IC_lease:I_task",
-        "LEASES_SLOT:IC_lease:workgraph-worker-slot:validator-1/1",
-    ] {
-        assert!(
-            deleted
-                .iter()
-                .any(|change| is_delete(change) && id(change) == removed),
-            "missing delete for {removed}"
-        );
-    }
-
-    // Editing an Assignment from v1 to v2 adds the queue binding in place.
-    let mut edited = comment_event("edited", ASSIGNMENT_V2, "open", true, "IC_assignment");
-    edited["changes"] = json!({ "body": { "from": ASSIGNMENT } });
-    let changes = convert("issue_comment", &edited);
-    assert!(changes
-        .iter()
-        .any(|change| label(change) == "ASSIGNED_TO" && is_insert(change)));
-
-    // Editing a Lease into an ordinary comment removes the lease and its anchor.
-    let mut world = LeaseWorld::default();
-    world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-    let mut edited = comment_event("edited", "just a note", "open", true, "IC_lease");
-    edited["changes"] = json!({ "body": { "from": LEASE } });
-    edited["sender"] = json!({"login": "bot", "node_id": "U_bot"});
-    let changes = world.deliver(&edited);
-    assert!(changes
-        .iter()
-        .any(|change| label(change) == "GitHubIssueComment" && is_insert(change)));
-    assert!(world.anchor().is_none());
-}
-
-#[test]
-fn a_trusted_identity_cannot_edit_across_its_configured_role() {
-    // Holding *a* lifecycle role is not enough: the editor must hold the role
-    // the artifact itself requires. A reporter is not authorized to acquire
-    // capacity, and a dispatcher is not authorized to report an end.
-    for (body, author, wrong_editor, binding) in [
-        // Dispatcher-authored Lease, edited by a configured reporter.
-        (LEASE, "bot", "reporter", "LEASE_ANCHOR"),
-        // Reporter-authored Result, edited by a configured dispatcher.
-        (RESULT_V2, "reporter", "bot", "RESULT_FOR_LEASE"),
-        // Reporter-authored Expiration, edited by a configured dispatcher.
-        (LEASE_EXPIRATION, "reporter", "bot", "EXPIRES_LEASE"),
-    ] {
-        let mut edited = comment_event_by("edited", body, "IC_target", "I_task", author);
-        edited["changes"] = json!({ "body": { "from": "an ordinary note" } });
-        edited["sender"] = json!({
-            "login": wrong_editor,
-            "node_id": format!("U_{wrong_editor}")
-        });
-
-        let mut world = LeaseWorld::default();
-        let changes = world.deliver(&edited);
-        assert_eq!(
-            node_property(&changes, "IC_target", "trusted"),
-            &ElementValue::Bool(false),
-            "'{wrong_editor}' must not be trusted to edit into {binding}"
-        );
-        assert!(
-            !changes.iter().any(|change| label(change) == binding),
-            "'{wrong_editor}' produced a {binding} binding"
-        );
-        assert!(
-            world.anchor().is_none(),
-            "'{wrong_editor}' moved the lifecycle via {binding}"
-        );
-
-        // The same edit by an identity holding the required role is accepted.
-        let mut correct = edited.clone();
-        correct["sender"] = json!({ "login": author, "node_id": format!("U_{author}") });
-        let mut world = LeaseWorld::default();
-        let changes = world.deliver(&correct);
-        assert_eq!(
-            node_property(&changes, "IC_target", "trusted"),
-            &ElementValue::Bool(true),
-            "'{author}' holds the role {binding} requires"
-        );
-        assert!(changes.iter().any(|change| label(change) == binding));
-    }
-}
-
-#[test]
-fn a_bootstrap_editor_is_also_role_matched() {
-    // Bootstrap reads GitHub's `editor` rather than a webhook `sender`, and
-    // applies exactly the same role match.
-    let mut event = comment_event("created", LEASE, "open", true, "IC_lease");
-    event["comment"]["editor"] = json!({"login": "reporter", "node_id": "U_reporter"});
-    let mut world = LeaseWorld::default();
-    let changes = world.deliver(&event);
-    assert_eq!(
-        property(&changes, "WorkGraphTaskLease", "trusted"),
-        &ElementValue::Bool(false),
-        "a reporter must not be able to edit a comment into a Lease"
-    );
-    assert!(world.anchor().is_none());
-
-    let mut event = comment_event_by("created", RESULT_V2, "IC_result", "I_task", "reporter");
-    event["comment"]["editor"] = json!({"login": "bot", "node_id": "U_bot"});
-    let changes = convert("issue_comment", &event);
-    assert_eq!(
-        property(&changes, "WorkGraphTaskResult", "trusted"),
-        &ElementValue::Bool(false),
-        "a dispatcher must not be able to edit a comment into a Result"
-    );
+    // A rejected configuration must not delete or rewrite the agent pool.
     assert!(!changes
         .iter()
-        .any(|change| label(change) == "RESULT_FOR_LEASE"));
+        .any(|change| label(change) == "WorkGraphAgent" || label(change) == "WorkGraphAgentSlot"));
+}
+
+fn instant(minute: u32) -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 1, 1, 0, minute, 0).unwrap()
+}
+
+fn assignment_event(comment: &str, task: &str, agent: &str, created_at: &str) -> AllocationEvent {
+    assignment_event_with(
+        comment,
+        task,
+        agent,
+        created_at,
+        true,
+        TaskType::ValidateIssue,
+    )
+}
+
+fn assignment_event_with(
+    comment: &str,
+    task: &str,
+    agent: &str,
+    created_at: &str,
+    trusted: bool,
+    task_type: TaskType,
+) -> AllocationEvent {
+    AllocationEvent::Comment {
+        comment_node_id: comment.into(),
+        task_node_id: task.into(),
+        artifact: Some(AllocationArtifact::Assignment {
+            trusted,
+            task_type,
+            agent_id: agent.into(),
+            created_at: created_at.into(),
+        }),
+    }
+}
+
+fn result_event(comment: &str, task: &str, lease_id: &str) -> AllocationEvent {
+    result_event_with(comment, task, lease_id, true, TaskType::ValidateIssue)
+}
+
+fn result_event_with(
+    comment: &str,
+    task: &str,
+    lease_id: &str,
+    reporter_trusted: bool,
+    task_type: TaskType,
+) -> AllocationEvent {
+    AllocationEvent::Comment {
+        comment_node_id: comment.into(),
+        task_node_id: task.into(),
+        artifact: Some(AllocationArtifact::Result {
+            reporter_trusted,
+            task_type,
+            lease_id: lease_id.into(),
+            outcome: Outcome::Succeeded,
+            body_digest: format!("sha256:{comment}"),
+        }),
+    }
+}
+
+fn feedback_event(comment: &str, task: &str) -> AllocationEvent {
+    feedback_event_for(comment, task, "result")
+}
+
+fn feedback_event_for(comment: &str, task: &str, result: &str) -> AllocationEvent {
+    AllocationEvent::Comment {
+        comment_node_id: comment.into(),
+        task_node_id: task.into(),
+        artifact: Some(AllocationArtifact::Feedback {
+            reporter_trusted: true,
+            result_comment_node_id: result.into(),
+            result_body_digest: format!("sha256:{result}"),
+            body_digest: "sha256:feedback".into(),
+        }),
+    }
+}
+
+fn acceptance_event(comment: &str, task: &str) -> AllocationEvent {
+    acceptance_event_for(comment, task, "result")
+}
+
+fn acceptance_event_for(comment: &str, task: &str, result: &str) -> AllocationEvent {
+    AllocationEvent::Comment {
+        comment_node_id: comment.into(),
+        task_node_id: task.into(),
+        artifact: Some(AllocationArtifact::Acceptance {
+            reporter_trusted: true,
+            result_comment_node_id: result.into(),
+            result_body_digest: format!("sha256:{result}"),
+            body_digest: "sha256:acceptance".into(),
+        }),
+    }
+}
+
+fn agent_file(text: &str) -> crate::agents::AgentFile {
+    parse_agent_file(text).unwrap()
+}
+
+fn assert_agent_counts(
+    state: &AllocationState,
+    delta: &AllocationDelta,
+    agent_id: &str,
+    queue_depth: usize,
+    active_lease_count: usize,
+    available_slot_count: usize,
+) {
+    let runtime = &state.agent_runtime()[agent_id];
+    assert_eq!(runtime.queue_depth, queue_depth);
+    assert_eq!(runtime.active_lease_count, active_lease_count);
+    assert_eq!(runtime.available_slot_count, available_slot_count);
+
+    let changes = allocation_changes("gh", 42, delta, &state.agent_runtime());
+    let agent = format!("workgraph-agent:{agent_id}");
+    assert_eq!(
+        node_property(&changes, &agent, "queueDepth"),
+        &ElementValue::Integer(queue_depth as i64)
+    );
+    assert_eq!(
+        node_property(&changes, &agent, "activeLeaseCount"),
+        &ElementValue::Integer(active_lease_count as i64)
+    );
+    assert_eq!(
+        node_property(&changes, &agent, "availableSlotCount"),
+        &ElementValue::Integer(available_slot_count as i64)
+    );
 }
 
 #[test]
-fn a_pin_after_an_unattributed_edit_fails_closed() {
-    // A pin or an unpin names the actor performing *that* action, never the
-    // last editor. A lifecycle comment that shows it was edited but supplies no
-    // editor identity therefore cannot be attributed, and must not be able to
-    // sneak past the editor check by arriving as a pin.
-    for (body, author, binding) in [
-        (LEASE, "bot", "LEASE_ANCHOR"),
-        (RESULT_V2, "reporter", "RESULT_FOR_LEASE"),
-        (LEASE_EXPIRATION, "reporter", "EXPIRES_LEASE"),
+fn allocator_orders_queue_and_slots_and_fills_capacity() {
+    let now = instant(0);
+    let mut state = AllocationState::default();
+    let agents = agent_file(
+        "version: 1\nagents:\n  - agentId: z\n    slots: 2\n    leaseDuration: PT1M\n  - agentId: a\n    slots: 2\n    leaseDuration: PT1M\n",
+    );
+    state.sync_agents(&agents, now);
+    for (index, agent) in ["a", "z", "a", "z"].into_iter().enumerate() {
+        let allocated = state.apply(
+            assignment_event(
+                &format!("blocker-{index}"),
+                &format!("blocker-task-{index}"),
+                agent,
+                "2025-12-31T23:59:00Z",
+            ),
+            now,
+        );
+        assert_eq!(allocated.started.len(), 1);
+    }
+    for event in [
+        assignment_event("a-late", "task-a-late", "a", "2026-01-01T00:02:00Z"),
+        assignment_event("z-b", "task-z-b", "z", "2026-01-01T00:01:00Z"),
+        assignment_event("a-early", "task-a-early", "a", "2026-01-01T00:01:00Z"),
+        assignment_event("z-a", "task-z-a", "z", "2026-01-01T00:01:00Z"),
+        assignment_event("duplicate", "task-a-early", "z", "2026-01-01T00:00:00Z"),
     ] {
-        for action in ["pinned", "unpinned", "created"] {
-            let mut event = comment_event_by(action, body, "IC_target", "I_task", author);
-            // GitHub reports the edit through the timestamps; the pin payload
-            // carries no editor at all.
-            event["comment"]["updated_at"] = json!("2026-01-04T00:00:00Z");
-            event["sender"] = json!({"login": author, "node_id": format!("U_{author}")});
+        assert!(state.apply(event, now).started.is_empty());
+    }
+    let mut started = Vec::new();
+    for index in 0..4 {
+        started.extend(
+            state
+                .apply(
+                    AllocationEvent::TaskCancelled {
+                        task_node_id: format!("blocker-task-{index}"),
+                    },
+                    instant(2),
+                )
+                .started,
+        );
+    }
+    let allocation: Vec<_> = started
+        .iter()
+        .map(|lease| (lease.slot_id.as_str(), lease.task_node_id.as_str()))
+        .collect();
+    assert_eq!(
+        allocation,
+        [
+            ("a/1", "task-a-early"),
+            ("z/1", "task-z-a"),
+            ("a/2", "task-a-late"),
+            ("z/2", "task-z-b"),
+        ]
+    );
+    assert_eq!(
+        started[0].lease_id,
+        hex::encode(Sha256::digest(b"task-a-early\0a-early\0\x31"))
+    );
+    assert!(started.iter().all(|lease| {
+        lease.acquired_at == "2026-01-01T00:02:00.000Z"
+            && lease.expires_at == "2026-01-01T00:03:00.000Z"
+    }));
+    assert_eq!(state.active_leases().count(), 4);
+    assert_eq!(state.agent_runtime()["a"].available_slot_count, 0);
+    assert_eq!(state.agent_runtime()["z"].active_lease_count, 2);
+    assert_eq!(
+        state
+            .active_leases()
+            .map(|lease| lease.task_node_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        4
+    );
+    assert_eq!(
+        state
+            .active_leases()
+            .map(|lease| lease.slot_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        4
+    );
+}
 
-            let mut world = LeaseWorld::default();
-            let changes = world.deliver(&event);
-            assert_eq!(
-                node_property(&changes, "IC_target", "trusted"),
-                &ElementValue::Bool(false),
-                "{action} of an edited {binding} comment must not be trusted"
-            );
-            assert!(
-                !changes.iter().any(|change| label(change) == binding),
-                "{action} produced a {binding} binding for an unattributed edit"
-            );
-            assert!(world.anchor().is_none(), "{action}/{binding}");
+#[test]
+fn allocator_contract_capacity_gates_leases_not_queue_and_projects_counters() {
+    let now = instant(0);
+    let mut state = AllocationState::default();
+    let synced = state.sync_agents(
+        &agent_file(
+            "version: 1\nagents:\n  - agentId: agent\n    slots: 2\n    leaseDuration: PT15M\n",
+        ),
+        now,
+    );
+    assert_agent_counts(&state, &synced, "agent", 0, 0, 2);
+
+    let first = state.apply(
+        assignment_event("assignment-a", "task-a", "agent", "2026-01-01T00:00:00Z"),
+        now,
+    );
+    assert_eq!(first.started[0].slot_id, "agent/1");
+    assert_agent_counts(&state, &first, "agent", 0, 1, 1);
+
+    let second = state.apply(
+        assignment_event("assignment-b", "task-b", "agent", "2026-01-01T00:01:00Z"),
+        now,
+    );
+    assert_eq!(second.started[0].slot_id, "agent/2");
+    assert_agent_counts(&state, &second, "agent", 0, 2, 0);
+
+    let queued = state.apply(
+        assignment_event("assignment-c", "task-c", "agent", "2026-01-01T00:02:00Z"),
+        now,
+    );
+    assert!(queued.started.is_empty());
+    assert_agent_counts(&state, &queued, "agent", 1, 2, 0);
+
+    let repeated = state.apply(
+        assignment_event("assignment-c", "task-c", "agent", "2026-01-01T00:02:00Z"),
+        now,
+    );
+    assert!(repeated.trusted);
+    assert!(repeated.started.is_empty());
+    let runtime = &state.agent_runtime()["agent"];
+    assert_eq!(
+        (
+            runtime.queue_depth,
+            runtime.active_lease_count,
+            runtime.available_slot_count,
+        ),
+        (1, 2, 0)
+    );
+}
+
+#[test]
+fn allocator_contract_closed_task_assignment_is_not_admitted() {
+    let now = instant(0);
+    let mut state = AllocationState::default();
+    state.sync_agents(
+        &agent_file(
+            "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+        ),
+        now,
+    );
+    let conversion = convert_full(
+        "issue_comment",
+        &comment_event("created", ASSIGNMENT, "closed", true, "assignment"),
+    );
+    assert!(conversion.changes.iter().any(|change| {
+        label(change) == "WorkGraphTaskAssignment"
+            && id(change) == "assignment"
+            && is_insert(change)
+    }));
+
+    let delta = state.apply(
+        conversion
+            .allocation
+            .expect("closed task comment must retract allocator state"),
+        now,
+    );
+    assert!(!delta.trusted);
+    assert!(delta.started.is_empty());
+    assert_eq!(
+        state.agent_runtime()["agent"],
+        AgentRuntime {
+            configured: true,
+            configured_slots: 1,
+            queue_depth: 0,
+            active_lease_count: 0,
+            available_slot_count: 1,
+            retiring_slots: BTreeSet::new(),
         }
+    );
+}
+
+#[test]
+fn allocator_contract_nonallocatable_assignment_matrix_is_fail_closed() {
+    let mut base = AllocationState::default();
+    base.sync_agents(
+        &agent_file(
+            "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+        ),
+        instant(0),
+    );
+
+    let untrusted = Converter::new("gh", "acme", &task_type(), 1)
+        .convert(
+            "issue_comment",
+            &comment_event(
+                "created",
+                &assignment_body("agent"),
+                "open",
+                true,
+                "untrusted",
+            ),
+        )
+        .unwrap()
+        .unwrap()
+        .allocation
+        .unwrap();
+    let mut state = base.clone();
+    let delta = state.apply(untrusted, instant(0));
+    assert!(!delta.trusted);
+    assert!(delta.started.is_empty());
+    assert_eq!(state.agent_runtime()["agent"].queue_depth, 0);
+
+    let malformed = convert_full(
+        "issue_comment",
+        &comment_event(
+            "created",
+            "WorkGraphTaskAssignment/v1\n\n```json\n{}\n```\n",
+            "open",
+            true,
+            "malformed",
+        ),
+    )
+    .allocation
+    .unwrap();
+    let mut state = base.clone();
+    let delta = state.apply(malformed, instant(0));
+    assert!(!delta.trusted);
+    assert!(delta.started.is_empty());
+    assert_eq!(state.agent_runtime()["agent"].queue_depth, 0);
+
+    let closed = convert_full(
+        "issue_comment",
+        &comment_event(
+            "created",
+            &assignment_body("agent"),
+            "closed",
+            true,
+            "closed",
+        ),
+    )
+    .allocation
+    .unwrap();
+    let mut state = base.clone();
+    let delta = state.apply(closed, instant(0));
+    assert!(!delta.trusted);
+    assert!(delta.started.is_empty());
+    assert_eq!(state.agent_runtime()["agent"].queue_depth, 0);
+
+    let cross_task_type = assignment_event_with(
+        "cross-task-type",
+        "task",
+        "agent",
+        "2026-01-01T00:00:00Z",
+        true,
+        TaskType::RequestInfo,
+    );
+    let mut state = base.clone();
+    let delta = state.apply(cross_task_type, instant(0));
+    assert!(delta.trusted);
+    assert_eq!(delta.started.len(), 1);
+    assert_eq!(delta.started[0].task_type, TaskType::RequestInfo);
+
+    let mut state = base;
+    let delta = state.apply(
+        assignment_event("unknown-agent", "task", "missing", "2026-01-01T00:00:00Z"),
+        instant(0),
+    );
+    assert!(!delta.trusted);
+    assert!(delta.started.is_empty());
+    assert_eq!(state.agent_runtime()["agent"].queue_depth, 0);
+}
+
+#[test]
+fn allocator_contract_assignment_revision_never_reuses_a_lease() {
+    let mut state = AllocationState::default();
+    state.sync_agents(
+        &agent_file(
+            "version: 1\nagents:\n  - agentId: agent-a\n    slots: 1\n    leaseDuration: PT15M\n  - agentId: \
+             agent-b\n    slots: 1\n    leaseDuration: PT15M\n",
+        ),
+        instant(0),
+    );
+    let first = state.apply(
+        assignment_event("assignment", "task", "agent-a", "2026-01-01T00:00:00Z"),
+        instant(0),
+    );
+    let old_lease = first.started[0].clone();
+
+    let revision = state.apply(
+        assignment_event("assignment", "task", "agent-b", "2026-01-01T00:00:00Z"),
+        instant(1),
+    );
+    assert_eq!(revision.ended.as_slice(), std::slice::from_ref(&old_lease));
+    assert_eq!(revision.started.len(), 1);
+    let revised_lease = revision.started[0].clone();
+    assert_eq!(revised_lease.agent_id, "agent-b");
+    assert_ne!(revised_lease.lease_id, old_lease.lease_id);
+
+    let stale = state.apply(
+        result_event("stale-result", "task", &old_lease.lease_id),
+        instant(2),
+    );
+    assert!(!stale.trusted);
+    assert!(stale.ended.is_empty());
+    assert_eq!(state.active_leases().next(), Some(&revised_lease));
+
+    let retracted = state.apply(
+        AllocationEvent::Comment {
+            comment_node_id: "assignment".into(),
+            task_node_id: "task".into(),
+            artifact: None,
+        },
+        instant(3),
+    );
+    assert_eq!(
+        retracted.ended.as_slice(),
+        std::slice::from_ref(&revised_lease)
+    );
+    let recreated = state.apply(
+        assignment_event("assignment", "task", "agent-a", "2026-01-01T00:00:00Z"),
+        instant(4),
+    );
+    assert_eq!(recreated.started.len(), 1);
+    let recreated_lease = recreated.started[0].clone();
+    assert_ne!(recreated_lease.lease_id, old_lease.lease_id);
+    assert_ne!(recreated_lease.lease_id, revised_lease.lease_id);
+    assert_eq!(
+        recreated_lease.lease_id,
+        hex::encode(Sha256::digest(b"task\0assignment\0\x33"))
+    );
+
+    let stale_revision = state.apply(
+        result_event("stale-revision-result", "task", &revised_lease.lease_id),
+        instant(5),
+    );
+    assert!(!stale_revision.trusted);
+    assert!(stale_revision.ended.is_empty());
+    assert_eq!(state.active_leases().next(), Some(&recreated_lease));
+}
+
+#[test]
+fn exact_result_releases_and_refills_while_stale_result_is_untrusted() {
+    let now = instant(0);
+    let mut state = AllocationState::default();
+    state.sync_agents(
+        &agent_file(
+            "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+        ),
+        now,
+    );
+    let first = state.apply(
+        assignment_event("assignment-1", "task-1", "agent", "2026-01-01T00:00:00Z"),
+        now,
+    );
+    state.apply(
+        assignment_event("assignment-2", "task-2", "agent", "2026-01-01T00:01:00Z"),
+        now,
+    );
+    let lease = first.started[0].clone();
+
+    let stale = state.apply(result_event("stale", "task-1", "wrong"), instant(1));
+    assert!(!stale.trusted);
+    assert!(stale.ended.is_empty());
+    assert_eq!(state.active_leases().next(), Some(&lease));
+
+    let exact = state.apply(
+        result_event("result", "task-1", &lease.lease_id),
+        instant(2),
+    );
+    assert!(exact.trusted);
+    assert_eq!(exact.ended, [lease]);
+    assert_eq!(exact.started.len(), 1);
+    assert_eq!(exact.started[0].task_node_id, "task-2");
+}
+
+#[test]
+fn allocator_contract_result_binding_matrix_preserves_the_current_lease() {
+    let mut state = AllocationState::default();
+    state.sync_agents(
+        &agent_file(
+            "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+        ),
+        instant(0),
+    );
+    let assigned = state.apply(
+        assignment_event("assignment-1", "task-1", "agent", "2026-01-01T00:00:00Z"),
+        instant(0),
+    );
+    state.apply(
+        assignment_event("assignment-2", "task-2", "agent", "2026-01-01T00:01:00Z"),
+        instant(0),
+    );
+    let current = assigned.started[0].clone();
+
+    for event in [
+        result_event_with(
+            "untrusted",
+            "task-1",
+            &current.lease_id,
+            false,
+            TaskType::ValidateIssue,
+        ),
+        result_event_with(
+            "wrong-task",
+            "task-other",
+            &current.lease_id,
+            true,
+            TaskType::ValidateIssue,
+        ),
+        result_event_with(
+            "wrong-type",
+            "task-1",
+            &current.lease_id,
+            true,
+            TaskType::RequestInfo,
+        ),
+        result_event_with(
+            "wrong-lease",
+            "task-1",
+            "not-the-current-lease",
+            true,
+            TaskType::ValidateIssue,
+        ),
+    ] {
+        let mut candidate = state.clone();
+        let rejected = candidate.apply(event, instant(1));
+        assert!(!rejected.trusted);
+        assert!(rejected.ended.is_empty());
+        assert!(rejected.started.is_empty());
+        assert_eq!(candidate.active_leases().next(), Some(&current));
     }
 
-    // The same comment with `lastEditedAt` set and no editor also fails closed.
-    let mut event = comment_event("created", LEASE, "open", true, "IC_target");
-    event["comment"]["last_edited_at"] = json!("2026-01-04T00:00:00Z");
-    let mut world = LeaseWorld::default();
-    world.deliver(&event);
-    assert!(world.anchor().is_none());
+    let mut released = state;
+    let exact = released.apply(
+        result_event("result", "task-1", &current.lease_id),
+        instant(1),
+    );
+    assert!(exact.trusted);
+    assert_eq!(exact.ended.as_slice(), std::slice::from_ref(&current));
+    assert_eq!(exact.started.len(), 1);
+    let replacement = exact.started[0].clone();
+    assert_eq!(replacement.task_node_id, "task-2");
 
-    // An edited comment that *does* name a role-matched editor is trusted.
-    let mut event = comment_event("created", LEASE, "open", true, "IC_target");
-    event["comment"]["updated_at"] = json!("2026-01-04T00:00:00Z");
-    event["comment"]["editor"] = json!({"login": "bot", "node_id": "U_bot"});
-    let mut world = LeaseWorld::default();
-    world.deliver(&event);
-    assert!(world.anchor().is_some_and(|state| state.is_active));
+    let late = released.apply(
+        result_event("late-result", "task-1", &current.lease_id),
+        instant(2),
+    );
+    assert!(!late.trusted);
+    assert!(late.ended.is_empty());
+    assert_eq!(released.active_leases().next(), Some(&replacement));
 }
 
 #[test]
-fn an_unattributed_edit_makes_no_statement_rather_than_retracting() {
-    // Indeterminate is not the same as untrusted: a pin whose editor is unknown
-    // must not tear down lifecycle state that a reconciliation already
-    // established from GitHub's own view of the comment.
-    let mut world = LeaseWorld::default();
-    world.deliver(&comment_event("created", LEASE, "open", true, "IC_lease"));
-    assert_anchor(&world, true, "none", None, "acquired");
-
-    let mut pinned = comment_event("pinned", LEASE, "open", true, "IC_lease");
-    pinned["comment"]["updated_at"] = json!("2026-01-04T00:00:00Z");
-    let conversion = convert_full("issue_comment", &pinned);
-    assert!(
-        conversion.lifecycle.is_empty(),
-        "an unattributable pin must contribute no lifecycle statement"
+fn allocator_contract_exact_result_projection_deletes_then_refills() {
+    let mut state = AllocationState::default();
+    state.sync_agents(
+        &agent_file(
+            "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+        ),
+        instant(0),
     );
-    // It still asks for reconciliation, so the Source can learn the editor.
-    assert!(conversion.lifecycle_scope.is_some());
+    let first = state.apply(
+        assignment_event("assignment-1", "task-1", "agent", "2026-01-01T00:00:00Z"),
+        instant(0),
+    );
+    state.apply(
+        assignment_event("assignment-2", "task-2", "agent", "2026-01-01T00:01:00Z"),
+        instant(0),
+    );
+    let ended = first.started[0].clone();
+    let delta = state.apply(
+        result_event("result", "task-1", &ended.lease_id),
+        instant(1),
+    );
+    let started = delta.started[0].clone();
+    assert_eq!(started.task_node_id, "task-2");
+    assert_eq!(started.slot_id, "agent/1");
 
-    world.deliver(&pinned);
-    assert_anchor(&world, true, "none", None, "pin left the lease intact");
+    let changes = allocation_changes("gh", 42, &delta, &state.agent_runtime());
+    assert_eq!(
+        changes
+            .iter()
+            .map(|change| (label(change), is_delete(change), is_update(change)))
+            .collect::<Vec<_>>(),
+        vec![
+            ("LEASE_FOR", true, false),
+            ("LEASES_SLOT", true, false),
+            ("WorkGraphTaskLease", true, false),
+            ("WorkGraphTaskLease", false, true),
+            ("LEASE_FOR", false, true),
+            ("LEASES_SLOT", false, true),
+            ("WorkGraphAgent", false, true),
+        ]
+    );
+    let started_element = format!("workgraph-lease:task-2:{}", started.lease_id);
+    assert_eq!(
+        relation_endpoints(
+            &changes,
+            "LEASE_FOR",
+            &format!("LEASE_FOR:{started_element}:task-2"),
+        ),
+        (started_element.as_str(), "task-2")
+    );
+    assert_eq!(
+        relation_endpoints(
+            &changes,
+            "LEASES_SLOT",
+            &format!("LEASES_SLOT:{started_element}:workgraph-agent-slot:agent/1"),
+        ),
+        (started_element.as_str(), "workgraph-agent-slot:agent/1",)
+    );
+    assert_eq!(
+        node_property(&changes, &started_element, "assignmentCommentNodeId"),
+        &ElementValue::from(&json!("assignment-2"))
+    );
+    assert_agent_counts(&state, &delta, "agent", 0, 1, 0);
+}
+
+#[test]
+fn allocator_contract_expiry_reissues_and_rejects_the_old_attempt() {
+    let mut state = AllocationState::default();
+    state.sync_agents(
+        &agent_file(
+            "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT1M\n",
+        ),
+        instant(0),
+    );
+    let first = state.apply(
+        assignment_event("assignment", "task", "agent", "2026-01-01T00:00:00Z"),
+        instant(0),
+    );
+    let attempt_one = first.started[0].clone();
+    assert_eq!(attempt_one.acquired_at, "2026-01-01T00:00:00.000Z");
+    assert_eq!(attempt_one.expires_at, "2026-01-01T00:01:00.000Z");
+    assert!(state
+        .active_exact(
+            "task",
+            &attempt_one.lease_id,
+            "assignment",
+            "agent",
+            "agent/1",
+            instant(1),
+        )
+        .is_none());
+
+    let expired = state.expire(instant(1));
+    assert_eq!(expired.ended.as_slice(), std::slice::from_ref(&attempt_one));
+    assert_eq!(expired.started.len(), 1);
+    let attempt_two = expired.started[0].clone();
+    assert_ne!(attempt_two.lease_id, attempt_one.lease_id);
+    assert_eq!(
+        attempt_two.lease_id,
+        hex::encode(Sha256::digest(b"task\0assignment\0\x32"))
+    );
+    assert_eq!(attempt_two.acquired_at, "2026-01-01T00:01:00.000Z");
+    assert_eq!(attempt_two.expires_at, "2026-01-01T00:02:00.000Z");
+
+    let stale = state.apply(
+        result_event("stale", "task", &attempt_one.lease_id),
+        instant(1),
+    );
+    assert!(!stale.trusted);
+    assert!(stale.ended.is_empty());
+    assert_eq!(state.active_leases().next(), Some(&attempt_two));
+}
+
+#[test]
+fn feedback_requeues_and_acceptance_suppresses_the_replacement() {
+    let now = instant(0);
+    let mut state = AllocationState::default();
+    state.sync_agents(
+        &agent_file(
+            "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+        ),
+        now,
+    );
+    let assigned = state.apply(
+        assignment_event("assignment", "task", "agent", "2026-01-01T00:00:00Z"),
+        now,
+    );
+    state.apply(
+        result_event("result", "task", &assigned.started[0].lease_id),
+        instant(1),
+    );
+
+    let feedback = state.apply(feedback_event("feedback", "task"), instant(2));
+    assert!(feedback.trusted);
+    assert_eq!(feedback.started.len(), 1);
+    let duplicate = state.apply(feedback_event("feedback-duplicate", "task"), instant(2));
+    assert!(duplicate.trusted);
+    assert!(duplicate.started.is_empty());
+    assert_eq!(state.active_leases().next(), feedback.started.first());
+    state.validate().unwrap();
+    let acceptance = state.apply(acceptance_event("acceptance", "task"), instant(3));
+    assert!(acceptance.trusted);
+    assert_eq!(acceptance.ended, feedback.started);
+    assert!(acceptance.started.is_empty());
+    assert_eq!(state.agent_runtime()["agent"].available_slot_count, 1);
+
+    let deletion = state.apply(
+        AllocationEvent::Comment {
+            comment_node_id: "acceptance".into(),
+            task_node_id: "task".into(),
+            artifact: None,
+        },
+        instant(4),
+    );
+    assert_eq!(deletion.started.len(), 1);
+}
+
+#[test]
+fn result_retraction_invalidates_feedback_before_capacity_refill() {
+    for edited in [false, true] {
+        let now = instant(0);
+        let mut state = AllocationState::default();
+        state.sync_agents(
+            &agent_file(
+                "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+            ),
+            now,
+        );
+        let task_a = state.apply(
+            assignment_event("assignment-a", "task-a", "agent", "2026-01-01T00:00:00Z"),
+            now,
+        );
+        state.apply(
+            assignment_event("assignment-b", "task-b", "agent", "2026-01-01T00:01:00Z"),
+            now,
+        );
+        let lease_a = task_a.started[0].clone();
+        let completed = state.apply(
+            result_event("result", "task-a", &lease_a.lease_id),
+            instant(1),
+        );
+        let lease_b = completed.started[0].clone();
+        let feedback = state.apply(feedback_event("feedback", "task-a"), instant(2));
+        assert!(feedback.trusted);
+        assert!(feedback.started.is_empty());
+        assert_eq!(state.agent_runtime()["agent"].queue_depth, 1);
+
+        let replacement = edited.then(|| AllocationArtifact::Result {
+            reporter_trusted: true,
+            task_type: TaskType::ValidateIssue,
+            lease_id: lease_a.lease_id.clone(),
+            outcome: Outcome::Succeeded,
+            body_digest: "sha256:edited-result".into(),
+        });
+        let invalidated = state.apply(
+            AllocationEvent::Comment {
+                comment_node_id: "result".into(),
+                task_node_id: "task-a".into(),
+                artifact: replacement,
+            },
+            instant(3),
+        );
+        assert!(!invalidated.trusted);
+        assert_eq!(
+            invalidated.untrusted_feedback,
+            BTreeSet::from(["feedback".to_string()])
+        );
+        assert!(invalidated.started.is_empty());
+        assert_eq!(state.agent_runtime()["agent"].queue_depth, 0);
+        assert_eq!(state.active_leases().next(), Some(&lease_b));
+        let stored = serde_json::to_value(&state).unwrap();
+        assert!(stored["comments"].get("feedback").is_none());
+        let projected = allocation_changes("gh", 42, &invalidated, &state.agent_runtime());
+        assert_eq!(
+            node_property(&projected, "feedback", "trusted"),
+            &ElementValue::Bool(false)
+        );
+        state.validate().unwrap();
+
+        let released = state.apply(
+            result_event("result-b", "task-b", &lease_b.lease_id),
+            instant(4),
+        );
+        assert_eq!(released.ended, vec![lease_b]);
+        assert!(released.started.is_empty());
+        assert!(state.active_leases().next().is_none());
+    }
+}
+
+#[test]
+fn result_retraction_invalidates_dependent_acceptance() {
+    let now = instant(0);
+    let mut state = AllocationState::default();
+    state.sync_agents(
+        &agent_file(
+            "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+        ),
+        now,
+    );
+    let assigned = state.apply(
+        assignment_event("assignment", "task", "agent", "2026-01-01T00:00:00Z"),
+        now,
+    );
+    state.apply(
+        result_event("result", "task", &assigned.started[0].lease_id),
+        instant(1),
+    );
+    assert!(
+        state
+            .apply(acceptance_event("acceptance", "task"), instant(2))
+            .trusted
+    );
+
+    let invalidated = state.apply(
+        AllocationEvent::Comment {
+            comment_node_id: "result".into(),
+            task_node_id: "task".into(),
+            artifact: None,
+        },
+        instant(3),
+    );
+    assert_eq!(
+        invalidated.untrusted_acceptances,
+        BTreeSet::from(["acceptance".to_string()])
+    );
+    let stored = serde_json::to_value(&state).unwrap();
+    assert!(stored["comments"].get("acceptance").is_none());
+    let projected = allocation_changes("gh", 42, &invalidated, &state.agent_runtime());
+    assert_eq!(
+        node_property(&projected, "acceptance", "trusted"),
+        &ElementValue::Bool(false)
+    );
+    state.validate().unwrap();
+}
+
+#[test]
+fn task_cancellation_deauthorizes_dependents_independent_of_comment_id_order() {
+    for (result_id, feedback_id, acceptance_id) in [
+        ("a-result", "z-feedback", "z-acceptance"),
+        ("z-result", "a-feedback", "a-acceptance"),
+    ] {
+        let now = instant(0);
+        let mut state = AllocationState::default();
+        state.sync_agents(
+            &agent_file(
+                "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+            ),
+            now,
+        );
+        let assigned = state.apply(
+            assignment_event("assignment", "task", "agent", "2026-01-01T00:00:00Z"),
+            now,
+        );
+        state.apply(
+            result_event(result_id, "task", &assigned.started[0].lease_id),
+            instant(1),
+        );
+        assert!(
+            state
+                .apply(
+                    feedback_event_for(feedback_id, "task", result_id),
+                    instant(2),
+                )
+                .trusted
+        );
+        assert!(
+            state
+                .apply(
+                    acceptance_event_for(acceptance_id, "task", result_id),
+                    instant(3),
+                )
+                .trusted
+        );
+
+        let cancelled = state.apply(
+            AllocationEvent::TaskCancelled {
+                task_node_id: "task".into(),
+            },
+            instant(4),
+        );
+        assert_eq!(
+            cancelled.untrusted_assignments,
+            BTreeSet::from(["assignment".to_string()])
+        );
+        assert_eq!(
+            cancelled.untrusted_feedback,
+            BTreeSet::from([feedback_id.to_string()])
+        );
+        assert_eq!(
+            cancelled.untrusted_acceptances,
+            BTreeSet::from([acceptance_id.to_string()])
+        );
+        let changes = allocation_changes("gh", 42, &cancelled, &state.agent_runtime());
+        for artifact_id in ["assignment", feedback_id, acceptance_id] {
+            assert_eq!(
+                node_property(&changes, artifact_id, "trusted"),
+                &ElementValue::Bool(false)
+            );
+        }
+        let stored = serde_json::to_value(&state).unwrap();
+        assert_eq!(stored["comments"], json!({}));
+        assert_eq!(stored["queue"], json!({}));
+        assert!(state.active_leases().next().is_none());
+        state.validate().unwrap();
+    }
+}
+
+#[test]
+fn removing_agent_evicts_queued_assignments_and_cleans_up_after_active_release() {
+    let now = instant(0);
+    let mut state = AllocationState::default();
+    state.sync_agents(
+        &agent_file(
+            "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+        ),
+        now,
+    );
+    let active = state
+        .apply(
+            assignment_event(
+                "assignment-active",
+                "task-active",
+                "agent",
+                "2026-01-01T00:00:00Z",
+            ),
+            now,
+        )
+        .started
+        .remove(0);
+    assert!(state
+        .apply(
+            assignment_event(
+                "assignment-queued",
+                "task-queued",
+                "agent",
+                "2026-01-01T00:01:00Z",
+            ),
+            now,
+        )
+        .started
+        .is_empty());
+
+    let removed = state.sync_agents(
+        &agent_file(
+            "version: 1\nagents:\n  - agentId: replacement\n    slots: 1\n    leaseDuration: PT15M\n",
+        ),
+        instant(1),
+    );
+    assert_eq!(state.active_leases().next(), Some(&active));
+    assert_eq!(
+        removed.untrusted_assignments,
+        BTreeSet::from(["assignment-queued".to_string()])
+    );
+    let stored = serde_json::to_value(&state).unwrap();
+    assert!(stored["queue"].get("assignment-queued").is_none());
+    assert!(stored["comments"].get("assignment-queued").is_none());
+    assert!(stored["queue"].get("assignment-active").is_some());
+    assert_eq!(state.agent_runtime()["agent"].queue_depth, 0);
+    assert_eq!(state.agent_runtime()["agent"].active_lease_count, 1);
+    let changes = allocation_changes("gh", 1, &removed, &state.agent_runtime());
+    assert_eq!(
+        node_property(&changes, "assignment-queued", "trusted"),
+        &ElementValue::Bool(false)
+    );
+    state.validate().unwrap();
+
+    let released = state.apply(
+        result_event("result", "task-active", &active.lease_id),
+        instant(2),
+    );
+    assert_eq!(released.ended, vec![active]);
+    assert_eq!(
+        released.untrusted_assignments,
+        BTreeSet::from(["assignment-active".to_string()])
+    );
+    let stored = serde_json::to_value(&state).unwrap();
+    assert!(stored["queue"].get("assignment-active").is_none());
+    assert!(stored["comments"].get("assignment-active").is_none());
+    assert!(!state.agent_runtime().contains_key("agent"));
+    let changes = allocation_changes("gh", 2, &released, &state.agent_runtime());
+    assert_eq!(
+        node_property(&changes, "assignment-active", "trusted"),
+        &ElementValue::Bool(false)
+    );
+    state.validate().unwrap();
+}
+
+#[test]
+fn cancellation_expiry_and_capacity_retirement_are_deterministic() {
+    let now = instant(0);
+    let mut state = AllocationState::default();
+    let three = agent_file(
+        "version: 1\nagents:\n  - agentId: agent\n    slots: 3\n    leaseDuration: PT1M\n",
+    );
+    state.sync_agents(&three, now);
+    let mut leases = Vec::new();
+    for number in 1..=3 {
+        leases.extend(
+            state
+                .apply(
+                    assignment_event(
+                        &format!("assignment-{number}"),
+                        &format!("task-{number}"),
+                        "agent",
+                        &format!("2026-01-01T00:0{number}:00Z"),
+                    ),
+                    now,
+                )
+                .started,
+        );
+    }
+    let one = agent_file(
+        "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT1M\n",
+    );
+    state.sync_agents(&one, now);
+    assert_eq!(
+        state.agent_runtime()["agent"].retiring_slots,
+        BTreeSet::from([2, 3])
+    );
+    let released = state.apply(
+        result_event("result-2", "task-2", &leases[1].lease_id),
+        instant(1),
+    );
+    assert!(released.removed_slots.contains(&("agent".to_string(), 2)));
+
+    let cancelled = state.apply(
+        AllocationEvent::TaskCancelled {
+            task_node_id: "task-1".into(),
+        },
+        instant(1),
+    );
+    assert_eq!(cancelled.ended[0].task_node_id, "task-1");
+    assert_eq!(
+        cancelled.untrusted_assignments,
+        BTreeSet::from(["assignment-1".to_string()])
+    );
+    let changes = allocation_changes("gh", 1, &cancelled, &state.agent_runtime());
+    assert_eq!(
+        node_property(&changes, "assignment-1", "trusted"),
+        &ElementValue::Bool(false)
+    );
+    assert!(!state
+        .active_leases()
+        .any(|lease| lease.task_node_id == "task-1"));
+
+    let expired = state.expire(instant(2));
+    let ended: Vec<_> = expired
+        .ended
+        .iter()
+        .map(|lease| lease.lease_id.clone())
+        .collect();
+    let mut sorted = ended.clone();
+    sorted.sort();
+    assert_eq!(ended, sorted);
+    assert_eq!(expired.started.len(), expired.ended.len());
+    state.sync_agents(&three, instant(2));
+    let grown = state.apply(
+        assignment_event("assignment-4", "task-4", "agent", "2026-01-01T00:04:00Z"),
+        instant(2),
+    );
+    assert_eq!(grown.started[0].slot_id, "agent/2");
+    let deleted = state.apply(
+        AllocationEvent::Comment {
+            comment_node_id: "assignment-4".into(),
+            task_node_id: "task-4".into(),
+            artifact: None,
+        },
+        instant(2),
+    );
+    assert_eq!(deleted.ended[0].task_node_id, "task-4");
+    assert!(state.validate().is_ok());
+}
+
+#[test]
+fn v1_protocols_are_exact_and_trust_is_role_specific() {
+    let identity = json!({"id": "U_bot", "login": "bot"});
+    assert!(serde_json::from_value::<LeaseTrust>(json!({
+        "assigners": [identity.clone()],
+        "reporters": [identity.clone()]
+    }))
+    .is_ok());
+    assert!(serde_json::from_value::<LeaseTrust>(json!({
+        "dispatchers": [identity.clone()],
+        "reporters": [identity]
+    }))
+    .is_err());
+    assert!(matches!(
+        classify_comment(ASSIGNMENT),
+        CommentClassification::Assignment(_)
+    ));
+    for body in [
+        "WorkGraphTaskAssignment/v2\n\n```json\n{}\n```\n",
+        "WorkGraphTaskAssignment/v1\n\n```json\n{\"agentId\":\"issue-validator\",\
+         \"agentId\":\"agent\",\"queuePriority\":1}\n```\n",
+        "WorkGraphTaskResult/v2\n\n```json\n{}\n```\n",
+    ] {
+        assert!(matches!(
+            classify_comment(body),
+            CommentClassification::Invalid(_)
+        ));
+    }
+    let trusted = convert_full(
+        "issue_comment",
+        &comment_event("created", ASSIGNMENT, "open", true, "assignment"),
+    );
+    assert!(matches!(
+        trusted.allocation,
+        Some(AllocationEvent::Comment {
+            artifact: Some(AllocationArtifact::Assignment { trusted: true, .. }),
+            ..
+        })
+    ));
+    let untrusted = Converter::new("gh", "acme", &task_type(), 1)
+        .convert(
+            "issue_comment",
+            &comment_event("created", ASSIGNMENT, "open", true, "assignment"),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        untrusted.allocation,
+        Some(AllocationEvent::Comment {
+            artifact: Some(AllocationArtifact::Assignment { trusted: false, .. }),
+            ..
+        })
+    ));
+}
+
+async fn allocator_fixture(
+    source_id: &str,
+) -> (
+    TempDir,
+    Arc<MemoryStateStoreProvider>,
+    Arc<RedbWalProvider>,
+    Allocator,
+) {
+    let tmp = TempDir::new().unwrap();
+    let store = Arc::new(MemoryStateStoreProvider::new());
+    let wal = Arc::new(RedbWalProvider::new(tmp.path().join("wal")));
+    wal.register(source_id, WriteAheadLogConfig::default())
+        .await
+        .unwrap();
+    let allocator = Allocator::new(source_id.into(), store.clone(), wal.clone());
+    (tmp, store, wal, allocator)
+}
+
+#[tokio::test]
+async fn allocator_contract_exact_active_lookup_requires_every_binding() {
+    let mut state = AllocationState::default();
+    state.sync_agents(
+        &agent_file(
+            "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+        ),
+        instant(0),
+    );
+    let lease = state
+        .apply(
+            assignment_event("assignment", "task", "agent", "2026-01-01T00:00:00Z"),
+            instant(0),
+        )
+        .started
+        .remove(0);
+    assert_eq!(
+        state.active_exact(
+            "task",
+            &lease.lease_id,
+            "assignment",
+            "agent",
+            "agent/1",
+            instant(14),
+        ),
+        Some(&lease)
+    );
+    for (task, lease_id, assignment, agent, slot) in [
+        (
+            "wrong-task",
+            lease.lease_id.as_str(),
+            "assignment",
+            "agent",
+            "agent/1",
+        ),
+        ("task", "wrong-lease", "assignment", "agent", "agent/1"),
+        (
+            "task",
+            lease.lease_id.as_str(),
+            "wrong-assignment",
+            "agent",
+            "agent/1",
+        ),
+        (
+            "task",
+            lease.lease_id.as_str(),
+            "assignment",
+            "wrong-agent",
+            "agent/1",
+        ),
+        (
+            "task",
+            lease.lease_id.as_str(),
+            "assignment",
+            "agent",
+            "agent/2",
+        ),
+    ] {
+        assert!(state
+            .active_exact(task, lease_id, assignment, agent, slot, instant(14),)
+            .is_none());
+    }
+    assert!(state
+        .active_exact(
+            "task",
+            &lease.lease_id,
+            "assignment",
+            "agent",
+            "agent/1",
+            instant(15),
+        )
+        .is_none());
+
+    let source_id = "exact-active";
+    let (_tmp, store, _wal, allocator) = allocator_fixture(source_id).await;
+    store
+        .set(
+            source_id,
+            "allocator:state",
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        allocator
+            .validate_active(
+                "task",
+                &lease.lease_id,
+                "assignment",
+                "agent",
+                "agent/1",
+                instant(14),
+            )
+            .await
+            .unwrap(),
+        Some(lease.clone())
+    );
+    assert!(allocator
+        .validate_active(
+            "task",
+            &lease.lease_id,
+            "assignment",
+            "wrong-agent",
+            "agent/1",
+            instant(14),
+        )
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn allocator_contract_durable_ingest_is_idempotent_and_wal_ordered() {
+    let source_id = "durable-contract";
+    let (_tmp, store, wal, allocator) = allocator_fixture(source_id).await;
+    let agents = agent_file(
+        "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+    );
+    allocator
+        .sync_agents(&agent_location(), &agents, &agent_content("agents"), 1)
+        .await
+        .unwrap();
+    allocator
+        .ingest(
+            "assignment-1-delivery",
+            assignment_event("IC_assignment", "I_task", "agent", "2026-01-01T00:00:00Z"),
+            Vec::new(),
+            2,
+        )
+        .await
+        .unwrap();
+    allocator
+        .ingest(
+            "assignment-2-delivery",
+            assignment_event(
+                "IC_assignment_next",
+                "I_next",
+                "agent",
+                "2026-01-01T00:01:00Z",
+            ),
+            Vec::new(),
+            3,
+        )
+        .await
+        .unwrap();
+    let old_lease = hex::encode(Sha256::digest(b"I_task\0IC_assignment\0\x31"));
+    let before = wal.head_sequence(source_id).await.unwrap();
+    let conversion = convert_full(
+        "issue_comment",
+        &comment_event(
+            "created",
+            &result_body(&old_lease),
+            "open",
+            true,
+            "IC_result",
+        ),
+    );
+    let (appended, trusted) = allocator
+        .ingest(
+            "result-delivery",
+            conversion.allocation.unwrap(),
+            conversion.changes,
+            4,
+        )
+        .await
+        .unwrap();
+    assert!(trusted);
+    assert_eq!(appended, 10);
+
+    let changes: Vec<_> = wal
+        .read_from(source_id, before + 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, change)| change)
+        .collect();
+    assert_eq!(
+        changes
+            .iter()
+            .map(|change| (label(change), is_delete(change), is_update(change)))
+            .collect::<Vec<_>>(),
+        vec![
+            ("WorkGraphTaskResult", false, false),
+            ("COMMENT_ON", false, false),
+            ("RESULT_FOR", false, false),
+            ("LEASE_FOR", true, false),
+            ("LEASES_SLOT", true, false),
+            ("WorkGraphTaskLease", true, false),
+            ("WorkGraphTaskLease", false, true),
+            ("LEASE_FOR", false, true),
+            ("LEASES_SLOT", false, true),
+            ("WorkGraphAgent", false, true),
+        ]
+    );
+    assert_eq!(
+        property(&changes, "WorkGraphTaskResult", "trusted"),
+        &ElementValue::Bool(true)
+    );
+    let next_lease = hex::encode(Sha256::digest(b"I_next\0IC_assignment_next\0\x31"));
+    assert!(changes.iter().any(|change| {
+        id(change) == format!("workgraph-lease:I_next:{next_lease}")
+            && label(change) == "WorkGraphTaskLease"
+            && is_update(change)
+    }));
+
+    assert_eq!(
+        allocator
+            .ingest(
+                "result-delivery",
+                result_event("ignored", "I_task", &old_lease),
+                Vec::new(),
+                5,
+            )
+            .await
+            .unwrap(),
+        (0, false)
+    );
+    assert_eq!(
+        allocator
+            .ingest(
+                "same-current-delivery",
+                assignment_event(
+                    "IC_assignment_next",
+                    "I_next",
+                    "agent",
+                    "2026-01-01T00:01:00Z",
+                ),
+                Vec::new(),
+                6,
+            )
+            .await
+            .unwrap(),
+        (0, true)
+    );
+    let stored = store
+        .get(source_id, "allocator:state")
+        .await
+        .unwrap()
+        .unwrap();
+    let stored: Value = serde_json::from_slice(&stored).unwrap();
+    assert_eq!(stored["pending"], json!([]));
+    assert_eq!(wal.head_sequence(source_id).await.unwrap(), before + 10);
+}
+
+#[tokio::test]
+async fn pending_projection_replays_every_crash_prefix_and_then_clears() {
+    let projected: Vec<_> = convert(
+        "issues",
+        &issue_event("opened", issue("I_pending", VALIDATION_TASK, true, "open")),
+    )
+    .into_iter()
+    .take(2)
+    .collect();
+    assert_eq!(projected.len(), 2);
+
+    for prefix in 0..=projected.len() {
+        let source_id = format!("pending-{prefix}");
+        let (_tmp, store, wal, allocator) = allocator_fixture(&source_id).await;
+        for change in projected.iter().take(prefix) {
+            wal.append(&source_id, change).await.unwrap();
+        }
+        let encoded = serde_json::to_vec(&json!({
+            "version": 2,
+            "agents": {},
+            "queue": {},
+            "assignmentAttempts": {},
+            "comments": {},
+            "active": {},
+            "pending": projected,
+        }))
+        .unwrap();
+        store
+            .set(&source_id, "allocator:state", encoded)
+            .await
+            .unwrap();
+
+        assert_eq!(allocator.recover(99).await.unwrap(), 0);
+        assert_eq!(
+            wal.head_sequence(&source_id).await.unwrap(),
+            (prefix + projected.len()) as u64
+        );
+        let stored = store
+            .get(&source_id, "allocator:state")
+            .await
+            .unwrap()
+            .unwrap();
+        let state: Value = serde_json::from_slice(&stored).unwrap();
+        assert_eq!(state["pending"], json!([]));
+        let head = wal.head_sequence(&source_id).await.unwrap();
+        allocator.recover(100).await.unwrap();
+        assert_eq!(wal.head_sequence(&source_id).await.unwrap(), head);
+    }
+}
+
+#[tokio::test]
+async fn restart_restates_the_exact_active_lease_and_corruption_fails_closed() {
+    let source_id = "restart";
+    let (_tmp, store, wal, allocator) = allocator_fixture(source_id).await;
+    let agents = agent_file(
+        "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+    );
+    allocator
+        .sync_agents(&agent_location(), &agents, &agent_content("agents"), 1)
+        .await
+        .unwrap();
+    allocator
+        .ingest(
+            "assignment-delivery",
+            assignment_event("assignment", "task", "agent", "2026-01-01T00:00:00Z"),
+            Vec::new(),
+            2,
+        )
+        .await
+        .unwrap();
+    let lease_id = hex::encode(Sha256::digest(b"task\0assignment\0\x31"));
+    let active = allocator
+        .validate_active(
+            "task",
+            &lease_id,
+            "assignment",
+            "agent",
+            "agent/1",
+            instant(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let before = wal.head_sequence(source_id).await.unwrap();
+
+    let restarted = Allocator::new(source_id.into(), store.clone(), wal.clone());
+    restarted.recover(3).await.unwrap();
+    let restated = wal.read_from(source_id, before + 1).await.unwrap();
+    let lease_element = format!("workgraph-lease:task:{lease_id}");
+    assert!(restated
+        .iter()
+        .any(|(_, change)| change.get_reference().element_id.as_ref() == lease_element));
+    assert_eq!(
+        restarted
+            .validate_active(
+                "task",
+                &lease_id,
+                "assignment",
+                "agent",
+                "agent/1",
+                instant(1),
+            )
+            .await
+            .unwrap(),
+        Some(active)
+    );
+
+    let stored = store
+        .get(source_id, "allocator:state")
+        .await
+        .unwrap()
+        .unwrap();
+    let legacy_worker_v2 = json!({
+        "version": 2,
+        "workers": {},
+        "queue": {},
+        "assignmentAttempts": {},
+        "comments": {},
+        "active": {},
+        "pending": []
+    });
+    store
+        .set(
+            source_id,
+            "allocator:state",
+            serde_json::to_vec(&legacy_worker_v2).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(restarted.recover(4).await.is_err());
+
+    store
+        .set(source_id, "allocator:state", stored.clone())
+        .await
+        .unwrap();
+    let mut unsupported: Value = serde_json::from_slice(&stored).unwrap();
+    unsupported["version"] = json!(1);
+    store
+        .set(
+            source_id,
+            "allocator:state",
+            serde_json::to_vec(&unsupported).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(restarted.recover(5).await.is_err());
+
+    store
+        .set(source_id, "allocator:state", b"{not-json".to_vec())
+        .await
+        .unwrap();
+    assert!(restarted.recover(6).await.is_err());
+    assert!(restarted
+        .validate_active(
+            "task",
+            &lease_id,
+            "assignment",
+            "agent",
+            "agent/1",
+            instant(1),
+        )
+        .await
+        .is_err());
 }

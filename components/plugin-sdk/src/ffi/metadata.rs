@@ -47,7 +47,10 @@ use super::types::FfiStr;
 /// - `0.14.0`: `StateStoreVtable` appends `is_durable_fn` so dynamic plugins
 ///   can distinguish persistent host stores from in-memory providers. The
 ///   nullable callback fails closed when the capability is unavailable.
-pub const FFI_SDK_VERSION: &str = "0.14.0";
+/// - `0.15.0`: `SourceVtable` appends `on_subscriptions_complete_fn` so the
+///   host lifecycle can signal dynamic sources to release their startup pruning
+///   fence (fixes the WorkGraph 60 s fallback regression on the dynamic path).
+pub const FFI_SDK_VERSION: &str = "0.15.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");

@@ -12,88 +12,88 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The strict `version: 1` worker-queue configuration file contract.
+//! The strict `version: 1` agent-capacity configuration file contract.
 //!
-//! The configured set of workers and their capacity lives in a versioned
-//! repository file (normally `.github/workgraph/workers.yaml`). It describes
-//! *desired* worker capacity only — runtime claims stay in GitHub task
-//! comments as Assignments and Leases.
+//! The configured set of agents and their capacity lives in a versioned
+//! repository file (normally `.github/workgraph/agents.yaml`). It describes
+//! *desired* agent capacity only; Assignments are GitHub comments and active
+//! Leases are synthetic Source state.
 //!
 //! This module owns parsing and validation exactly once. Both the streaming
 //! Source (on a relevant `push`) and the bootstrapper (before it projects any
-//! task artifact) call [`parse_worker_file`], so a file that one accepts the
+//! task artifact) call [`parse_agent_file`], so a file that one accepts the
 //! other accepts identically.
 //!
 //! Every rejection is an explicit [`WorkGraphError`]. A malformed or missing
-//! required worker file must never degrade into a silently empty worker pool.
+//! required agent file must never degrade into a silently empty agent pool.
 
-use crate::workgraph::{slot_id, WorkGraphError, SUPPORTED_AGENT_PROFILES};
+use crate::workgraph::{slot_id, WorkGraphError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Only `version: 1` worker files are understood.
-pub const SUPPORTED_WORKER_FILE_VERSION: u64 = 1;
-/// Upper bound on configured workers in one file.
-pub const MAX_WORKERS: usize = 64;
-/// Upper bound on the concurrent slots one worker may declare.
+/// Only `version: 1` agent files are understood.
+pub const SUPPORTED_AGENT_FILE_VERSION: u64 = 1;
+/// Upper bound on configured agents in one file.
+pub const MAX_AGENTS: usize = 64;
+/// Upper bound on the concurrent slots one agent may declare.
 ///
 /// The bound is part of the contract: `slots` is a *positive bounded* integer,
-/// and the bound keeps the derived slot node count per worker predictable.
-pub const MAX_WORKER_SLOTS: u32 = 16;
-/// Upper bound on a worker ID, so derived slot IDs stay bounded too.
-pub const MAX_WORKER_ID_LEN: usize = 64;
+/// and the bound keeps the derived slot node count per agent predictable.
+pub const MAX_AGENT_SLOTS: u32 = 16;
+/// Upper bound on an agent ID, so derived slot IDs stay bounded too.
+pub const MAX_AGENT_ID_LEN: usize = 64;
 /// Lower bound on a lease duration; a non-positive lease can never be held.
 pub const MIN_LEASE_DURATION_SECONDS: i64 = 1;
 /// Upper bound on a lease duration. A lease longer than a day would keep a
-/// slot unusable far past any plausible worker execution.
+/// slot unusable far past any plausible agent execution.
 pub const MAX_LEASE_DURATION_SECONDS: i64 = 24 * 60 * 60;
-/// Upper bound on the raw worker file the Source will parse.
-pub const MAX_WORKER_FILE_BYTES: u64 = 256 * 1024;
+/// Upper bound on the raw agent file the Source will parse.
+pub const MAX_AGENT_FILE_BYTES: u64 = 256 * 1024;
 
 pub mod error_code {
-    pub const WORKER_FILE_UNAVAILABLE: &str = "worker-file-unavailable";
-    pub const WORKER_FILE_TOO_LARGE: &str = "worker-file-too-large";
-    pub const INVALID_WORKER_FILE_YAML: &str = "invalid-worker-file-yaml";
-    pub const INVALID_WORKER_FILE_PAYLOAD: &str = "invalid-worker-file-payload";
+    pub const AGENT_FILE_UNAVAILABLE: &str = "agent-file-unavailable";
+    pub const AGENT_FILE_TOO_LARGE: &str = "agent-file-too-large";
+    pub const INVALID_AGENT_FILE_YAML: &str = "invalid-agent-file-yaml";
+    pub const INVALID_AGENT_FILE_PAYLOAD: &str = "invalid-agent-file-payload";
 }
 
-/// The exact repository location of the worker file.
+/// The exact repository location of the agent file.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WorkerFileLocation {
-    /// `owner/name` of the repository holding the worker file.
+pub struct AgentFileLocation {
+    /// `owner/name` of the repository holding the agent file.
     pub repository: String,
     /// The exact git ref (normally a branch name such as `main`).
     pub r#ref: String,
-    /// The exact repository-relative path of the worker file.
+    /// The exact repository-relative path of the agent file.
     pub path: String,
 }
 
-impl WorkerFileLocation {
+impl AgentFileLocation {
     pub fn validate(&self) -> anyhow::Result<()> {
         let (owner, name) = self
             .repository
             .split_once('/')
-            .ok_or_else(|| anyhow::anyhow!("workerConfig.repository must be 'owner/name'"))?;
+            .ok_or_else(|| anyhow::anyhow!("agentConfig.repository must be 'owner/name'"))?;
         anyhow::ensure!(
             !owner.is_empty()
                 && !name.is_empty()
                 && !name.contains('/')
                 && self.repository.trim() == self.repository,
-            "workerConfig.repository must be exactly one 'owner/name' pair without surrounding whitespace"
+            "agentConfig.repository must be exactly one 'owner/name' pair without surrounding whitespace"
         );
         anyhow::ensure!(
             !self.r#ref.trim().is_empty() && self.r#ref.trim() == self.r#ref,
-            "workerConfig.ref must be a non-empty git ref without surrounding whitespace"
+            "agentConfig.ref must be a non-empty git ref without surrounding whitespace"
         );
         anyhow::ensure!(
             !self.r#ref.chars().any(char::is_whitespace) && !self.r#ref.contains(':'),
-            "workerConfig.ref must not contain whitespace or ':'"
+            "agentConfig.ref must not contain whitespace or ':'"
         );
         let path = &self.path;
         anyhow::ensure!(
             !path.trim().is_empty() && path.trim() == *path,
-            "workerConfig.path must be a non-empty path without surrounding whitespace"
+            "agentConfig.path must be a non-empty path without surrounding whitespace"
         );
         anyhow::ensure!(
             !path.starts_with('/')
@@ -102,7 +102,7 @@ impl WorkerFileLocation {
                     .split('/')
                     .any(|segment| segment == ".." || segment == ".")
                 && !path.chars().any(char::is_whitespace),
-            "workerConfig.path must be a normalized repository-relative path without '.', '..', \
+            "agentConfig.path must be a normalized repository-relative path without '.', '..', \
              empty segments, or whitespace"
         );
         Ok(())
@@ -134,19 +134,18 @@ impl WorkerFileLocation {
     }
 }
 
-/// The exact bytes fetched for a worker file, plus their content provenance.
+/// The exact bytes fetched for an agent file, plus their content provenance.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkerFileContent {
+pub struct AgentFileContent {
     pub text: String,
     /// The git object ID of the blob, recorded as configuration provenance.
     pub oid: String,
 }
 
-/// One validated configured worker.
+/// One validated configured agent.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkerDefinition {
-    pub worker_id: String,
-    pub agent_profile: String,
+pub struct AgentDefinition {
+    pub agent_id: String,
     pub slots: u32,
     /// The exact `leaseDuration` text as written in the file.
     pub lease_duration: String,
@@ -155,134 +154,124 @@ pub struct WorkerDefinition {
     pub lease_duration_seconds: i64,
 }
 
-impl WorkerDefinition {
-    /// The deterministic one-based slot IDs of this worker.
+impl AgentDefinition {
+    /// The deterministic one-based slot IDs of this agent.
     pub fn slot_ids(&self) -> Vec<String> {
         (1..=self.slots)
-            .map(|number| slot_id(&self.worker_id, number))
+            .map(|number| slot_id(&self.agent_id, number))
             .collect()
     }
 }
 
-/// A validated worker file.
+/// A validated agent file.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkerFile {
+pub struct AgentFile {
     pub version: u64,
-    pub workers: Vec<WorkerDefinition>,
+    pub agents: Vec<AgentDefinition>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct WorkerFileRoot {
+struct AgentFileRoot {
     version: u64,
-    workers: Vec<WorkerRoot>,
+    agents: Vec<AgentRoot>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct WorkerRoot {
-    worker_id: String,
-    agent_profile: String,
+struct AgentRoot {
+    agent_id: String,
     slots: u32,
     lease_duration: String,
 }
 
-/// Parse and strictly validate a worker file.
+/// Parse and strictly validate an agent file.
 ///
-/// Rejects anything that is not exactly `version: 1` with a non-empty `workers`
-/// list of fully-specified, uniquely-identified workers.
-pub fn parse_worker_file(text: &str) -> Result<WorkerFile, WorkGraphError> {
-    let root: WorkerFileRoot = serde_yaml::from_str(text).map_err(|error| {
+/// Rejects anything that is not LF UTF-8 text of at most 256 KiB and exactly
+/// `version: 1` with a non-empty `agents` list of uniquely-identified agents.
+pub fn parse_agent_file(text: &str) -> Result<AgentFile, WorkGraphError> {
+    if text.len() as u64 > MAX_AGENT_FILE_BYTES {
+        return Err(WorkGraphError::new(
+            error_code::AGENT_FILE_TOO_LARGE,
+            format!(
+                "the agent file is {} bytes, exceeding the {MAX_AGENT_FILE_BYTES} byte limit",
+                text.len()
+            ),
+        ));
+    }
+    if text.contains('\r') {
+        return Err(WorkGraphError::new(
+            error_code::INVALID_AGENT_FILE_PAYLOAD,
+            "the agent file must use LF line endings",
+        ));
+    }
+    let root: AgentFileRoot = serde_yaml::from_str(text).map_err(|error| {
         WorkGraphError::new(
-            error_code::INVALID_WORKER_FILE_YAML,
-            format!("invalid worker file YAML: {error}"),
+            error_code::INVALID_AGENT_FILE_YAML,
+            format!("invalid agent file YAML: {error}"),
         )
     })?;
     parse_root(root)
-        .map_err(|message| WorkGraphError::new(error_code::INVALID_WORKER_FILE_PAYLOAD, message))
+        .map_err(|message| WorkGraphError::new(error_code::INVALID_AGENT_FILE_PAYLOAD, message))
 }
 
-fn parse_root(root: WorkerFileRoot) -> Result<WorkerFile, String> {
-    if root.version != SUPPORTED_WORKER_FILE_VERSION {
+fn parse_root(root: AgentFileRoot) -> Result<AgentFile, String> {
+    if root.version != SUPPORTED_AGENT_FILE_VERSION {
         return Err(format!(
-            "version must equal {SUPPORTED_WORKER_FILE_VERSION}, found {}",
+            "version must equal {SUPPORTED_AGENT_FILE_VERSION}, found {}",
             root.version
         ));
     }
-    if root.workers.is_empty() {
-        return Err("workers must contain at least one worker".to_string());
+    if root.agents.is_empty() {
+        return Err("agents must contain at least one agent".to_string());
     }
-    if root.workers.len() > MAX_WORKERS {
+    if root.agents.len() > MAX_AGENTS {
         return Err(format!(
-            "workers must contain at most {MAX_WORKERS} workers, found {}",
-            root.workers.len()
+            "agents must contain at most {MAX_AGENTS} agents, found {}",
+            root.agents.len()
         ));
     }
 
-    let mut workers = Vec::with_capacity(root.workers.len());
-    let mut seen_worker_ids = BTreeSet::new();
+    let mut agents = Vec::with_capacity(root.agents.len());
+    let mut seen_agent_ids = BTreeSet::new();
     let mut seen_slot_ids = BTreeSet::new();
-    for (index, worker) in root.workers.into_iter().enumerate() {
-        let worker = parse_worker(index, worker)?;
-        if !seen_worker_ids.insert(worker.worker_id.clone()) {
+    for (index, agent) in root.agents.into_iter().enumerate() {
+        let agent = parse_agent(index, agent)?;
+        if !seen_agent_ids.insert(agent.agent_id.clone()) {
             return Err(format!(
-                "workers[{index}].workerId '{}' is duplicated; worker IDs must be unique",
-                worker.worker_id
+                "agents[{index}].agentId '{}' is duplicated; agent IDs must be unique",
+                agent.agent_id
             ));
         }
-        for slot in worker.slot_ids() {
+        for slot in agent.slot_ids() {
             if !seen_slot_ids.insert(slot.clone()) {
                 return Err(format!(
-                    "workers[{index}] derives slot ID '{slot}', which is already claimed by \
-                     another worker"
+                    "agents[{index}] derives slot ID '{slot}', which is already claimed by \
+                     another agent"
                 ));
             }
         }
-        workers.push(worker);
+        agents.push(agent);
     }
 
-    Ok(WorkerFile {
-        version: SUPPORTED_WORKER_FILE_VERSION,
-        workers,
+    Ok(AgentFile {
+        version: SUPPORTED_AGENT_FILE_VERSION,
+        agents,
     })
 }
 
-fn parse_worker(index: usize, worker: WorkerRoot) -> Result<WorkerDefinition, String> {
-    let field = |name: &str| format!("workers[{index}].{name}");
-    let worker_id = worker.worker_id;
-    if worker_id.is_empty() || worker_id.len() > MAX_WORKER_ID_LEN {
+fn parse_agent(index: usize, agent: AgentRoot) -> Result<AgentDefinition, String> {
+    let field = |name: &str| format!("agents[{index}].{name}");
+    validate_agent_id(&agent.agent_id, &field("agentId"))?;
+    if agent.slots == 0 || agent.slots > MAX_AGENT_SLOTS {
         return Err(format!(
-            "{} must be 1 to {MAX_WORKER_ID_LEN} characters",
-            field("workerId")
-        ));
-    }
-    // A worker ID must be a stable, path-safe token: slot IDs are derived as
-    // `workerId/slotNumber`, so any '/' would make a slot ID ambiguous.
-    if !worker_id
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || b"-._".contains(&byte))
-    {
-        return Err(format!(
-            "{} must contain only ASCII letters, digits, '-', '.', or '_'",
-            field("workerId")
-        ));
-    }
-    if !SUPPORTED_AGENT_PROFILES.contains(&worker.agent_profile.as_str()) {
-        return Err(format!(
-            "{} must be one of: {}",
-            field("agentProfile"),
-            SUPPORTED_AGENT_PROFILES.join(", ")
-        ));
-    }
-    if worker.slots == 0 || worker.slots > MAX_WORKER_SLOTS {
-        return Err(format!(
-            "{} must be between 1 and {MAX_WORKER_SLOTS}, found {}",
+            "{} must be between 1 and {MAX_AGENT_SLOTS}, found {}",
             field("slots"),
-            worker.slots
+            agent.slots
         ));
     }
-    let lease_duration_seconds = parse_iso8601_duration_seconds(&worker.lease_duration)
-        .ok_or_else(|| {
+    let lease_duration_seconds =
+        parse_iso8601_duration_seconds(&agent.lease_duration).ok_or_else(|| {
             format!(
                 "{} must be a positive ISO-8601 duration built from whole days, hours, minutes, \
                  and seconds, for example 'PT15M'",
@@ -297,13 +286,30 @@ fn parse_worker(index: usize, worker: WorkerRoot) -> Result<WorkerDefinition, St
             field("leaseDuration")
         ));
     }
-    Ok(WorkerDefinition {
-        worker_id,
-        agent_profile: worker.agent_profile,
-        slots: worker.slots,
-        lease_duration: worker.lease_duration,
+    Ok(AgentDefinition {
+        agent_id: agent.agent_id,
+        slots: agent.slots,
+        lease_duration: agent.lease_duration,
         lease_duration_seconds,
     })
+}
+
+/// Validate the case-sensitive agent ID used by Assignments and capacity files.
+pub(crate) fn validate_agent_id(value: &str, field: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > MAX_AGENT_ID_LEN {
+        return Err(format!(
+            "{field} must be 1 to {MAX_AGENT_ID_LEN} characters"
+        ));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"-._".contains(&byte))
+    {
+        return Err(format!(
+            "{field} must contain only ASCII letters, digits, '-', '.', or '_'"
+        ));
+    }
+    Ok(())
 }
 
 /// Parse a strict `P[nD][T[nH][nM][nS]]` duration into whole seconds.

@@ -1,10 +1,10 @@
 # GitHub WorkGraph Source
 
-Streams one organization's GitHub webhook into Drasi. Webhook conversion is
-read-only, stateless, cache-free, and payload-only.
+Streams one organization's GitHub webhook into Drasi. The Source is the
+single-instance authority for agent queues and active task allocations.
 
-The one exception is the worker-queue configuration file. A `push` payload
-carries only changed paths, never file content, so when `workerConfig` is set
+The one exception is the agent-capacity configuration file. A `push` payload
+carries only changed paths, never file content, so when `agentConfig` is set
 the Source reads that one blob back over the same GitHub GraphQL endpoint and
 credential mechanism the bootstrapper uses. No other GitHub read, no side
 service, and no second transport is introduced. All other initial API reads
@@ -21,16 +21,16 @@ taskIssueType:
   name: WorkGraphTask
 repositories:
   - drasi-workgraph-demo
-workerConfig:
+agentConfig:
   repository: drasi-project/drasi-workgraph-demo
   ref: main
-  path: .github/workgraph/workers.yaml
+  path: .github/workgraph/agents.yaml
   token:
     kind: Secret
-    name: github-workgraph-worker-config-token
+    name: github-workgraph-agent-config-token
   apiBaseUrl: https://api.github.com/graphql
-leaseTrust:
-  dispatchers:
+protocolTrust:
+  assigners:
     - id: U_kgDOAbcDisp
       login: drasi-workqueue-dispatcher
   reporters:
@@ -43,6 +43,9 @@ webhook:
   secret:
     kind: Secret
     name: github-workgraph-webhook-secret
+  leaseValidationToken:
+    kind: Secret
+    name: github-workgraph-lease-validation-token
   bodyLimitBytes: 26214400
 durability:
   enabled: true
@@ -57,13 +60,13 @@ deployment-configurable; Core has no built-in Issue Type ID or name.
 `organization` is one login. `repositories` is optional; empty means all
 repositories in the organization. Entries may be bare names or matching
 `owner/name` values and are normalized to sorted lowercase names. The webhook
-secret must be a `SecretReference`, the path must be static, and durability must
-use `RejectIncoming`.
+secret and lease validation token must be separate `SecretReference` values,
+the path must be static, and durability must use `RejectIncoming`.
 
-`workerConfig` is optional. Omitting it turns the worker queue off entirely: no
-`WorkGraphWorker` or `WorkGraphWorkerSlot` node is projected and `push`
+`agentConfig` is optional. Omitting it turns agent allocation off entirely: no
+`WorkGraphAgent` or `WorkGraphAgentSlot` node is projected and `push`
 deliveries are ignored. When it *is* present it is strictly required — see
-[Worker queue configuration](#worker-queue-configuration). `repository` must be
+[Agent capacity configuration](#agent-capacity-configuration). `repository` must be
 one `owner/name` pair, `ref` an exact git ref, and `path` a normalized
 repository-relative path (no leading `/`, no `.`/`..`/empty segments, no
 whitespace). `token` must be a `SecretReference` and needs only `Contents: Read`
@@ -72,7 +75,7 @@ and is overridden for GitHub Enterprise Server.
 
 Configure one organization webhook for `repository`, `issues`, `sub_issues`,
 `issue_comment`, `pull_request`, and `pull_request_review`. Add `push` only when
-`workerConfig` is configured. Other event families are ignored.
+`agentConfig` is configured. Other event families are ignored.
 
 ## Graph contract
 
@@ -103,15 +106,14 @@ normalized `state` is `open`; unknown and non-open states produce false.
 | `GitHubIssueComment` / `GitHubPullRequestComment` | comment node ID | ordinary conversation comment |
 | `GitHubPullRequestReview` | review node ID | PR review |
 | `WorkGraphTask` | typed child Issue node ID | native Issue metadata plus strict work definition |
-| `WorkGraphTaskAssignment` | assignment comment node ID | selected supported agent profile |
+| `WorkGraphTaskAssignment` | assignment comment node ID | selected custom-agent profile name in `agentId` |
 | `WorkGraphTaskResult` | result comment node ID | strict Result fields and comment provenance |
+| `WorkGraphTaskFeedback` | feedback comment node ID | exact feedback bound to one Result revision |
 | `WorkGraphTaskResultAcceptance` | acceptance comment node ID | accepted Result identity and body revision |
-| `WorkGraphTaskLease` | lease comment node ID | one execution attempt holding one worker slot |
-| `WorkGraphTaskLeaseAnchor` | `workgraph-lease:{task}:{leaseId}` | derived, task-scoped join point plus the derived lease lifecycle |
-| `WorkGraphTaskLeaseExpiration` | expiration comment node ID | records that a lease reached its deadline |
-| `WorkGraphWorker` | `workgraph-worker:{workerId}` | one configured worker and its capacity |
-| `WorkGraphWorkerSlot` | `workgraph-worker-slot:{slotId}` | one unit of that worker's concurrency |
-| `WorkGraphError` | deterministic error ID | malformed task/comment, status conflict, or worker config |
+| `WorkGraphTaskLease` | `workgraph-lease:{task}:{leaseId}` | synthetic active allocation owned by the Source |
+| `WorkGraphAgent` | `workgraph-agent:{agentId}` | one configured custom agent and its capacity |
+| `WorkGraphAgentSlot` | `workgraph-agent-slot:{slotId}` | one unit of that agent's concurrency |
+| `WorkGraphError` | deterministic error ID | malformed task/comment, status conflict, or agent config |
 
 A typed child is emitted only as `WorkGraphTask`; it is never also emitted as
 `GitHubIssue`.
@@ -123,15 +125,13 @@ A typed child is emitted only as `WorkGraphTask`; it is never also emitted as
 | `TASK_FOR` | task → parent Issue | `TASK_FOR:{task.databaseId}` |
 | `COMMENT_ON` | ordinary/specialized comment → Issue/PR/task | `COMMENT_ON:{comment}:{parent}` |
 | `ASSIGNMENT_FOR` | assignment → task | `ASSIGNMENT_FOR:{assignment}:{task}` |
+| `ASSIGNED_TO` | assignment → agent | `ASSIGNED_TO:{assignment}:{agent}` |
 | `RESULT_FOR` | result → task | `RESULT_FOR:{comment}:{task}` |
+| `FEEDBACK_FOR` | feedback → result | `FEEDBACK_FOR:{feedback}:{result}` |
 | `ACCEPTS_RESULT` | acceptance → result | `ACCEPTS_RESULT:{acceptance}:{result}` |
-| `ASSIGNED_TO` | v2 assignment → worker | `ASSIGNED_TO:{assignment}:{worker}` |
-| `HAS_SLOT` | worker → slot | `HAS_SLOT:{worker}:{slot}` |
+| `HAS_SLOT` | agent → slot | `HAS_SLOT:{agent}:{slot}` |
 | `LEASE_FOR` | lease → task | `LEASE_FOR:{lease}:{task}` |
 | `LEASES_SLOT` | lease → slot | `LEASES_SLOT:{lease}:{slot}` |
-| `LEASE_ANCHOR` | trusted lease → anchor | `LEASE_ANCHOR:{lease}:{anchor}` |
-| `RESULT_FOR_LEASE` | trusted v2 result → anchor | `RESULT_FOR_LEASE:{result}:{anchor}` |
-| `EXPIRES_LEASE` | trusted expiration → anchor | `EXPIRES_LEASE:{expiration}:{anchor}` |
 | `REVIEW_OF` | review → PR | `REVIEW_OF:{review}:{pr}` |
 | `ERROR_ON` | comment/status error → subject | deterministic from source and subject IDs |
 
@@ -165,8 +165,24 @@ fields, malformed or multi-document YAML, prose, and envelope deviations are
 rejected. A malformed typed task emits `WorkGraphError`.
 
 An Assignment comment uses `WorkGraphTaskAssignment/v1` with canonical
-two-space JSON containing only a non-empty supported `agentProfile`. It emits a
-`WorkGraphTaskAssignment`, `COMMENT_ON`, and `ASSIGNMENT_FOR`.
+two-space JSON containing exactly `agentId`:
+
+````text
+WorkGraphTaskAssignment/v1
+
+```json
+{
+  "agentId": "issue-validator"
+}
+```
+````
+
+`agentId` is the exact, case-sensitive GitHub custom-agent profile name. It is
+1-64 ASCII letters, digits, `-`, `.`, or `_`; Core never lowercases it. The
+comment emits `WorkGraphTaskAssignment`, `COMMENT_ON`, `ASSIGNMENT_FOR`, and
+`ASSIGNED_TO`. A trusted Assignment naming an unknown agent remains visible
+with that intent relation but has `trusted = false` and never enters allocator
+state.
 
 A task Result comment has exactly this grammar:
 
@@ -176,6 +192,7 @@ WorkGraphTaskResult/v1
 ```json
 {
   "taskType": "validate-issue",
+  "leaseId": "EXACT_ACTIVE_LEASE_ID",
   "outcome": "succeeded",
   "summary": "Validated the issue.",
   "result": {
@@ -206,381 +223,122 @@ emits `WorkGraphTaskResultAcceptance`, `COMMENT_ON`, and `ACCEPTS_RESULT`; the
 last edge targets the Result comment node ID. Result nodes expose their own
 `bodyDigest` so a query can reject stale acceptances.
 
-### Worker queue comments
+### Feedback
 
-`WorkGraphTaskAssignment/v2` adds a worker queue to the historical v1 contract
-and contains exactly `agentProfile` and `workerId`, in that order:
+`WorkGraphTaskFeedback/v1` contains exactly `resultCommentNodeId`,
+`resultBodyDigest`, and non-empty `feedback`. The digest is
+`sha256:<64 lowercase hex>` over the exact current Result comment body. A trusted
+Feedback makes that Result's Assignment queue-eligible again unless an exact
+Acceptance exists.
 
-````text
-WorkGraphTaskAssignment/v2
+All specialized protocols are v1-only. Unknown versions, fields, or noncanonical
+JSON emit `WorkGraphError`; they are never interpreted through a compatibility
+schema.
 
-```json
-{
-  "agentProfile": "issue-validator",
-  "workerId": "validator-1"
-}
-```
-````
+## Agent capacity configuration
 
-v1 remains readable for existing completed tasks. Every Assignment node exposes
-an integer `version` and a `workerId` that is null for v1, so a queue query
-selects v2 with `assignment.version = 2` rather than by absence. A v2 Assignment
-additionally emits `ASSIGNED_TO`. The Source validates that `agentProfile` is
-supported, but deliberately does **not** require the named worker to exist or to
-be profile-compatible — that is a query-level assertion, and requiring it here
-would make an Assignment silently disappear whenever a worker file is being
-edited.
-
-`WorkGraphTaskLease/v1` reserves one slot for one execution attempt:
-
-````text
-WorkGraphTaskLease/v1
-
-```json
-{
-  "leaseId": "0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21",
-  "assignmentCommentNodeId": "IC_assignment",
-  "workerId": "validator-1",
-  "slotId": "validator-1/1",
-  "acquiredAt": "2026-08-19T22:00:00Z",
-  "expiresAt": "2026-08-19T22:15:00Z"
-}
-```
-````
-
-Every identifier must be a non-empty, bounded token with no whitespace or
-control characters. Both instants must be the exact canonical UTC form
-`YYYY-MM-DDTHH:MM:SSZ` — a space separator, a lowercase `t`/`z`, a `+00:00`
-offset, and a fractional part are all rejected so two spellings of one instant
-can never compare unequal in a query. `acquiredAt` must be strictly earlier than
-`expiresAt`. Like every specialized comment, a Lease is only recognized on a
-configured typed task.
-
-`WorkGraphTaskResult/v2` adds `leaseId` immediately after `taskType` and is
-otherwise identical to v1, including the task-specific `result` schemas. Result
-nodes expose `version` and a `leaseId` that is null for v1.
-
-`WorkGraphTaskLeaseExpiration/v1` contains exactly `leaseCommentNodeId`,
-`leaseId`, `expiredAt`, and a non-empty bounded `reason`.
-
-Assignment, Lease, Result, Lease Expiration, and Result Acceptance comments are
-mutually exclusive and are never also emitted as `GitHubIssueComment`. Malformed
-marked comments emit `WorkGraphError` and never a partial success-shaped
-artifact. None of these comments closes or deletes a task; this Source is
-read-only.
-
-## Worker queue configuration
-
-The configured worker set lives in a versioned repository file:
+The configured agent set lives in one strict repository file, normally
+`.github/workgraph/agents.yaml`:
 
 ```yaml
 version: 1
-workers:
-  - workerId: validator-1
-    agentProfile: issue-validator
+agents:
+  - agentId: issue-validator
     slots: 2
     leaseDuration: PT15M
-  - workerId: info-requester-1
-    agentProfile: issue-info-requester
-    slots: 1
-    leaseDuration: PT15M
 ```
 
-`version` must be exactly `1` and `workers` must be non-empty. Each worker needs
-a stable `workerId` of 1–64 ASCII letters, digits, `-`, `.`, or `_` (no `/`, so
-the derived slot IDs stay unambiguous), a supported `agentProfile`, an integer
-`slots` between 1 and 16, and a positive `leaseDuration`. Durations are strict
-ISO-8601 built only from whole days, hours, minutes, and seconds
-(`P[nD][T[nH][nM][nS]]`); calendar-relative `Y`/`M`/`W` designators and
-fractional components are rejected because a lease deadline must be an exact,
-offset-independent number of seconds. A duration must be between 1 second and 24
-hours. Duplicate worker IDs, duplicate derived slot IDs, unknown fields, wrong
-types, more than 64 workers, and files larger than 256 KiB are all rejected.
+`version` must be `1` and `agents` must contain 1-64 entries. Each agent has a
+unique `agentId` using the Assignment grammar, 1-16 slots, and a whole-unit
+ISO-8601 duration from one through 86,400 seconds. The file must be LF UTF-8 and
+at most 256 KiB. Legacy fields and unknown fields are rejected. The Source
+reads the file at startup and on matching `push` deliveries. A deterministic
+invalid file projects `workgraph-error:agent-config` without changing the last
+accepted pool; an unreadable file fails startup or returns `503`.
 
-Each worker becomes a `WorkGraphWorker` carrying `workerId`, `agentProfile`,
-`configuredSlotCount`, `leaseDuration`, `leaseDurationSeconds` (so an expiry
-Reaction computes `expiresAt` without re-parsing ISO-8601), and the
-configuration provenance `configRepository`, `configRef`, `configPath`,
-`configBlobOid`, and `configDigest`. Each unit of concurrency becomes a
-`WorkGraphWorkerSlot` with the deterministic one-based `slotId`
-`{workerId}/{slotNumber}`, plus `slotNumber`, `workerId`, `agentProfile`,
-`enabled`, and `retiring`:
+Every configured slot has the stable ID `{agentId}/{slotNumber}`. Capacity
+reductions retain occupied excess slots as disabled and retiring until their
+Lease ends. Unoccupied excess slots are deleted immediately. Removing an agent
+uses the same rule, and growing capacity reuses the same slot identities.
 
-```text
-(WorkGraphWorker { workerId: "validator-1" })
-  -[:HAS_SLOT]->
-(WorkGraphWorkerSlot { slotId: "validator-1/1" })
-```
+## Source-owned allocation
 
-### Loading and convergence
+A trusted Assignment/v1 is the durable queue entry for its named configured
+agent. Queue admission is independent of available capacity and task type:
+any configured agent may receive any `taskType`.
+Assignments are ordered by GitHub `createdAt`, then task node ID. Free slots are
+ordered by numeric slot number, then slot ID. The Source enforces one active
+Lease per task and per slot and fills all available capacity deterministically.
 
-The bootstrapper fetches, validates, and projects the worker file **before** any
-Issue or task artifact, so a query that bootstraps capacity always sees workers
-and slots ahead of the Assignments and Leases that reference them. The live
-Source converges the same file:
+`WorkGraphTaskLease` is synthetic Source graph state, not a GitHub comment.
+Existence means active. It carries exactly:
 
-- once at `start()`, so a restarted Source re-states configured capacity even if
-  `push` deliveries were missed while it was down;
-- on every `push` whose repository, ref, and path match the configuration
-  exactly. GitHub truncates the `commits` array of a large push, so a push that
-  cannot be *proven* irrelevant is converged rather than ignored — re-reading
-  the file is idempotent, while missing a change would leave stale capacity.
+- `leaseId`, `taskNodeId`, and `assignmentCommentNodeId`
+- `agentId`, `slotId`, and `taskType`
+- `acquiredAt` and `expiresAt`
 
-Both paths call exactly the same validator and the same projection function, so
-a file that bootstrap accepts one way can never be projected differently live.
+It has `LEASE_FOR` to the task and `LEASES_SLOT` to the slot. A trusted exact
+Result/v1 releases it and any replacement allocation is emitted in the same
+transition. A stale or mismatched Result remains visible with `trusted = false`
+and cannot release capacity. Exact Feedback requeues the same Assignment;
+Acceptance suppresses that requeue. Closing/deleting the task or deleting/editing
+away the Assignment cancels queued and active work. The existing 500 ms Source
+dispatch tick expires due Leases and refills capacity.
 
-A worker file that cannot be **read** (transport, authentication, or a 5xx) is
-never treated as "no workers": `start()` fails, a `push` delivery answers `503`
-so GitHub redelivers, and a bootstrap fails. A file that *is* read but is
-deterministically **invalid** — no blob at the configured path, a non-text or
-oversized blob, or a body failing the grammar above — projects a single
-`WorkGraphError` node with the stable ID `workgraph-error:worker-config` and
-leaves the previously projected workers untouched. Silently emptying the pool
-would make a broken configuration look like "no capacity configured".
+Agent nodes expose `queueDepth`, `activeLeaseCount`, and `availableSlotCount`
+from the same allocator state that owns the queue and Leases.
 
-### Capacity changes and their bounded limitation
-
-Removing a worker from the file deletes its `WorkGraphWorker`, its slots, and
-its `HAS_SLOT` relations. Reducing an existing worker's `slots` does **not**
-delete the excess slots: they are re-projected with `enabled = false` and
-`retiring = true`. An in-flight Lease therefore keeps a valid `LEASES_SLOT`
-target until it reaches a Result or an Expiration, while the retired slot is
-never offered for a new Lease. A capacity query must select free capacity with
-`slot.enabled = true`. Growing capacity back re-enables the same stable slot
-identities; a Lease is never silently moved to a different slot.
-
-Knowing which slots to retire requires knowing what was projected before, so the
-live Source keeps a small retirement ledger (`workerId` → highest slot number
-ever projected) in its own durable state store, next to the delivery dedupe
-markers. **Bounded limitation:** that ledger is Source-local. A clean bootstrap
-builds a fresh snapshot from the configured file alone, so slots retired before
-that bootstrap are not re-materialized, and a Lease still naming one of them
-produces no capacity row rather than a guessed binding. Recovering the ledger
-after a clean bootstrap needs no action beyond the next convergence.
-
-### Lease trust
-
-The workflow defines an active Lease in terms of *trusted* artifacts: a Lease is
-active until a **trusted** Result or a **trusted** Expiration ends it. A Source
-that publishes a derived `isActive` therefore has to know which identities are
-trusted, exactly as it already has to know the configured organization,
-repository allowlist, and task Issue Type. `leaseTrust` states that explicitly:
+### Protocol trust
 
 ```yaml
-leaseTrust:
-  dispatchers:            # may acquire a Lease
-    - id: U_kgDOAbcDisp
-      login: drasi-workqueue-dispatcher
-  reporters:              # may end a Lease with a Result/v2 or an Expiration/v1
-    - id: U_kgDOAbcRept
-      login: drasi-result-reporter
+protocolTrust:
+  assigners:
+    - id: U_kgDOAbcAssign
+      login: drasi-workgraph-assigner
+  reporters:
+    - id: U_kgDOAbcReport
+      login: drasi-workgraph-reporter
 ```
 
-Both lists must be non-empty and free of duplicate IDs, and each identity must
-carry a non-empty node ID *and* login. Both are matched, mirroring how
-`taskIssueType` requires the configured ID *and* name: a renamed or recreated
-account stops matching rather than silently inheriting trust.
+Both lists are non-empty and match the exact GitHub node ID and login.
+Assigners alone can queue Assignment/v1. Reporters alone can produce trusted
+Result/v1, Feedback/v1, and Acceptance/v1. The preserved author and, on edits,
+the editor must both hold the required role. Without `protocolTrust`, protocol
+artifacts are visible but untrusted and cannot change allocation state.
 
-`leaseTrust` is optional and **fails closed**. With no configured trust nothing
-is trusted, so no Lease binds an anchor, no Result or Expiration ends anything,
-and no lease is ever counted active. A deployment running the worker queue must
-configure it. The bootstrapper inherits it from the Source, so a snapshot and a
-live delivery can never disagree about who is trusted.
+### Durability and restart
 
-Setting `leaseTrust` **requires `workerConfig`**: the same token and endpoint
-that read the worker file also reconcile a task's current lifecycle comments
-(below), so trust without that credential would leave the Source unable to
-interpret its own deliveries. The token needs `Issues: Read` on the task
-repositories in addition to `Contents: Read` on the worker file repository.
+The allocator persists one Source-local `AllocationState` containing the agent
+snapshot, queue, active Leases, outcomes, deadlines, retirement state, and a
+narrow pending synthetic-projection list. For each allocator transition it
+persists state with pending changes, appends those stable idempotent changes to
+the Source WAL in dependency-safe order, then clears pending. Restart replays a
+pending crash prefix and re-states every active Lease with the same IDs. Corrupt
+or unsupported allocator state fails closed.
 
-Every Lease, Result, and Lease Expiration node exposes a boolean `trusted`. An
-untrusted artifact is still projected with its full provenance — so a forged
-comment is visible rather than invisible — but it emits **no** `LEASE_ANCHOR`,
-`RESULT_FOR_LEASE`, or `EXPIRES_LEASE` edge and contributes nothing to the fold.
+The bootstrapper does not fold comments into allocation state and never creates
+synthetic Leases. Clean activation requires external preflight to find no open
+Assignment/v1 artifacts; normal restart preserves Source and query state.
 
-**Trust covers the editor, not just the author, and is role-matched.** GitHub
-preserves `comment.user` across an edit, so trusting the author alone would let
-anyone with edit rights rewrite a trusted author's ordinary comment into a
-Lease, a Result, or an Expiration. A lifecycle artifact is therefore trusted
-only when the preserved author *and* the identity that last edited the comment
-both hold **the role that artifact requires** — a `dispatcher` for a Lease, a
-`reporter` for a Result or an Expiration.
+### Exact active-Lease validation
 
-Holding some lifecycle role is not enough. A configured reporter cannot edit a
-comment into a trusted Lease, and a configured dispatcher cannot edit one into a
-trusted Result or Expiration: a reporter is not authorized to acquire capacity,
-and a dispatcher is not authorized to report an end.
+`POST {webhook.path}/lease/validate` accepts:
 
-The webhook reads the editor from the delivery `sender` on an `edited` action;
-the bootstrapper reads GitHub's `editor` field on the fetched comment, and an
-absent editor means the comment was never edited. Both are projected as
-`editorLogin` and `editorId` on every comment node.
-
-### Lease lifecycle and active-lease counting
-
-A `WorkGraphTaskLease` node is keyed by its own comment node ID. **Every
-acquisition fact lives there and nowhere else**: `leaseId`,
-`assignmentCommentNodeId`, `workerId`, `slotId`, `taskNodeId`, `acquiredAt`,
-`expiresAt`, the author and editor provenance, and `trusted`. That node has
-exactly one writer for its whole lifetime.
-
-A `WorkGraphTaskResult/v2` carries only `leaseId`, so it cannot address the
-Lease node. A trusted Lease therefore also reaches a **lease anchor**,
-`WorkGraphTaskLeaseAnchor`, keyed by `{taskNodeId}:{leaseId}`, and trusted
-lifecycle artifacts bind to it. Because `leaseId` is free text in a comment body
-while the task node ID is the GitHub-assigned Issue the comment was written on,
-scoping the key by the task makes "the named task agrees" *structural*: a
-comment on one task can never reach another task's anchor. GitHub node IDs
-contain no colon, so the first separator always terminates the task ID.
-
-#### The lifecycle is a fold, never a per-comment write
-
-**No comment ever writes anchor state.** Each delivery states only that
-comment's *current* contribution — it acquires a lease, it ends a lease, or it
-contributes nothing — and the Source folds those contributions into a ledger
-keyed by `(task, leaseId)`, then recomputes each affected anchor from every
-artifact that currently survives. `isActive`, `endReason`, `endedAt`,
-`endCommentNodeId`, `acquisitionCount`, and `endClaimCount` are all derived from
-that fold.
-
-That is what makes current-state semantics hold in every direction:
-
-- **Re-observing an acquisition is a no-op.** A pin, an unpin, a body-preserving
-  edit, or a redelivery restates the same set member, so it can never resurrect
-  a lease that has been ended.
-- **Removing an end releases its hold.** Deleting a Result, or editing it onto a
-  different `leaseId`, recomputes from the ends that survive: with no end left
-  the lease is active again, and with another end left that one takes over.
-- **Duplicate and mixed ends apply once.** The end is chosen deterministically —
-  earliest authoritative instant, then the stable comment node ID — so a Result
-  and an Expiration for one lease, in either delivery order, produce the same
-  result, and a second end of the same kind changes nothing.
-- **Moving a comment updates both anchors.** A rekeyed Lease or end recomputes
-  the anchor it left as well as the one it joined.
-
-A Result's authoritative end instant is its own GitHub comment timestamp; an
-Expiration's is its `expiredAt`. Both are canonical fixed-width UTC, so ordering
-them lexicographically is ordering them chronologically.
-
-An **Expiration only counts when its `leaseCommentNodeId` names the Lease
-comment that currently survives on that anchor.** A stale or mismatched
-reference stays projected as its own artifact, and is still counted in
-`endClaimCount`, but cannot end anything.
-
-**Duplicate acquisitions fail closed.** If two trusted Lease comments claim one
-`(task, leaseId)`, the anchor is inactive with `endReason: "conflict"`, so the
-ambiguous identity can neither be dispatched against nor silently rewritten —
-each Lease keeps its own facts on its own node. Deleting or editing back down to
-one acquisition restores the state the survivor implies, including any end that
-still applies.
-
-An anchor with **no** surviving trusted acquisition is not materialized at all;
-an existing one is deleted. An end naming a lease that was never acquired — a
-cross-task or unknown `leaseId` — therefore leaves nothing for a query to bind
-to or count.
-
-#### Reconciling a task the ledger has never seen
-
-The bootstrapper's fold is transient — it is not handed to the Source, and the
-Source's durable ledger starts empty. A ledger that has never seen a task
-therefore cannot distinguish "this lease was never acquired" from "this lease
-was acquired before I existed", which is exactly the state after a clean
-bootstrap.
-
-Reconciliation is triggered by the body the comment is moving *away* from as
-well as the one it is moving to. Editing a bootstrapped Lease, Result, or
-Expiration into ordinary, `v1`, or invalid content emits only a retraction, and
-a ledger that had never seen the task would apply that to nothing and leave the
-historical anchor stale. Any edit or delete of a comment on a configured task is
-treated as lifecycle-relevant for the same reason — reconciliation happens at
-most once per task, so erring wide costs one read while erring narrow loses
-state. Separately, every anchor a delivery *names* — via its current or previous
-body — is re-projected from the ledger afterwards, which is how deleting a
-bootstrapped Lease removes an anchor the ledger itself never recorded.
-
-Reconciliation only happens when the lease lifecycle is actually configured.
-With no `leaseTrust` — and therefore no credential — nothing can ever be
-trusted, so a lifecycle-shaped comment is simply projected as an ordinary
-untrusted artifact with `trusted = false`, and no anchor is produced. It is
-never an error: reaching for an API client that was never configured would turn
-an ordinary untrusted comment into a failed delivery.
-
-So before applying a lifecycle delivery for a task it has not seen, a
-lifecycle-configured Source re-reads **that task's current comments** over the same GitHub GraphQL endpoint
-and credential the worker file uses — no side service and no second transport —
-and rebuilds that task's ledger entries by running each comment through the same
-`Converter`, with the same task typing, trust, and grammar rules. Only then is
-the delivery applied. The task is recorded as reconciled, so this costs one
-extra read per task per Source lifetime, and the durable ledger carries that
-across restarts.
-
-That read is performed **outside the shared ingress gate**, like the worker-file
-read on a `push`: a remote call can take tens of seconds, and holding the gate
-across it would stall every other delivery for this Source. The pre-gate checks
-that decide whether to fetch are deliberately dirty. Under the gate the Source
-re-checks the delivery marker and `knows_task` authoritatively, and discards the
-prefetched snapshot if a concurrent delivery reconciled the task first.
-Concurrent duplicate reconciliation is idempotent either way — `reset_task` plus
-the same comment set converges on the same ledger — so discarding is an
-optimization, not a correctness requirement.
-
-This is what makes a live `WorkGraphTaskResult/v2` against a historical Lease
-*end* it rather than delete an anchor the Source thinks was never acquired, and
-what lets a historical duplicate acquisition be discovered as a conflict.
-Because reconciliation reads GitHub's *current* comments, a delete or an edit
-converges on what GitHub actually holds after the event.
-
-#### Durability ordering
-
-The live Source keeps the ledger in its durable state store, updated under the
-same delivery gate that guards the WAL append and the delivery marker, in this
-order: **append every graph change, then persist the ledger, then record the
-delivery marker.** Persisting the ledger first would let a failed append leave
-the ledger advanced, so a redelivery would compute a smaller affected set and
-permanently drop the anchor changes the first attempt never wrote — most
-visibly for a delete or a rekey, which touch two anchors. Every contribution is
-keyed by its comment node ID and states current state rather than a delta, so a
-replayed delivery converges on the same ledger and the same anchors.
-
-The bootstrapper folds the identical structure over its fetched comment
-snapshot, so the same set of current comments yields the same anchors either
-way, differing only in `effectiveFrom`.
-
-#### Counting
-
-Active-lease counting is one positive match, with no `OPTIONAL MATCH` and no
-subtraction:
-
-```cypher
-MATCH (lease:WorkGraphTaskLease)-[:LEASE_ANCHOR]->(anchor:WorkGraphTaskLeaseAnchor)
-WHERE anchor.isActive = true
-RETURN lease.workerId AS workerId, count(lease) AS activeLeaseCount
+```json
+{
+  "taskNodeId": "I_task",
+  "leaseId": "LEASE_ID",
+  "assignmentCommentNodeId": "IC_assignment",
+  "agentId": "issue-validator",
+  "slotId": "issue-validator/1"
+}
 ```
 
-It is exact because it counts surviving rows rather than subtracting ends: a
-Result or an Expiration both clear `isActive`; both together clear it once;
-duplicates change nothing; only a trusted Lease has a `LEASE_ANCHOR` edge; and
-each lease contributes exactly one row through exactly one edge, so no
-`DISTINCT` is needed.
-
-Because `isActive` is a real recomputed boolean, the design's deadline query
-works as written — the scheduled expiry is **cancelled** by a trusted completion
-rather than firing unconditionally:
-
-```cypher
-MATCH (lease:WorkGraphTaskLease)-[:LEASE_ANCHOR]->(anchor:WorkGraphTaskLeaseAnchor)
-WHERE drasi.trueLater(anchor.isActive, datetime(lease.expiresAt))
-RETURN lease.sourceCommentNodeId AS leaseCommentNodeId, anchor.leaseId AS leaseId,
-       anchor.taskNodeId AS taskNodeId
-```
-
-Those three values are exactly the binding a `WorkGraphTaskLeaseExpiration/v1`
-comment needs. The one adaptation from the design draft is that `isActive` and
-the end reason live on the anchor rather than directly on the Lease node,
-because a Result/v2 can address the anchor and cannot address the Lease comment.
-
-History is fully retained: the Lease, Result, and Expiration comments each
-remain their own node with their own provenance, and nothing is overwritten.
+Authenticate with `Authorization: Bearer <webhook.leaseValidationToken>`.
+The token is separate from the webhook HMAC secret. The endpoint returns the
+exact active Lease snapshot on `200`, `409` for stale, mismatched, or locally
+expired input, `401` for failed authentication, and `503` when allocator state
+cannot be read. It is point-in-time and read-only.
 
 ## Live projection behavior
 
@@ -635,15 +393,15 @@ Configured typed tasks are different:
   ordinary comment create/edit/delete transitions are deterministic and use
   only current and `changes.body.from` payload content.
 
-- Worker queue comments follow the same create/edit/delete rules as every other
-  specialized comment. Editing an Assignment from v1 to v2 adds `ASSIGNED_TO`
-  in place; editing a Lease onto a different `leaseId` removes the identity node
-  it previously owned; editing a Lease into an ordinary comment removes every
-  lease element.
+- Assignment comments follow the same create/edit/delete rules as every other
+  specialized comment. Editing or deleting an Assignment retracts its prior
+  intent and cancels queued or active work. Recreating or revising it advances a
+  persisted attempt so it cannot reuse a prior Lease ID. Leases are synthetic
+  Source state; there is no Lease comment protocol.
 
 Ingress verifies `X-Hub-Signature-256`, converts the payload, appends each
 change to the WAL, persists the delivery dedupe marker, and then acknowledges.
-A `push` delivery follows the same order: it converges the worker graph, appends
+A `push` delivery follows the same order: it converges the agent graph, appends
 the resulting changes, and only then records the dedupe marker, so a redelivered
 push is absorbed. Stable IDs make redelivery idempotent at the graph identity
 level, but consumers must still tolerate at-least-once change delivery.

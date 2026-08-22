@@ -21,12 +21,18 @@
 mod mock_source;
 
 use anyhow::Result;
+use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::channels::{ComponentStatus, QueryResult};
 use drasi_lib::context::ReactionRuntimeContext;
+use drasi_lib::reactions::checkpoint::ReactionCheckpoint;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::recovery::ReactionRecoveryPolicy;
-use drasi_lib::{DispatchMode, DrasiLib, MemoryStateStoreProvider, Query, Reaction};
+use drasi_lib::state_store::StateStoreProvider;
+use drasi_lib::{
+    DispatchMode, DrasiLib, MemoryStateStoreProvider, Query, Reaction, StorageBackendRef,
+};
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
+use serial_test::serial;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -305,6 +311,22 @@ async fn stop_reaction_and_wait(core: &DrasiLib, id: &str) -> Result<()> {
     anyhow::bail!("Reaction {id} did not reach Stopped state within timeout");
 }
 
+async fn wait_for_output_sequence(core: &DrasiLib, query_id: &str, sequence: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(metrics) = core.get_query_output_metrics(query_id).await {
+            if metrics.outbox_latest_seq >= sequence {
+                return;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Query {query_id} did not reach output sequence {sequence}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -382,6 +404,116 @@ async fn test_reaction_outbox_catchup_on_restart() -> Result<()> {
     }
 
     core.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn test_checkpointed_reaction_receives_first_post_restart_sequence_once() -> Result<()> {
+    let data_dir = tempfile::TempDir::new()?;
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+        .from_source("test-source")
+        .with_outbox_capacity(100)
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
+        .enable_bootstrap(false)
+        .auto_start(true)
+        .build();
+    let config_hash = drasi_lib::queries::compute_config_hash(&query);
+
+    let (source1, handle1) = MockSource::new("test-source")?;
+    let core1 = Arc::new(
+        DrasiLib::builder()
+            .with_id("reaction-output-restart-1")
+            .with_index_provider(
+                "persistent",
+                Arc::new(RocksDbIndexProvider::new(data_dir.path(), false, false)),
+            )
+            .with_source(source1)
+            .with_query(query.clone())
+            .build()
+            .await?,
+    );
+    core1.start().await?;
+    insert_person(&handle1, "p1", "Alice", 30).await?;
+    insert_person(&handle1, "p2", "Bob", 25).await?;
+    insert_person(&handle1, "p3", "Charlie", 35).await?;
+    wait_for_output_sequence(&core1, "q1", 3).await;
+    core1.shutdown().await?;
+
+    let checkpoint = ReactionCheckpoint {
+        sequence: 3,
+        config_hash,
+    };
+    state_store
+        .set("rec", "checkpoint:q1", bincode::serialize(&checkpoint)?)
+        .await?;
+
+    let (source2, handle2) = MockSource::new("test-source")?;
+    let (reaction, mut receiver) = recording_reaction(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        true,
+        false,
+    );
+    let core2 = Arc::new(
+        DrasiLib::builder()
+            .with_id("reaction-output-restart-2")
+            .with_index_provider(
+                "persistent",
+                Arc::new(RocksDbIndexProvider::new(data_dir.path(), false, false)),
+            )
+            .with_source(source2)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+    core2.start_source("test-source").await?;
+    let source_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while core2.get_source_status("test-source").await? != ComponentStatus::Running {
+        assert!(tokio::time::Instant::now() < source_deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Advance the restarted source's framework sequence before the query
+    // subscribes, mirroring a replay-capable source resuming after sequence 3.
+    insert_person(&handle2, "replayed-1", "Replay One", 1).await?;
+    insert_person(&handle2, "replayed-2", "Replay Two", 2).await?;
+    insert_person(&handle2, "replayed-3", "Replay Three", 3).await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    core2.start_query("q1").await?;
+    let query_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while core2.get_query_status("q1").await? != ComponentStatus::Running {
+        assert!(tokio::time::Instant::now() < query_deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    core2.start_reaction("rec").await?;
+    insert_person(&handle2, "p4", "Diana", 28).await?;
+
+    let delivered = receiver.wait_for_count(1, Duration::from_secs(5)).await;
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].sequence, 4);
+    wait_for_output_sequence(&core2, "q1", 4).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let extras = receiver.drain_available();
+    assert!(
+        extras.is_empty(),
+        "checkpointed reaction must receive sequence 4 exactly once; extras: {:?}",
+        extras
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>()
+    );
+
+    stop_reaction_and_wait(&core2, "rec").await?;
+    core2.stop_query("q1").await?;
+    core2.stop_source("test-source").await?;
+    core2.shutdown().await?;
     Ok(())
 }
 

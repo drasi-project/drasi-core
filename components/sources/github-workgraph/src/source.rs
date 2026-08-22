@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::agent_sync::AgentSync;
 use crate::config::{GitHubWorkGraphSourceConfig, RepositoryFilter};
+use crate::lease_ledger::Allocator;
 use crate::mapping::{NODE_LABELS, RELATION_LABELS};
 use crate::webhook::{serve, IngressParams};
-use crate::worker_client::WorkerFileClient;
-use crate::worker_sync::WorkerSync;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -31,14 +31,20 @@ use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::wal::WalProvider;
 use drasi_lib::Source;
 use log::{error, info, warn};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, RwLock};
-use tokio::time::{timeout, Duration};
+use tokio::time::{timeout, Duration, Instant};
 
 const SOURCE_TYPE: &str = "github-workgraph";
 const DRAIN_TICK: Duration = Duration::from_millis(500);
 const TASK_GRACE: Duration = Duration::from_secs(3);
+// DrasiLib releases this fence through the lifecycle hook. The fallback only
+// prevents unbounded retention in standalone hosts that omit that hook.
+const PRUNING_FENCE_FALLBACK: Duration = Duration::from_secs(60);
 
 async fn report(base: &SourceBase, status: ComponentStatus, message: &str) {
     base.set_status(status, Some(message.to_string())).await;
@@ -49,9 +55,12 @@ pub struct GitHubWorkGraphSource {
     config: GitHubWorkGraphSourceConfig,
     repository_filter: RepositoryFilter,
     wal: Arc<RwLock<Option<Arc<dyn WalProvider>>>>,
-    worker_sync: Arc<RwLock<Option<Arc<WorkerSync>>>>,
+    agent_sync: Arc<RwLock<Option<Arc<AgentSync>>>>,
     notify: Arc<Notify>,
     replay_gate: Arc<Mutex<()>>,
+    /// Prevents pruning restart history before every auto-start query registers
+    /// its durable position handle.
+    startup_subscriptions_complete: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -69,13 +78,22 @@ impl Source for GitHubWorkGraphSource {
             if webhook.get("secret").is_some_and(Value::is_string) {
                 webhook.insert("secret".to_string(), serde_json::json!("[REDACTED]"));
             }
+            if webhook
+                .get("leaseValidationToken")
+                .is_some_and(Value::is_string)
+            {
+                webhook.insert(
+                    "leaseValidationToken".to_string(),
+                    serde_json::json!("[REDACTED]"),
+                );
+            }
         }
-        if let Some(worker) = properties
-            .get_mut("workerConfig")
+        if let Some(agent) = properties
+            .get_mut("agentConfig")
             .and_then(Value::as_object_mut)
         {
-            if worker.get("token").is_some_and(Value::is_string) {
-                worker.insert("token".to_string(), serde_json::json!("[REDACTED]"));
+            if agent.get("token").is_some_and(Value::is_string) {
+                agent.insert("token".to_string(), serde_json::json!("[REDACTED]"));
             }
         }
         properties
@@ -133,33 +151,40 @@ impl Source for GitHubWorkGraphSource {
             .await
             .with_context(|| format!("Failed to register WAL for source '{}'", self.base.id))?;
         let head = wal.head_sequence(&self.base.id).await?;
+        // A nonzero head means durable queries may resume from pre-start
+        // checkpoints even when all older WAL entries were already pruned.
+        self.startup_subscriptions_complete
+            .store(head == 0, Ordering::Release);
         self.base.set_next_sequence(head);
         *self.wal.write().await = Some(wal.clone());
+        let allocator = Arc::new(Allocator::new(
+            self.base.id.clone(),
+            state_store,
+            wal.clone(),
+        ));
+        allocator
+            .recover(chrono::Utc::now().timestamp_millis().max(0) as u64)
+            .await?;
 
-        // The worker file is converged once at start-up, before any delivery is
+        // The agent file is converged once at start-up, before any delivery is
         // accepted, so a Source that missed `push` deliveries while stopped
         // still re-states the configured capacity, and so the retirement ledger
         // reflects what is actually in the graph.
-        let worker_sync = match &self.config.worker_config {
-            Some(worker_config) => {
+        let agent_sync = match &self.config.agent_config {
+            Some(agent_config) => {
                 let sync = Arc::new(
-                    WorkerSync::new(
-                        self.base.id.clone(),
-                        worker_config,
-                        state_store.clone(),
-                        wal.clone(),
-                    )
-                    .context("Failed to build the worker file client")?,
+                    AgentSync::new(self.base.id.clone(), agent_config, allocator.clone())
+                        .context("Failed to build the agent file client")?,
                 );
                 sync.converge().await.map_err(|error| {
                     anyhow!(
-                        "Failed to load the configured worker file '{}' at '{}' ref '{}': {error}",
-                        worker_config.path,
-                        worker_config.repository,
-                        worker_config.r#ref
+                        "Failed to load the configured agent file '{}' at '{}' ref '{}': {error}",
+                        agent_config.path,
+                        agent_config.repository,
+                        agent_config.r#ref
                     )
                 })?;
-                *self.worker_sync.write().await = Some(sync.clone());
+                *self.agent_sync.write().await = Some(sync.clone());
                 Some(sync)
             }
             None => None,
@@ -183,22 +208,12 @@ impl Source for GitHubWorkGraphSource {
             repository_filter: self.repository_filter.clone(),
             task_issue_type: self.config.task_issue_type.clone(),
             lease_trust: self.config.lease_trust.clone(),
-            // The same credential and endpoint that read the worker file also
-            // reconcile a task's current lifecycle comments; config validation
-            // requires `workerConfig` whenever `leaseTrust` is set.
-            worker_client: match &self.config.worker_config {
-                Some(worker_config) => Some(Arc::new(
-                    WorkerFileClient::new(&worker_config.token, &worker_config.api_base_url)
-                        .context("Failed to build the GitHub lifecycle client")?,
-                )),
-                None => None,
-            },
             path: self.config.webhook.path.clone(),
             secret: self.config.webhook.secret.clone(),
+            lease_validation_token: self.config.webhook.lease_validation_token.clone(),
             body_limit_bytes: self.config.webhook.body_limit_bytes,
-            wal: wal.clone(),
-            state_store: state_store.clone(),
-            worker_sync,
+            allocator: allocator.clone(),
+            agent_sync,
             notify: self.notify.clone(),
             shutdown: shutdown_rx.clone(),
         };
@@ -217,6 +232,9 @@ impl Source for GitHubWorkGraphSource {
             shutdown: shutdown_rx,
             last_dispatched: head,
             replay_gate: self.replay_gate.clone(),
+            allocator,
+            startup_subscriptions_complete: self.startup_subscriptions_complete.clone(),
+            pruning_fence_started: Instant::now(),
         }));
         let supervisor = tokio::spawn(async move {
             let _ = base_rx.await;
@@ -300,6 +318,12 @@ impl Source for GitHubWorkGraphSource {
     async fn remove_position_handle(&self, query_id: &str) {
         self.base.remove_position_handle(query_id).await;
     }
+    async fn on_subscriptions_complete(&self) -> anyhow::Result<()> {
+        self.startup_subscriptions_complete
+            .store(true, Ordering::Release);
+        self.notify.notify_one();
+        Ok(())
+    }
     async fn deprovision(&self) -> Result<()> {
         let context = self.base.context().await;
         let wal = self
@@ -330,6 +354,9 @@ struct DispatchLoop {
     shutdown: tokio::sync::watch::Receiver<bool>,
     last_dispatched: u64,
     replay_gate: Arc<Mutex<()>>,
+    allocator: Arc<Allocator>,
+    startup_subscriptions_complete: Arc<AtomicBool>,
+    pruning_fence_started: Instant,
 }
 
 async fn dispatch_loop(mut state: DispatchLoop) {
@@ -338,15 +365,33 @@ async fn dispatch_loop(mut state: DispatchLoop) {
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_pruned = 0u64;
     loop {
-        tokio::select! {
+        let tick = tokio::select! {
             biased;
             changed = state.shutdown.changed() => {
                 if changed.is_err() || *state.shutdown.borrow() {
                     break;
                 }
+                false
             }
-            _ = state.notify.notified() => {}
-            _ = ticker.tick() => {}
+            _ = state.notify.notified() => { false }
+            _ = ticker.tick() => { true }
+        };
+        if tick {
+            let now = chrono::Utc::now();
+            if let Err(error) = state
+                .allocator
+                .expire(now, now.timestamp_millis().max(0) as u64)
+                .await
+            {
+                error!("[{source_id}] allocator expiry failed: {error:#}");
+                report(
+                    &state.base,
+                    ComponentStatus::Error,
+                    "allocator state failure",
+                )
+                .await;
+                break;
+            }
         }
         let _gate = state.replay_gate.lock().await;
         let head = match state.wal.head_sequence(&source_id).await {
@@ -394,14 +439,29 @@ async fn dispatch_loop(mut state: DispatchLoop) {
                 }
             }
         }
-        if let Some(confirmed) = state.base.compute_confirmed_position().await {
-            let prune_to = confirmed.min(state.last_dispatched);
-            if prune_to > last_pruned {
-                if let Err(e) = state.wal.prune_up_to(&source_id, prune_to).await {
-                    warn!("[{source_id}] failed pruning WAL at {prune_to}: {e}");
-                } else {
-                    state.base.prune_position_map(prune_to).await;
-                    last_pruned = prune_to;
+        let subscriptions_complete = state.startup_subscriptions_complete.load(Ordering::Acquire);
+        let fallback_elapsed = !subscriptions_complete
+            && state.pruning_fence_started.elapsed() >= PRUNING_FENCE_FALLBACK;
+        if fallback_elapsed {
+            warn!(
+                "[{source_id}] startup subscription lifecycle signal was not received; \
+                 releasing WAL pruning fence after {}s fallback",
+                PRUNING_FENCE_FALLBACK.as_secs()
+            );
+            state
+                .startup_subscriptions_complete
+                .store(true, Ordering::Release);
+        }
+        if subscriptions_complete || fallback_elapsed {
+            if let Some(confirmed) = state.base.compute_confirmed_position().await {
+                let prune_to = confirmed.min(state.last_dispatched);
+                if prune_to > last_pruned {
+                    if let Err(e) = state.wal.prune_up_to(&source_id, prune_to).await {
+                        warn!("[{source_id}] failed pruning WAL at {prune_to}: {e}");
+                    } else {
+                        state.base.prune_position_map(prune_to).await;
+                        last_pruned = prune_to;
+                    }
                 }
             }
         }
@@ -460,9 +520,10 @@ impl GitHubWorkGraphSourceBuilder {
             config,
             repository_filter,
             wal: Arc::new(RwLock::new(None)),
-            worker_sync: Arc::new(RwLock::new(None)),
+            agent_sync: Arc::new(RwLock::new(None)),
             notify: Arc::new(Notify::new()),
             replay_gate: Arc::new(Mutex::new(())),
+            startup_subscriptions_complete: Arc::new(AtomicBool::new(true)),
         })
     }
 }

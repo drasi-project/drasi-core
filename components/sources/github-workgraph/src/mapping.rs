@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::agents::{AgentFile, AgentFileContent, AgentFileLocation, MAX_AGENT_SLOTS};
 use crate::config::{LeaseTrust, RepositoryFilter, TaskIssueType};
 use crate::lease_ledger::{
-    Acquisition, AnchorKey, AnchorState, EndClaim, EndKind, LeaseLedger, LifecycleIntent,
+    ActiveLease, AgentRuntime, AllocationArtifact, AllocationDelta, AllocationEvent,
 };
-use crate::workers::{WorkerFile, WorkerFileContent, WorkerFileLocation, MAX_WORKER_SLOTS};
 use crate::workgraph::{
-    classify_comment, classify_task_body, comment_error_element_id, lease_anchor_element_id,
-    slot_id, status_error_element_id, task_error_element_id, worker_config_error_element_id,
-    worker_element_id, worker_slot_element_id, CommentClassification, TaskClassification,
-    TaskLease, WorkGraphError,
+    agent_config_error_element_id, agent_element_id, agent_slot_element_id, classify_comment,
+    classify_task_body, comment_error_element_id, lease_element_id, slot_id,
+    status_error_element_id, task_error_element_id, CommentClassification, TaskClassification,
+    TaskType, WorkGraphError,
 };
 use chrono::{DateTime, SecondsFormat};
 use drasi_core::models::{
@@ -29,7 +29,7 @@ use drasi_core::models::{
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use Op::{Insert, Update};
 
@@ -52,12 +52,11 @@ labels!(
     NODE_WORKGRAPH_TASK = "WorkGraphTask",
     NODE_WORKGRAPH_TASK_ASSIGNMENT = "WorkGraphTaskAssignment",
     NODE_WORKGRAPH_TASK_RESULT = "WorkGraphTaskResult",
+    NODE_WORKGRAPH_TASK_FEEDBACK = "WorkGraphTaskFeedback",
     NODE_WORKGRAPH_TASK_RESULT_ACCEPTANCE = "WorkGraphTaskResultAcceptance",
     NODE_WORKGRAPH_TASK_LEASE = "WorkGraphTaskLease",
-    NODE_WORKGRAPH_TASK_LEASE_ANCHOR = "WorkGraphTaskLeaseAnchor",
-    NODE_WORKGRAPH_TASK_LEASE_EXPIRATION = "WorkGraphTaskLeaseExpiration",
-    NODE_WORKGRAPH_WORKER = "WorkGraphWorker",
-    NODE_WORKGRAPH_WORKER_SLOT = "WorkGraphWorkerSlot",
+    NODE_WORKGRAPH_AGENT = "WorkGraphAgent",
+    NODE_WORKGRAPH_AGENT_SLOT = "WorkGraphAgentSlot",
     NODE_WORKGRAPH_ERROR = "WorkGraphError",
 );
 
@@ -70,14 +69,12 @@ labels!(
     REL_ASSIGNMENT_FOR = "ASSIGNMENT_FOR",
     REL_ASSIGNED_TO = "ASSIGNED_TO",
     REL_RESULT_FOR = "RESULT_FOR",
-    REL_RESULT_FOR_LEASE = "RESULT_FOR_LEASE",
+    REL_FEEDBACK_FOR = "FEEDBACK_FOR",
     REL_ACCEPTS_RESULT = "ACCEPTS_RESULT",
     REL_TASK_FOR = "TASK_FOR",
     REL_HAS_SLOT = "HAS_SLOT",
     REL_LEASE_FOR = "LEASE_FOR",
     REL_LEASES_SLOT = "LEASES_SLOT",
-    REL_LEASE_ANCHOR = "LEASE_ANCHOR",
-    REL_EXPIRES_LEASE = "EXPIRES_LEASE",
     REL_ERROR_ON = "ERROR_ON",
 );
 
@@ -137,28 +134,9 @@ fn is_known_action(event_type: &str, action: &str) -> bool {
     in_table(table, action)
 }
 
-/// One delivery's graph changes plus the lease-lifecycle contributions it
-/// states. Anchor state is never written here; the caller folds the
-/// contributions into its [`LeaseLedger`] and projects the affected anchors.
 pub struct Conversion {
     pub changes: Vec<SourceChange>,
-    pub lifecycle: Vec<LifecycleIntent>,
-    /// Set when the delivery concerns a lease lifecycle artifact, whatever its
-    /// trust. The caller reconciles this task's current comments from GitHub
-    /// before applying the delivery if its ledger has never seen the task.
-    pub lifecycle_scope: Option<LifecycleScope>,
-    /// Anchor element IDs this delivery names, by its current body or the one
-    /// it is moving away from. The caller re-projects each from its ledger.
-    pub lifecycle_anchors: Vec<String>,
-}
-
-/// Everything needed to re-read one task's current comments from GitHub.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LifecycleScope {
-    pub task_node_id: String,
-    pub repository_owner: String,
-    pub repository_name: String,
-    pub issue_number: u64,
+    pub allocation: Option<AllocationEvent>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -205,11 +183,6 @@ impl<'a> Converter<'a> {
         }
     }
 
-    /// Configure which identities may author lease lifecycle artifacts.
-    ///
-    /// Without it nothing is trusted: Lease, Result/v2, and Lease Expiration
-    /// comments are still projected with their provenance, but none of them
-    /// binds or moves the lease lifecycle.
     pub fn with_lease_trust(mut self, lease_trust: &'a LeaseTrust) -> Self {
         self.lease_trust = Some(lease_trust);
         self
@@ -258,9 +231,7 @@ impl<'a> Converter<'a> {
         }
         Ok(Some(Conversion {
             changes: cs.changes,
-            lifecycle: cs.lifecycle,
-            lifecycle_scope: cs.lifecycle_scope,
-            lifecycle_anchors: cs.lifecycle_anchors,
+            allocation: cs.allocation,
         }))
     }
 
@@ -499,6 +470,11 @@ impl<'a> Converter<'a> {
         let task_database_id = required_database_id(issue, "/id")?;
         let repo = d.payload.get("repository");
         let repo_id = required_str(d.payload, "/repository/node_id")?;
+        if previous_task && (!current_task || in_table("closed deleted transferred", d.action)) {
+            cs.allocation = Some(AllocationEvent::TaskCancelled {
+                task_node_id: issue_id.clone(),
+            });
+        }
 
         if d.action == "transferred" {
             delete_task(cs, &issue_id, &task_database_id, &repo_id);
@@ -544,6 +520,9 @@ impl<'a> Converter<'a> {
                 upsert_task(cs, issue, repo, &issue_id, Some(&repo_id))?;
             }
             TaskClassification::Invalid(error) => {
+                cs.allocation = Some(AllocationEvent::TaskCancelled {
+                    task_node_id: issue_id.clone(),
+                });
                 delete_task_representation(cs, &issue_id, &repo_id);
                 let mut props = task_error_props(issue, repo, body);
                 props.text("errorKind", "invalid-workgraph-task");
@@ -753,6 +732,12 @@ impl<'a> Converter<'a> {
             NODE_ISSUE_COMMENT
         };
         let on_task = self.is_task_issue(issue);
+        let task_open = !on_task || item_is_open(issue, "issue")?;
+        let task_type =
+            match classify_task_body(issue.get("body").and_then(Value::as_str).unwrap_or("")) {
+                TaskClassification::Task(task) => Some(task.task_type),
+                TaskClassification::Invalid(_) => None,
+            };
         let repo = payload.get("repository");
         // On an edit GitHub reports the acting identity as the delivery
         // `sender`, which is the only place the editor appears in a webhook.
@@ -771,48 +756,23 @@ impl<'a> Converter<'a> {
                 repo,
                 self.lease_trust,
                 editor_identity,
+                task_type,
             )
         };
         let current = classify_body(comment.get("body").and_then(Value::as_str).unwrap_or(""));
-        // A delete removes the comment entirely, so it contributes nothing
-        // regardless of what its body said; every other action contributes
-        // whatever the body currently says, unless that is indeterminate.
-        let contribution = if action == "deleted" {
-            Some(LifecycleIntent::Retract {
+        if on_task && in_table("created edited deleted", action) {
+            let artifact = (action != "deleted")
+                .then(|| current.allocation.clone())
+                .flatten();
+            let artifact = match artifact {
+                Some(AllocationArtifact::Assignment { .. }) if !task_open => None,
+                artifact => artifact,
+            };
+            cs.allocation = Some(AllocationEvent::Comment {
                 comment_node_id: comment_id.clone(),
-            })
-        } else {
-            current.lifecycle.clone()
-        };
-        if let Some(contribution) = contribution {
-            cs.lifecycle.push(contribution);
-        }
-        // Reconciliation scope must cover the body the comment is moving *away*
-        // from as well as the one it is moving to. Editing a bootstrapped
-        // Lease, Result, or Expiration into ordinary, v1, or invalid content
-        // emits only a Retract, and a ledger that has never seen the task would
-        // apply that Retract to nothing and leave the historical anchor stale.
-        // Any edit or delete of a comment on a configured task is treated as
-        // lifecycle-relevant for the same reason: reconciliation happens at
-        // most once per task, so erring wide costs one read and erring narrow
-        // loses state.
-        let previous_anchor = payload
-            .pointer("/changes/body/from")
-            .and_then(Value::as_str)
-            .map(classify_body)
-            .and_then(|previous| previous.lifecycle_anchor);
-        // Every anchor this delivery names — by its current body or the body it
-        // is moving away from — is re-projected from the ledger afterwards.
-        // That is what lets a deleted or edited-away artifact correct an anchor
-        // the ledger never recorded, such as one projected by a bootstrap.
-        cs.lifecycle_anchors
-            .extend(current.lifecycle_anchor.iter().cloned());
-        cs.lifecycle_anchors.extend(previous_anchor.iter().cloned());
-        if current.lifecycle_anchor.is_some()
-            || previous_anchor.is_some()
-            || (on_task && in_table("edited deleted", action))
-        {
-            cs.lifecycle_scope = lifecycle_scope(payload, &parent);
+                task_node_id: parent.clone(),
+                artifact,
+            });
         }
         match action {
             "created" => current.insert(cs, &comment_id, &parent),
@@ -833,7 +793,7 @@ impl<'a> Converter<'a> {
                     }
                     Some(prev)
                         if prev.specialized_relations != current.specialized_relations
-                            || prev.lifecycle != current.lifecycle =>
+                            || prev.allocation != current.allocation =>
                     {
                         current.update(cs);
                         for (label, target) in &prev.specialized_relations {
@@ -845,10 +805,6 @@ impl<'a> Converter<'a> {
                                 cs.delete(&rel_id(label, &comment_id, target), label);
                             }
                         }
-                        // An edited Lease that now names a different `leaseId`
-                        // simply stops pointing at its previous anchor; the
-                        // ledger recomputes both the anchor it left and the one
-                        // it joined.
                         for (label, target) in &current.specialized_relations {
                             let id = rel_id(label, &comment_id, target);
                             cs.relation(Insert, label, &id, &comment_id, target);
@@ -910,22 +866,6 @@ fn shows_edit(comment: &Value) -> bool {
         (Some(created), Some(updated)) => created != updated,
         _ => false,
     }
-}
-
-/// The task coordinates a reconciliation needs, when the delivery carries them.
-fn lifecycle_scope(payload: &Value, task_node_id: &str) -> Option<LifecycleScope> {
-    Some(LifecycleScope {
-        task_node_id: task_node_id.to_string(),
-        repository_owner: payload
-            .pointer("/repository/owner/login")
-            .and_then(Value::as_str)?
-            .to_string(),
-        repository_name: payload
-            .pointer("/repository/name")
-            .and_then(Value::as_str)?
-            .to_string(),
-        issue_number: payload.pointer("/issue/number").and_then(Value::as_u64)?,
-    })
 }
 
 fn update_work_item(
@@ -1099,18 +1039,7 @@ struct CommentNode {
     /// Relations from this comment node to other elements, beyond the
     /// `COMMENT_ON`/`ERROR_ON` parent relation.
     specialized_relations: Vec<(&'static str, String)>,
-    /// What this comment currently contributes to the lease lifecycle, or
-    /// `None` when its contribution is indeterminate. The comment never writes
-    /// anchor state itself; the ledger recomputes each anchor from every
-    /// surviving contribution.
-    lifecycle: Option<LifecycleIntent>,
-    /// The anchor this body names, whatever its trust, when the body is a lease
-    /// lifecycle artifact. The Source reconciles a task's current comments
-    /// before applying such a delivery if it has never seen that task, and
-    /// always re-projects the named anchor from the ledger — which is how a
-    /// deleted or edited-away artifact removes an anchor the ledger itself
-    /// never recorded, such as one a bootstrap projected.
-    lifecycle_anchor: Option<String>,
+    allocation: Option<AllocationArtifact>,
     is_error: bool,
 }
 
@@ -1126,28 +1055,17 @@ impl CommentNode {
         repo: Option<&Value>,
         lease_trust: Option<&LeaseTrust>,
         editor_identity: Option<&Value>,
+        task_type: Option<TaskType>,
     ) -> Self {
         let author = comment.get("user");
-        // A lifecycle artifact is only trusted when the *preserved author* and
         // the identity that last edited the comment are both trusted. GitHub
         // keeps `user` as the original author across an edit, so trusting it
         // alone would let anyone with edit rights rewrite a trusted author's
-        // ordinary comment into a Lease, a Result, or an Expiration.
+        // ordinary comment into a protocol artifact.
         let editor = comment
             .get("editor")
             .filter(|editor| !editor.is_null())
             .or(editor_identity);
-        // The editor must hold the *same* role the artifact requires, not merely
-        // some lifecycle role. A configured reporter editing a comment into a
-        // Lease is exactly as much of a forgery as a stranger doing it: a
-        // reporter is not authorized to acquire capacity, and a dispatcher is
-        // not authorized to report a Result or an Expiration.
-        // A comment that shows it was edited but supplies no editor identity —
-        // a pin or an unpin, whose payload names the actor performing *that*
-        // action rather than the last editor — cannot be attributed. It is
-        // indeterminate rather than trusted or untrusted: the comment makes no
-        // statement at all, so it can neither acquire capacity nor overwrite
-        // what a reconciliation from GitHub already established.
         let unattributed_edit = editor.is_none() && shows_edit(comment);
         let role_trusted = |role: fn(&LeaseTrust, Option<&Value>) -> bool| {
             !unattributed_edit
@@ -1155,7 +1073,7 @@ impl CommentNode {
                     role(trust, author) && editor.is_none_or(|editor| role(trust, Some(editor)))
                 })
         };
-        let is_dispatcher = role_trusted(|trust, identity| trust.is_dispatcher(identity));
+        let is_assigner = role_trusted(|trust, identity| trust.is_assigner(identity));
         let is_reporter = role_trusted(|trust, identity| trust.is_reporter(identity));
 
         let mut props = ElementPropertyMap::new();
@@ -1172,10 +1090,7 @@ impl CommentNode {
         } else {
             CommentClassification::Ordinary
         };
-        let mut lifecycle = Some(LifecycleIntent::Retract {
-            comment_node_id: comment_id.to_string(),
-        });
-        let mut lifecycle_anchor = None;
+        let mut allocation = None;
         let (element_id, label, specialized_relations) = match classification {
             CommentClassification::Ordinary => {
                 props.table(comment, COMMENT_PROPS);
@@ -1187,88 +1102,93 @@ impl CommentNode {
             }
             CommentClassification::Assignment(assignment) => {
                 props.table(comment, PROVENANCE_PROPS);
-                props.text("bodyDigest", &sha256_digest(body));
-                props.insert(
-                    "version",
-                    ElementValue::Integer(i64::from(assignment.version)),
-                );
-                props.text("agentProfile", &assignment.agent_profile);
-                let mut relations = vec![(REL_ASSIGNMENT_FOR, task_id.to_string())];
-                match &assignment.worker_id {
-                    Some(worker_id) => {
-                        props.text("workerId", worker_id);
-                        // A v2 Assignment places the task in exactly this
-                        // worker's queue. The Source validates the profile but
-                        // deliberately does not require the worker to exist or
-                        // to be profile-compatible; queries assert that.
-                        relations.push((REL_ASSIGNED_TO, worker_element_id(worker_id)));
-                    }
-                    None => props.insert("workerId", ElementValue::Null),
+                let body_digest = sha256_digest(body);
+                props.text("bodyDigest", &body_digest);
+                props.insert("version", ElementValue::Integer(1));
+                props.text("agentId", &assignment.agent_id);
+                props.insert("trusted", ElementValue::Bool(is_assigner));
+                if let Some(task_type) = task_type {
+                    allocation = Some(AllocationArtifact::Assignment {
+                        trusted: is_assigner,
+                        task_type,
+                        agent_id: assignment.agent_id.clone(),
+                        created_at: comment
+                            .get("created_at")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    });
                 }
                 (
                     comment_id.to_string(),
                     NODE_WORKGRAPH_TASK_ASSIGNMENT,
-                    relations,
+                    vec![
+                        (REL_ASSIGNMENT_FOR, task_id.to_string()),
+                        (REL_ASSIGNED_TO, agent_element_id(&assignment.agent_id)),
+                    ],
                 )
             }
             CommentClassification::Result(result) => {
                 props.table(comment, PROVENANCE_PROPS);
-                props.text("bodyDigest", &sha256_digest(body));
-                props.insert("version", ElementValue::Integer(i64::from(result.version)));
+                let body_digest = sha256_digest(body);
+                props.text("bodyDigest", &body_digest);
+                props.insert("version", ElementValue::Integer(1));
                 props.text("taskType", result.task_type.as_str());
+                props.text("leaseId", &result.lease_id);
                 props.text("outcome", result.outcome.as_str());
                 props.text("summary", &result.summary);
                 props.insert(
                     "result",
                     ElementValue::from(&serde_json::json!(result.result)),
                 );
-                let mut relations = vec![(REL_RESULT_FOR, task_id.to_string())];
-                match &result.lease_id {
-                    Some(lease_id) => {
-                        props.text("leaseId", lease_id);
-                        props.insert("trusted", ElementValue::Bool(is_reporter));
-                        lifecycle_anchor = Some(AnchorKey::new(task_id, lease_id).element_id());
-                        if unattributed_edit {
-                            lifecycle = None;
-                        }
-                        // Only a configured reporter's Result binds and ends a
-                        // lease. Any other commenter's Result is still
-                        // projected with its provenance, but it reaches no
-                        // anchor and moves no lifecycle.
-                        if is_reporter {
-                            let key = AnchorKey::new(task_id, lease_id);
-                            relations.push((REL_RESULT_FOR_LEASE, key.element_id()));
-                            lifecycle = Some(LifecycleIntent::End {
-                                comment_node_id: comment_id.to_string(),
-                                anchor: key,
-                                end: EndClaim {
-                                    kind: EndKind::Result,
-                                    // A Result's authoritative end instant is
-                                    // the comment's own GitHub timestamp.
-                                    ended_at: comment
-                                        .get("created_at")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                    lease_comment_node_id: None,
-                                },
-                            });
-                        }
-                    }
-                    None => props.insert("leaseId", ElementValue::Null),
-                }
+                props.insert("trusted", ElementValue::Bool(false));
+                allocation = Some(AllocationArtifact::Result {
+                    reporter_trusted: is_reporter,
+                    task_type: result.task_type,
+                    lease_id: result.lease_id.clone(),
+                    outcome: result.outcome,
+                    body_digest,
+                });
                 (
                     comment_id.to_string(),
                     NODE_WORKGRAPH_TASK_RESULT,
-                    relations,
+                    vec![(REL_RESULT_FOR, task_id.to_string())],
+                )
+            }
+            CommentClassification::Feedback(feedback) => {
+                props.table(comment, PROVENANCE_PROPS);
+                let body_digest = sha256_digest(body);
+                props.text("bodyDigest", &body_digest);
+                props.text("resultCommentNodeId", &feedback.result_comment_node_id);
+                props.text("resultBodyDigest", &feedback.result_body_digest);
+                props.text("feedback", &feedback.feedback);
+                props.insert("trusted", ElementValue::Bool(false));
+                allocation = Some(AllocationArtifact::Feedback {
+                    reporter_trusted: is_reporter,
+                    result_comment_node_id: feedback.result_comment_node_id.clone(),
+                    result_body_digest: feedback.result_body_digest.clone(),
+                    body_digest,
+                });
+                (
+                    comment_id.to_string(),
+                    NODE_WORKGRAPH_TASK_FEEDBACK,
+                    vec![(REL_FEEDBACK_FOR, feedback.result_comment_node_id.clone())],
                 )
             }
             CommentClassification::Acceptance(acceptance) => {
                 props.table(comment, PROVENANCE_PROPS);
-                props.text("bodyDigest", &sha256_digest(body));
+                let body_digest = sha256_digest(body);
+                props.text("bodyDigest", &body_digest);
                 props.text("resultCommentNodeId", &acceptance.result_comment_node_id);
                 props.text("resultBodyDigest", &acceptance.result_body_digest);
                 props.text("summary", &acceptance.summary);
+                props.insert("trusted", ElementValue::Bool(false));
+                allocation = Some(AllocationArtifact::Acceptance {
+                    reporter_trusted: is_reporter,
+                    result_comment_node_id: acceptance.result_comment_node_id.clone(),
+                    result_body_digest: acceptance.result_body_digest.clone(),
+                    body_digest,
+                });
                 (
                     comment_id.to_string(),
                     NODE_WORKGRAPH_TASK_RESULT_ACCEPTANCE,
@@ -1276,79 +1196,6 @@ impl CommentNode {
                         REL_ACCEPTS_RESULT,
                         acceptance.result_comment_node_id.clone(),
                     )],
-                )
-            }
-            CommentClassification::Lease(lease) => {
-                props.table(comment, PROVENANCE_PROPS);
-                props.text("bodyDigest", &sha256_digest(body));
-                props.text("leaseId", &lease.lease_id);
-                props.text("assignmentCommentNodeId", &lease.assignment_comment_node_id);
-                props.text("workerId", &lease.worker_id);
-                props.text("slotId", &lease.slot_id);
-                props.text("taskNodeId", task_id);
-                props.text("acquiredAt", &lease.acquired_at);
-                props.text("expiresAt", &lease.expires_at);
-                let key = AnchorKey::new(task_id, &lease.lease_id);
-                let anchor = key.element_id();
-                props.text("leaseAnchorNodeId", &anchor);
-                props.insert("trusted", ElementValue::Bool(is_dispatcher));
-                lifecycle_anchor = Some(anchor.clone());
-                if unattributed_edit {
-                    lifecycle = None;
-                }
-                let mut relations = vec![
-                    (REL_LEASE_FOR, task_id.to_string()),
-                    (REL_LEASES_SLOT, worker_slot_element_id(&lease.slot_id)),
-                ];
-                // Only a configured dispatcher's Lease opens a lease
-                // lifecycle. Any other commenter's Lease is projected with its
-                // provenance but can never occupy capacity.
-                if is_dispatcher {
-                    relations.push((REL_LEASE_ANCHOR, anchor));
-                    lifecycle = Some(LifecycleIntent::Acquire {
-                        comment_node_id: comment_id.to_string(),
-                        anchor: key,
-                        acquisition: Acquisition {
-                            worker_id: lease.worker_id.clone(),
-                            slot_id: lease.slot_id.clone(),
-                            acquired_at: lease.acquired_at.clone(),
-                            expires_at: lease.expires_at.clone(),
-                        },
-                    });
-                }
-                (comment_id.to_string(), NODE_WORKGRAPH_TASK_LEASE, relations)
-            }
-            CommentClassification::LeaseExpiration(expiration) => {
-                props.table(comment, PROVENANCE_PROPS);
-                props.text("bodyDigest", &sha256_digest(body));
-                props.text("leaseId", &expiration.lease_id);
-                props.text("leaseCommentNodeId", &expiration.lease_comment_node_id);
-                props.text("expiredAt", &expiration.expired_at);
-                props.text("reason", &expiration.reason);
-                props.insert("trusted", ElementValue::Bool(is_reporter));
-                lifecycle_anchor = Some(AnchorKey::new(task_id, &expiration.lease_id).element_id());
-                if unattributed_edit {
-                    lifecycle = None;
-                }
-                let mut relations = Vec::new();
-                if is_reporter {
-                    let key = AnchorKey::new(task_id, &expiration.lease_id);
-                    relations.push((REL_EXPIRES_LEASE, key.element_id()));
-                    lifecycle = Some(LifecycleIntent::End {
-                        comment_node_id: comment_id.to_string(),
-                        anchor: key,
-                        end: EndClaim {
-                            kind: EndKind::Expired,
-                            ended_at: expiration.expired_at.clone(),
-                            // Only counts against the Lease comment it names.
-                            lease_comment_node_id: Some(expiration.lease_comment_node_id.clone()),
-                        },
-                    });
-                }
-                (
-                    comment_id.to_string(),
-                    NODE_WORKGRAPH_TASK_LEASE_EXPIRATION,
-                    relations,
                 )
             }
             CommentClassification::Invalid(error) => {
@@ -1367,8 +1214,7 @@ impl CommentNode {
             label,
             properties: props,
             specialized_relations,
-            lifecycle,
-            lifecycle_anchor,
+            allocation,
             is_error: label == NODE_WORKGRAPH_ERROR,
         }
     }
@@ -1411,58 +1257,7 @@ impl CommentNode {
         let label = self.parent_relation();
         cs.delete(&rel_id(label, comment_id, parent), label);
         cs.delete(&self.element_id, self.label);
-        // The lease anchor is deliberately *not* deleted. It is a shared,
-        // task-scoped join point that several comments may reference, so no
-        // single comment may remove it — otherwise deleting one Lease comment
-        // would destroy the join point another Lease and its Result still use.
-        // An anchor left without a Lease edge is inert: every lifecycle
-        // pattern traverses LEASE_ANCHOR from a trusted Lease.
     }
-}
-
-/// The lease anchor: the task-scoped join point that lifecycle artifacts bind
-/// to, plus the derived lifecycle the workflow defines over it.
-///
-/// The anchor deliberately carries **no acquisition facts**. `workerId`,
-/// `slotId`, `acquiredAt`, `expiresAt`, the assignment binding, and the author
-/// all live on the stable `WorkGraphTaskLease` comment node, which has exactly
-/// one writer for its whole lifetime. A second Lease comment naming the same
-/// `(task, leaseId)` therefore cannot rewrite or delete anything the first
-/// Lease authored — every exact check reads the Lease node.
-///
-/// `leaseId` and `taskNodeId` restate the anchor's own key, so every writer
-/// writes byte-identical values for them.
-fn anchor_identity_props(lease_id: &str, task_id: &str) -> ElementPropertyMap {
-    let mut props = ElementPropertyMap::new();
-    props.text("leaseId", lease_id);
-    props.text("taskNodeId", task_id);
-    props
-}
-
-/// A trusted dispatcher's Lease opens the lifecycle.
-fn acquired_lease_props(lease: &TaskLease, task_id: &str) -> ElementPropertyMap {
-    let mut props = anchor_identity_props(&lease.lease_id, task_id);
-    props.insert("isActive", ElementValue::Bool(true));
-    props.text("endReason", "none");
-    props.insert("endedAt", ElementValue::Null);
-    props.insert("endCommentNodeId", ElementValue::Null);
-    props
-}
-
-/// A trusted reporter's Result or Expiration closes the lifecycle.
-fn lease_end_props(
-    lease_id: &str,
-    task_id: &str,
-    end_reason: &str,
-    ended_at: Option<&Value>,
-    end_comment_id: &str,
-) -> ElementPropertyMap {
-    let mut props = anchor_identity_props(lease_id, task_id);
-    props.insert("isActive", ElementValue::Bool(false));
-    props.text("endReason", end_reason);
-    props.copy("endedAt", ended_at);
-    props.text("endCommentNodeId", end_comment_id);
-    props
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1630,42 +1425,35 @@ fn rel_id(label: &str, from: &str, to: &str) -> String {
     format!("{label}:{from}:{to}")
 }
 
-/// The outcome of loading the configured worker file, as the projection sees it.
-pub enum WorkerProjection<'a> {
+/// The outcome of loading the configured agent file, as the projection sees it.
+pub enum AgentProjection<'a> {
     /// The file was fetched and strictly validated.
     Loaded {
-        file: &'a WorkerFile,
-        content: &'a WorkerFileContent,
+        file: &'a AgentFile,
+        content: &'a AgentFileContent,
     },
-    /// The configured file is deterministically unusable. No worker is
+    /// The configured file is deterministically unusable. No agent is
     /// projected and the failure becomes an explicit `WorkGraphError` node.
     Rejected(&'a WorkGraphError),
 }
 
-/// Convert a worker-file outcome into graph changes.
+/// Convert an agent-file outcome into graph changes.
 ///
-/// `retiring` maps a `workerId` to the highest slot number ever projected for
-/// it, so a capacity reduction can keep the excess slot nodes addressable while
-/// taking them out of dispatch. Callers that hold no prior projection state
-/// (the bootstrapper builds a fresh snapshot) pass an empty map.
-///
-/// `removed` lists workers that were projected before and are no longer
-/// configured; they and their slots are removed outright.
-pub fn worker_changes(
+pub fn agent_changes(
     source_id: &str,
     effective_from: u64,
-    location: &WorkerFileLocation,
-    projection: &WorkerProjection<'_>,
-    retiring: &BTreeMap<String, u32>,
-    removed: &BTreeMap<String, u32>,
+    location: &AgentFileLocation,
+    projection: &AgentProjection<'_>,
+    retiring: &BTreeMap<String, BTreeSet<u32>>,
+    removed: &BTreeMap<String, BTreeSet<u32>>,
 ) -> Vec<SourceChange> {
     let mut cs = Changes::new(source_id, effective_from);
-    let error_id = worker_config_error_element_id();
+    let error_id = agent_config_error_element_id();
 
     match projection {
-        WorkerProjection::Rejected(error) => {
+        AgentProjection::Rejected(error) => {
             let mut props = ElementPropertyMap::new();
-            props.text("errorKind", "invalid-workgraph-worker-config");
+            props.text("errorKind", "invalid-workgraph-agent-config");
             props.text("errorCode", error.code);
             props.text("errorMessage", &error.message);
             props.text("configRepository", &location.repository);
@@ -1673,31 +1461,36 @@ pub fn worker_changes(
             props.text("configPath", &location.path);
             cs.node(Update, &error_id, NODE_WORKGRAPH_ERROR, props);
             // A rejected configuration deliberately leaves the previously
-            // projected workers untouched. Silently emptying the pool would
+            // projected agents untouched. Silently emptying the pool would
             // make a broken config look like "no capacity configured".
             return cs.changes;
         }
-        WorkerProjection::Loaded { file, content } => {
+        AgentProjection::Loaded { file, content } => {
             cs.delete(&error_id, NODE_WORKGRAPH_ERROR);
-            for (worker_id, slot_count) in removed {
-                delete_worker(&mut cs, worker_id, *slot_count);
+            for (agent_id, slots) in removed {
+                delete_agent(&mut cs, agent_id, slots);
             }
-            for worker in &file.workers {
-                let worker_element = worker_element_id(&worker.worker_id);
+            for agent in &file.agents {
+                let agent_element = agent_element_id(&agent.agent_id);
                 let mut props = ElementPropertyMap::new();
-                props.text("workerId", &worker.worker_id);
-                props.text("agentProfile", &worker.agent_profile);
+                props.text("agentId", &agent.agent_id);
                 props.insert(
                     "configuredSlotCount",
-                    ElementValue::Integer(i64::from(worker.slots)),
+                    ElementValue::Integer(i64::from(agent.slots)),
                 );
-                props.text("leaseDuration", &worker.lease_duration);
+                props.insert("queueDepth", ElementValue::Integer(0));
+                props.insert("activeLeaseCount", ElementValue::Integer(0));
+                props.insert(
+                    "availableSlotCount",
+                    ElementValue::Integer(i64::from(agent.slots)),
+                );
+                props.text("leaseDuration", &agent.lease_duration);
                 props.insert(
                     "leaseDurationSeconds",
-                    ElementValue::Integer(worker.lease_duration_seconds),
+                    ElementValue::Integer(agent.lease_duration_seconds),
                 );
                 props.insert(
-                    "workerFileVersion",
+                    "agentFileVersion",
                     ElementValue::Integer(file.version as i64),
                 );
                 props.text("configRepository", &location.repository);
@@ -1705,44 +1498,36 @@ pub fn worker_changes(
                 props.text("configPath", &location.path);
                 props.text("configBlobOid", &content.oid);
                 props.text("configDigest", &sha256_digest(&content.text));
-                cs.node(Update, &worker_element, NODE_WORKGRAPH_WORKER, props);
+                cs.node(Update, &agent_element, NODE_WORKGRAPH_AGENT, props);
 
-                let highest = (*retiring.get(&worker.worker_id).unwrap_or(&0))
-                    .max(worker.slots)
-                    // The retirement ledger is Source-owned durable state, but
-                    // clamp it anyway so a corrupted entry can never make the
-                    // projection unbounded.
-                    .min(MAX_WORKER_SLOTS);
-                for slot_number in 1..=highest {
-                    let slot = slot_id(&worker.worker_id, slot_number);
-                    let slot_element = worker_slot_element_id(&slot);
-                    // Slots above the configured count are retired, not
-                    // deleted: an already leased excess slot keeps a valid
-                    // `LEASES_SLOT` target until its lease reaches a Result or
-                    // an Expiration, while never being offered again.
-                    let enabled = slot_number <= worker.slots;
+                let retiring = retiring.get(&agent.agent_id).cloned().unwrap_or_default();
+                let slots: BTreeSet<u32> =
+                    (1..=agent.slots).chain(retiring.iter().copied()).collect();
+                for slot_number in slots {
+                    let slot = slot_id(&agent.agent_id, slot_number);
+                    let slot_element = agent_slot_element_id(&slot);
+                    let enabled = slot_number <= agent.slots;
                     let mut props = ElementPropertyMap::new();
                     props.text("slotId", &slot);
                     props.insert("slotNumber", ElementValue::Integer(i64::from(slot_number)));
-                    props.text("workerId", &worker.worker_id);
-                    props.text("agentProfile", &worker.agent_profile);
+                    props.text("agentId", &agent.agent_id);
                     props.insert("enabled", ElementValue::Bool(enabled));
                     props.insert("retiring", ElementValue::Bool(!enabled));
-                    props.text("leaseDuration", &worker.lease_duration);
+                    props.text("leaseDuration", &agent.lease_duration);
                     props.insert(
                         "leaseDurationSeconds",
-                        ElementValue::Integer(worker.lease_duration_seconds),
+                        ElementValue::Integer(agent.lease_duration_seconds),
                     );
                     props.text("configRepository", &location.repository);
                     props.text("configRef", &location.r#ref);
                     props.text("configPath", &location.path);
-                    cs.node(Update, &slot_element, NODE_WORKGRAPH_WORKER_SLOT, props);
-                    let relation = rel_id(REL_HAS_SLOT, &worker_element, &slot_element);
+                    cs.node(Update, &slot_element, NODE_WORKGRAPH_AGENT_SLOT, props);
+                    let relation = rel_id(REL_HAS_SLOT, &agent_element, &slot_element);
                     cs.relation(
                         Update,
                         REL_HAS_SLOT,
                         &relation,
-                        &worker_element,
+                        &agent_element,
                         &slot_element,
                     );
                 }
@@ -1752,68 +1537,182 @@ pub fn worker_changes(
     cs.changes
 }
 
-/// Project every anchor named in `affected` from the ledger's current state.
-///
-/// An anchor with no surviving trusted acquisition is deleted rather than
-/// materialized, so an end naming a lease that was never acquired leaves
-/// nothing a query could bind to or count.
-pub fn anchor_changes(
+pub fn set_artifact_trusted(changes: &mut [SourceChange], comment_id: &str, trusted: bool) {
+    for change in changes {
+        let element = match change {
+            SourceChange::Insert { element } | SourceChange::Update { element } => element,
+            _ => continue,
+        };
+        if element.get_reference().element_id.as_ref() != comment_id {
+            continue;
+        }
+        if let Element::Node {
+            metadata,
+            properties,
+        } = element
+        {
+            let protocol_artifact = metadata.labels.iter().any(|label| {
+                matches!(
+                    label.as_ref(),
+                    NODE_WORKGRAPH_TASK_ASSIGNMENT
+                        | NODE_WORKGRAPH_TASK_RESULT
+                        | NODE_WORKGRAPH_TASK_FEEDBACK
+                        | NODE_WORKGRAPH_TASK_RESULT_ACCEPTANCE
+                )
+            });
+            if protocol_artifact {
+                properties.insert("trusted", ElementValue::Bool(trusted));
+            }
+        }
+    }
+}
+pub fn allocation_changes(
     source_id: &str,
     effective_from: u64,
-    ledger: &LeaseLedger,
-    affected: impl IntoIterator<Item = String>,
+    delta: &AllocationDelta,
+    runtime: &BTreeMap<String, AgentRuntime>,
 ) -> Vec<SourceChange> {
     let mut cs = Changes::new(source_id, effective_from);
-    for anchor in affected {
-        match ledger.project(&anchor) {
-            Some(state) => cs.node(
+    for lease in &delta.ended {
+        delete_lease(&mut cs, lease);
+    }
+    for (agent_id, slot_number) in &delta.removed_slots {
+        let agent = agent_element_id(agent_id);
+        let slot = agent_slot_element_id(&slot_id(agent_id, *slot_number));
+        cs.delete(&rel_id(REL_HAS_SLOT, &agent, &slot), REL_HAS_SLOT);
+        cs.delete(&slot, NODE_WORKGRAPH_AGENT_SLOT);
+    }
+    for agent_id in &delta.removed_agents {
+        cs.delete(&agent_element_id(agent_id), NODE_WORKGRAPH_AGENT);
+    }
+    for assignment_id in &delta.untrusted_assignments {
+        let mut props = ElementPropertyMap::new();
+        props.insert("trusted", ElementValue::Bool(false));
+        cs.node(Update, assignment_id, NODE_WORKGRAPH_TASK_ASSIGNMENT, props);
+    }
+    for feedback_id in &delta.untrusted_feedback {
+        let mut props = ElementPropertyMap::new();
+        props.insert("trusted", ElementValue::Bool(false));
+        cs.node(Update, feedback_id, NODE_WORKGRAPH_TASK_FEEDBACK, props);
+    }
+    for acceptance_id in &delta.untrusted_acceptances {
+        let mut props = ElementPropertyMap::new();
+        props.insert("trusted", ElementValue::Bool(false));
+        cs.node(
+            Update,
+            acceptance_id,
+            NODE_WORKGRAPH_TASK_RESULT_ACCEPTANCE,
+            props,
+        );
+    }
+    for lease in &delta.started {
+        upsert_lease(&mut cs, lease);
+    }
+    for agent_id in &delta.affected_agents {
+        let Some(runtime) = runtime.get(agent_id) else {
+            continue;
+        };
+        let agent = agent_element_id(agent_id);
+        let mut props = ElementPropertyMap::new();
+        props.insert(
+            "configuredSlotCount",
+            ElementValue::Integer(i64::from(runtime.configured_slots)),
+        );
+        props.insert(
+            "queueDepth",
+            ElementValue::Integer(runtime.queue_depth as i64),
+        );
+        props.insert(
+            "activeLeaseCount",
+            ElementValue::Integer(runtime.active_lease_count as i64),
+        );
+        props.insert(
+            "availableSlotCount",
+            ElementValue::Integer(runtime.available_slot_count as i64),
+        );
+        cs.node(Update, &agent, NODE_WORKGRAPH_AGENT, props);
+        for slot_number in &runtime.retiring_slots {
+            let slot_id = slot_id(agent_id, *slot_number);
+            let slot = agent_slot_element_id(&slot_id);
+            let mut props = ElementPropertyMap::new();
+            props.text("slotId", &slot_id);
+            props.insert("slotNumber", ElementValue::Integer(i64::from(*slot_number)));
+            props.text("agentId", agent_id);
+            props.insert("enabled", ElementValue::Bool(false));
+            props.insert("retiring", ElementValue::Bool(true));
+            cs.node(Update, &slot, NODE_WORKGRAPH_AGENT_SLOT, props);
+            cs.relation(
                 Update,
-                &anchor,
-                NODE_WORKGRAPH_TASK_LEASE_ANCHOR,
-                anchor_props(&state),
-            ),
-            None => cs.delete(&anchor, NODE_WORKGRAPH_TASK_LEASE_ANCHOR),
+                REL_HAS_SLOT,
+                &rel_id(REL_HAS_SLOT, &agent, &slot),
+                &agent,
+                &slot,
+            );
         }
     }
     cs.changes
 }
 
-fn anchor_props(state: &AnchorState) -> ElementPropertyMap {
+fn upsert_lease(cs: &mut Changes, lease: &ActiveLease) {
+    let element_id = lease_element_id(&lease.task_node_id, &lease.lease_id);
     let mut props = ElementPropertyMap::new();
-    props.text("leaseId", &state.key.lease_id);
-    props.text("taskNodeId", &state.key.task_node_id);
-    props.insert("isActive", ElementValue::Bool(state.is_active));
-    props.text("endReason", state.end_reason);
-    match &state.ended_at {
-        Some(ended_at) => props.text("endedAt", ended_at),
-        None => props.insert("endedAt", ElementValue::Null),
-    }
-    match &state.end_comment_node_id {
-        Some(comment) => props.text("endCommentNodeId", comment),
-        None => props.insert("endCommentNodeId", ElementValue::Null),
-    }
-    props.insert(
-        "acquisitionCount",
-        ElementValue::Integer(state.acquisition_count as i64),
+    props.text("leaseId", &lease.lease_id);
+    props.text("taskNodeId", &lease.task_node_id);
+    props.text("assignmentCommentNodeId", &lease.assignment_comment_node_id);
+    props.text("agentId", &lease.agent_id);
+    props.text("slotId", &lease.slot_id);
+    props.text("taskType", lease.task_type.as_str());
+    props.text("acquiredAt", &lease.acquired_at);
+    props.text("expiresAt", &lease.expires_at);
+    cs.node(Update, &element_id, NODE_WORKGRAPH_TASK_LEASE, props);
+    cs.relation(
+        Update,
+        REL_LEASE_FOR,
+        &rel_id(REL_LEASE_FOR, &element_id, &lease.task_node_id),
+        &element_id,
+        &lease.task_node_id,
     );
-    props.insert(
-        "endClaimCount",
-        ElementValue::Integer(state.end_claim_count as i64),
+    let slot = agent_slot_element_id(&lease.slot_id);
+    cs.relation(
+        Update,
+        REL_LEASES_SLOT,
+        &rel_id(REL_LEASES_SLOT, &element_id, &slot),
+        &element_id,
+        &slot,
     );
-    props
 }
 
-fn delete_worker(cs: &mut Changes, worker_id: &str, slot_count: u32) {
-    let worker_element = worker_element_id(worker_id);
-    for slot_number in 1..=slot_count.min(MAX_WORKER_SLOTS) {
-        let slot_element = worker_slot_element_id(&slot_id(worker_id, slot_number));
+fn delete_lease(cs: &mut Changes, lease: &ActiveLease) {
+    let element_id = lease_element_id(&lease.task_node_id, &lease.lease_id);
+    cs.delete(
+        &rel_id(REL_LEASE_FOR, &element_id, &lease.task_node_id),
+        REL_LEASE_FOR,
+    );
+    cs.delete(
+        &rel_id(
+            REL_LEASES_SLOT,
+            &element_id,
+            &agent_slot_element_id(&lease.slot_id),
+        ),
+        REL_LEASES_SLOT,
+    );
+    cs.delete(&element_id, NODE_WORKGRAPH_TASK_LEASE);
+}
+fn delete_agent(cs: &mut Changes, agent_id: &str, slots: &BTreeSet<u32>) {
+    let agent_element = agent_element_id(agent_id);
+    for slot_number in slots
+        .iter()
+        .copied()
+        .filter(|slot| *slot <= MAX_AGENT_SLOTS)
+    {
+        let slot_element = agent_slot_element_id(&slot_id(agent_id, slot_number));
         cs.delete(
-            &rel_id(REL_HAS_SLOT, &worker_element, &slot_element),
+            &rel_id(REL_HAS_SLOT, &agent_element, &slot_element),
             REL_HAS_SLOT,
         );
-        cs.delete(&slot_element, NODE_WORKGRAPH_WORKER_SLOT);
+        cs.delete(&slot_element, NODE_WORKGRAPH_AGENT_SLOT);
     }
-    cs.delete(&worker_element, NODE_WORKGRAPH_WORKER);
+    cs.delete(&agent_element, NODE_WORKGRAPH_AGENT);
 }
 
 fn org_props(payload: &Value) -> ElementPropertyMap {
@@ -1977,9 +1876,7 @@ struct Changes<'a> {
     source_id: &'a str,
     effective_from: u64,
     changes: Vec<SourceChange>,
-    lifecycle: Vec<LifecycleIntent>,
-    lifecycle_scope: Option<LifecycleScope>,
-    lifecycle_anchors: Vec<String>,
+    allocation: Option<AllocationEvent>,
 }
 
 impl<'a> Changes<'a> {
@@ -1988,9 +1885,7 @@ impl<'a> Changes<'a> {
             source_id,
             effective_from,
             changes: Vec::new(),
-            lifecycle: Vec::new(),
-            lifecycle_scope: None,
-            lifecycle_anchors: Vec::new(),
+            allocation: None,
         }
     }
     fn metadata(&self, id: &str, label: &str) -> ElementMetadata {

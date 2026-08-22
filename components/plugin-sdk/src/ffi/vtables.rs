@@ -372,6 +372,11 @@ drasi_ffi_primitives::ffi_vtable! {
         /// handle. The source can stop tracking the resume position for this
         /// query.
         fn remove_position_handle_fn(state: *mut, query_id: FfiStr) -> FfiResult,
+
+        /// Called by the host lifecycle once all startup queries have
+        /// subscribed. Sources that hold back feedback during the subscription
+        /// window (e.g. a pruning fence) should release those guards here.
+        fn on_subscriptions_complete_fn(state: *mut) -> FfiResult,
     }
 }
 
