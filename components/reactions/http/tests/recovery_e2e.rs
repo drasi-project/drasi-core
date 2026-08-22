@@ -510,6 +510,66 @@ async fn strict_fail_stops_on_sustained_failure_then_recovers_on_restart() {
     core.stop().await.expect("stop core");
 }
 
+/// Catch-up only queues work for the effect loop. Repeated delivery failure must
+/// leave the durable checkpoint behind so another restart can replay the event;
+/// the first successful delivery advances it and suppresses later replays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catchup_failure_is_replayed_until_effect_success() {
+    let server = mock_server::start().await;
+    respond_with(&server, "/changes/e2e-query", 503).await;
+    let store = Arc::new(MemoryStateStoreProvider::new());
+    let (core, handle) =
+        build_core(server.uri(), store, ReactionRecoveryPolicy::Strict, false).await;
+    core.start().await.expect("start core");
+
+    insert_person(&handle, "p1", "Alice").await;
+    assert!(
+        wait_for_reaction_status(&core, ComponentStatus::Error, Duration::from_secs(15)).await,
+        "initial delivery failure must fail-stop the reaction"
+    );
+
+    // Restart against the still-failing endpoint. This path fetches Alice from
+    // the outbox and enqueues it; enqueue alone must not acknowledge it.
+    respond_with(&server, "/changes/e2e-query", 503).await;
+    core.start_reaction(REACTION)
+        .await
+        .expect("restart reaction for failed catch-up");
+    assert!(
+        wait_for_reaction_status(&core, ComponentStatus::Error, Duration::from_secs(15)).await,
+        "catch-up delivery failure must fail-stop without checkpointing"
+    );
+    assert!(
+        !names_received(&server).await.is_empty(),
+        "the failed catch-up must attempt Alice"
+    );
+
+    // A later healthy restart must replay Alice exactly once.
+    respond_with(&server, "/changes/e2e-query", 200).await;
+    core.start_reaction(REACTION)
+        .await
+        .expect("restart reaction after recovery");
+    assert_eq!(
+        wait_for_name_count(&server, 1, Duration::from_secs(10)).await,
+        1
+    );
+    assert_eq!(names_received(&server).await, vec!["Alice"]);
+    assert_no_extra_deliveries(&server, 1, Duration::from_millis(500)).await;
+
+    // Once the effect succeeds, its checkpoint is authoritative and another
+    // restart has nothing to replay.
+    stop_reaction_and_wait(&core).await;
+    respond_with(&server, "/changes/e2e-query", 200).await;
+    core.start_reaction(REACTION)
+        .await
+        .expect("clean restart after successful effect");
+    assert!(
+        wait_for_reaction_status(&core, ComponentStatus::Running, Duration::from_secs(5)).await
+    );
+    assert_no_extra_deliveries(&server, 0, Duration::from_millis(750)).await;
+
+    core.stop().await.expect("stop core");
+}
+
 /// A logical failure in an HTTP 200 response is sustained delivery failure, not
 /// a retryable HTTP status. Strict therefore fail-stops after one request and
 /// leaves the checkpoint behind the event so an operator restart can replay it.

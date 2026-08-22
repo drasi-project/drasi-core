@@ -5,11 +5,10 @@
 
 ## Snapshot scope
 
-When `workerConfig` is set, bootstrap first reads and validates the worker-queue
-configuration file and projects its `WorkGraphWorker`, `WorkGraphWorkerSlot`,
+When `agentConfig` is set, bootstrap first reads and validates the agent-capacity
+configuration file and projects its `WorkGraphAgent`, `WorkGraphAgentSlot`,
 and `HAS_SLOT` elements **before** any Issue or task artifact, so a capacity
-query always sees workers and slots ahead of the Assignments and Leases that
-reference them.
+query always sees agents and slots ahead of task artifacts.
 
 For every repository allowed by the Source configuration, bootstrap retrieves:
 
@@ -29,12 +28,11 @@ Every fetched object is reshaped into webhook JSON and passed through the same
 `mapping::Converter` used by live deliveries. Consequently bootstrap and live
 use identical:
 
-- `WorkGraphTask`, `WorkGraphTaskAssignment` (v1 and v2),
-  `WorkGraphTaskResult` (v1 and v2), `WorkGraphTaskResultAcceptance`,
-  `WorkGraphTaskLease`, `WorkGraphTaskLeaseExpiration`, and `WorkGraphError`
-  parsing;
-- worker file validation and worker/slot projection, which come from the same
-  `workers` and `mapping` code the live Source uses;
+- `WorkGraphTask`, `WorkGraphTaskAssignment`, `WorkGraphTaskResult`,
+  `WorkGraphTaskFeedback`, `WorkGraphTaskResultAcceptance`, and `WorkGraphError`
+  v1 parsing;
+- agent file validation and agent/slot projection, which come from the same
+  `agents` and `mapping` code the live Source uses;
 - node and relation IDs/directions;
 - generic open-only and task open/closed behavior;
 - ordered `statusLabels`/`workgraphLabels` arrays, derived `currentStatus` and
@@ -71,10 +69,20 @@ sources:
       name: WorkGraphTask
     repositories:
       - drasi-workgraph-demo
+    agentConfig:
+      repository: drasi-project/drasi-workgraph-demo
+      ref: main
+      path: .github/workgraph/agents.yaml
+      token:
+        kind: Secret
+        name: github-workgraph-agent-config-token
     webhook:
       secret:
         kind: Secret
         name: github-workgraph-webhook-secret
+      leaseValidationToken:
+        kind: Secret
+        name: github-workgraph-lease-validation-token
     durability:
       enabled: true
       maxEvents: 10000
@@ -88,32 +96,38 @@ sources:
 | `apiBaseUrl` | GraphQL endpoint; defaults to `https://api.github.com/graphql` |
 | `maxConcurrency` | Bound for request and repository concurrency; defaults to 4 |
 
-The worker file location and the lease trust configuration are **not** bootstrap
+The agent file location and protocol trust configuration are **not** bootstrap
 fields. Like organization, repository allowlist, and task Issue Type, they are
-inherited from the parent Source's `workerConfig` (`repository`, `ref`, `path`)
-and `leaseTrust` (`dispatchers`, `reporters`), so bootstrap and streaming can
+inherited from the parent Source's `agentConfig` (`repository`, `ref`, `path`)
+and `protocolTrust` (`assigners`, `reporters`), so bootstrap and streaming can
 never disagree about which file is authoritative or which producers are
 trusted. Only the read credential and endpoint above are the bootstrapper's own.
 
 The token needs read access for Issues, Pull Requests, and repository metadata,
-plus repository contents when `workerConfig` is set. The worker file is read
+plus repository contents when `agentConfig` is set. The agent file is read
 with this same token and `apiBaseUrl` — no separate credential, endpoint, or
 service. The provider never writes to GitHub.
 
-The Source's `workerConfig` is optional; omitting it snapshots no worker or slot
+The Source's `agentConfig` is optional; omitting it snapshots no agent or slot
 elements.
 When present, a file that cannot be **read** (transport, authentication, or a
-5xx) fails the bootstrap outright, because claiming an empty worker pool would
+5xx) fails the bootstrap outright, because claiming an empty agent pool would
 silently stop every dispatch. A file that *is* read but is deterministically
 **invalid** — missing at the configured path, non-text, oversized, or failing
 the strict `version: 1` grammar — snapshots a single `WorkGraphError` node with
-the stable ID `workgraph-error:worker-config`, projects no worker, and lets the
+the stable ID `workgraph-error:agent-config`, projects no agent, and lets the
 rest of the snapshot complete.
 
 A bootstrap builds a fresh snapshot, so it has no prior projection to retire
 slots against: it projects exactly the configured slots, all `enabled`. Slot
 retirement after a live capacity reduction is Source-local; see the Source
-README's *Capacity changes and their bounded limitation*.
+README's *Agent capacity configuration*.
+
+Bootstrap never folds protocol comments into allocator state and never creates
+synthetic `WorkGraphTaskLease` nodes. Prototype clean activation must be
+externally preflighted to contain no open Assignment/v1 artifacts; normal
+restart uses the Source's persistent allocator and query state instead of a new
+bootstrap injection.
 
 Use a top-level provider and string reference. The Source owns organization,
 repository, and task Issue Type scope; the bootstrap descriptor reads those
@@ -154,15 +168,11 @@ This is what keeps a repeatedly observed element — a repository reached both
 directly and as a task parent, for example — in exactly the state the live
 Source converges to.
 
-Separately, the lease lifecycle is not folded this way at all: bootstrap builds
-the same `(task, leaseId)` ledger the live Source keeps durably, from the
-current task comments it fetched, and then projects each
-`WorkGraphTaskLeaseAnchor` from the artifacts that survive. A snapshot therefore
-reflects current state — a lease whose completing Result no longer exists is
-active again — and matches a live delivery stream exactly. Bootstrap also reads
-GitHub's `editor` on every comment so it applies the same editor-trust rule the
-webhook applies via `sender`. See the Source README's *Lease trust* and *Lease
-lifecycle and active-lease counting*.
+Bootstrap deliberately does not fold protocol comments into allocator state or
+project synthetic `WorkGraphTaskLease` nodes. The Source is the only allocation
+authority. Prototype clean activation must therefore be externally preflighted
+to contain no open Assignment/v1 artifacts; normal restart preserves the
+Source's durable allocator and query state instead of injecting bootstrap state.
 
 GitHub does not offer a transaction spanning these queries. Bootstrap fails on
 any repository task error rather than intentionally returning a partial
@@ -185,14 +195,10 @@ and open/closed task selection, complete order-independent parent repositories,
 comments on closed tasks, strict task/specialized-comment errors, repository filtering,
 requested-label filtering, and live-converter parity.
 
-Worker-queue tests additionally assert the folded lease lifecycle (ended,
-reactivated when the end is gone, conflicting acquisitions, and an end with no
-acquisition), that neither an untrusted author nor an untrusted editor can forge
-lease state in a snapshot, bootstrap/live lifecycle parity, worker/slot snapshot
-ordering ahead of
-every task artifact, malformed and missing worker files becoming an explicit
-error with no worker pool, oversized/truncated/binary and non-Blob rejections,
-an unreadable file failing the bootstrap, omitted `workerConfig` projecting
-nothing, requested-label filtering of worker elements, the folded
-Assignment/v2 → Lease/v1 → Result/v2 lifecycle, bootstrap/live worker parity,
-and byte-identical repeated snapshots.
+Agent-capacity tests additionally assert agent/slot snapshot ordering ahead of
+every task artifact, malformed and missing agent files becoming an explicit
+error with no agent pool, oversized/truncated/binary and non-Blob rejections,
+an unreadable file failing the bootstrap, omitted `agentConfig` projecting
+nothing, requested-label filtering of agent elements, shared Assignment/v1
+`agentId` parsing and projection, bootstrap/live agent parity, and
+byte-identical repeated snapshots.

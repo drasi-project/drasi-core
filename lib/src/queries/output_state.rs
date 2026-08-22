@@ -159,6 +159,31 @@ impl QueryOutputState {
         self.as_of_sequence
     }
 
+    /// Restore durable live rows and their output high-water mark.
+    ///
+    /// A same-process stop/start may retain output newer than the durable
+    /// snapshot when a persistence write failed. Never move that state backward.
+    pub(crate) fn hydrate(
+        &mut self,
+        results: im::HashMap<u64, serde_json::Value>,
+        as_of_sequence: u64,
+    ) {
+        if as_of_sequence <= self.as_of_sequence {
+            return;
+        }
+
+        self.outbox.clear();
+        self.results = results;
+        self.as_of_sequence = as_of_sequence;
+    }
+
+    /// Reset all output state after persistent query state is invalidated.
+    pub(crate) fn reset(&mut self) {
+        self.results.clear();
+        self.as_of_sequence = 0;
+        self.outbox.clear();
+    }
+
     /// Return the number of entries currently in the outbox.
     pub fn outbox_len(&self) -> usize {
         self.outbox.len()
@@ -630,6 +655,85 @@ mod tests {
         let arc = state.advance_sequence_and_push(result);
         assert_eq!(arc.sequence, 2);
         assert_eq!(state.outbox.len(), 2);
+    }
+
+    #[test]
+    fn hydrate_restores_rows_and_advances_from_durable_high_water() {
+        let mut rows = im::HashMap::new();
+        rows.insert(100, serde_json::json!({"name": "Alice"}));
+
+        let mut state = QueryOutputState::new(3);
+        state.hydrate(rows, 4);
+
+        assert_eq!(state.as_of_sequence(), 4);
+        assert_eq!(
+            state.clone_results().get(&100),
+            Some(&serde_json::json!({"name": "Alice"}))
+        );
+
+        let result = make_query_result(
+            "q1",
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"name": "Bob"}),
+                row_signature: 200,
+            }],
+        );
+        state.apply_diffs(&result.results);
+        let result = state.advance_sequence_and_push(result);
+
+        assert_eq!(result.sequence, 5);
+        assert_eq!(state.as_of_sequence(), 5);
+    }
+
+    #[test]
+    fn hydrate_never_lowers_newer_in_memory_state() {
+        let mut state = QueryOutputState::new(3);
+        state.results.insert(200, serde_json::json!({"version": 2}));
+        state.as_of_sequence = 6;
+
+        let mut stale_rows = im::HashMap::new();
+        stale_rows.insert(100, serde_json::json!({"version": 1}));
+        state.hydrate(stale_rows, 5);
+
+        assert_eq!(state.as_of_sequence(), 6);
+        assert_eq!(
+            state.clone_results().get(&200),
+            Some(&serde_json::json!({"version": 2}))
+        );
+        assert!(!state.clone_results().contains_key(&100));
+    }
+
+    #[test]
+    fn hydrate_preserves_in_memory_rows_at_equal_sequence() {
+        let mut state = QueryOutputState::new(3);
+        state.results.insert(200, serde_json::json!({"version": 2}));
+        state.as_of_sequence = 6;
+
+        let mut durable_rows = im::HashMap::new();
+        durable_rows.insert(100, serde_json::json!({"version": 1}));
+        state.hydrate(durable_rows, 6);
+
+        assert_eq!(state.as_of_sequence(), 6);
+        assert_eq!(
+            state.clone_results().get(&200),
+            Some(&serde_json::json!({"version": 2}))
+        );
+        assert!(!state.clone_results().contains_key(&100));
+    }
+
+    #[test]
+    fn reset_clears_rows_sequence_and_outbox() {
+        let mut state = QueryOutputState::new(3);
+        state
+            .results
+            .insert(100, serde_json::json!({"name": "Alice"}));
+        state.advance_sequence_and_push(make_query_result("q1", vec![]));
+
+        state.reset();
+
+        assert!(state.clone_results().is_empty());
+        assert_eq!(state.as_of_sequence(), 0);
+        assert_eq!(state.outbox_len(), 0);
     }
 
     #[test]

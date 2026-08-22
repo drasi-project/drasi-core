@@ -110,21 +110,21 @@ impl BootstrapPluginDescriptor for GitHubWorkGraphBootstrapDescriptor {
             serde_json::from_value(source_config_json.clone())?;
         let mapper = DtoMapper::new();
         let repositories = mapper.resolve_string_vec(&source_dto.repositories).await?;
-        // The worker file location is part of the Source's own configuration,
+        // The agent file location is part of the Source's own configuration,
         // so bootstrap and streaming can never disagree about which file is
         // authoritative. Only the read credential and endpoint are the
         // bootstrapper's own.
-        let worker_config = match &source_dto.worker_config {
-            Some(worker) => Some(drasi_source_github_workgraph::workers::WorkerFileLocation {
-                repository: mapper.resolve_string(&worker.repository).await?,
-                r#ref: mapper.resolve_string(&worker.r#ref).await?,
-                path: mapper.resolve_string(&worker.path).await?,
+        let agent_config = match &source_dto.agent_config {
+            Some(agent) => Some(drasi_source_github_workgraph::agents::AgentFileLocation {
+                repository: mapper.resolve_string(&agent.repository).await?,
+                r#ref: mapper.resolve_string(&agent.r#ref).await?,
+                path: mapper.resolve_string(&agent.path).await?,
             }),
             None => None,
         };
 
         // Lease trust is inherited from the Source for the same reason the
-        // worker file location is: bootstrap and streaming must trust exactly
+        // agent file location is: bootstrap and streaming must trust exactly
         // the same producers or a snapshot and a delivery could disagree.
         let lease_trust = match &source_dto.lease_trust {
             Some(trust) => {
@@ -163,8 +163,8 @@ impl BootstrapPluginDescriptor for GitHubWorkGraphBootstrapDescriptor {
             .with_token(mapper.resolve_string(&dto.token).await?)
             .with_api_base_url(mapper.resolve_string(&dto.api_base_url).await?)
             .with_max_concurrency(mapper.resolve_typed(&dto.max_concurrency).await?);
-        if let Some(worker_config) = worker_config {
-            builder = builder.with_worker_config(worker_config);
+        if let Some(agent_config) = agent_config {
+            builder = builder.with_agent_config(agent_config);
         }
         if let Some(lease_trust) = lease_trust {
             builder = builder.with_lease_trust(lease_trust);
@@ -188,7 +188,10 @@ mod tests {
                     "organization": "acme",
                     "taskIssueType": {"id":"IT_test","name":"WorkGraphTask"},
                     "repositories": ["widgets", "acme/widgets"],
-                    "webhook": { "secret": "webhook-secret" }
+                    "webhook": {
+                        "secret": "webhook-secret",
+                        "leaseValidationToken": "validation-token"
+                    }
                 }),
             )
             .await;
@@ -206,7 +209,10 @@ mod tests {
                     "organization": "acme",
                     "taskIssueType": {"id":"IT_test","name":"WorkGraphTask"},
                     "repositories": ["other/widgets"],
-                    "webhook": { "secret": "webhook-secret" }
+                    "webhook": {
+                        "secret": "webhook-secret",
+                        "leaseValidationToken": "validation-token"
+                    }
                 }),
             )
             .await;
@@ -214,14 +220,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn descriptor_inherits_the_worker_file_location_from_the_source() {
+    async fn descriptor_inherits_the_agent_file_location_from_the_source() {
         let descriptor = GitHubWorkGraphBootstrapDescriptor;
-        let source = |worker: serde_json::Value| {
+        let source = |agent: serde_json::Value| {
             json!({
                 "organization": "acme",
                 "taskIssueType": {"id":"IT_test","name":"WorkGraphTask"},
-                "webhook": { "secret": "webhook-secret" },
-                "workerConfig": worker
+                "webhook": {
+                    "secret": "webhook-secret",
+                    "leaseValidationToken": "validation-token"
+                },
+                "agentConfig": agent
             })
         };
 
@@ -231,25 +240,44 @@ mod tests {
                 &source(json!({
                     "repository": "acme/widgets",
                     "ref": "main",
-                    "path": ".github/workgraph/workers.yaml",
-                    "token": "worker-token"
+                    "path": ".github/workgraph/agents.yaml",
+                    "token": "agent-token"
                 })),
             )
             .await
             .is_ok());
 
-        // An invalid worker file location fails provider construction rather
-        // than silently bootstrapping an empty worker pool.
+        // An invalid agent file location fails provider construction rather
+        // than silently bootstrapping an empty agent pool.
         assert!(descriptor
             .create_bootstrap_provider(
                 &json!({ "token": "read-only-token" }),
                 &source(json!({
                     "repository": "widgets",
                     "ref": "main",
-                    "path": ".github/workgraph/workers.yaml",
-                    "token": "worker-token"
+                    "path": ".github/workgraph/agents.yaml",
+                    "token": "agent-token"
                 })),
             )
+            .await
+            .is_err());
+
+        let legacy = json!({
+            "organization": "acme",
+            "taskIssueType": {"id":"IT_test","name":"WorkGraphTask"},
+            "webhook": {
+                "secret": "webhook-secret",
+                "leaseValidationToken": "validation-token"
+            },
+            "workerConfig": {
+                "repository": "acme/widgets",
+                "ref": "main",
+                "path": ".github/workgraph/workers.yaml",
+                "token": "legacy-token"
+            }
+        });
+        assert!(descriptor
+            .create_bootstrap_provider(&json!({ "token": "read-only-token" }), &legacy)
             .await
             .is_err());
     }

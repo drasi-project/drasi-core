@@ -333,7 +333,10 @@ pub trait Source: Send + Sync {
     /// window (e.g., Postgres flush-fence) should release those guards here.
     ///
     /// The default is a no-op for sources that do not need startup fencing.
-    async fn on_subscriptions_complete(&self) {}
+    async fn on_subscriptions_complete(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Set the identity provider for this source.
     ///
     /// This method allows attaching a per-source identity provider after
@@ -433,7 +436,7 @@ impl Source for Box<dyn Source + 'static> {
         (**self).remove_position_handle(query_id).await
     }
 
-    async fn on_subscriptions_complete(&self) {
+    async fn on_subscriptions_complete(&self) -> anyhow::Result<()> {
         (**self).on_subscriptions_complete().await
     }
 

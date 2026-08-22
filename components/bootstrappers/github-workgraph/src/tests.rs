@@ -13,14 +13,13 @@
 // limitations under the License.
 
 use crate::client::GitHubGraphQLClient;
-use crate::{GitHubWorkGraphBootstrapProvider, WorkerFileLocation};
+use crate::{AgentFileLocation, GitHubWorkGraphBootstrapProvider};
 use drasi_core::models::{Element, ElementValue, SourceChange};
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use drasi_lib::channels::BootstrapEvent;
+use drasi_source_github_workgraph::agents::{parse_agent_file, AgentFileContent};
 use drasi_source_github_workgraph::config::{LeaseTrust, TaskIssueType, TrustedIdentity};
-use drasi_source_github_workgraph::lease_ledger::LeaseLedger;
-use drasi_source_github_workgraph::mapping::{worker_changes, Converter, WorkerProjection};
-use drasi_source_github_workgraph::workers::{parse_worker_file, WorkerFileContent};
+use drasi_source_github_workgraph::mapping::{agent_changes, AgentProjection, Converter};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use wiremock::matchers::{body_string_contains, method, path};
@@ -40,7 +39,15 @@ const ASSIGNMENT_BODY: &str = r#"WorkGraphTaskAssignment/v1
 
 ```json
 {
-  "agentProfile": "issue-validator"
+  "agentId": "issue-validator"
+}
+```
+"#;
+const UNKNOWN_AGENT_ASSIGNMENT_BODY: &str = r#"WorkGraphTaskAssignment/v1
+
+```json
+{
+  "agentId": "issue-risk-profiler"
 }
 ```
 "#;
@@ -49,6 +56,7 @@ const RESULT_BODY: &str = r#"WorkGraphTaskResult/v1
 ```json
 {
   "taskType": "validate-issue",
+  "leaseId": "00000000-0000-7000-8000-000000000001",
   "outcome": "succeeded",
   "summary": "Bootstrap result.",
   "result": {
@@ -181,6 +189,34 @@ async fn mount_query(server: &MockServer, needles: &[&str], data: Value, expecte
 }
 
 async fn mount_snapshot(server: &MockServer, task_body: &str, result_body: &str) {
+    mount_snapshot_with_assignment(server, task_body, ASSIGNMENT_BODY, result_body).await;
+}
+
+async fn mount_snapshot_with_assignment(
+    server: &MockServer,
+    task_body: &str,
+    assignment_body: &str,
+    result_body: &str,
+) {
+    mount_snapshot_with_comments(
+        server,
+        task_body,
+        assignment_body,
+        result_body,
+        "IC_closed_result",
+        RESULT_BODY,
+    )
+    .await;
+}
+
+async fn mount_snapshot_with_comments(
+    server: &MockServer,
+    task_body: &str,
+    assignment_body: &str,
+    result_body: &str,
+    closed_comment_id: &str,
+    closed_comment_body: &str,
+) {
     mount_query(
         server,
         &["avatar_url: avatarUrl"],
@@ -248,7 +284,7 @@ async fn mount_snapshot(server: &MockServer, task_body: &str, result_body: &str)
         &["... on Issue {", "\"id\":\"I_task_open\""],
         json!({"node":{"comments":connection(vec![
             comment("IC_plain","Ordinary task comment."),
-            comment("IC_assignment",ASSIGNMENT_BODY),
+            comment("IC_assignment",assignment_body),
             comment("IC_result",result_body),
             comment("IC_acceptance",ACCEPTANCE_BODY)
         ],false,None)}}),
@@ -259,7 +295,7 @@ async fn mount_snapshot(server: &MockServer, task_body: &str, result_body: &str)
         server,
         &["... on Issue {", "\"id\":\"I_task_closed\""],
         json!({"node":{"comments":connection(vec![
-            comment("IC_closed_result",RESULT_BODY)
+            comment(closed_comment_id,closed_comment_body)
         ],false,None)}}),
         Some(1),
     )
@@ -722,71 +758,19 @@ async fn ordinary_open_issue_with_result_marker_stays_generic_comment() {
         .any(|event| id(event) == "IC_generic" && label(event) == "GitHubIssueComment"));
 }
 
-// ---------------------------------------------------------------------------
-// Worker queue: worker file snapshot, ordering ahead of task artifacts, and
-// bootstrap/live parity for the Assignment/Lease/Result lifecycle.
-// ---------------------------------------------------------------------------
+const AGENT_FILE: &str =
+    "version: 1\nagents:\n  - agentId: issue-validator\n    slots: 2\n    leaseDuration: PT15M\n";
 
-const WORKER_FILE: &str = "version: 1\nworkers:\n  - workerId: validator-1\n    agentProfile: \
-                           issue-validator\n    slots: 2\n    leaseDuration: PT15M\n";
-const LEASE_ID: &str = "0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21";
-const LEASE_ANCHOR_ID: &str = "workgraph-lease:I_task_open:0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21";
-
-const ASSIGNMENT_V2_BODY: &str = r#"WorkGraphTaskAssignment/v2
-
-```json
-{
-  "agentProfile": "issue-validator",
-  "workerId": "validator-1"
-}
-```
-"#;
-
-const LEASE_BODY: &str = r#"WorkGraphTaskLease/v1
-
-```json
-{
-  "leaseId": "0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21",
-  "assignmentCommentNodeId": "IC_assignment",
-  "workerId": "validator-1",
-  "slotId": "validator-1/1",
-  "acquiredAt": "2026-08-19T22:00:00Z",
-  "expiresAt": "2026-08-19T22:15:00Z"
-}
-```
-"#;
-
-const RESULT_V2_BODY: &str = r#"WorkGraphTaskResult/v2
-
-```json
-{
-  "taskType": "validate-issue",
-  "leaseId": "0198d8c4-7c28-7d43-a8dd-e9f5be8c1b21",
-  "outcome": "succeeded",
-  "summary": "Bootstrap result.",
-  "result": {
-    "criteria": [
-      {
-        "criterion": "Contract",
-        "passed": true,
-        "evidence": "Verified."
-      }
-    ]
-  }
-}
-```
-"#;
-
-fn worker_location() -> WorkerFileLocation {
-    WorkerFileLocation {
+fn agent_location() -> AgentFileLocation {
+    AgentFileLocation {
         repository: "acme/widgets".to_string(),
         r#ref: "main".to_string(),
-        path: ".github/workgraph/workers.yaml".to_string(),
+        path: ".github/workgraph/agents.yaml".to_string(),
     }
 }
 
-/// Mount the shared worker-file blob query with an explicit GraphQL response.
-async fn mount_worker_file(server: &MockServer, object: Value) {
+/// Mount the shared agent-file blob query with an explicit GraphQL response.
+async fn mount_agent_file(server: &MockServer, object: Value) {
     mount_query(
         server,
         &["object(expression: $expression)"],
@@ -796,8 +780,8 @@ async fn mount_worker_file(server: &MockServer, object: Value) {
     .await;
 }
 
-async fn mount_worker_blob(server: &MockServer, text: &str) {
-    mount_worker_file(
+async fn mount_agent_blob(server: &MockServer, text: &str) {
+    mount_agent_file(
         server,
         json!({
             "__typename": "Blob",
@@ -811,7 +795,7 @@ async fn mount_worker_blob(server: &MockServer, text: &str) {
     .await;
 }
 
-fn bootstrap_lease_trust() -> LeaseTrust {
+fn bootstrap_protocol_trust() -> LeaseTrust {
     // The comment fixtures author every comment as "bot", matching the
     // prototype's single-identity deployment.
     let bot = TrustedIdentity {
@@ -824,15 +808,15 @@ fn bootstrap_lease_trust() -> LeaseTrust {
     }
 }
 
-fn worker_provider(server: &MockServer) -> GitHubWorkGraphBootstrapProvider {
+fn agent_provider(server: &MockServer) -> GitHubWorkGraphBootstrapProvider {
     GitHubWorkGraphBootstrapProvider::builder()
         .with_organization("acme")
         .with_task_issue_type(task_type())
         .with_token("read-only-token")
         .with_api_base_url(format!("{}/graphql", server.uri()))
         .with_max_concurrency(2)
-        .with_worker_config(worker_location())
-        .with_lease_trust(bootstrap_lease_trust())
+        .with_agent_config(agent_location())
+        .with_lease_trust(bootstrap_protocol_trust())
         .build()
         .unwrap()
 }
@@ -858,21 +842,21 @@ fn position(events: &[BootstrapEvent], node_id: &str) -> usize {
 }
 
 #[tokio::test]
-async fn worker_snapshot_precedes_every_task_artifact() {
+async fn agent_snapshot_precedes_every_task_artifact() {
     let server = MockServer::start().await;
-    mount_worker_blob(&server, WORKER_FILE).await;
+    mount_agent_blob(&server, AGENT_FILE).await;
     mount_snapshot(&server, TASK_BODY, RESULT_BODY).await;
 
-    let (result, events) = run(&worker_provider(&server), request()).await;
+    let (result, events) = run(&agent_provider(&server), request()).await;
     assert_eq!(result.event_count, events.len());
     assert!(events
         .iter()
         .all(|event| matches!(event.change, SourceChange::Insert { .. })));
 
     for node_id in [
-        "workgraph-worker:validator-1",
-        "workgraph-worker-slot:validator-1/1",
-        "workgraph-worker-slot:validator-1/2",
+        "workgraph-agent:issue-validator",
+        "workgraph-agent-slot:issue-validator/1",
+        "workgraph-agent-slot:issue-validator/2",
     ] {
         assert!(
             events.iter().any(|event| id(event) == node_id),
@@ -881,36 +865,36 @@ async fn worker_snapshot_precedes_every_task_artifact() {
     }
     assert!(events.iter().any(|event| label(event) == "HAS_SLOT"));
 
-    // Every worker element is snapshotted before the organization, the
+    // Every agent element is snapshotted before the organization, the
     // repositories, and any Issue, task, or task comment that references it.
-    let last_worker = events
+    let last_agent = events
         .iter()
         .rposition(|event| {
             matches!(
                 label(event),
-                "WorkGraphWorker" | "WorkGraphWorkerSlot" | "HAS_SLOT"
+                "WorkGraphAgent" | "WorkGraphAgentSlot" | "HAS_SLOT"
             )
         })
-        .expect("worker elements are snapshotted");
+        .expect("agent elements are snapshotted");
     let first_other = events
         .iter()
         .position(|event| {
             !matches!(
                 label(event),
-                "WorkGraphWorker" | "WorkGraphWorkerSlot" | "HAS_SLOT"
+                "WorkGraphAgent" | "WorkGraphAgentSlot" | "HAS_SLOT"
             )
         })
         .expect("task artifacts are snapshotted");
     assert!(
-        last_worker < first_other,
-        "worker elements must precede all other snapshot state"
+        last_agent < first_other,
+        "agent elements must precede all other snapshot state"
     );
-    assert!(position(&events, "I_task_open") > last_worker);
+    assert!(position(&events, "I_task_open") > last_agent);
 
     assert_eq!(
         node_property(
             &events,
-            "workgraph-worker:validator-1",
+            "workgraph-agent:issue-validator",
             "configuredSlotCount"
         ),
         &ElementValue::Integer(2)
@@ -918,30 +902,33 @@ async fn worker_snapshot_precedes_every_task_artifact() {
     assert_eq!(
         node_property(
             &events,
-            "workgraph-worker:validator-1",
+            "workgraph-agent:issue-validator",
             "leaseDurationSeconds"
         ),
         &ElementValue::Integer(900)
     );
     assert_eq!(
-        node_property(&events, "workgraph-worker-slot:validator-1/2", "enabled"),
+        node_property(&events, "workgraph-agent-slot:issue-validator/2", "enabled"),
         &ElementValue::Bool(true)
     );
     assert_eq!(
-        node_property(&events, "workgraph-worker:validator-1", "configPath"),
-        &ElementValue::from(&json!(".github/workgraph/workers.yaml"))
+        node_property(&events, "workgraph-agent:issue-validator", "configPath"),
+        &ElementValue::from(&json!(".github/workgraph/agents.yaml"))
     );
 
-    // Historical v1 Assignments and Results keep working after a clean
-    // bootstrap that also projects the worker queue: they are readable, they
-    // name no worker queue, and they bind no lease.
+    // Protocol artifacts remain ordinary snapshot graph data; bootstrap never
+    // synthesizes Source-owned active Lease state.
     assert_eq!(
         node_property(&events, "IC_assignment", "version"),
         &ElementValue::Integer(1)
     );
     assert_eq!(
-        node_property(&events, "IC_assignment", "workerId"),
-        &ElementValue::Null
+        node_property(&events, "IC_assignment", "agentId"),
+        &ElementValue::from(&json!("issue-validator"))
+    );
+    assert_eq!(
+        node_property(&events, "IC_assignment", "trusted"),
+        &ElementValue::Bool(true)
     );
     assert_eq!(
         node_property(&events, "IC_result", "version"),
@@ -949,15 +936,16 @@ async fn worker_snapshot_precedes_every_task_artifact() {
     );
     assert_eq!(
         node_property(&events, "IC_result", "leaseId"),
-        &ElementValue::Null
+        &ElementValue::from(&json!("00000000-0000-7000-8000-000000000001"))
     );
     assert!(events.iter().any(|event| label(event) == "ASSIGNMENT_FOR"));
+    assert!(events.iter().any(|event| label(event) == "ASSIGNED_TO"));
     assert!(events.iter().any(|event| label(event) == "RESULT_FOR"));
     for absent in [
-        "ASSIGNED_TO",
         "RESULT_FOR_LEASE",
-        "LEASE_ANCHOR",
-        "WorkGraphTaskLeaseAnchor",
+        "WorkGraphTaskLease",
+        "LEASE_FOR",
+        "LEASES_SLOT",
     ] {
         assert!(
             !events.iter().any(|event| label(event) == absent),
@@ -967,34 +955,96 @@ async fn worker_snapshot_precedes_every_task_artifact() {
 }
 
 #[tokio::test]
-async fn malformed_worker_file_snapshots_an_error_and_no_workers() {
+async fn unknown_agent_assignment_is_visible_but_untrusted_in_snapshot() {
+    let server = MockServer::start().await;
+    mount_agent_blob(&server, AGENT_FILE).await;
+    mount_snapshot_with_assignment(
+        &server,
+        TASK_BODY,
+        UNKNOWN_AGENT_ASSIGNMENT_BODY,
+        RESULT_BODY,
+    )
+    .await;
+
+    let (_, events) = run(&agent_provider(&server), request()).await;
+    assert_eq!(
+        node_property(&events, "IC_assignment", "agentId"),
+        &ElementValue::from(&json!("issue-risk-profiler"))
+    );
+    assert_eq!(
+        node_property(&events, "IC_assignment", "trusted"),
+        &ElementValue::Bool(false)
+    );
+    assert!(events.iter().any(|event| {
+        id(event) == "ASSIGNED_TO:IC_assignment:workgraph-agent:issue-risk-profiler"
+            && label(event) == "ASSIGNED_TO"
+    }));
+    assert!(!events
+        .iter()
+        .any(|event| id(event) == "workgraph-agent:issue-risk-profiler"));
+}
+
+#[tokio::test]
+async fn closed_task_assignment_is_visible_but_untrusted_in_snapshot() {
+    let server = MockServer::start().await;
+    mount_agent_blob(&server, AGENT_FILE).await;
+    mount_snapshot_with_comments(
+        &server,
+        TASK_BODY,
+        ASSIGNMENT_BODY,
+        RESULT_BODY,
+        "IC_closed_assignment",
+        ASSIGNMENT_BODY,
+    )
+    .await;
+
+    let (_, events) = run(&agent_provider(&server), request()).await;
+    assert_eq!(
+        node_property(&events, "IC_closed_assignment", "agentId"),
+        &ElementValue::from(&json!("issue-validator"))
+    );
+    assert_eq!(
+        node_property(&events, "IC_closed_assignment", "trusted"),
+        &ElementValue::Bool(false)
+    );
+    assert!(events.iter().any(|event| {
+        id(event) == "ASSIGNED_TO:IC_closed_assignment:workgraph-agent:issue-validator"
+            && label(event) == "ASSIGNED_TO"
+    }));
+    assert!(!events
+        .iter()
+        .any(|event| label(event) == "WorkGraphTaskLease"));
+}
+
+#[tokio::test]
+async fn malformed_agent_file_snapshots_an_error_and_no_agents() {
     for body in [
-        "version: 1\nworkers: []\n",
-        "version: 2\nworkers:\n  - workerId: w\n    agentProfile: issue-validator\n    slots: 1\n    leaseDuration: PT1M\n",
-        "workers: not-a-list\n",
-        "version: 1\nworkers:\n  - workerId: w\n    agentProfile: issue-validator\n    slots: 1\n    leaseDuration: PT1M\n  - workerId: w\n    agentProfile: issue-validator\n    slots: 1\n    leaseDuration: PT1M\n",
+        "version: 1\nagents: []\n",
+        "version: 2\nagents:\n  - agentId: w\n    slots: 1\n    leaseDuration: PT1M\n",
+        "agents: not-a-list\n",
+        "version: 1\nagents:\n  - agentId: w\n    slots: 1\n    leaseDuration: PT1M\n  - agentId: w\n    slots: 1\n    leaseDuration: PT1M\n",
     ] {
         let server = MockServer::start().await;
-        mount_worker_blob(&server, body).await;
+        mount_agent_blob(&server, body).await;
         mount_snapshot(&server, TASK_BODY, RESULT_BODY).await;
 
-        let (_, events) = run(&worker_provider(&server), request()).await;
+        let (_, events) = run(&agent_provider(&server), request()).await;
         assert!(
             events
                 .iter()
-                .any(|event| id(event) == "workgraph-error:worker-config"),
-            "expected a worker-config error for: {body}"
+                .any(|event| id(event) == "workgraph-error:agent-config"),
+            "expected an agent-config error for: {body}"
         );
         assert!(
             !events.iter().any(|event| matches!(
                 label(event),
-                "WorkGraphWorker" | "WorkGraphWorkerSlot" | "HAS_SLOT"
+                "WorkGraphAgent" | "WorkGraphAgentSlot" | "HAS_SLOT"
             )),
-            "a rejected worker file must never project a worker pool: {body}"
+            "a rejected agent file must never project an agent pool: {body}"
         );
         assert_eq!(
-            node_property(&events, "workgraph-error:worker-config", "errorKind"),
-            &ElementValue::from(&json!("invalid-workgraph-worker-config"))
+            node_property(&events, "workgraph-error:agent-config", "errorKind"),
+            &ElementValue::from(&json!("invalid-workgraph-agent-config"))
         );
         // The rest of the snapshot still completes.
         assert!(events.iter().any(|event| id(event) == "I_task_open"));
@@ -1002,21 +1052,21 @@ async fn malformed_worker_file_snapshots_an_error_and_no_workers() {
 }
 
 #[tokio::test]
-async fn missing_worker_file_is_a_configuration_error_not_an_empty_pool() {
+async fn missing_agent_file_is_a_configuration_error_not_an_empty_pool() {
     let server = MockServer::start().await;
-    mount_worker_file(&server, Value::Null).await;
+    mount_agent_file(&server, Value::Null).await;
     mount_snapshot(&server, TASK_BODY, RESULT_BODY).await;
 
-    let (_, events) = run(&worker_provider(&server), request()).await;
+    let (_, events) = run(&agent_provider(&server), request()).await;
     assert_eq!(
-        node_property(&events, "workgraph-error:worker-config", "errorCode"),
-        &ElementValue::from(&json!("worker-file-unavailable"))
+        node_property(&events, "workgraph-error:agent-config", "errorCode"),
+        &ElementValue::from(&json!("agent-file-unavailable"))
     );
-    assert!(!events.iter().any(|event| label(event) == "WorkGraphWorker"));
+    assert!(!events.iter().any(|event| label(event) == "WorkGraphAgent"));
 }
 
 #[tokio::test]
-async fn oversized_or_binary_worker_file_is_rejected() {
+async fn oversized_or_binary_agent_file_is_rejected() {
     for object in [
         json!({
             "__typename": "Blob", "oid": "o", "text": "version: 1\n",
@@ -1030,26 +1080,26 @@ async fn oversized_or_binary_worker_file_is_rejected() {
             "__typename": "Blob", "oid": "o", "text": Value::Null,
             "byteSize": 10, "isTruncated": false, "isBinary": true
         }),
-        // A tree at the configured path is not a worker file.
+        // A tree at the configured path is not an agent file.
         json!({ "__typename": "Tree" }),
     ] {
         let server = MockServer::start().await;
-        mount_worker_file(&server, object.clone()).await;
+        mount_agent_file(&server, object.clone()).await;
         mount_snapshot(&server, TASK_BODY, RESULT_BODY).await;
 
-        let (_, events) = run(&worker_provider(&server), request()).await;
+        let (_, events) = run(&agent_provider(&server), request()).await;
         assert!(
             events
                 .iter()
-                .any(|event| id(event) == "workgraph-error:worker-config"),
+                .any(|event| id(event) == "workgraph-error:agent-config"),
             "expected rejection for: {object}"
         );
-        assert!(!events.iter().any(|event| label(event) == "WorkGraphWorker"));
+        assert!(!events.iter().any(|event| label(event) == "WorkGraphAgent"));
     }
 }
 
 #[tokio::test]
-async fn unreadable_worker_file_fails_the_bootstrap() {
+async fn unreadable_agent_file_fails_the_bootstrap() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
@@ -1060,565 +1110,46 @@ async fn unreadable_worker_file_fails_the_bootstrap() {
 
     let context = BootstrapContext::new_minimal("server".to_string(), "gh".to_string());
     let (tx, _rx) = tokio::sync::mpsc::channel(512);
-    let error = worker_provider(&server)
+    let error = agent_provider(&server)
         .bootstrap(request(), &context, tx, None)
         .await
-        .expect_err("an unreadable worker file must fail the bootstrap");
+        .expect_err("an unreadable agent file must fail the bootstrap");
     let rendered = format!("{error:#}");
     assert!(
-        rendered.contains("worker file"),
+        rendered.contains("agent file"),
         "unexpected error: {rendered}"
     );
 }
 
 #[tokio::test]
-async fn omitted_worker_config_snapshots_no_worker_elements() {
+async fn omitted_agent_config_snapshots_no_agent_elements() {
     let server = MockServer::start().await;
     mount_snapshot(&server, TASK_BODY, RESULT_BODY).await;
 
     let (_, events) = run(&provider(&server, vec![]), request()).await;
     assert!(!events.iter().any(|event| matches!(
         label(event),
-        "WorkGraphWorker" | "WorkGraphWorkerSlot" | "HAS_SLOT"
+        "WorkGraphAgent" | "WorkGraphAgentSlot" | "HAS_SLOT"
     )));
     assert!(!events
         .iter()
-        .any(|event| id(event) == "workgraph-error:worker-config"));
+        .any(|event| id(event) == "workgraph-error:agent-config"));
     assert!(events.iter().any(|event| id(event) == "I_task_open"));
 }
 
 #[tokio::test]
-async fn requested_labels_filter_the_worker_snapshot() {
+async fn requested_labels_filter_the_agent_snapshot() {
     let server = MockServer::start().await;
-    mount_worker_blob(&server, WORKER_FILE).await;
+    mount_agent_blob(&server, AGENT_FILE).await;
     mount_snapshot(&server, TASK_BODY, RESULT_BODY).await;
 
     let request = BootstrapRequest {
-        node_labels: vec!["WorkGraphWorkerSlot".to_string()],
+        node_labels: vec!["WorkGraphAgentSlot".to_string()],
         ..request()
     };
-    let (_, events) = run(&worker_provider(&server), request).await;
+    let (_, events) = run(&agent_provider(&server), request).await;
     assert!(!events.is_empty());
     assert!(events
         .iter()
-        .all(|event| label(event) == "WorkGraphWorkerSlot"));
-}
-
-#[tokio::test]
-async fn bootstrap_folds_the_lease_lifecycle_without_inventing_a_verdict() {
-    let server = MockServer::start().await;
-    mount_worker_blob(&server, WORKER_FILE).await;
-    mount_query(
-        &server,
-        &["avatar_url: avatarUrl"],
-        json!({"organization":org()}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["repositories(first"],
-        json!({"organization":{"repositories":connection(vec![repo("widgets")],false,None)}}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["states: [OPEN]", "type: issueType"],
-        json!({"repository":{"issues":connection(vec![],false,None)}}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["filterBy: {type: $issueType}", "\"state\":\"OPEN\""],
-        json!({"repository":{"issues":connection(
-            vec![task("I_task_open","OPEN",TASK_BODY,3)],false,None
-        )}}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["filterBy: {type: $issueType}", "\"state\":\"CLOSED\""],
-        json!({"repository":{"issues":connection(vec![],false,None)}}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["pullRequests(first"],
-        json!({"repository":{"pullRequests":connection(vec![],false,None)}}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["... on Issue {", "\"id\":\"I_task_open\""],
-        json!({"node":{"comments":connection(vec![
-            comment("IC_assignment",ASSIGNMENT_V2_BODY),
-            comment("IC_lease",LEASE_BODY),
-            comment("IC_result",RESULT_V2_BODY)
-        ],false,None)}}),
-        Some(1),
-    )
-    .await;
-
-    let (_, events) = run(&worker_provider(&server), request()).await;
-
-    // The v2 Assignment queues the task on its exact worker.
-    assert_eq!(
-        node_property(&events, "IC_assignment", "workerId"),
-        &ElementValue::from(&json!("validator-1"))
-    );
-    assert_eq!(
-        node_property(&events, "IC_assignment", "version"),
-        &ElementValue::Integer(2)
-    );
-    assert!(events.iter().any(|event| label(event) == "ASSIGNED_TO"));
-
-    // The Lease binds its task and its configured slot.
-    assert!(events.iter().any(|event| label(event) == "LEASE_FOR"));
-    assert!(events.iter().any(|event| label(event) == "LEASES_SLOT"));
-    assert!(events.iter().any(|event| label(event) == "LEASE_ANCHOR"));
-    assert!(events
-        .iter()
-        .any(|event| label(event) == "RESULT_FOR_LEASE"));
-
-    // Exactly one lease anchor exists. The Lease opened it and the trusted
-    // Result closed it, and the folded snapshot carries the same final
-    // lifecycle the live Source converges to.
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| id(event) == LEASE_ANCHOR_ID)
-            .count(),
-        1
-    );
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "isActive"),
-        &ElementValue::Bool(false)
-    );
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "endReason"),
-        &ElementValue::from(&json!("result"))
-    );
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "endCommentNodeId"),
-        &ElementValue::from(&json!("IC_result"))
-    );
-    // The anchor holds only its own key; every acquisition fact stays on the
-    // Lease comment node, where exactly one writer authored it.
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "taskNodeId"),
-        &ElementValue::from(&json!("I_task_open"))
-    );
-    for acquisition in ["workerId", "slotId", "acquiredAt", "leaseCommentNodeId"] {
-        assert!(
-            node_property_opt(&events, LEASE_ANCHOR_ID, acquisition).is_none(),
-            "the anchor must not carry {acquisition}"
-        );
-        assert!(
-            node_property_opt(&events, "IC_lease", acquisition).is_some()
-                || acquisition == "leaseCommentNodeId",
-            "the Lease node must carry {acquisition}"
-        );
-    }
-    assert_eq!(
-        node_property(&events, "IC_lease", "trusted"),
-        &ElementValue::Bool(true)
-    );
-    assert_eq!(
-        node_property(&events, "IC_result", "trusted"),
-        &ElementValue::Bool(true)
-    );
-
-    // History is retained: the Lease and the Result remain their own nodes.
-    assert!(events.iter().any(|event| id(event) == "IC_lease"));
-    assert!(events.iter().any(|event| id(event) == "IC_result"));
-}
-
-#[tokio::test]
-async fn bootstrap_and_live_conversion_agree_on_worker_queue_state() {
-    let server = MockServer::start().await;
-    mount_worker_blob(&server, WORKER_FILE).await;
-    mount_snapshot(&server, TASK_BODY, RESULT_BODY).await;
-    let (_, events) = run(&worker_provider(&server), request()).await;
-
-    // The same worker file, projected by the shared mapper the live Source
-    // uses, yields exactly the same worker element identities and properties.
-    let file = parse_worker_file(WORKER_FILE).unwrap();
-    let content = WorkerFileContent {
-        text: WORKER_FILE.to_string(),
-        oid: "blob-oid".to_string(),
-    };
-    let live = worker_changes(
-        "gh",
-        1,
-        &worker_location(),
-        &WorkerProjection::Loaded {
-            file: &file,
-            content: &content,
-        },
-        &BTreeMap::new(),
-        &BTreeMap::new(),
-    );
-
-    let live_ids: Vec<String> = live
-        .iter()
-        .filter(|change| !matches!(change, SourceChange::Delete { .. }))
-        .map(|change| change.get_reference().element_id.to_string())
-        .collect();
-    let snapshot_ids: Vec<String> = events
-        .iter()
-        .filter(|event| {
-            matches!(
-                label(event),
-                "WorkGraphWorker" | "WorkGraphWorkerSlot" | "HAS_SLOT"
-            )
-        })
-        .map(|event| id(event).to_string())
-        .collect();
-    assert_eq!(live_ids, snapshot_ids);
-
-    for key in [
-        "workerId",
-        "agentProfile",
-        "configuredSlotCount",
-        "leaseDuration",
-        "leaseDurationSeconds",
-        "configRepository",
-        "configRef",
-        "configPath",
-        "configBlobOid",
-        "configDigest",
-    ] {
-        let live_value = live
-            .iter()
-            .find_map(|change| match change {
-                SourceChange::Insert {
-                    element:
-                        Element::Node {
-                            metadata,
-                            properties,
-                        },
-                }
-                | SourceChange::Update {
-                    element:
-                        Element::Node {
-                            metadata,
-                            properties,
-                        },
-                } if metadata.reference.element_id.as_ref() == "workgraph-worker:validator-1" => {
-                    properties.get(key)
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("live projection missing {key}"));
-        assert_eq!(
-            node_property(&events, "workgraph-worker:validator-1", key),
-            live_value,
-            "bootstrap and live disagree on {key}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn repeated_bootstraps_produce_identical_worker_snapshots() {
-    let snapshot = |events: Vec<BootstrapEvent>| -> Vec<(String, String)> {
-        events
-            .iter()
-            .map(|event| (label(event).to_string(), id(event).to_string()))
-            .collect()
-    };
-
-    let server = MockServer::start().await;
-    mount_worker_blob(&server, WORKER_FILE).await;
-    mount_snapshot(&server, TASK_BODY, RESULT_BODY).await;
-    let (_, first) = run(&worker_provider(&server), request()).await;
-
-    let server = MockServer::start().await;
-    mount_worker_blob(&server, WORKER_FILE).await;
-    mount_snapshot(&server, TASK_BODY, RESULT_BODY).await;
-    let (_, second) = run(&worker_provider(&server), request()).await;
-
-    assert_eq!(snapshot(first), snapshot(second));
-}
-
-#[tokio::test]
-async fn an_untrusted_end_cannot_forge_lease_state_in_a_snapshot() {
-    // The bootstrap path must apply exactly the same trust gate as the live
-    // Source: a drive-by Result naming a real leaseId must not appear as a
-    // completed lease in the snapshot.
-    let server = MockServer::start().await;
-    mount_worker_blob(&server, WORKER_FILE).await;
-    mount_query(
-        &server,
-        &["avatar_url: avatarUrl"],
-        json!({"organization":org()}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["repositories(first"],
-        json!({"organization":{"repositories":connection(vec![repo("widgets")],false,None)}}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["states: [OPEN]", "type: issueType"],
-        json!({"repository":{"issues":connection(vec![],false,None)}}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["filterBy: {type: $issueType}", "\"state\":\"OPEN\""],
-        json!({"repository":{"issues":connection(
-            vec![task("I_task_open","OPEN",TASK_BODY,2)],false,None
-        )}}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["filterBy: {type: $issueType}", "\"state\":\"CLOSED\""],
-        json!({"repository":{"issues":connection(vec![],false,None)}}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["pullRequests(first"],
-        json!({"repository":{"pullRequests":connection(vec![],false,None)}}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["... on Issue {", "\"id\":\"I_task_open\""],
-        json!({"node":{"comments":connection(vec![
-            comment("IC_lease",LEASE_BODY),
-            comment_by("IC_drive_by",RESULT_V2_BODY,"attacker")
-        ],false,None)}}),
-        Some(1),
-    )
-    .await;
-
-    let (_, events) = run(&worker_provider(&server), request()).await;
-
-    // The lease is snapshotted as acquired and still active.
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "isActive"),
-        &ElementValue::Bool(true)
-    );
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "endReason"),
-        &ElementValue::from(&json!("none"))
-    );
-    // The untrusted Result is retained for visibility, flagged, and bound to
-    // nothing.
-    assert_eq!(
-        node_property(&events, "IC_drive_by", "trusted"),
-        &ElementValue::Bool(false)
-    );
-    assert!(!events
-        .iter()
-        .any(|event| label(event) == "RESULT_FOR_LEASE"));
-}
-
-/// Mount a task-comment snapshot and run a worker-enabled bootstrap.
-async fn snapshot_with_task_comments(comments: Vec<Value>) -> Vec<BootstrapEvent> {
-    let server = MockServer::start().await;
-    mount_worker_blob(&server, WORKER_FILE).await;
-    mount_query(
-        &server,
-        &["avatar_url: avatarUrl"],
-        json!({"organization":org()}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["repositories(first"],
-        json!({"organization":{"repositories":connection(vec![repo("widgets")],false,None)}}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["states: [OPEN]", "type: issueType"],
-        json!({"repository":{"issues":connection(vec![],false,None)}}),
-        Some(1),
-    )
-    .await;
-    let count = comments.len() as u64;
-    mount_query(
-        &server,
-        &["filterBy: {type: $issueType}", "\"state\":\"OPEN\""],
-        json!({"repository":{"issues":connection(
-            vec![task("I_task_open","OPEN",TASK_BODY,count)],false,None
-        )}}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["filterBy: {type: $issueType}", "\"state\":\"CLOSED\""],
-        json!({"repository":{"issues":connection(vec![],false,None)}}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["pullRequests(first"],
-        json!({"repository":{"pullRequests":connection(vec![],false,None)}}),
-        Some(1),
-    )
-    .await;
-    mount_query(
-        &server,
-        &["... on Issue {", "\"id\":\"I_task_open\""],
-        json!({"node":{"comments":connection(comments,false,None)}}),
-        Some(1),
-    )
-    .await;
-    run(&worker_provider(&server), request()).await.1
-}
-
-#[tokio::test]
-async fn a_bootstrap_snapshot_folds_current_comments_to_the_same_lifecycle() {
-    // A Lease plus a trusted Result: the snapshot reflects the ended lease.
-    let events = snapshot_with_task_comments(vec![
-        comment("IC_lease", LEASE_BODY),
-        comment("IC_result", RESULT_V2_BODY),
-    ])
-    .await;
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "isActive"),
-        &ElementValue::Bool(false)
-    );
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "endCommentNodeId"),
-        &ElementValue::from(&json!("IC_result"))
-    );
-
-    // The same lease with the Result no longer present is active again: a
-    // snapshot is current state, not accumulated history.
-    let events = snapshot_with_task_comments(vec![comment("IC_lease", LEASE_BODY)]).await;
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "isActive"),
-        &ElementValue::Bool(true)
-    );
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "endReason"),
-        &ElementValue::from(&json!("none"))
-    );
-
-    // Duplicate acquisitions fail closed in a snapshot too.
-    let second_lease = LEASE_BODY.replace("validator-1/1", "validator-1/2");
-    let events = snapshot_with_task_comments(vec![
-        comment("IC_lease", LEASE_BODY),
-        comment("IC_lease_2", &second_lease),
-    ])
-    .await;
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "isActive"),
-        &ElementValue::Bool(false)
-    );
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "endReason"),
-        &ElementValue::from(&json!("conflict"))
-    );
-
-    // An end with no acquisition materializes no anchor at all.
-    let events = snapshot_with_task_comments(vec![comment("IC_result", RESULT_V2_BODY)]).await;
-    assert!(!events
-        .iter()
-        .any(|event| label(event) == "WorkGraphTaskLeaseAnchor"));
-}
-
-#[tokio::test]
-async fn a_bootstrap_untrusted_editor_cannot_forge_a_lifecycle_artifact() {
-    // Bootstrap sees GitHub's `editor` rather than a webhook `sender`, and must
-    // apply the same rule: an untrusted editor removes trust.
-    let mut edited = comment("IC_lease", LEASE_BODY);
-    edited["editor"] = json!({"login": "attacker", "node_id": "U_attacker"});
-    let events = snapshot_with_task_comments(vec![edited]).await;
-    assert_eq!(
-        node_property(&events, "IC_lease", "trusted"),
-        &ElementValue::Bool(false)
-    );
-    assert_eq!(
-        node_property(&events, "IC_lease", "editorLogin"),
-        &ElementValue::from(&json!("attacker"))
-    );
-    assert!(!events
-        .iter()
-        .any(|event| label(event) == "WorkGraphTaskLeaseAnchor"));
-
-    // An edit by the trusted author is accepted.
-    let mut edited = comment("IC_lease", LEASE_BODY);
-    edited["editor"] = json!({"login": "bot", "node_id": "U_bot"});
-    let events = snapshot_with_task_comments(vec![edited]).await;
-    assert_eq!(
-        node_property(&events, "IC_lease", "trusted"),
-        &ElementValue::Bool(true)
-    );
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "isActive"),
-        &ElementValue::Bool(true)
-    );
-}
-
-#[tokio::test]
-async fn bootstrap_and_live_agree_on_the_same_current_comments() {
-    // The bootstrapper's fold and the live Source's ledger must project the
-    // same anchor for the same set of current comments.
-    let comments = vec![
-        comment("IC_lease", LEASE_BODY),
-        comment("IC_result", RESULT_V2_BODY),
-    ];
-    let events = snapshot_with_task_comments(comments).await;
-
-    let mut ledger = LeaseLedger::new();
-    let trust = bootstrap_lease_trust();
-    for (comment_id, body) in [("IC_lease", LEASE_BODY), ("IC_result", RESULT_V2_BODY)] {
-        let payload = json!({
-            "action": "created",
-            "organization": org(),
-            "repository": repo("widgets"),
-            "issue": task("I_task_open", "OPEN", TASK_BODY, 2),
-            "comment": comment(comment_id, body),
-        });
-        let conversion = Converter::new("gh", "acme", &task_type(), 1)
-            .with_lease_trust(&trust)
-            .convert("issue_comment", &payload)
-            .unwrap()
-            .unwrap();
-        for intent in &conversion.lifecycle {
-            ledger.apply(intent);
-        }
-    }
-    let live = ledger
-        .project(LEASE_ANCHOR_ID)
-        .expect("the live ledger projects the anchor");
-
-    assert!(!live.is_active);
-    assert_eq!(live.end_reason, "result");
-    assert_eq!(live.end_comment_node_id.as_deref(), Some("IC_result"));
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "isActive"),
-        &ElementValue::Bool(live.is_active)
-    );
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "endReason"),
-        &ElementValue::from(&json!(live.end_reason))
-    );
-    assert_eq!(
-        node_property(&events, LEASE_ANCHOR_ID, "endCommentNodeId"),
-        &ElementValue::from(&json!(live.end_comment_node_id))
-    );
+        .all(|event| label(event) == "WorkGraphAgentSlot"));
 }

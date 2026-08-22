@@ -13,15 +13,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod agent_client;
+pub mod agent_sync;
+pub mod agents;
 pub mod config;
 pub mod descriptor;
 pub mod lease_ledger;
 pub mod mapping;
 pub mod source;
 pub mod webhook;
-pub mod worker_client;
-pub mod worker_sync;
-pub mod workers;
 pub mod workgraph;
 
 pub use config::GitHubWorkGraphSourceConfig;

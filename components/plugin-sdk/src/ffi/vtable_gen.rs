@@ -914,6 +914,23 @@ pub fn build_source_vtable<T: Source + 'static>(
         })
     }
 
+    extern "C" fn on_subscriptions_complete_fn<T: Source + 'static>(
+        state: *mut c_void,
+    ) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const SourceWrapper<T>) };
+            let handle = (w.runtime_handle)().handle().clone();
+            let ptr = SendPtr(state as *const SourceWrapper<T>);
+            match dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { ptr.as_ref() };
+                inner.inner.on_subscriptions_complete().await
+            }) {
+                Ok(()) => FfiResult::ok(),
+                Err(e) => FfiResult::err(e.to_string()),
+            }
+        })
+    }
+
     let cached_id = source.id().to_string();
     let cached_type_name = source.type_name().to_string();
 
@@ -950,6 +967,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         set_bootstrap_provider_fn: set_bootstrap_provider_fn::<T>,
         supports_replay_fn: supports_replay_fn::<T>,
         remove_position_handle_fn: remove_position_handle_fn::<T>,
+        on_subscriptions_complete_fn: on_subscriptions_complete_fn::<T>,
         drop_fn: drop_fn::<T>,
     }
 }
@@ -1297,6 +1315,21 @@ pub fn build_source_vtable_from_boxed(
         })
     }
 
+    extern "C" fn on_subscriptions_complete_fn(state: *mut c_void) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const DynSourceWrapper) };
+            let handle = (w.runtime_handle)().handle().clone();
+            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+            match dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { inner_ptr.as_ref() };
+                inner.inner.on_subscriptions_complete().await
+            }) {
+                Ok(()) => FfiResult::ok(),
+                Err(e) => FfiResult::err(e.to_string()),
+            }
+        })
+    }
+
     let cached_id = source.id().to_string();
     let cached_type_name = source.type_name().to_string();
 
@@ -1333,6 +1366,7 @@ pub fn build_source_vtable_from_boxed(
         set_bootstrap_provider_fn,
         supports_replay_fn,
         remove_position_handle_fn,
+        on_subscriptions_complete_fn,
         drop_fn,
     }
 }
@@ -3880,5 +3914,303 @@ mod snapshot_stream_tests {
         );
         assert_eq!(rows[0].0, 0, "bare row gets the unknown signature 0");
         assert_eq!(rows[0].1, serde_json::json!({"id": 1}));
+    }
+}
+
+/// Focused vtable tests for `on_subscriptions_complete_fn` — the new slot added
+/// in ABI 0.15.0 to route the host lifecycle signal to plugin sources.
+///
+/// These tests exercise only the vtable machinery (build → call → verify), not
+/// the full cdylib loading path.  They complement the `#[ignore]`
+/// integration tests in `components/host-sdk/tests/integration_test.rs`.
+#[cfg(test)]
+mod source_subscriptions_complete_vtable_tests {
+    use super::super::callbacks::FfiLifecycleEventType;
+    use super::*;
+    use std::any::Any;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, OnceLock};
+
+    // ---- Static Tokio runtime for the vtable dispatch path ------------------
+
+    fn test_rt() -> &'static tokio::runtime::Runtime {
+        static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        RT.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("test runtime")
+        })
+    }
+
+    // No-op lifecycle emitter for tests (plain fn, matching LifecycleEmitterFn alias).
+    fn noop_lifecycle(_id: &str, _ev: FfiLifecycleEventType, _details: &str) {}
+
+    // No-op async executor (not reached by on_subscriptions_complete_fn).
+    extern "C" fn noop_executor(_future_ptr: *mut std::ffi::c_void) -> *mut std::ffi::c_void {
+        std::ptr::null_mut()
+    }
+
+    // ---- Minimal Source stubs -----------------------------------------------
+
+    /// Source that counts how many times `on_subscriptions_complete` is called.
+    struct CountingSource {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl drasi_lib::sources::Source for CountingSource {
+        fn id(&self) -> &str {
+            "counting"
+        }
+        fn type_name(&self) -> &str {
+            "counting"
+        }
+        fn auto_start(&self) -> bool {
+            false
+        }
+        fn dispatch_mode(&self) -> drasi_lib::DispatchMode {
+            drasi_lib::DispatchMode::Broadcast
+        }
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+        async fn start(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn status(&self) -> drasi_lib::ComponentStatus {
+            drasi_lib::ComponentStatus::Stopped
+        }
+        async fn subscribe(
+            &self,
+            _settings: drasi_lib::config::SourceSubscriptionSettings,
+        ) -> anyhow::Result<drasi_lib::channels::SubscriptionResponse> {
+            unimplemented!()
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        async fn initialize(&self, _ctx: drasi_lib::context::SourceRuntimeContext) {}
+        async fn on_subscriptions_complete(&self) -> anyhow::Result<()> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Source that returns an error from `on_subscriptions_complete`.
+    struct ErrorSource;
+
+    #[async_trait::async_trait]
+    impl drasi_lib::sources::Source for ErrorSource {
+        fn id(&self) -> &str {
+            "error-source"
+        }
+        fn type_name(&self) -> &str {
+            "error-source"
+        }
+        fn auto_start(&self) -> bool {
+            false
+        }
+        fn dispatch_mode(&self) -> drasi_lib::DispatchMode {
+            drasi_lib::DispatchMode::Broadcast
+        }
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+        async fn start(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn status(&self) -> drasi_lib::ComponentStatus {
+            drasi_lib::ComponentStatus::Stopped
+        }
+        async fn subscribe(
+            &self,
+            _settings: drasi_lib::config::SourceSubscriptionSettings,
+        ) -> anyhow::Result<drasi_lib::channels::SubscriptionResponse> {
+            unimplemented!()
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        async fn initialize(&self, _ctx: drasi_lib::context::SourceRuntimeContext) {}
+        async fn on_subscriptions_complete(&self) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("source fence release failed"))
+        }
+    }
+
+    /// Source that panics inside `on_subscriptions_complete`.
+    struct PanickingSource;
+
+    #[async_trait::async_trait]
+    impl drasi_lib::sources::Source for PanickingSource {
+        fn id(&self) -> &str {
+            "panicking"
+        }
+        fn type_name(&self) -> &str {
+            "panicking"
+        }
+        fn auto_start(&self) -> bool {
+            false
+        }
+        fn dispatch_mode(&self) -> drasi_lib::DispatchMode {
+            drasi_lib::DispatchMode::Broadcast
+        }
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+        async fn start(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn status(&self) -> drasi_lib::ComponentStatus {
+            drasi_lib::ComponentStatus::Stopped
+        }
+        async fn subscribe(
+            &self,
+            _settings: drasi_lib::config::SourceSubscriptionSettings,
+        ) -> anyhow::Result<drasi_lib::channels::SubscriptionResponse> {
+            unimplemented!()
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        async fn initialize(&self, _ctx: drasi_lib::context::SourceRuntimeContext) {}
+        async fn on_subscriptions_complete(&self) -> anyhow::Result<()> {
+            panic!("plugin panic in on_subscriptions_complete");
+        }
+    }
+
+    // ---- Helpers ------------------------------------------------------------
+
+    /// Send-safe raw-pointer wrapper for test use.
+    struct RawStatePtr(*mut std::ffi::c_void);
+    unsafe impl Send for RawStatePtr {}
+    impl RawStatePtr {
+        fn as_ptr(&self) -> *mut std::ffi::c_void {
+            self.0
+        }
+    }
+
+    /// Build a typed vtable, call `on_subscriptions_complete_fn` from a new
+    /// thread (mirroring the SourceProxy pattern), return the FfiResult.
+    fn call_on_subscriptions_complete<T: drasi_lib::sources::Source + 'static>(
+        source: T,
+    ) -> FfiResult {
+        let vtable = build_source_vtable(source, noop_executor, noop_lifecycle, test_rt);
+        let state = RawStatePtr(vtable.state);
+        let complete_fn = vtable.on_subscriptions_complete_fn;
+        let drop_fn = vtable.drop_fn;
+        // Call from a separate thread, exactly as SourceProxy does.
+        let result = std::thread::spawn(move || (complete_fn)(state.as_ptr()))
+            .join()
+            .expect("thread should not abort");
+        // Explicitly free the vtable state (SourceProxy's Drop does this normally).
+        (drop_fn)(vtable.state);
+        result
+    }
+
+    // ---- Tests --------------------------------------------------------------
+
+    /// Exactly one call to `on_subscriptions_complete` reaches the source via
+    /// the typed vtable adapter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn typed_vtable_routes_one_call_to_source() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let source = CountingSource {
+            call_count: Arc::clone(&counter),
+        };
+        let result = call_on_subscriptions_complete(source);
+        let ok: Result<(), String> = unsafe { result.into_result() };
+        assert!(ok.is_ok(), "typed vtable call must succeed: {ok:?}");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "on_subscriptions_complete must be called exactly once"
+        );
+    }
+
+    /// A plugin panic in `on_subscriptions_complete` is caught by
+    /// `catch_panic_ffi` and surfaced as an `FfiResult` error rather than
+    /// aborting the process.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn typed_vtable_surfaces_plugin_panic_as_ffi_error() {
+        let result = call_on_subscriptions_complete(PanickingSource);
+        // catch_panic_ffi converts a panic to an error FfiResult — not abort.
+        let r: Result<(), String> = unsafe { result.into_result() };
+        assert!(
+            r.is_err(),
+            "panic inside on_subscriptions_complete must surface as FfiResult error"
+        );
+    }
+
+    /// A source returning `Err` surfaces as `FfiResult` error via the typed adapter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn typed_vtable_converts_source_error_to_ffi_error() {
+        let result = call_on_subscriptions_complete(ErrorSource);
+        let r: Result<(), String> = unsafe { result.into_result() };
+        assert!(
+            r.is_err(),
+            "anyhow::Err from on_subscriptions_complete must surface as FfiResult error"
+        );
+        let msg = r.unwrap_err();
+        assert!(
+            msg.contains("source fence release failed"),
+            "FfiResult error message must contain source error text, got: {msg}"
+        );
+    }
+
+    /// A source returning `Err` surfaces as `FfiResult` error via the boxed adapter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boxed_vtable_converts_source_error_to_ffi_error() {
+        let source: Box<dyn drasi_lib::sources::Source + 'static> = Box::new(ErrorSource);
+        let vtable = build_source_vtable_from_boxed(source, noop_executor, noop_lifecycle, test_rt);
+        let state = RawStatePtr(vtable.state);
+        let complete_fn = vtable.on_subscriptions_complete_fn;
+        let drop_fn = vtable.drop_fn;
+        let result = std::thread::spawn(move || (complete_fn)(state.as_ptr()))
+            .join()
+            .expect("thread should not abort");
+        (drop_fn)(vtable.state);
+        let r: Result<(), String> = unsafe { result.into_result() };
+        assert!(
+            r.is_err(),
+            "anyhow::Err from on_subscriptions_complete must surface as FfiResult error (boxed path)"
+        );
+    }
+
+    /// Exactly one call to `on_subscriptions_complete` reaches the source via
+    /// the boxed (`Box<dyn Source>`) vtable adapter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boxed_vtable_routes_one_call_to_source() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let source: Box<dyn drasi_lib::sources::Source + 'static> = Box::new(CountingSource {
+            call_count: Arc::clone(&counter),
+        });
+        let vtable = build_source_vtable_from_boxed(source, noop_executor, noop_lifecycle, test_rt);
+        let state = RawStatePtr(vtable.state);
+        let complete_fn = vtable.on_subscriptions_complete_fn;
+        let drop_fn = vtable.drop_fn;
+        let result = std::thread::spawn(move || (complete_fn)(state.as_ptr()))
+            .join()
+            .expect("thread should not abort");
+        // Explicitly free the vtable state.
+        (drop_fn)(vtable.state);
+        let ok: Result<(), String> = unsafe { result.into_result() };
+        assert!(ok.is_ok(), "boxed vtable call must succeed: {ok:?}");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "on_subscriptions_complete must be called exactly once (boxed path)"
+        );
     }
 }

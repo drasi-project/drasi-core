@@ -429,6 +429,22 @@ impl Source for SourceProxy {
         }
     }
 
+    async fn on_subscriptions_complete(&self) -> anyhow::Result<()> {
+        match call_on_subscriptions_complete_slot(
+            self.vtable.state,
+            self.vtable.on_subscriptions_complete_fn,
+        ) {
+            Ok(()) => {
+                log::debug!("SourceProxy::on_subscriptions_complete() completed via FFI");
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("SourceProxy::on_subscriptions_complete() FFI error: {e}");
+                Err(anyhow::anyhow!(e))
+            }
+        }
+    }
+
     async fn deprovision(&self) -> anyhow::Result<()> {
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let deprovision_fn = self.vtable.deprovision_fn;
@@ -585,6 +601,26 @@ impl Drop for SourceProxy {
 }
 
 // ============================================================================
+// Private helpers
+// ============================================================================
+
+/// Call the `on_subscriptions_complete_fn` slot through the FFI boundary.
+///
+/// Dispatches on a new OS thread (matching the SourceProxy call pattern) and
+/// converts the `FfiResult` into a `Result<(), String>`.  Thread join failure
+/// (plugin panic/abort) is treated as an error so the caller can log it.
+fn call_on_subscriptions_complete_slot(
+    state: *mut c_void,
+    complete_fn: extern "C" fn(*mut c_void) -> drasi_plugin_sdk::ffi::FfiResult,
+) -> Result<(), String> {
+    let state = drasi_plugin_sdk::ffi::SendMutPtr(state);
+    std::thread::spawn(move || (complete_fn)(state.as_ptr()))
+        .join()
+        .map_err(|_| "thread panicked".to_string())
+        .and_then(|r| unsafe { r.into_result() })
+}
+
+// ============================================================================
 // SourcePluginProxy — wraps SourcePluginVtable into SourcePluginDescriptor
 // ============================================================================
 
@@ -687,5 +723,66 @@ impl Drop for SourcePluginProxy {
         let drop_fn = self.vtable.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         super::drop_worker::execute_drop_fn(drop_fn, state);
+    }
+}
+
+// ============================================================================
+// Unit tests for the on_subscriptions_complete slot dispatch
+// ============================================================================
+//
+// These tests exercise `call_on_subscriptions_complete_slot` directly with
+// synthetic `extern "C"` fn pointers — no cdylib required.  They prove:
+//   1. The fn pointer is called exactly once and the helper returns `Ok(())`.
+//   2. An `FfiResult` error returned by the plugin surfaces as `Err(msg)` from
+//      the helper, which `SourceProxy::on_subscriptions_complete` propagates to
+//      the caller as `anyhow::Err` (the trait now returns `anyhow::Result<()>`).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // --- success path --------------------------------------------------------
+
+    static SUCCESS_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn success_fn(_state: *mut c_void) -> drasi_plugin_sdk::ffi::FfiResult {
+        SUCCESS_CALLS.fetch_add(1, Ordering::SeqCst);
+        drasi_plugin_sdk::ffi::FfiResult::ok()
+    }
+
+    #[test]
+    fn slot_is_called_exactly_once_and_returns_ok() {
+        SUCCESS_CALLS.store(0, Ordering::SeqCst);
+        let result = call_on_subscriptions_complete_slot(std::ptr::null_mut(), success_fn);
+        assert_eq!(
+            SUCCESS_CALLS.load(Ordering::SeqCst),
+            1,
+            "on_subscriptions_complete_fn must be called exactly once"
+        );
+        assert!(result.is_ok(), "success fn must yield Ok: {result:?}");
+    }
+
+    // --- error path ----------------------------------------------------------
+
+    extern "C" fn error_fn(_state: *mut c_void) -> drasi_plugin_sdk::ffi::FfiResult {
+        drasi_plugin_sdk::ffi::FfiResult::err("plugin signalled an error".to_string())
+    }
+
+    /// The helper surfaces the FfiResult error and the proxy propagates it as
+    /// `anyhow::Err` to the caller (rather than logging and swallowing).
+    #[test]
+    fn ffi_error_is_propagated_to_caller() {
+        let result = call_on_subscriptions_complete_slot(std::ptr::null_mut(), error_fn);
+        assert!(
+            result.is_err(),
+            "FfiResult error must be surfaced as Err to the proxy caller"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("plugin signalled an error"),
+            "error message must be preserved in the propagated error: {msg}"
+        );
     }
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::workers::WorkerFileLocation;
+use crate::agents::AgentFileLocation;
 use anyhow::{ensure, Result};
 use drasi_lib::wal::CapacityPolicy;
 use drasi_lib::DurabilityConfig;
@@ -152,6 +152,7 @@ pub struct WebhookConfig {
     pub port: u16,
     pub path: String,
     pub secret: String,
+    pub lease_validation_token: String,
     pub body_limit_bytes: usize,
 }
 
@@ -162,6 +163,7 @@ impl Default for WebhookConfig {
             port: 8080,
             path: "/webhook".to_string(),
             secret: String::new(),
+            lease_validation_token: String::new(),
             body_limit_bytes: DEFAULT_BODY_LIMIT_BYTES,
         }
     }
@@ -201,30 +203,19 @@ impl TrustedIdentity {
     }
 }
 
-/// The identities allowed to author lease lifecycle artifacts.
-///
-/// The workflow's definition of an active Lease is stated in terms of *trusted*
-/// artifacts: a Lease is active until a trusted Result or a trusted Expiration
-/// ends it. A Source that publishes a derived `isActive` therefore has to know
-/// which identities are trusted, exactly as it already has to know the
-/// configured organization, repository allowlist, and task Issue Type. Without
-/// this configuration nothing is trusted and no lease lifecycle is published at
-/// all, so the failure mode is closed rather than forged.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LeaseTrust {
-    /// Identities allowed to acquire a Lease (the workqueue dispatcher).
+    #[serde(rename = "assigners")]
     pub dispatchers: Vec<TrustedIdentity>,
-    /// Identities allowed to end a Lease with a `WorkGraphTaskResult/v2` or a
-    /// `WorkGraphTaskLeaseExpiration/v1`.
     pub reporters: Vec<TrustedIdentity>,
 }
 
 impl LeaseTrust {
     pub fn validate(&self) -> Result<()> {
         for (name, identities) in [
-            ("leaseTrust.dispatchers", &self.dispatchers),
-            ("leaseTrust.reporters", &self.reporters),
+            ("protocolTrust.assigners", &self.dispatchers),
+            ("protocolTrust.reporters", &self.reporters),
         ] {
             ensure!(
                 !identities.is_empty(),
@@ -242,14 +233,12 @@ impl LeaseTrust {
         Ok(())
     }
 
-    /// True when `author` is a configured dispatcher.
-    pub fn is_dispatcher(&self, author: Option<&Value>) -> bool {
+    pub fn is_assigner(&self, author: Option<&Value>) -> bool {
         self.dispatchers
             .iter()
             .any(|identity| identity.matches(author))
     }
 
-    /// True when `author` is a configured lifecycle reporter.
     pub fn is_reporter(&self, author: Option<&Value>) -> bool {
         self.reporters
             .iter()
@@ -259,43 +248,43 @@ impl LeaseTrust {
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WorkerConfig {
-    /// `owner/name` of the repository holding the worker file.
+pub struct AgentConfig {
+    /// `owner/name` of the repository holding the agent file.
     pub repository: String,
     /// The exact git ref (normally a branch such as `main`).
     pub r#ref: String,
-    /// The exact repository-relative path of the worker file.
+    /// The exact repository-relative path of the agent file.
     pub path: String,
-    /// A read-only GitHub credential used only to read the worker file. It is
+    /// A read-only GitHub credential used only to read the agent file. It is
     /// the same bearer-token mechanism the bootstrapper already uses.
     pub token: String,
     /// GraphQL API endpoint. Override for GitHub Enterprise Server.
-    #[serde(default = "default_worker_api_base_url")]
+    #[serde(default = "default_agent_api_base_url")]
     pub api_base_url: String,
 }
 
-fn default_worker_api_base_url() -> String {
-    DEFAULT_WORKER_API_BASE_URL.to_string()
+fn default_agent_api_base_url() -> String {
+    DEFAULT_AGENT_API_BASE_URL.to_string()
 }
 
-/// Default GitHub GraphQL API endpoint used to read the worker file.
-pub const DEFAULT_WORKER_API_BASE_URL: &str = "https://api.github.com/graphql";
+/// Default GitHub GraphQL API endpoint used to read the agent file.
+pub const DEFAULT_AGENT_API_BASE_URL: &str = "https://api.github.com/graphql";
 
-impl Default for WorkerConfig {
+impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             repository: String::new(),
             r#ref: String::new(),
             path: String::new(),
             token: String::new(),
-            api_base_url: default_worker_api_base_url(),
+            api_base_url: default_agent_api_base_url(),
         }
     }
 }
 
-impl WorkerConfig {
-    pub fn location(&self) -> WorkerFileLocation {
-        WorkerFileLocation {
+impl AgentConfig {
+    pub fn location(&self) -> AgentFileLocation {
+        AgentFileLocation {
             repository: self.repository.clone(),
             r#ref: self.r#ref.clone(),
             path: self.path.clone(),
@@ -306,11 +295,11 @@ impl WorkerConfig {
         self.location().validate()?;
         ensure!(
             !self.token.trim().is_empty(),
-            "workerConfig.token cannot be empty"
+            "agentConfig.token cannot be empty"
         );
         ensure!(
             !self.api_base_url.trim().is_empty(),
-            "workerConfig.apiBaseUrl cannot be empty"
+            "agentConfig.apiBaseUrl cannot be empty"
         );
         Ok(())
     }
@@ -323,20 +312,19 @@ pub struct GitHubWorkGraphSourceConfig {
     pub task_issue_type: TaskIssueType,
     #[serde(default)]
     pub repositories: Vec<String>,
-    /// Location and credential of the worker-queue configuration file.
+    /// Location and credential of the agent-capacity configuration file.
     ///
-    /// Optional: a deployment that does not run the worker queue omits it and
-    /// projects no worker or slot nodes at all. When it *is* present it is
+    /// Optional: a deployment that does not run the agent queue omits it and
+    /// projects no agent or slot nodes at all. When it *is* present it is
     /// strictly required — a malformed or unreadable file never degrades into
-    /// a silently empty worker pool.
+    /// a silently empty agent pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_config: Option<WorkerConfig>,
-    /// Identities allowed to author lease lifecycle artifacts.
-    ///
-    /// Optional, and fail-closed when absent: with no configured trust the
-    /// Source publishes no lease lifecycle, so no Lease can be counted active
-    /// and no Result or Expiration can end one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_config: Option<AgentConfig>,
+    #[serde(
+        default,
+        rename = "protocolTrust",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub lease_trust: Option<LeaseTrust>,
     pub webhook: WebhookConfig,
     #[serde(default, with = "DurabilityConfigDef")]
@@ -349,7 +337,7 @@ impl Default for GitHubWorkGraphSourceConfig {
             organization: String::new(),
             task_issue_type: TaskIssueType::default(),
             repositories: Vec::new(),
-            worker_config: None,
+            agent_config: None,
             lease_trust: None,
             webhook: WebhookConfig::default(),
             durability: DurabilityConfig {
@@ -368,6 +356,14 @@ impl GitHubWorkGraphSourceConfig {
         ensure!(single, "organization must be one GitHub organization login");
         let secret = &self.webhook.secret;
         ensure!(!secret.trim().is_empty(), "webhook.secret cannot be empty");
+        ensure!(
+            !self.webhook.lease_validation_token.trim().is_empty(),
+            "webhook.leaseValidationToken cannot be empty"
+        );
+        ensure!(
+            self.webhook.lease_validation_token != *secret,
+            "webhook.leaseValidationToken must differ from webhook.secret"
+        );
         let path = &self.webhook.path;
         ensure!(path.starts_with('/'), "webhook.path must start with '/'");
         let static_path = path
@@ -384,19 +380,14 @@ impl GitHubWorkGraphSourceConfig {
             "durability.capacityPolicy must be RejectIncoming"
         );
         self.task_issue_type.validate()?;
-        if let Some(worker_config) = &self.worker_config {
-            worker_config.validate()?;
+        if let Some(agent_config) = &self.agent_config {
+            agent_config.validate()?;
         }
         if let Some(lease_trust) = &self.lease_trust {
             lease_trust.validate()?;
-            // Lease lifecycle state is reconciled from GitHub's current task
-            // comments whenever the Source has not seen a task before, so
-            // configuring trust without the credential that read requires would
-            // leave the Source unable to interpret its own deliveries.
             ensure!(
-                self.worker_config.is_some(),
-                "leaseTrust requires workerConfig, whose token and apiBaseUrl are used to \
-                 reconcile a task's current lifecycle comments"
+                self.agent_config.is_some(),
+                "protocolTrust requires agentConfig"
             );
         }
         RepositoryFilter::new(org, &self.repositories)?;

@@ -39,6 +39,7 @@ use crate::indexes::{IndexBackendPlugin, StorageBackendRef};
 use crate::sources::{Source, SourceBase, SourceBaseParams, SourceError};
 use crate::{DrasiLib, Query, RecoveryPolicy};
 
+use drasi_core::models::{Element, SourceChange};
 use drasi_index_rocksdb::RocksDbIndexProvider;
 
 // ============================================================================
@@ -265,32 +266,40 @@ async fn send_event(
     sequence: u64,
     position: &[u8],
 ) {
-    use drasi_core::models::{
-        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
-    };
-
     let node_id = format!("node-{sequence}");
+    let change = SourceChange::Insert {
+        element: make_node(source_id, &node_id, sequence as i64, sequence),
+    };
+    send_change(tx, source_id, sequence, position, change).await;
+}
+
+fn make_node(source_id: &str, node_id: &str, value: i64, effective_from: u64) -> Element {
+    use drasi_core::models::{ElementMetadata, ElementPropertyMap, ElementReference};
+
     let mut props = ElementPropertyMap::new();
     props.insert(
         "id",
-        drasi_core::models::ElementValue::String(node_id.clone().into()),
+        drasi_core::models::ElementValue::String(node_id.into()),
     );
-    props.insert(
-        "value",
-        drasi_core::models::ElementValue::Integer(sequence as i64),
-    );
+    props.insert("value", drasi_core::models::ElementValue::Integer(value));
 
-    let element = Element::Node {
+    Element::Node {
         metadata: ElementMetadata {
-            reference: ElementReference::new(source_id, &node_id),
+            reference: ElementReference::new(source_id, node_id),
             labels: Arc::from(vec![Arc::from("Node")]),
-            effective_from: 0,
+            effective_from,
         },
         properties: props,
-    };
+    }
+}
 
-    let change = SourceChange::Insert { element };
-
+async fn send_change(
+    tx: &Arc<RwLock<Option<mpsc::Sender<Arc<SourceEventWrapper>>>>>,
+    source_id: &str,
+    sequence: u64,
+    position: &[u8],
+    change: SourceChange,
+) {
     let mut event = SourceEventWrapper::new(
         source_id.to_string(),
         crate::channels::events::SourceEvent::Change(change),
@@ -304,6 +313,20 @@ async fn send_event(
     }
     // Brief pause for processing
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+}
+
+async fn wait_for_snapshot_sequence(
+    query: &Arc<dyn crate::queries::Query>,
+    expected_sequence: u64,
+) -> crate::queries::SnapshotResponse {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let snapshot = query.fetch_snapshot().await.unwrap();
+        if snapshot.as_of_sequence >= expected_sequence || tokio::time::Instant::now() >= deadline {
+            return snapshot;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 async fn wait_for_status(core: &DrasiLib, component_id: &str, expected: ComponentStatus) {
@@ -383,6 +406,270 @@ async fn test_e2e_checkpoint_round_trip() {
     );
 
     core.stop_query("e2e-q").await.unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn test_persistent_output_hydrates_and_keeps_monotonic_sequence() {
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let query_config = make_persistent_query("output-q", "output-src", None);
+
+    let core1 = build_e2e_lib("output-restart-1", &tmp_dir, None)
+        .await
+        .unwrap();
+    let source1 = E2eTestSource::new("output-src", true).unwrap();
+    let event_tx1 = source1.event_sender();
+    core1.add_source(source1).await.unwrap();
+    core1.start_source("output-src").await.unwrap();
+    wait_for_status(&core1, "output-src", ComponentStatus::Running).await;
+    core1.add_query(query_config.clone()).await.unwrap();
+    core1.start_query("output-q").await.unwrap();
+    wait_for_status(&core1, "output-q", ComponentStatus::Running).await;
+
+    send_event(&event_tx1, "output-src", 1, b"pos-1").await;
+    send_event(&event_tx1, "output-src", 2, b"pos-2").await;
+    send_event(&event_tx1, "output-src", 3, b"pos-3").await;
+
+    let query1 = core1
+        .query_manager
+        .get_query_instance("output-q")
+        .await
+        .unwrap();
+    let before_restart = wait_for_snapshot_sequence(&query1, 3).await;
+    assert_eq!(before_restart.as_of_sequence, 3);
+    assert_eq!(before_restart.len(), 3);
+    drop(before_restart);
+    drop(query1);
+    core1.stop_query("output-q").await.unwrap();
+    wait_for_status(&core1, "output-q", ComponentStatus::Stopped).await;
+    core1.shutdown().await.unwrap();
+
+    // Simulate a crash after outbox sequence 3 was appended but before its live
+    // row mutation and final result-sequence write completed.
+    let recovery_provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+    let recovery_indexes = recovery_provider.create_indexes("output-q").await.unwrap();
+    let pending = recovery_indexes
+        .outbox_writer
+        .as_ref()
+        .unwrap()
+        .read_from("output-q", 2)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    let pending_result: crate::channels::QueryResult =
+        rmp_serde::from_slice(&pending[0].1).unwrap();
+    let pending_row_signature = match &pending_result.results[0] {
+        crate::channels::ResultDiff::Add { row_signature, .. } => *row_signature,
+        other => panic!("expected pending ADD result, got {other:?}"),
+    };
+    recovery_indexes
+        .live_results_writer
+        .as_ref()
+        .unwrap()
+        .apply_mutations(
+            "output-q",
+            &[drasi_core::interface::RowMutation {
+                row_signature: pending_row_signature,
+                data: None,
+            }],
+        )
+        .await
+        .unwrap();
+    recovery_indexes
+        .checkpoint_store
+        .as_ref()
+        .unwrap()
+        .write_result_sequence("output-q", 2)
+        .await
+        .unwrap();
+    drop(recovery_indexes);
+    drop(recovery_provider);
+
+    let core2 = build_e2e_lib("output-restart-2", &tmp_dir, None)
+        .await
+        .unwrap();
+    let source2 = E2eTestSource::new("output-src", true).unwrap();
+    let event_tx2 = source2.event_sender();
+    core2.add_source(source2).await.unwrap();
+    core2.start_source("output-src").await.unwrap();
+    wait_for_status(&core2, "output-src", ComponentStatus::Running).await;
+    core2.add_query(query_config).await.unwrap();
+    core2.start_query("output-q").await.unwrap();
+    wait_for_status(&core2, "output-q", ComponentStatus::Running).await;
+
+    let query2 = core2
+        .query_manager
+        .get_query_instance("output-q")
+        .await
+        .unwrap();
+    let hydrated = wait_for_snapshot_sequence(&query2, 3).await;
+    assert_eq!(hydrated.as_of_sequence, 3);
+    assert_eq!(hydrated.len(), 3);
+    let hydrated_rows = hydrated.to_vec();
+    assert!(hydrated_rows.iter().any(|row| row["id"] == "node-1"));
+    assert!(hydrated_rows.iter().any(|row| row["id"] == "node-2"));
+    assert!(hydrated_rows.iter().any(|row| row["id"] == "node-3"));
+
+    send_change(
+        &event_tx2,
+        "output-src",
+        4,
+        b"pos-4",
+        SourceChange::Update {
+            element: make_node("output-src", "node-1", 100, 4),
+        },
+    )
+    .await;
+    let after_update = wait_for_snapshot_sequence(&query2, 4).await;
+    assert_eq!(after_update.as_of_sequence, 4);
+    assert_eq!(after_update.len(), 3);
+    assert!(after_update
+        .to_vec()
+        .iter()
+        .any(|row| row["id"] == "node-1" && row["value"] == 100));
+    let update_outbox = query2.fetch_outbox(3).await.unwrap();
+    assert_eq!(
+        update_outbox
+            .results
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        vec![4]
+    );
+
+    let delete_metadata = match make_node("output-src", "node-2", 2, 5) {
+        Element::Node { metadata, .. } => metadata,
+        Element::Relation { .. } => unreachable!(),
+    };
+    send_change(
+        &event_tx2,
+        "output-src",
+        5,
+        b"pos-5",
+        SourceChange::Delete {
+            metadata: delete_metadata,
+        },
+    )
+    .await;
+    let after_delete = wait_for_snapshot_sequence(&query2, 5).await;
+    assert_eq!(after_delete.as_of_sequence, 5);
+    assert_eq!(after_delete.len(), 2);
+    assert!(!after_delete
+        .to_vec()
+        .iter()
+        .any(|row| row["id"] == "node-2"));
+    let delete_outbox = query2.fetch_outbox(4).await.unwrap();
+    assert_eq!(
+        delete_outbox
+            .results
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        vec![5]
+    );
+
+    send_change(
+        &event_tx2,
+        "output-src",
+        6,
+        b"pos-6",
+        SourceChange::Insert {
+            element: make_node("output-src", "node-6", 6, 6),
+        },
+    )
+    .await;
+    let after_add = wait_for_snapshot_sequence(&query2, 6).await;
+    assert_eq!(after_add.as_of_sequence, 6);
+    assert_eq!(after_add.len(), 3);
+    assert!(after_add.to_vec().iter().any(|row| row["id"] == "node-6"));
+    let add_outbox = query2.fetch_outbox(5).await.unwrap();
+    assert_eq!(
+        add_outbox
+            .results
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        vec![6]
+    );
+
+    drop(query2);
+    core2.stop_query("output-q").await.unwrap();
+    wait_for_status(&core2, "output-q", ComponentStatus::Stopped).await;
+    core2.shutdown().await.unwrap();
+
+    let verify_provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+    let verify_indexes = verify_provider.create_indexes("output-q").await.unwrap();
+    let persisted = verify_indexes
+        .outbox_writer
+        .as_ref()
+        .unwrap()
+        .read_from("output-q", 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        persisted
+            .iter()
+            .map(|(sequence, _)| *sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5, 6],
+        "restart must append after the durable high-water without overwriting old keys"
+    );
+    assert_eq!(
+        verify_indexes
+            .checkpoint_store
+            .as_ref()
+            .unwrap()
+            .read_result_sequence("output-q")
+            .await
+            .unwrap(),
+        Some(6)
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn test_persistent_output_sequence_ahead_of_outbox_fails_closed() {
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let query_config = make_persistent_query("corrupt-output-q", "corrupt-output-src", None);
+    let seed_provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+    let seed_indexes = seed_provider
+        .create_indexes("corrupt-output-q")
+        .await
+        .unwrap();
+    let checkpoint_store = seed_indexes.checkpoint_store.as_ref().unwrap();
+    checkpoint_store
+        .write_config_hash(crate::queries::compute_config_hash(&query_config))
+        .await
+        .unwrap();
+    checkpoint_store
+        .write_result_sequence("corrupt-output-q", 2)
+        .await
+        .unwrap();
+    seed_indexes
+        .outbox_writer
+        .as_ref()
+        .unwrap()
+        .append("corrupt-output-q", 1, b"existing")
+        .await
+        .unwrap();
+    drop(seed_indexes);
+    drop(seed_provider);
+
+    let core = build_e2e_lib("corrupt-output", &tmp_dir, None)
+        .await
+        .unwrap();
+    let source = E2eTestSource::new("corrupt-output-src", true).unwrap();
+    core.add_source(source).await.unwrap();
+    core.start_source("corrupt-output-src").await.unwrap();
+    wait_for_status(&core, "corrupt-output-src", ComponentStatus::Running).await;
+    core.add_query(query_config).await.unwrap();
+
+    let error = core.start_query("corrupt-output-q").await.unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("inconsistent durable output state"));
+    assert!(message.contains("result sequence 2"));
+    assert!(message.contains("outbox high-water 1"));
+    core.shutdown().await.unwrap();
 }
 
 /// Volatile query (no storage backend) should never send resume_from.

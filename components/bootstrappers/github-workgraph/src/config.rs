@@ -15,7 +15,7 @@
 use drasi_source_github_workgraph::config::{LeaseTrust, RepositoryFilter, TaskIssueType};
 use serde::{Deserialize, Serialize};
 
-pub use drasi_source_github_workgraph::workers::WorkerFileLocation;
+pub use drasi_source_github_workgraph::agents::AgentFileLocation;
 
 /// Default GitHub GraphQL API endpoint (github.com; override for GHE).
 pub const DEFAULT_API_BASE_URL: &str = "https://api.github.com/graphql";
@@ -27,7 +27,7 @@ pub const DEFAULT_PAGE_SIZE: u32 = 100;
 /// Configuration for [`crate::GitHubWorkGraphBootstrapProvider`].
 ///
 /// This bootstrapper owns all GitHub API access; the streaming
-/// `drasi-source-github-workgraph` source reads only the worker file. The
+/// `drasi-source-github-workgraph` source reads only the agent file. The
 /// `token` MUST be a read-only credential (a fine-grained PAT with only
 /// `Issues: Read`, `Pull requests: Read`, `Contents: Read`, and
 /// `Metadata: Read` suffices) — this bootstrapper never writes to GitHub.
@@ -40,15 +40,15 @@ pub struct GitHubWorkGraphBootstrapConfig {
     /// Canonical lowercase repository names to include. Empty means all.
     #[serde(default)]
     pub repositories: Vec<String>,
-    /// Location of the worker-queue configuration file. It is read with the
+    /// Location of the agent-capacity configuration file. It is read with the
     /// same `token` and `api_base_url` as every other GitHub read, before any
     /// task artifact is projected.
     ///
-    /// Optional: a deployment that does not run the worker queue omits it and
-    /// snapshots no worker or slot nodes. When present, a malformed or
-    /// unreadable file is an explicit failure, never an empty worker pool.
+    /// Optional: a deployment that does not run agent allocation omits it and
+    /// snapshots no agent or slot nodes. When present, a malformed or
+    /// unreadable file is an explicit failure, never an empty agent pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_config: Option<WorkerFileLocation>,
+    pub agent_config: Option<AgentFileLocation>,
     /// Identities allowed to author lease lifecycle artifacts. Inherited from
     /// the Source so bootstrap and streaming trust exactly the same producers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,7 +68,7 @@ impl Default for GitHubWorkGraphBootstrapConfig {
             organization: String::new(),
             task_issue_type: TaskIssueType::default(),
             repositories: Vec::new(),
-            worker_config: None,
+            agent_config: None,
             lease_trust: None,
             token: String::new(),
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
@@ -94,8 +94,8 @@ impl GitHubWorkGraphBootstrapConfig {
         );
         anyhow::ensure!(self.max_concurrency > 0, "max_concurrency must be > 0");
         self.task_issue_type.validate()?;
-        if let Some(worker_config) = &self.worker_config {
-            worker_config.validate()?;
+        if let Some(agent_config) = &self.agent_config {
+            agent_config.validate()?;
         }
         if let Some(lease_trust) = &self.lease_trust {
             lease_trust.validate()?;

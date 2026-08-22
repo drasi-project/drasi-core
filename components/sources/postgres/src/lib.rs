@@ -225,8 +225,8 @@ pub(crate) struct ReplayState {
 
 /// Duration (in seconds) after which the flush fence auto-clears.
 ///
-/// This is a safety fallback for deployments where no explicit
-/// `on_subscriptions_complete()` signal arrives (e.g., FFI plugin usage).
+/// This is a safety fallback for standalone hosts where no explicit
+/// `on_subscriptions_complete()` signal arrives.
 /// During normal startup all queries subscribe within a few seconds; the
 /// timeout must be generous enough to cover slow-starting deployments.
 const FENCE_TIMEOUT_SECS: u64 = 60;
@@ -1048,10 +1048,11 @@ impl Source for PostgresReplicationSource {
         self.base.remove_position_handle(query_id).await;
     }
 
-    async fn on_subscriptions_complete(&self) {
+    async fn on_subscriptions_complete(&self) -> anyhow::Result<()> {
         // Release the flush fence so that send_feedback() can advance flush_lsn
         // based on the natural min-watermark of all registered position handles.
         self.replay_state.clear_flush_fence();
+        Ok(())
     }
 
     async fn set_bootstrap_provider(
