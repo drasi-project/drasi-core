@@ -13,50 +13,44 @@
 # limitations under the License.
 
 [package]
-name = "drasi-source-github-workgraph"
+name = "drasi-reaction-github-workgraph-dispatcher"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
 authors = ["Drasi Project"]
-description = "GitHub WorkGraph source plugin for Drasi (organization webhook and worker queue configuration)"
-license = "Apache-2.0"
-repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "github", "source"]
+description = "Durable capacity-aware GitHub WorkGraph queue dispatcher Reaction"
+repository.workspace = true
+keywords = ["drasi", "reaction", "github", "workgraph"]
 categories = ["development-tools"]
-
-[lib]
-crate-type = ["lib", "cdylib"]
 
 [lints]
 workspace = true
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [dependencies]
+drasi-github-workgraph.workspace = true
 drasi-lib.workspace = true
-drasi-core.workspace = true
-drasi-plugin-sdk = { workspace = true }
-drasi-github-workgraph = { workspace = true }
-utoipa = { workspace = true }
+drasi-plugin-sdk.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
-axum = "0.7"
-bytes = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
-hmac = "0.12"
 log = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
 sha2 = "0.10"
-subtle = "2"
-tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
+utoipa.workspace = true
+uuid = { version = "1.0", features = ["v7"] }
 
 [dev-dependencies]
-drasi-functions-cypher.workspace = true
-drasi-query-cypher.workspace = true
+drasi-core.workspace = true
 drasi-state-store-redb = { path = "../../state_stores/redb" }
-drasi-wal-redb = { path = "../../wals/redb" }
 tempfile = "3"
+tokio-stream = "0.1"
 wiremock = "0.6"
 
 [features]

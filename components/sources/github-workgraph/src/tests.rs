@@ -37,6 +37,7 @@ use drasi_core::evaluation::functions::FunctionRegistry;
 use drasi_core::evaluation::variable_value::VariableValue;
 use drasi_core::models::{Element, ElementValue, SourceChange};
 use drasi_core::query::{ContinuousQuery, QueryBuilder};
+use drasi_github_workgraph::{canonical_task_lease_body, TaskLease};
 use drasi_lib::wal::CapacityPolicy;
 use drasi_lib::DurabilityConfig;
 use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
@@ -2598,6 +2599,25 @@ fn lease_rejects_invalid_ids_timestamps_and_orderings() {
     assert!(matches!(
         classify_comment("WorkGraphTaskLease/v2\n\n```json\n{}\n```\n"),
         CommentClassification::Invalid(error) if error.code == error_code::UNSUPPORTED_VERSION
+    ));
+}
+
+#[test]
+fn shared_lease_writer_round_trips_through_the_authoritative_source_classifier() {
+    let lease = TaskLease {
+        lease_id: LEASE_ID.to_string(),
+        assignment_comment_node_id: "IC_assignment".to_string(),
+        worker_id: "validator-1".to_string(),
+        slot_id: "validator-1/1".to_string(),
+        acquired_at: "2026-08-19T22:00:00Z".to_string(),
+        expires_at: "2026-08-19T22:15:00Z".to_string(),
+    };
+    let body = canonical_task_lease_body(&lease).unwrap();
+    assert!(body.ends_with("```\n"));
+    assert_eq!(body.matches("```\n").count(), 1);
+    assert!(matches!(
+        classify_comment(&body),
+        CommentClassification::Lease(parsed) if *parsed == lease
     ));
 }
 

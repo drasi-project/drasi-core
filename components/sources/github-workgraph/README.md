@@ -116,6 +116,11 @@ normalized `state` is `open`; unknown and non-open states produce false.
 A typed child is emitted only as `WorkGraphTask`; it is never also emitted as
 `GitHubIssue`.
 
+The canonical `WorkGraphTaskLease/v1` DTO and body builder live in the shared
+`drasi-github-workgraph` crate. The Source classifier and the stateful
+`github-workgraph-dispatcher` Reaction consume that same wire type, with a
+byte-exact classifier round-trip test preventing writer/parser drift.
+
 | Relation | Direction | Stable ID |
 |---|---|---|
 | `IN_ORGANIZATION` | repository → organization | `IN_ORGANIZATION:{repository}:{organization}` |

@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use chrono::{DateTime, Utc};
+use drasi_github_workgraph::validate_task_lease;
+pub use drasi_github_workgraph::{TaskLease, SUPPORTED_AGENT_PROFILES};
 use serde::{Deserialize, Serialize};
 
 const TASK_FAMILY: &str = "WorkGraphTask/";
@@ -32,8 +34,6 @@ const V2: &str = "v2";
 const MAX_ID_LEN: usize = 256;
 /// Upper bound on the free-text `reason` of a Lease Expiration.
 const MAX_REASON_LEN: usize = 512;
-pub const SUPPORTED_AGENT_PROFILES: &[&str] = &["issue-validator", "issue-info-requester"];
-
 pub mod error_code {
     pub const UNSUPPORTED_VERSION: &str = "unsupported-workgraph-version";
     pub const INVALID_ENVELOPE: &str = "invalid-envelope";
@@ -126,18 +126,6 @@ pub struct TaskAssignment {
     pub version: u8,
     pub agent_profile: String,
     pub worker_id: Option<String>,
-}
-
-/// Canonical `WorkGraphTaskLease/v1` wire object.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TaskLease {
-    pub lease_id: String,
-    pub assignment_comment_node_id: String,
-    pub worker_id: String,
-    pub slot_id: String,
-    pub acquired_at: String,
-    pub expires_at: String,
 }
 
 /// Canonical `WorkGraphTaskLeaseExpiration/v1` wire object.
@@ -546,16 +534,7 @@ fn parse_result(version: &str, value: serde_json::Value) -> Result<WorkResult, S
 
 fn parse_lease(value: serde_json::Value) -> Result<TaskLease, String> {
     let lease: TaskLease = json_typed(value)?;
-    opaque_id(&lease.lease_id, "leaseId")?;
-    opaque_id(&lease.assignment_comment_node_id, "assignmentCommentNodeId")?;
-    opaque_id(&lease.worker_id, "workerId")?;
-    opaque_id(&lease.slot_id, "slotId")?;
-    let acquired_at = utc_timestamp(&lease.acquired_at, "acquiredAt")?;
-    let expires_at = utc_timestamp(&lease.expires_at, "expiresAt")?;
-    require(
-        acquired_at < expires_at,
-        "acquiredAt must be strictly earlier than expiresAt",
-    )?;
+    validate_task_lease(&lease)?;
     Ok(lease)
 }
 

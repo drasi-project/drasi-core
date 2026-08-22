@@ -49,6 +49,7 @@ build-test-plugins:
 	cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
 	cargo build --lib -p drasi-source-github-workgraph --features drasi-source-github-workgraph/dynamic-plugin
 	cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
+	cargo build --lib -p drasi-reaction-github-workgraph-dispatcher --features drasi-reaction-github-workgraph-dispatcher/dynamic-plugin
 	cargo build --lib -p drasi-reaction-sse --features drasi-reaction-sse/dynamic-plugin
 	cargo build --lib -p drasi-reaction-snapshot-test
 	cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
@@ -59,6 +60,7 @@ build-test-plugins:
 		for f in target/debug/libdrasi_source_mock.$$ext \
 		         target/debug/libdrasi_source_github_workgraph.$$ext \
 		         target/debug/libdrasi_reaction_log.$$ext \
+		         target/debug/libdrasi_reaction_github_workgraph_dispatcher.$$ext \
 		         target/debug/libdrasi_reaction_sse.$$ext \
 		         target/debug/libdrasi_reaction_snapshot_test.$$ext \
 		         target/debug/libdrasi_identity_test.$$ext \
@@ -66,6 +68,7 @@ build-test-plugins:
 		         target/debug/drasi_source_mock.$$ext \
 		         target/debug/drasi_source_github_workgraph.$$ext \
 		         target/debug/drasi_reaction_log.$$ext \
+		         target/debug/drasi_reaction_github_workgraph_dispatcher.$$ext \
 		         target/debug/drasi_reaction_sse.$$ext \
 		         target/debug/drasi_reaction_snapshot_test.$$ext \
 		         target/debug/drasi_identity_test.$$ext \

@@ -16,6 +16,7 @@ members = [
   "components/kubernetes-common",
   "components/oracle-common",
   "components/sources/mapping",
+  "components/github-workgraph",
 
   # Bootstrap Plugins
   "components/bootstrappers/postgres",
@@ -66,6 +67,7 @@ members = [
 
   # Reaction Plugins
   "components/reactions/http",
+  "components/reactions/github-workgraph-dispatcher",
   "components/reactions/grpc",
   "components/reactions/aws-sqs",
   "components/reactions/sse",
@@ -159,6 +161,7 @@ drasi-lib = { version = "0.9.0", path = "lib" }
 drasi-ffi-primitives = { version = "0.11.0", path = "components/ffi-primitives" }
 drasi-plugin-sdk = { version = "0.11.0", path = "components/plugin-sdk" }
 drasi-host-sdk = { version = "0.11.0", path = "components/host-sdk" }
+drasi-github-workgraph = { version = "0.1.0", path = "components/github-workgraph" }
 
 # Common dependencies
 im = "15"
@@ -182,6 +185,7 @@ drasi-source-hyperliquid = { version = "0.1.7", path = "components/sources/hyper
 drasi-source-cloudflare-radar = { version = "0.1.6", path = "components/sources/cloudflare-radar" }
 drasi-bootstrap-application = { version = "0.2.11", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.3.2", path = "components/reactions/http" }
+drasi-reaction-github-workgraph-dispatcher = { version = "0.1.0", path = "components/reactions/github-workgraph-dispatcher" }
 drasi-reaction-grpc = { version = "0.4.2", path = "components/reactions/grpc" }
 drasi-reaction-file = { version = "0.1.3", path = "components/reactions/file" }
 drasi-reaction-eventgrid = { version = "0.1.0", path = "components/reactions/eventgrid" }
