@@ -2269,9 +2269,28 @@ async fn test_reaction_identity_provider_cross_cdylib_clone_stress() {
 
 extern "C" fn resolve_github_workgraph_test_secret(
     _ctx: *const std::ffi::c_void,
-    _config_value_json: drasi_plugin_sdk::ffi::FfiStr,
+    config_value_json: drasi_plugin_sdk::ffi::FfiStr,
 ) -> drasi_plugin_sdk::ffi::FfiGetSecretResult {
-    drasi_plugin_sdk::ffi::FfiGetSecretResult::ok("test-webhook-secret".to_string())
+    let config = unsafe { config_value_json.as_str() };
+    let secret_name = serde_json::from_str::<serde_json::Value>(config)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+    match secret_name.as_deref() {
+        Some("github-webhook-secret") => {
+            drasi_plugin_sdk::ffi::FfiGetSecretResult::ok("test-webhook-secret".to_string())
+        }
+        Some("github-lease-validation-token") => {
+            drasi_plugin_sdk::ffi::FfiGetSecretResult::ok("test-lease-validation-token".to_string())
+        }
+        _ => drasi_plugin_sdk::ffi::FfiGetSecretResult::err(
+            "unexpected GitHub WorkGraph test secret".to_string(),
+        ),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2304,6 +2323,10 @@ async fn test_github_workgraph_source_state_store_durability_cross_cdylib() {
             "secret": {
                 "kind": "Secret",
                 "name": "github-webhook-secret"
+            },
+            "leaseValidationToken": {
+                "kind": "Secret",
+                "name": "github-lease-validation-token"
             },
             "bodyLimitBytes": 1024
         },
