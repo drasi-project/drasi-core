@@ -903,8 +903,55 @@ impl DrasiQuery {
             );
         }
 
+        let serialized_outbox = outbox_writer
+            .read_from(query_id, 0)
+            .await
+            .with_context(|| format!("Query '{query_id}' failed to read durable outbox"))?;
+        let mut hydrated_outbox = Vec::with_capacity(serialized_outbox.len());
+        let mut previous_sequence: Option<u64> = None;
+        for (stored_sequence, data) in serialized_outbox {
+            if let Some(previous) = previous_sequence {
+                let expected = previous.checked_add(1).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Query '{query_id}' durable outbox sequence overflow during hydration"
+                    )
+                })?;
+                if stored_sequence != expected {
+                    anyhow::bail!(
+                        "Query '{query_id}' durable outbox hydration gap: expected sequence \
+                         {expected}, found {stored_sequence}"
+                    );
+                }
+            }
+
+            let result = rmp_serde::from_slice::<QueryResult>(&data).with_context(|| {
+                format!(
+                    "Query '{query_id}' has corrupt durable outbox result at sequence \
+                     {stored_sequence}"
+                )
+            })?;
+            if result.query_id != *query_id || result.sequence != stored_sequence {
+                anyhow::bail!(
+                    "Query '{query_id}' durable outbox result at sequence {stored_sequence} \
+                     has mismatched identity (query='{}', sequence={})",
+                    result.query_id,
+                    result.sequence
+                );
+            }
+
+            previous_sequence = Some(stored_sequence);
+            hydrated_outbox.push(Arc::new(result));
+        }
+        if previous_sequence.unwrap_or(0) != outbox_sequence {
+            anyhow::bail!(
+                "Query '{query_id}' durable outbox hydration ended at sequence {}, \
+                 expected {outbox_sequence}",
+                previous_sequence.unwrap_or(0)
+            );
+        }
+
         let mut state = self.output_state.write().await;
-        state.hydrate(rows, durable_sequence);
+        state.hydrate(rows, durable_sequence, hydrated_outbox);
         let earliest_sequence = state.outbox_earliest_seq().unwrap_or(0);
         self.output_metrics
             .record_live_results_count(state.results_len());

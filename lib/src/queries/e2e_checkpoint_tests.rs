@@ -509,6 +509,16 @@ async fn test_persistent_output_hydrates_and_keeps_monotonic_sequence() {
     assert!(hydrated_rows.iter().any(|row| row["id"] == "node-1"));
     assert!(hydrated_rows.iter().any(|row| row["id"] == "node-2"));
     assert!(hydrated_rows.iter().any(|row| row["id"] == "node-3"));
+    let hydrated_outbox = query2.fetch_outbox(0).await.unwrap();
+    assert_eq!(
+        hydrated_outbox
+            .results
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "restart must restore retained durable outbox entries for reaction replay"
+    );
 
     send_change(
         &event_tx2,

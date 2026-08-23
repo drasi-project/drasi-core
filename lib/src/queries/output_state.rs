@@ -159,7 +159,7 @@ impl QueryOutputState {
         self.as_of_sequence
     }
 
-    /// Restore durable live rows and their output high-water mark.
+    /// Restore durable live rows, retained outbox entries, and their output high-water mark.
     ///
     /// A same-process stop/start may retain output newer than the durable
     /// snapshot when a persistence write failed. Never move that state backward.
@@ -167,12 +167,14 @@ impl QueryOutputState {
         &mut self,
         results: im::HashMap<u64, serde_json::Value>,
         as_of_sequence: u64,
+        outbox: Vec<Arc<QueryResult>>,
     ) {
         if as_of_sequence <= self.as_of_sequence {
             return;
         }
 
-        self.outbox.clear();
+        let retain_from = outbox.len().saturating_sub(self.outbox_capacity);
+        self.outbox = outbox.into_iter().skip(retain_from).collect();
         self.results = results;
         self.as_of_sequence = as_of_sequence;
     }
@@ -661,11 +663,24 @@ mod tests {
     fn hydrate_restores_rows_and_advances_from_durable_high_water() {
         let mut rows = im::HashMap::new();
         rows.insert(100, serde_json::json!({"name": "Alice"}));
+        let mut third = make_query_result("q1", vec![]);
+        third.sequence = 3;
+        let mut fourth = make_query_result("q1", vec![]);
+        fourth.sequence = 4;
 
         let mut state = QueryOutputState::new(3);
-        state.hydrate(rows, 4);
+        state.hydrate(rows, 4, vec![Arc::new(third), Arc::new(fourth)]);
 
         assert_eq!(state.as_of_sequence(), 4);
+        assert_eq!(
+            state
+                .fetch_outbox_after(2)
+                .unwrap()
+                .iter()
+                .map(|result| result.sequence)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
         assert_eq!(
             state.clone_results().get(&100),
             Some(&serde_json::json!({"name": "Alice"}))
@@ -693,7 +708,7 @@ mod tests {
 
         let mut stale_rows = im::HashMap::new();
         stale_rows.insert(100, serde_json::json!({"version": 1}));
-        state.hydrate(stale_rows, 5);
+        state.hydrate(stale_rows, 5, Vec::new());
 
         assert_eq!(state.as_of_sequence(), 6);
         assert_eq!(
@@ -711,7 +726,7 @@ mod tests {
 
         let mut durable_rows = im::HashMap::new();
         durable_rows.insert(100, serde_json::json!({"version": 1}));
-        state.hydrate(durable_rows, 6);
+        state.hydrate(durable_rows, 6, Vec::new());
 
         assert_eq!(state.as_of_sequence(), 6);
         assert_eq!(
