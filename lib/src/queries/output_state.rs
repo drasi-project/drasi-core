@@ -16,7 +16,8 @@
 //!
 //! `QueryOutputState` replaces the naive `Vec<serde_json::Value>` approach with an
 //! `im::HashMap` keyed by `row_signature`, providing:
-//! - O(1) insert, update, and delete operations
+//! - O(1) operations when the engine signature is stable
+//! - Value-based reconciliation when optional matches change a row's signature
 //! - O(1) structural-sharing clones for non-blocking snapshot reads
 //! - A bounded ring buffer (`outbox`) of recent `QueryResult` emissions
 
@@ -43,6 +44,103 @@ pub struct KeyedSnapshotRow {
 
 /// Default outbox capacity if not configured.
 pub const DEFAULT_OUTBOX_CAPACITY: usize = 1000;
+
+/// A live-result mutation after reconciling an engine signature with the
+/// currently materialized row set.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LiveResultMutation {
+    pub(crate) row_signature: u64,
+    pub(crate) data: Option<serde_json::Value>,
+}
+
+pub(crate) fn apply_result_diffs_to_rows(
+    rows: &mut im::HashMap<u64, serde_json::Value>,
+    diffs: &[ResultDiff],
+) -> Vec<LiveResultMutation> {
+    let mut mutations = Vec::with_capacity(diffs.len());
+
+    for diff in diffs {
+        match diff {
+            ResultDiff::Add {
+                data,
+                row_signature,
+            } => {
+                rows.insert(*row_signature, data.clone());
+                mutations.push(LiveResultMutation {
+                    row_signature: *row_signature,
+                    data: Some(data.clone()),
+                });
+            }
+            ResultDiff::Delete {
+                data,
+                row_signature,
+            } => {
+                let resolved_signature = if rows.contains_key(row_signature) {
+                    *row_signature
+                } else {
+                    rows.iter()
+                        .find_map(|(signature, row)| (row == data).then_some(*signature))
+                        .unwrap_or(*row_signature)
+                };
+                rows.remove(&resolved_signature);
+                mutations.push(LiveResultMutation {
+                    row_signature: resolved_signature,
+                    data: None,
+                });
+            }
+            ResultDiff::Update {
+                before,
+                after,
+                row_signature,
+                ..
+            } => {
+                if !rows.contains_key(row_signature) {
+                    if let Some(previous_signature) = rows
+                        .iter()
+                        .find_map(|(signature, row)| (row == before).then_some(*signature))
+                    {
+                        rows.remove(&previous_signature);
+                        mutations.push(LiveResultMutation {
+                            row_signature: previous_signature,
+                            data: None,
+                        });
+                    }
+                }
+                rows.insert(*row_signature, after.clone());
+                mutations.push(LiveResultMutation {
+                    row_signature: *row_signature,
+                    data: Some(after.clone()),
+                });
+            }
+            ResultDiff::Aggregation {
+                before,
+                after,
+                row_signature,
+            } => {
+                if !rows.contains_key(row_signature) {
+                    if let Some(previous_signature) = before.as_ref().and_then(|before| {
+                        rows.iter()
+                            .find_map(|(signature, row)| (row == before).then_some(*signature))
+                    }) {
+                        rows.remove(&previous_signature);
+                        mutations.push(LiveResultMutation {
+                            row_signature: previous_signature,
+                            data: None,
+                        });
+                    }
+                }
+                rows.insert(*row_signature, after.clone());
+                mutations.push(LiveResultMutation {
+                    row_signature: *row_signature,
+                    data: Some(after.clone()),
+                });
+            }
+            ResultDiff::Noop => {}
+        }
+    }
+
+    mutations
+}
 
 /// In-memory state tracking the live result set and recent emissions for a query.
 ///
@@ -89,42 +187,12 @@ impl QueryOutputState {
         }
     }
 
-    /// Apply a set of result diffs to the live result set using O(1) HashMap operations.
+    /// Apply result diffs and return the reconciled mutations for durable storage.
     ///
     /// This does NOT increment the sequence or push to the outbox — that is done
     /// separately by the caller after constructing the `QueryResult`.
-    pub fn apply_diffs(&mut self, diffs: &[ResultDiff]) {
-        for diff in diffs {
-            match diff {
-                ResultDiff::Add {
-                    data,
-                    row_signature,
-                } => {
-                    self.results.insert(*row_signature, data.clone());
-                }
-                ResultDiff::Delete { row_signature, .. } => {
-                    self.results.remove(row_signature);
-                }
-                ResultDiff::Update {
-                    after,
-                    row_signature,
-                    ..
-                } => {
-                    self.results.insert(*row_signature, after.clone());
-                }
-                ResultDiff::Aggregation {
-                    after,
-                    row_signature,
-                    ..
-                } => {
-                    // Insert/overwrite the aggregation result for this group.
-                    // Note: identity-value detection (empty group removal) depends on #384
-                    // and will be handled in a follow-up.
-                    self.results.insert(*row_signature, after.clone());
-                }
-                ResultDiff::Noop => {}
-            }
-        }
+    pub(crate) fn apply_diffs(&mut self, diffs: &[ResultDiff]) -> Vec<LiveResultMutation> {
+        apply_result_diffs_to_rows(&mut self.results, diffs)
     }
 
     /// Increment the sequence counter, wrap the result in an `Arc`, push to the outbox,
@@ -594,6 +662,64 @@ mod tests {
         assert_eq!(
             state.results.get(&100),
             Some(&serde_json::json!({"name": "Bob"}))
+        );
+    }
+
+    #[test]
+    fn update_rekeys_row_when_optional_match_changes_signature() {
+        let mut state = QueryOutputState::new(10);
+        state
+            .results
+            .insert(100, serde_json::json!({"name": "Alice", "detail": null}));
+
+        let mutations = state.apply_diffs(&[ResultDiff::Update {
+            data: serde_json::json!({"name": "Alice", "detail": "ready"}),
+            before: serde_json::json!({"name": "Alice", "detail": null}),
+            after: serde_json::json!({"name": "Alice", "detail": "ready"}),
+            grouping_keys: None,
+            row_signature: 200,
+        }]);
+
+        assert_eq!(
+            state.clone_results(),
+            im::hashmap! {
+                200 => serde_json::json!({"name": "Alice", "detail": "ready"})
+            }
+        );
+        assert_eq!(
+            mutations,
+            vec![
+                LiveResultMutation {
+                    row_signature: 100,
+                    data: None,
+                },
+                LiveResultMutation {
+                    row_signature: 200,
+                    data: Some(serde_json::json!({"name": "Alice", "detail": "ready"})),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn delete_finds_row_when_optional_match_changed_signature() {
+        let mut state = QueryOutputState::new(10);
+        state
+            .results
+            .insert(100, serde_json::json!({"name": "Alice"}));
+
+        let mutations = state.apply_diffs(&[ResultDiff::Delete {
+            data: serde_json::json!({"name": "Alice"}),
+            row_signature: 200,
+        }]);
+
+        assert!(state.clone_results().is_empty());
+        assert_eq!(
+            mutations,
+            vec![LiveResultMutation {
+                row_signature: 100,
+                data: None,
+            }]
         );
     }
 

@@ -48,7 +48,8 @@ use crate::managers::{
 use crate::metrics::QueryOutputMetrics;
 use crate::queries::label_extractor::{LabelExtractor, QueryLabels};
 use crate::queries::output_state::{
-    FetchError, OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse,
+    apply_result_diffs_to_rows, FetchError, LiveResultMutation, OutboxGap, OutboxResponse,
+    QueryOutputState, SnapshotResponse,
 };
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
@@ -84,80 +85,26 @@ fn convert_query_variables_to_json(vars: &QueryVariables) -> serde_json::Value {
     serde_json::Value::Object(result)
 }
 
-fn apply_result_diffs_to_rows(
-    rows: &mut im::HashMap<u64, serde_json::Value>,
-    diffs: &[ResultDiff],
-) {
-    for diff in diffs {
-        match diff {
-            ResultDiff::Add {
-                data,
-                row_signature,
-            } => {
-                rows.insert(*row_signature, data.clone());
-            }
-            ResultDiff::Delete { row_signature, .. } => {
-                rows.remove(row_signature);
-            }
-            ResultDiff::Update {
-                after,
-                row_signature,
-                ..
-            }
-            | ResultDiff::Aggregation {
-                after,
-                row_signature,
-                ..
-            } => {
-                rows.insert(*row_signature, after.clone());
-            }
-            ResultDiff::Noop => {}
-        }
-    }
-}
-
-fn serialize_live_result_mutations(diffs: &[ResultDiff]) -> Result<Vec<(u64, Option<Vec<u8>>)>> {
-    let mut serialized = Vec::with_capacity(diffs.len());
-    for diff in diffs {
-        let mutation = match diff {
-            ResultDiff::Add {
-                data,
-                row_signature,
-            } => Some((
-                *row_signature,
-                Some(
-                    rmp_serde::to_vec(data)
-                        .with_context(|| format!("Failed to serialize Add row {row_signature}"))?,
-                ),
-            )),
-            ResultDiff::Update {
-                after,
-                row_signature,
-                ..
-            } => {
-                Some((
-                    *row_signature,
-                    Some(rmp_serde::to_vec(after).with_context(|| {
-                        format!("Failed to serialize Update row {row_signature}")
-                    })?),
-                ))
-            }
-            ResultDiff::Aggregation {
-                after,
-                row_signature,
-                ..
-            } => Some((
-                *row_signature,
-                Some(rmp_serde::to_vec(after).with_context(|| {
-                    format!("Failed to serialize Aggregation row {row_signature}")
-                })?),
-            )),
-            ResultDiff::Delete { row_signature, .. } => Some((*row_signature, None)),
-            ResultDiff::Noop => None,
-        };
-        if let Some(mutation) = mutation {
-            serialized.push(mutation);
-        }
+fn serialize_live_result_mutations(
+    mutations: &[LiveResultMutation],
+) -> Result<Vec<(u64, Option<Vec<u8>>)>> {
+    let mut serialized = Vec::with_capacity(mutations.len());
+    for mutation in mutations {
+        serialized.push((
+            mutation.row_signature,
+            mutation
+                .data
+                .as_ref()
+                .map(|data| {
+                    rmp_serde::to_vec(data).with_context(|| {
+                        format!(
+                            "Failed to serialize live result row {}",
+                            mutation.row_signature
+                        )
+                    })
+                })
+                .transpose()?,
+        ));
     }
     Ok(serialized)
 }
@@ -424,10 +371,10 @@ async fn dispatch_query_results(
     // Apply diffs to the output state, build QueryResult, increment sequence,
     // push to outbox, and get back the Arc for zero-copy dispatch — all in one
     // write-lock acquisition.
-    let arc_result = {
+    let (arc_result, live_result_mutations) = {
         let tx_start = std::time::Instant::now();
         let mut state = output_state.write().await;
-        state.apply_diffs(&converted_results);
+        let live_result_mutations = state.apply_diffs(&converted_results);
 
         let result_count = converted_results.len();
         let query_result = QueryResult::with_profiling(
@@ -464,7 +411,7 @@ async fn dispatch_query_results(
         let earliest_seq = state.outbox_earliest_seq().unwrap_or(0);
         output_metrics.update_outbox(state.outbox_len(), earliest_seq, state.as_of_sequence());
 
-        result
+        (result, live_result_mutations)
     };
 
     // Persist to outbox and live-results writers if available. These writes are
@@ -504,7 +451,7 @@ async fn dispatch_query_results(
     if let Some(writer) = live_results_writer {
         use drasi_core::interface::RowMutation;
 
-        match serialize_live_result_mutations(&arc_result.results) {
+        match serialize_live_result_mutations(&live_result_mutations) {
             Ok(serialized_data) => {
                 let row_mutations: Vec<RowMutation<'_>> = serialized_data
                     .iter()
@@ -848,14 +795,7 @@ impl DrasiQuery {
                         result.sequence
                     );
                 }
-                let mutations =
-                    serialize_live_result_mutations(&result.results).with_context(|| {
-                        format!(
-                            "Query '{query_id}' failed to recover live results from durable \
-                             outbox sequence {stored_sequence}"
-                        )
-                    })?;
-                recovery.push((result, mutations));
+                recovery.push(result);
             }
             if expected_sequence != outbox_sequence {
                 anyhow::bail!(
@@ -864,7 +804,16 @@ impl DrasiQuery {
                 );
             }
 
-            for (result, serialized_data) in recovery {
+            for result in recovery {
+                let mutations = apply_result_diffs_to_rows(&mut rows, &result.results);
+                let serialized_data =
+                    serialize_live_result_mutations(&mutations).with_context(|| {
+                        format!(
+                            "Query '{query_id}' failed to recover live results from durable \
+                             outbox sequence {}",
+                            result.sequence
+                        )
+                    })?;
                 let row_mutations: Vec<RowMutation<'_>> = serialized_data
                     .iter()
                     .map(|(row_signature, data)| RowMutation {
@@ -884,7 +833,6 @@ impl DrasiQuery {
                             )
                         })?;
                 }
-                apply_result_diffs_to_rows(&mut rows, &result.results);
             }
             checkpoint_store
                 .write_result_sequence(query_id, outbox_sequence)
