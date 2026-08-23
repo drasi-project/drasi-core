@@ -6,7 +6,7 @@
 RUSTFLAGS := -Dwarnings
 
 .PHONY: clippy clippy-fix help build-test-plugins test-host-sdk \
-       build-plugins build-plugins-release list-plugins \
+       build-plugins build-plugins-release build-selected-dynamic-plugins list-plugins \
        publish-plugins publish-plugins-dry-run publish-plugins-release \
        publish-all publish-all-dry-run \
        merge-manifests merge-manifests-dry-run
@@ -19,6 +19,7 @@ help:
 	@echo "  test-host-sdk             - Build test plugins and run host-sdk integration tests"
 	@echo "  build-plugins             - Build all dynamic plugins (debug)"
 	@echo "  build-plugins-release     - Build all dynamic plugins (release)"
+	@echo "  build-selected-dynamic-plugins PLUGINS=\"...\" - Build selected dynamic plugins (release)"
 	@echo "  list-plugins              - List all discovered dynamic plugin crates"
 	@echo "  publish-plugins-dry-run   - Show what would be published (no push)"
 	@echo "  publish-plugins           - Publish plugins to OCI registry (per-arch tags, SIGN=1 to cosign)"
@@ -117,6 +118,19 @@ build-plugins:
 # Build all dynamic plugins (release)
 build-plugins-release:
 	cargo run -p xtask -- build-plugins --release
+
+# Build only the requested dynamic plugins in release mode.
+# Usage: make build-selected-dynamic-plugins PLUGINS="drasi-source-mock drasi-reaction-log"
+build-selected-dynamic-plugins:
+	@if [ -z "$(strip $(PLUGINS))" ]; then \
+		echo "PLUGINS is required."; \
+		exit 1; \
+	fi
+	@set -e; for plugin in $(PLUGINS); do \
+		echo "=== Building $$plugin ==="; \
+		cargo build --locked --release --lib -p "$$plugin" \
+			--features "$$plugin/dynamic-plugin"; \
+	done
 
 # List all discovered dynamic plugin crates
 list-plugins:
