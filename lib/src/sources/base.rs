@@ -218,7 +218,8 @@ pub struct SourceBase {
     /// heap never reorders same-source events relative to their sequence. The
     /// wrapper timestamp is used only for merge ordering (the query consumer
     /// never reads it; event-time semantics use `effective_from`), so nudging
-    /// it forward by nanoseconds when the wall clock stalls is harmless.
+    /// it forward by microseconds when the wall clock stalls is harmless.
+    /// Microseconds are the finest precision preserved by the plugin ABI.
     dispatch_order: Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
     /// Original raw config JSON from the descriptor, preserving ConfigValue
     /// envelopes (secrets, env vars) for lossless persistence roundtrips.
@@ -1237,9 +1238,9 @@ impl SourceBase {
     /// to prevent memory issues, preserving the last good position.
     pub const MAX_SOURCE_POSITION_BYTES: usize = 65_536;
 
-    /// Return a dispatch timestamp strictly greater than `*last`, using
-    /// `candidate` when it already advances past `*last` and otherwise nudging
-    /// forward by one nanosecond. Updates `*last` to the returned value.
+    /// Return a dispatch timestamp strictly greater than `*last` at the
+    /// microsecond precision preserved by the plugin ABI. Updates `*last` to
+    /// the returned value.
     ///
     /// Called while holding the `dispatch_order` lock, so per-source dispatch
     /// timestamps stay strictly increasing in sequence order — the priority
@@ -1249,15 +1250,14 @@ impl SourceBase {
         last: &mut chrono::DateTime<chrono::Utc>,
         candidate: chrono::DateTime<chrono::Utc>,
     ) -> chrono::DateTime<chrono::Utc> {
-        let next = if candidate > *last {
-            candidate
+        let last_micros = last.timestamp_micros();
+        let candidate_micros = candidate.timestamp_micros();
+        let next_micros = if candidate_micros > last_micros {
+            candidate_micros
         } else {
-            // `checked_add_signed` keeps this panic-free; `None` only occurs at
-            // the far edge of the representable range, where `*last` is already
-            // effectively "infinitely far in the future".
-            last.checked_add_signed(chrono::Duration::nanoseconds(1))
-                .unwrap_or(*last)
+            last_micros.checked_add(1).unwrap_or(last_micros)
         };
+        let next = chrono::DateTime::from_timestamp_micros(next_micros).unwrap_or(*last);
         *last = next;
         next
     }
@@ -2250,14 +2250,14 @@ mod tests {
 
         let mut last = chrono::DateTime::<Utc>::MIN_UTC;
 
-        let t1 = Utc::now();
+        let t1 = chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap();
         let r1 = SourceBase::next_monotonic_timestamp(&mut last, t1);
         assert_eq!(r1, t1, "a candidate ahead of `last` is used verbatim");
         assert_eq!(last, t1);
 
         // Equal candidate must be nudged strictly forward.
         let r2 = SourceBase::next_monotonic_timestamp(&mut last, t1);
-        assert_eq!(r2, t1 + Duration::nanoseconds(1));
+        assert_eq!(r2, t1 + Duration::microseconds(1));
         assert!(r2 > r1);
 
         // A candidate that goes backwards (reversed wall clock) must still
@@ -2282,7 +2282,10 @@ mod tests {
         let base = SourceBase::new(params).unwrap();
         let mut receiver = base.create_streaming_receiver().await.unwrap();
         let mut dispatch_order = base.dispatch_order.lock().await;
-        *dispatch_order = Utc::now() + Duration::hours(1);
+        *dispatch_order = chrono::DateTime::from_timestamp_micros(
+            (Utc::now() + Duration::hours(1)).timestamp_micros(),
+        )
+        .unwrap();
         let previous = *dispatch_order;
         let replay = vec![
             (
@@ -2305,6 +2308,10 @@ mod tests {
 
         assert!(wrappers[0].timestamp > previous);
         assert!(wrappers[1].timestamp > wrappers[0].timestamp);
+        assert!(wrappers[0].timestamp.timestamp_micros() > previous.timestamp_micros());
+        assert!(
+            wrappers[1].timestamp.timestamp_micros() > wrappers[0].timestamp.timestamp_micros()
+        );
         assert_eq!(*dispatch_order, wrappers[1].timestamp);
         assert_eq!(wrappers[0].sequence, Some(41));
         assert_eq!(wrappers[1].sequence, Some(42));
@@ -2316,6 +2323,7 @@ mod tests {
             .unwrap();
         let live = receiver.recv().await.unwrap();
         assert!(live.timestamp > last_replay_timestamp);
+        assert!(live.timestamp.timestamp_micros() > last_replay_timestamp.timestamp_micros());
     }
 
     /// Regression test for issue #640: dispatching changes concurrently on a
