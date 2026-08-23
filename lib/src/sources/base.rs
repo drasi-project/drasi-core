@@ -962,6 +962,11 @@ impl SourceBase {
             settings.query_id, source_type, self.id, resume_seq
         );
 
+        // Serialize replay timestamp assignment with live dispatch. Otherwise
+        // equal or later live timestamps can make the query priority queue
+        // process a higher sequence first and permanently deduplicate replay.
+        let mut last_dispatch_ts = self.dispatch_order.lock().await;
+
         // Hold dispatchers write lock to block live dispatch during setup.
         // This ensures no live events reach the new subscriber before replay.
         let mut dispatchers = self.dispatchers.write().await;
@@ -983,9 +988,10 @@ impl SourceBase {
 
         self.subscriber_notify.notify_one();
 
-        // Read WAL events (after releasing lock — I/O can be slow).
-        // Filter to only include events up to the captured head to avoid
-        // duplicates with live events that were appended during setup.
+        // Read WAL events after releasing the dispatcher lock, but keep the
+        // dispatch-order lock held so live events cannot receive timestamps
+        // that sort before this replay. Filter to the captured head to avoid
+        // duplicates with live events appended during setup.
         let replay_events = if resume_seq < head {
             match wal.read_from(&self.id, resume_seq.saturating_add(1)).await {
                 Ok(events) => events
@@ -1001,22 +1007,8 @@ impl SourceBase {
             Vec::new()
         };
 
-        // Build replay wrappers
-        let replay_wrappers: std::collections::VecDeque<
-            std::sync::Arc<crate::channels::events::SourceEventWrapper>,
-        > = replay_events
-            .into_iter()
-            .map(|(seq, change)| {
-                std::sync::Arc::new(crate::channels::events::SourceEventWrapper {
-                    source_id: self.id.clone(),
-                    event: crate::channels::events::SourceEvent::Change(change),
-                    timestamp: chrono::Utc::now(),
-                    sequence: Some(seq),
-                    source_position: Some(bytes::Bytes::from(seq.to_be_bytes().to_vec())),
-                    profiling: None,
-                })
-            })
-            .collect();
+        let replay_wrappers = self.build_replay_wrappers(replay_events, &mut last_dispatch_ts);
+        drop(last_dispatch_ts);
 
         let replay_count = replay_wrappers.len();
         info!(
@@ -1052,6 +1044,28 @@ impl SourceBase {
             position_handle,
             bootstrap_result_receiver: None,
         })
+    }
+
+    fn build_replay_wrappers(
+        &self,
+        replay_events: Vec<(u64, drasi_core::models::SourceChange)>,
+        last_dispatch_ts: &mut chrono::DateTime<chrono::Utc>,
+    ) -> std::collections::VecDeque<std::sync::Arc<SourceEventWrapper>> {
+        replay_events
+            .into_iter()
+            .map(|(seq, change)| {
+                let timestamp =
+                    Self::next_monotonic_timestamp(last_dispatch_ts, chrono::Utc::now());
+                std::sync::Arc::new(SourceEventWrapper {
+                    source_id: self.id.clone(),
+                    event: SourceEvent::Change(change),
+                    timestamp,
+                    sequence: Some(seq),
+                    source_position: Some(bytes::Bytes::from(seq.to_be_bytes().to_vec())),
+                    profiling: None,
+                })
+            })
+            .collect()
     }
 
     /// Handle bootstrap subscription logic.
@@ -2257,6 +2271,51 @@ mod tests {
         let r4 = SourceBase::next_monotonic_timestamp(&mut last, much_later);
         assert_eq!(r4, much_later);
         assert!(r4 > r3);
+    }
+
+    #[tokio::test]
+    async fn replay_timestamps_advance_the_shared_dispatch_clock() {
+        use chrono::{Duration, Utc};
+
+        let params =
+            SourceBaseParams::new("replay-order").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        let mut receiver = base.create_streaming_receiver().await.unwrap();
+        let mut dispatch_order = base.dispatch_order.lock().await;
+        *dispatch_order = Utc::now() + Duration::hours(1);
+        let previous = *dispatch_order;
+        let replay = vec![
+            (
+                41,
+                match make_event("replay-order", None).event {
+                    SourceEvent::Change(change) => change,
+                    _ => unreachable!(),
+                },
+            ),
+            (
+                42,
+                match make_event("replay-order", None).event {
+                    SourceEvent::Change(change) => change,
+                    _ => unreachable!(),
+                },
+            ),
+        ];
+
+        let wrappers = base.build_replay_wrappers(replay, &mut dispatch_order);
+
+        assert!(wrappers[0].timestamp > previous);
+        assert!(wrappers[1].timestamp > wrappers[0].timestamp);
+        assert_eq!(*dispatch_order, wrappers[1].timestamp);
+        assert_eq!(wrappers[0].sequence, Some(41));
+        assert_eq!(wrappers[1].sequence, Some(42));
+
+        let last_replay_timestamp = wrappers[1].timestamp;
+        drop(dispatch_order);
+        base.dispatch_event(make_event("replay-order", None))
+            .await
+            .unwrap();
+        let live = receiver.recv().await.unwrap();
+        assert!(live.timestamp > last_replay_timestamp);
     }
 
     /// Regression test for issue #640: dispatching changes concurrently on a

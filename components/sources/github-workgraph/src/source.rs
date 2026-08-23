@@ -55,6 +55,7 @@ pub struct GitHubWorkGraphSource {
     config: GitHubWorkGraphSourceConfig,
     repository_filter: RepositoryFilter,
     wal: Arc<RwLock<Option<Arc<dyn WalProvider>>>>,
+    allocator: Arc<RwLock<Option<Arc<Allocator>>>>,
     agent_sync: Arc<RwLock<Option<Arc<AgentSync>>>>,
     notify: Arc<Notify>,
     replay_gate: Arc<Mutex<()>>,
@@ -162,6 +163,7 @@ impl Source for GitHubWorkGraphSource {
             state_store,
             wal.clone(),
         ));
+        *self.allocator.write().await = Some(allocator.clone());
         allocator
             .recover(chrono::Utc::now().timestamp_millis().max(0) as u64)
             .await?;
@@ -319,6 +321,16 @@ impl Source for GitHubWorkGraphSource {
         self.base.remove_position_handle(query_id).await;
     }
     async fn on_subscriptions_complete(&self) -> anyhow::Result<()> {
+        let allocator = self
+            .allocator
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow!("GitHub WorkGraph allocator is not initialized"))?;
+        allocator
+            .recover(chrono::Utc::now().timestamp_millis().max(0) as u64)
+            .await
+            .context("Failed to restate allocator state after startup subscriptions")?;
         self.startup_subscriptions_complete
             .store(true, Ordering::Release);
         self.notify.notify_one();
@@ -520,6 +532,7 @@ impl GitHubWorkGraphSourceBuilder {
             config,
             repository_filter,
             wal: Arc::new(RwLock::new(None)),
+            allocator: Arc::new(RwLock::new(None)),
             agent_sync: Arc::new(RwLock::new(None)),
             notify: Arc::new(Notify::new()),
             replay_gate: Arc::new(Mutex::new(())),

@@ -797,6 +797,68 @@ async fn signed_source_contract_capacity_gates_leases_not_queue() {
 }
 
 #[tokio::test]
+async fn startup_completion_restates_active_leases_for_fresh_subscribers() {
+    let server = wiremock::MockServer::start().await;
+    mount_agent_blob(&server, &agent_file(1)).await;
+    let harness = agent_harness(&server).await;
+
+    let assignment = task_comment(
+        "I_restate",
+        "open",
+        "IC_restate",
+        &assignment_body("issue-validator"),
+        "assigner",
+        "U_assigner",
+    );
+    assert_eq!(
+        harness
+            .post("issue_comment", "assignment-restate", &assignment)
+            .await,
+        202
+    );
+
+    // Ensure the original allocation changes have already drained with no
+    // subscriber, matching startup recovery before queries are registered.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let mut subscription = harness
+        .source
+        .subscribe(settings("fresh-after-allocation", None, false))
+        .await
+        .unwrap();
+
+    harness
+        .source
+        .on_subscriptions_complete()
+        .await
+        .expect("startup completion must restate durable allocator state");
+
+    let lease_id = format!(
+        "workgraph-lease:I_restate:{}",
+        hex::encode(Sha256::digest(b"I_restate\0IC_restate\0\x31"))
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = subscription.receiver.recv().await.unwrap();
+            if let SourceEvent::Change(change) = &event.event {
+                if change_id(change) == lease_id
+                    && change_label(change) == "WorkGraphTaskLease"
+                    && matches!(
+                        change,
+                        SourceChange::Insert { .. } | SourceChange::Update { .. }
+                    )
+                {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("fresh subscriber must receive the active lease restatement");
+
+    harness.source.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn signed_source_contract_exact_result_releases_and_refills() {
     let server = wiremock::MockServer::start().await;
     mount_agent_blob(&server, &agent_file(1)).await;
