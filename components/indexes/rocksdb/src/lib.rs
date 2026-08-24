@@ -60,6 +60,7 @@ pub(crate) fn bound_write_buffer_history(opts: &mut rocksdb::Options) {
     opts.set_max_write_buffer_size_to_maintain(WRITE_BUFFER_HISTORY_BYTES as i64);
 }
 
+mod budget_monitor;
 mod cf_options;
 pub mod checkpoint;
 #[cfg(feature = "plugin-descriptor")]
