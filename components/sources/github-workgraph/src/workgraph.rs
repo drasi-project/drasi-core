@@ -538,6 +538,10 @@ fn validate_workflow_task_inputs(inputs: &WorkflowTaskInputs) -> Result<(), Stri
                     "inputs.children agent values must be unique",
                 )?;
             }
+            require(
+                !agents.contains(&inputs.agent),
+                "composite inputs.agent must differ from every child agent",
+            )?;
         }
         _ => {
             return Err(

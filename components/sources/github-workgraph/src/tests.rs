@@ -570,6 +570,10 @@ fn task_envelopes_accept_only_strict_work_definitions() {
             "agent: issue-body-validator",
             "agent: issue-title-validator",
         ),
+        &WORKFLOW_COMPOSITE_TASK.replace(
+            "agent: issue-validation-evaluator",
+            "agent: issue-title-validator",
+        ),
         "WorkGraphTask/v2\n\n```yaml\n{}\n```\n",
         "prose\n{}",
     ] {
