@@ -45,6 +45,8 @@ chrono = { version = "0.4", features = ["serde"] }
 ordered-float = "3.0"
 mysql_async = { version = "0.37", features = ["rustls-tls", "ring", "tls12"] }
 mysql_common = "0.37"
+# Explicit rustls + ring so the cdylib links a CryptoProvider (see issue #781).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 bytes = "1.0"
 
 [features]

@@ -642,6 +642,7 @@ impl OtelSourceBuilder {
     ///
     /// Returns an error if binds, TTLs, or TLS paths are invalid.
     pub fn build(self) -> Result<OtelSource> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         self.config.validate()?;
         let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {

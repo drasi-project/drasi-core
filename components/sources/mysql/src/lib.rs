@@ -57,6 +57,7 @@ pub struct MySqlReplicationSource {
 
 impl MySqlReplicationSource {
     pub fn new(id: impl Into<String>, config: MySqlSourceConfig) -> Result<Self> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let id = id.into();
         let params = SourceBaseParams::new(id);
         Ok(Self {

@@ -44,6 +44,8 @@ serde_json = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
 neo4rs = "0.8"
+# Explicit rustls + ring so the cdylib links a CryptoProvider (see issue #781).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 [dev-dependencies]
 drasi-bootstrap-neo4j.workspace = true

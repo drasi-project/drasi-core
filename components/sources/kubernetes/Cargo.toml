@@ -46,6 +46,8 @@ chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 kube = { version = "0.98", features = ["client", "runtime", "derive"] }
 k8s-openapi = { version = "0.24", features = ["v1_32"] }
+# Explicit rustls + ring so the cdylib links a CryptoProvider (see issue #781).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"

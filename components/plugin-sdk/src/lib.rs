@@ -239,6 +239,16 @@ pub use mapper::{DtoMapper, MappingError};
 pub use registration::{PluginRegistration, SDK_VERSION};
 pub use resolver::{register_secret_resolver, ResolverError};
 
+/// Install rustls `ring` as the process-level [`CryptoProvider`](rustls::crypto::CryptoProvider).
+///
+/// linux-gnu plugin artifacts built with cargo-zigbuild have shipped rustls 0.23
+/// with neither `ring` nor `aws-lc-rs` compiled in (see issue #781). Calling this
+/// from `drasi_plugin_init` selects ring before any TLS client is constructed.
+/// `AlreadyInstalled` / other errors are ignored so this is safe to call twice.
+pub fn install_default_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Re-export tokio so the `export_plugin!` macro can reference it
 /// without requiring plugins to declare a direct tokio dependency.
 #[doc(hidden)]
@@ -756,6 +766,7 @@ macro_rules! export_plugin {
         #[no_mangle]
         pub extern "C" fn drasi_plugin_init() -> *mut $crate::ffi::FfiPluginRegistration {
             match ::std::panic::catch_unwind(|| {
+                $crate::install_default_rustls_crypto_provider();
                 let _ = __plugin_runtime();
                 let (source_descs, reaction_descs, bootstrap_descs, identity_provider_descs, secret_store_descs) = $init_fn();
 

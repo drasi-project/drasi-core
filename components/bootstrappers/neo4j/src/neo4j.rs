@@ -371,6 +371,8 @@ fn quote_ident(input: &str) -> String {
 }
 
 async fn connect_graph(config: &Neo4jBootstrapConfig) -> Result<Graph> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    drasi_neo4j_common::install_rustls_crypto_provider();
     let neo4j_config = ConfigBuilder::default()
         .uri(config.uri.trim())
         .user(config.user.as_str())

@@ -209,6 +209,7 @@ impl GrpcSource {
     /// let source = GrpcSource::new("my-grpc-source", config)?;
     /// ```
     pub fn new(id: impl Into<String>, config: GrpcSourceConfig) -> Result<Self> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let id = id.into();
         let params = SourceBaseParams::new(id);
         Ok(Self {

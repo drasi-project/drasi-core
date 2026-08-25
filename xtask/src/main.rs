@@ -735,6 +735,9 @@ fn build_plugins(args: &[String]) {
                 0
             });
             let _ = fs::remove_file(&src);
+            if release && is_linux_gnu_plugin_target(target.as_deref()) {
+                assert_rustls_crypto_provider(&dst);
+            }
         } else {
             eprintln!(
                 "ERROR: expected cdylib not found after build: {}",
@@ -801,6 +804,45 @@ fn build_plugins(args: &[String]) {
     }
 
     println!("=== cdylib plugins output to {} ===", plugins_dir.display());
+}
+
+fn is_linux_gnu_plugin_target(target: Option<&str>) -> bool {
+    match target {
+        Some(t) => t.contains("linux-gnu"),
+        None => cfg!(all(target_os = "linux", target_env = "gnu")),
+    }
+}
+
+/// Fail a release linux-gnu `.so` that links rustls 0.23 without a CryptoProvider.
+/// See issue #781.
+fn assert_rustls_crypto_provider(so_path: &Path) {
+    let bytes = match fs::read(so_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!(
+                "ERROR: failed to read {} for rustls provider check: {e}",
+                so_path.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    if !contains_bytes(&bytes, b"rustls-0.23") {
+        return;
+    }
+    if contains_bytes(&bytes, b"src/crypto/ring") || contains_bytes(&bytes, b"aws_lc_rs") {
+        return;
+    }
+    eprintln!(
+        "ERROR: {} contains rustls-0.23 but neither src/crypto/ring nor aws_lc_rs (issue #781)",
+        so_path.display()
+    );
+    std::process::exit(1);
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 fn clean_build_artifacts(build_dir: &Path, lib_name: &str) {
@@ -1689,5 +1731,20 @@ mod tests {
             plugin_lib_name("drasi-source-kubernetes", Some(base)),
             "libdrasi_source_kubernetes"
         );
+    }
+
+    #[test]
+    fn rustls_provider_guard_requires_ring_or_aws_lc() {
+        assert!(contains_bytes(b"xx rustls-0.23 yy", b"rustls-0.23"));
+        assert!(contains_bytes(b"src/crypto/ring", b"src/crypto/ring"));
+        assert!(contains_bytes(b"aws_lc_rs", b"aws_lc_rs"));
+        assert!(!contains_bytes(b"rustls-0.23 only", b"src/crypto/ring"));
+        assert!(is_linux_gnu_plugin_target(Some("x86_64-unknown-linux-gnu")));
+        assert!(is_linux_gnu_plugin_target(Some(
+            "aarch64-unknown-linux-gnu.2.28"
+        )));
+        assert!(!is_linux_gnu_plugin_target(Some(
+            "x86_64-unknown-linux-musl"
+        )));
     }
 }

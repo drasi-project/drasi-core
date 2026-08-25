@@ -31,3 +31,6 @@ drasi-core.workspace = true
 anyhow = "1.0"
 neo4rs = "0.8"
 ordered-float = "3.0"
+# Explicit rustls + ring so feature unification compiles a CryptoProvider into
+# neo4j cdylibs (see issue #781).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

@@ -35,6 +35,7 @@ pub struct KubernetesBootstrapProvider {
 
 impl KubernetesBootstrapProvider {
     pub fn new(source_config: KubernetesSourceConfig) -> Self {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         Self { source_config }
     }
 

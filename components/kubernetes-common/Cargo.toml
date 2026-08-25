@@ -35,3 +35,6 @@ chrono = { version = "0.4", features = ["serde"] }
 kube = { version = "0.98", features = ["client", "runtime", "derive"] }
 k8s-openapi = { version = "0.24", features = ["v1_32"] }
 log = "0.4"
+# Explicit rustls + ring so feature unification compiles a CryptoProvider into
+# kubernetes cdylibs (see issue #781).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

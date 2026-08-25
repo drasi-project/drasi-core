@@ -63,6 +63,7 @@ impl RabbitMQReaction {
         queries: Vec<String>,
         config: RabbitMQReactionConfig,
     ) -> anyhow::Result<Self> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         Self::validate_config(&queries, &config)?;
         let params = ReactionBaseParams::new(id, queries);
         Ok(Self {

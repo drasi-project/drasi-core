@@ -47,6 +47,10 @@ pub async fn connect_with_ssl_mode<F>(build_opts: F, mode: SslMode) -> Result<Co
 where
     F: Fn() -> OptsBuilder,
 {
+    // mysql_async's rustls-tls+ring features do not always unify ring into
+    // linux-gnu cdylibs. Install ring before the first TLS handshake (see #781).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     match mode {
         SslMode::Disabled => Ok(Conn::new(build_opts().ssl_opts(None)).await?),
         SslMode::IfAvailable => connect_if_available(build_opts).await,

@@ -18,6 +18,10 @@ use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Client, Config};
 
 pub async fn build_client(config: &KubernetesSourceConfig) -> Result<Client> {
+    // kube-rs constructs rustls even for http:// kubeconfigs. Install ring
+    // before the first rustls use (see issue #781).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let kube_config = if let Some(content) = &config.kubeconfig_content {
         let cfg = Kubeconfig::from_yaml(content)?;
         Config::from_custom_kubeconfig(cfg, &KubeConfigOptions::default()).await?

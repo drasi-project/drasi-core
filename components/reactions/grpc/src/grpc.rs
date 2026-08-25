@@ -50,6 +50,7 @@ impl GrpcReaction {
         queries: Vec<String>,
         config: GrpcReactionConfig,
     ) -> anyhow::Result<Self> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         config.validate(&queries)?;
         let id = id.into();
         let params = ReactionBaseParams::new(id, queries);

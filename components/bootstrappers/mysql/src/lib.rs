@@ -39,6 +39,7 @@ pub struct MySqlBootstrapProvider {
 
 impl MySqlBootstrapProvider {
     pub fn new(config: MySqlBootstrapConfig) -> Self {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         Self { config }
     }
 

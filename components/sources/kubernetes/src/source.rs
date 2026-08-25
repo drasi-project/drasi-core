@@ -56,6 +56,7 @@ impl KubernetesSource {
     }
 
     pub fn new(id: impl Into<String>, config: KubernetesSourceConfig) -> Result<Self> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         config.validate()?;
         let params = SourceBaseParams::new(id.into());
         Ok(Self {

@@ -15,3 +15,8 @@
 //! Shared utilities for Neo4j source and bootstrap plugins.
 
 pub mod mapping;
+
+/// Install rustls `ring` before any bolt+s client is built. See issue #781.
+pub fn install_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}

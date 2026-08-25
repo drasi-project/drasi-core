@@ -42,6 +42,8 @@ async-trait = "0.1"
 log = "0.4"
 tonic = "0.14"
 tonic-prost = "0.14"
+# Explicit rustls + ring so the cdylib links a CryptoProvider (see issue #781).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 prost = "0.14"
 tokio = { version = "1.0", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
