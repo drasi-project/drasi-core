@@ -20,13 +20,14 @@
 //! database; a query DB holds fifteen column families, most of them small or
 //! idle, and pays fixed memory floors per CF that scale with the buffer size:
 //! the memtable bloom filters on the point-lookup CFs are allocated at 2% of
-//! `write_buffer_size` (~1.3 MiB each at the 64 MiB default, ~5.2 MiB per
-//! query across the four such CFs), and any CF that accumulates more than the
-//! arena's 2 KiB inline block allocates a full arena block. At the default
-//! 128 MiB shared budget, sizing both explicitly cuts the touched per-query
-//! floor roughly 5x and halves the memtable ceiling under load, at throughput
-//! parity (see issue #692 for measurements). Larger budgets trade some of
-//! those savings for fewer self-triggered flushes.
+//! `write_buffer_size`. Under RocksDB's 64 MiB per-CF default, they total about
+//! 5.2 MiB per query. Drasi's default 16/8 MiB tiers reduce that total to about
+//! 1.0 MiB, rising to about 3.8 MiB at the maximum 64/32 MiB tiers. Any CF that
+//! accumulates more than the arena's 2 KiB inline block allocates a full arena
+//! block. At the default 128 MiB shared budget, sizing both explicitly cuts the
+//! touched per-query floor roughly 5x and halves the memtable ceiling under
+//! load, at throughput parity (see issue #692 for measurements). Larger budgets
+//! trade some of those savings for fewer self-triggered flushes.
 //!
 //! Two buffer sizes are derived from the shared write-buffer manager's budget
 //! and assigned by per-source-change byte volume. The large tier is one eighth
