@@ -33,7 +33,7 @@ use crate::mapping::{
 use crate::webhook::verify_signature;
 use crate::workgraph::{
     classify_comment, classify_task_body, error_code, CommentClassification, Outcome,
-    TaskClassification, TaskType,
+    TaskClassification, TaskInputs, TaskType, WorkflowJoin,
 };
 use chrono::{TimeZone, Utc};
 use drasi_core::evaluation::context::QueryPartEvaluationContext;
@@ -69,6 +69,54 @@ const REQUEST_INFO_TASK: &str = r#"WorkGraphTask/v1
 taskType: request-info
 inputs:
   validationResultCommentNodeId: IC_validation_result
+```
+"#;
+const WORKFLOW_COMPOSITE_TASK: &str = r#"WorkGraphTask/v2
+
+```yaml
+taskType: workflow-task
+inputs:
+  workflowId: issue-lifecycle
+  workflowRunId: run-001
+  stepId: parallel-validation
+  definitionCommit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  definitionDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  generation: 1
+  operation: evaluate-validation
+  agent: issue-validation-evaluator
+  inputs:
+    issueNodeId: I_parent
+  join: all
+  expectedChildCount: 2
+  children:
+    - branchId: title
+      operation: validate-title
+      agent: issue-title-validator
+      inputs:
+        field: title
+    - branchId: body
+      operation: validate-body
+      agent: issue-body-validator
+      inputs:
+        field: body
+```
+"#;
+const WORKFLOW_BRANCH_TASK: &str = r#"WorkGraphTask/v2
+
+```yaml
+taskType: workflow-task
+inputs:
+  workflowId: issue-lifecycle
+  workflowRunId: run-001
+  stepId: parallel-validation
+  definitionCommit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  definitionDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  generation: 1
+  operation: validate-title
+  agent: issue-title-validator
+  inputs:
+    field: title
+  branchId: title
 ```
 "#;
 const ASSIGNMENT: &str = r#"WorkGraphTaskAssignment/v1
@@ -117,6 +165,20 @@ const REQUEST_INFO_RESULT: &str = r#"WorkGraphTaskResult/v1
   "summary": "Requested the missing information.",
   "result": {
     "requestCommentNodeId": "IC_request"
+  }
+}
+```
+"#;
+const WORKFLOW_RESULT: &str = r#"WorkGraphTaskResult/v1
+
+```json
+{
+  "taskType": "workflow-task",
+  "leaseId": "00000000-0000-7000-8000-000000000003",
+  "outcome": "succeeded",
+  "summary": "Selected the next viable workflow outcome.",
+  "result": {
+    "decision": "triage"
   }
 }
 ```
@@ -462,7 +524,12 @@ fn has_property(changes: &[SourceChange], node_label: &str, key: &str) -> bool {
 
 #[test]
 fn task_envelopes_accept_only_strict_work_definitions() {
-    for body in [VALIDATION_TASK, REQUEST_INFO_TASK] {
+    for body in [
+        VALIDATION_TASK,
+        REQUEST_INFO_TASK,
+        WORKFLOW_COMPOSITE_TASK,
+        WORKFLOW_BRANCH_TASK,
+    ] {
         assert!(matches!(
             classify_task_body(body),
             TaskClassification::Task(_)
@@ -473,6 +540,14 @@ fn task_envelopes_accept_only_strict_work_definitions() {
         "WorkGraphTask/v1\n\n```yaml\ntaskType: validate-issue\ninputs:\n  validationProfile: other\n```\n",
         "WorkGraphTask/v1\n\n```yaml\ntaskType: validate-issue\nagentId: issue-validator\ninputs:\n  validationProfile: new-issue-default\n```\n",
         "WorkGraphTask/v1\n\n```yaml\ntaskType: validate-issue\ninputs:\n  validationProfile: new-issue-default\n---\ntaskType: request-info\ninputs:\n  validationResultCommentNodeId: IC_result\n```\n",
+        "WorkGraphTask/v1\n\n```yaml\ntaskType: workflow-task\ninputs: {}\n```\n",
+        "WorkGraphTask/v2\n\n```yaml\ntaskType: validate-issue\ninputs:\n  validationProfile: new-issue-default\n```\n",
+        &WORKFLOW_COMPOSITE_TASK.replace("expectedChildCount: 2", "expectedChildCount: 3"),
+        &WORKFLOW_COMPOSITE_TASK.replace("branchId: body", "branchId: title"),
+        &WORKFLOW_COMPOSITE_TASK.replace(
+            "agent: issue-body-validator",
+            "agent: issue-title-validator",
+        ),
         "WorkGraphTask/v2\n\n```yaml\n{}\n```\n",
         "prose\n{}",
     ] {
@@ -481,6 +556,25 @@ fn task_envelopes_accept_only_strict_work_definitions() {
             TaskClassification::Invalid(_)
         ));
     }
+}
+
+#[test]
+fn workflow_task_v2_preserves_the_complete_direct_child_manifest() {
+    let TaskClassification::Task(task) = classify_task_body(WORKFLOW_COMPOSITE_TASK) else {
+        panic!("workflow composite must parse");
+    };
+    let TaskInputs::WorkflowTask(inputs) = task.inputs else {
+        panic!("workflow composite must use workflow inputs");
+    };
+
+    assert_eq!(task.task_type, TaskType::WorkflowTask);
+    assert_eq!(inputs.workflow_id, "issue-lifecycle");
+    assert_eq!(inputs.generation, 1);
+    assert_eq!(inputs.join, Some(WorkflowJoin::All));
+    assert_eq!(inputs.expected_child_count, Some(2));
+    assert_eq!(inputs.children.len(), 2);
+    assert_eq!(inputs.children[0].branch_id, "title");
+    assert_eq!(inputs.children[1].agent, "issue-body-validator");
 }
 
 #[test]
@@ -499,6 +593,10 @@ fn specialized_comment_grammars_are_mutually_exclusive() {
     ));
     assert!(matches!(
         classify_comment(REQUEST_INFO_RESULT),
+        CommentClassification::Result(_)
+    ));
+    assert!(matches!(
+        classify_comment(WORKFLOW_RESULT),
         CommentClassification::Result(_)
     ));
     assert!(matches!(
@@ -568,6 +666,53 @@ fn typed_issue_emits_task_not_github_issue() {
     assert_eq!(
         property(&changes, "WorkGraphTask", "taskType"),
         &ElementValue::from(&json!("validate-issue"))
+    );
+}
+
+#[test]
+fn workflow_task_v2_projects_the_runtime_manifest() {
+    let changes = convert(
+        "issues",
+        &issue_event(
+            "opened",
+            issue("I_workflow_task", WORKFLOW_COMPOSITE_TASK, true, "open"),
+        ),
+    );
+
+    assert_eq!(
+        property(&changes, "WorkGraphTask", "taskType"),
+        &ElementValue::from(&json!("workflow-task"))
+    );
+    assert_eq!(
+        property(&changes, "WorkGraphTask", "inputs"),
+        &ElementValue::from(&json!({
+            "workflowId": "issue-lifecycle",
+            "workflowRunId": "run-001",
+            "stepId": "parallel-validation",
+            "definitionCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "definitionDigest":
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "generation": 1,
+            "operation": "evaluate-validation",
+            "agent": "issue-validation-evaluator",
+            "inputs": {"issueNodeId": "I_parent"},
+            "join": "all",
+            "expectedChildCount": 2,
+            "children": [
+                {
+                    "branchId": "title",
+                    "operation": "validate-title",
+                    "agent": "issue-title-validator",
+                    "inputs": {"field": "title"}
+                },
+                {
+                    "branchId": "body",
+                    "operation": "validate-body",
+                    "agent": "issue-body-validator",
+                    "inputs": {"field": "body"}
+                }
+            ]
+        }))
     );
 }
 

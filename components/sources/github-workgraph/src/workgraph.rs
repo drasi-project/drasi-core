@@ -14,6 +14,7 @@
 
 use crate::agents::validate_agent_id;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 const TASK_FAMILY: &str = "WorkGraphTask/";
 const ASSIGNMENT_FAMILY: &str = "WorkGraphTaskAssignment/";
@@ -24,6 +25,7 @@ const YAML_FENCE: &str = "yaml";
 const JSON_FENCE: &str = "json";
 const FENCE_SUFFIX: &str = "\n```\n";
 const V1: &str = "v1";
+const V2: &str = "v2";
 /// Upper bound on any opaque identifier the Source will accept from a
 /// specialized comment. GitHub node IDs are far shorter; the bound only exists
 /// to reject unbounded values before they reach the graph.
@@ -60,11 +62,16 @@ wire_enum! {
     TaskType {
         ValidateIssue = "validate-issue",
         RequestInfo = "request-info",
+        WorkflowTask = "workflow-task",
     }
 }
 
 wire_enum! {
     Outcome { Succeeded = "succeeded", Failed = "failed", Blocked = "blocked" }
+}
+
+wire_enum! {
+    WorkflowJoin { All = "all" }
 }
 
 macro_rules! strict {
@@ -95,6 +102,39 @@ strict! {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowChildDefinition {
+    pub branch_id: String,
+    pub operation: String,
+    pub agent: String,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowTaskInputs {
+    pub workflow_id: String,
+    pub workflow_run_id: String,
+    pub step_id: String,
+    pub definition_commit: String,
+    pub definition_digest: String,
+    pub generation: u64,
+    pub operation: String,
+    pub agent: String,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join: Option<WorkflowJoin>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_child_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<WorkflowChildDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AssignmentRootV1 {
     agent_id: String,
 }
@@ -109,6 +149,7 @@ pub struct TaskAssignment {
 pub enum TaskInputs {
     ValidateIssue(ValidateIssueInputs),
     RequestInfo(RequestInfoInputs),
+    WorkflowTask(WorkflowTaskInputs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -116,6 +157,7 @@ pub enum TaskInputs {
 pub enum TaskResult {
     ValidateIssue(ValidateIssueResult),
     RequestInfo(RequestInfoResult),
+    WorkflowTask(serde_json::Value),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -184,10 +226,11 @@ struct ResultRootV1 {
 }
 
 pub fn classify_task_body(body: &str) -> TaskClassification {
-    let yaml_text = match exact_envelope(body, TASK_FAMILY, YAML_FENCE, "task", &[V1]) {
-        Ok((_, text)) => text,
-        Err(error) => return TaskClassification::Invalid(error),
-    };
+    let (version, yaml_text) =
+        match exact_envelope(body, TASK_FAMILY, YAML_FENCE, "task", &[V1, V2]) {
+            Ok(envelope) => envelope,
+            Err(error) => return TaskClassification::Invalid(error),
+        };
     let root: TaskRoot = match serde_yaml::from_str(yaml_text) {
         Ok(root) => root,
         Err(error) => {
@@ -197,7 +240,7 @@ pub fn classify_task_body(body: &str) -> TaskClassification {
             ))
         }
     };
-    match parse_task(root) {
+    match parse_task(version, root) {
         Ok(task) => TaskClassification::Task(Box::new(task)),
         Err(message) => TaskClassification::Invalid(WorkGraphError::new(
             error_code::INVALID_TASK_PAYLOAD,
@@ -355,9 +398,9 @@ fn canonical_json<T: Serialize>(value: &T, json_text: &str) -> bool {
     serde_json::to_string_pretty(value).is_ok_and(|canonical| canonical == json_text)
 }
 
-fn parse_task(root: TaskRoot) -> Result<TaskDefinition, String> {
-    let inputs = match root.task_type {
-        TaskType::ValidateIssue => {
+fn parse_task(version: &str, root: TaskRoot) -> Result<TaskDefinition, String> {
+    let inputs = match (version, root.task_type) {
+        (V1, TaskType::ValidateIssue) => {
             let inputs: ValidateIssueInputs = yaml_typed(root.inputs)?;
             require(
                 inputs.validation_profile == "new-issue-default",
@@ -365,7 +408,7 @@ fn parse_task(root: TaskRoot) -> Result<TaskDefinition, String> {
             )?;
             TaskInputs::ValidateIssue(inputs)
         }
-        TaskType::RequestInfo => {
+        (V1, TaskType::RequestInfo) => {
             let inputs: RequestInfoInputs = yaml_typed(root.inputs)?;
             non_empty(
                 &inputs.validation_result_comment_node_id,
@@ -373,6 +416,16 @@ fn parse_task(root: TaskRoot) -> Result<TaskDefinition, String> {
             )?;
             TaskInputs::RequestInfo(inputs)
         }
+        (V2, TaskType::WorkflowTask) => {
+            let inputs: WorkflowTaskInputs = yaml_typed(root.inputs)?;
+            validate_workflow_task_inputs(&inputs)?;
+            TaskInputs::WorkflowTask(inputs)
+        }
+        (V1, TaskType::WorkflowTask) => {
+            return Err("taskType 'workflow-task' requires WorkGraphTask/v2".to_string())
+        }
+        (V2, _) => return Err("WorkGraphTask/v2 requires taskType 'workflow-task'".to_string()),
+        _ => return Err(format!("unsupported task version '{version}'")),
     };
     Ok(TaskDefinition {
         task_type: root.task_type,
@@ -419,6 +472,13 @@ fn parse_result(version: &str, value: serde_json::Value) -> Result<WorkResult, S
             )?;
             TaskResult::RequestInfo(result)
         }
+        TaskType::WorkflowTask => {
+            require(
+                raw_result.is_object(),
+                "result for taskType 'workflow-task' must be an object",
+            )?;
+            TaskResult::WorkflowTask(raw_result)
+        }
     };
     Ok(WorkResult {
         task_type,
@@ -427,6 +487,67 @@ fn parse_result(version: &str, value: serde_json::Value) -> Result<WorkResult, S
         summary,
         result,
     })
+}
+
+fn validate_workflow_task_inputs(inputs: &WorkflowTaskInputs) -> Result<(), String> {
+    validate_agent_id(&inputs.workflow_id, "inputs.workflowId")?;
+    opaque_id(&inputs.workflow_run_id, "inputs.workflowRunId")?;
+    validate_agent_id(&inputs.step_id, "inputs.stepId")?;
+    opaque_id(&inputs.definition_commit, "inputs.definitionCommit")?;
+    require(
+        is_sha256_digest(&inputs.definition_digest),
+        "inputs.definitionDigest must be 'sha256:' followed by 64 lowercase hexadecimal characters",
+    )?;
+    require(
+        inputs.generation > 0,
+        "inputs.generation must be greater than zero",
+    )?;
+    validate_agent_id(&inputs.operation, "inputs.operation")?;
+    validate_agent_id(&inputs.agent, "inputs.agent")?;
+    if let Some(branch_id) = &inputs.branch_id {
+        validate_agent_id(branch_id, "inputs.branchId")?;
+    }
+
+    match (
+        inputs.join,
+        inputs.expected_child_count,
+        inputs.children.is_empty(),
+    ) {
+        (None, None, true) => {}
+        (Some(WorkflowJoin::All), Some(expected), false) => {
+            require(
+                expected >= 2,
+                "inputs.expectedChildCount must be at least two for join 'all'",
+            )?;
+            require(
+                usize::try_from(expected).is_ok_and(|value| value == inputs.children.len()),
+                "inputs.expectedChildCount must equal the number of children",
+            )?;
+            let mut branch_ids = BTreeSet::new();
+            let mut agents = BTreeSet::new();
+            for child in &inputs.children {
+                validate_agent_id(&child.branch_id, "inputs.children[].branchId")?;
+                validate_agent_id(&child.operation, "inputs.children[].operation")?;
+                validate_agent_id(&child.agent, "inputs.children[].agent")?;
+                require(
+                    branch_ids.insert(&child.branch_id),
+                    "inputs.children branchId values must be unique",
+                )?;
+                require(
+                    agents.insert(&child.agent),
+                    "inputs.children agent values must be unique",
+                )?;
+            }
+        }
+        _ => {
+            return Err(
+                "inputs.join, inputs.expectedChildCount, and inputs.children must either all \
+                 describe one composite task or all be absent"
+                    .to_string(),
+            )
+        }
+    }
+    Ok(())
 }
 
 fn parse_acceptance(value: serde_json::Value) -> Result<ResultAcceptance, String> {
