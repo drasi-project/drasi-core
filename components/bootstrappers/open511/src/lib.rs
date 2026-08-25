@@ -219,7 +219,9 @@ impl BootstrapProvider for Open511BootstrapProvider {
         let mut known_areas = HashSet::new();
         let mut sent = 0usize;
         let mut offset = 0usize;
-        let page_size = self.config.page_size;
+        // validate() already rejects 0; clamp so a bypass cannot loop forever
+        // (`0 < 0` is false and `offset + 0` never advances).
+        let page_size = self.config.page_size.max(1);
 
         loop {
             let page = api_client
@@ -314,6 +316,15 @@ mod tests {
     #[test]
     fn builder_requires_base_url() {
         let result = Open511BootstrapProvider::builder().build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_page_size() {
+        let result = Open511BootstrapProvider::builder()
+            .with_base_url("https://api.open511.gov.bc.ca")
+            .with_page_size(0)
+            .build();
         assert!(result.is_err());
     }
 
