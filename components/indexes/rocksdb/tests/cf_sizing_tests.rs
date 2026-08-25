@@ -148,11 +148,22 @@ fn effective_sizes_match_the_tier_policy_on_every_cf() {
 }
 
 #[tokio::test]
-async fn provider_derives_tier_sizes_from_its_memory_budget() {
+async fn provider_derives_tier_sizes_from_total_memory_budget() {
+    const TOTAL_MEMORY_BUDGET: usize = 512 * MIB;
+    const WRITE_BUFFER_BUDGET: usize = 256 * MIB;
+
     let dir = tempfile::tempdir().expect("tempdir");
     let provider = RocksDbIndexProvider::new(dir.path(), true, false)
-        .with_memory_budget_bytes(512 * MIB)
+        .with_memory_budget_bytes(TOTAL_MEMORY_BUDGET)
         .expect("valid memory budget");
+    assert_eq!(
+        provider
+            .memory_budget()
+            .write_buffer_manager()
+            .get_buffer_size(),
+        WRITE_BUFFER_BUDGET
+    );
+
     let created = provider
         .create_indexes("provider-test")
         .await
