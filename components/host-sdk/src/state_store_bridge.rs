@@ -64,6 +64,7 @@ impl StateStoreVtableBuilder {
             key_count_fn: ss_key_count,
             sync_fn: ss_sync,
             drop_fn: ss_drop,
+            is_durable_fn: Some(ss_is_durable),
         }
     }
 }
@@ -282,9 +283,108 @@ extern "C" fn ss_sync(state: *mut c_void) -> FfiResult {
     })
 }
 
+extern "C" fn ss_is_durable(state: *mut c_void) -> bool {
+    ffi_guard(false, || {
+        if state.is_null() {
+            return false;
+        }
+        provider_ref(state).is_durable()
+    })
+}
+
 extern "C" fn ss_drop(state: *mut c_void) {
     ffi_guard((), || {
         // Reconstruct the Box<Arc<...>> and drop it
         unsafe { drop(Box::from_raw(state as *mut Arc<dyn StateStoreProvider>)) };
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_lib::{MemoryStateStoreProvider, StateStoreProvider};
+    use drasi_plugin_sdk::ffi::FfiStateStoreProxy;
+    use drasi_state_store_redb::RedbStateStoreProvider;
+
+    fn release(vtable: StateStoreVtable) {
+        (vtable.drop_fn)(vtable.state);
+    }
+
+    #[test]
+    fn durable_redb_reports_true_through_host_vtable_and_plugin_proxy() {
+        let temp_dir = tempfile::tempdir().expect("temp directory");
+        let provider = Arc::new(
+            RedbStateStoreProvider::new(temp_dir.path().join("state.redb"))
+                .expect("redb state store"),
+        );
+        let vtable = StateStoreVtableBuilder::build(provider);
+        {
+            let proxy = unsafe { FfiStateStoreProxy::from_raw(&vtable) };
+            assert!(proxy.is_durable());
+        }
+
+        release(vtable);
+    }
+
+    #[test]
+    fn in_memory_store_reports_false_through_host_vtable_and_plugin_proxy() {
+        let provider = Arc::new(MemoryStateStoreProvider::new());
+        let vtable = StateStoreVtableBuilder::build(provider);
+        {
+            let proxy = unsafe { FfiStateStoreProxy::from_raw(&vtable) };
+            assert!(!proxy.is_durable());
+        }
+
+        release(vtable);
+    }
+
+    #[test]
+    fn missing_durability_callback_fails_closed() {
+        let temp_dir = tempfile::tempdir().expect("temp directory");
+        let provider = Arc::new(
+            RedbStateStoreProvider::new(temp_dir.path().join("state.redb"))
+                .expect("redb state store"),
+        );
+        let mut vtable = StateStoreVtableBuilder::build(provider);
+        vtable.is_durable_fn = None;
+        {
+            let proxy = unsafe { FfiStateStoreProxy::from_raw(&vtable) };
+            assert!(!proxy.is_durable());
+        }
+
+        release(vtable);
+    }
+
+    #[test]
+    fn invalid_null_state_fails_closed() {
+        let temp_dir = tempfile::tempdir().expect("temp directory");
+        let provider = Arc::new(
+            RedbStateStoreProvider::new(temp_dir.path().join("state.redb"))
+                .expect("redb state store"),
+        );
+        let mut vtable = StateStoreVtableBuilder::build(provider);
+        let provider_state = vtable.state;
+        vtable.state = std::ptr::null_mut();
+        {
+            let proxy = unsafe { FfiStateStoreProxy::from_raw(&vtable) };
+            assert!(!proxy.is_durable());
+        }
+
+        vtable.state = provider_state;
+        release(vtable);
+    }
+
+    #[test]
+    fn durability_callback_is_versioned_and_trailing() {
+        assert_eq!(drasi_plugin_sdk::ffi::metadata::FFI_SDK_VERSION, "0.14.0");
+
+        let callback_offset = std::mem::offset_of!(StateStoreVtable, is_durable_fn);
+        let callback_size =
+            std::mem::size_of::<Option<extern "C" fn(state: *mut c_void) -> bool>>();
+
+        assert_eq!(
+            callback_offset + callback_size,
+            std::mem::size_of::<StateStoreVtable>()
+        );
+    }
 }
