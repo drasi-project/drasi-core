@@ -574,6 +574,10 @@ fn task_envelopes_accept_only_strict_work_definitions() {
             "agent: issue-validation-evaluator",
             "agent: issue-title-validator",
         ),
+        &WORKFLOW_COMPOSITE_TASK.replace(
+            "  join: all",
+            "  branchId: nested-composite\n  join: all",
+        ),
         "WorkGraphTask/v2\n\n```yaml\n{}\n```\n",
         "prose\n{}",
     ] {

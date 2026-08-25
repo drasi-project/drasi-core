@@ -516,6 +516,10 @@ fn validate_workflow_task_inputs(inputs: &WorkflowTaskInputs) -> Result<(), Stri
         (None, None, true) => {}
         (Some(WorkflowJoin::All), Some(expected), false) => {
             require(
+                inputs.branch_id.is_none(),
+                "composite inputs.branchId must be absent",
+            )?;
+            require(
                 expected >= 2,
                 "inputs.expectedChildCount must be at least two for join 'all'",
             )?;
