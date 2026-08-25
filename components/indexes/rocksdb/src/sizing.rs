@@ -56,8 +56,14 @@
 //!
 //! Shared cache/table configuration and the flushed-memtable history bound are
 //! applied by [`crate::cf_options`] before this module overlays the per-CF
-//! write-buffer and arena sizing. The provider-wide write-buffer manager
-//! remains the aggregate backstop across query databases.
+//! write-buffer and arena sizing. Per-CF sizes are flush thresholds, not memory
+//! reservations, so their aggregate across CFs and query databases can exceed
+//! the shared budget. When active memtable usage approaches that budget, the
+//! provider-wide write-buffer manager may switch the oldest eligible memtable
+//! in the DB handling a write before that CF reaches its own threshold. Larger
+//! tiers therefore reduce self-triggered flushes most in lightly loaded or
+//! skewed fleets; under multi-query pressure the shared manager remains the
+//! aggregate authority.
 
 use rocksdb::{ColumnFamilyDescriptor, Options};
 
