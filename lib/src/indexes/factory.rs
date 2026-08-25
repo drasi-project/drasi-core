@@ -157,7 +157,7 @@ impl IndexFactory {
                 StorageBackendSpec::Memory { enable_archive } => {
                     memory_backends.insert(b.id, enable_archive);
                 }
-                StorageBackendSpec::Plugin { kind, .. } => {
+                StorageBackendSpec::Plugin { kind } => {
                     plugin_backends.insert(b.id, kind);
                 }
             }
@@ -210,7 +210,7 @@ impl IndexFactory {
             StorageBackendRef::Inline(StorageBackendSpec::Memory { enable_archive }) => {
                 self.build_memory_indexes(*enable_archive)
             }
-            StorageBackendRef::Inline(StorageBackendSpec::Plugin { kind, .. }) => {
+            StorageBackendRef::Inline(StorageBackendSpec::Plugin { kind }) => {
                 Err(IndexError::InitializationFailed(format!(
                     "Inline plugin storage backend (kind '{kind}') is not supported in embedded mode. \
                      Declare a named storage backend and inject a provider via \
@@ -356,7 +356,6 @@ mod tests {
                 id: "rocks_test".to_string(),
                 spec: StorageBackendSpec::Plugin {
                     kind: "rocksdb".to_string(),
-                    config: serde_json::json!({ "path": "/tmp/test" }),
                 },
             },
         ];
@@ -420,7 +419,6 @@ mod tests {
             id: "rocks".to_string(),
             spec: StorageBackendSpec::Plugin {
                 kind: "rocksdb".to_string(),
-                config: serde_json::json!({ "path": "/data/test" }),
             },
         }];
         let factory = IndexFactory::new(backends, HashMap::new());
@@ -453,7 +451,6 @@ mod tests {
         let factory = IndexFactory::new(vec![], providers_with("rocks", false));
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Plugin {
             kind: "rocksdb".to_string(),
-            config: serde_json::json!({ "path": "/data/test" }),
         });
         let result = factory.build(&backend_ref, "test_query").await;
 
@@ -497,7 +494,6 @@ mod tests {
             id: "rocks".to_string(),
             spec: StorageBackendSpec::Plugin {
                 kind: "rocksdb".to_string(),
-                config: serde_json::json!({ "path": "/data/test" }),
             },
         }];
         let factory = IndexFactory::new(backends, HashMap::new());
@@ -516,7 +512,6 @@ mod tests {
 
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Plugin {
             kind: "rocksdb".to_string(),
-            config: serde_json::json!({ "path": "/data/test" }),
         });
         assert!(!factory.is_volatile(&backend_ref));
     }

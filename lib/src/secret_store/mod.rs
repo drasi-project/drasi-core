@@ -16,8 +16,8 @@
 //!
 //! A [`SecretStoreProvider`] resolves named secret references (e.g., `"DB_PASSWORD"`)
 //! into their actual string values. Plugin configuration DTOs use
-//! [`ConfigValue::Secret`](drasi_plugin_sdk::ConfigValue) references which are resolved
-//! through the configured secret store during plugin initialization.
+//! `ConfigValue::Secret` references from the plugin SDK, which are resolved through
+//! the configured secret store during plugin initialization.
 //!
 //! # Architecture
 //!

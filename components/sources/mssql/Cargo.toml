@@ -58,7 +58,8 @@ testcontainers = "0.27"
 drasi-bootstrap-mssql = { workspace = true }
 drasi-reaction-application = { workspace = true }
 drasi-index-rocksdb = { workspace = true }
-drasi-host-sdk = { workspace = true }
+# Path-only so this dev dependency is omitted from the published manifest.
+drasi-host-sdk = { path = "../../host-sdk" }
 drasi-plugin-sdk = { workspace = true }
 tempfile = "3"
 bytes = "1"
