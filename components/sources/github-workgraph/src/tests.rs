@@ -119,6 +119,27 @@ inputs:
   branchId: title
 ```
 "#;
+const WORKFLOW_FLOW_STYLE_TASK: &str = r#"WorkGraphTask/v2
+
+```yaml
+taskType: workflow-task
+inputs: {
+  "workflowId": "issue-lifecycle",
+  "workflowRunId": "run-001",
+  "stepId": "parallel-validation",
+  "definitionCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "definitionDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "generation": 1,
+  "operation": "validate-title",
+  "agent": "issue-title-validator",
+  "inputs": {
+    "field": "title",
+    "rule": "non-empty"
+  },
+  "branchId": "title"
+}
+```
+"#;
 const ASSIGNMENT: &str = r#"WorkGraphTaskAssignment/v1
 
 ```json
@@ -529,6 +550,7 @@ fn task_envelopes_accept_only_strict_work_definitions() {
         REQUEST_INFO_TASK,
         WORKFLOW_COMPOSITE_TASK,
         WORKFLOW_BRANCH_TASK,
+        WORKFLOW_FLOW_STYLE_TASK,
     ] {
         assert!(matches!(
             classify_task_body(body),
