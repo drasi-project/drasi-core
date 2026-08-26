@@ -2460,15 +2460,14 @@ async fn test_reaction_enqueue_query_result() {
         std::collections::HashMap::new(),
     );
 
-    // This is the critical path: host calls enqueue_query_result on the reaction proxy,
-    // which transfers the QueryResult as an opaque pointer through FFI into the
-    // reaction's priority queue.
+    // This is the critical path: the serialized result crosses FFI and this
+    // future resolves only after the plugin acknowledges its callback result.
     reaction
         .enqueue_query_result(query_result)
         .await
         .expect("enqueue_query_result should succeed");
 
-    // If we get here without panic/crash, the opaque pointer transfer worked.
+    // Reaching here confirms the plugin acknowledged the delivery.
     // Stop the reaction cleanly.
     reaction.stop().await.expect("Reaction should stop");
 }
@@ -2593,7 +2592,7 @@ async fn test_reaction_enqueue_query_result_with_data() {
     };
 
     // Enqueue a result with actual data — validates that complex types
-    // cross the FFI boundary correctly as opaque pointers
+    // cross the FFI boundary correctly as serialized payloads
     reaction
         .enqueue_query_result(query_result)
         .await

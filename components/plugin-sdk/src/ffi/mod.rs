@@ -73,10 +73,12 @@ pub use vtables::{
     FfiBootstrapResultCallbackFn, FfiBootstrapResultReceiver, FfiBootstrapStream,
     FfiBootstrapWriteCheckpointFn, FfiChangePushCallbackFn, FfiChangeReceiver, FfiCheckpoint,
     FfiCheckpointResult, FfiOutboxIterator, FfiOutboxIteratorResponse, FfiPluginRegistration,
-    FfiQueryResult, FfiResultPushCallbackFn, FfiRuntimeContext, FfiSnapshotIterator,
-    FfiSnapshotIteratorResponse, FfiSourceEvent, FfiSubscriptionResponse,
+    FfiQueryResult, FfiResultPushCallbackFn, FfiResultPushControl, FfiRuntimeContext,
+    FfiSnapshotIterator, FfiSnapshotIteratorResponse, FfiSourceEvent, FfiSubscriptionResponse,
     IdentityProviderPluginVtable, ReactionPluginVtable, ReactionVtable, SecretStorePluginVtable,
     SnapshotFetcherVtable, SourcePluginVtable, SourceVtable, StateStoreVtable, WalProviderVtable,
+    FFI_RESULT_PUSH_ACK_ERROR, FFI_RESULT_PUSH_ACK_OK, FFI_RESULT_PUSH_FORWARDER_EXIT,
+    FFI_RESULT_PUSH_PROTOCOL_VERSION, FFI_RESULT_PUSH_REQUEST,
 };
 
 pub use bootstrap_proxy::FfiBootstrapProviderProxy;

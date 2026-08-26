@@ -1217,7 +1217,6 @@ impl ReactionManager {
                                     }
                                 }
 
-                                last_forwarded_seq = query_result.sequence;
                                 let seq = query_result.sequence;
                                 let result = Arc::try_unwrap(query_result)
                                     .unwrap_or_else(|arc| (*arc).clone());
@@ -1225,7 +1224,12 @@ impl ReactionManager {
                                     log::error!(
                                         "[{reaction_id_owned}] Failed to enqueue result from query '{query_id_clone}': {e}"
                                     );
+                                    // Do not process later results after a rejected delivery:
+                                    // advancing past `seq` would acknowledge a gap and could
+                                    // permanently skip the failed effect.
+                                    break;
                                 } else {
+                                    last_forwarded_seq = seq;
                                     // Advance in-memory checkpoint so forwarder tracks
                                     // position (skip stale events on reconnect).
                                     // NOTE: We do NOT persist to durable storage here.

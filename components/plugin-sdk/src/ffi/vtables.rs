@@ -216,13 +216,44 @@ unsafe impl Sync for FfiBootstrapResultReceiver {}
 // Query result events — carries QueryResult across FFI to reactions
 // ============================================================================
 
-/// Callback for push-based query result delivery to reactions.
-/// The plugin calls this to receive the next QueryResult from the host.
-/// Returns a `*mut QueryResult` (ownership transfers to the plugin),
-/// or null to signal end-of-stream / shutdown.
-/// The `result` parameter is unused (reserved).
+/// Version of the query-result push callback control protocol.
+///
+/// This is deliberately separate from the SDK ABI version so callback users can
+/// reject an unexpected control block defensively. The SDK metadata version
+/// prevents a plugin compiled with the old reserved-parameter semantics from
+/// being loaded by a new host.
+pub const FFI_RESULT_PUSH_PROTOCOL_VERSION: u32 = 1;
+
+/// Request the next result from the host.
+pub const FFI_RESULT_PUSH_REQUEST: u32 = 1;
+/// Acknowledge that the reaction accepted the previously requested result.
+pub const FFI_RESULT_PUSH_ACK_OK: u32 = 2;
+/// Acknowledge that the reaction rejected the previously requested result.
+pub const FFI_RESULT_PUSH_ACK_ERROR: u32 = 3;
+/// Report that the plugin forwarder has exited and will not touch its wrapper again.
+pub const FFI_RESULT_PUSH_FORWARDER_EXIT: u32 = 4;
+
+/// Control block for [`FfiResultPushCallbackFn`].
+///
+/// `error` is borrowed for the duration of an `ACK_ERROR` callback only. The
+/// host must copy it before the callback returns. It is empty for other kinds.
+#[repr(C)]
+pub struct FfiResultPushControl {
+    pub version: u32,
+    pub kind: u32,
+    pub error: FfiStr,
+}
+
+/// Callback for serialized query-result delivery to reactions.
+///
+/// The plugin calls this with `REQUEST` to receive the next `FfiQueryResult`;
+/// ownership of the returned envelope transfers to the plugin. After awaiting
+/// `Reaction::enqueue_query_result`, it calls the callback again with
+/// `ACK_OK` or `ACK_ERROR`. The host does not consider delivery complete until
+/// that acknowledgement. `FORWARDER_EXIT` terminates the stream and resolves
+/// any unacknowledged host deliveries as errors.
 pub type FfiResultPushCallbackFn =
-    extern "C" fn(ctx: *mut c_void, result: *mut c_void) -> *mut c_void;
+    extern "C" fn(ctx: *mut c_void, control: *const FfiResultPushControl) -> *mut c_void;
 
 // ============================================================================
 // Bootstrap stream — handles returned by a bootstrap provider vtable
@@ -511,9 +542,9 @@ drasi_ffi_primitives::ffi_vtable! {
         fn initialize_fn(state: *mut, ctx: *const FfiRuntimeContext),
 
         // Host-managed query subscription forwarding (push-based)
-        /// The host calls this once to start push-based delivery.
-        /// The plugin spawns a forwarder task that reads from an internal channel
-        /// and calls `reaction.enqueue_query_result()` for each item.
+        /// The host calls this once to start serialized, acknowledged result delivery.
+        /// The plugin forwarder requests one result, awaits
+        /// `reaction.enqueue_query_result()`, then acknowledges that exact result.
         fn start_result_push_fn(state: *mut, callback: FfiResultPushCallbackFn, callback_ctx: *mut c_void),
 
         // Recovery archetype methods

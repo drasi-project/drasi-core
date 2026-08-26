@@ -143,6 +143,34 @@ unsafe fn decode_ffi_query_result(
     unsafe { super::payload::consume_query_result(ptr) }
 }
 
+fn result_push_control(kind: u32, error: &str) -> FfiResultPushControl {
+    FfiResultPushControl {
+        version: FFI_RESULT_PUSH_PROTOCOL_VERSION,
+        kind,
+        error: FfiStr::from_str(error),
+    }
+}
+
+fn acknowledge_result_push(
+    callback: FfiResultPushCallbackFn,
+    callback_ctx: usize,
+    result: Result<(), String>,
+) {
+    let (kind, error) = match result {
+        Ok(()) => (FFI_RESULT_PUSH_ACK_OK, String::new()),
+        Err(error) => (FFI_RESULT_PUSH_ACK_ERROR, error),
+    };
+    let control = result_push_control(kind, &error);
+    let _ = callback(callback_ctx as *mut c_void, &control);
+}
+
+fn signal_result_push_forwarder_exit(callback: FfiResultPushCallbackFn, callback_ctx: *mut c_void) {
+    let control = result_push_control(FFI_RESULT_PUSH_FORWARDER_EXIT, "");
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        callback(callback_ctx, &control);
+    }));
+}
+
 // Compile-time assertions that transmute between raw pointers and callback
 // function pointers is safe (same size and alignment).
 const _: () = assert!(
@@ -1597,20 +1625,34 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         callback: FfiResultPushCallbackFn,
         callback_ctx: *mut c_void,
     ) {
-        // Push-based result delivery. The host provides a blocking callback
-        // that returns the next QueryResult pointer (or null on shutdown).
-        // The plugin spawns a forwarder that calls the callback via
-        // spawn_blocking (to avoid starving async workers), then enqueues
-        // each result into the reaction's priority queue.
+        // The host provides a blocking callback that returns one serialized
+        // QueryResult per REQUEST. This single forwarder awaits and acknowledges
+        // each callback before requesting another result, preserving delivery
+        // order and making the acknowledgement specific to that result.
         let w = unsafe { &*(state as *const ReactionWrapper<T>) };
         let handle = (w.runtime_handle)().handle().clone();
         let ctx_raw = callback_ctx as usize;
         let ptr = SendPtr(state as *const ReactionWrapper<T>);
+        struct ForwarderExit {
+            callback: FfiResultPushCallbackFn,
+            callback_ctx: usize,
+        }
+        impl Drop for ForwarderExit {
+            fn drop(&mut self) {
+                signal_result_push_forwarder_exit(self.callback, self.callback_ctx as *mut c_void);
+            }
+        }
+
         handle.spawn(async move {
+            let _exit = ForwarderExit {
+                callback,
+                callback_ctx: ctx_raw,
+            };
             loop {
                 let ctx_val = ctx_raw;
                 let result_ptr = tokio::task::spawn_blocking(move || {
-                    SendMutPtr(callback(ctx_val as *mut c_void, std::ptr::null_mut()))
+                    let control = result_push_control(FFI_RESULT_PUSH_REQUEST, "");
+                    SendMutPtr(callback(ctx_val as *mut c_void, &control))
                 })
                 .await;
                 let result_ptr = match result_ptr {
@@ -1623,23 +1665,26 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
                 let query_result =
                     match unsafe { decode_ffi_query_result(result_ptr as *mut FfiQueryResult) } {
                         Some(qr) => qr,
-                        None => continue,
+                        None => {
+                            acknowledge_result_push(
+                                callback,
+                                ctx_raw,
+                                Err("failed to decode query result payload".into()),
+                            );
+                            continue;
+                        }
                     };
                 let inner = unsafe { ptr.as_ref() };
-                if let Err(e) = inner.inner.enqueue_query_result(query_result).await {
-                    log::error!("Failed to enqueue query result: {e}");
-                }
+                acknowledge_result_push(
+                    callback,
+                    ctx_raw,
+                    inner
+                        .inner
+                        .enqueue_query_result(query_result)
+                        .await
+                        .map_err(|error| error.to_string()),
+                );
             }
-            // Signal the host that the forwarder has fully exited its loop
-            // and will not access the ReactionWrapper again.  The non-null
-            // second parameter acts as a sentinel recognized by the callback.
-            let ctx_val = ctx_raw;
-            let _ = tokio::task::spawn_blocking(move || {
-                #[allow(clippy::manual_dangling_ptr)]
-                let sentinel = 1usize as *mut c_void;
-                callback(ctx_val as *mut c_void, sentinel);
-            })
-            .await;
         });
     }
 
@@ -1989,34 +2034,25 @@ pub fn build_reaction_vtable_from_boxed(
             // process-global plugin runtime).
             let arc = wrapper_arc(state);
 
-            // Bug F: Drop guard ensures the sentinel callback is ALWAYS sent
-            // — even if the forwarder task panics on an `enqueue_query_result`
-            // .await against a shutting-down priority queue, or if tokio drops
-            // the spawned task. Without this, the host's Drop times out at
-            // 5 s and leaks resources, allowing Bugs B/C to compound into a
-            // hard SIGSEGV.
-            struct SentinelOnDrop {
+            // The exit guard reports failure for every unacknowledged delivery
+            // before the host frees its callback context or wrapper state.
+            struct ForwarderExit {
                 ctx_raw: usize,
                 callback: FfiResultPushCallbackFn,
             }
-            impl Drop for SentinelOnDrop {
+            impl Drop for ForwarderExit {
                 fn drop(&mut self) {
-                    let cb = self.callback;
-                    let ctx = self.ctx_raw as *mut c_void;
-                    #[allow(clippy::manual_dangling_ptr)]
-                    let sentinel = 1usize as *mut c_void;
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        cb(ctx, sentinel);
-                    }));
+                    signal_result_push_forwarder_exit(self.callback, self.ctx_raw as *mut c_void);
                 }
             }
 
             handle.spawn(async move {
-                let _sentinel_guard = SentinelOnDrop { ctx_raw, callback };
+                let _exit = ForwarderExit { ctx_raw, callback };
                 loop {
                     let ctx_val = ctx_raw;
                     let result_ptr = tokio::task::spawn_blocking(move || {
-                        SendMutPtr(callback(ctx_val as *mut c_void, std::ptr::null_mut()))
+                        let control = result_push_control(FFI_RESULT_PUSH_REQUEST, "");
+                        SendMutPtr(callback(ctx_val as *mut c_void, &control))
                     })
                     .await;
                     let result_ptr = match result_ptr {
@@ -2030,14 +2066,24 @@ pub fn build_reaction_vtable_from_boxed(
                         match unsafe { decode_ffi_query_result(result_ptr as *mut FfiQueryResult) }
                         {
                             Some(qr) => qr,
-                            None => continue,
+                            None => {
+                                acknowledge_result_push(
+                                    callback,
+                                    ctx_raw,
+                                    Err("failed to decode query result payload".into()),
+                                );
+                                continue;
+                            }
                         };
-                    if let Err(e) = arc.inner.enqueue_query_result(query_result).await {
-                        log::error!("Failed to enqueue query result: {e}");
-                    }
+                    acknowledge_result_push(
+                        callback,
+                        ctx_raw,
+                        arc.inner
+                            .enqueue_query_result(query_result)
+                            .await
+                            .map_err(|error| error.to_string()),
+                    );
                 }
-                // Sentinel sent by SentinelOnDrop on scope exit (covers panic
-                // and normal exit paths).
                 drop(arc);
             });
         });
@@ -3943,6 +3989,189 @@ mod source_subscriptions_complete_vtable_tests {
                 .build()
                 .expect("test runtime")
         })
+    }
+
+    #[cfg(test)]
+    mod reaction_result_push_vtable_tests {
+        use super::*;
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, OnceLock};
+
+        fn test_rt() -> &'static tokio::runtime::Runtime {
+            static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+            RT.get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("test runtime")
+            })
+        }
+
+        extern "C" fn noop_executor(_future_ptr: *mut c_void) -> *mut c_void {
+            std::ptr::null_mut()
+        }
+
+        fn noop_lifecycle(_id: &str, _event: FfiLifecycleEventType, _details: &str) {}
+
+        extern "C" fn drop_test_payload(ptr: *mut u8, len: usize) {
+            if !ptr.is_null() {
+                unsafe {
+                    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
+                }
+            }
+        }
+
+        struct CallbackContext {
+            sent: AtomicBool,
+            events: mpsc::Sender<(u32, String)>,
+        }
+
+        extern "C" fn callback(
+            ctx: *mut c_void,
+            control: *const FfiResultPushControl,
+        ) -> *mut c_void {
+            let context = unsafe { &*(ctx as *const CallbackContext) };
+            let control = unsafe { &*control };
+            match control.kind {
+                FFI_RESULT_PUSH_REQUEST if !context.sent.swap(true, Ordering::SeqCst) => {
+                    let result = drasi_lib::channels::QueryResult::new(
+                        "query".into(),
+                        0,
+                        chrono::Utc::now(),
+                        Vec::new(),
+                        HashMap::new(),
+                    );
+                    let bytes = crate::ffi::payload::encode_query_result(&result);
+                    let payload_len = bytes.len();
+                    let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
+                    Box::into_raw(Box::new(FfiQueryResult {
+                        payload_ptr,
+                        payload_len,
+                        payload_drop_fn: Some(drop_test_payload),
+                    })) as *mut c_void
+                }
+                FFI_RESULT_PUSH_ACK_OK
+                | FFI_RESULT_PUSH_ACK_ERROR
+                | FFI_RESULT_PUSH_FORWARDER_EXIT => {
+                    let error = unsafe { control.error.to_string() };
+                    let _ = context.events.send((control.kind, error));
+                    std::ptr::null_mut()
+                }
+                _ => std::ptr::null_mut(),
+            }
+        }
+
+        struct TestReaction {
+            fail: bool,
+        }
+
+        #[async_trait::async_trait]
+        impl Reaction for TestReaction {
+            fn id(&self) -> &str {
+                "test"
+            }
+            fn type_name(&self) -> &str {
+                "test"
+            }
+            fn properties(&self) -> HashMap<String, serde_json::Value> {
+                HashMap::new()
+            }
+            fn query_ids(&self) -> Vec<String> {
+                vec!["query".into()]
+            }
+            async fn initialize(&self, _context: drasi_lib::ReactionRuntimeContext) {}
+            async fn start(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn stop(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn status(&self) -> ComponentStatus {
+                ComponentStatus::Running
+            }
+            async fn enqueue_query_result(
+                &self,
+                _result: drasi_lib::channels::QueryResult,
+            ) -> anyhow::Result<()> {
+                if self.fail {
+                    Err(anyhow::anyhow!("reaction callback failed"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        fn assert_forwarder_acknowledges(
+            start_push: impl FnOnce(FfiResultPushCallbackFn, *mut c_void),
+            fail: bool,
+        ) {
+            let (events_tx, events_rx) = mpsc::channel();
+            let context = Box::new(CallbackContext {
+                sent: AtomicBool::new(false),
+                events: events_tx,
+            });
+            let context_ptr = Box::into_raw(context) as *mut c_void;
+            start_push(callback, context_ptr);
+
+            let (kind, error) = events_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("reaction acknowledgement");
+            assert_eq!(
+                kind,
+                if fail {
+                    FFI_RESULT_PUSH_ACK_ERROR
+                } else {
+                    FFI_RESULT_PUSH_ACK_OK
+                }
+            );
+            if fail {
+                assert_eq!(error, "reaction callback failed");
+            }
+            assert_eq!(
+                events_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .expect("forwarder exit")
+                    .0,
+                FFI_RESULT_PUSH_FORWARDER_EXIT
+            );
+            unsafe { drop(Box::from_raw(context_ptr as *mut CallbackContext)) };
+        }
+
+        #[test]
+        fn typed_reaction_forwarder_acknowledges_callback_result() {
+            let vtable = build_reaction_vtable(
+                TestReaction { fail: false },
+                noop_executor,
+                noop_lifecycle,
+                test_rt,
+            );
+            let start_push = vtable.start_result_push_fn;
+            let state = vtable.state;
+            assert_forwarder_acknowledges(
+                |callback, context| start_push(state, callback, context),
+                false,
+            );
+            (vtable.drop_fn)(vtable.state);
+        }
+
+        #[test]
+        fn boxed_reaction_forwarder_acknowledges_callback_error() {
+            let vtable = build_reaction_vtable_from_boxed(
+                Box::new(TestReaction { fail: true }),
+                noop_executor,
+                noop_lifecycle,
+                test_rt,
+            );
+            let start_push = vtable.start_result_push_fn;
+            let state = vtable.state;
+            assert_forwarder_acknowledges(
+                |callback, context| start_push(state, callback, context),
+                true,
+            );
+            (vtable.drop_fn)(vtable.state);
+        }
     }
 
     // No-op lifecycle emitter for tests (plain fn, matching LifecycleEmitterFn alias).

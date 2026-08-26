@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn durability_callback_is_versioned_and_trailing() {
-        assert_eq!(drasi_plugin_sdk::ffi::metadata::FFI_SDK_VERSION, "0.15.0");
+        assert_eq!(drasi_plugin_sdk::ffi::metadata::FFI_SDK_VERSION, "0.16.0");
 
         let callback_offset = std::mem::offset_of!(StateStoreVtable, is_durable_fn);
         let callback_size =

@@ -28,8 +28,10 @@ use drasi_plugin_sdk::descriptor::ReactionPluginDescriptor;
 use drasi_plugin_sdk::ffi::payload::encode_query_result;
 use drasi_plugin_sdk::ffi::{
     FfiBootstrapContext, FfiCheckpoint, FfiCheckpointResult, FfiComponentStatus, FfiOutboxIterator,
-    FfiOutboxIteratorResponse, FfiQueryResult, FfiResult, FfiRuntimeContext, FfiSnapshotIterator,
-    FfiSnapshotIteratorResponse, FfiStr, ReactionPluginVtable, ReactionVtable,
+    FfiOutboxIteratorResponse, FfiQueryResult, FfiResult, FfiResultPushControl, FfiRuntimeContext,
+    FfiSnapshotIterator, FfiSnapshotIteratorResponse, FfiStr, ReactionPluginVtable, ReactionVtable,
+    FFI_RESULT_PUSH_ACK_ERROR, FFI_RESULT_PUSH_ACK_OK, FFI_RESULT_PUSH_FORWARDER_EXIT,
+    FFI_RESULT_PUSH_PROTOCOL_VERSION, FFI_RESULT_PUSH_REQUEST,
 };
 use libloading::Library;
 
@@ -53,9 +55,9 @@ pub struct ReactionProxy {
     /// (see `host-sdk/src/loader.rs`), so the small per-instance `Arc` leak is
     /// acceptable in exchange for closing the late-callback UAF window.
     _callback_ctx: std::sync::Mutex<Option<Arc<crate::callbacks::InstanceCallbackContext>>>,
-    /// Channel for push-based result delivery. Created on start, closed on stop/drop.
-    result_tx:
-        std::sync::Mutex<Option<std::sync::mpsc::SyncSender<drasi_lib::channels::QueryResult>>>,
+    /// Bounded bridge for serialized, acknowledged result delivery. Created on
+    /// start and closed on stop/drop.
+    result_tx: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<ResultDelivery>>>,
     /// Keep the callback context alive for the lifetime of the forwarder.
     _push_ctx: std::sync::Mutex<Option<Arc<ResultPushContext>>>,
     /// Per-reaction identity provider set programmatically via
@@ -66,15 +68,90 @@ pub struct ReactionProxy {
     identity_provider: std::sync::Mutex<Option<Arc<dyn IdentityProvider>>>,
 }
 
-/// Context for the push-based result callback.
+/// Context for the serialized result request/acknowledgement callback.
 struct ResultPushContext {
-    rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<drasi_lib::channels::QueryResult>>>,
+    rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<ResultDelivery>>>,
+    /// All host enqueue calls that have not been acknowledged. This includes
+    /// items still in the bounded bridge, so a forwarder failure can resolve
+    /// every waiting host future rather than stranding one behind the failure.
+    pending: std::sync::Mutex<Vec<Arc<ResultAck>>>,
+    /// The one item currently held by the serialized plugin forwarder.
+    current: std::sync::Mutex<Option<Arc<ResultAck>>>,
+    accepting: std::sync::atomic::AtomicBool,
     /// Signaled when the plugin-side forwarder task has fully exited its loop
     /// and will no longer access the `ReactionWrapper`. The forwarder signals
     /// this by calling the callback one final time with the sentinel parameter,
     /// AFTER breaking out of its processing loop.
     forwarder_done: std::sync::Mutex<bool>,
     forwarder_done_cv: std::sync::Condvar,
+}
+
+struct ResultDelivery {
+    result: drasi_lib::channels::QueryResult,
+    ack: Arc<ResultAck>,
+}
+
+struct ResultAck {
+    completion: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Result<(), String>>>>,
+}
+
+impl ResultAck {
+    fn complete(&self, result: Result<(), String>) {
+        if let Ok(mut completion) = self.completion.lock() {
+            if let Some(tx) = completion.take() {
+                let _ = tx.send(result);
+            }
+        }
+    }
+}
+
+impl ResultPushContext {
+    fn register(&self, ack: Arc<ResultAck>) -> Result<(), String> {
+        if !self.accepting.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("Reaction result forwarder is not accepting deliveries".into());
+        }
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| "Result acknowledgement state is poisoned".to_string())?;
+        if !self.accepting.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("Reaction result forwarder is not accepting deliveries".into());
+        }
+        pending.push(ack);
+        Ok(())
+    }
+
+    fn acknowledge_current(&self, result: Result<(), String>) {
+        let current = self
+            .current
+            .lock()
+            .ok()
+            .and_then(|mut current| current.take());
+        if let Some(ack) = current {
+            ack.complete(result);
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.retain(|candidate| !Arc::ptr_eq(candidate, &ack));
+            }
+        } else {
+            log::warn!("Reaction result forwarder acknowledged without a pending delivery");
+        }
+    }
+
+    fn fail_all(&self, message: impl Into<String>) {
+        self.accepting
+            .store(false, std::sync::atomic::Ordering::Release);
+        let message = message.into();
+        if let Ok(mut current) = self.current.lock() {
+            if let Some(ack) = current.take() {
+                ack.complete(Err(message.clone()));
+            }
+        }
+        if let Ok(mut pending) = self.pending.lock() {
+            for ack in pending.drain(..) {
+                ack.complete(Err(message.clone()));
+            }
+        }
+    }
 }
 
 fn signal_forwarder_done(context: &ResultPushContext) {
@@ -87,21 +164,23 @@ fn signal_forwarder_done(context: &ResultPushContext) {
 /// Callback invoked by the plugin's forwarder task to receive the next QueryResult.
 /// Blocks until a result is available. Returns null on channel close (shutdown).
 ///
-/// The `sentinel` parameter serves dual purpose:
-/// - `null`: Normal mode — block on recv() and return the next QueryResult.
-/// - Non-null: **Forwarder-exit sentinel** — the forwarder has fully exited its
-///   processing loop and will not access the ReactionWrapper again. Signal
-///   `forwarder_done` so the host can safely free the wrapper.
+/// The control block is a versioned request/acknowledgement protocol. The
+/// forwarder requests one result at a time and then acknowledges the same item
+/// after awaiting the plugin's `Reaction::enqueue_query_result()` callback.
 ///
 /// Wrapped in `catch_unwind` because this is `extern "C"` — panics unwinding
 /// across the FFI boundary are undefined behavior.
-extern "C" fn result_push_callback(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c_void {
+extern "C" fn result_push_callback(
+    ctx: *mut c_void,
+    control: *const FfiResultPushControl,
+) -> *mut c_void {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        result_push_callback_inner(ctx, sentinel)
+        result_push_callback_inner(ctx, control)
     }))
     .unwrap_or_else(|_| {
         // On panic, signal done so drop() doesn't deadlock
         let context = unsafe { &*(ctx as *const ResultPushContext) };
+        context.fail_all("Reaction result forwarder panicked");
         signal_forwarder_done(context);
         std::ptr::null_mut()
     })
@@ -120,14 +199,49 @@ extern "C" fn drop_query_result_bytes(ptr: *mut u8, len: usize) {
     }
 }
 
-fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c_void {
+fn result_push_callback_inner(
+    ctx: *mut c_void,
+    control: *const FfiResultPushControl,
+) -> *mut c_void {
     let context = unsafe { &*(ctx as *const ResultPushContext) };
+    if control.is_null() {
+        context.fail_all("Reaction result forwarder used an invalid null control block");
+        return std::ptr::null_mut();
+    }
+    let control = unsafe { &*control };
+    if control.version != FFI_RESULT_PUSH_PROTOCOL_VERSION {
+        context.fail_all(format!(
+            "Reaction result forwarder used unsupported control protocol version {}",
+            control.version
+        ));
+        return std::ptr::null_mut();
+    }
 
-    // Sentinel call: the forwarder task has exited its loop and will not
-    // access the ReactionWrapper again.  Signal completion so Drop can
-    // safely call drop_fn.
-    if !sentinel.is_null() {
-        signal_forwarder_done(context);
+    match control.kind {
+        FFI_RESULT_PUSH_ACK_OK => {
+            context.acknowledge_current(Ok(()));
+            return std::ptr::null_mut();
+        }
+        FFI_RESULT_PUSH_ACK_ERROR => {
+            context.acknowledge_current(Err(unsafe { control.error.to_string() }));
+            return std::ptr::null_mut();
+        }
+        FFI_RESULT_PUSH_FORWARDER_EXIT => {
+            context.fail_all("Reaction result forwarder exited before acknowledging delivery");
+            signal_forwarder_done(context);
+            return std::ptr::null_mut();
+        }
+        FFI_RESULT_PUSH_REQUEST => {}
+        _ => {
+            context.fail_all(format!(
+                "Reaction result forwarder used unknown control kind {}",
+                control.kind
+            ));
+            return std::ptr::null_mut();
+        }
+    }
+
+    if !context.accepting.load(std::sync::atomic::Ordering::Acquire) {
         return std::ptr::null_mut();
     }
 
@@ -137,10 +251,22 @@ fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c
         .expect("result_push_callback lock poisoned");
     if let Some(ref rx) = *guard {
         match rx.recv() {
-            Ok(result) => {
+            Ok(delivery) => {
+                if !context.accepting.load(std::sync::atomic::Ordering::Acquire) {
+                    delivery.ack.complete(Err(
+                        "Reaction result forwarder stopped before delivery".into()
+                    ));
+                    return std::ptr::null_mut();
+                }
+                if let Ok(mut current) = context.current.lock() {
+                    *current = Some(delivery.ack);
+                } else {
+                    context.fail_all("Result acknowledgement state is poisoned");
+                    return std::ptr::null_mut();
+                }
                 // Serialize the QueryResult for cross-cdylib transfer (issue #602):
                 // never hand the plugin a reinterpreted `repr(Rust)` pointer.
-                let bytes = encode_query_result(&result);
+                let bytes = encode_query_result(&delivery.result);
                 let payload_len = bytes.len();
                 let payload_ptr = Box::into_raw(bytes.into_boxed_slice()) as *const u8;
                 Box::into_raw(Box::new(FfiQueryResult {
@@ -151,13 +277,12 @@ fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c
             }
             Err(_) => {
                 // Channel closed — return null so the forwarder breaks.
-                // Do NOT signal forwarder_done here; the forwarder will
-                // send a sentinel callback after it has fully exited.
+                // The forwarder will send FORWARDER_EXIT after it has fully exited.
                 std::ptr::null_mut()
             }
         }
     } else {
-        // rx already taken — return null (forwarder will send sentinel after exiting)
+        // rx already taken — return null (forwarder will report its exit)
         std::ptr::null_mut()
     }
 }
@@ -307,7 +432,7 @@ impl Reaction for ReactionProxy {
 
     async fn start(&self) -> anyhow::Result<()> {
         // Set up push-based result channel before starting the reaction
-        let (tx, rx) = std::sync::mpsc::sync_channel::<drasi_lib::channels::QueryResult>(256);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<ResultDelivery>(256);
         {
             let mut guard = self.result_tx.lock().expect("result_tx lock poisoned");
             *guard = Some(tx);
@@ -315,6 +440,9 @@ impl Reaction for ReactionProxy {
 
         let push_ctx = Arc::new(ResultPushContext {
             rx: std::sync::Mutex::new(Some(rx)),
+            pending: std::sync::Mutex::new(Vec::new()),
+            current: std::sync::Mutex::new(None),
+            accepting: std::sync::atomic::AtomicBool::new(true),
             forwarder_done: std::sync::Mutex::new(false),
             forwarder_done_cv: std::sync::Condvar::new(),
         });
@@ -338,14 +466,14 @@ impl Reaction for ReactionProxy {
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
-        // Bug B fix: close ONLY the sender. Dropping the sender is sufficient
-        // to unblock the forwarder's `rx.recv()` (it returns Err, the callback
-        // returns null, and the forwarder breaks). Do NOT also drop the
-        // receiver here — the callback may still be holding `context.rx.lock()`
-        // for a recv() that is racing this stop, and removing the receiver
-        // mid-flight creates a race against the forwarder's in-flight
-        // `enqueue_query_result(qr).await` against the reaction's
-        // shutting-down priority queue.
+        // Fail every accepted delivery before stopping the plugin. The callback
+        // context remains alive until the forwarder reports its exit, so an
+        // in-flight plugin callback cannot observe freed acknowledgement state.
+        if let Ok(guard) = self._push_ctx.lock() {
+            if let Some(context) = guard.as_ref() {
+                context.fail_all("Reaction stopped before query-result delivery completed");
+            }
+        }
         {
             let mut guard = self.result_tx.lock().expect("result_tx lock poisoned");
             *guard = None;
@@ -377,16 +505,50 @@ impl Reaction for ReactionProxy {
         &self,
         result: drasi_lib::channels::QueryResult,
     ) -> anyhow::Result<()> {
-        let guard = self.result_tx.lock().expect("result_tx lock poisoned");
-        if let Some(ref tx) = *guard {
-            tx.send(result)
-                .map_err(|_| anyhow::anyhow!("Result channel closed"))?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "Reaction not started — result channel not initialized"
-            ));
+        let tx = self
+            .result_tx
+            .lock()
+            .expect("result_tx lock poisoned")
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("Reaction not started — result channel not initialized")
+            })?;
+        let context = self
+            ._push_ctx
+            .lock()
+            .expect("_push_ctx lock poisoned")
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Reaction result forwarder is not initialized"))?;
+
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        let ack = Arc::new(ResultAck {
+            completion: std::sync::Mutex::new(Some(completion_tx)),
+        });
+        context.register(ack.clone()).map_err(anyhow::Error::msg)?;
+
+        // Do not block a host runtime worker while the bounded bridge is full:
+        // a full bridge is not an accepted delivery and cannot be acknowledged.
+        if tx
+            .try_send(ResultDelivery {
+                result,
+                ack: ack.clone(),
+            })
+            .is_err()
+        {
+            ack.complete(Err("Reaction result channel is closed or full".into()));
+            if let Ok(mut pending) = context.pending.lock() {
+                pending.retain(|candidate| !Arc::ptr_eq(candidate, &ack));
+            }
         }
-        Ok(())
+        // A suspended enqueue must not keep the bridge open during stop/drop.
+        drop(tx);
+
+        completion_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("Reaction result acknowledgement channel closed"))?
+            .map_err(anyhow::Error::msg)
     }
 
     async fn deprovision(&self) -> anyhow::Result<()> {
@@ -851,15 +1013,17 @@ impl Drop for ReactionProxy {
     fn drop(&mut self) {
         // Close the result channel sender to unblock the forwarder's callback.
         // The callback's rx.recv() will return Err, causing it to return null.
-        // The forwarder then breaks out of its loop and sends a sentinel
-        // callback to signal forwarder_done.
+        // The forwarder then reports FORWARDER_EXIT to signal forwarder_done.
         if let Ok(mut guard) = self.result_tx.lock() {
             *guard = None;
         }
-        // Bug B fix: do NOT drop the receiver here. Sender drop alone unblocks
-        // recv(); leaving the receiver in place avoids racing a callback that
-        // is currently holding `context.rx.lock()`. The receiver lives until
-        // the leaked push-ctx Arc is collected (see the `mem::forget` below).
+        if let Ok(guard) = self._push_ctx.lock() {
+            if let Some(context) = guard.as_ref() {
+                context.fail_all("Reaction proxy dropped before query-result delivery completed");
+            }
+        }
+        // Do NOT drop the receiver here. Leaving it in place avoids racing a
+        // callback that is currently holding `context.rx.lock()`.
 
         // Wait for the forwarder task to fully exit its processing loop.
         //
@@ -1026,5 +1190,145 @@ impl Drop for ReactionPluginProxy {
         let drop_fn = self.vtable.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         super::drop_worker::execute_drop_fn(drop_fn, state);
+    }
+}
+
+#[cfg(test)]
+mod result_push_ack_tests {
+    use super::*;
+
+    fn context() -> (
+        Arc<ResultPushContext>,
+        std::sync::mpsc::SyncSender<ResultDelivery>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        (
+            Arc::new(ResultPushContext {
+                rx: std::sync::Mutex::new(Some(rx)),
+                pending: std::sync::Mutex::new(Vec::new()),
+                current: std::sync::Mutex::new(None),
+                accepting: std::sync::atomic::AtomicBool::new(true),
+                forwarder_done: std::sync::Mutex::new(false),
+                forwarder_done_cv: std::sync::Condvar::new(),
+            }),
+            tx,
+        )
+    }
+
+    fn queue_delivery(
+        context: &ResultPushContext,
+        tx: &std::sync::mpsc::SyncSender<ResultDelivery>,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        let ack = Arc::new(ResultAck {
+            completion: std::sync::Mutex::new(Some(completion_tx)),
+        });
+        context.register(ack.clone()).expect("register delivery");
+        tx.send(ResultDelivery {
+            result: drasi_lib::channels::QueryResult::new(
+                "query".into(),
+                0,
+                chrono::Utc::now(),
+                Vec::new(),
+                HashMap::new(),
+            ),
+            ack,
+        })
+        .expect("queue delivery");
+        completion_rx
+    }
+
+    fn callback(context: &ResultPushContext, kind: u32, error: &str) -> *mut c_void {
+        let control = FfiResultPushControl {
+            version: FFI_RESULT_PUSH_PROTOCOL_VERSION,
+            kind,
+            error: FfiStr::from_str(error),
+        };
+        result_push_callback(
+            context as *const ResultPushContext as *mut c_void,
+            &control as *const FfiResultPushControl,
+        )
+    }
+
+    unsafe fn free_result(ptr: *mut c_void) {
+        let result = unsafe { Box::from_raw(ptr as *mut FfiQueryResult) };
+        if let Some(drop_payload) = result.payload_drop_fn {
+            drop_payload(result.payload_ptr as *mut u8, result.payload_len);
+        }
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_completes_the_specific_delivery() {
+        let (context, tx) = context();
+        let completion = queue_delivery(&context, &tx);
+
+        let result = callback(&context, FFI_RESULT_PUSH_REQUEST, "");
+        assert!(
+            !result.is_null(),
+            "request must receive a serialized result"
+        );
+        unsafe { free_result(result) };
+        callback(&context, FFI_RESULT_PUSH_ACK_OK, "");
+
+        assert_eq!(completion.await.expect("ack channel"), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn delivery_stays_pending_until_callback_acknowledges_it() {
+        let (context, tx) = context();
+        let mut completion = queue_delivery(&context, &tx);
+
+        let result = callback(&context, FFI_RESULT_PUSH_REQUEST, "");
+        assert!(
+            !result.is_null(),
+            "request must receive a serialized result"
+        );
+        unsafe { free_result(result) };
+        assert!(
+            matches!(
+                completion.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "queue receipt must not complete the host delivery"
+        );
+
+        callback(&context, FFI_RESULT_PUSH_ACK_OK, "");
+        assert_eq!(completion.await.expect("ack channel"), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn callback_failure_propagates_its_exact_message() {
+        let (context, tx) = context();
+        let completion = queue_delivery(&context, &tx);
+
+        let result = callback(&context, FFI_RESULT_PUSH_REQUEST, "");
+        unsafe { free_result(result) };
+        callback(
+            &context,
+            FFI_RESULT_PUSH_ACK_ERROR,
+            "GitHub update failed: forbidden",
+        );
+
+        assert_eq!(
+            completion.await.expect("ack channel"),
+            Err("GitHub update failed: forbidden".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn forwarder_exit_fails_pending_delivery_and_signals_drop_safety() {
+        let (context, tx) = context();
+        let completion = queue_delivery(&context, &tx);
+
+        let result = callback(&context, FFI_RESULT_PUSH_REQUEST, "");
+        unsafe { free_result(result) };
+        callback(&context, FFI_RESULT_PUSH_FORWARDER_EXIT, "");
+
+        let error = completion
+            .await
+            .expect("ack channel")
+            .expect_err("forwarder exit must fail delivery");
+        assert!(error.contains("forwarder exited"));
+        assert!(*context.forwarder_done.lock().expect("forwarder done"));
     }
 }

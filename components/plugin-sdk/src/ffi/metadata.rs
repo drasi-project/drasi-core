@@ -50,7 +50,11 @@ use super::types::FfiStr;
 /// - `0.15.0`: `SourceVtable` appends `on_subscriptions_complete_fn` so the
 ///   host lifecycle can signal dynamic sources to release their startup pruning
 ///   fence (fixes the WorkGraph 60 s fallback regression on the dynamic path).
-pub const FFI_SDK_VERSION: &str = "0.15.0";
+/// - `0.16.0`: the reaction result-push callback's formerly reserved second
+///   parameter is a versioned request/acknowledgement control block. Hosts now
+///   wait for `Reaction::enqueue_query_result()` to complete and receive its
+///   exact error rather than treating queue insertion as delivery.
+pub const FFI_SDK_VERSION: &str = "0.16.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
