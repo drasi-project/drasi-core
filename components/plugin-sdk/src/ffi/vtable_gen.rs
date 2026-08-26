@@ -1682,7 +1682,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
                         .inner
                         .enqueue_query_result(query_result)
                         .await
-                        .map_err(|error| error.to_string()),
+                        .map_err(|error| format!("{error:#}")),
                 );
             }
         });
@@ -2081,7 +2081,7 @@ pub fn build_reaction_vtable_from_boxed(
                         arc.inner
                             .enqueue_query_result(query_result)
                             .await
-                            .map_err(|error| error.to_string()),
+                            .map_err(|error| format!("{error:#}")),
                     );
                 }
                 drop(arc);
@@ -4096,7 +4096,8 @@ mod source_subscriptions_complete_vtable_tests {
                 _result: drasi_lib::channels::QueryResult,
             ) -> anyhow::Result<()> {
                 if self.fail {
-                    Err(anyhow::anyhow!("reaction callback failed"))
+                    Err(anyhow::anyhow!("underlying callback failure")
+                        .context("reaction callback failed"))
                 } else {
                     Ok(())
                 }
@@ -4127,7 +4128,10 @@ mod source_subscriptions_complete_vtable_tests {
                 }
             );
             if fail {
-                assert_eq!(error, "reaction callback failed");
+                assert_eq!(
+                    error,
+                    "reaction callback failed: underlying callback failure"
+                );
             }
             assert_eq!(
                 events_rx
