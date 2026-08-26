@@ -13,11 +13,11 @@
 // limitations under the License.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tonic_build::configure()
+    tonic_prost_build::configure()
         // Server stubs are generated so in-crate tests can stand up a mock
         // gRPC server; production code only uses the client.
         .build_server(true)
         .build_client(true)
-        .compile(&["proto/drasi/v1/reaction.proto"], &["proto"])?;
+        .compile_protos(&["proto/drasi/v1/reaction.proto"], &["proto"])?;
     Ok(())
 }

@@ -33,8 +33,8 @@ use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 
 use crate::config::MySqlBootstrapConfig;
 use drasi_mysql_common::{
-    canonicalize_json_text, format_datetime, format_time, format_value_for_key,
-    is_valid_identifier, normalize_time_text, quote_identifier,
+    canonicalize_json_text, connect_with_ssl_mode, format_datetime, format_time,
+    format_value_for_key, is_valid_identifier, normalize_time_text, quote_identifier,
 };
 
 /// Binlog position captured during bootstrap snapshot.
@@ -137,13 +137,17 @@ impl MySqlBootstrapHandler {
     }
 
     async fn connect(&self) -> Result<Conn> {
-        let opts = OptsBuilder::default()
-            .ip_or_hostname(&self.config.host)
-            .tcp_port(self.config.port)
-            .user(Some(&self.config.user))
-            .pass(Some(&self.config.password))
-            .db_name(Some(&self.config.database));
-        let mut conn = Conn::new(opts).await?;
+        let build_opts = || {
+            OptsBuilder::default()
+                .ip_or_hostname(&self.config.host)
+                .tcp_port(self.config.port)
+                .user(Some(&self.config.user))
+                .pass(Some(&self.config.password))
+                .db_name(Some(&self.config.database))
+        };
+        let mut conn = connect_with_ssl_mode(build_opts, self.config.ssl_mode)
+            .await
+            .context("Failed to connect to MySQL for bootstrap")?;
         // Pin session TZ to UTC so TIMESTAMP text matches CDC epoch→UTC formatting.
         conn.query_drop("SET time_zone = '+00:00'")
             .await

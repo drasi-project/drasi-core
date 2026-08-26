@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-mysql"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "MySQL source plugin for Drasi"
@@ -33,7 +33,7 @@ workspace = true
 drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
-drasi-mysql-common = { workspace = true }
+drasi-mysql-common = { workspace = true, features = ["api"] }
 utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
@@ -44,7 +44,7 @@ serde_json = "1.0"
 tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 ordered-float = "3.0"
-mysql_async = { version = "0.37", features = ["binlog"] }
+mysql_async = { version = "0.37", features = ["binlog", "rustls-tls", "ring", "tls12"] }
 mysql_common = { version = "0.37", features = ["binlog"] }
 futures-util = "0.3"
 bytes = "1.0"

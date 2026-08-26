@@ -20,6 +20,11 @@ use bytes::Bytes;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
+use drasi_postgres_common::{
+    oid_from_information_schema, parse_bytea_text, PostgresValue, BOOL, BYTEA, CHAR, DATE, FLOAT4,
+    FLOAT8, INT2, INT4, INT8, JSON, JSONB, NAME, NUMERIC, TEXT, TIME, TIMESTAMP, TIMESTAMPTZ, UUID,
+    VARCHAR,
+};
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -505,27 +510,45 @@ impl PostgresBootstrapHandler {
         transaction: &Transaction<'_>,
         table_name: &str,
     ) -> Result<Vec<ColumnInfo>> {
+        // Prefer pg_attribute + pg_type: use atttypid, but resolve domains to typbasetype
+        // so CREATE DOMAIN ... AS integer reads as int4 (not an unknown domain OID).
+        // Fall back to information_schema mapping if the catalog query fails.
+        let catalog_result = transaction
+            .query(
+                "SELECT a.attname AS column_name,
+                        CASE
+                          WHEN t.typtype = 'd' THEN t.typbasetype
+                          ELSE a.atttypid
+                        END::int4 AS type_oid
+                 FROM pg_attribute a
+                 JOIN pg_class c ON a.attrelid = c.oid
+                 JOIN pg_namespace n ON c.relnamespace = n.oid
+                 JOIN pg_type t ON a.atttypid = t.oid
+                 WHERE n.nspname = 'public'
+                   AND c.relname = $1
+                   AND a.attnum > 0
+                   AND NOT a.attisdropped
+                 ORDER BY a.attnum",
+                &[&table_name],
+            )
+            .await;
+
+        if let Ok(rows) = catalog_result {
+            if !rows.is_empty() {
+                let mut columns = Vec::new();
+                for row in rows {
+                    columns.push(ColumnInfo {
+                        name: row.get(0),
+                        type_oid: row.get::<_, i32>(1),
+                    });
+                }
+                return Ok(columns);
+            }
+        }
+
         let rows = transaction
             .query(
-                "SELECT column_name,
-                        CASE
-                            WHEN data_type = 'character varying' THEN 1043
-                            WHEN data_type = 'integer' THEN 23
-                            WHEN data_type = 'bigint' THEN 20
-                            WHEN data_type = 'smallint' THEN 21
-                            WHEN data_type = 'text' THEN 25
-                            WHEN data_type = 'boolean' THEN 16
-                            WHEN data_type = 'numeric' THEN 1700
-                            WHEN data_type = 'real' THEN 700
-                            WHEN data_type = 'double precision' THEN 701
-                            WHEN data_type = 'timestamp without time zone' THEN 1114
-                            WHEN data_type = 'timestamp with time zone' THEN 1184
-                            WHEN data_type = 'date' THEN 1082
-                            WHEN data_type = 'uuid' THEN 2950
-                            WHEN data_type = 'json' THEN 114
-                            WHEN data_type = 'jsonb' THEN 3802
-                            ELSE 25  -- Default to text
-                        END as type_oid
+                "SELECT column_name, data_type, udt_name
                  FROM information_schema.columns
                  WHERE table_schema = 'public' AND table_name = $1
                  ORDER BY ordinal_position",
@@ -535,10 +558,11 @@ impl PostgresBootstrapHandler {
 
         let mut columns = Vec::new();
         for row in rows {
-            columns.push(ColumnInfo {
-                name: row.get(0),
-                type_oid: row.get::<_, i32>(1),
-            });
+            let name: String = row.get(0);
+            let data_type: String = row.get(1);
+            let udt_name: String = row.get(2);
+            let type_oid = oid_from_information_schema(&data_type, Some(&udt_name)) as i32;
+            columns.push(ColumnInfo { name, type_oid });
         }
 
         Ok(columns)
@@ -632,92 +656,15 @@ impl PostgresBootstrapHandler {
                 .map(|pks| pks.contains(&column.name))
                 .unwrap_or(false);
 
-            // Get the value for this column
-            let element_value = match column.type_oid {
-                16 => {
-                    // boolean
-                    if let Ok(Some(val)) = row.try_get::<_, Option<bool>>(idx) {
-                        drasi_core::models::ElementValue::Bool(val)
-                    } else {
-                        drasi_core::models::ElementValue::Null
-                    }
-                }
-                21 | 23 | 20 => {
-                    // int2, int4, int8
-                    if let Ok(Some(val)) = row.try_get::<_, Option<i64>>(idx) {
-                        drasi_core::models::ElementValue::Integer(val)
-                    } else if let Ok(Some(val)) = row.try_get::<_, Option<i32>>(idx) {
-                        drasi_core::models::ElementValue::Integer(val as i64)
-                    } else if let Ok(Some(val)) = row.try_get::<_, Option<i16>>(idx) {
-                        drasi_core::models::ElementValue::Integer(val as i64)
-                    } else {
-                        drasi_core::models::ElementValue::Null
-                    }
-                }
-                700 | 701 => {
-                    // float4, float8
-                    if let Ok(Some(val)) = row.try_get::<_, Option<f64>>(idx) {
-                        drasi_core::models::ElementValue::Float(ordered_float::OrderedFloat(val))
-                    } else if let Ok(Some(val)) = row.try_get::<_, Option<f32>>(idx) {
-                        drasi_core::models::ElementValue::Float(ordered_float::OrderedFloat(
-                            val as f64,
-                        ))
-                    } else {
-                        drasi_core::models::ElementValue::Null
-                    }
-                }
-                1700 => {
-                    // numeric/decimal
-                    if let Ok(Some(val)) = row.try_get::<_, Option<rust_decimal::Decimal>>(idx) {
-                        drasi_core::models::ElementValue::Float(ordered_float::OrderedFloat(
-                            val.to_string().parse::<f64>().unwrap_or(0.0),
-                        ))
-                    } else {
-                        drasi_core::models::ElementValue::Null
-                    }
-                }
-                25 | 1043 | 19 => {
-                    // text, varchar, name
-                    if let Ok(Some(val)) = row.try_get::<_, Option<String>>(idx) {
-                        drasi_core::models::ElementValue::String(std::sync::Arc::from(val))
-                    } else {
-                        drasi_core::models::ElementValue::Null
-                    }
-                }
-                1114 | 1184 => {
-                    // timestamp, timestamptz
-                    if let Ok(Some(val)) = row.try_get::<_, Option<chrono::NaiveDateTime>>(idx) {
-                        drasi_core::models::ElementValue::LocalDateTime(val)
-                    } else if let Ok(Some(val)) =
-                        row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(idx)
-                    {
-                        drasi_core::models::ElementValue::ZonedDateTime(val.fixed_offset())
-                    } else {
-                        drasi_core::models::ElementValue::Null
-                    }
-                }
-                _ => {
-                    // Default: try to get as string
-                    if let Ok(Some(val)) = row.try_get::<_, Option<String>>(idx) {
-                        drasi_core::models::ElementValue::String(std::sync::Arc::from(val))
-                    } else {
-                        drasi_core::models::ElementValue::Null
-                    }
-                }
-            };
+            // Convert via shared PostgresValue so bootstrap ≡ CDC (#670/#672).
+            let pg_value = row_column_to_postgres_value(row, idx, column.type_oid as u32);
+            let element_value = pg_value.to_element_value();
 
             // If this is a primary key column, collect its value for the element ID
-            if is_pk && !matches!(element_value, drasi_core::models::ElementValue::Null) {
-                let value_str = match &element_value {
-                    drasi_core::models::ElementValue::Integer(i) => i.to_string(),
-                    drasi_core::models::ElementValue::Float(f) => f.to_string(),
-                    drasi_core::models::ElementValue::String(s) => s.to_string(),
-                    drasi_core::models::ElementValue::Bool(b) => b.to_string(),
-                    drasi_core::models::ElementValue::LocalDateTime(dt) => dt.to_string(),
-                    drasi_core::models::ElementValue::ZonedDateTime(dt) => dt.to_rfc3339(),
-                    _ => format!("{element_value:?}"),
-                };
-                pk_values.push(value_str);
+            if is_pk {
+                if let Some(value_str) = pg_value.to_key_string() {
+                    pk_values.push(value_str);
+                }
             }
 
             properties.insert(&column.name, element_value);
@@ -783,6 +730,155 @@ impl PostgresBootstrapHandler {
 struct ColumnInfo {
     name: String,
     type_oid: i32,
+}
+
+/// Read a single column from a tokio-postgres `Row` into the shared `PostgresValue`.
+fn row_column_to_postgres_value(row: &Row, idx: usize, type_oid: u32) -> PostgresValue {
+    // Helper: Option try_get that maps None → Null
+    macro_rules! opt {
+        ($t:ty, $map:expr) => {
+            match row.try_get::<_, Option<$t>>(idx) {
+                Ok(Some(v)) => $map(v),
+                Ok(None) => PostgresValue::Null,
+                Err(e) => {
+                    warn!(
+                        "Failed to read column idx={idx} oid={type_oid} as {}: {e}",
+                        stringify!($t)
+                    );
+                    // Last resort: string
+                    match row.try_get::<_, Option<String>>(idx) {
+                        Ok(Some(s)) => PostgresValue::Text(s),
+                        Ok(None) => PostgresValue::Null,
+                        Err(_) => PostgresValue::Null,
+                    }
+                }
+            }
+        };
+    }
+
+    match type_oid {
+        BOOL => opt!(bool, PostgresValue::Bool),
+        INT2 => opt!(i16, PostgresValue::Int2),
+        INT4 => opt!(i32, PostgresValue::Int4),
+        INT8 => opt!(i64, PostgresValue::Int8),
+        FLOAT4 => opt!(f32, PostgresValue::Float4),
+        FLOAT8 => opt!(f64, PostgresValue::Float8),
+        NUMERIC => opt!(rust_decimal::Decimal, PostgresValue::Numeric),
+        TEXT | NAME => opt!(String, PostgresValue::Text),
+        VARCHAR => opt!(String, PostgresValue::Varchar),
+        CHAR => match row.try_get::<_, Option<String>>(idx) {
+            Ok(Some(s)) => PostgresValue::Char(s.trim_end().to_string()),
+            Ok(None) => PostgresValue::Null,
+            Err(e) => {
+                warn!("Failed to read char column idx={idx}: {e}");
+                PostgresValue::Null
+            }
+        },
+        UUID => opt!(uuid::Uuid, PostgresValue::Uuid),
+        TIMESTAMP => opt!(chrono::NaiveDateTime, PostgresValue::Timestamp),
+        TIMESTAMPTZ => opt!(chrono::DateTime<chrono::Utc>, PostgresValue::TimestampTz),
+        DATE => opt!(chrono::NaiveDate, PostgresValue::Date),
+        TIME => opt!(chrono::NaiveTime, PostgresValue::Time),
+        JSON => opt!(serde_json::Value, PostgresValue::Json),
+        JSONB => opt!(serde_json::Value, PostgresValue::Jsonb),
+        BYTEA => match row.try_get::<_, Option<Vec<u8>>>(idx) {
+            Ok(Some(bytes)) => PostgresValue::Bytea(bytes),
+            Ok(None) => PostgresValue::Null,
+            Err(e) => {
+                // Sometimes delivered as text \x...
+                warn!("bytea try_get failed idx={idx}: {e}; trying text");
+                match row.try_get::<_, Option<String>>(idx) {
+                    Ok(Some(s)) => match parse_bytea_text(&s) {
+                        Ok(b) => PostgresValue::Bytea(b),
+                        Err(_) => PostgresValue::Text(s),
+                    },
+                    Ok(None) => PostgresValue::Null,
+                    Err(_) => PostgresValue::Null,
+                }
+            }
+        },
+        // Common 1-D arrays. Use Vec<Option<T>> so NULL elements stay Null
+        // (Vec<T> cannot represent '{1,NULL,3}' and would fail try_get).
+        1007 /* int4[] */ => match row.try_get::<_, Option<Vec<Option<i32>>>>(idx) {
+            Ok(Some(v)) => PostgresValue::Array(
+                v.into_iter()
+                    .map(|o| o.map(PostgresValue::Int4).unwrap_or(PostgresValue::Null))
+                    .collect(),
+            ),
+            Ok(None) => PostgresValue::Null,
+            Err(_) => try_array_as_text(row, idx, type_oid),
+        },
+        1009 /* text[] */ => match row.try_get::<_, Option<Vec<Option<String>>>>(idx) {
+            Ok(Some(v)) => PostgresValue::Array(
+                v.into_iter()
+                    .map(|o| o.map(PostgresValue::Text).unwrap_or(PostgresValue::Null))
+                    .collect(),
+            ),
+            Ok(None) => PostgresValue::Null,
+            Err(_) => try_array_as_text(row, idx, type_oid),
+        },
+        1016 /* int8[] */ => match row.try_get::<_, Option<Vec<Option<i64>>>>(idx) {
+            Ok(Some(v)) => PostgresValue::Array(
+                v.into_iter()
+                    .map(|o| o.map(PostgresValue::Int8).unwrap_or(PostgresValue::Null))
+                    .collect(),
+            ),
+            Ok(None) => PostgresValue::Null,
+            Err(_) => try_array_as_text(row, idx, type_oid),
+        },
+        1005 /* int2[] */ => match row.try_get::<_, Option<Vec<Option<i16>>>>(idx) {
+            Ok(Some(v)) => PostgresValue::Array(
+                v.into_iter()
+                    .map(|o| o.map(PostgresValue::Int2).unwrap_or(PostgresValue::Null))
+                    .collect(),
+            ),
+            Ok(None) => PostgresValue::Null,
+            Err(_) => try_array_as_text(row, idx, type_oid),
+        },
+        1000 /* bool[] */ => match row.try_get::<_, Option<Vec<Option<bool>>>>(idx) {
+            Ok(Some(v)) => PostgresValue::Array(
+                v.into_iter()
+                    .map(|o| o.map(PostgresValue::Bool).unwrap_or(PostgresValue::Null))
+                    .collect(),
+            ),
+            Ok(None) => PostgresValue::Null,
+            Err(_) => try_array_as_text(row, idx, type_oid),
+        },
+        _ => {
+            // Unknown / other arrays: try string, else Null
+            match row.try_get::<_, Option<String>>(idx) {
+                Ok(Some(s)) => {
+                    // If it looks like an array literal, try shared text decode
+                    if s.starts_with('{') {
+                        match drasi_postgres_common::decode_text_to_postgres_value(&s, type_oid) {
+                            Ok(v) => v,
+                            Err(_) => PostgresValue::Text(s),
+                        }
+                    } else {
+                        PostgresValue::Text(s)
+                    }
+                }
+                Ok(None) => PostgresValue::Null,
+                Err(e) => {
+                    warn!(
+                        "Unsupported PG type oid={type_oid} at idx={idx}: {e}; emitting Null"
+                    );
+                    PostgresValue::Null
+                }
+            }
+        }
+    }
+}
+
+fn try_array_as_text(row: &Row, idx: usize, array_oid: u32) -> PostgresValue {
+    match row.try_get::<_, Option<String>>(idx) {
+        Ok(Some(s)) => match drasi_postgres_common::decode_text_to_postgres_value(&s, array_oid) {
+            Ok(v) => v,
+            Err(_) => PostgresValue::Text(s),
+        },
+        Ok(None) => PostgresValue::Null,
+        Err(_) => PostgresValue::Null,
+    }
 }
 
 #[cfg(test)]

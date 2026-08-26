@@ -461,3 +461,58 @@ pub async fn insert_decimal_test_row(
         .await?;
     Ok(())
 }
+
+/// Table covering types that previously lost data or disagreed between bootstrap and CDC
+/// (issues #669, #670, #672).
+pub async fn create_type_parity_table(client: &Client, table_name: &str) -> Result<()> {
+    let table = quote_ident(table_name);
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS {table} (
+            id INTEGER PRIMARY KEY,
+            u uuid,
+            d date,
+            t time,
+            j json,
+            jb jsonb,
+            b bytea,
+            ints integer[],
+            n_whole numeric(12,0),
+            n_frac numeric(12,2),
+            c char(8),
+            ts timestamp,
+            tstz timestamptz,
+            maybe_null text
+        )"
+    );
+    execute_sql(client, &create_sql).await?;
+    let replica_sql = format!("ALTER TABLE {table} REPLICA IDENTITY FULL");
+    execute_sql(client, &replica_sql).await?;
+    Ok(())
+}
+
+/// Insert a fixed sample row used for bootstrap↔CDC parity checks.
+pub async fn insert_type_parity_row(client: &Client, table: &str, id: i32) -> Result<()> {
+    let sql = format!(
+        "INSERT INTO {} (
+            id, u, d, t, j, jb, b, ints, n_whole, n_frac, c, ts, tstz, maybe_null
+         ) VALUES (
+            $1,
+            '550e8400-e29b-41d4-a716-446655440000'::uuid,
+            '2024-06-15'::date,
+            '10:30:45'::time,
+            '{{\"k\":1}}'::json,
+            '{{\"k\":1}}'::jsonb,
+            '\\xdeadbeef'::bytea,
+            ARRAY[1,2,3]::integer[],
+            4200::numeric(12,0),
+            12.50::numeric(12,2),
+            'abc',
+            '2024-06-15 10:30:45.123456'::timestamp,
+            '2024-06-15 10:30:45.123456+02'::timestamptz,
+            NULL
+         )",
+        quote_ident(table)
+    );
+    client.execute(&sql, &[&id]).await?;
+    Ok(())
+}

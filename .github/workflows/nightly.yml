@@ -64,10 +64,13 @@ jobs:
     name: Publish nightly plugins
     needs: release-dry-run
     # Elevated package scope needed by the called publish-plugins.yml for OCI push.
-    # A called workflow's token can't exceed the calling job's grants.
+    # A called workflow's token can't exceed the calling job's grants, and that
+    # check is static: publish-plugins.yml declares id-token: write at workflow
+    # level, so callers must grant it even though sign: false leaves it unused.
     permissions:
       contents: read
       packages: write
+      id-token: write
     # Single chain: publish only after the release dry-run passes. always()
     # so a *skipped* release-dry-run (skip_release_dry_run) still lets publishing
     # proceed, while a *failed* release-dry-run blocks the rest of the nightly.

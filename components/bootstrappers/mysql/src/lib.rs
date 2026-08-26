@@ -24,7 +24,7 @@ mod mysql;
 #[cfg(test)]
 mod tests;
 
-pub use config::{MySqlBootstrapConfig, TableKeyConfig};
+pub use config::{MySqlBootstrapConfig, SslMode, TableKeyConfig};
 
 use async_trait::async_trait;
 use drasi_lib::bootstrap::{
@@ -71,6 +71,7 @@ pub struct MySqlBootstrapBuilder {
     user: String,
     password: String,
     tables: Vec<String>,
+    ssl_mode: SslMode,
     table_keys: Vec<TableKeyConfig>,
 }
 
@@ -89,6 +90,7 @@ impl MySqlBootstrapBuilder {
             user: String::new(),
             password: String::new(),
             tables: Vec::new(),
+            ssl_mode: SslMode::default(),
             table_keys: Vec::new(),
         }
     }
@@ -128,6 +130,13 @@ impl MySqlBootstrapBuilder {
         self
     }
 
+    /// Sets the SSL/TLS mode for the MySQL connection (default:
+    /// [`SslMode::IfAvailable`]).
+    pub fn with_ssl_mode(mut self, ssl_mode: SslMode) -> Self {
+        self.ssl_mode = ssl_mode;
+        self
+    }
+
     pub fn with_table_keys(mut self, table_keys: Vec<TableKeyConfig>) -> Self {
         self.table_keys = table_keys;
         self
@@ -146,6 +155,7 @@ impl MySqlBootstrapBuilder {
             user: self.user,
             password: self.password,
             tables: self.tables,
+            ssl_mode: self.ssl_mode,
             table_keys: self.table_keys,
         };
         config.validate()?;

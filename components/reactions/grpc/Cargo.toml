@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-grpc"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "gRPC reaction plugin for Drasi (configurable fixed and adaptive batching, with Handlebars output templating)"
@@ -40,8 +40,9 @@ drasi-lib.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
-tonic = "0.11"
-prost = "0.12"
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
 tokio = { version = "1.0", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -49,7 +50,7 @@ serde_json = "1.0"
 rand = "0.8"
 chrono = "0.4"
 uuid = { version = "1.0", features = ["v4"] }
-prost-types = "0.12"
+prost-types = "0.14"
 ordered-float = "3.0"
 handlebars = "5.1"
 
@@ -66,7 +67,7 @@ tokio-stream = { version = "0.1", features = ["net"] }
 drasi-core.workspace = true
 
 [build-dependencies]
-tonic-build = "0.11"
+tonic-prost-build = "0.14"
 
 
 [features]

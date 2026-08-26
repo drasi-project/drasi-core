@@ -20,11 +20,17 @@
 //! `drasi-source-mysql` and `drasi-bootstrap-mysql`.
 
 pub mod config;
+pub mod connect;
+#[cfg(feature = "api")]
+pub mod dto;
 pub mod keys;
 pub mod types;
 
 // Re-export main types
-pub use config::{is_valid_identifier, TableKeyConfig};
+pub use config::{is_valid_identifier, SslMode, TableKeyConfig};
+pub use connect::connect_with_ssl_mode;
+#[cfg(feature = "api")]
+pub use dto::SslModeDto;
 pub use keys::{escape_identifier, format_value_for_key, quote_identifier};
 pub use types::{
     canonicalize_json_text, enum_label, format_datetime, format_time, format_timestamp_epoch,
