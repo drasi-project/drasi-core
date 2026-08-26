@@ -174,6 +174,9 @@ impl RocksDbIndexProvider {
     ///
     /// Half of the capacity is available to memtables. Memtable reservations
     /// are charged to the same cache, so the two capacities are not additive.
+    /// Per-CF flush thresholds are derived from the memtable budget when each
+    /// query DB opens. They are not reservations: aggregate pressure across
+    /// query DBs can make the shared manager flush before those thresholds.
     pub fn with_memory_budget_bytes(
         mut self,
         total_budget_bytes: usize,
