@@ -96,7 +96,7 @@ let reaction = DashboardReaction::builder("my-dashboard")
 | Map | `"map"` | `queryId`, `latField`, `lngField`, `valueField` |
 | Graph | `"graph"` | `queryId`, `nodeField`, `connectsToField` |
 
-**Every query row adds a node.** If the Connects-to column has a value, that row also draws an arrow. Isolated nodes stay on the graph.
+**Every query row adds a node from its `nodeField` value.** If the Connects-to column has a value, that row also draws an arrow to a second node. Isolated nodes (no Connects-to value) stay on the graph.
 
 ```cypher
 MATCH (a:SensorReading)

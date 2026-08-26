@@ -35,6 +35,8 @@ const rowsToGraph = widgetsSandbox.rowsToGraph;
 const describeGraphRow = widgetsSandbox.describeGraphRow;
 const layoutGraphNodes = widgetsSandbox.layoutGraphNodes;
 const asCoord = widgetsSandbox.asCoord;
+const idFromRef = widgetsSandbox.idFromRef;
+const escapeHtml = widgetsSandbox.escapeHtml;
 
 let passed = 0;
 let failed = 0;
@@ -337,6 +339,19 @@ console.log("\n=== asCoord: ignore ECharts nulls ===");
     false,
     "null prev does not stack nodes at the origin",
   );
+}
+
+console.log("\n=== idFromRef / escapeHtml ===");
+
+{
+  assertEqual(idFromRef("sensors:sensor_1"), "sensor_1", "plain source:id ref");
+  assertEqual(idFromRef("(sensors:sensor_0, [SensorReading], 1)"), "sensor_0", "metadata-style ref");
+  assertEqual(idFromRef("sensor_0"), "sensor_0", "ref without colon");
+  assertEqual(idFromRef(""), null, "empty ref");
+  assertEqual(idFromRef(null), null, "null ref");
+  assertEqual(idFromRef("src:id:with:colons"), "id:with:colons", "keeps colons after the first");
+  assertEqual(escapeHtml("<img src=x onerror=alert(1)>"), "&lt;img src=x onerror=alert(1)&gt;", "escapes html tags");
+  assertEqual(escapeHtml(`a&b"'`), "a&amp;b&quot;&#39;", "escapes amp quotes");
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

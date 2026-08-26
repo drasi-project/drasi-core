@@ -854,8 +854,17 @@ function idFromRef(ref) {
   if (ref == null) return null;
   const text = String(ref).replace(/^\(/, "").split(",")[0].trim();
   if (!text) return null;
-  const colon = text.lastIndexOf(":");
-  return colon >= 0 ? text.slice(colon + 1).trim() : text;
+  const match = text.match(/^([^:]*):(.*)$/);
+  return match ? match[2].trim() : text;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function scalarId(value) {
@@ -1266,7 +1275,9 @@ function renderGraph(widget, runtime, container) {
     container.__graphSizeRetry = tries;
     if (tries <= 12) {
       requestAnimationFrame(() => renderGraph(widget, runtime, container));
+      return;
     }
+    console.warn("Graph widget container never received a usable size; skipping render.", container);
     return;
   }
   container.__graphSizeRetry = 0;
@@ -1301,10 +1312,10 @@ function renderGraph(widget, runtime, container) {
         if (p.dataType === "edge") {
           const label = p.data?.label?.formatter ?? "";
           const value = p.data?.value;
-          return `${p.data.source} → ${p.data.target}${label ? `<br/>${label}` : ""}${value != null ? `<br/>value: ${value}` : ""}`;
+          return `${escapeHtml(p.data.source)} → ${escapeHtml(p.data.target)}${label ? `<br/>${escapeHtml(label)}` : ""}${value != null ? `<br/>value: ${escapeHtml(value)}` : ""}`;
         }
         const value = p.data?.value;
-        return `${p.data?.name ?? p.name}${value != null ? `<br/>value: ${value}` : ""}`;
+        return `${escapeHtml(p.data?.name ?? p.name)}${value != null ? `<br/>value: ${escapeHtml(value)}` : ""}`;
       },
     },
     legend: graph.categories.length > 0 ? [{ data: graph.categories.map((c) => c.name) }] : undefined,

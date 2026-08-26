@@ -880,6 +880,48 @@ fn random_strength() -> f64 {
     0.3 + rand::random::<f64>() * 0.7
 }
 
+fn mesh_timestamp_millis() -> u64 {
+    crate::time::get_system_time_millis().unwrap_or_else(|e| {
+        log::warn!("Failed to get timestamp for mesh edge: {e}");
+        chrono::Utc::now().timestamp_millis() as u64
+    })
+}
+
+fn pick_replacement_chord(
+    existing: &HashSet<(u32, u32)>,
+    sensor_count: u32,
+    next_chord: u32,
+) -> Option<MeshEdge> {
+    if sensor_count < 2 {
+        return None;
+    }
+    for _ in 0..16 {
+        let from = rand::random::<u32>() % sensor_count;
+        let to = rand::random::<u32>() % sensor_count;
+        if from == to || existing.contains(&(from, to)) {
+            continue;
+        }
+        return Some(make_chord(from, to, next_chord));
+    }
+    for from in 0..sensor_count {
+        for to in 0..sensor_count {
+            if from != to && !existing.contains(&(from, to)) {
+                return Some(make_chord(from, to, next_chord));
+            }
+        }
+    }
+    None
+}
+
+fn make_chord(from: u32, to: u32, next_chord: u32) -> MeshEdge {
+    MeshEdge {
+        from,
+        to,
+        id: format!("mesh_chord_{next_chord}"),
+        is_chord: true,
+    }
+}
+
 fn initial_mesh_edges(sensor_count: u32) -> Vec<MeshEdge> {
     let mut edges = Vec::new();
     if sensor_count < 2 {
@@ -933,10 +975,7 @@ fn connected_to_element(source_name: &str, edge: &MeshEdge, strength: f64) -> El
         metadata: ElementMetadata {
             reference: ElementReference::new(source_name, &edge.id),
             labels: Arc::from(vec![Arc::from("CONNECTED_TO")]),
-            effective_from: crate::time::get_system_time_millis().unwrap_or_else(|e| {
-                log::warn!("Failed to get timestamp for mesh edge: {e}");
-                chrono::Utc::now().timestamp_millis() as u64
-            }),
+            effective_from: mesh_timestamp_millis(),
         },
         properties,
         in_node: ElementReference::new(source_name, &format!("sensor_{}", edge.from)),
@@ -1009,42 +1048,26 @@ async fn emit_mesh_tick(
             .map(|(i, _)| i)
             .next()
         {
-            let old = state.edges.remove(idx);
             let existing: HashSet<(u32, u32)> =
                 state.edges.iter().map(|e| (e.from, e.to)).collect();
-            let mut replacement = None;
-            for _ in 0..16 {
-                let from = rand::random::<u32>() % sensor_count;
-                let to = rand::random::<u32>() % sensor_count;
-                if from == to || existing.contains(&(from, to)) {
-                    continue;
-                }
-                replacement = Some(MeshEdge {
-                    from,
-                    to,
-                    id: format!("mesh_chord_{}", state.next_chord),
-                    is_chord: true,
-                });
+            if let Some(edge) = pick_replacement_chord(&existing, sensor_count, state.next_chord) {
+                let old = state.edges.remove(idx);
                 state.next_chord += 1;
-                break;
-            }
-            let new_edge = replacement;
-            drop(state);
+                drop(state);
 
-            dispatch_generated_change(
-                base_dispatchers.clone(),
-                source_id,
-                SourceChange::Delete {
-                    metadata: ElementMetadata {
-                        reference: ElementReference::new(source_name, &old.id),
-                        labels: Arc::from(vec![Arc::from("CONNECTED_TO")]),
-                        effective_from: crate::time::get_system_time_millis().unwrap_or(0),
+                dispatch_generated_change(
+                    base_dispatchers.clone(),
+                    source_id,
+                    SourceChange::Delete {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new(source_name, &old.id),
+                            labels: Arc::from(vec![Arc::from("CONNECTED_TO")]),
+                            effective_from: mesh_timestamp_millis(),
+                        },
                     },
-                },
-            )
-            .await;
+                )
+                .await;
 
-            if let Some(edge) = new_edge {
                 {
                     let mut state = mesh_state.write().await;
                     state.edges.push(edge.clone());
@@ -1074,5 +1097,49 @@ async fn emit_mesh_tick(
             },
         )
         .await;
+    }
+}
+
+#[cfg(test)]
+mod mesh_unit_tests {
+    use super::*;
+
+    #[test]
+    fn initial_mesh_edges_empty_for_tiny_counts() {
+        assert!(initial_mesh_edges(0).is_empty());
+        assert!(initial_mesh_edges(1).is_empty());
+    }
+
+    #[test]
+    fn initial_mesh_edges_is_a_ring_for_two_sensors() {
+        let edges = initial_mesh_edges(2);
+        let ring: Vec<_> = edges.iter().filter(|e| !e.is_chord).collect();
+        assert_eq!(ring.len(), 2);
+        assert_eq!((ring[0].from, ring[0].to), (0, 1));
+        assert_eq!((ring[1].from, ring[1].to), (1, 0));
+    }
+
+    #[test]
+    fn initial_mesh_edges_has_unique_pairs_and_chords() {
+        let edges = initial_mesh_edges(10);
+        assert_eq!(edges.iter().filter(|e| !e.is_chord).count(), 10);
+        assert!(edges.iter().any(|e| e.is_chord));
+        let pairs: HashSet<_> = edges.iter().map(|e| (e.from, e.to)).collect();
+        assert_eq!(pairs.len(), edges.len());
+    }
+
+    #[test]
+    fn pick_replacement_chord_none_when_complete() {
+        let existing: HashSet<(u32, u32)> = [(0, 1), (1, 0)].into_iter().collect();
+        assert!(pick_replacement_chord(&existing, 2, 0).is_none());
+    }
+
+    #[test]
+    fn pick_replacement_chord_finds_missing_pair() {
+        let existing: HashSet<(u32, u32)> = [(0, 1)].into_iter().collect();
+        let edge = pick_replacement_chord(&existing, 2, 5).expect("should find (1, 0)");
+        assert_eq!((edge.from, edge.to), (1, 0));
+        assert_eq!(edge.id, "mesh_chord_5");
+        assert!(edge.is_chord);
     }
 }
