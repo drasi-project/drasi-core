@@ -7,6 +7,7 @@ test: test-js
 test-js:
 	node tests/handlebars_helpers.test.js
 	node tests/apply_result_diff.test.js
+	node tests/graph_mapping.test.js
 
 integration-test:
 	cargo test -p drasi-reaction-dashboard -- --ignored --nocapture

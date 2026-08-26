@@ -41,7 +41,7 @@
 //! }
 //! ```
 //!
-//! ## Sensor Reading Mode (`data_type: DataType::SensorReading { sensor_count }`)
+//! ## Sensor Reading Mode (`data_type: DataType::SensorReading { sensor_count, mesh }`)
 //!
 //! Generates simulated IoT sensor readings with randomized temperature and humidity
 //! values from a configurable number of sensors (default: 5). Each node has the
@@ -50,6 +50,10 @@
 //! **Key Behavior**: The first reading for each sensor generates an INSERT event;
 //! subsequent readings for the same sensor generate UPDATE events. This simulates
 //! real sensor behavior where devices are discovered once then continuously report.
+//!
+//! When `mesh` is true (`DataType::sensor_reading_mesh(n)`), the source also emits
+//! a live `CONNECTED_TO` mesh (ring plus chords) after every sensor has been seen.
+//! Edge `strength` updates over time and chords are occasionally rewired.
 //!
 //! ```text
 //! Element {
