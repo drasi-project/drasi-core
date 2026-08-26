@@ -15,6 +15,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use log::{debug, error, info, warn};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
@@ -109,6 +110,126 @@ fn serialize_live_result_mutations(
     Ok(serialized)
 }
 
+// Compact MessagePack omitted `grouping_keys` when it was `None`, shifting the
+// following row signature. Keep that exact legacy layout readable during recovery.
+#[derive(Deserialize)]
+struct LegacyCompactQueryResult {
+    query_id: String,
+    #[serde(default)]
+    sequence: u64,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    results: Vec<LegacyCompactResultDiff>,
+    metadata: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    profiling: Option<crate::profiling::ProfilingMetadata>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum LegacyCompactResultDiff {
+    #[serde(rename = "ADD")]
+    Add {
+        data: serde_json::Value,
+        #[serde(default)]
+        row_signature: u64,
+    },
+    #[serde(rename = "DELETE")]
+    Delete {
+        data: serde_json::Value,
+        #[serde(default)]
+        row_signature: u64,
+    },
+    #[serde(rename = "UPDATE")]
+    Update {
+        data: serde_json::Value,
+        before: serde_json::Value,
+        after: serde_json::Value,
+        #[serde(default)]
+        row_signature: u64,
+    },
+    #[serde(rename = "aggregation")]
+    Aggregation {
+        before: Option<serde_json::Value>,
+        after: serde_json::Value,
+        #[serde(default)]
+        row_signature: u64,
+    },
+    #[serde(rename = "noop")]
+    Noop,
+}
+
+impl From<LegacyCompactQueryResult> for QueryResult {
+    fn from(result: LegacyCompactQueryResult) -> Self {
+        Self {
+            query_id: result.query_id,
+            sequence: result.sequence,
+            timestamp: result.timestamp,
+            results: result.results.into_iter().map(ResultDiff::from).collect(),
+            metadata: result.metadata,
+            profiling: result.profiling,
+        }
+    }
+}
+
+impl From<LegacyCompactResultDiff> for ResultDiff {
+    fn from(diff: LegacyCompactResultDiff) -> Self {
+        match diff {
+            LegacyCompactResultDiff::Add {
+                data,
+                row_signature,
+            } => Self::Add {
+                data,
+                row_signature,
+            },
+            LegacyCompactResultDiff::Delete {
+                data,
+                row_signature,
+            } => Self::Delete {
+                data,
+                row_signature,
+            },
+            LegacyCompactResultDiff::Update {
+                data,
+                before,
+                after,
+                row_signature,
+            } => Self::Update {
+                data,
+                before,
+                after,
+                grouping_keys: None,
+                row_signature,
+            },
+            LegacyCompactResultDiff::Aggregation {
+                before,
+                after,
+                row_signature,
+            } => Self::Aggregation {
+                before,
+                after,
+                row_signature,
+            },
+            LegacyCompactResultDiff::Noop => Self::Noop,
+        }
+    }
+}
+
+fn deserialize_outbox_result(data: &[u8]) -> Result<QueryResult> {
+    match rmp_serde::from_slice(data) {
+        Ok(result) => Ok(result),
+        Err(current_error) => {
+            let legacy: LegacyCompactQueryResult =
+                rmp_serde::from_slice(data).map_err(|legacy_error| {
+                    anyhow::anyhow!(
+                        "MessagePack decode failed with the current schema ({current_error}) \
+                         and the legacy compact schema ({legacy_error})"
+                    )
+                })?;
+            Ok(legacy.into())
+        }
+    }
+}
+
 /// Convert a single VariableValue to JSON
 fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
     match value {
@@ -162,12 +283,14 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::convert_variable_value_to_json;
-    use chrono::{Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveTime, TimeZone};
+    use super::{convert_variable_value_to_json, deserialize_outbox_result};
+    use crate::channels::{QueryResult, ResultDiff};
+    use chrono::{Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveTime, TimeZone, Utc};
     use drasi_core::evaluation::variable_value::{
         duration::Duration as VarDuration, zoned_datetime::ZonedDateTime as VarZonedDateTime,
         zoned_time::ZonedTime as VarZonedTime, VariableValue,
     };
+    use std::collections::HashMap;
 
     #[test]
     fn temporal_values_serialize_as_plain_strings() {
@@ -222,6 +345,41 @@ mod tests {
             duration_json,
             serde_json::Value::String(duration.to_string())
         );
+    }
+
+    #[test]
+    fn outbox_decodes_legacy_compact_update_without_grouping_keys() {
+        let row_signature = 1_716_732_019_073_666_664;
+        let result = QueryResult::new(
+            "query".to_string(),
+            3,
+            Utc::now(),
+            vec![ResultDiff::Update {
+                data: serde_json::json!({"count": 2}),
+                before: serde_json::json!({"count": 1}),
+                after: serde_json::json!({"count": 2}),
+                grouping_keys: None,
+                row_signature,
+            }],
+            HashMap::new(),
+        );
+        let legacy = rmp_serde::to_vec(&result).unwrap();
+
+        assert!(rmp_serde::from_slice::<QueryResult>(&legacy).is_err());
+        let decoded = deserialize_outbox_result(&legacy).unwrap();
+        assert_eq!(decoded.sequence, 3);
+        assert!(matches!(
+            decoded.results.as_slice(),
+            [ResultDiff::Update {
+                grouping_keys: None,
+                row_signature: actual,
+                ..
+            }] if *actual == row_signature
+        ));
+
+        let named = rmp_serde::to_vec_named(&result).unwrap();
+        let decoded: QueryResult = rmp_serde::from_slice(&named).unwrap();
+        assert_eq!(decoded.sequence, 3);
     }
 }
 
@@ -419,8 +577,8 @@ async fn dispatch_query_results(
     // or result-sequence write that does not complete.
     let mut outbox_ok = true;
     if let Some(writer) = outbox_writer {
-        // Serialize the QueryResult for the outbox using MessagePack (compact binary)
-        match rmp_serde::to_vec(arc_result.as_ref()) {
+        // Named fields keep skipped optional fields safe across schema evolution.
+        match rmp_serde::to_vec_named(arc_result.as_ref()) {
             Ok(data) => {
                 if let Err(e) = writer.append(query_id, arc_result.sequence, &data).await {
                     warn!(
@@ -781,7 +939,7 @@ impl DrasiQuery {
                     );
                 }
 
-                let result = rmp_serde::from_slice::<QueryResult>(&data).with_context(|| {
+                let result = deserialize_outbox_result(&data).with_context(|| {
                     format!(
                         "Query '{query_id}' has corrupt durable outbox result at sequence \
                          {stored_sequence}"
@@ -872,7 +1030,7 @@ impl DrasiQuery {
                 }
             }
 
-            let result = rmp_serde::from_slice::<QueryResult>(&data).with_context(|| {
+            let result = deserialize_outbox_result(&data).with_context(|| {
                 format!(
                     "Query '{query_id}' has corrupt durable outbox result at sequence \
                      {stored_sequence}"
