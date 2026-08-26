@@ -51,6 +51,8 @@ pub struct RocksDbIndexConfigDto {
     pub direct_io: ConfigValue<bool>,
 
     /// Combined capacity for cached blocks and memtable reservations, in bytes.
+    /// Half becomes the shared memtable budget from which per-CF flush
+    /// thresholds are derived; aggregate query pressure can flush them earlier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueUsize>)]
     pub memory_budget_bytes: Option<ConfigValue<usize>>,
