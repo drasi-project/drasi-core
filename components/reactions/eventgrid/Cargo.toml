@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-eventgrid"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Azure Event Grid reaction plugin for Drasi (custom-topic event publishing)"
