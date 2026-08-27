@@ -34,7 +34,12 @@ use super::types::FfiStr;
 ///   `KeyedSnapshotRow { k: <row_signature>, v: <row> }` JSON envelope instead
 ///   of a bare row, so the engine's canonical `row_signature` survives FFI
 ///   (fixes #605 duplicate dashboard rows on the plugin path).
-pub const FFI_SDK_VERSION: &str = "0.11.0";
+/// - `0.12.0`: `SourceVtable::subscribe_fn` gained `resume_sequence: u64` +
+///   `resume_sequence_present: bool` params so a resuming source can advance its
+///   sequence counter above the query's dedup high-water mark (fixes #664 on the
+///   FFI path). This widens the function-pointer signature, so an older cdylib
+///   must be rejected rather than called through the new signature.
+pub const FFI_SDK_VERSION: &str = "0.12.0";
 
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
