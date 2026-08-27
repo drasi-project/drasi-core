@@ -31,7 +31,6 @@ pub(crate) enum FrameError {
     MalformedJson(serde_json::Error),
     InvalidItemsPathType,
     TooManyItems,
-    BinaryMessage,
 }
 
 impl FrameError {
@@ -52,7 +51,6 @@ impl fmt::Display for FrameError {
                 f,
                 "WebSocket message selected more than {MAX_ITEMS_PER_MESSAGE} items"
             ),
-            Self::BinaryMessage => f.write_str("binary WebSocket messages are not supported"),
         }
     }
 }
@@ -70,24 +68,15 @@ pub(crate) struct FrameMapper {
     engine: SourceMappingEngine,
     items_path: String,
     mappings: Vec<SourceMapping>,
-    uses_envelope_condition: bool,
     max_message_size_bytes: usize,
 }
 
 impl FrameMapper {
     pub(crate) fn new(config: &WebSocketSourceConfig) -> Self {
-        let uses_envelope_condition = config.mappings.iter().any(|mapping| {
-            mapping
-                .when
-                .as_ref()
-                .and_then(|condition| condition.field.as_deref())
-                .is_some_and(|field| field == "envelope" || field.starts_with("envelope."))
-        });
         Self {
             engine: SourceMappingEngine::new(),
             items_path: config.items_path.clone(),
             mappings: config.mappings.clone(),
-            uses_envelope_condition,
             max_message_size_bytes: config.max_message_size_bytes,
         }
     }
@@ -106,15 +95,17 @@ impl FrameMapper {
         if selected_item_count > MAX_ITEMS_PER_MESSAGE {
             return Err(FrameError::TooManyItems);
         }
+        if selected_item_count == 0 {
+            return Ok(Vec::new());
+        }
 
         let mut changes = Vec::new();
-        let envelope_condition_context = self.uses_envelope_condition.then(|| {
-            json!({
-                "payload": {
-                    "envelope": envelope.clone(),
-                },
-            })
-        });
+        // An envelope.* condition has one result for the entire frame. Evaluate
+        // it lazily, cache it across selected items, and expose the envelope as
+        // payload.envelope because SourceMappingEngine resolves these fields
+        // relative to payload.
+        let mut envelope_condition_context = None;
+        let mut envelope_matches = vec![None; self.mappings.len()];
         let mut context = json!({
             "payload": Value::Null,
             "envelope": envelope,
@@ -127,8 +118,32 @@ impl FrameMapper {
                 .clone();
             context["payload"] = payload;
 
-            for mapping in &self.mappings {
-                if !self.mapping_matches(mapping, &context, envelope_condition_context.as_ref()) {
+            for (mapping_index, mapping) in self.mappings.iter().enumerate() {
+                let envelope_match = if uses_envelope_condition(mapping) {
+                    let matches = envelope_matches[mapping_index].get_or_insert_with(|| {
+                        let condition_context =
+                            envelope_condition_context.get_or_insert_with(|| {
+                                json!({
+                                    "payload": {
+                                        "envelope": context["envelope"].clone(),
+                                    },
+                                })
+                            });
+                        self.engine.condition_matches(
+                            mapping
+                                .when
+                                .as_ref()
+                                .expect("envelope condition must exist"),
+                            condition_context,
+                            None,
+                        )
+                    });
+                    Some(*matches)
+                } else {
+                    None
+                };
+
+                if !self.mapping_matches(mapping, &context, envelope_match) {
                     continue;
                 }
 
@@ -149,24 +164,26 @@ impl FrameMapper {
         &self,
         mapping: &SourceMapping,
         context: &Value,
-        envelope_condition_context: Option<&Value>,
+        envelope_match: Option<bool>,
     ) -> bool {
+        if let Some(matches) = envelope_match {
+            return matches;
+        }
+
         mapping
             .when
             .as_ref()
-            .map(|condition| {
-                let condition_context = match condition.field.as_deref() {
-                    Some("envelope") => envelope_condition_context,
-                    Some(field) if field.starts_with("envelope.") => envelope_condition_context,
-                    _ => Some(context),
-                };
-                condition_context.is_some_and(|condition_context| {
-                    self.engine
-                        .condition_matches(condition, condition_context, None)
-                })
-            })
+            .map(|condition| self.engine.condition_matches(condition, context, None))
             .unwrap_or(true)
     }
+}
+
+fn uses_envelope_condition(mapping: &SourceMapping) -> bool {
+    mapping
+        .when
+        .as_ref()
+        .and_then(|condition| condition.field.as_deref())
+        .is_some_and(|field| field == "envelope" || field.starts_with("envelope."))
 }
 
 pub(crate) fn derive_schema(mappings: &[SourceMapping]) -> Option<SourceSchema> {
@@ -300,326 +317,353 @@ mod tests {
         }
     }
 
-    #[test]
-    fn maps_array_field_in_order() {
-        let mapper = FrameMapper::new(&config());
-        let changes = mapper
+    mod selection {
+        use super::*;
+
+        #[test]
+        fn maps_array_field_in_order() {
+            let mapper = FrameMapper::new(&config());
+            let changes = mapper
             .map_text(
                 "source",
                 r#"{"type":"batch","items":[{"kind":"sensor","id":"a","value":1},{"kind":"sensor","id":"b","value":2}]}"#,
             )
             .unwrap();
 
-        let ids = changes
-            .iter()
-            .map(|change| change.get_reference().element_id.as_ref())
-            .collect::<Vec<_>>();
-        assert_eq!(ids, vec!["a", "b"]);
-    }
+            let ids = changes
+                .iter()
+                .map(|change| change.get_reference().element_id.as_ref())
+                .collect::<Vec<_>>();
+            assert_eq!(ids, vec!["a", "b"]);
+        }
 
-    #[test]
-    fn maps_top_level_array_in_order() {
-        let mut config = config();
-        config.items_path = "$".to_string();
-        let mapper = FrameMapper::new(&config);
-        let changes = mapper
+        #[test]
+        fn maps_top_level_array_in_order() {
+            let mut config = config();
+            config.items_path = "$".to_string();
+            let mapper = FrameMapper::new(&config);
+            let changes = mapper
             .map_text(
                 "source",
                 r#"[{"kind":"sensor","id":"a","value":1},{"kind":"sensor","id":"b","value":2}]"#,
             )
             .unwrap();
 
-        let ids = changes
-            .iter()
-            .map(|change| change.get_reference().element_id.as_ref())
-            .collect::<Vec<_>>();
-        assert_eq!(ids, vec!["a", "b"]);
-    }
-
-    #[test]
-    fn applies_only_the_first_matching_mapping() {
-        let mapper = FrameMapper::new(&config());
-        let changes = mapper
-            .map_text(
-                "source",
-                r#"{"items":[{"kind":"sensor","id":"a","value":1}]}"#,
-            )
-            .unwrap();
-        assert_eq!(changes.len(), 1);
-
-        match &changes[0] {
-            SourceChange::Insert {
-                element: Element::Node { metadata, .. },
-            } => assert_eq!(metadata.labels[0].as_ref(), "First"),
-            other => panic!("expected node insert, got {other:?}"),
+            let ids = changes
+                .iter()
+                .map(|change| change.get_reference().element_id.as_ref())
+                .collect::<Vec<_>>();
+            assert_eq!(ids, vec!["a", "b"]);
         }
-    }
 
-    #[test]
-    fn missing_array_field_selects_no_items() {
-        let mapper = FrameMapper::new(&config());
-        assert!(mapper
-            .map_text("source", r#"{"type":"heartbeat"}"#)
-            .unwrap()
-            .is_empty());
-    }
+        #[test]
+        fn applies_only_the_first_matching_mapping() {
+            let mapper = FrameMapper::new(&config());
+            let changes = mapper
+                .map_text(
+                    "source",
+                    r#"{"items":[{"kind":"sensor","id":"a","value":1}]}"#,
+                )
+                .unwrap();
+            assert_eq!(changes.len(), 1);
 
-    #[test]
-    fn matches_condition_against_envelope_field() {
-        let mut config = config();
-        config.mappings.truncate(1);
-        config.mappings[0].when = Some(MappingCondition {
-            header: None,
-            field: Some("envelope.type".to_string()),
-            equals: Some("batch".to_string()),
-            contains: None,
-            regex: None,
-        });
-        let mapper = FrameMapper::new(&config);
-
-        let changes = mapper
-            .map_text(
-                "source",
-                r#"{"type":"batch","items":[{"id":"a","value":1}]}"#,
-            )
-            .unwrap();
-        assert_eq!(changes.len(), 1);
-    }
-
-    #[test]
-    fn derives_static_node_and_relation_schema() {
-        let mut relation = mapping("READS");
-        relation.element_type = ElementType::Relation;
-        relation.template.from = Some("{{payload.reader}}".to_string());
-        relation.template.to = Some("{{payload.sensor}}".to_string());
-
-        let schema = derive_schema(&[mapping("Sensor"), relation]).unwrap();
-        assert_eq!(schema.nodes[0].label, "Sensor");
-        assert_eq!(schema.nodes[0].properties[0].name, "value");
-        assert_eq!(schema.relations[0].label, "READS");
-        assert_eq!(schema.relations[0].properties[0].name, "value");
-    }
-
-    #[test]
-    fn exposes_payload_envelope_and_source_id_to_templates() {
-        let mut config = config();
-        config.mappings.truncate(1);
-        config.mappings[0].when = None;
-        config.mappings[0].template.id =
-            "{{source_id}}/{{envelope.type}}/{{payload.id}}".to_string();
-        let mapper = FrameMapper::new(&config);
-
-        let change = mapper
-            .map_text(
-                "source",
-                r#"{"type":"batch","items":[{"id":"sensor-1","value":1}]}"#,
-            )
-            .unwrap()
-            .pop()
-            .unwrap();
-
-        assert_eq!(
-            change.get_reference().element_id.as_ref(),
-            "source/batch/sensor-1"
-        );
-    }
-
-    #[test]
-    fn processes_maximum_items_across_maximum_mappings() {
-        let mut config = config();
-        config.mappings = (0..64)
-            .map(|index| mapping(&format!("Sensor{index}")))
-            .collect();
-        let items = (0..1_000)
-            .map(|index| json!({"kind": "other", "id": index, "value": index}))
-            .collect::<Vec<_>>();
-
-        let changes = FrameMapper::new(&config)
-            .map_text("source", &json!({"items": items}).to_string())
-            .unwrap();
-        assert!(changes.is_empty());
-    }
-
-    #[test]
-    fn rejects_more_than_maximum_selected_items() {
-        let config = config();
-        let items = (0..=MAX_ITEMS_PER_MESSAGE)
-            .map(|index| json!({"kind": "other", "id": index}))
-            .collect::<Vec<_>>();
-
-        let error = FrameMapper::new(&config)
-            .map_text("source", &json!({"items": items}).to_string())
-            .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            format!("WebSocket message selected more than {MAX_ITEMS_PER_MESSAGE} items")
-        );
-        assert!(!error.is_recoverable());
-    }
-
-    #[test]
-    fn skips_items_with_missing_or_unmapped_dynamic_operations() {
-        let mut config = config();
-        config.items_path = "$".to_string();
-        config.mappings = vec![SourceMapping {
-            when: None,
-            operation: None,
-            operation_from: Some("payload.op".to_string()),
-            operation_map: Some(std::collections::HashMap::from([(
-                "insert".to_string(),
-                OperationType::Insert,
-            )])),
-            element_type: ElementType::Node,
-            effective_from: None,
-            template: ElementTemplate {
-                id: "{{payload.id}}".to_string(),
-                labels: vec!["Sensor".to_string()],
-                properties: None,
-                from: None,
-                to: None,
-            },
-        }];
-        let mapper = FrameMapper::new(&config);
-
-        assert!(mapper
-            .map_text("source", r#"{"type":"heartbeat"}"#)
-            .unwrap()
-            .is_empty());
-        assert!(mapper
-            .map_text("source", r#"{"op":"subscribed"}"#)
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn maps_delete_metadata() {
-        let mut config = config();
-        config.items_path = "$".to_string();
-        config.mappings = vec![SourceMapping {
-            when: None,
-            operation: Some(OperationType::Delete),
-            operation_from: None,
-            operation_map: None,
-            element_type: ElementType::Node,
-            effective_from: None,
-            template: ElementTemplate {
-                id: "{{payload.id}}".to_string(),
-                labels: vec!["Sensor".to_string()],
-                properties: None,
-                from: None,
-                to: None,
-            },
-        }];
-
-        let change = FrameMapper::new(&config)
-            .map_text("source", r#"{"id":"sensor-1"}"#)
-            .unwrap()
-            .pop()
-            .unwrap();
-
-        match change {
-            SourceChange::Delete { metadata } => {
-                assert_eq!(metadata.reference.source_id.as_ref(), "source");
-                assert_eq!(metadata.reference.element_id.as_ref(), "sensor-1");
-                assert_eq!(metadata.labels[0].as_ref(), "Sensor");
+            match &changes[0] {
+                SourceChange::Insert {
+                    element: Element::Node { metadata, .. },
+                } => assert_eq!(metadata.labels[0].as_ref(), "First"),
+                other => panic!("expected node insert, got {other:?}"),
             }
-            other => panic!("expected delete, got {other:?}"),
+        }
+
+        #[test]
+        fn missing_array_field_selects_no_items() {
+            let mapper = FrameMapper::new(&config());
+            assert!(mapper
+                .map_text("source", r#"{"type":"heartbeat"}"#)
+                .unwrap()
+                .is_empty());
         }
     }
 
-    #[test]
-    fn maps_explicit_unix_millisecond_timestamp() {
-        let mut config = config();
-        config.items_path = "$".to_string();
-        config.mappings.truncate(1);
-        config.mappings[0].effective_from = Some(EffectiveFromConfig::Explicit {
-            value: "{{payload.timestamp}}".to_string(),
-            format: TimestampFormat::UnixMillis,
-        });
+    mod conditions {
+        use super::*;
 
-        let change = FrameMapper::new(&config)
-            .map_text(
-                "source",
-                r#"{"kind":"sensor","id":"sensor-1","value":10,"timestamp":1770000000000}"#,
-            )
-            .unwrap()
-            .pop()
-            .unwrap();
+        #[test]
+        fn matches_condition_against_envelope_field() {
+            let mut config = config();
+            config.mappings.truncate(1);
+            config.mappings[0].when = Some(MappingCondition {
+                header: None,
+                field: Some("envelope.type".to_string()),
+                equals: Some("batch".to_string()),
+                contains: None,
+                regex: None,
+            });
+            let mapper = FrameMapper::new(&config);
 
-        match change {
-            SourceChange::Insert {
-                element: Element::Node { metadata, .. },
-            } => assert_eq!(metadata.effective_from, 1_770_000_000_000),
-            other => panic!("expected node insert, got {other:?}"),
+            let changes = mapper
+                .map_text(
+                    "source",
+                    r#"{"type":"batch","items":[{"id":"a","value":1},{"id":"b","value":2}]}"#,
+                )
+                .unwrap();
+            assert_eq!(changes.len(), 2);
         }
     }
 
-    #[test]
-    fn maps_relation_metadata_and_endpoints() {
-        let mut config = config();
-        config.items_path = "$".to_string();
-        config.mappings = vec![SourceMapping {
-            when: None,
-            operation: Some(OperationType::Insert),
-            operation_from: None,
-            operation_map: None,
-            element_type: ElementType::Relation,
-            effective_from: None,
-            template: ElementTemplate {
-                id: "{{payload.id}}".to_string(),
-                labels: vec!["READS".to_string()],
-                properties: None,
-                from: Some("{{payload.reader}}".to_string()),
-                to: Some("{{payload.sensor}}".to_string()),
-            },
-        }];
+    mod selection_edge_cases {
+        use super::*;
 
-        let change = FrameMapper::new(&config)
-            .map_text(
-                "source",
-                r#"{"id":"reading-1","reader":"reader-1","sensor":"sensor-1"}"#,
-            )
-            .unwrap()
-            .pop()
-            .unwrap();
+        #[test]
+        fn whole_message_null_is_one_selected_item() {
+            let envelope = Value::Null;
+            assert_eq!(selected_item_count(&envelope, "$").unwrap(), 1);
+            assert_eq!(selected_item_at(&envelope, "$", 0), Some(&Value::Null));
+        }
+    }
 
-        match change {
-            SourceChange::Insert {
-                element:
-                    Element::Relation {
-                        metadata,
-                        out_node,
-                        in_node,
-                        ..
-                    },
-            } => {
-                assert_eq!(metadata.reference.element_id.as_ref(), "reading-1");
-                assert_eq!(metadata.labels[0].as_ref(), "READS");
-                assert_eq!(out_node.element_id.as_ref(), "reader-1");
-                assert_eq!(in_node.element_id.as_ref(), "sensor-1");
+    mod schema_derivation {
+        use super::*;
+
+        #[test]
+        fn derives_static_node_and_relation_schema() {
+            let mut relation = mapping("READS");
+            relation.element_type = ElementType::Relation;
+            relation.template.from = Some("{{payload.reader}}".to_string());
+            relation.template.to = Some("{{payload.sensor}}".to_string());
+
+            let schema = derive_schema(&[mapping("Sensor"), relation]).unwrap();
+            assert_eq!(schema.nodes[0].label, "Sensor");
+            assert_eq!(schema.nodes[0].properties[0].name, "value");
+            assert_eq!(schema.relations[0].label, "READS");
+            assert_eq!(schema.relations[0].properties[0].name, "value");
+        }
+    }
+
+    mod transformation {
+        use super::*;
+
+        #[test]
+        fn exposes_payload_envelope_and_source_id_to_templates() {
+            let mut config = config();
+            config.mappings.truncate(1);
+            config.mappings[0].when = None;
+            config.mappings[0].template.id =
+                "{{source_id}}/{{envelope.type}}/{{payload.id}}".to_string();
+            let mapper = FrameMapper::new(&config);
+
+            let change = mapper
+                .map_text(
+                    "source",
+                    r#"{"type":"batch","items":[{"id":"sensor-1","value":1}]}"#,
+                )
+                .unwrap()
+                .pop()
+                .unwrap();
+
+            assert_eq!(
+                change.get_reference().element_id.as_ref(),
+                "source/batch/sensor-1"
+            );
+        }
+
+        #[test]
+        fn processes_maximum_items_across_maximum_mappings() {
+            let mut config = config();
+            config.mappings = (0..64)
+                .map(|index| mapping(&format!("Sensor{index}")))
+                .collect();
+            let items = (0..1_000)
+                .map(|index| json!({"kind": "other", "id": index, "value": index}))
+                .collect::<Vec<_>>();
+
+            let changes = FrameMapper::new(&config)
+                .map_text("source", &json!({"items": items}).to_string())
+                .unwrap();
+            assert!(changes.is_empty());
+        }
+
+        #[test]
+        fn rejects_more_than_maximum_selected_items() {
+            let config = config();
+            let items = (0..=MAX_ITEMS_PER_MESSAGE)
+                .map(|index| json!({"kind": "other", "id": index}))
+                .collect::<Vec<_>>();
+
+            let error = FrameMapper::new(&config)
+                .map_text("source", &json!({"items": items}).to_string())
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("WebSocket message selected more than {MAX_ITEMS_PER_MESSAGE} items")
+            );
+            assert!(!error.is_recoverable());
+        }
+
+        #[test]
+        fn skips_items_with_missing_or_unmapped_dynamic_operations() {
+            let mut config = config();
+            config.items_path = "$".to_string();
+            config.mappings = vec![SourceMapping {
+                when: None,
+                operation: None,
+                operation_from: Some("payload.op".to_string()),
+                operation_map: Some(std::collections::HashMap::from([(
+                    "insert".to_string(),
+                    OperationType::Insert,
+                )])),
+                element_type: ElementType::Node,
+                effective_from: None,
+                template: ElementTemplate {
+                    id: "{{payload.id}}".to_string(),
+                    labels: vec!["Sensor".to_string()],
+                    properties: None,
+                    from: None,
+                    to: None,
+                },
+            }];
+            let mapper = FrameMapper::new(&config);
+
+            assert!(mapper
+                .map_text("source", r#"{"type":"heartbeat"}"#)
+                .unwrap()
+                .is_empty());
+            assert!(mapper
+                .map_text("source", r#"{"op":"subscribed"}"#)
+                .unwrap()
+                .is_empty());
+        }
+
+        #[test]
+        fn maps_delete_metadata() {
+            let mut config = config();
+            config.items_path = "$".to_string();
+            config.mappings = vec![SourceMapping {
+                when: None,
+                operation: Some(OperationType::Delete),
+                operation_from: None,
+                operation_map: None,
+                element_type: ElementType::Node,
+                effective_from: None,
+                template: ElementTemplate {
+                    id: "{{payload.id}}".to_string(),
+                    labels: vec!["Sensor".to_string()],
+                    properties: None,
+                    from: None,
+                    to: None,
+                },
+            }];
+
+            let change = FrameMapper::new(&config)
+                .map_text("source", r#"{"id":"sensor-1"}"#)
+                .unwrap()
+                .pop()
+                .unwrap();
+
+            match change {
+                SourceChange::Delete { metadata } => {
+                    assert_eq!(metadata.reference.source_id.as_ref(), "source");
+                    assert_eq!(metadata.reference.element_id.as_ref(), "sensor-1");
+                    assert_eq!(metadata.labels[0].as_ref(), "Sensor");
+                }
+                other => panic!("expected delete, got {other:?}"),
             }
-            other => panic!("expected relation insert, got {other:?}"),
         }
-    }
 
-    #[test]
-    fn classifies_malformed_json_as_recoverable_without_exposing_payload() {
-        let mapper = FrameMapper::new(&config());
-        let malformed = mapper.map_text("source", "{invalid").unwrap_err();
-        assert!(malformed.is_recoverable());
-        assert!(!malformed.to_string().contains("{invalid"));
-    }
+        #[test]
+        fn maps_explicit_unix_millisecond_timestamp() {
+            let mut config = config();
+            config.items_path = "$".to_string();
+            config.mappings.truncate(1);
+            config.mappings[0].effective_from = Some(EffectiveFromConfig::Explicit {
+                value: "{{payload.timestamp}}".to_string(),
+                format: TimestampFormat::UnixMillis,
+            });
 
-    #[test]
-    fn classifies_non_array_items_field_as_fatal() {
-        let mapper = FrameMapper::new(&config());
-        let invalid_items = mapper
-            .map_text("source", r#"{"items":"not-an-array"}"#)
-            .unwrap_err();
-        assert_eq!(
-            invalid_items.to_string(),
-            "itemsPath must select a top-level array"
-        );
-        assert!(!invalid_items.is_recoverable());
+            let change = FrameMapper::new(&config)
+                .map_text(
+                    "source",
+                    r#"{"kind":"sensor","id":"sensor-1","value":10,"timestamp":1770000000000}"#,
+                )
+                .unwrap()
+                .pop()
+                .unwrap();
+
+            match change {
+                SourceChange::Insert {
+                    element: Element::Node { metadata, .. },
+                } => assert_eq!(metadata.effective_from, 1_770_000_000_000),
+                other => panic!("expected node insert, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn maps_relation_metadata_and_endpoints() {
+            let mut config = config();
+            config.items_path = "$".to_string();
+            config.mappings = vec![SourceMapping {
+                when: None,
+                operation: Some(OperationType::Insert),
+                operation_from: None,
+                operation_map: None,
+                element_type: ElementType::Relation,
+                effective_from: None,
+                template: ElementTemplate {
+                    id: "{{payload.id}}".to_string(),
+                    labels: vec!["READS".to_string()],
+                    properties: None,
+                    from: Some("{{payload.reader}}".to_string()),
+                    to: Some("{{payload.sensor}}".to_string()),
+                },
+            }];
+
+            let change = FrameMapper::new(&config)
+                .map_text(
+                    "source",
+                    r#"{"id":"reading-1","reader":"reader-1","sensor":"sensor-1"}"#,
+                )
+                .unwrap()
+                .pop()
+                .unwrap();
+
+            match change {
+                SourceChange::Insert {
+                    element:
+                        Element::Relation {
+                            metadata,
+                            out_node,
+                            in_node,
+                            ..
+                        },
+                } => {
+                    assert_eq!(metadata.reference.element_id.as_ref(), "reading-1");
+                    assert_eq!(metadata.labels[0].as_ref(), "READS");
+                    assert_eq!(out_node.element_id.as_ref(), "reader-1");
+                    assert_eq!(in_node.element_id.as_ref(), "sensor-1");
+                }
+                other => panic!("expected relation insert, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn classifies_malformed_json_as_recoverable_without_exposing_payload() {
+            let mapper = FrameMapper::new(&config());
+            let malformed = mapper.map_text("source", "{invalid").unwrap_err();
+            assert!(malformed.is_recoverable());
+            assert!(!malformed.to_string().contains("{invalid"));
+        }
+
+        #[test]
+        fn classifies_non_array_items_field_as_fatal() {
+            let mapper = FrameMapper::new(&config());
+            let invalid_items = mapper
+                .map_text("source", r#"{"items":"not-an-array"}"#)
+                .unwrap_err();
+            assert_eq!(
+                invalid_items.to_string(),
+                "itemsPath must select a top-level array"
+            );
+            assert!(!invalid_items.is_recoverable());
+        }
     }
 }
