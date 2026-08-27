@@ -47,6 +47,10 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["c
 tracing = "0.1"
 url = "2"
 
+[dev-dependencies]
+rcgen = "0.13"
+tokio-rustls = "0.26"
+
 [features]
 default = []
 dynamic-plugin = []

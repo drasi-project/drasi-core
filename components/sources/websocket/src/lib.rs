@@ -43,10 +43,11 @@
 //!
 //! # Delivery
 //!
-//! The source is volatile and returns `supports_replay() == false`. Mapping and
-//! dispatch happen inline, so downstream channel backpressure stops socket reads.
-//! Shutdown may abandon or partially fan out one in-flight event if a subscriber
-//! remains blocked beyond the bounded shutdown grace period.
+//! The source is volatile and returns `supports_replay() == false`. A bounded
+//! internal frame queue lets the socket process control frames during temporary
+//! downstream backpressure. Socket reads stop when that queue fills. Shutdown
+//! may abandon queued work or partially fan out an in-flight event if a
+//! subscriber remains blocked beyond the bounded shutdown grace period.
 //!
 //! # Embedded use
 //!

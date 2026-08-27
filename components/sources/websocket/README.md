@@ -68,10 +68,12 @@ such as `Host`, `Upgrade`, and `Sec-WebSocket-Protocol` cannot be overridden.
 For dynamic-plugin configuration, these fields accept `ConfigValue`: `url`,
 `allowInsecure`, every header value, `connectTimeoutMs`, every initial message,
 all reconnect fields, `itemsPath`, `maxMessageSizeBytes`, and `bufferCapacity`.
-Header names and mapping configuration are plain values. `properties()`
-intentionally preserves the complete configuration: descriptor-created sources
-retain unresolved `ConfigValue` envelopes, while embedded sources serialize the
-literal runtime configuration. This is persistence behavior, not redaction.
+Header names and mapping configuration are always plain values; they cannot be
+expressed as `ConfigValue` (for example, secret or environment-variable
+references). `properties()` intentionally preserves the complete configuration:
+descriptor-created sources retain unresolved `ConfigValue` envelopes, while
+embedded sources serialize the literal runtime configuration. This is
+persistence behavior, not redaction.
 
 Source-owned diagnostics do not include resolved URLs, header values, initial
 messages, or raw malformed input. The shared `SourceBase` may log mapped graph
@@ -134,7 +136,10 @@ auto-detected; an explicit object supports `iso8601`, `unix_seconds`,
 Dynamic-plugin configuration rejects unknown fields in mapping, condition,
 explicit `effectiveFrom`, and template objects. A `when` condition must specify
 `field` and exactly one of `equals`, `contains`, or `regex`; header conditions
-are not supported. Invalid regular expressions fail source construction.
+are not supported. Regular expressions are limited to 4,096 bytes and compiled
+with explicit program-size limits; invalid or oversized patterns fail source
+construction. Mapping configuration is trusted operator input and must not be
+derived from upstream message data.
 
 ## Runtime behavior
 
@@ -157,28 +162,29 @@ The lifecycle states are:
 `Running` does not confirm that the remote application accepted an initial
 message. Each reconnect resends all initial messages.
 
-Mapping and dispatch happen inline, so a full subscriber channel stops socket
-reads and lets TCP backpressure apply. WebSocket control and data frames share
-the transport; prolonged downstream backpressure can therefore delay Ping
-handling and cause the peer to close the connection. An inbound Ping queues and
-flushes the automatic Pong response; Pong messages are ignored.
+Text frames enter a bounded 16-frame internal queue before mapping and dispatch.
+This lets the socket continue handling Ping, Pong, and Close frames during
+temporary subscriber backpressure. If downstream dispatch remains blocked long
+enough to fill that queue, socket reads stop and TCP backpressure applies. An
+inbound Ping queues and flushes the automatic Pong response; Pong messages are
+ignored.
 
-The source-owned malformed-JSON warning omits message contents, and malformed
-JSON is skipped. Binary messages, oversized messages or frames, invalid UTF-8,
-attack detection, a non-array selected field, and selection of more than 1,000
-items are fatal. Other local WebSocket parser/protocol and TLS errors are also
-fatal.
+The source-owned malformed-JSON warning omits message contents. Malformed JSON
+and unsupported binary messages are skipped. Oversized messages or frames,
+invalid UTF-8, attack detection, a non-array selected field, and selection of
+more than 1,000 items are fatal. Other local WebSocket parser/protocol and TLS
+errors are also fatal.
 
 When reconnect is enabled, retryable setup failures and established-connection
 disconnects, including abrupt EOF without a Close handshake, use bounded
-exponential backoff. `delayMs` is the first delay.
-Optional `maxDelayMs` caps growth; when omitted, the effective cap is the
-greater of `delayMs` and 30 seconds. Backoff resets only after the handshake and
-all initial messages have been sent and flushed. Setup timeouts, I/O failures,
-and handshake HTTP 408, 425, 429, 500, 502, 503, and 504 are retryable. Every
-other handshake HTTP response, TLS failure, invalid URL, and invalid local
-request configuration is fatal. Retry sleeps are shutdown-aware. With reconnect
-disabled, setup failures are not retried.
+exponential backoff. `delayMs` is the first delay. Optional `maxDelayMs` caps
+growth; when omitted, the effective cap is the greater of `delayMs` and 30
+seconds. Backoff resets only after the handshake and all initial messages have
+been sent and flushed. Setup timeouts, I/O failures, and handshake HTTP 408,
+425, 429, 500, 502, 503, and 504 are retryable. Every other handshake HTTP
+response, TLS failure, invalid URL, and invalid local request configuration is
+fatal. Retry sleeps are shutdown-aware. With reconnect disabled, setup failures
+are not retried.
 
 `maxMessageSizeBytes` bounds both individual WebSocket frames and reassembled
 messages before mapping. One message may select at most 1,000 items.
@@ -196,10 +202,11 @@ attached through the standard `SourceBase` path. Such a provider must not
 return a source position, and there is no atomic boundary between its snapshot
 and the live WebSocket stream.
 
-During shutdown, an in-flight event gets a 250 ms dispatch grace period. If a
-subscriber remains blocked, shutdown abandons the event; subscribers reached
-before the block may already have received it. This partial-fanout possibility
-is limited to explicit shutdown of this volatile source.
+During shutdown, queued and in-flight frames get a 250 ms dispatch grace period.
+If a subscriber remains blocked, shutdown abandons the remaining work;
+subscribers reached before the block may already have received the current
+event. This partial-fanout possibility is limited to explicit shutdown of this
+volatile source.
 
 There is no client-initiated Ping or idle timeout, so a half-open connection can
 remain `Running` until socket I/O reports the failure. Client liveness probing,

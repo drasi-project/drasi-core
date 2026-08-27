@@ -544,228 +544,293 @@ mod tests {
         }
     }
 
-    #[test]
-    fn new_source_exposes_expected_identity_and_capabilities() {
-        let source = WebSocketSource::new("source", config()).unwrap();
+    mod construction {
+        use super::*;
 
-        assert_eq!(source.id(), "source");
-        assert_eq!(source.type_name(), "websocket");
-        assert_eq!(source.dispatch_mode(), DispatchMode::Channel);
-        assert!(source.auto_start());
-        assert!(!source.supports_replay());
-    }
+        #[test]
+        fn new_source_exposes_expected_identity_and_capabilities() {
+            let source = WebSocketSource::new("source", config()).unwrap();
 
-    #[test]
-    fn embedded_source_properties_round_trip_configuration() {
-        let source = WebSocketSource::new("source", config()).unwrap();
-
-        assert_eq!(
-            serde_json::to_value(source.properties()).unwrap(),
-            serde_json::json!({
-                "url": "wss://example.com/events?token=embedded-secret",
-                "allowInsecure": false,
-                "headers": [{
-                    "name": "Authorization",
-                    "value": "header-secret"
-                }],
-                "connectTimeoutMs": 10_000,
-                "initialMessages": [r#"{"token":"message-secret"}"#],
-                "reconnect": {
-                    "enabled": true,
-                    "delayMs": 1_000
-                },
-                "itemsPath": "$",
-                "mappings": [{
-                    "operation": "insert",
-                    "elementType": "node",
-                    "template": {
-                        "id": "{{payload.id}}",
-                        "labels": ["Item"]
-                    }
-                }],
-                "maxMessageSizeBytes": 1024 * 1024,
-                "bufferCapacity": 64
-            })
-        );
-    }
-
-    #[test]
-    fn builder_rejects_insecure_url_without_opt_in() {
-        let error = WebSocketSource::builder("invalid")
-            .with_url("ws://example.com")
-            .with_mapping(mapping())
-            .build()
-            .err()
-            .expect("insecure URL should be rejected");
-        assert_eq!(
-            error.to_string(),
-            "allowInsecure must be true for ws:// endpoints"
-        );
-    }
-
-    #[test]
-    fn builder_applies_headers_initial_messages_and_auto_start() {
-        let source = WebSocketSource::builder("source")
-            .with_url("wss://example.com")
-            .with_header("X-Test", "value")
-            .with_initial_message(r#"{"subscribe":true}"#)
-            .with_mapping(mapping())
-            .with_auto_start(false)
-            .build()
-            .unwrap();
-
-        assert!(!source.auto_start());
-        assert_eq!(
-            source.config.headers,
-            vec![HeaderConfig {
-                name: "X-Test".to_string(),
-                value: "value".to_string(),
-            }]
-        );
-        assert_eq!(
-            source.config.initial_messages,
-            vec![r#"{"subscribe":true}"#.to_string()]
-        );
-    }
-
-    #[tokio::test]
-    async fn stop_cancels_worker_waiting_for_subscription() {
-        let source = WebSocketSource::new("source", config()).unwrap();
-        assert_eq!(source.status().await, ComponentStatus::Stopped);
-
-        source.start().await.unwrap();
-        assert_eq!(source.status().await, ComponentStatus::Starting);
-
-        timeout(Duration::from_secs(1), source.stop())
-            .await
-            .expect("stop should cancel subscriber waiting")
-            .unwrap();
-        assert_eq!(source.status().await, ComponentStatus::Stopped);
-    }
-
-    #[tokio::test]
-    async fn subscribe_returns_streaming_response_without_bootstrap_or_position() {
-        let source = WebSocketSource::new("source", config()).unwrap();
-        let response = source
-            .subscribe(subscription_settings("query", false))
-            .await
-            .unwrap();
-
-        assert_eq!(response.query_id, "query");
-        assert_eq!(response.source_id, "source");
-        assert!(response.bootstrap_receiver.is_none());
-        assert!(response.position_handle.is_none());
-    }
-
-    #[tokio::test]
-    async fn stop_clears_subscription_registered_while_stopped() {
-        let source = WebSocketSource::new("source", config()).unwrap();
-        let response = source
-            .subscribe(subscription_settings("query", false))
-            .await
-            .unwrap();
-        let mut receiver = response.receiver;
-
-        source.stop().await.unwrap();
-
-        assert!(timeout(Duration::from_secs(1), receiver.recv())
-            .await
-            .expect("stopped source should close its subscriber channel")
-            .is_err());
-    }
-
-    struct RecordingBootstrapProvider {
-        called: Arc<AtomicBool>,
-    }
-
-    #[async_trait]
-    impl BootstrapProvider for RecordingBootstrapProvider {
-        async fn bootstrap(
-            &self,
-            _request: BootstrapRequest,
-            _context: &BootstrapContext,
-            _event_tx: BootstrapEventSender,
-            _settings: Option<&SourceSubscriptionSettings>,
-        ) -> Result<BootstrapResult> {
-            self.called.store(true, Ordering::SeqCst);
-            Ok(BootstrapResult {
-                event_count: 0,
-                source_position: None,
-            })
+            assert_eq!(source.id(), "source");
+            assert_eq!(source.type_name(), "websocket");
+            assert_eq!(source.dispatch_mode(), DispatchMode::Channel);
+            assert!(source.auto_start());
+            assert!(!source.supports_replay());
         }
     }
 
-    #[tokio::test]
-    async fn set_bootstrap_provider_delegates_without_a_source_position() {
-        let called = Arc::new(AtomicBool::new(false));
-        let source = WebSocketSource::builder("source")
-            .with_config(config())
-            .build()
-            .unwrap();
-        source
-            .set_bootstrap_provider(Box::new(RecordingBootstrapProvider {
-                called: called.clone(),
-            }))
-            .await;
+    mod properties {
+        use super::*;
 
-        let mut response = source
-            .subscribe(subscription_settings("bootstrap-query", true))
-            .await
-            .unwrap();
-        assert!(response.bootstrap_receiver.is_some());
-        let result = response
-            .bootstrap_result_receiver
-            .take()
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
+        #[test]
+        fn embedded_source_properties_round_trip_configuration() {
+            let source = WebSocketSource::new("source", config()).unwrap();
 
-        assert!(called.load(Ordering::SeqCst));
-        assert_eq!(result.event_count, 0);
-        assert!(result.source_position.is_none());
+            assert_eq!(
+                serde_json::to_value(source.properties()).unwrap(),
+                serde_json::json!({
+                    "url": "wss://example.com/events?token=embedded-secret",
+                    "allowInsecure": false,
+                    "headers": [{
+                        "name": "Authorization",
+                        "value": "header-secret"
+                    }],
+                    "connectTimeoutMs": 10_000,
+                    "initialMessages": [r#"{"token":"message-secret"}"#],
+                    "reconnect": {
+                        "enabled": true,
+                        "delayMs": 1_000
+                    },
+                    "itemsPath": "$",
+                    "mappings": [{
+                        "operation": "insert",
+                        "elementType": "node",
+                        "template": {
+                            "id": "{{payload.id}}",
+                            "labels": ["Item"]
+                        }
+                    }],
+                    "maxMessageSizeBytes": 1024 * 1024,
+                    "bufferCapacity": 64
+                })
+            );
+        }
     }
 
-    #[test]
-    fn backoff_grows_safely_caps_and_resets() {
-        let mut backoff = ReconnectBackoff::new(1_000, 4_000);
+    mod builder {
+        use super::*;
 
-        assert_eq!(backoff.next_delay(), Duration::from_millis(1_000));
-        assert_eq!(backoff.next_delay(), Duration::from_millis(2_000));
-        assert_eq!(backoff.next_delay(), Duration::from_millis(4_000));
-        assert_eq!(backoff.next_delay(), Duration::from_millis(4_000));
+        #[test]
+        fn default_trait_uses_builder_defaults() {
+            let builder = WebSocketSourceBuilder::default();
 
-        backoff.reset();
-        assert_eq!(backoff.next_delay(), Duration::from_millis(1_000));
+            assert_eq!(builder.id, "websocket");
+            assert_eq!(builder.config, WebSocketSourceConfig::default());
+            assert!(builder.bootstrap_provider.is_none());
+            assert!(builder.auto_start);
+        }
+
+        #[test]
+        fn builder_rejects_insecure_url_without_opt_in() {
+            let error = WebSocketSource::builder("invalid")
+                .with_url("ws://example.com")
+                .with_mapping(mapping())
+                .build()
+                .err()
+                .expect("insecure URL should be rejected");
+            assert_eq!(
+                error.to_string(),
+                "allowInsecure must be true for ws:// endpoints"
+            );
+        }
+
+        #[test]
+        fn builder_applies_headers_initial_messages_and_auto_start() {
+            let source = WebSocketSource::builder("source")
+                .with_url("wss://example.com")
+                .with_header("X-Test", "value")
+                .with_initial_message(r#"{"subscribe":true}"#)
+                .with_mapping(mapping())
+                .with_auto_start(false)
+                .build()
+                .unwrap();
+
+            assert!(!source.auto_start());
+            assert_eq!(
+                source.config.headers,
+                vec![HeaderConfig {
+                    name: "X-Test".to_string(),
+                    value: "value".to_string(),
+                }]
+            );
+            assert_eq!(
+                source.config.initial_messages,
+                vec![r#"{"subscribe":true}"#.to_string()]
+            );
+        }
     }
 
-    #[test]
-    fn backoff_growth_is_overflow_safe() {
-        let mut backoff = ReconnectBackoff::new(u64::MAX - 1, u64::MAX);
-        assert_eq!(backoff.next_delay(), Duration::from_millis(u64::MAX - 1));
-        assert_eq!(backoff.next_delay(), Duration::from_millis(u64::MAX));
-        assert_eq!(backoff.next_delay(), Duration::from_millis(u64::MAX));
+    mod lifecycle {
+        use super::*;
+
+        #[tokio::test]
+        async fn stop_cancels_worker_waiting_for_subscription() {
+            let source = WebSocketSource::new("source", config()).unwrap();
+            assert_eq!(source.status().await, ComponentStatus::Stopped);
+
+            source.start().await.unwrap();
+            assert_eq!(source.status().await, ComponentStatus::Starting);
+
+            timeout(Duration::from_secs(1), source.stop())
+                .await
+                .expect("stop should cancel subscriber waiting")
+                .unwrap();
+            assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+
+        #[tokio::test]
+        async fn subscribe_returns_streaming_response_without_bootstrap_or_position() {
+            let source = WebSocketSource::new("source", config()).unwrap();
+            let response = source
+                .subscribe(subscription_settings("query", false))
+                .await
+                .unwrap();
+
+            assert_eq!(response.query_id, "query");
+            assert_eq!(response.source_id, "source");
+            assert!(response.bootstrap_receiver.is_none());
+            assert!(response.position_handle.is_none());
+        }
+
+        #[tokio::test]
+        async fn stop_clears_subscription_registered_while_stopped() {
+            let source = WebSocketSource::new("source", config()).unwrap();
+            let response = source
+                .subscribe(subscription_settings("query", false))
+                .await
+                .unwrap();
+            let mut receiver = response.receiver;
+
+            source.stop().await.unwrap();
+
+            assert!(timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("stopped source should close its subscriber channel")
+                .is_err());
+        }
     }
 
-    #[test]
-    fn status_messages_omit_unclassified_error_details() {
-        let error = anyhow::anyhow!("url-secret header-secret message-secret");
-        let message = status_message("WebSocket connection failed", &error);
+    mod bootstrap {
+        use super::*;
 
-        assert_eq!(
-            message,
-            "WebSocket connection failed: WebSocket operation failed"
-        );
-        assert!(!message.contains("url-secret"));
-        assert!(!message.contains("header-secret"));
-        assert!(!message.contains("message-secret"));
+        struct RecordingBootstrapProvider {
+            called: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl BootstrapProvider for RecordingBootstrapProvider {
+            async fn bootstrap(
+                &self,
+                _request: BootstrapRequest,
+                _context: &BootstrapContext,
+                _event_tx: BootstrapEventSender,
+                _settings: Option<&SourceSubscriptionSettings>,
+            ) -> Result<BootstrapResult> {
+                self.called.store(true, Ordering::SeqCst);
+                Ok(BootstrapResult {
+                    event_count: 0,
+                    source_position: None,
+                })
+            }
+        }
+
+        #[tokio::test]
+        async fn builder_attaches_bootstrap_provider() {
+            let called = Arc::new(AtomicBool::new(false));
+            let source = WebSocketSource::builder("source")
+                .with_config(config())
+                .with_bootstrap_provider(RecordingBootstrapProvider {
+                    called: called.clone(),
+                })
+                .build()
+                .unwrap();
+
+            let mut response = source
+                .subscribe(subscription_settings("builder-bootstrap-query", true))
+                .await
+                .unwrap();
+            let result = response
+                .bootstrap_result_receiver
+                .take()
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert!(called.load(Ordering::SeqCst));
+            assert!(result.source_position.is_none());
+        }
+
+        #[tokio::test]
+        async fn set_bootstrap_provider_delegates_without_a_source_position() {
+            let called = Arc::new(AtomicBool::new(false));
+            let source = WebSocketSource::builder("source")
+                .with_config(config())
+                .build()
+                .unwrap();
+            source
+                .set_bootstrap_provider(Box::new(RecordingBootstrapProvider {
+                    called: called.clone(),
+                }))
+                .await;
+
+            let mut response = source
+                .subscribe(subscription_settings("bootstrap-query", true))
+                .await
+                .unwrap();
+            assert!(response.bootstrap_receiver.is_some());
+            let result = response
+                .bootstrap_result_receiver
+                .take()
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert!(called.load(Ordering::SeqCst));
+            assert_eq!(result.event_count, 0);
+            assert!(result.source_position.is_none());
+        }
     }
 
-    #[test]
-    fn status_messages_truncate_long_summaries() {
-        let message = status_message(&"x".repeat(600), &anyhow::anyhow!("details"));
+    mod backoff {
+        use super::*;
 
-        assert_eq!(message.chars().count(), 512);
-        assert!(message.ends_with("..."));
+        #[test]
+        fn backoff_grows_safely_caps_and_resets() {
+            let mut backoff = ReconnectBackoff::new(1_000, 4_000);
+
+            assert_eq!(backoff.next_delay(), Duration::from_millis(1_000));
+            assert_eq!(backoff.next_delay(), Duration::from_millis(2_000));
+            assert_eq!(backoff.next_delay(), Duration::from_millis(4_000));
+            assert_eq!(backoff.next_delay(), Duration::from_millis(4_000));
+
+            backoff.reset();
+            assert_eq!(backoff.next_delay(), Duration::from_millis(1_000));
+        }
+
+        #[test]
+        fn backoff_growth_is_overflow_safe() {
+            let mut backoff = ReconnectBackoff::new(u64::MAX - 1, u64::MAX);
+            assert_eq!(backoff.next_delay(), Duration::from_millis(u64::MAX - 1));
+            assert_eq!(backoff.next_delay(), Duration::from_millis(u64::MAX));
+            assert_eq!(backoff.next_delay(), Duration::from_millis(u64::MAX));
+        }
+    }
+
+    mod diagnostics {
+        use super::*;
+
+        #[test]
+        fn status_messages_omit_unclassified_error_details() {
+            let error = anyhow::anyhow!("url-secret header-secret message-secret");
+            let message = status_message("WebSocket connection failed", &error);
+
+            assert_eq!(
+                message,
+                "WebSocket connection failed: WebSocket operation failed"
+            );
+            assert!(!message.contains("url-secret"));
+            assert!(!message.contains("header-secret"));
+            assert!(!message.contains("message-secret"));
+        }
+
+        #[test]
+        fn status_messages_truncate_long_summaries() {
+            let message = status_message(&"x".repeat(600), &anyhow::anyhow!("details"));
+
+            assert_eq!(message.chars().count(), 512);
+            assert!(message.ends_with("..."));
+        }
     }
 }

@@ -31,6 +31,7 @@ use std::{collections::HashSet, fmt};
 
 use anyhow::{ensure, Context, Result};
 use drasi_source_mapping::SourceMapping;
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
 use url::Url;
@@ -39,10 +40,23 @@ const MAX_URL_LENGTH: usize = 8 * 1024;
 const MAX_HEADERS: usize = 64;
 const MAX_INITIAL_MESSAGES: usize = 32;
 const MAX_MAPPINGS: usize = 64;
+// Pattern length bounds trusted operator input. The compilation limits pin the
+// regex 1.13 builder defaults so dependency updates cannot silently raise the
+// per-pattern program and lazy-DFA memory allowances.
+const MAX_CONDITION_REGEX_PATTERN_BYTES: usize = 4 * 1024;
+const CONDITION_REGEX_SIZE_LIMIT_BYTES: usize = 10 * 1024 * 1024;
+const CONDITION_REGEX_DFA_SIZE_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 const MIN_MESSAGE_SIZE: usize = 1024;
 const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 const MAX_BUFFER_CAPACITY: usize = 1024;
 const DEFAULT_MAX_RECONNECT_DELAY_MS: u64 = 30_000;
+pub(crate) const DEFAULT_ALLOW_INSECURE: bool = false;
+pub(crate) const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
+pub(crate) const DEFAULT_RECONNECT_ENABLED: bool = true;
+pub(crate) const DEFAULT_RECONNECT_DELAY_MS: u64 = 1_000;
+pub(crate) const DEFAULT_ITEMS_PATH: &str = "$";
+pub(crate) const DEFAULT_MAX_MESSAGE_SIZE_BYTES: usize = 1024 * 1024;
+pub(crate) const DEFAULT_BUFFER_CAPACITY: usize = 64;
 
 const MANAGED_HEADERS: &[&str] = &[
     "host",
@@ -94,7 +108,7 @@ pub struct ReconnectConfig {
 impl Default for ReconnectConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: DEFAULT_RECONNECT_ENABLED,
             delay_ms: default_reconnect_delay_ms(),
             max_delay_ms: None,
         }
@@ -168,7 +182,7 @@ impl Default for WebSocketSourceConfig {
     fn default() -> Self {
         Self {
             url: String::new(),
-            allow_insecure: false,
+            allow_insecure: DEFAULT_ALLOW_INSECURE,
             headers: Vec::new(),
             connect_timeout_ms: default_connect_timeout_ms(),
             initial_messages: Vec::new(),
@@ -311,7 +325,12 @@ impl WebSocketSourceConfig {
 
                 if let Some(pattern) = condition.regex.as_deref() {
                     ensure!(
-                        regex::Regex::new(pattern).is_ok(),
+                        pattern.len() <= MAX_CONDITION_REGEX_PATTERN_BYTES,
+                        "mappings[{index}].when.regex cannot exceed \
+                         {MAX_CONDITION_REGEX_PATTERN_BYTES} bytes"
+                    );
+                    ensure!(
+                        compile_condition_regex(pattern).is_ok(),
                         "mappings[{index}].when.regex must be a valid regular expression"
                     );
                 }
@@ -320,6 +339,13 @@ impl WebSocketSourceConfig {
 
         Ok(())
     }
+}
+
+fn compile_condition_regex(pattern: &str) -> Result<Regex, regex::Error> {
+    RegexBuilder::new(pattern)
+        .size_limit(CONDITION_REGEX_SIZE_LIMIT_BYTES)
+        .dfa_size_limit(CONDITION_REGEX_DFA_SIZE_LIMIT_BYTES)
+        .build()
 }
 
 fn validate_items_path(path: &str) -> Result<()> {
@@ -335,27 +361,27 @@ fn validate_items_path(path: &str) -> Result<()> {
 }
 
 const fn default_true() -> bool {
-    true
+    DEFAULT_RECONNECT_ENABLED
 }
 
 const fn default_connect_timeout_ms() -> u64 {
-    10_000
+    DEFAULT_CONNECT_TIMEOUT_MS
 }
 
 const fn default_reconnect_delay_ms() -> u64 {
-    1_000
+    DEFAULT_RECONNECT_DELAY_MS
 }
 
 fn default_items_path() -> String {
-    "$".to_string()
+    DEFAULT_ITEMS_PATH.to_string()
 }
 
 const fn default_max_message_size_bytes() -> usize {
-    1024 * 1024
+    DEFAULT_MAX_MESSAGE_SIZE_BYTES
 }
 
 const fn default_buffer_capacity() -> usize {
-    64
+    DEFAULT_BUFFER_CAPACITY
 }
 
 #[cfg(test)]
@@ -394,231 +420,343 @@ mod tests {
         }
     }
 
-    #[test]
-    fn default_values_match_runtime_configuration_defaults() {
-        let config = WebSocketSourceConfig::default();
+    mod defaults {
+        use super::*;
 
-        assert!(!config.allow_insecure);
-        assert!(config.headers.is_empty());
-        assert_eq!(config.connect_timeout_ms, 10_000);
-        assert!(config.initial_messages.is_empty());
-        assert!(config.reconnect.enabled);
-        assert_eq!(config.reconnect.delay_ms, 1_000);
-        assert_eq!(config.reconnect.max_delay_ms, None);
-        assert_eq!(
-            config.reconnect.effective_max_delay_ms(),
-            DEFAULT_MAX_RECONNECT_DELAY_MS
-        );
-        assert_eq!(config.items_path, "$");
-        assert!(config.mappings.is_empty());
-        assert_eq!(config.max_message_size_bytes, 1024 * 1024);
-        assert_eq!(config.buffer_capacity, 64);
-    }
+        #[test]
+        fn default_values_match_runtime_configuration_defaults() {
+            let config = WebSocketSourceConfig::default();
 
-    #[test]
-    fn accepts_minimal_secure_config() {
-        valid_config().validate().unwrap();
-    }
+            assert!(!config.allow_insecure);
+            assert!(config.headers.is_empty());
+            assert_eq!(config.connect_timeout_ms, 10_000);
+            assert!(config.initial_messages.is_empty());
+            assert!(config.reconnect.enabled);
+            assert_eq!(config.reconnect.delay_ms, 1_000);
+            assert_eq!(config.reconnect.max_delay_ms, None);
+            assert_eq!(
+                config.reconnect.effective_max_delay_ms(),
+                DEFAULT_MAX_RECONNECT_DELAY_MS
+            );
+            assert_eq!(config.items_path, "$");
+            assert!(config.mappings.is_empty());
+            assert_eq!(config.max_message_size_bytes, 1024 * 1024);
+            assert_eq!(config.buffer_capacity, 64);
+        }
 
-    #[test]
-    fn requires_explicit_insecure_opt_in() {
-        let mut config = valid_config();
-        config.url = "ws://localhost:8080/events".to_string();
-        assert_eq!(
-            config.validate().unwrap_err().to_string(),
-            "allowInsecure must be true for ws:// endpoints"
-        );
-
-        config.allow_insecure = true;
-        config.validate().unwrap();
-    }
-
-    #[test]
-    fn url_validation_errors_do_not_expose_resolved_values() {
-        let mut config = valid_config();
-        config.url = "private-scheme://example.com/events".to_string();
-
-        let error = config.validate().unwrap_err().to_string();
-        assert_eq!(error, "url scheme must be ws or wss");
-        assert!(!error.contains("private-scheme"));
-    }
-
-    #[test]
-    fn rejects_websocket_managed_headers() {
-        let mut config = valid_config();
-        config.headers.push(HeaderConfig {
-            name: "Sec-WebSocket-Protocol".to_string(),
-            value: "custom".to_string(),
-        });
-
-        let error = config.validate().unwrap_err().to_string();
-        assert!(error.contains("Sec-WebSocket-Protocol"), "{error}");
-        assert!(error.contains("managed by the WebSocket client"), "{error}");
-    }
-
-    #[test]
-    fn rejects_non_json_initial_messages() {
-        let mut config = valid_config();
-        config.initial_messages.push("{invalid".to_string());
-
-        let error = config.validate().unwrap_err().to_string();
-        assert!(error.contains("initialMessages[0]"), "{error}");
-        assert!(error.contains("valid JSON"), "{error}");
-    }
-
-    #[test]
-    fn rejects_http_header_mapping_conditions() {
-        let mut config = valid_config();
-        config.mappings[0].when = Some(MappingCondition {
-            header: Some("X-Test".to_string()),
-            field: None,
-            equals: Some("value".to_string()),
-            contains: None,
-            regex: None,
-        });
-        assert_eq!(
-            config.validate().unwrap_err().to_string(),
-            "mappings[0].when.header is not supported by WebSocket sources"
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_mapping_regexes() {
-        let mut config = valid_config();
-        config.mappings[0].when = Some(MappingCondition {
-            header: None,
-            field: Some("payload.kind".to_string()),
-            equals: None,
-            contains: None,
-            regex: Some("(".to_string()),
-        });
-
-        let error = config.validate().unwrap_err().to_string();
-        assert_eq!(
-            error,
-            "mappings[0].when.regex must be a valid regular expression"
-        );
-    }
-
-    #[test]
-    fn rejects_incomplete_or_ambiguous_mapping_conditions() {
-        let cases = [
-            (
-                MappingCondition {
-                    header: None,
-                    field: None,
-                    equals: Some("sensor".to_string()),
-                    contains: None,
-                    regex: None,
-                },
-                "mappings[0].when.field must be specified",
-            ),
-            (
-                MappingCondition {
-                    header: None,
-                    field: Some("payload.kind".to_string()),
-                    equals: None,
-                    contains: None,
-                    regex: None,
-                },
-                "mappings[0].when must specify exactly one of equals, contains, or regex",
-            ),
-            (
-                MappingCondition {
-                    header: None,
-                    field: Some("payload.kind".to_string()),
-                    equals: Some("sensor".to_string()),
-                    contains: Some("sens".to_string()),
-                    regex: None,
-                },
-                "mappings[0].when must specify exactly one of equals, contains, or regex",
-            ),
-        ];
-
-        for (condition, expected_error) in cases {
-            let mut config = valid_config();
-            config.mappings[0].when = Some(condition);
-            assert_eq!(config.validate().unwrap_err().to_string(), expected_error);
+        #[test]
+        fn accepts_minimal_secure_config() {
+            valid_config().validate().unwrap();
         }
     }
 
-    #[test]
-    fn accepts_dynamic_operation_mapping_configuration() {
-        let mut config = valid_config();
-        config.mappings[0].operation = None;
-        config.mappings[0].operation_from = Some("payload.op".to_string());
-        config.mappings[0].operation_map = Some(HashMap::from([(
-            "insert".to_string(),
-            OperationType::Insert,
-        )]));
-        config.validate().unwrap();
+    mod serialization {
+        use super::*;
+
+        #[test]
+        fn configuration_round_trips_through_json() {
+            let config = valid_config();
+            let serialized = serde_json::to_value(&config).unwrap();
+            let deserialized: WebSocketSourceConfig = serde_json::from_value(serialized).unwrap();
+
+            assert_eq!(deserialized, config);
+        }
+
+        #[test]
+        fn omitted_optional_fields_use_runtime_defaults() {
+            let mapping_json = serde_json::to_value(mapping()).unwrap();
+            let config: WebSocketSourceConfig = serde_json::from_value(serde_json::json!({
+                "url": "wss://example.com/events",
+                "mappings": [mapping_json]
+            }))
+            .unwrap();
+            let expected = WebSocketSourceConfig {
+                url: "wss://example.com/events".to_string(),
+                mappings: vec![mapping()],
+                ..Default::default()
+            };
+
+            assert_eq!(config, expected);
+        }
     }
 
-    #[test]
-    fn rejects_nested_items_paths() {
-        let mut config = valid_config();
-        config.items_path = "data.events".to_string();
-        assert_eq!(
-            config.validate().unwrap_err().to_string(),
-            "itemsPath must be '$' or one top-level field name"
-        );
+    mod url_and_headers {
+        use super::*;
+
+        #[test]
+        fn requires_explicit_insecure_opt_in() {
+            let mut config = valid_config();
+            config.url = "ws://localhost:8080/events".to_string();
+            assert_eq!(
+                config.validate().unwrap_err().to_string(),
+                "allowInsecure must be true for ws:// endpoints"
+            );
+
+            config.allow_insecure = true;
+            config.validate().unwrap();
+        }
+
+        #[test]
+        fn url_validation_errors_do_not_expose_resolved_values() {
+            let mut config = valid_config();
+            config.url = "private-scheme://example.com/events".to_string();
+
+            let error = config.validate().unwrap_err().to_string();
+            assert_eq!(error, "url scheme must be ws or wss");
+            assert!(!error.contains("private-scheme"));
+        }
+
+        #[test]
+        fn rejects_websocket_managed_headers() {
+            let mut config = valid_config();
+            config.headers.push(HeaderConfig {
+                name: "Sec-WebSocket-Protocol".to_string(),
+                value: "custom".to_string(),
+            });
+
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains("Sec-WebSocket-Protocol"), "{error}");
+            assert!(error.contains("managed by the WebSocket client"), "{error}");
+        }
+
+        #[test]
+        fn rejects_non_json_initial_messages() {
+            let mut config = valid_config();
+            config.initial_messages.push("{invalid".to_string());
+
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains("initialMessages[0]"), "{error}");
+            assert!(error.contains("valid JSON"), "{error}");
+        }
     }
 
-    #[test]
-    fn omitted_maximum_reconnect_delay_uses_the_greater_default_or_initial_delay() {
-        let mut config = valid_config();
-        config.reconnect.delay_ms = 60_000;
+    mod mapping_validation {
+        use super::*;
 
-        config.validate().unwrap();
-        assert_eq!(config.reconnect.effective_max_delay_ms(), 60_000);
+        #[test]
+        fn rejects_http_header_mapping_conditions() {
+            let mut config = valid_config();
+            config.mappings[0].when = Some(MappingCondition {
+                header: Some("X-Test".to_string()),
+                field: None,
+                equals: Some("value".to_string()),
+                contains: None,
+                regex: None,
+            });
+            assert_eq!(
+                config.validate().unwrap_err().to_string(),
+                "mappings[0].when.header is not supported by WebSocket sources"
+            );
+        }
 
-        config.reconnect.delay_ms = 1_000;
-        assert_eq!(
-            config.reconnect.effective_max_delay_ms(),
-            DEFAULT_MAX_RECONNECT_DELAY_MS
-        );
+        #[test]
+        fn rejects_invalid_mapping_regexes() {
+            let mut config = valid_config();
+            config.mappings[0].when = Some(MappingCondition {
+                header: None,
+                field: Some("payload.kind".to_string()),
+                equals: None,
+                contains: None,
+                regex: Some("(".to_string()),
+            });
+
+            let error = config.validate().unwrap_err().to_string();
+            assert_eq!(
+                error,
+                "mappings[0].when.regex must be a valid regular expression"
+            );
+        }
+
+        #[test]
+        fn mapping_regex_enforces_pattern_length_boundary() {
+            let mut config = valid_config();
+            config.mappings[0].when = Some(MappingCondition {
+                header: None,
+                field: Some("payload.kind".to_string()),
+                equals: None,
+                contains: None,
+                regex: Some("a".repeat(MAX_CONDITION_REGEX_PATTERN_BYTES)),
+            });
+            config.validate().unwrap();
+
+            config.mappings[0].when.as_mut().unwrap().regex =
+                Some("a".repeat(MAX_CONDITION_REGEX_PATTERN_BYTES + 1));
+            assert_eq!(
+                config.validate().unwrap_err().to_string(),
+                format!(
+                    "mappings[0].when.regex cannot exceed \
+                 {MAX_CONDITION_REGEX_PATTERN_BYTES} bytes"
+                )
+            );
+        }
+
+        #[test]
+        fn rejects_incomplete_or_ambiguous_mapping_conditions() {
+            let cases = [
+                (
+                    MappingCondition {
+                        header: None,
+                        field: None,
+                        equals: Some("sensor".to_string()),
+                        contains: None,
+                        regex: None,
+                    },
+                    "mappings[0].when.field must be specified",
+                ),
+                (
+                    MappingCondition {
+                        header: None,
+                        field: Some("payload.kind".to_string()),
+                        equals: None,
+                        contains: None,
+                        regex: None,
+                    },
+                    "mappings[0].when must specify exactly one of equals, contains, or regex",
+                ),
+                (
+                    MappingCondition {
+                        header: None,
+                        field: Some("payload.kind".to_string()),
+                        equals: Some("sensor".to_string()),
+                        contains: Some("sens".to_string()),
+                        regex: None,
+                    },
+                    "mappings[0].when must specify exactly one of equals, contains, or regex",
+                ),
+            ];
+
+            for (condition, expected_error) in cases {
+                let mut config = valid_config();
+                config.mappings[0].when = Some(condition);
+                assert_eq!(config.validate().unwrap_err().to_string(), expected_error);
+            }
+        }
+
+        #[test]
+        fn accepts_dynamic_operation_mapping_configuration() {
+            let mut config = valid_config();
+            config.mappings[0].operation = None;
+            config.mappings[0].operation_from = Some("payload.op".to_string());
+            config.mappings[0].operation_map = Some(HashMap::from([(
+                "insert".to_string(),
+                OperationType::Insert,
+            )]));
+            config.validate().unwrap();
+        }
+
+        #[test]
+        fn rejects_nested_items_paths() {
+            let mut config = valid_config();
+            config.items_path = "data.events".to_string();
+            assert_eq!(
+                config.validate().unwrap_err().to_string(),
+                "itemsPath must be '$' or one top-level field name"
+            );
+        }
     }
 
-    #[test]
-    fn rejects_maximum_reconnect_delay_below_initial_delay() {
-        let mut config = valid_config();
-        config.reconnect.delay_ms = 2_000;
-        config.reconnect.max_delay_ms = Some(1_000);
+    mod limits {
+        use super::*;
 
-        let error = config.validate().unwrap_err().to_string();
-        assert_eq!(
-            error,
-            "reconnect.delayMs must not exceed reconnect.maxDelayMs"
-        );
+        #[test]
+        fn omitted_maximum_reconnect_delay_uses_the_greater_default_or_initial_delay() {
+            let mut config = valid_config();
+            config.reconnect.delay_ms = 60_000;
+
+            config.validate().unwrap();
+            assert_eq!(config.reconnect.effective_max_delay_ms(), 60_000);
+
+            config.reconnect.delay_ms = 1_000;
+            assert_eq!(
+                config.reconnect.effective_max_delay_ms(),
+                DEFAULT_MAX_RECONNECT_DELAY_MS
+            );
+        }
+
+        #[test]
+        fn rejects_maximum_reconnect_delay_below_initial_delay() {
+            let mut config = valid_config();
+            config.reconnect.delay_ms = 2_000;
+            config.reconnect.max_delay_ms = Some(1_000);
+
+            let error = config.validate().unwrap_err().to_string();
+            assert_eq!(
+                error,
+                "reconnect.delayMs must not exceed reconnect.maxDelayMs"
+            );
+        }
+
+        #[test]
+        fn validates_message_size_boundaries() {
+            for value in [MIN_MESSAGE_SIZE, MAX_MESSAGE_SIZE] {
+                let mut config = valid_config();
+                config.max_message_size_bytes = value;
+                config.validate().unwrap();
+            }
+
+            for value in [MIN_MESSAGE_SIZE - 1, MAX_MESSAGE_SIZE + 1] {
+                let mut config = valid_config();
+                config.max_message_size_bytes = value;
+                assert_eq!(
+                    config.validate().unwrap_err().to_string(),
+                    format!(
+                        "maxMessageSizeBytes must be between {MIN_MESSAGE_SIZE} and \
+                     {MAX_MESSAGE_SIZE}"
+                    )
+                );
+            }
+        }
+
+        #[test]
+        fn validates_buffer_capacity_boundaries() {
+            for value in [1, MAX_BUFFER_CAPACITY] {
+                let mut config = valid_config();
+                config.buffer_capacity = value;
+                config.validate().unwrap();
+            }
+
+            for value in [0, MAX_BUFFER_CAPACITY + 1] {
+                let mut config = valid_config();
+                config.buffer_capacity = value;
+                assert_eq!(
+                    config.validate().unwrap_err().to_string(),
+                    format!("bufferCapacity must be between 1 and {MAX_BUFFER_CAPACITY}")
+                );
+            }
+        }
     }
 
-    #[test]
-    fn debug_redacts_sensitive_configuration() {
-        let mut config = valid_config();
-        config.url =
+    mod redaction {
+        use super::*;
+
+        #[test]
+        fn debug_redacts_sensitive_configuration() {
+            let mut config = valid_config();
+            config.url =
             "wss://user-secret:password-secret@example-secret.com/path-secret?token=query-secret#fragment-secret"
                 .to_string();
-        config.headers.push(HeaderConfig {
-            name: "Authorization".to_string(),
-            value: "header-secret".to_string(),
-        });
-        config
-            .initial_messages
-            .push(r#"{"token":"message-secret"}"#.to_string());
+            config.headers.push(HeaderConfig {
+                name: "Authorization".to_string(),
+                value: "header-secret".to_string(),
+            });
+            config
+                .initial_messages
+                .push(r#"{"token":"message-secret"}"#.to_string());
 
-        let debug = format!("{config:?}");
-        for secret in [
-            "user-secret",
-            "password-secret",
-            "example-secret.com",
-            "path-secret",
-            "query-secret",
-            "fragment-secret",
-            "header-secret",
-            "message-secret",
-        ] {
-            assert!(!debug.contains(secret));
+            let debug = format!("{config:?}");
+            for secret in [
+                "user-secret",
+                "password-secret",
+                "example-secret.com",
+                "path-secret",
+                "query-secret",
+                "fragment-secret",
+                "header-secret",
+                "message-secret",
+            ] {
+                assert!(!debug.contains(secret));
+            }
+            assert!(debug.contains("<redacted>"));
         }
-        assert!(debug.contains("<redacted>"));
     }
 }
