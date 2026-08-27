@@ -478,10 +478,13 @@ function asRows(rt) {
   return Array.isArray(rt?.rows) ? rt.rows : [];
 }
 
-function escapeHtml(str) {
-  const div = document.createElement("div");
-  div.textContent = str;
-  return div.innerHTML;
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function getLatestValue(rt, field) {
@@ -856,15 +859,6 @@ function idFromRef(ref) {
   if (!text) return null;
   const match = text.match(/^([^:]*):(.*)$/);
   return match ? match[2].trim() : text;
-}
-
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 function scalarId(value) {
