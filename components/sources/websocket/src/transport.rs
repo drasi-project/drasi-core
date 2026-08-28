@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{future::Future, pin::Pin, time::Duration};
+use std::{error::Error as StdError, fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use rustls::{pki_types::CertificateDer, ClientConfig, RootCertStore};
 use tokio::{
     net::TcpStream,
     sync::{mpsc, oneshot},
@@ -33,6 +34,7 @@ use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream,
 };
 use tracing::warn;
+use url::Url;
 
 use drasi_lib::SourceBase;
 
@@ -58,25 +60,169 @@ pub(crate) enum ConnectErrorDisposition {
     Fatal,
 }
 
-pub(crate) async fn connect(config: &WebSocketSourceConfig) -> Result<WebSocketConnection> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TrustRootLoadReport {
+    pub(crate) accepted: usize,
+    pub(crate) rejected: usize,
+    pub(crate) load_errors: usize,
+}
+
+pub(crate) struct PreparedConnector {
+    pub(crate) connector: Connector,
+    pub(crate) trust_root_report: Option<TrustRootLoadReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TlsInitializationError {
+    NoUsableRoots { rejected: usize, load_errors: usize },
+    UnsupportedProtocolConfiguration,
+    UnsupportedScheme,
+}
+
+impl TlsInitializationError {
+    pub(crate) fn failure_summary(&self) -> &'static str {
+        match self {
+            Self::NoUsableRoots { .. } => "WebSocket TLS trust store unavailable",
+            Self::UnsupportedProtocolConfiguration => "WebSocket TLS initialization failed",
+            Self::UnsupportedScheme => "Invalid WebSocket configuration",
+        }
+    }
+
+    fn safe_description(&self) -> &'static str {
+        match self {
+            Self::NoUsableRoots { .. } => "No usable platform TLS trust roots were found",
+            Self::UnsupportedProtocolConfiguration => {
+                "Rustls protocol configuration could not be initialized"
+            }
+            Self::UnsupportedScheme => "WebSocket URL scheme must be ws or wss",
+        }
+    }
+}
+
+impl fmt::Display for TlsInitializationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoUsableRoots {
+                rejected,
+                load_errors,
+            } => write!(
+                formatter,
+                "no usable platform TLS trust roots ({rejected} rejected, {load_errors} load errors)"
+            ),
+            Self::UnsupportedProtocolConfiguration => {
+                formatter.write_str("Rustls protocol configuration could not be initialized")
+            }
+            Self::UnsupportedScheme => {
+                formatter.write_str("WebSocket URL scheme must be ws or wss")
+            }
+        }
+    }
+}
+
+impl StdError for TlsInitializationError {}
+
+struct PreparedRootStore {
+    roots: RootCertStore,
+    report: TrustRootLoadReport,
+}
+
+pub(crate) fn prepare_connector(
+    config: &WebSocketSourceConfig,
+) -> std::result::Result<PreparedConnector, TlsInitializationError> {
+    prepare_connector_with(config, || {
+        let rustls_native_certs::CertificateResult { certs, errors, .. } =
+            rustls_native_certs::load_native_certs();
+        (certs, errors.len())
+    })
+}
+
+fn prepare_connector_with<F>(
+    config: &WebSocketSourceConfig,
+    load_roots: F,
+) -> std::result::Result<PreparedConnector, TlsInitializationError>
+where
+    F: FnOnce() -> (Vec<CertificateDer<'static>>, usize),
+{
+    let url = Url::parse(&config.url).map_err(|_| TlsInitializationError::UnsupportedScheme)?;
+    match url.scheme() {
+        "ws" => Ok(PreparedConnector {
+            connector: Connector::Plain,
+            trust_root_report: None,
+        }),
+        "wss" => {
+            let (certificates, load_errors) = load_roots();
+            prepare_rustls_connector(certificates, load_errors)
+        }
+        _ => Err(TlsInitializationError::UnsupportedScheme),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn prepare_connector_with_roots(
+    config: &WebSocketSourceConfig,
+    certificates: Vec<CertificateDer<'static>>,
+    load_errors: usize,
+) -> std::result::Result<PreparedConnector, TlsInitializationError> {
+    prepare_connector_with(config, || (certificates, load_errors))
+}
+
+fn prepare_rustls_connector(
+    certificates: Vec<CertificateDer<'static>>,
+    load_errors: usize,
+) -> std::result::Result<PreparedConnector, TlsInitializationError> {
+    let PreparedRootStore { roots, report } = build_root_store(certificates, load_errors)?;
+    let config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .map_err(|_| TlsInitializationError::UnsupportedProtocolConfiguration)?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+    Ok(PreparedConnector {
+        connector: Connector::Rustls(Arc::new(config)),
+        trust_root_report: Some(report),
+    })
+}
+
+fn build_root_store(
+    certificates: Vec<CertificateDer<'static>>,
+    load_errors: usize,
+) -> std::result::Result<PreparedRootStore, TlsInitializationError> {
+    let mut roots = RootCertStore::empty();
+    let (accepted, rejected) = roots.add_parsable_certificates(certificates);
+    if accepted == 0 {
+        return Err(TlsInitializationError::NoUsableRoots {
+            rejected,
+            load_errors,
+        });
+    }
+
+    Ok(PreparedRootStore {
+        roots,
+        report: TrustRootLoadReport {
+            accepted,
+            rejected,
+            load_errors,
+        },
+    })
+}
+
+pub(crate) async fn connect(
+    config: &WebSocketSourceConfig,
+    connector: &Connector,
+) -> Result<WebSocketConnection> {
     timeout(
         Duration::from_millis(config.connect_timeout_ms),
-        connect_inner(config),
+        connect_inner(config, connector),
     )
     .await
     .context("WebSocket connection setup timed out")?
 }
 
-async fn connect_inner(config: &WebSocketSourceConfig) -> Result<WebSocketConnection> {
-    connect_inner_with_connector(config, None).await
-}
-
-async fn connect_inner_with_connector(
+async fn connect_inner(
     config: &WebSocketSourceConfig,
-    connector: Option<Connector>,
+    connector: &Connector,
 ) -> Result<WebSocketConnection> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     let mut request = config
         .url
         .as_str()
@@ -96,10 +242,14 @@ async fn connect_inner_with_connector(
         ..Default::default()
     };
 
-    let (mut socket, _) =
-        connect_async_tls_with_config(request, Some(websocket_config), false, connector)
-            .await
-            .context("WebSocket handshake failed")?;
+    let (mut socket, _) = connect_async_tls_with_config(
+        request,
+        Some(websocket_config),
+        false,
+        Some(connector.clone()),
+    )
+    .await
+    .context("WebSocket handshake failed")?;
 
     for message in &config.initial_messages {
         socket
@@ -144,6 +294,10 @@ pub(crate) fn safe_error_description(error: &anyhow::Error) -> String {
         .is_some()
     {
         return "WebSocket connection setup timed out".to_string();
+    }
+
+    if let Some(error) = error.downcast_ref::<TlsInitializationError>() {
+        return error.safe_description().to_string();
     }
 
     if let Some(frame_error) = error.downcast_ref::<FrameError>() {
@@ -418,10 +572,13 @@ mod tests {
     use std::{io::ErrorKind, sync::Arc};
 
     use anyhow::Context as _;
-    use rcgen::{generate_simple_self_signed, CertifiedKey};
+    use rcgen::{
+        generate_simple_self_signed, BasicConstraints, CertificateParams, CertifiedKey, DnType,
+        IsCa, KeyPair, KeyUsagePurpose,
+    };
     use rustls::{
         pki_types::{CertificateDer, PrivatePkcs8KeyDer},
-        CertificateError, ClientConfig, RootCertStore, ServerConfig,
+        CertificateError, ServerConfig,
     };
     use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
     use tokio_rustls::TlsAcceptor;
@@ -558,6 +715,121 @@ mod tests {
         }
     }
 
+    mod connector_configuration {
+        use super::*;
+
+        #[test]
+        fn selects_plain_transport_for_ws_without_loading_roots() {
+            let config = tls_config("ws://localhost/events".to_string());
+
+            let prepared = prepare_connector_with(&config, || {
+                panic!("plain WebSocket transport must not load TLS roots")
+            })
+            .unwrap();
+
+            assert!(matches!(prepared.connector, Connector::Plain));
+            assert_eq!(prepared.trust_root_report, None);
+        }
+
+        #[test]
+        fn selects_rustls_transport_for_wss() {
+            let config = tls_config("wss://localhost/events".to_string());
+            let root = test_certificate("unrelated.example");
+
+            let prepared = prepare_connector_with_roots(&config, vec![root], 0).unwrap();
+
+            assert!(matches!(prepared.connector, Connector::Rustls(_)));
+            assert_eq!(
+                prepared.trust_root_report,
+                Some(TrustRootLoadReport {
+                    accepted: 1,
+                    rejected: 0,
+                    load_errors: 0,
+                })
+            );
+        }
+
+        #[test]
+        fn rejects_schemes_other_than_ws_and_wss() {
+            let config = tls_config("https://localhost/events".to_string());
+
+            let error = prepare_connector_with(&config, || {
+                panic!("unsupported schemes must fail before loading TLS roots")
+            })
+            .err()
+            .expect("unsupported schemes must fail");
+
+            assert_eq!(error, TlsInitializationError::UnsupportedScheme);
+        }
+
+        #[test]
+        fn reports_accepted_rejected_and_loader_error_counts() {
+            let valid = test_certificate("root.example");
+            let invalid = CertificateDer::from(vec![0, 1, 2]);
+
+            let prepared = build_root_store(vec![valid, invalid], 2).unwrap();
+
+            assert_eq!(prepared.roots.len(), 1);
+            assert_eq!(
+                prepared.report,
+                TrustRootLoadReport {
+                    accepted: 1,
+                    rejected: 1,
+                    load_errors: 2,
+                }
+            );
+        }
+
+        #[test]
+        fn rejects_a_root_store_with_no_usable_certificates() {
+            let invalid = CertificateDer::from(vec![0, 1, 2]);
+
+            let error = build_root_store(vec![invalid], 3)
+                .err()
+                .expect("a root store with no usable certificates must fail");
+
+            assert_eq!(
+                error,
+                TlsInitializationError::NoUsableRoots {
+                    rejected: 1,
+                    load_errors: 3,
+                }
+            );
+        }
+
+        #[test]
+        fn initialization_errors_have_variant_specific_safe_summaries() {
+            let cases = [
+                (
+                    TlsInitializationError::NoUsableRoots {
+                        rejected: 4,
+                        load_errors: 2,
+                    },
+                    "WebSocket TLS trust store unavailable",
+                    "No usable platform TLS trust roots were found",
+                ),
+                (
+                    TlsInitializationError::UnsupportedProtocolConfiguration,
+                    "WebSocket TLS initialization failed",
+                    "Rustls protocol configuration could not be initialized",
+                ),
+                (
+                    TlsInitializationError::UnsupportedScheme,
+                    "Invalid WebSocket configuration",
+                    "WebSocket URL scheme must be ws or wss",
+                ),
+            ];
+
+            for (error, summary, description) in cases {
+                assert_eq!(error.failure_summary(), summary);
+                assert_eq!(
+                    safe_error_description(&anyhow::Error::new(error)),
+                    description
+                );
+            }
+        }
+    }
+
     mod tls {
         use super::*;
 
@@ -565,13 +837,9 @@ mod tests {
         async fn connects_with_a_trusted_certificate() {
             let (address, certificate, _accepted, server) = spawn_tls_server("127.0.0.1").await;
             let config = tls_config(format!("wss://{address}/events"));
+            let connector = tls_connector(std::slice::from_ref(&certificate));
 
-            let socket = connect_inner_with_connector(
-                &config,
-                Some(tls_connector(std::slice::from_ref(&certificate))),
-            )
-            .await
-            .unwrap();
+            let socket = connect_inner(&config, &connector).await.unwrap();
             drop(socket);
 
             timeout(Duration::from_secs(2), server)
@@ -585,9 +853,11 @@ mod tests {
         async fn production_connector_rejects_self_signed_certificate_as_unknown_issuer() {
             let (address, _certificate, accepted, server) = spawn_tls_server("127.0.0.1").await;
             let config = tls_config(format!("wss://{address}/events"));
+            let unrelated_root = test_certificate("unrelated.example");
+            let connector = tls_connector(&[unrelated_root]);
 
             let (client_result, accepted_result) = tokio::join!(
-                timeout(Duration::from_secs(2), connect_inner(&config)),
+                timeout(Duration::from_secs(2), connect_inner(&config, &connector)),
                 timeout(Duration::from_secs(2), accepted),
             );
             accepted_result
@@ -624,39 +894,12 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn rejects_an_untrusted_certificate_with_injected_roots() {
-            let (address, _certificate, _accepted, server) = spawn_tls_server("127.0.0.1").await;
-            let config = tls_config(format!("wss://{address}/events"));
-
-            let error = connect_inner_with_connector(&config, Some(tls_connector(&[])))
-                .await
-                .unwrap_err();
-            assert_eq!(
-                safe_error_description(&error),
-                "WebSocket TLS negotiation failed"
-            );
-            assert_eq!(
-                connect_error_disposition(&error),
-                ConnectErrorDisposition::Fatal
-            );
-            assert!(timeout(Duration::from_secs(2), server)
-                .await
-                .unwrap()
-                .unwrap()
-                .is_err());
-        }
-
-        #[tokio::test]
         async fn rejects_a_hostname_mismatch() {
             let (address, certificate, _accepted, server) = spawn_tls_server("localhost").await;
             let config = tls_config(format!("wss://{address}/events"));
+            let connector = tls_connector(std::slice::from_ref(&certificate));
 
-            let error = connect_inner_with_connector(
-                &config,
-                Some(tls_connector(std::slice::from_ref(&certificate))),
-            )
-            .await
-            .unwrap_err();
+            let error = connect_inner(&config, &connector).await.unwrap_err();
             assert_eq!(
                 safe_error_description(&error),
                 "WebSocket TLS negotiation failed"
@@ -681,15 +924,17 @@ mod tests {
         oneshot::Receiver<()>,
         JoinHandle<Result<()>>,
     ) {
-        let _ = rustls::crypto::ring::default_provider().install_default();
         let CertifiedKey { cert, key_pair } =
             generate_simple_self_signed(vec![subject_alt_name.to_string()]).unwrap();
         let certificate = cert.der().clone();
         let private_key = PrivatePkcs8KeyDer::from(key_pair.serialize_der());
-        let server_config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![certificate.clone()], private_key.into())
-            .unwrap();
+        let server_config =
+            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate.clone()], private_key.into())
+                .unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(server_config));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -729,15 +974,25 @@ mod tests {
     }
 
     fn tls_connector(certificates: &[CertificateDer<'static>]) -> Connector {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let mut roots = RootCertStore::empty();
-        for certificate in certificates {
-            roots.add(certificate.clone()).unwrap();
-        }
-        let config = ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        Connector::Rustls(Arc::new(config))
+        let config = tls_config("wss://localhost/events".to_string());
+        prepare_connector_with_roots(&config, certificates.to_vec(), 0)
+            .unwrap()
+            .connector
+    }
+
+    fn test_certificate(common_name: &str) -> CertificateDer<'static> {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, common_name);
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+        ];
+        let key_pair = KeyPair::generate().unwrap();
+        params.self_signed(&key_pair).unwrap().der().clone()
     }
 
     fn tls_config(url: String) -> WebSocketSourceConfig {

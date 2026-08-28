@@ -59,11 +59,11 @@ bufferCapacity: 64
 | `bufferCapacity` | `64` | 1–1,024 |
 
 Cleartext `ws://` endpoints are rejected unless `allowInsecure: true` is set.
-`wss://` uses Rustls and the platform's native trust roots. This version has no
-custom-CA, client-certificate, or mTLS configuration. WebSocket-managed headers
-such as `Host`, `Upgrade`, and `Sec-WebSocket-Protocol` cannot be overridden.
-`connectTimeoutMs` covers the handshake and sending and flushing every
-`initialMessages` entry.
+`wss://` uses a source-owned, Ring-backed Rustls connector and the platform's
+native trust roots. This version has no custom-CA, client-certificate, or mTLS
+configuration. WebSocket-managed headers such as `Host`, `Upgrade`, and
+`Sec-WebSocket-Protocol` cannot be overridden. `connectTimeoutMs` covers the
+handshake and sending and flushing every `initialMessages` entry.
 
 For dynamic-plugin configuration, these fields accept `ConfigValue`: `url`,
 `allowInsecure`, every header value, `connectTimeoutMs`, every initial message,
@@ -143,9 +143,13 @@ derived from upstream message data.
 
 ## Runtime behavior
 
-`start()` creates a cancellable worker and returns without waiting for a
-connection. The worker waits for at least one query subscription before its
-first connection attempt. This gate runs once per explicit start: losing every
+For `wss://`, `start()` synchronously loads and validates the platform trust
+roots before it creates a worker. It returns an error if no usable roots are
+available. A successful start creates a cancellable worker and returns before
+making a network connection. The worker waits for at least one query
+subscription before its first connection attempt. The loaded roots are reused
+for every reconnect; trust-store changes require stopping and starting the
+source. The subscriber gate runs once per explicit start: losing every
 subscriber after connection does not pause socket consumption, and reconnects
 do not wait for a new subscriber. Messages consumed without a subscriber are
 lost because this is a volatile source.
