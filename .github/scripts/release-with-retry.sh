@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+#
+# Retry a release command only when crates.io returns HTTP 429.
+# Usage: release-with-retry.sh <command> [args...]
+#
+# Runtime limits are configurable with RELEASE_PUBLISH_MAX_ATTEMPTS,
+# RELEASE_PUBLISH_MAX_DURATION_SECONDS, RELEASE_PUBLISH_SAFETY_BUFFER_SECONDS,
+# RELEASE_PUBLISH_FALLBACK_BASE_SECONDS, and RELEASE_PUBLISH_FALLBACK_MAX_SECONDS.
+# RELEASE_PUBLISH_NOW_EPOCH and RELEASE_PUBLISH_DISABLE_SLEEP are test overrides.
 
 set -euo pipefail
 
@@ -62,6 +70,11 @@ parse_retry_epoch() {
         date -j -u -f '%a, %d %b %Y %H:%M:%S %Z' "$retry_at" +%s 2>/dev/null
 }
 
+is_crates_io_rate_limit() {
+    local log_file="$1"
+    grep -qE '429 Too Many Requests.*https://crates\.io/docs/rate-limits' "$log_file"
+}
+
 fallback_delay() {
     local attempt="$1"
     local exponent=$((attempt - 1))
@@ -101,8 +114,7 @@ while true; do
         exit 0
     fi
 
-    if ! grep -q '429 Too Many Requests' "$attempt_log" ||
-        ! grep -q 'https://crates.io/docs/rate-limits' "$attempt_log"; then
+    if ! is_crates_io_rate_limit "$attempt_log"; then
         echo "Release failed with a non-rate-limit error; not retrying." >&2
         exit "$status"
     fi

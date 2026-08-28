@@ -30,6 +30,11 @@ case "$MOCK_SCENARIO" in
         echo "status 429 Too Many Requests from api.github.com" >&2
         exit 43
         ;;
+    split-markers)
+        echo "status 429 Too Many Requests from api.github.com" >&2
+        echo "See https://crates.io/docs/rate-limits for unrelated documentation" >&2
+        exit 44
+        ;;
     retry-after)
         if [[ "$count" -eq 1 ]]; then
             echo "status 429 Too Many Requests: Please try again after Wed, 26 Aug 2026 01:02:32 GMT and see https://crates.io/docs/rate-limits" >&2
@@ -98,6 +103,15 @@ set -e
 [[ "$(cat "$count_file")" -eq 1 ]] || fail "non-crates.io 429 should not retry"
 assert_contains "$output" "not retrying"
 
+count_file="$test_dir/split-markers-count"
+set +e
+output="$(run_mock split-markers "$count_file" 2>&1)"
+status="$?"
+set -e
+[[ "$status" -eq 44 ]] || fail "split-marker status should be preserved"
+[[ "$(cat "$count_file")" -eq 1 ]] || fail "split markers should not retry"
+assert_contains "$output" "not retrying"
+
 count_file="$test_dir/retry-after-count"
 output="$(
     run_mock retry-after "$count_file" \
@@ -108,6 +122,15 @@ output="$(
 )"
 [[ "$(cat "$count_file")" -eq 2 ]] || fail "retry-after should retry once"
 assert_contains "$output" "retrying in 70s"
+
+count_file="$test_dir/expired-retry-after-count"
+output="$(
+    run_mock retry-after "$count_file" \
+        RELEASE_PUBLISH_NOW_EPOCH=1787706212 \
+        RELEASE_PUBLISH_SAFETY_BUFFER_SECONDS=10
+)"
+[[ "$(cat "$count_file")" -eq 2 ]] || fail "expired retry-after should retry once"
+assert_contains "$output" "retrying in 10s"
 
 count_file="$test_dir/duration-count"
 set +e
