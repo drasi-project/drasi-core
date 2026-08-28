@@ -25,10 +25,50 @@ use crate::evaluation::functions::aggregation::ValueAccumulator;
 
 use super::IndexError;
 
-pub trait ResultIndex: AccumulatorIndex + ResultSequenceCounter {}
+pub const RESULT_INDEX_STATE_VERSION: u64 = 2;
+
+#[async_trait]
+pub trait ResultIndex: AccumulatorIndex + ResultSequenceCounter {
+    /// Ensures the accumulator store uses the current result-index state format.
+    ///
+    /// A missing version marker is initialized only when the store is empty.
+    /// Markerless non-empty stores predate the current format and must be
+    /// cleared and replayed rather than interpreted with incomplete state.
+    async fn ensure_state_version(&self) -> Result<(), IndexError> {
+        let key = ResultKey::InputHash(0);
+        let owner = ResultOwner::QueryState;
+
+        match self.get(&key, &owner).await? {
+            Some(ValueAccumulator::Signature(RESULT_INDEX_STATE_VERSION)) => Ok(()),
+            Some(ValueAccumulator::Signature(version)) => Err(IndexError::other(
+                ResultIndexStateVersionError::UnsupportedVersion {
+                    expected: RESULT_INDEX_STATE_VERSION,
+                    actual: version,
+                },
+            )),
+            Some(_) => Err(IndexError::other(
+                ResultIndexStateVersionError::InvalidMarker,
+            )),
+            None if self.is_empty().await? => {
+                self.set(
+                    key,
+                    owner,
+                    Some(ValueAccumulator::Signature(RESULT_INDEX_STATE_VERSION)),
+                )
+                .await
+            }
+            None => Err(IndexError::other(
+                ResultIndexStateVersionError::MissingMarker,
+            )),
+        }
+    }
+}
 
 #[async_trait]
 pub trait AccumulatorIndex: LazySortedSetStore {
+    /// Returns true when the accumulator and sorted-set stores contain no state.
+    async fn is_empty(&self) -> Result<bool, IndexError>;
+
     async fn clear(&self) -> Result<(), IndexError>;
     async fn get(
         &self,
@@ -96,6 +136,8 @@ pub enum ResultOwner {
     Function(usize),
     PartCurrent(usize),
     PartDefault(usize),
+    PartGroupCardinality(usize),
+    QueryState,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +145,18 @@ pub enum ResultKey {
     GroupBy(Arc<Vec<VariableValue>>),
     InputHash(u64),
     Element(ElementReference),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ResultIndexStateVersionError {
+    #[error(
+        "result index has no state-version marker but contains data; clear and replay the query index"
+    )]
+    MissingMarker,
+    #[error("result index state-version marker has an incompatible value")]
+    InvalidMarker,
+    #[error("unsupported result index state version {actual}; expected {expected}")]
+    UnsupportedVersion { expected: u64, actual: u64 },
 }
 
 impl ResultKey {
@@ -135,5 +189,51 @@ impl std::hash::Hash for ResultKey {
                 element_reference.hash(state);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::in_memory_index::in_memory_result_index::InMemoryResultIndex;
+
+    #[tokio::test]
+    async fn state_version_initializes_only_empty_indexes() {
+        let empty = InMemoryResultIndex::new();
+        empty.ensure_state_version().await.unwrap();
+        empty.ensure_state_version().await.unwrap();
+        assert!(!empty.is_empty().await.unwrap());
+
+        let legacy = InMemoryResultIndex::new();
+        legacy
+            .set(
+                ResultKey::InputHash(42),
+                ResultOwner::Function(1),
+                Some(ValueAccumulator::Count { value: 1 }),
+            )
+            .await
+            .unwrap();
+        let error = legacy.ensure_state_version().await.unwrap_err();
+        assert!(
+            matches!(&error, IndexError::Other(source) if source.to_string().contains("clear and replay"))
+        );
+    }
+
+    #[tokio::test]
+    async fn incompatible_state_version_is_rejected() {
+        let index = InMemoryResultIndex::new();
+        index
+            .set(
+                ResultKey::InputHash(0),
+                ResultOwner::QueryState,
+                Some(ValueAccumulator::Signature(RESULT_INDEX_STATE_VERSION - 1)),
+            )
+            .await
+            .unwrap();
+
+        let error = index.ensure_state_version().await.unwrap_err();
+        assert!(
+            matches!(&error, IndexError::Other(source) if source.to_string().contains("unsupported result index state version"))
+        );
     }
 }

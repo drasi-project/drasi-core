@@ -244,6 +244,7 @@ impl QueryBuilder {
             path_solver,
             part_evaluator,
             future_queue,
+            result_index,
             source_pipelines,
             session_control,
         ))

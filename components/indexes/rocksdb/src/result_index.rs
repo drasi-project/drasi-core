@@ -73,6 +73,50 @@ impl RocksDbResultIndex {
 
 #[async_trait]
 impl AccumulatorIndex for RocksDbResultIndex {
+    async fn is_empty(&self) -> Result<bool, IndexError> {
+        let db = self.db.clone();
+        let session_state = self.session_state.clone();
+        let task = task::spawn_blocking(move || {
+            let values_cf = db.cf_handle(VALUES_CF).expect("values cf not found");
+            let sets_cf = db.cf_handle(SETS_CF).expect("sorted-sets cf not found");
+
+            session_state.with_txn_or_db(
+                |txn| {
+                    let values_empty = txn
+                        .iterator_cf(&values_cf, IteratorMode::Start)
+                        .next()
+                        .transpose()
+                        .map_err(IndexError::other)?
+                        .is_none();
+                    let sets_empty = txn
+                        .iterator_cf(&sets_cf, IteratorMode::Start)
+                        .next()
+                        .transpose()
+                        .map_err(IndexError::other)?
+                        .is_none();
+                    Ok(values_empty && sets_empty)
+                },
+                |db| {
+                    let values_empty = db
+                        .iterator_cf(&values_cf, IteratorMode::Start)
+                        .next()
+                        .transpose()
+                        .map_err(IndexError::other)?
+                        .is_none();
+                    let sets_empty = db
+                        .iterator_cf(&sets_cf, IteratorMode::Start)
+                        .next()
+                        .transpose()
+                        .map_err(IndexError::other)?
+                        .is_none();
+                    Ok(values_empty && sets_empty)
+                },
+            )
+        });
+
+        task.await.map_err(IndexError::other)?
+    }
+
     #[tracing::instrument(name = "ari::get", skip_all, err)]
     async fn get(
         &self,

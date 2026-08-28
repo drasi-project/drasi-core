@@ -440,9 +440,10 @@ mod session {
 
     use drasi_core::{
         evaluation::functions::aggregation::ValueAccumulator,
+        index_cache::cached_result_index::CachedResultIndex,
         interface::{
             AccumulatorIndex, CheckpointStore, ElementIndex, FutureQueue, LazySortedSetStore,
-            PushType, ResultKey, ResultOwner, SessionControl,
+            PushType, ResultIndex, ResultKey, ResultOwner, SessionControl,
         },
         models::{Element, ElementMetadata, ElementPropertyMap, ElementReference},
     };
@@ -593,6 +594,57 @@ mod session {
         // peek_due_time runs outside the session by design
         let due = future_queue.peek_due_time().await.unwrap();
         assert_eq!(due, Some(20));
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn result_index_state_and_cardinality_are_transactional() {
+        let redis = super::shared_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let result_index = Arc::new(GarnetResultIndex::new(&query_id, connection, session_state));
+        result_index.clear().await.unwrap();
+        let result_index = CachedResultIndex::new(result_index, 3).unwrap();
+        let key = ResultKey::GroupBy(Arc::new(vec![]));
+        let owner = ResultOwner::PartGroupCardinality(2);
+
+        session_control.begin().await.unwrap();
+        assert!(result_index.is_empty().await.unwrap());
+        result_index.ensure_state_version().await.unwrap();
+        assert!(!result_index.is_empty().await.unwrap());
+        result_index
+            .set(
+                key.clone(),
+                owner.clone(),
+                Some(ValueAccumulator::Count { value: 2 }),
+            )
+            .await
+            .unwrap();
+        session_control.rollback().unwrap();
+
+        session_control.begin().await.unwrap();
+        assert!(result_index.is_empty().await.unwrap());
+        result_index.ensure_state_version().await.unwrap();
+        result_index
+            .set(
+                key.clone(),
+                owner.clone(),
+                Some(ValueAccumulator::Count { value: 2 }),
+            )
+            .await
+            .unwrap();
+        session_control.commit().await.unwrap();
+
+        session_control.begin().await.unwrap();
+        result_index.ensure_state_version().await.unwrap();
+        assert!(matches!(
+            result_index.get(&key, &owner).await.unwrap(),
+            Some(ValueAccumulator::Count { value: 2 })
+        ));
+        session_control.rollback().unwrap();
     }
 
     #[allow(clippy::unwrap_used)]

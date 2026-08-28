@@ -400,9 +400,10 @@ mod session {
 
     use drasi_core::{
         evaluation::functions::aggregation::ValueAccumulator,
+        index_cache::cached_result_index::CachedResultIndex,
         interface::{
-            AccumulatorIndex, ElementIndex, FutureQueue, PushType, ResultKey, ResultOwner,
-            SessionControl,
+            AccumulatorIndex, ElementIndex, FutureQueue, PushType, ResultIndex, ResultKey,
+            ResultOwner, SessionControl,
         },
         models::{Element, ElementMetadata, ElementPropertyMap, ElementReference},
     };
@@ -553,6 +554,63 @@ mod session {
 
         let due = future_queue.peek_due_time().await.unwrap();
         assert_eq!(due, Some(20));
+
+        let _ = std::fs::remove_dir_all(&url);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    #[serial]
+    async fn result_index_state_and_cardinality_are_transactional() {
+        let url = format!("test-data/{}", Uuid::new_v4());
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions::new(true, false, RocksDbMemoryBudget::default());
+        let db = open_unified_db(&url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let result_index = Arc::new(RocksDbResultIndex::new(
+            db,
+            session_state.clone(),
+            options.clone(),
+        ));
+        let session_control = RocksDbSessionControl::new(session_state);
+        result_index.clear().await.unwrap();
+        let result_index = CachedResultIndex::new(result_index, 3).unwrap();
+        let key = ResultKey::GroupBy(Arc::new(vec![]));
+        let owner = ResultOwner::PartGroupCardinality(2);
+
+        session_control.begin().await.unwrap();
+        assert!(result_index.is_empty().await.unwrap());
+        result_index.ensure_state_version().await.unwrap();
+        result_index
+            .set(
+                key.clone(),
+                owner.clone(),
+                Some(ValueAccumulator::Count { value: 2 }),
+            )
+            .await
+            .unwrap();
+        session_control.rollback().unwrap();
+
+        session_control.begin().await.unwrap();
+        assert!(result_index.is_empty().await.unwrap());
+        result_index.ensure_state_version().await.unwrap();
+        result_index
+            .set(
+                key.clone(),
+                owner.clone(),
+                Some(ValueAccumulator::Count { value: 2 }),
+            )
+            .await
+            .unwrap();
+        session_control.commit().await.unwrap();
+
+        session_control.begin().await.unwrap();
+        result_index.ensure_state_version().await.unwrap();
+        assert!(matches!(
+            result_index.get(&key, &owner).await.unwrap(),
+            Some(ValueAccumulator::Count { value: 2 })
+        ));
+        session_control.rollback().unwrap();
 
         let _ = std::fs::remove_dir_all(&url);
     }

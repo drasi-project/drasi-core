@@ -86,3 +86,59 @@ fn build_query(query: &str) -> Query {
     let parser = Arc::new(CypherParser::new(function_registry.clone()));
     parser.parse(query).unwrap()
 }
+
+#[tokio::test]
+async fn outer_group_cardinality_rejects_underflow_and_corrupt_state() {
+    use crate::{
+        evaluation::variable_value::VariableValue,
+        in_memory_index::in_memory_result_index::InMemoryResultIndex,
+        interface::{AccumulatorIndex, ResultKey, ResultOwner},
+    };
+
+    let registry = Arc::new(FunctionRegistry::new());
+    let result_index = Arc::new(InMemoryResultIndex::new());
+    let expression_evaluator = Arc::new(ExpressionEvaluator::new(registry, result_index.clone()));
+    let evaluator = QueryPartEvaluator::new(expression_evaluator, result_index.clone());
+    let key = ResultKey::GroupBy(Arc::new(vec![VariableValue::from("group")]));
+
+    let underflow = evaluator
+        .transition_group_cardinality(2, key.clone(), true, false)
+        .await;
+    assert!(matches!(
+        underflow,
+        Err(EvaluationError::InvalidGroupCardinality {
+            part_num: 2,
+            count: 0,
+            ..
+        })
+    ));
+
+    result_index
+        .set(
+            key.clone(),
+            ResultOwner::PartGroupCardinality(2),
+            Some(ValueAccumulator::Signature(1)),
+        )
+        .await
+        .unwrap();
+    let corrupt = evaluator
+        .transition_group_cardinality(2, key, false, true)
+        .await;
+    assert!(matches!(corrupt, Err(EvaluationError::CorruptData)));
+
+    for owner in [ResultOwner::PartCurrent(2), ResultOwner::PartDefault(2)] {
+        let key = ResultKey::GroupBy(Arc::new(vec![VariableValue::from("signature")]));
+        result_index
+            .set(
+                key.clone(),
+                owner.clone(),
+                Some(ValueAccumulator::Count { value: 1 }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            evaluator.read_signature_state(&key, &owner).await,
+            Err(EvaluationError::CorruptData)
+        ));
+    }
+}

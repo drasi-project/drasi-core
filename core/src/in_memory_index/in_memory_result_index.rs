@@ -56,6 +56,10 @@ impl InMemoryResultIndex {
 
 #[async_trait]
 impl AccumulatorIndex for InMemoryResultIndex {
+    async fn is_empty(&self) -> Result<bool, IndexError> {
+        Ok(self.values.read().await.is_empty() && self.sorted_sets.read().await.is_empty())
+    }
+
     async fn get(
         &self,
         key: &ResultKey,

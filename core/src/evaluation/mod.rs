@@ -36,20 +36,34 @@ use crate::interface::{IndexError, MiddlewareError};
 #[derive(Debug)]
 pub enum EvaluationError {
     DivideByZero,
-    InvalidType { expected: String },
+    InvalidType {
+        expected: String,
+    },
     UnknownIdentifier(String),
     UnknownFunction(String), // Unknown Cypher function
     IndexError(IndexError),
     MiddlewareError(MiddlewareError),
     ParseError,
     InvalidContext,
-    OutOfRange { kind: OutOfRangeType },
+    OutOfRange {
+        kind: OutOfRangeType,
+    },
     OverflowError,
     FunctionError(FunctionError),
     CorruptData,
+    InvalidGroupCardinality {
+        part_num: usize,
+        count: i64,
+        before_contributes: bool,
+        after_contributes: bool,
+    },
     InvalidArgument,
-    UnknownProperty { property_name: String },
-    FormatError { expected: String },
+    UnknownProperty {
+        property_name: String,
+    },
+    FormatError {
+        expected: String,
+    },
 }
 
 #[derive(Debug)]

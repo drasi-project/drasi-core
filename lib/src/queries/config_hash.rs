@@ -33,6 +33,7 @@ use serde::Serialize;
 use crate::config::{
     QueryConfig, QueryJoinConfig, QueryJoinKeyConfig, QueryLanguage, SourceSubscriptionConfig,
 };
+use drasi_core::interface::RESULT_INDEX_STATE_VERSION;
 use drasi_core::models::SourceMiddlewareConfig;
 
 /// Minimal projection of `QueryConfig` containing only identity-defining fields.
@@ -53,6 +54,7 @@ use drasi_core::models::SourceMiddlewareConfig;
 ///     `storage_backend`, `recovery_policy`.
 #[derive(Serialize)]
 struct QueryIdentity<'a> {
+    result_index_state_version: u64,
     query: &'a str,
     query_language: &'a QueryLanguage,
     middleware: &'a [SourceMiddlewareConfig],
@@ -113,6 +115,13 @@ fn canonicalize_join(join: &QueryJoinConfig) -> JoinIdentity<'_> {
 /// and it is invariant under cosmetic reordering of `sources`, `joins`, a
 /// source's `nodes` / `relations`, and a join's `keys`.
 pub fn compute_config_hash(config: &QueryConfig) -> u64 {
+    compute_config_hash_for_result_index_version(config, RESULT_INDEX_STATE_VERSION)
+}
+
+fn compute_config_hash_for_result_index_version(
+    config: &QueryConfig,
+    result_index_state_version: u64,
+) -> u64 {
     let mut sources: Vec<SourceIdentity> = config.sources.iter().map(canonicalize_source).collect();
     sources.sort_by(|a, b| a.source_id.cmp(b.source_id));
 
@@ -123,6 +132,7 @@ pub fn compute_config_hash(config: &QueryConfig) -> u64 {
     });
 
     let identity = QueryIdentity {
+        result_index_state_version,
         query: &config.query,
         query_language: &config.query_language,
         middleware: &config.middleware,
@@ -174,6 +184,15 @@ mod tests {
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
         }
+    }
+
+    #[test]
+    fn result_index_state_version_changes_config_hash() {
+        let config = base();
+        assert_ne!(
+            compute_config_hash_for_result_index_version(&config, RESULT_INDEX_STATE_VERSION - 1),
+            compute_config_hash(&config)
+        );
     }
 
     #[test]

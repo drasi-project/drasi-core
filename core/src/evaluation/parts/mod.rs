@@ -225,6 +225,8 @@ impl QueryPartEvaluator {
                                         before_out,
                                         agg_after,
                                         agg_snapshot,
+                                        part_num,
+                                        None,
                                         change_context,
                                     )
                                     .await;
@@ -260,6 +262,8 @@ impl QueryPartEvaluator {
                             before_out,
                             after_out,
                             agg_snapshot,
+                            part_num,
+                            None,
                             change_context,
                         )
                         .await
@@ -367,11 +371,13 @@ impl QueryPartEvaluator {
                             before.hash(&mut before_hash);
                             let before_hash = before_hash.finish();
                             match self
-                                .result_index
-                                .get(&result_key, &ResultOwner::PartCurrent(part_num))
+                                .read_signature_state(
+                                    &result_key,
+                                    &ResultOwner::PartCurrent(part_num),
+                                )
                                 .await?
                             {
-                                Some(ValueAccumulator::Signature(sig)) => sig == before_hash,
+                                Some(sig) => sig == before_hash,
                                 None => {
                                     self.result_index
                                         .set(
@@ -382,7 +388,6 @@ impl QueryPartEvaluator {
                                         .await?;
                                     false
                                 }
-                                _ => false,
                             }
                         }
                     }
@@ -398,11 +403,10 @@ impl QueryPartEvaluator {
                         true
                     } else {
                         match self
-                            .result_index
-                            .get(&result_key, &ResultOwner::PartDefault(part_num))
+                            .read_signature_state(&result_key, &ResultOwner::PartDefault(part_num))
                             .await?
                         {
-                            Some(ValueAccumulator::Signature(sig)) => {
+                            Some(sig) => {
                                 if sig == after_hash {
                                     self.result_index
                                         .set(
@@ -415,7 +419,6 @@ impl QueryPartEvaluator {
                                 sig != after_hash
                             }
                             None => true,
-                            _ => true,
                         }
                     }
                 };
@@ -538,13 +541,18 @@ impl QueryPartEvaluator {
                                         next_before,
                                         next_after,
                                         agg_snapshot,
+                                        part_num,
+                                        Some(OuterContributionTransition {
+                                            before: !before_filtered && should_revert,
+                                            after: false,
+                                        }),
                                         change_context,
                                     )
                                     .await;
                             }
                         }
 
-                        if before.is_some() && !before_filtered {
+                        if !before_filtered && should_revert {
                             return Ok(vec![QueryPartEvaluationContext::Removing {
                                 before: next_before.unwrap_or_default(),
                                 row_signature: 0,
@@ -576,6 +584,11 @@ impl QueryPartEvaluator {
                             next_before,
                             next_after,
                             agg_snapshot,
+                            part_num,
+                            Some(OuterContributionTransition {
+                                before: !before_filtered && should_revert,
+                                after: should_apply,
+                            }),
                             change_context,
                         )
                         .await?),
@@ -664,8 +677,26 @@ impl QueryPartEvaluator {
         before_out: Option<QueryVariables>,
         after_out: QueryVariables,
         snapshot: Option<QueryVariables>,
+        part_num: usize,
+        contribution: Option<OuterContributionTransition>,
         change_context: &ChangeContext,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
+        if let Some(contribution) = contribution {
+            return self
+                .reconcile_tracked_aggregate(
+                    part,
+                    grouping_keys,
+                    before_in,
+                    before_out,
+                    after_out,
+                    snapshot,
+                    part_num,
+                    contribution,
+                    change_context,
+                )
+                .await;
+        }
+
         if before_in.is_none() || before_out.is_none() {
             return Ok(vec![QueryPartEvaluationContext::Aggregation {
                 before: before_out,
@@ -731,4 +762,232 @@ impl QueryPartEvaluator {
             },
         ])
     }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn reconcile_tracked_aggregate(
+        &self,
+        part: &QueryPart,
+        grouping_keys: Vec<String>,
+        before_in: Option<QueryVariables>,
+        before_out: Option<QueryVariables>,
+        after_out: QueryVariables,
+        snapshot: Option<QueryVariables>,
+        part_num: usize,
+        contribution: OuterContributionTransition,
+        change_context: &ChangeContext,
+    ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
+        if !contribution.before && !contribution.after {
+            return Ok(vec![QueryPartEvaluationContext::Noop]);
+        }
+
+        if contribution.before && contribution.after {
+            let before_out = before_out.ok_or(EvaluationError::InvalidContext)?;
+            if grouping_values_match(&grouping_keys, &before_out, &after_out) {
+                let key = ResultKey::groupby_from_variables(&grouping_keys, &after_out);
+                let cardinality = self
+                    .transition_group_cardinality(part_num, key, true, true)
+                    .await?;
+                return Ok(vec![QueryPartEvaluationContext::Aggregation {
+                    before: Some(before_out),
+                    after: after_out,
+                    grouping_keys,
+                    default_before: cardinality.before == 0,
+                    default_after: cardinality.after == 0,
+                    row_signature: 0,
+                }]);
+            }
+
+            let before_key = ResultKey::groupby_from_variables(&grouping_keys, &before_out);
+            let after_key = ResultKey::groupby_from_variables(&grouping_keys, &after_out);
+            let before_cardinality = self.read_group_cardinality(part_num, &before_key).await?;
+            let after_cardinality = self.read_group_cardinality(part_num, &after_key).await?;
+            if before_cardinality == 0 {
+                return Err(EvaluationError::InvalidGroupCardinality {
+                    part_num,
+                    count: before_cardinality,
+                    before_contributes: true,
+                    after_contributes: false,
+                });
+            }
+            let new_before_cardinality = before_cardinality - 1;
+            let new_after_cardinality = after_cardinality.checked_add(1).ok_or(
+                EvaluationError::InvalidGroupCardinality {
+                    part_num,
+                    count: after_cardinality,
+                    before_contributes: false,
+                    after_contributes: true,
+                },
+            )?;
+            self.write_group_cardinality(part_num, before_key, new_before_cardinality)
+                .await?;
+            self.write_group_cardinality(part_num, after_key, new_after_cardinality)
+                .await?;
+
+            let before_in = before_in.ok_or(EvaluationError::InvalidContext)?;
+            let mut source_context =
+                ExpressionEvaluationContext::new(&before_in, change_context.before_clock.clone());
+            source_context.set_side_effects(context::SideEffects::Snapshot);
+            let mut source_grouping_keys = Vec::new();
+            let source_after = self
+                .project(
+                    &source_context,
+                    &part.return_clause,
+                    &mut source_grouping_keys,
+                )
+                .await?;
+
+            return Ok(vec![
+                QueryPartEvaluationContext::Aggregation {
+                    before: snapshot,
+                    after: after_out,
+                    grouping_keys: grouping_keys.clone(),
+                    default_before: after_cardinality == 0,
+                    default_after: new_after_cardinality == 0,
+                    row_signature: 0,
+                },
+                QueryPartEvaluationContext::Aggregation {
+                    before: Some(before_out),
+                    after: source_after,
+                    grouping_keys,
+                    default_before: before_cardinality == 0,
+                    default_after: new_before_cardinality == 0,
+                    row_signature: 0,
+                },
+            ]);
+        }
+
+        if contribution.before {
+            let before_out = before_out.ok_or(EvaluationError::InvalidContext)?;
+            let key = ResultKey::groupby_from_variables(&grouping_keys, &before_out);
+            let cardinality = self
+                .transition_group_cardinality(part_num, key, true, false)
+                .await?;
+            return Ok(vec![QueryPartEvaluationContext::Aggregation {
+                before: Some(before_out),
+                after: after_out,
+                grouping_keys,
+                default_before: cardinality.before == 0,
+                default_after: cardinality.after == 0,
+                row_signature: 0,
+            }]);
+        }
+
+        let key = ResultKey::groupby_from_variables(&grouping_keys, &after_out);
+        let cardinality = self
+            .transition_group_cardinality(part_num, key, false, true)
+            .await?;
+        Ok(vec![QueryPartEvaluationContext::Aggregation {
+            before: snapshot.or(before_out),
+            after: after_out,
+            grouping_keys,
+            default_before: cardinality.before == 0,
+            default_after: cardinality.after == 0,
+            row_signature: 0,
+        }])
+    }
+
+    async fn transition_group_cardinality(
+        &self,
+        part_num: usize,
+        key: ResultKey,
+        before_contributes: bool,
+        after_contributes: bool,
+    ) -> Result<GroupCardinalityTransition, EvaluationError> {
+        let before = self.read_group_cardinality(part_num, &key).await?;
+        if before_contributes && before == 0 {
+            return Err(EvaluationError::InvalidGroupCardinality {
+                part_num,
+                count: before,
+                before_contributes,
+                after_contributes,
+            });
+        }
+
+        let delta = i64::from(after_contributes) - i64::from(before_contributes);
+        let after = before
+            .checked_add(delta)
+            .ok_or(EvaluationError::InvalidGroupCardinality {
+                part_num,
+                count: before,
+                before_contributes,
+                after_contributes,
+            })?;
+        if after < 0 {
+            return Err(EvaluationError::InvalidGroupCardinality {
+                part_num,
+                count: before,
+                before_contributes,
+                after_contributes,
+            });
+        }
+
+        self.write_group_cardinality(part_num, key, after).await?;
+        Ok(GroupCardinalityTransition { before, after })
+    }
+
+    async fn read_group_cardinality(
+        &self,
+        part_num: usize,
+        key: &ResultKey,
+    ) -> Result<i64, EvaluationError> {
+        match self
+            .result_index
+            .get(key, &ResultOwner::PartGroupCardinality(part_num))
+            .await?
+        {
+            Some(ValueAccumulator::Count { value }) if value >= 0 => Ok(value),
+            Some(_) => Err(EvaluationError::CorruptData),
+            None => Ok(0),
+        }
+    }
+
+    async fn read_signature_state(
+        &self,
+        key: &ResultKey,
+        owner: &ResultOwner,
+    ) -> Result<Option<u64>, EvaluationError> {
+        match self.result_index.get(key, owner).await? {
+            Some(ValueAccumulator::Signature(signature)) => Ok(Some(signature)),
+            Some(_) => Err(EvaluationError::CorruptData),
+            None => Ok(None),
+        }
+    }
+
+    async fn write_group_cardinality(
+        &self,
+        part_num: usize,
+        key: ResultKey,
+        count: i64,
+    ) -> Result<(), EvaluationError> {
+        let value = (count > 0).then_some(ValueAccumulator::Count { value: count });
+        self.result_index
+            .set(key, ResultOwner::PartGroupCardinality(part_num), value)
+            .await?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OuterContributionTransition {
+    before: bool,
+    after: bool,
+}
+
+struct GroupCardinalityTransition {
+    before: i64,
+    after: i64,
+}
+
+fn grouping_values_match(
+    grouping_keys: &[String],
+    before: &QueryVariables,
+    after: &QueryVariables,
+) -> bool {
+    grouping_keys.iter().all(
+        |key| match (before.get(key.as_str()), after.get(key.as_str())) {
+            (Some(before), Some(after)) => before.eq_for_groupby(after),
+            (None, None) => true,
+            _ => false,
+        },
+    )
 }
