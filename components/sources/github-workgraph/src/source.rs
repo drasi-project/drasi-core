@@ -46,6 +46,9 @@ const TASK_GRACE: Duration = Duration::from_secs(3);
 // DrasiLib releases this fence through the lifecycle hook. The fallback only
 // prevents unbounded retention in standalone hosts that omit that hook.
 const PRUNING_FENCE_FALLBACK: Duration = Duration::from_secs(60);
+const FRESH_RESET_INSTRUCTION: &str =
+    "clear the entire Source state namespace (including VNext origin dedupe records) and Source \
+     WAL, then replay all VNext inputs";
 
 async fn report(base: &SourceBase, status: ComponentStatus, message: &str) {
     base.set_status(status, Some(message.to_string())).await;
@@ -64,6 +67,13 @@ pub struct GitHubWorkGraphSource {
     /// Prevents pruning restart history before every auto-start query registers
     /// its durable position handle.
     startup_subscriptions_complete: Arc<AtomicBool>,
+}
+
+impl GitHubWorkGraphSource {
+    fn begin_startup_subscription_window(&self) {
+        self.startup_subscriptions_complete
+            .store(false, Ordering::Release);
+    }
 }
 
 #[async_trait]
@@ -162,10 +172,9 @@ impl Source for GitHubWorkGraphSource {
             .await
             .with_context(|| format!("Failed to register WAL for source '{}'", self.base.id))?;
         let head = wal.head_sequence(&self.base.id).await?;
-        // A nonzero head means durable queries may resume from pre-start
-        // checkpoints even when all older WAL entries were already pruned.
-        self.startup_subscriptions_complete
-            .store(head == 0, Ordering::Release);
+        // Keep the startup pruning fence closed until every configured query
+        // has registered its durable position handle.
+        self.begin_startup_subscription_window();
         self.base.set_next_sequence(head);
         *self.wal.write().await = Some(wal.clone());
         let allocator = Arc::new(Allocator::new(
@@ -358,13 +367,51 @@ impl Source for GitHubWorkGraphSource {
             .await
             .clone()
             .ok_or_else(|| anyhow!("GitHub WorkGraph source WAL is not initialized"))?;
+        let _gate = self.replay_gate.lock().await;
         let Some(resume_from) = settings.resume_from.clone() else {
+            let head = wal.head_sequence(&self.base.id).await?;
+            match wal.oldest_sequence(&self.base.id).await? {
+                Some(1) => {
+                    return self
+                        .base
+                        .subscribe_with_replay(&settings, wal.as_ref(), 0, SOURCE_TYPE)
+                        .await;
+                }
+                Some(oldest) => {
+                    return Err(anyhow::Error::new(SourceError::PositionUnavailable {
+                        source_id: self.base.id.clone(),
+                        requested: Bytes::copy_from_slice(&0u64.to_be_bytes()),
+                        earliest_available: Some(Bytes::copy_from_slice(&oldest.to_be_bytes())),
+                    }))
+                    .with_context(|| {
+                        format!(
+                            "GitHub WorkGraph source WAL starts at sequence {oldest}; \
+                             positionless replay requires complete history from sequence 1; \
+                             {FRESH_RESET_INSTRUCTION}"
+                        )
+                    });
+                }
+                None if head > 0 => {
+                    return Err(anyhow::Error::new(SourceError::PositionUnavailable {
+                        source_id: self.base.id.clone(),
+                        requested: Bytes::copy_from_slice(&0u64.to_be_bytes()),
+                        earliest_available: None,
+                    }))
+                    .with_context(|| {
+                        format!(
+                            "GitHub WorkGraph source WAL has advanced to sequence {head} but \
+                             retains no history; positionless replay requires complete history \
+                             from sequence 1; {FRESH_RESET_INSTRUCTION}"
+                        )
+                    });
+                }
+                None => {}
+            }
             return self
                 .base
                 .subscribe_with_bootstrap(&settings, SOURCE_TYPE)
                 .await;
         };
-        let _gate = self.replay_gate.lock().await;
         let resume_seq = decode_position(&resume_from)?;
         let head = wal.head_sequence(&self.base.id).await?;
         let earliest = wal
@@ -649,11 +696,174 @@ impl GitHubWorkGraphSourceBuilder {
             projector: self.projector,
             notify: Arc::new(Notify::new()),
             replay_gate: Arc::new(Mutex::new(())),
-            startup_subscriptions_complete: Arc::new(AtomicBool::new(true)),
+            startup_subscriptions_complete: Arc::new(AtomicBool::new(false)),
         };
         if let Some(raw_config) = self.raw_config {
             source.base.set_raw_config(raw_config);
         }
         Ok(source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{TaskIssueType, WebhookConfig};
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+    };
+    use drasi_lib::wal::WriteAheadLogConfig;
+    use drasi_lib::DurabilityConfig;
+    use drasi_wal_redb::RedbWalProvider;
+    use std::collections::HashSet;
+    use tempfile::TempDir;
+
+    fn source(id: &str) -> GitHubWorkGraphSource {
+        GitHubWorkGraphSourceBuilder::new(id)
+            .with_config(GitHubWorkGraphSourceConfig {
+                organization: "acme".to_string(),
+                task_issue_type: TaskIssueType {
+                    id: "IT_test".to_string(),
+                    name: "WorkGraphTask".to_string(),
+                },
+                webhook: WebhookConfig {
+                    secret: "webhook-secret".to_string(),
+                    lease_validation_token: "lease-secret".to_string(),
+                    ..WebhookConfig::default()
+                },
+                durability: DurabilityConfig {
+                    enabled: true,
+                    ..DurabilityConfig::default()
+                },
+                ..GitHubWorkGraphSourceConfig::default()
+            })
+            .build()
+            .unwrap()
+    }
+
+    fn settings(source_id: &str, query_id: &str) -> SourceSubscriptionSettings {
+        SourceSubscriptionSettings {
+            source_id: source_id.to_string(),
+            enable_bootstrap: true,
+            query_id: query_id.to_string(),
+            nodes: HashSet::new(),
+            relations: HashSet::new(),
+            resume_from: None,
+            request_position_handle: true,
+        }
+    }
+
+    fn change(id: &str, effective_from: u64) -> SourceChange {
+        SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("source", id),
+                    labels: Arc::new([Arc::from("Item")]),
+                    effective_from,
+                },
+                properties: ElementPropertyMap::new(),
+            },
+        }
+    }
+
+    async fn install_wal(
+        source: &GitHubWorkGraphSource,
+        wal: Arc<RedbWalProvider>,
+    ) -> Arc<RedbWalProvider> {
+        wal.register(source.id(), WriteAheadLogConfig::default())
+            .await
+            .unwrap();
+        *source.wal.write().await = Some(wal.clone());
+        wal
+    }
+
+    #[test]
+    fn startup_pruning_fence_begins_closed() {
+        let source = source("startup-fence");
+        assert!(!source
+            .startup_subscriptions_complete
+            .load(Ordering::Acquire));
+        source
+            .startup_subscriptions_complete
+            .store(true, Ordering::Release);
+        source.begin_startup_subscription_window();
+        assert!(!source
+            .startup_subscriptions_complete
+            .load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn positionless_subscription_replays_complete_wal_history() {
+        let source = source("complete-history");
+        let temp = TempDir::new().unwrap();
+        let wal = install_wal(
+            &source,
+            Arc::new(RedbWalProvider::new(temp.path().join("wal"))),
+        )
+        .await;
+        wal.append(source.id(), &change("one", 1)).await.unwrap();
+        wal.append(source.id(), &change("two", 2)).await.unwrap();
+
+        let mut subscription = source
+            .subscribe(settings(source.id(), "query"))
+            .await
+            .unwrap();
+        assert!(subscription.bootstrap_receiver.is_none());
+        assert_eq!(
+            subscription
+                .position_handle
+                .as_ref()
+                .unwrap()
+                .load(Ordering::Acquire),
+            0
+        );
+        for expected in [1, 2] {
+            let event = tokio::time::timeout(Duration::from_secs(1), subscription.receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.sequence, Some(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn positionless_subscription_rejects_pruned_wal_history() {
+        let source = source("pruned-history");
+        let temp = TempDir::new().unwrap();
+        let wal = install_wal(
+            &source,
+            Arc::new(RedbWalProvider::new(temp.path().join("wal"))),
+        )
+        .await;
+        wal.append(source.id(), &change("one", 1)).await.unwrap();
+        wal.append(source.id(), &change("two", 2)).await.unwrap();
+        wal.prune_up_to(source.id(), 1).await.unwrap();
+
+        let error = match source.subscribe(settings(source.id(), "query")).await {
+            Ok(_) => panic!("truncated WAL history must not be replayed"),
+            Err(error) => error,
+        };
+        assert!(error.downcast_ref::<SourceError>().is_some());
+        assert!(error.to_string().contains(FRESH_RESET_INSTRUCTION));
+    }
+
+    #[tokio::test]
+    async fn positionless_subscription_rejects_fully_pruned_wal_history() {
+        let source = source("fully-pruned-history");
+        let temp = TempDir::new().unwrap();
+        let wal = install_wal(
+            &source,
+            Arc::new(RedbWalProvider::new(temp.path().join("wal"))),
+        )
+        .await;
+        wal.append(source.id(), &change("one", 1)).await.unwrap();
+        wal.prune_up_to(source.id(), 1).await.unwrap();
+
+        let error = match source.subscribe(settings(source.id(), "query")).await {
+            Ok(_) => panic!("fully pruned WAL history must not bootstrap"),
+            Err(error) => error,
+        };
+        assert!(error.downcast_ref::<SourceError>().is_some());
+        assert!(error.to_string().contains(FRESH_RESET_INSTRUCTION));
     }
 }

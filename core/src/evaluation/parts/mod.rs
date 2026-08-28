@@ -367,9 +367,7 @@ impl QueryPartEvaluator {
                         if !default_before {
                             true
                         } else {
-                            let mut before_hash = SpookyHasher::default();
-                            before.hash(&mut before_hash);
-                            let before_hash = before_hash.finish();
+                            let before_hash = hash_variables_for_groupby(before);
                             match self
                                 .read_signature_state(
                                     &result_key,
@@ -394,9 +392,7 @@ impl QueryPartEvaluator {
                     None => false,
                 };
 
-                let mut after_hash = SpookyHasher::default();
-                after.hash(&mut after_hash);
-                let after_hash = after_hash.finish();
+                let after_hash = hash_variables_for_groupby(&after);
 
                 let should_apply = {
                     if !default_after {
@@ -990,4 +986,13 @@ fn grouping_values_match(
             _ => false,
         },
     )
+}
+
+fn hash_variables_for_groupby(variables: &QueryVariables) -> u64 {
+    let mut hasher = SpookyHasher::default();
+    for (name, value) in variables {
+        name.hash(&mut hasher);
+        value.hash_for_groupby(&mut hasher);
+    }
+    hasher.finish()
 }

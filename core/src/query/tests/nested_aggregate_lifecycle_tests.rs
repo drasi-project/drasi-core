@@ -81,6 +81,36 @@ WHERE innerCount = 0
 RETURN count(bucket) AS bucketCount
 ";
 
+const LATE_COMPLETION_QUERY: &str = "
+MATCH (parent:Parent)-[:DECLARES]->(slot:Slot)
+OPTIONAL MATCH (child:Child)-[:FILLS]->(slot)
+OPTIONAL MATCH (result:Result)-[:RESULT_FOR]->(child)
+OPTIONAL MATCH (evaluation:Evaluation)-[:EVALUATES]->(result)
+WITH parent, slot, child, result, evaluation,
+  count(parent) AS basePathCount,
+  count(CASE WHEN child IS NOT NULL THEN 1 ELSE null END) AS structuralPathCount
+WITH parent, slot, child,
+  count(CASE WHEN basePathCount <> 1 THEN 1 ELSE null END) AS invalidPathCount,
+  count(CASE WHEN structuralPathCount = 1 AND result IS NOT NULL
+    THEN 1 ELSE null END) AS resultCount,
+  count(CASE WHEN structuralPathCount = 1 AND evaluation IS NOT NULL
+    THEN 1 ELSE null END) AS evaluationCount,
+  count(CASE WHEN structuralPathCount = 1
+    AND NOT child.isOpen
+    AND evaluation.resultId = result.id
+    THEN 1 ELSE null END) AS validCompletionCount
+WITH parent, slot,
+  count(CASE WHEN invalidPathCount = 0
+    AND resultCount = 1
+    AND evaluationCount = 1
+    AND validCompletionCount = 1
+    THEN 1 ELSE null END) AS completedSlotCount
+WITH parent,
+  count(CASE WHEN completedSlotCount = 1 THEN 1 ELSE null END) AS completedChildCount
+WHERE completedChildCount = parent.declaredCount
+RETURN parent.id AS parentId, completedChildCount
+";
+
 struct MaterializedQuery {
     query: ContinuousQuery,
     rows: HashMap<u64, QueryVariables>,
@@ -261,6 +291,100 @@ async fn insert_member(
             &format!("node-slot-{slot}"),
         ))
         .await
+}
+
+async fn insert_parent_and_child(subject: &mut MaterializedQuery) {
+    for change in [
+        insert_node(
+            "node-parent",
+            "Parent",
+            1,
+            json!({"id": "parent", "declaredCount": 1}),
+        ),
+        insert_node("node-slot", "Slot", 2, json!({"id": "slot"})),
+        insert_relation("rel-parent-slot", "DECLARES", 3, "node-parent", "node-slot"),
+        insert_node(
+            "node-child",
+            "Child",
+            4,
+            json!({"id": "child", "isOpen": true}),
+        ),
+        insert_relation("rel-child-slot", "FILLS", 5, "node-child", "node-slot"),
+    ] {
+        subject.process(change).await;
+    }
+}
+
+async fn close_child(subject: &mut MaterializedQuery, effective_from: u64) {
+    subject
+        .process(SourceChange::Update {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "node-child"),
+                    labels: Arc::new([Arc::from("Child")]),
+                    effective_from,
+                },
+                properties: ElementPropertyMap::from(json!({"id": "child", "isOpen": false})),
+            },
+        })
+        .await;
+}
+
+async fn insert_completion_artifacts(subject: &mut MaterializedQuery, effective_from: u64) {
+    for change in [
+        insert_node(
+            "node-result",
+            "Result",
+            effective_from,
+            json!({"id": "result"}),
+        ),
+        insert_relation(
+            "rel-result-child",
+            "RESULT_FOR",
+            effective_from + 1,
+            "node-result",
+            "node-child",
+        ),
+        insert_node(
+            "node-evaluation",
+            "Evaluation",
+            effective_from + 2,
+            json!({"id": "evaluation", "resultId": "result"}),
+        ),
+        insert_relation(
+            "rel-evaluation-result",
+            "EVALUATES",
+            effective_from + 3,
+            "node-evaluation",
+            "node-result",
+        ),
+    ] {
+        subject.process(change).await;
+    }
+}
+
+#[tokio::test]
+async fn closed_child_converges_when_result_and_evaluation_replay_later() {
+    let mut late_artifacts = MaterializedQuery::new(LATE_COMPLETION_QUERY).await;
+    insert_parent_and_child(&mut late_artifacts).await;
+    close_child(&mut late_artifacts, 6).await;
+    insert_completion_artifacts(&mut late_artifacts, 7).await;
+
+    assert_eq!(late_artifacts.rows.len(), 1);
+    assert_eq!(
+        MaterializedQuery::row_integer(
+            late_artifacts.rows.values().next().unwrap(),
+            "completedChildCount",
+        ),
+        1
+    );
+
+    let mut close_last = MaterializedQuery::new(LATE_COMPLETION_QUERY).await;
+    insert_parent_and_child(&mut close_last).await;
+    insert_completion_artifacts(&mut close_last, 6).await;
+    close_child(&mut close_last, 10).await;
+
+    assert_eq!(close_last.rows, late_artifacts.rows);
 }
 
 #[tokio::test]
