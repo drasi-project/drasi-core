@@ -18,6 +18,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::SinkExt;
 use tokio::sync::{oneshot, Mutex};
+use tokio_tungstenite::Connector;
 use tracing::{error, info, warn};
 
 use drasi_lib::{
@@ -29,7 +30,7 @@ use crate::{
     config::{HeaderConfig, WebSocketSourceConfig},
     descriptor::WebSocketSourceConfigDto,
     mapping::{derive_schema, FrameMapper},
-    transport::{self, SessionEnd, WebSocketConnection},
+    transport::{self, PreparedConnector, SessionEnd, TlsInitializationError, WebSocketConnection},
 };
 
 /// Generic outbound WebSocket source.
@@ -52,6 +53,76 @@ impl WebSocketSource {
     /// Creates a source builder.
     pub fn builder(id: impl Into<String>) -> WebSocketSourceBuilder {
         WebSocketSourceBuilder::new(id)
+    }
+
+    async fn start_with_connector<F>(&self, prepare_connector: F) -> Result<()>
+    where
+        F: FnOnce(
+            &WebSocketSourceConfig,
+        ) -> std::result::Result<PreparedConnector, TlsInitializationError>,
+    {
+        let _lifecycle = self.lifecycle.lock().await;
+        match self.base.get_status().await {
+            ComponentStatus::Running | ComponentStatus::Starting => return Ok(()),
+            ComponentStatus::Stopping => {
+                anyhow::bail!("source '{}' is stopping", self.base.id)
+            }
+            _ => {}
+        }
+
+        self.base
+            .set_status(
+                ComponentStatus::Starting,
+                Some("Initializing WebSocket source".to_string()),
+            )
+            .await;
+
+        let prepared_connector = match prepare_connector(&self.config) {
+            Ok(connector) => connector,
+            Err(error) => {
+                let failure_summary = error.failure_summary();
+                let error = anyhow::Error::new(error);
+                fail_source(&self.base, failure_summary, &error).await;
+                return Err(error);
+            }
+        };
+        if let Some(report) = prepared_connector.trust_root_report {
+            if report.rejected > 0 || report.load_errors > 0 {
+                warn!(
+                    "[{}] Loaded {} platform TLS trust roots; rejected {} certificates and encountered {} load errors",
+                    self.base.id,
+                    report.accepted,
+                    report.rejected,
+                    report.load_errors
+                );
+            }
+        }
+
+        self.base
+            .set_status(
+                ComponentStatus::Starting,
+                Some("Waiting for WebSocket subscribers".to_string()),
+            )
+            .await;
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        self.base.set_shutdown_tx(shutdown_tx).await;
+
+        let base = self.base.clone_shared();
+        let config = self.config.clone();
+        let task = tokio::spawn(run_worker(
+            base,
+            config,
+            shutdown_rx,
+            prepared_connector.connector,
+        ));
+
+        self.base.set_task_handle(task).await;
+        info!(
+            "[{}] WebSocket source waiting for subscribers",
+            self.base.id
+        );
+        Ok(())
     }
 }
 
@@ -190,35 +261,8 @@ impl Source for WebSocketSource {
     }
 
     async fn start(&self) -> Result<()> {
-        let _lifecycle = self.lifecycle.lock().await;
-        match self.base.get_status().await {
-            ComponentStatus::Running | ComponentStatus::Starting => return Ok(()),
-            ComponentStatus::Stopping => {
-                anyhow::bail!("source '{}' is stopping", self.base.id)
-            }
-            _ => {}
-        }
-
-        self.base
-            .set_status(
-                ComponentStatus::Starting,
-                Some("Waiting for WebSocket subscribers".to_string()),
-            )
-            .await;
-
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        self.base.set_shutdown_tx(shutdown_tx).await;
-
-        let base = self.base.clone_shared();
-        let config = self.config.clone();
-        let task = tokio::spawn(run_worker(base, config, shutdown_rx));
-
-        self.base.set_task_handle(task).await;
-        info!(
-            "[{}] WebSocket source waiting for subscribers",
-            self.base.id
-        );
-        Ok(())
+        self.start_with_connector(transport::prepare_connector)
+            .await
     }
 
     async fn stop(&self) -> Result<()> {
@@ -266,6 +310,7 @@ async fn run_worker(
     base: SourceBase,
     config: Arc<WebSocketSourceConfig>,
     mut shutdown_rx: oneshot::Receiver<()>,
+    connector: Connector,
 ) {
     tokio::select! {
         biased;
@@ -294,6 +339,7 @@ async fn run_worker(
         &mut reconnect_backoff,
         false,
         "WebSocket connection failed",
+        &connector,
     )
     .await
     {
@@ -353,6 +399,7 @@ async fn run_worker(
             &mut reconnect_backoff,
             true,
             "WebSocket reconnect failed",
+            &connector,
         )
         .await
         {
@@ -384,6 +431,7 @@ async fn connect_with_retry(
     backoff: &mut ReconnectBackoff,
     delay_before_first_attempt: bool,
     failure_summary: &str,
+    connector: &Connector,
 ) -> Result<Option<WebSocketConnection>> {
     let mut delay_before_attempt = delay_before_first_attempt.then(|| backoff.next_delay());
 
@@ -399,7 +447,7 @@ async fn connect_with_retry(
         let connection = tokio::select! {
             biased;
             _ = &mut *shutdown_rx => return Ok(None),
-            connection = transport::connect(config) => connection,
+            connection = transport::connect(config, connector) => connection,
         };
 
         match connection {
@@ -495,6 +543,7 @@ mod tests {
     use drasi_lib::{
         bootstrap::{BootstrapContext, BootstrapRequest, BootstrapResult},
         channels::BootstrapEventSender,
+        component_graph::ComponentUpdate,
     };
     use drasi_source_mapping::{ElementTemplate, ElementType, OperationType, SourceMapping};
     use tokio::time::timeout;
@@ -529,6 +578,14 @@ mod tests {
             initial_messages: vec![r#"{"token":"message-secret"}"#.to_string()],
             mappings: vec![mapping()],
             ..Default::default()
+        }
+    }
+
+    fn plain_config() -> WebSocketSourceConfig {
+        WebSocketSourceConfig {
+            url: "ws://example.com/events".to_string(),
+            allow_insecure: true,
+            ..config()
         }
     }
 
@@ -655,7 +712,7 @@ mod tests {
 
         #[tokio::test]
         async fn stop_cancels_worker_waiting_for_subscription() {
-            let source = WebSocketSource::new("source", config()).unwrap();
+            let source = WebSocketSource::new("source", plain_config()).unwrap();
             assert_eq!(source.status().await, ComponentStatus::Stopped);
 
             source.start().await.unwrap();
@@ -666,6 +723,59 @@ mod tests {
                 .expect("stop should cancel subscriber waiting")
                 .unwrap();
             assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+
+        #[tokio::test]
+        async fn connector_failure_sets_error_without_creating_a_worker() {
+            let source = WebSocketSource::new("source", config()).unwrap();
+            let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(4);
+            source
+                .initialize(SourceRuntimeContext::new(
+                    "test-instance",
+                    "source",
+                    None,
+                    update_tx,
+                    None,
+                ))
+                .await;
+
+            let error = source
+                .start_with_connector(|config| {
+                    transport::prepare_connector_with_roots(config, Vec::new(), 0)
+                })
+                .await
+                .unwrap_err();
+
+            assert_eq!(
+                error.downcast_ref::<TlsInitializationError>(),
+                Some(&TlsInitializationError::NoUsableRoots {
+                    rejected: 0,
+                    load_errors: 0,
+                })
+            );
+            assert_eq!(source.status().await, ComponentStatus::Error);
+            assert!(source.base.task_handle.read().await.is_none());
+            assert!(source.base.shutdown_tx.read().await.is_none());
+
+            assert!(matches!(
+                update_rx.recv().await,
+                Some(ComponentUpdate::Status {
+                    component_id,
+                    status: ComponentStatus::Starting,
+                    message: Some(message),
+                }) if component_id == "source" && message == "Initializing WebSocket source"
+            ));
+            assert!(matches!(
+                update_rx.recv().await,
+                Some(ComponentUpdate::Status {
+                    component_id,
+                    status: ComponentStatus::Error,
+                    message: Some(message),
+                }) if component_id == "source"
+                    && message
+                        == "WebSocket TLS trust store unavailable: No usable platform TLS trust roots were found"
+            ));
+            assert!(update_rx.try_recv().is_err());
         }
 
         #[tokio::test]
