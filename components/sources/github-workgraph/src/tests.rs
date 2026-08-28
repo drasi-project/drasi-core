@@ -30,11 +30,17 @@ use crate::mapping::{
     agent_changes, allocation_changes, AgentProjection, Conversion, Converter, NODE_LABELS,
     RELATION_LABELS,
 };
+use crate::vnext::{
+    LifecycleArtifactDocument, PreparedProjection, PreparedProjectionCommit, ProjectionInput,
+    TaskDocument, VNextAllocatorProjection, VNextAssignmentBinding, VNextDispatchBinding,
+    VNextTaskBinding, WorkGraphProjector,
+};
 use crate::webhook::verify_signature;
 use crate::workgraph::{
     classify_comment, classify_task_body, error_code, CommentClassification, Outcome,
     TaskClassification, TaskInputs, TaskType, WorkflowJoin,
 };
+use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use drasi_core::evaluation::context::QueryPartEvaluationContext;
 use drasi_core::evaluation::functions::FunctionRegistry;
@@ -42,16 +48,18 @@ use drasi_core::evaluation::variable_value::VariableValue;
 use drasi_core::models::{Element, ElementValue, SourceChange};
 use drasi_core::query::{ContinuousQuery, QueryBuilder};
 use drasi_lib::state_store::StateStoreProvider;
-use drasi_lib::wal::{CapacityPolicy, WalProvider, WriteAheadLogConfig};
+use drasi_lib::wal::{CapacityPolicy, WalError, WalProvider, WriteAheadLogConfig};
 use drasi_lib::{DurabilityConfig, MemoryStateStoreProvider};
 use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
 use drasi_query_cypher::CypherParser;
 use drasi_wal_redb::RedbWalProvider;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::TempDir;
+use tokio::sync::Mutex;
 
 const TASK_TYPE_ID: &str = "IT_test";
 const TASK_TYPE_NAME: &str = "WorkGraphTask";
@@ -2572,6 +2580,7 @@ fn descriptor_exposes_task_type_and_graph_schema() {
     assert!(NODE_LABELS.contains(&"WorkGraphTaskAssignment"));
     assert!(NODE_LABELS.contains(&"WorkGraphTaskResult"));
     assert!(NODE_LABELS.contains(&"WorkGraphTaskResultAcceptance"));
+    assert!(NODE_LABELS.contains(&"WorkGraphTaskArtifact"));
     assert!(NODE_LABELS.contains(&"WorkGraphAgent"));
     assert!(NODE_LABELS.contains(&"WorkGraphAgentSlot"));
     assert!(RELATION_LABELS.contains(&"ASSIGNMENT_FOR"));
@@ -2580,6 +2589,7 @@ fn descriptor_exposes_task_type_and_graph_schema() {
     assert!(RELATION_LABELS.contains(&"ASSIGNED_TO"));
     assert!(RELATION_LABELS.contains(&"HAS_SLOT"));
     assert!(RELATION_LABELS.contains(&"TASK_FOR"));
+    assert!(RELATION_LABELS.contains(&"ARTIFACT_FOR"));
     assert!(
         serde_json::from_value::<crate::descriptor::GitHubWorkGraphSourceConfigDto>(json!({
             "organization": "acme",
@@ -4315,6 +4325,960 @@ async fn allocator_fixture(
     (tmp, store, wal, allocator)
 }
 
+struct DirectiveProjector {
+    source_id: String,
+    projections: Mutex<VecDeque<VNextAllocatorProjection>>,
+    commits: Arc<AtomicUsize>,
+}
+
+impl DirectiveProjector {
+    fn new(source_id: &str) -> Self {
+        Self {
+            source_id: source_id.to_string(),
+            projections: Mutex::new(VecDeque::new()),
+            commits: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    async fn next(&self, projection: VNextAllocatorProjection) {
+        self.projections.lock().await.push_back(projection);
+    }
+}
+
+struct CountingProjectionCommit {
+    commits: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl PreparedProjectionCommit for CountingProjectionCommit {
+    async fn commit(self: Box<Self>) {
+        self.commits.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl WorkGraphProjector for DirectiveProjector {
+    async fn prepare(
+        &self,
+        _inputs: Vec<ProjectionInput>,
+        _effective_from: u64,
+    ) -> anyhow::Result<PreparedProjection> {
+        Ok(PreparedProjection {
+            changes: Vec::new(),
+            allocator: self
+                .projections
+                .lock()
+                .await
+                .pop_front()
+                .unwrap_or_default(),
+            rejection: None,
+            state_changed: true,
+            checkpoint: vec![1],
+            commit: Box::new(CountingProjectionCommit {
+                commits: self.commits.clone(),
+            }),
+        })
+    }
+
+    async fn restore(&self, _checkpoint: &[u8]) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn source_id(&self) -> &str {
+        &self.source_id
+    }
+}
+
+struct FailAtWal {
+    inner: Arc<RedbWalProvider>,
+    calls: AtomicUsize,
+    fail_at: usize,
+}
+
+#[async_trait]
+impl WalProvider for FailAtWal {
+    async fn register(&self, source_id: &str, config: WriteAheadLogConfig) -> Result<(), WalError> {
+        self.inner.register(source_id, config).await
+    }
+
+    async fn append(&self, source_id: &str, event: &SourceChange) -> Result<u64, WalError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == self.fail_at {
+            return Err(WalError::StorageError("injected failure".to_string()));
+        }
+        self.inner.append(source_id, event).await
+    }
+
+    async fn read_from(
+        &self,
+        source_id: &str,
+        sequence: u64,
+    ) -> Result<Vec<(u64, SourceChange)>, WalError> {
+        self.inner.read_from(source_id, sequence).await
+    }
+
+    async fn prune_up_to(&self, source_id: &str, sequence: u64) -> Result<u64, WalError> {
+        self.inner.prune_up_to(source_id, sequence).await
+    }
+
+    async fn head_sequence(&self, source_id: &str) -> Result<u64, WalError> {
+        self.inner.head_sequence(source_id).await
+    }
+
+    async fn oldest_sequence(&self, source_id: &str) -> Result<Option<u64>, WalError> {
+        self.inner.oldest_sequence(source_id).await
+    }
+
+    async fn event_count(&self, source_id: &str) -> Result<u64, WalError> {
+        self.inner.event_count(source_id).await
+    }
+
+    async fn delete_wal(&self, source_id: &str) -> Result<(), WalError> {
+        self.inner.delete_wal(source_id).await
+    }
+}
+
+fn vnext_task_input(source_key: &str, is_open: bool) -> ProjectionInput {
+    ProjectionInput::UpsertTask(TaskDocument {
+        source_key: source_key.to_string(),
+        body: "WorkGraphTask/v3\n\n```json\n{}\n```\n".to_string(),
+        is_open,
+        state_reason: String::new(),
+        parent_source_key: None,
+    })
+}
+
+fn vnext_artifact_input(source_key: &str, task_source_key: &str, marker: &str) -> ProjectionInput {
+    ProjectionInput::UpsertLifecycleArtifact(LifecycleArtifactDocument {
+        source_key: source_key.to_string(),
+        task_source_key: task_source_key.to_string(),
+        body: format!("{marker}\n\n```json\n{{}}\n```\n"),
+    })
+}
+
+fn vnext_task_binding() -> VNextTaskBinding {
+    VNextTaskBinding {
+        source_key: "issue-node".to_string(),
+        task_id: "task-1".to_string(),
+        task_element_id: "workgraph-vnext:task:task-1".to_string(),
+    }
+}
+
+fn vnext_assignment_binding(source_key: &str, assignment_id: &str) -> VNextAssignmentBinding {
+    VNextAssignmentBinding {
+        source_key: source_key.to_string(),
+        task_source_key: "issue-node".to_string(),
+        task_id: "task-1".to_string(),
+        assignment_id: assignment_id.to_string(),
+        permitted_executors: vec!["agent".to_string()],
+    }
+}
+
+fn vnext_dispatch_binding(lease_id: &str) -> VNextDispatchBinding {
+    VNextDispatchBinding {
+        source_key: "dispatch-comment".to_string(),
+        task_source_key: "issue-node".to_string(),
+        task_id: "task-1".to_string(),
+        assignment_id: "assignment-1".to_string(),
+        lease_id: lease_id.to_string(),
+        executor_id: "agent".to_string(),
+        slot_id: "agent/1".to_string(),
+    }
+}
+
+#[tokio::test]
+async fn vnext_allocator_projects_exact_lease_details_and_retains_them_after_dispatch() {
+    let source_id = "vnext-allocation";
+    let (_tmp, store, wal, allocator) = allocator_fixture(source_id).await;
+    allocator
+        .sync_agents(
+            &agent_location(),
+            &agent_file(
+                "version: 1\nagents:\n  - agentId: agent-b\n    slots: 1\n    leaseDuration: PT15M\n  - agentId: agent-a\n    slots: 1\n    leaseDuration: PT15M\n",
+            ),
+            &agent_content("agents"),
+            1,
+        )
+        .await
+        .unwrap();
+    let projector = DirectiveProjector::new(source_id);
+    let task_binding = vnext_task_binding();
+    let assignment_binding = VNextAssignmentBinding {
+        permitted_executors: vec!["agent-b".to_string(), "agent-a".to_string()],
+        ..vnext_assignment_binding("assign-comment", "assignment-1")
+    };
+
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task_binding.clone()],
+            ..VNextAllocatorProjection::default()
+        })
+        .await;
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![vnext_task_input("issue-node", true)],
+            2,
+            "task-delivery",
+        )
+        .await
+        .unwrap();
+
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task_binding.clone()],
+            assignments: vec![assignment_binding.clone()],
+            ..VNextAllocatorProjection::default()
+        })
+        .await;
+    let before_assignment = wal.head_sequence(source_id).await.unwrap();
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![vnext_artifact_input(
+                "assign-comment",
+                "issue-node",
+                "WorkGraphTaskAssign/v1",
+            )],
+            3,
+            "assign-delivery",
+        )
+        .await
+        .unwrap();
+    let assignment_changes = wal
+        .read_from(source_id, before_assignment + 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, change)| change)
+        .collect::<Vec<_>>();
+    let lease_id = hex::encode(Sha256::digest(b"task-1\0assignment-1\0\x31"));
+    let lease_element = format!("workgraph-vnext-lease:{lease_id}");
+    for (property_name, expected) in [
+        ("leaseId", lease_id.as_str()),
+        ("taskId", "task-1"),
+        ("assignmentId", "assignment-1"),
+        ("executorId", "agent-a"),
+        ("slotId", "agent-a/1"),
+    ] {
+        assert_eq!(
+            node_property(&assignment_changes, &lease_element, property_name),
+            &ElementValue::from(&json!(expected))
+        );
+    }
+    assert_eq!(
+        relation_endpoints(
+            &assignment_changes,
+            "LEASE_FOR",
+            &format!("LEASE_FOR:{lease_element}:workgraph-vnext:task:task-1"),
+        ),
+        (lease_element.as_str(), "workgraph-vnext:task:task-1")
+    );
+    for (artifact_name, artifact_id) in [
+        ("lease.id", lease_id.as_str()),
+        ("lease.assignmentId", "assignment-1"),
+        ("lease.executorId", "agent-a"),
+        ("lease.slotId", "agent-a/1"),
+    ] {
+        let artifact_element = format!("workgraph-vnext-artifact:{lease_id}:{artifact_name}");
+        assert_eq!(
+            node_property(&assignment_changes, &artifact_element, "taskId"),
+            &ElementValue::from(&json!("task-1"))
+        );
+        assert_eq!(
+            node_property(&assignment_changes, &artifact_element, "artifactName"),
+            &ElementValue::from(&json!(artifact_name))
+        );
+        assert_eq!(
+            node_property(&assignment_changes, &artifact_element, "artifactId"),
+            &ElementValue::from(&json!(artifact_id))
+        );
+        assert_eq!(
+            relation_endpoints(
+                &assignment_changes,
+                "ARTIFACT_FOR",
+                &format!("ARTIFACT_FOR:{artifact_element}:workgraph-vnext:task:task-1"),
+            ),
+            (artifact_element.as_str(), "workgraph-vnext:task:task-1")
+        );
+    }
+
+    let dispatch_input =
+        vnext_artifact_input("dispatch-comment", "issue-node", "WorkGraphTaskDispatch/v1");
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task_binding.clone()],
+            assignments: vec![assignment_binding.clone()],
+            dispatches: vec![VNextDispatchBinding {
+                executor_id: "agent-b".to_string(),
+                slot_id: "agent-a/1".to_string(),
+                ..vnext_dispatch_binding(&lease_id)
+            }],
+        })
+        .await;
+    let before_rejected_dispatch = wal.head_sequence(source_id).await.unwrap();
+    assert!(allocator
+        .ingest_vnext(
+            &projector,
+            vec![dispatch_input.clone()],
+            4,
+            "bad-dispatch-delivery",
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        wal.head_sequence(source_id).await.unwrap(),
+        before_rejected_dispatch
+    );
+    assert!(!allocator
+        .vnext_origin_completed("bad-dispatch-delivery")
+        .await
+        .unwrap());
+
+    let dispatch_binding = VNextDispatchBinding {
+        executor_id: "agent-a".to_string(),
+        slot_id: "agent-a/1".to_string(),
+        ..vnext_dispatch_binding(&lease_id)
+    };
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task_binding.clone()],
+            assignments: vec![assignment_binding.clone()],
+            dispatches: vec![dispatch_binding.clone()],
+        })
+        .await;
+    let before_dispatch = wal.head_sequence(source_id).await.unwrap();
+    allocator
+        .ingest_vnext(&projector, vec![dispatch_input], 4, "dispatch-delivery")
+        .await
+        .unwrap();
+    let dispatch_changes = wal
+        .read_from(source_id, before_dispatch + 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, change)| change)
+        .collect::<Vec<_>>();
+    assert!(dispatch_changes
+        .iter()
+        .any(|change| { label(change) == "LEASES_SLOT" && is_delete(change) }));
+    assert!(!dispatch_changes.iter().any(|change| {
+        is_delete(change)
+            && matches!(
+                label(change),
+                "WorkGraphTaskLease" | "LEASE_FOR" | "WorkGraphTaskArtifact" | "ARTIFACT_FOR"
+            )
+    }));
+
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task_binding.clone()],
+            assignments: vec![assignment_binding.clone()],
+            dispatches: vec![dispatch_binding.clone()],
+        })
+        .await;
+    let before_close = wal.head_sequence(source_id).await.unwrap();
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![vnext_task_input("issue-node", false)],
+            5,
+            "close-after-dispatch",
+        )
+        .await
+        .unwrap();
+    let close_changes = wal
+        .read_from(source_id, before_close + 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, change)| change)
+        .collect::<Vec<_>>();
+    assert!(!close_changes.iter().any(|change| {
+        is_delete(change)
+            && matches!(
+                label(change),
+                "WorkGraphTaskLease" | "LEASE_FOR" | "WorkGraphTaskArtifact" | "ARTIFACT_FOR"
+            )
+    }));
+
+    let before_restart = wal.head_sequence(source_id).await.unwrap();
+    let restarted = Allocator::new(source_id.to_string(), store, wal.clone());
+    restarted.recover(6).await.unwrap();
+    let restated = wal
+        .read_from(source_id, before_restart + 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, change)| change)
+        .collect::<Vec<_>>();
+    assert!(restated
+        .iter()
+        .any(|change| { id(change) == lease_element && label(change) == "WorkGraphTaskLease" }));
+    assert!(restated
+        .iter()
+        .any(|change| label(change) == "LEASE_FOR" && !is_delete(change)));
+    assert_eq!(
+        restated
+            .iter()
+            .filter(|change| label(change) == "WorkGraphTaskArtifact")
+            .count(),
+        4
+    );
+    assert!(!restated.iter().any(|change| label(change) == "LEASES_SLOT"));
+
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task_binding.clone()],
+            assignments: vec![assignment_binding.clone()],
+            dispatches: vec![dispatch_binding],
+        })
+        .await;
+    restarted
+        .ingest_vnext(
+            &projector,
+            vec![vnext_task_input("issue-node", true)],
+            7,
+            "reopen-after-dispatch",
+        )
+        .await
+        .unwrap();
+
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task_binding.clone()],
+            assignments: vec![assignment_binding],
+            ..VNextAllocatorProjection::default()
+        })
+        .await;
+    let before_dispatch_edit = wal.head_sequence(source_id).await.unwrap();
+    restarted
+        .ingest_vnext(
+            &projector,
+            vec![vnext_artifact_input(
+                "dispatch-comment",
+                "issue-node",
+                "WorkGraphTaskResult/v1",
+            )],
+            8,
+            "dispatch-edit-away",
+        )
+        .await
+        .unwrap();
+    let dispatch_edit = wal
+        .read_from(source_id, before_dispatch_edit + 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, change)| change)
+        .collect::<Vec<_>>();
+    let replacement_lease_id = hex::encode(Sha256::digest(b"task-1\0assignment-1\0\x32"));
+    let replacement_lease_element = format!("workgraph-vnext-lease:{replacement_lease_id}");
+    assert!(dispatch_edit.iter().any(|change| {
+        id(change) == lease_element && label(change) == "WorkGraphTaskLease" && is_delete(change)
+    }));
+    assert!(dispatch_edit.iter().any(|change| {
+        id(change) == replacement_lease_element
+            && label(change) == "WorkGraphTaskLease"
+            && !is_delete(change)
+    }));
+
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task_binding],
+            ..VNextAllocatorProjection::default()
+        })
+        .await;
+    let before_delete = wal.head_sequence(source_id).await.unwrap();
+    restarted
+        .ingest_vnext(
+            &projector,
+            vec![ProjectionInput::DeleteLifecycleArtifact {
+                source_key: "assign-comment".to_string(),
+            }],
+            9,
+            "assign-delete-delivery",
+        )
+        .await
+        .unwrap();
+    let deleted = wal
+        .read_from(source_id, before_delete + 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, change)| change)
+        .collect::<Vec<_>>();
+    assert!(deleted.iter().any(|change| {
+        id(change) == replacement_lease_element
+            && label(change) == "WorkGraphTaskLease"
+            && is_delete(change)
+    }));
+    assert_eq!(
+        deleted
+            .iter()
+            .filter(|change| label(change) == "WorkGraphTaskArtifact" && is_delete(change))
+            .count(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn vnext_allocator_converges_delayed_assignment_and_cancels_on_edit_or_task_close() {
+    let source_id = "vnext-out-of-order";
+    let (_tmp, _store, wal, allocator) = allocator_fixture(source_id).await;
+    allocator
+        .sync_agents(
+            &agent_location(),
+            &agent_file(
+                "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+            ),
+            &agent_content("agents"),
+            1,
+        )
+        .await
+        .unwrap();
+    let projector = DirectiveProjector::new(source_id);
+    let assignment_input =
+        vnext_artifact_input("assign-comment", "issue-node", "WorkGraphTaskAssign/v1");
+    let task_binding = vnext_task_binding();
+    let assignment_binding = vnext_assignment_binding("assign-comment", "assignment-1");
+
+    projector.next(VNextAllocatorProjection::default()).await;
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![assignment_input.clone()],
+            2,
+            "assign-first",
+        )
+        .await
+        .unwrap();
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task_binding.clone()],
+            assignments: vec![assignment_binding],
+            ..VNextAllocatorProjection::default()
+        })
+        .await;
+    let before_task = wal.head_sequence(source_id).await.unwrap();
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![vnext_task_input("issue-node", true)],
+            3,
+            "task-second",
+        )
+        .await
+        .unwrap();
+    let lease_id = hex::encode(Sha256::digest(b"task-1\0assignment-1\0\x31"));
+    let lease_element = format!("workgraph-vnext-lease:{lease_id}");
+    assert!(wal
+        .read_from(source_id, before_task + 1)
+        .await
+        .unwrap()
+        .iter()
+        .any(|(_, change)| {
+            id(change) == lease_element
+                && label(change) == "WorkGraphTaskLease"
+                && !is_delete(change)
+        }));
+
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task_binding.clone()],
+            ..VNextAllocatorProjection::default()
+        })
+        .await;
+    let before_edit = wal.head_sequence(source_id).await.unwrap();
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![vnext_artifact_input(
+                "assign-comment",
+                "issue-node",
+                "WorkGraphTaskResult/v1",
+            )],
+            4,
+            "assign-edit-away",
+        )
+        .await
+        .unwrap();
+    assert!(wal
+        .read_from(source_id, before_edit + 1)
+        .await
+        .unwrap()
+        .iter()
+        .any(|(_, change)| {
+            id(change) == lease_element
+                && label(change) == "WorkGraphTaskLease"
+                && is_delete(change)
+        }));
+
+    let second_assignment = vnext_assignment_binding("assign-comment-2", "assignment-2");
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task_binding.clone()],
+            assignments: vec![second_assignment.clone()],
+            ..VNextAllocatorProjection::default()
+        })
+        .await;
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![vnext_artifact_input(
+                "assign-comment-2",
+                "issue-node",
+                "WorkGraphTaskAssign/v1",
+            )],
+            5,
+            "assign-again",
+        )
+        .await
+        .unwrap();
+    let second_lease_id = hex::encode(Sha256::digest(b"task-1\0assignment-2\0\x31"));
+    let second_lease_element = format!("workgraph-vnext-lease:{second_lease_id}");
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task_binding],
+            assignments: vec![second_assignment],
+            ..VNextAllocatorProjection::default()
+        })
+        .await;
+    let before_close = wal.head_sequence(source_id).await.unwrap();
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![vnext_task_input("issue-node", false)],
+            6,
+            "task-close",
+        )
+        .await
+        .unwrap();
+    assert!(wal
+        .read_from(source_id, before_close + 1)
+        .await
+        .unwrap()
+        .iter()
+        .any(|(_, change)| {
+            id(change) == second_lease_element
+                && label(change) == "WorkGraphTaskLease"
+                && is_delete(change)
+        }));
+}
+
+#[tokio::test]
+async fn vnext_allocator_recovers_partial_lease_wal_without_duplicate_facts() {
+    let source_id = "vnext-partial-wal";
+    let (_tmp, store, inner, allocator) = allocator_fixture(source_id).await;
+    allocator
+        .sync_agents(
+            &agent_location(),
+            &agent_file(
+                "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+            ),
+            &agent_content("agents"),
+            1,
+        )
+        .await
+        .unwrap();
+    let projector = DirectiveProjector::new(source_id);
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![vnext_task_binding()],
+            ..VNextAllocatorProjection::default()
+        })
+        .await;
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![vnext_task_input("issue-node", true)],
+            2,
+            "task",
+        )
+        .await
+        .unwrap();
+    let commits_before_failure = projector.commits.load(Ordering::SeqCst);
+    let before = inner.head_sequence(source_id).await.unwrap();
+    let failing = Allocator::new(
+        source_id.to_string(),
+        store.clone(),
+        Arc::new(FailAtWal {
+            inner: inner.clone(),
+            calls: AtomicUsize::new(0),
+            fail_at: 1,
+        }),
+    );
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![vnext_task_binding()],
+            assignments: vec![vnext_assignment_binding("assign-comment", "assignment-1")],
+            ..VNextAllocatorProjection::default()
+        })
+        .await;
+    assert!(failing
+        .ingest_vnext(
+            &projector,
+            vec![vnext_artifact_input(
+                "assign-comment",
+                "issue-node",
+                "WorkGraphTaskAssign/v1",
+            )],
+            3,
+            "assign-crash",
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        projector.commits.load(Ordering::SeqCst),
+        commits_before_failure
+    );
+    let stored = store
+        .get(source_id, "allocator:state")
+        .await
+        .unwrap()
+        .unwrap();
+    let stored: Value = serde_json::from_slice(&stored).unwrap();
+    let pending_len = stored["pending"].as_array().unwrap().len();
+    assert!(pending_len > 1);
+    assert_eq!(stored["pendingOffset"], json!(1));
+    assert_eq!(inner.head_sequence(source_id).await.unwrap(), before + 1);
+
+    let restarted = Allocator::new(source_id.to_string(), store, inner.clone());
+    assert_eq!(restarted.vnext_checkpoint().await.unwrap(), vec![1]);
+    assert_eq!(
+        inner.head_sequence(source_id).await.unwrap(),
+        before + pending_len as u64
+    );
+    let recovered = inner.read_from(source_id, before + 1).await.unwrap();
+    let lease_id = hex::encode(Sha256::digest(b"task-1\0assignment-1\0\x31"));
+    assert_eq!(
+        recovered
+            .iter()
+            .filter(|(_, change)| {
+                id(change) == format!("workgraph-vnext-lease:{lease_id}")
+                    && label(change) == "WorkGraphTaskLease"
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        recovered
+            .iter()
+            .filter(|(_, change)| label(change) == "WorkGraphTaskArtifact")
+            .count(),
+        4
+    );
+    assert!(restarted
+        .vnext_origin_completed("assign-crash")
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn vnext_allocator_converges_dispatch_assignment_task_out_of_order() {
+    let source_id = "vnext-reverse-order";
+    let (_tmp, _store, wal, allocator) = allocator_fixture(source_id).await;
+    allocator
+        .sync_agents(
+            &agent_location(),
+            &agent_file(
+                "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+            ),
+            &agent_content("agents"),
+            1,
+        )
+        .await
+        .unwrap();
+    let projector = DirectiveProjector::new(source_id);
+    let lease_id = hex::encode(Sha256::digest(b"task-1\0assignment-1\0\x31"));
+
+    projector.next(VNextAllocatorProjection::default()).await;
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![vnext_artifact_input(
+                "dispatch-comment",
+                "issue-node",
+                "WorkGraphTaskDispatch/v1",
+            )],
+            2,
+            "dispatch-first",
+        )
+        .await
+        .unwrap();
+    projector.next(VNextAllocatorProjection::default()).await;
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![vnext_artifact_input(
+                "assign-comment",
+                "issue-node",
+                "WorkGraphTaskAssign/v1",
+            )],
+            3,
+            "assign-second",
+        )
+        .await
+        .unwrap();
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![vnext_task_binding()],
+            assignments: vec![vnext_assignment_binding("assign-comment", "assignment-1")],
+            dispatches: vec![vnext_dispatch_binding(&lease_id)],
+        })
+        .await;
+    let before = wal.head_sequence(source_id).await.unwrap();
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![vnext_task_input("issue-node", true)],
+            4,
+            "task-third",
+        )
+        .await
+        .unwrap();
+    let changes = wal
+        .read_from(source_id, before + 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, change)| change)
+        .collect::<Vec<_>>();
+    assert!(changes.iter().any(|change| {
+        id(change) == format!("workgraph-vnext-lease:{lease_id}")
+            && label(change) == "WorkGraphTaskLease"
+            && !is_delete(change)
+    }));
+    assert!(changes
+        .iter()
+        .any(|change| label(change) == "LEASE_FOR" && !is_delete(change)));
+    assert_eq!(
+        changes
+            .iter()
+            .filter(|change| label(change) == "WorkGraphTaskArtifact")
+            .count(),
+        4
+    );
+    assert!(!changes.iter().any(|change| label(change) == "LEASES_SLOT"));
+}
+
+#[tokio::test]
+async fn vnext_allocator_snapshot_retracts_and_restores_cross_source_duplicate_assignment() {
+    let source_id = "vnext-duplicate-assignment";
+    let (_tmp, _store, wal, allocator) = allocator_fixture(source_id).await;
+    allocator
+        .sync_agents(
+            &agent_location(),
+            &agent_file(
+                "version: 1\nagents:\n  - agentId: agent\n    slots: 1\n    leaseDuration: PT15M\n",
+            ),
+            &agent_content("agents"),
+            1,
+        )
+        .await
+        .unwrap();
+    let projector = DirectiveProjector::new(source_id);
+    let task = vnext_task_binding();
+    let assignment = vnext_assignment_binding("assign-one", "assignment-1");
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task.clone()],
+            ..VNextAllocatorProjection::default()
+        })
+        .await;
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![vnext_task_input("issue-node", true)],
+            2,
+            "task",
+        )
+        .await
+        .unwrap();
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task.clone()],
+            assignments: vec![assignment.clone()],
+            ..VNextAllocatorProjection::default()
+        })
+        .await;
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![vnext_artifact_input(
+                "assign-one",
+                "issue-node",
+                "WorkGraphTaskAssign/v1",
+            )],
+            3,
+            "assign-one",
+        )
+        .await
+        .unwrap();
+    let first_lease_id = hex::encode(Sha256::digest(b"task-1\0assignment-1\0\x31"));
+
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task.clone()],
+            ..VNextAllocatorProjection::default()
+        })
+        .await;
+    let before_duplicate = wal.head_sequence(source_id).await.unwrap();
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![vnext_artifact_input(
+                "assign-two",
+                "issue-node",
+                "WorkGraphTaskAssign/v1",
+            )],
+            4,
+            "assign-two-duplicate",
+        )
+        .await
+        .unwrap();
+    assert!(wal
+        .read_from(source_id, before_duplicate + 1)
+        .await
+        .unwrap()
+        .iter()
+        .any(|(_, change)| {
+            id(change) == format!("workgraph-vnext-lease:{first_lease_id}")
+                && label(change) == "WorkGraphTaskLease"
+                && is_delete(change)
+        }));
+
+    projector
+        .next(VNextAllocatorProjection {
+            tasks: vec![task],
+            assignments: vec![assignment],
+            ..VNextAllocatorProjection::default()
+        })
+        .await;
+    let before_restore = wal.head_sequence(source_id).await.unwrap();
+    allocator
+        .ingest_vnext(
+            &projector,
+            vec![ProjectionInput::DeleteLifecycleArtifact {
+                source_key: "assign-two".to_string(),
+            }],
+            5,
+            "assign-two-delete",
+        )
+        .await
+        .unwrap();
+    let replacement_lease_id = hex::encode(Sha256::digest(b"task-1\0assignment-1\0\x32"));
+    assert!(wal
+        .read_from(source_id, before_restore + 1)
+        .await
+        .unwrap()
+        .iter()
+        .any(|(_, change)| {
+            id(change) == format!("workgraph-vnext-lease:{replacement_lease_id}")
+                && label(change) == "WorkGraphTaskLease"
+                && !is_delete(change)
+        }));
+}
+
 #[tokio::test]
 async fn allocator_contract_exact_active_lookup_requires_every_binding() {
     let mut state = AllocationState::default();
@@ -4577,13 +5541,14 @@ async fn pending_projection_replays_every_crash_prefix_and_then_clears() {
             wal.append(&source_id, change).await.unwrap();
         }
         let encoded = serde_json::to_vec(&json!({
-            "version": 2,
+            "version": 4,
             "agents": {},
             "queue": {},
             "assignmentAttempts": {},
             "comments": {},
             "active": {},
             "pending": projected,
+            "pendingOffset": prefix,
         }))
         .unwrap();
         store
@@ -4594,7 +5559,7 @@ async fn pending_projection_replays_every_crash_prefix_and_then_clears() {
         assert_eq!(allocator.recover(99).await.unwrap(), 0);
         assert_eq!(
             wal.head_sequence(&source_id).await.unwrap(),
-            (prefix + projected.len()) as u64
+            projected.len() as u64
         );
         let stored = store
             .get(&source_id, "allocator:state")
@@ -4694,6 +5659,27 @@ async fn restart_restates_the_exact_active_lease_and_corruption_fails_closed() {
         .set(source_id, "allocator:state", stored.clone())
         .await
         .unwrap();
+    let mut prior_prototype: Value = serde_json::from_slice(&stored).unwrap();
+    prior_prototype["version"] = json!(3);
+    store
+        .set(
+            source_id,
+            "allocator:state",
+            serde_json::to_vec(&prior_prototype).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(restarted
+        .recover(5)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("clear source state"));
+
+    store
+        .set(source_id, "allocator:state", stored.clone())
+        .await
+        .unwrap();
     let mut unsupported: Value = serde_json::from_slice(&stored).unwrap();
     unsupported["version"] = json!(1);
     store
@@ -4704,13 +5690,13 @@ async fn restart_restates_the_exact_active_lease_and_corruption_fails_closed() {
         )
         .await
         .unwrap();
-    assert!(restarted.recover(5).await.is_err());
+    assert!(restarted.recover(6).await.is_err());
 
     store
         .set(source_id, "allocator:state", b"{not-json".to_vec())
         .await
         .unwrap();
-    assert!(restarted.recover(6).await.is_err());
+    assert!(restarted.recover(7).await.is_err());
     assert!(restarted
         .validate_active(
             "task",
@@ -4880,6 +5866,38 @@ mod vnext_tests {
             ProjectionInput::DeleteTask { source_key } => assert_eq!(source_key, "node1"),
             _ => panic!("expected DeleteTask"),
         }
+    }
+
+    #[test]
+    fn vnext_allocator_projection_roundtrip() {
+        let projection = VNextAllocatorProjection {
+            tasks: vec![VNextTaskBinding {
+                source_key: "issue-node".to_string(),
+                task_id: "task-1".to_string(),
+                task_element_id: "task-element".to_string(),
+            }],
+            assignments: vec![VNextAssignmentBinding {
+                source_key: "assign-comment".to_string(),
+                task_source_key: "issue-node".to_string(),
+                task_id: "task-1".to_string(),
+                assignment_id: "assignment-1".to_string(),
+                permitted_executors: vec!["agent".to_string()],
+            }],
+            dispatches: vec![VNextDispatchBinding {
+                source_key: "dispatch-comment".to_string(),
+                task_source_key: "issue-node".to_string(),
+                task_id: "task-1".to_string(),
+                assignment_id: "assignment-1".to_string(),
+                lease_id: "lease-1".to_string(),
+                executor_id: "agent".to_string(),
+                slot_id: "agent/1".to_string(),
+            }],
+        };
+        let encoded = serde_json::to_vec(&projection).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<VNextAllocatorProjection>(&encoded).unwrap(),
+            projection
+        );
     }
 
     // ── GitHub issue locator ────────────────────────────────────────────

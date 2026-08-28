@@ -142,13 +142,60 @@ pub enum ProjectionInput {
     DeleteLocator { source_key: String },
 }
 
+/// Complete bounded allocator projection derived by the trusted VNext
+/// projector.
+///
+/// Core validates the projection against authenticated normalized documents
+/// and reconciles its Source-owned queue/lease state to this exact desired set
+/// in the same transaction as the projector graph changes and checkpoint.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VNextAllocatorProjection {
+    pub tasks: Vec<VNextTaskBinding>,
+    pub assignments: Vec<VNextAssignmentBinding>,
+    pub dispatches: Vec<VNextDispatchBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VNextTaskBinding {
+    pub source_key: String,
+    pub task_id: String,
+    pub task_element_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VNextAssignmentBinding {
+    pub source_key: String,
+    pub task_source_key: String,
+    pub task_id: String,
+    pub assignment_id: String,
+    pub permitted_executors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VNextDispatchBinding {
+    pub source_key: String,
+    pub task_source_key: String,
+    pub task_id: String,
+    pub assignment_id: String,
+    pub lease_id: String,
+    pub executor_id: String,
+    pub slot_id: String,
+}
+
 // ── Object-safe projector trait ───────────────────────────────────────────
 
-/// The result of a successful `prepare()` call: an ordered batch of graph
-/// changes plus optional diagnostic.
+/// The result of a successful `prepare()` call: an ordered graph-change batch,
+/// complete allocator projection, and optional diagnostic.
 pub struct PreparedProjection {
     /// Ordered changes to append to the WAL.
     pub changes: Vec<SourceChange>,
+    /// Complete canonical allocator projection parsed by the trusted
+    /// projector and reconciled by Core in the same WAL transaction.
+    pub allocator: VNextAllocatorProjection,
     /// If non-empty, the projection was rejected but the changes are
     /// fail-closed retractions that must still be durably appended.
     pub rejection: Option<String>,
@@ -175,9 +222,10 @@ pub trait PreparedProjectionCommit: Send {
 /// The staged semantics are:
 ///
 /// 1. Core calls `prepare(inputs, effective_from)` on a clone/staged copy.
-/// 2. The prepared object exposes ordered `SourceChange`s and optional
-///    rejection diagnostic.
-/// 3. Core durably appends the changes through the existing WAL.
+/// 2. The prepared object exposes ordered `SourceChange`s, the complete
+///    canonical allocator projection, and an optional rejection diagnostic.
+/// 3. Core reconciles allocator state and durably appends all changes through
+///    the existing WAL.
 /// 4. Core calls `commit()` on the prepared object, which replaces the
 ///    projector's live state. **No state commit before WAL.**
 ///

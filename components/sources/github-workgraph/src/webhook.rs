@@ -942,6 +942,7 @@ mod vnext_tests {
     use crate::config::{TaskIssueType, TrustedIdentity};
     use crate::vnext::{
         PreparedProjection, PreparedProjectionCommit, ProjectionInput, TaskDocument,
+        VNextAllocatorProjection, VNextTaskBinding,
     };
     use async_trait::async_trait;
     use drasi_core::models::{
@@ -985,6 +986,17 @@ mod vnext_tests {
             _effective_from: u64,
         ) -> anyhow::Result<PreparedProjection> {
             let checkpoint = serde_json::to_vec(&inputs)?;
+            let tasks = inputs
+                .iter()
+                .filter_map(|input| match input {
+                    ProjectionInput::UpsertTask(document) => Some(VNextTaskBinding {
+                        source_key: document.source_key.clone(),
+                        task_id: document.source_key.clone(),
+                        task_element_id: format!("task:{}", document.source_key),
+                    }),
+                    _ => None,
+                })
+                .collect();
             let changes = (0..self.change_count)
                 .map(|index| SourceChange::Insert {
                     element: Element::Node {
@@ -1002,6 +1014,10 @@ mod vnext_tests {
                 .collect();
             Ok(PreparedProjection {
                 changes,
+                allocator: VNextAllocatorProjection {
+                    tasks,
+                    ..VNextAllocatorProjection::default()
+                },
                 rejection: None,
                 state_changed: true,
                 checkpoint,

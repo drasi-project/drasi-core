@@ -16,6 +16,7 @@ use crate::agents::{AgentFile, AgentFileContent, AgentFileLocation, MAX_AGENT_SL
 use crate::config::{LeaseTrust, RepositoryFilter, TaskIssueType};
 use crate::lease_ledger::{
     ActiveLease, AgentRuntime, AllocationArtifact, AllocationDelta, AllocationEvent,
+    VNextActiveLease,
 };
 use crate::workgraph::{
     agent_config_error_element_id, agent_element_id, agent_slot_element_id, classify_comment,
@@ -55,6 +56,7 @@ labels!(
     NODE_WORKGRAPH_TASK_FEEDBACK = "WorkGraphTaskFeedback",
     NODE_WORKGRAPH_TASK_RESULT_ACCEPTANCE = "WorkGraphTaskResultAcceptance",
     NODE_WORKGRAPH_TASK_LEASE = "WorkGraphTaskLease",
+    NODE_WORKGRAPH_TASK_ARTIFACT = "WorkGraphTaskArtifact",
     NODE_WORKGRAPH_AGENT = "WorkGraphAgent",
     NODE_WORKGRAPH_AGENT_SLOT = "WorkGraphAgentSlot",
     NODE_WORKGRAPH_ERROR = "WorkGraphError",
@@ -75,6 +77,7 @@ labels!(
     REL_HAS_SLOT = "HAS_SLOT",
     REL_LEASE_FOR = "LEASE_FOR",
     REL_LEASES_SLOT = "LEASES_SLOT",
+    REL_ARTIFACT_FOR = "ARTIFACT_FOR",
     REL_ERROR_ON = "ERROR_ON",
 );
 
@@ -1576,6 +1579,15 @@ pub fn allocation_changes(
     for lease in &delta.ended {
         delete_lease(&mut cs, lease);
     }
+    for lease in &delta.vnext_ended {
+        delete_vnext_lease(&mut cs, lease, true);
+    }
+    for lease in &delta.vnext_historical_ended {
+        delete_vnext_lease(&mut cs, lease, false);
+    }
+    for lease in &delta.vnext_released {
+        delete_vnext_lease_slot(&mut cs, lease);
+    }
     for (agent_id, slot_number) in &delta.removed_slots {
         let agent = agent_element_id(agent_id);
         let slot = agent_slot_element_id(&slot_id(agent_id, *slot_number));
@@ -1607,6 +1619,12 @@ pub fn allocation_changes(
     }
     for lease in &delta.started {
         upsert_lease(&mut cs, lease);
+    }
+    for lease in &delta.vnext_started {
+        upsert_vnext_lease(&mut cs, lease, true);
+    }
+    for lease in &delta.vnext_historical {
+        upsert_vnext_lease(&mut cs, lease, false);
     }
     for agent_id in &delta.affected_agents {
         let Some(runtime) = runtime.get(agent_id) else {
@@ -1698,6 +1716,113 @@ fn delete_lease(cs: &mut Changes, lease: &ActiveLease) {
     );
     cs.delete(&element_id, NODE_WORKGRAPH_TASK_LEASE);
 }
+
+fn upsert_vnext_lease(cs: &mut Changes, lease: &VNextActiveLease, active: bool) {
+    let element_id = vnext_lease_element_id(&lease.lease_id);
+    let mut props = ElementPropertyMap::new();
+    props.text("leaseId", &lease.lease_id);
+    props.text("taskId", &lease.task_id);
+    props.text("assignmentId", &lease.assignment_id);
+    props.text("executorId", &lease.executor_id);
+    props.text("slotId", &lease.slot_id);
+    props.text("acquiredAt", &lease.acquired_at);
+    props.text("expiresAt", &lease.expires_at);
+    cs.node(Update, &element_id, NODE_WORKGRAPH_TASK_LEASE, props);
+    for (artifact_name, artifact_id) in vnext_lease_artifact_details(lease) {
+        let artifact_element = vnext_lease_artifact_element_id(&lease.lease_id, artifact_name);
+        let mut props = ElementPropertyMap::new();
+        props.text("taskId", &lease.task_id);
+        props.text("artifactName", artifact_name);
+        props.text("artifactId", artifact_id);
+        cs.node(
+            Update,
+            &artifact_element,
+            NODE_WORKGRAPH_TASK_ARTIFACT,
+            props,
+        );
+        cs.relation(
+            Update,
+            REL_ARTIFACT_FOR,
+            &rel_id(REL_ARTIFACT_FOR, &artifact_element, &lease.task_element_id),
+            &artifact_element,
+            &lease.task_element_id,
+        );
+    }
+    cs.relation(
+        Update,
+        REL_LEASE_FOR,
+        &rel_id(REL_LEASE_FOR, &element_id, &lease.task_element_id),
+        &element_id,
+        &lease.task_element_id,
+    );
+    if active {
+        let slot = agent_slot_element_id(&lease.slot_id);
+        cs.relation(
+            Update,
+            REL_LEASES_SLOT,
+            &rel_id(REL_LEASES_SLOT, &element_id, &slot),
+            &element_id,
+            &slot,
+        );
+    }
+}
+
+fn delete_vnext_lease(cs: &mut Changes, lease: &VNextActiveLease, active: bool) {
+    let element_id = vnext_lease_element_id(&lease.lease_id);
+    for (artifact_name, _) in vnext_lease_artifact_details(lease) {
+        let artifact_element = vnext_lease_artifact_element_id(&lease.lease_id, artifact_name);
+        cs.delete(
+            &rel_id(REL_ARTIFACT_FOR, &artifact_element, &lease.task_element_id),
+            REL_ARTIFACT_FOR,
+        );
+        cs.delete(&artifact_element, NODE_WORKGRAPH_TASK_ARTIFACT);
+    }
+    cs.delete(
+        &rel_id(REL_LEASE_FOR, &element_id, &lease.task_element_id),
+        REL_LEASE_FOR,
+    );
+    if active {
+        cs.delete(
+            &rel_id(
+                REL_LEASES_SLOT,
+                &element_id,
+                &agent_slot_element_id(&lease.slot_id),
+            ),
+            REL_LEASES_SLOT,
+        );
+    }
+    cs.delete(&element_id, NODE_WORKGRAPH_TASK_LEASE);
+}
+
+fn delete_vnext_lease_slot(cs: &mut Changes, lease: &VNextActiveLease) {
+    let element_id = vnext_lease_element_id(&lease.lease_id);
+    cs.delete(
+        &rel_id(
+            REL_LEASES_SLOT,
+            &element_id,
+            &agent_slot_element_id(&lease.slot_id),
+        ),
+        REL_LEASES_SLOT,
+    );
+}
+
+fn vnext_lease_artifact_details(lease: &VNextActiveLease) -> [(&'static str, &str); 4] {
+    [
+        ("lease.id", &lease.lease_id),
+        ("lease.assignmentId", &lease.assignment_id),
+        ("lease.executorId", &lease.executor_id),
+        ("lease.slotId", &lease.slot_id),
+    ]
+}
+
+fn vnext_lease_element_id(lease_id: &str) -> String {
+    format!("workgraph-vnext-lease:{lease_id}")
+}
+
+fn vnext_lease_artifact_element_id(lease_id: &str, artifact_name: &str) -> String {
+    format!("workgraph-vnext-artifact:{lease_id}:{artifact_name}")
+}
+
 fn delete_agent(cs: &mut Changes, agent_id: &str, slots: &BTreeSet<u32>) {
     let agent_element = agent_element_id(agent_id);
     for slot_number in slots

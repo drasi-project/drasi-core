@@ -5,7 +5,11 @@ use crate::agents::{
     AgentDefinition, AgentFile, AgentFileContent, AgentFileLocation, MAX_AGENT_SLOTS,
 };
 use crate::mapping::{agent_changes, allocation_changes, set_artifact_trusted, AgentProjection};
-use crate::vnext::{PreparedProjectionCommit, ProjectionInput, TaskDocument, WorkGraphProjector};
+use crate::vnext::{
+    LifecycleArtifactDocument, PreparedProjectionCommit, ProjectionInput, TaskDocument,
+    VNextAllocatorProjection, VNextAssignmentBinding, VNextDispatchBinding, WorkGraphProjector,
+    VNEXT_ASSIGN_MARKER, VNEXT_DISPATCH_MARKER,
+};
 use crate::workgraph::{slot_id, Outcome, TaskType};
 use anyhow::{Context, Result as AnyResult};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -18,12 +22,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const VERSION: u8 = 3;
-/// Version 2 is accepted during upgrade; version 3 is the canonical version.
-const PREVIOUS_VERSION: u8 = 2;
+const VERSION: u8 = 4;
 const STATE_KEY: &str = "allocator:state";
 const DELIVERY_PREFIX: &str = "delivery:";
 const VNEXT_ORIGIN_PREFIX: &str = "vnext-origin:";
+const MAX_VNEXT_ID_LENGTH: usize = 256;
+const MAX_VNEXT_PERMITTED_EXECUTORS: usize = 64;
 
 fn vnext_origin_key(origin_id: &str) -> String {
     let digest = Sha256::digest(origin_id.as_bytes());
@@ -82,6 +86,11 @@ pub struct AllocationDelta {
     pub untrusted_assignments: BTreeSet<String>,
     pub untrusted_feedback: BTreeSet<String>,
     pub untrusted_acceptances: BTreeSet<String>,
+    pub vnext_ended: Vec<VNextActiveLease>,
+    pub vnext_historical_ended: Vec<VNextActiveLease>,
+    pub vnext_started: Vec<VNextActiveLease>,
+    pub vnext_released: Vec<VNextActiveLease>,
+    pub vnext_historical: Vec<VNextActiveLease>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +103,22 @@ pub struct ActiveLease {
     pub slot_id: String,
     pub slot_number: u32,
     pub task_type: TaskType,
+    pub acquired_at: String,
+    pub expires_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VNextActiveLease {
+    pub lease_id: String,
+    pub task_source_key: String,
+    pub task_id: String,
+    pub task_element_id: String,
+    pub assignment_source_key: String,
+    pub assignment_id: String,
+    pub executor_id: String,
+    pub slot_id: String,
+    pub slot_number: u32,
     pub acquired_at: String,
     pub expires_at: String,
 }
@@ -149,6 +174,26 @@ struct QueueEntry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VNextTaskState {
+    task_id: String,
+    task_element_id: String,
+    is_open: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VNextAssignmentState {
+    task_source_key: String,
+    task_id: String,
+    assignment_id: String,
+    permitted_executors: Vec<String>,
+    queued_at: u64,
+    next_attempt: u64,
+    eligible: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 enum StoredArtifact {
     Assignment {
@@ -197,6 +242,16 @@ pub struct AllocationState {
     assignment_attempts: BTreeMap<String, u64>,
     comments: BTreeMap<String, StoredArtifact>,
     active: BTreeMap<String, ActiveLease>,
+    #[serde(default)]
+    vnext_task_identities: BTreeMap<String, VNextTaskState>,
+    #[serde(default)]
+    vnext_assignments: BTreeMap<String, VNextAssignmentState>,
+    #[serde(default)]
+    vnext_assignment_attempts: BTreeMap<String, u64>,
+    #[serde(default)]
+    vnext_active: BTreeMap<String, VNextActiveLease>,
+    #[serde(default)]
+    vnext_dispatched: BTreeMap<String, VNextActiveLease>,
     pub pending: Vec<SourceChange>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pending_offset: usize,
@@ -207,6 +262,10 @@ pub struct AllocationState {
     /// parsing VNext bodies or scanning projector history.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     vnext_tasks: BTreeMap<String, TaskDocument>,
+    /// Current authenticated lifecycle documents used to validate directives
+    /// emitted later when out-of-order dependencies become available.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    vnext_artifacts: BTreeMap<String, LifecycleArtifactDocument>,
     /// Origins staged with pending WAL changes but not yet finalized into
     /// their separate durable dedupe key.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -405,10 +464,6 @@ impl Allocator {
             None => AllocationState::default(),
         };
         state.validate().map_err(anyhow::Error::msg)?;
-        // Upgrade version 2 → 3. New VNext fields have serde defaults.
-        if state.version == PREVIOUS_VERSION {
-            state.version = VERSION;
-        }
         if !state.pending.is_empty() {
             self.append_pending(&mut state).await?;
             let commits = {
@@ -527,23 +582,25 @@ impl Allocator {
             "VNext projector returned an empty recovery checkpoint"
         );
         let rejection = prepared.rejection.clone();
+        let mut next_tasks = state.vnext_tasks.clone();
+        let mut next_artifacts = state.vnext_artifacts.clone();
+        apply_vnext_documents(&inputs, &mut next_tasks, &mut next_artifacts);
+        validate_vnext_projection(&prepared.allocator, &next_tasks, &next_artifacts)?;
+        let allocation_delta =
+            state.reconcile_vnext(prepared.allocator, &next_tasks, effective_from, Utc::now())?;
+        let mut changes = prepared.changes;
+        changes.extend(allocation_changes(
+            &self.source_id,
+            effective_from,
+            &allocation_delta,
+            &state.agent_runtime(),
+        ));
 
-        for input in &inputs {
-            match input {
-                ProjectionInput::UpsertTask(document) => {
-                    state
-                        .vnext_tasks
-                        .insert(document.source_key.clone(), document.clone());
-                }
-                ProjectionInput::DeleteTask { source_key } => {
-                    state.vnext_tasks.remove(source_key);
-                }
-                _ => {}
-            }
-        }
+        state.vnext_tasks = next_tasks;
+        state.vnext_artifacts = next_artifacts;
         state.vnext_checkpoint = prepared.checkpoint;
         state.pending_vnext_origins.insert(origin_id.to_string());
-        state.pending = prepared.changes.clone();
+        state.pending = changes;
         state.pending_offset = 0;
         self.save(&state).await?;
         self.pending_vnext_commits
@@ -607,6 +664,156 @@ impl Allocator {
     }
 }
 
+fn apply_vnext_documents(
+    inputs: &[ProjectionInput],
+    tasks: &mut BTreeMap<String, TaskDocument>,
+    artifacts: &mut BTreeMap<String, LifecycleArtifactDocument>,
+) {
+    for input in inputs {
+        match input {
+            ProjectionInput::UpsertTask(document) => {
+                tasks.insert(document.source_key.clone(), document.clone());
+            }
+            ProjectionInput::DeleteTask { source_key } => {
+                tasks.remove(source_key);
+            }
+            ProjectionInput::UpsertLifecycleArtifact(document) => {
+                artifacts.insert(document.source_key.clone(), document.clone());
+            }
+            ProjectionInput::DeleteLifecycleArtifact { source_key } => {
+                artifacts.remove(source_key);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn validate_vnext_projection(
+    projection: &VNextAllocatorProjection,
+    tasks: &BTreeMap<String, TaskDocument>,
+    artifacts: &BTreeMap<String, LifecycleArtifactDocument>,
+) -> AnyResult<()> {
+    let task_bindings = projection
+        .tasks
+        .iter()
+        .map(|task| (task.source_key.as_str(), task))
+        .collect::<BTreeMap<_, _>>();
+    anyhow::ensure!(
+        task_bindings.len() == projection.tasks.len(),
+        "VNext allocator projection contains duplicate task source keys"
+    );
+    let mut task_ids = BTreeSet::new();
+    let mut task_elements = BTreeSet::new();
+    for task in &projection.tasks {
+        anyhow::ensure!(
+            tasks.contains_key(&task.source_key)
+                && valid_vnext_id(&task.source_key)
+                && valid_vnext_id(&task.task_id)
+                && valid_vnext_id(&task.task_element_id)
+                && task_ids.insert(&task.task_id)
+                && task_elements.insert(&task.task_element_id),
+            "VNext allocator projection contains an invalid or duplicate task binding"
+        );
+    }
+
+    let assignments = projection
+        .assignments
+        .iter()
+        .map(|assignment| (assignment.source_key.as_str(), assignment))
+        .collect::<BTreeMap<_, _>>();
+    anyhow::ensure!(
+        assignments.len() == projection.assignments.len(),
+        "VNext allocator projection contains duplicate assignment source keys"
+    );
+    let mut assignment_ids = BTreeSet::new();
+    for assignment in &projection.assignments {
+        let document = artifacts
+            .get(&assignment.source_key)
+            .context("VNext assignment has no authenticated artifact")?;
+        let task = task_bindings
+            .get(assignment.task_source_key.as_str())
+            .context("VNext assignment has no accepted task binding")?;
+        anyhow::ensure!(
+            document.task_source_key == assignment.task_source_key
+                && document.body.starts_with(VNEXT_ASSIGN_MARKER)
+                && task.task_id == assignment.task_id
+                && valid_vnext_id(&assignment.assignment_id)
+                && assignment_ids.insert(&assignment.assignment_id)
+                && !assignment.permitted_executors.is_empty()
+                && assignment.permitted_executors.len() <= MAX_VNEXT_PERMITTED_EXECUTORS
+                && assignment
+                    .permitted_executors
+                    .iter()
+                    .all(|executor| valid_vnext_id(executor))
+                && assignment
+                    .permitted_executors
+                    .iter()
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    == assignment.permitted_executors.len(),
+            "VNext allocator projection contains an invalid or duplicate assignment"
+        );
+    }
+
+    let mut dispatch_sources = BTreeSet::new();
+    let mut dispatch_leases = BTreeSet::new();
+    for dispatch in &projection.dispatches {
+        let document = artifacts
+            .get(&dispatch.source_key)
+            .context("VNext dispatch has no authenticated artifact")?;
+        let assignment = projection
+            .assignments
+            .iter()
+            .find(|assignment| assignment.assignment_id == dispatch.assignment_id)
+            .context("VNext dispatch has no accepted assignment")?;
+        anyhow::ensure!(
+            dispatch_sources.insert(&dispatch.source_key)
+                && dispatch_leases.insert(&dispatch.lease_id)
+                && document.task_source_key == dispatch.task_source_key
+                && document.body.starts_with(VNEXT_DISPATCH_MARKER)
+                && assignment.task_source_key == dispatch.task_source_key
+                && assignment.task_id == dispatch.task_id
+                && assignment
+                    .permitted_executors
+                    .contains(&dispatch.executor_id)
+                && [
+                    &dispatch.task_id,
+                    &dispatch.assignment_id,
+                    &dispatch.lease_id,
+                    &dispatch.executor_id,
+                    &dispatch.slot_id,
+                ]
+                .into_iter()
+                .all(|value| valid_vnext_id(value)),
+            "VNext allocator projection contains an invalid or duplicate dispatch"
+        );
+    }
+    Ok(())
+}
+
+fn valid_vnext_id(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= MAX_VNEXT_ID_LENGTH
+}
+
+fn vnext_assignment_matches(
+    state: &VNextAssignmentState,
+    desired: &VNextAssignmentBinding,
+) -> bool {
+    state.task_source_key == desired.task_source_key
+        && state.task_id == desired.task_id
+        && state.assignment_id == desired.assignment_id
+        && state.permitted_executors == desired.permitted_executors
+}
+
+fn vnext_dispatch_matches(lease: &VNextActiveLease, desired: &VNextDispatchBinding) -> bool {
+    lease.task_source_key == desired.task_source_key
+        && lease.task_id == desired.task_id
+        && lease.assignment_id == desired.assignment_id
+        && lease.lease_id == desired.lease_id
+        && lease.executor_id == desired.executor_id
+        && lease.slot_id == desired.slot_id
+}
+
 impl Default for AllocationState {
     fn default() -> Self {
         Self {
@@ -616,10 +823,16 @@ impl Default for AllocationState {
             assignment_attempts: BTreeMap::new(),
             comments: BTreeMap::new(),
             active: BTreeMap::new(),
+            vnext_task_identities: BTreeMap::new(),
+            vnext_assignments: BTreeMap::new(),
+            vnext_assignment_attempts: BTreeMap::new(),
+            vnext_active: BTreeMap::new(),
+            vnext_dispatched: BTreeMap::new(),
             pending: Vec::new(),
             pending_offset: 0,
             vnext_checkpoint: Vec::new(),
             vnext_tasks: BTreeMap::new(),
+            vnext_artifacts: BTreeMap::new(),
             pending_vnext_origins: BTreeSet::new(),
         }
     }
@@ -627,9 +840,10 @@ impl Default for AllocationState {
 
 impl AllocationState {
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != VERSION && self.version != PREVIOUS_VERSION {
+        if self.version != VERSION {
             return Err(format!(
-                "allocator state version must equal {VERSION} (or {PREVIOUS_VERSION} for upgrade)"
+                "allocator state version must equal {VERSION}; clear source state before starting \
+                 this prototype revision"
             ));
         }
         if self.pending_offset > self.pending.len()
@@ -704,6 +918,133 @@ impl AllocationState {
                 return Err("allocator queue entry has no matching Assignment".into());
             }
         }
+        let mut canonical_task_ids = BTreeSet::new();
+        let mut canonical_task_elements = BTreeSet::new();
+        for (source_key, task) in &self.vnext_task_identities {
+            if source_key.trim().is_empty()
+                || task.task_id.trim().is_empty()
+                || task.task_element_id.trim().is_empty()
+                || !canonical_task_ids.insert(&task.task_id)
+                || !canonical_task_elements.insert(&task.task_element_id)
+            {
+                return Err("VNext task identity state is invalid or duplicated".into());
+            }
+        }
+        let mut canonical_assignment_ids = BTreeSet::new();
+        for (source_key, assignment) in &self.vnext_assignments {
+            let task = self
+                .vnext_task_identities
+                .get(&assignment.task_source_key)
+                .ok_or("VNext assignment has no projected task")?;
+            let executors = assignment
+                .permitted_executors
+                .iter()
+                .collect::<BTreeSet<_>>();
+            if source_key.trim().is_empty()
+                || assignment.assignment_id.trim().is_empty()
+                || assignment.task_id != task.task_id
+                || (!task.is_open && assignment.eligible)
+                || assignment.permitted_executors.is_empty()
+                || executors.len() != assignment.permitted_executors.len()
+                || assignment
+                    .permitted_executors
+                    .iter()
+                    .any(|executor| executor.trim().is_empty())
+                || !canonical_assignment_ids.insert(&assignment.assignment_id)
+                || self
+                    .vnext_assignment_attempts
+                    .get(&assignment.assignment_id)
+                    .copied()
+                    .unwrap_or_default()
+                    != assignment.next_attempt
+            {
+                return Err("VNext assignment state violates canonical invariants".into());
+            }
+        }
+        let mut active_vnext_tasks = BTreeSet::new();
+        for (lease_id, lease) in &self.vnext_active {
+            let assignment = self
+                .vnext_assignments
+                .get(&lease.assignment_source_key)
+                .ok_or("VNext active lease has no assignment")?;
+            let task = self
+                .vnext_task_identities
+                .get(&lease.task_source_key)
+                .ok_or("VNext active lease has no task")?;
+            let agent = self
+                .agents
+                .get(&lease.executor_id)
+                .ok_or("VNext active lease has no executor")?;
+            if lease_id != &lease.lease_id
+                || lease.task_id != task.task_id
+                || lease.task_element_id != task.task_element_id
+                || assignment.task_source_key != lease.task_source_key
+                || assignment.task_id != lease.task_id
+                || assignment.assignment_id != lease.assignment_id
+                || !assignment.permitted_executors.contains(&lease.executor_id)
+                || assignment.eligible
+                || assignment.next_attempt == 0
+                || lease_id
+                    != &make_lease_id(
+                        &lease.task_id,
+                        &lease.assignment_id,
+                        assignment.next_attempt,
+                    )
+                || lease.slot_id != slot_id(&lease.executor_id, lease.slot_number)
+                || !task.is_open
+                || (lease.slot_number > agent.configured_slots
+                    && !agent.retiring_slots.contains(&lease.slot_number))
+                || !active_vnext_tasks.insert(&lease.task_id)
+                || !slots.insert(&lease.slot_id)
+            {
+                return Err("VNext active lease violates canonical invariants".into());
+            }
+            let acquired =
+                DateTime::parse_from_rfc3339(&lease.acquired_at).map_err(|e| e.to_string())?;
+            let expires =
+                DateTime::parse_from_rfc3339(&lease.expires_at).map_err(|e| e.to_string())?;
+            if acquired >= expires {
+                return Err("VNext active lease acquiredAt must precede expiresAt".into());
+            }
+        }
+        let mut dispatched_lease_ids = BTreeSet::new();
+        for (dispatch_source, lease) in &self.vnext_dispatched {
+            let assignment = self
+                .vnext_assignments
+                .get(&lease.assignment_source_key)
+                .ok_or("VNext dispatched lease has no assignment")?;
+            let task = self
+                .vnext_task_identities
+                .get(&lease.task_source_key)
+                .ok_or("VNext dispatched lease has no task")?;
+            if dispatch_source.trim().is_empty()
+                || !dispatched_lease_ids.insert(&lease.lease_id)
+                || self.vnext_active.contains_key(&lease.lease_id)
+                || lease.task_id != task.task_id
+                || lease.task_element_id != task.task_element_id
+                || assignment.task_source_key != lease.task_source_key
+                || assignment.task_id != lease.task_id
+                || assignment.assignment_id != lease.assignment_id
+                || assignment.eligible
+                || assignment.next_attempt == 0
+                || lease.lease_id
+                    != make_lease_id(
+                        &lease.task_id,
+                        &lease.assignment_id,
+                        assignment.next_attempt,
+                    )
+                || !active_vnext_tasks.insert(&lease.task_id)
+            {
+                return Err("VNext dispatched lease violates canonical invariants".into());
+            }
+            let acquired =
+                DateTime::parse_from_rfc3339(&lease.acquired_at).map_err(|e| e.to_string())?;
+            let expires =
+                DateTime::parse_from_rfc3339(&lease.expires_at).map_err(|e| e.to_string())?;
+            if acquired >= expires {
+                return Err("VNext dispatched lease acquiredAt must precede expiresAt".into());
+            }
+        }
         for artifact in self.comments.values() {
             match artifact {
                 StoredArtifact::Feedback {
@@ -746,6 +1087,399 @@ impl AllocationState {
         Ok(())
     }
 
+    fn reconcile_vnext(
+        &mut self,
+        projection: VNextAllocatorProjection,
+        task_documents: &BTreeMap<String, TaskDocument>,
+        effective_from: u64,
+        now: DateTime<Utc>,
+    ) -> AnyResult<AllocationDelta> {
+        let mut delta = AllocationDelta::default();
+        let desired_tasks = projection
+            .tasks
+            .iter()
+            .map(|task| (task.source_key.as_str(), task))
+            .collect::<BTreeMap<_, _>>();
+        for source_key in self
+            .vnext_task_identities
+            .keys()
+            .filter(|source_key| !desired_tasks.contains_key(source_key.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.cancel_vnext_task(&source_key, true, &mut delta);
+        }
+        for binding in &projection.tasks {
+            let document = task_documents
+                .get(&binding.source_key)
+                .expect("projection provenance was validated");
+            let identity_changed = self
+                .vnext_task_identities
+                .get(&binding.source_key)
+                .is_some_and(|task| {
+                    task.task_id != binding.task_id
+                        || task.task_element_id != binding.task_element_id
+                });
+            if identity_changed {
+                self.cancel_vnext_task(&binding.source_key, true, &mut delta);
+            }
+            self.vnext_task_identities.insert(
+                binding.source_key.clone(),
+                VNextTaskState {
+                    task_id: binding.task_id.clone(),
+                    task_element_id: binding.task_element_id.clone(),
+                    is_open: document.is_open,
+                },
+            );
+            if !document.is_open {
+                self.deactivate_vnext_task(&binding.source_key, &mut delta);
+            }
+        }
+
+        let desired_assignments = projection
+            .assignments
+            .iter()
+            .map(|assignment| (assignment.source_key.as_str(), assignment))
+            .collect::<BTreeMap<_, _>>();
+        for source_key in self
+            .vnext_assignments
+            .iter()
+            .filter(|(source_key, state)| {
+                desired_assignments
+                    .get(source_key.as_str())
+                    .is_none_or(|desired| !vnext_assignment_matches(state, desired))
+            })
+            .map(|(source_key, _)| source_key.clone())
+            .collect::<Vec<_>>()
+        {
+            self.retract_vnext_assignment(&source_key, &mut delta);
+        }
+        for assignment in &projection.assignments {
+            if let Some(state) = self.vnext_assignments.get_mut(&assignment.source_key) {
+                let task_open = self
+                    .vnext_task_identities
+                    .get(&state.task_source_key)
+                    .is_some_and(|task| task.is_open);
+                let owned = self
+                    .vnext_active
+                    .values()
+                    .any(|lease| lease.assignment_source_key == assignment.source_key)
+                    || self
+                        .vnext_dispatched
+                        .values()
+                        .any(|lease| lease.assignment_source_key == assignment.source_key);
+                state.eligible = task_open && !owned;
+                continue;
+            }
+            let task = self
+                .vnext_task_identities
+                .get(&assignment.task_source_key)
+                .context("VNext assignment references an unknown task")?;
+            let next_attempt = self
+                .vnext_assignment_attempts
+                .get(&assignment.assignment_id)
+                .copied()
+                .unwrap_or_default();
+            self.vnext_assignments.insert(
+                assignment.source_key.clone(),
+                VNextAssignmentState {
+                    task_source_key: assignment.task_source_key.clone(),
+                    task_id: assignment.task_id.clone(),
+                    assignment_id: assignment.assignment_id.clone(),
+                    permitted_executors: assignment.permitted_executors.clone(),
+                    queued_at: effective_from,
+                    next_attempt,
+                    eligible: task.is_open,
+                },
+            );
+        }
+
+        let desired_dispatches = projection
+            .dispatches
+            .iter()
+            .map(|dispatch| (dispatch.source_key.as_str(), dispatch))
+            .collect::<BTreeMap<_, _>>();
+        for source_key in self
+            .vnext_dispatched
+            .iter()
+            .filter(|(source_key, lease)| {
+                desired_dispatches
+                    .get(source_key.as_str())
+                    .is_none_or(|desired| !vnext_dispatch_matches(lease, desired))
+            })
+            .map(|(source_key, _)| source_key.clone())
+            .collect::<Vec<_>>()
+        {
+            self.retract_vnext_dispatch(&source_key, &mut delta);
+        }
+
+        self.allocate(now, &mut delta);
+        self.allocate_vnext(now, &mut delta);
+
+        for dispatch in &projection.dispatches {
+            if self.vnext_dispatched.contains_key(&dispatch.source_key) {
+                continue;
+            }
+            let lease = self
+                .vnext_active
+                .get(&dispatch.lease_id)
+                .filter(|lease| {
+                    lease.task_source_key == dispatch.task_source_key
+                        && lease.task_id == dispatch.task_id
+                        && lease.assignment_id == dispatch.assignment_id
+                        && lease.executor_id == dispatch.executor_id
+                        && lease.slot_id == dispatch.slot_id
+                })
+                .cloned()
+                .context("VNext dispatch does not match the active Source lease")?;
+            let assignment = self
+                .vnext_assignments
+                .get(&lease.assignment_source_key)
+                .context("VNext dispatch lease has no queued assignment")?;
+            anyhow::ensure!(
+                assignment.assignment_id == dispatch.assignment_id
+                    && assignment.task_id == dispatch.task_id
+                    && assignment
+                        .permitted_executors
+                        .contains(&dispatch.executor_id),
+                "VNext dispatch violates its trusted assignment"
+            );
+            let lease = self
+                .vnext_active
+                .remove(&dispatch.lease_id)
+                .expect("validated VNext dispatch lease exists");
+            delta.affected_agents.insert(lease.executor_id.clone());
+            if let Some(index) = delta
+                .vnext_started
+                .iter()
+                .position(|started| started.lease_id == lease.lease_id)
+            {
+                delta.vnext_started.remove(index);
+                delta.vnext_historical.push(lease.clone());
+            } else {
+                delta.vnext_released.push(lease.clone());
+            }
+            self.vnext_dispatched
+                .insert(dispatch.source_key.clone(), lease);
+        }
+
+        self.allocate(now, &mut delta);
+        self.allocate_vnext(now, &mut delta);
+        Ok(delta)
+    }
+
+    fn retract_vnext_assignment(&mut self, source_key: &str, delta: &mut AllocationDelta) {
+        let Some(assignment) = self.vnext_assignments.remove(source_key) else {
+            return;
+        };
+        let leases = self
+            .vnext_active
+            .values()
+            .filter(|lease| lease.assignment_source_key == source_key)
+            .map(|lease| lease.lease_id.clone())
+            .collect::<Vec<_>>();
+        for lease_id in leases {
+            self.release_vnext(&lease_id, delta);
+        }
+        for dispatch_source in self
+            .vnext_dispatched
+            .iter()
+            .filter(|(_, lease)| lease.assignment_source_key == source_key)
+            .map(|(source, _)| source.clone())
+            .collect::<Vec<_>>()
+        {
+            if let Some(lease) = self.vnext_dispatched.remove(&dispatch_source) {
+                delta.vnext_historical_ended.push(lease);
+            }
+        }
+        for executor in assignment.permitted_executors {
+            delta.affected_agents.insert(executor);
+        }
+    }
+
+    fn retract_vnext_dispatch(&mut self, source_key: &str, delta: &mut AllocationDelta) {
+        let Some(lease) = self.vnext_dispatched.remove(source_key) else {
+            return;
+        };
+        if let Some(assignment) = self.vnext_assignments.get_mut(&lease.assignment_source_key) {
+            assignment.eligible = self
+                .vnext_task_identities
+                .get(&assignment.task_source_key)
+                .is_some_and(|task| task.is_open);
+        }
+        delta.affected_agents.insert(lease.executor_id.clone());
+        delta.vnext_historical_ended.push(lease);
+    }
+
+    fn cancel_vnext_task(
+        &mut self,
+        source_key: &str,
+        remove_identity: bool,
+        delta: &mut AllocationDelta,
+    ) {
+        for assignment_source in self
+            .vnext_assignments
+            .iter()
+            .filter(|(_, assignment)| assignment.task_source_key == source_key)
+            .map(|(source, _)| source.clone())
+            .collect::<Vec<_>>()
+        {
+            self.retract_vnext_assignment(&assignment_source, delta);
+        }
+        for dispatch_source in self
+            .vnext_dispatched
+            .iter()
+            .filter(|(_, lease)| lease.task_source_key == source_key)
+            .map(|(source, _)| source.clone())
+            .collect::<Vec<_>>()
+        {
+            if let Some(lease) = self.vnext_dispatched.remove(&dispatch_source) {
+                delta.vnext_historical_ended.push(lease);
+            }
+        }
+        if remove_identity {
+            self.vnext_task_identities.remove(source_key);
+        } else if let Some(task) = self.vnext_task_identities.get_mut(source_key) {
+            task.is_open = false;
+        }
+    }
+
+    fn deactivate_vnext_task(&mut self, source_key: &str, delta: &mut AllocationDelta) {
+        let leases = self
+            .vnext_active
+            .values()
+            .filter(|lease| lease.task_source_key == source_key)
+            .map(|lease| lease.lease_id.clone())
+            .collect::<Vec<_>>();
+        for lease_id in leases {
+            self.release_vnext(&lease_id, delta);
+        }
+        for assignment in self
+            .vnext_assignments
+            .values_mut()
+            .filter(|assignment| assignment.task_source_key == source_key)
+        {
+            assignment.eligible = false;
+        }
+    }
+
+    fn allocate_vnext(&mut self, now: DateTime<Utc>, delta: &mut AllocationDelta) {
+        let mut slots = self
+            .agents
+            .iter()
+            .filter(|(_, agent)| agent.configured)
+            .flat_map(|(executor_id, agent)| {
+                (1..=agent.configured_slots)
+                    .map(move |number| (number, slot_id(executor_id, number), executor_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        slots.sort();
+        for (slot_number, slot, executor_id) in slots {
+            if self.active.values().any(|lease| lease.slot_id == slot)
+                || self
+                    .vnext_active
+                    .values()
+                    .any(|lease| lease.slot_id == slot)
+            {
+                continue;
+            }
+            let mut queue = self
+                .vnext_assignments
+                .iter()
+                .filter(|(_, assignment)| {
+                    assignment.eligible
+                        && assignment.permitted_executors.contains(&executor_id)
+                        && !self
+                            .vnext_active
+                            .values()
+                            .any(|lease| lease.task_id == assignment.task_id)
+                        && !self
+                            .vnext_dispatched
+                            .values()
+                            .any(|lease| lease.task_id == assignment.task_id)
+                        && self
+                            .vnext_task_identities
+                            .get(&assignment.task_source_key)
+                            .is_some_and(|task| task.is_open && task.task_id == assignment.task_id)
+                })
+                .map(|(source_key, assignment)| {
+                    (
+                        assignment.queued_at,
+                        assignment.task_id.clone(),
+                        assignment.assignment_id.clone(),
+                        source_key.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            queue.sort();
+            let Some((_, _, assignment_id, assignment_source_key)) = queue.into_iter().next()
+            else {
+                continue;
+            };
+            let assignment = self
+                .vnext_assignments
+                .get_mut(&assignment_source_key)
+                .expect("queued VNext assignment exists");
+            let attempt = self
+                .vnext_assignment_attempts
+                .entry(assignment_id.clone())
+                .or_insert(assignment.next_attempt);
+            *attempt += 1;
+            assignment.next_attempt = *attempt;
+            assignment.eligible = false;
+            let lease_id = make_lease_id(
+                &assignment.task_id,
+                &assignment.assignment_id,
+                assignment.next_attempt,
+            );
+            let task = self
+                .vnext_task_identities
+                .get(&assignment.task_source_key)
+                .expect("validated VNext assignment task exists");
+            let agent = &self.agents[&executor_id];
+            let lease = VNextActiveLease {
+                lease_id: lease_id.clone(),
+                task_source_key: assignment.task_source_key.clone(),
+                task_id: assignment.task_id.clone(),
+                task_element_id: task.task_element_id.clone(),
+                assignment_source_key,
+                assignment_id,
+                executor_id: executor_id.clone(),
+                slot_id: slot,
+                slot_number,
+                acquired_at: timestamp(now),
+                expires_at: timestamp(
+                    now + chrono::Duration::seconds(agent.lease_duration_seconds),
+                ),
+            };
+            self.vnext_active.insert(lease_id, lease.clone());
+            delta.vnext_started.push(lease);
+            delta.affected_agents.insert(executor_id);
+        }
+    }
+
+    fn release_vnext(&mut self, lease_id: &str, delta: &mut AllocationDelta) {
+        let Some(lease) = self.vnext_active.remove(lease_id) else {
+            return;
+        };
+        delta.affected_agents.insert(lease.executor_id.clone());
+        delta.vnext_ended.push(lease.clone());
+        if let Some(agent) = self
+            .agents
+            .get_mut(&lease.executor_id)
+            .filter(|agent| agent.retiring_slots.contains(&lease.slot_number))
+        {
+            agent.retiring_slots.remove(&lease.slot_number);
+            delta
+                .removed_slots
+                .insert((lease.executor_id.clone(), lease.slot_number));
+            if !agent.configured && agent.retiring_slots.is_empty() {
+                self.agents.remove(&lease.executor_id);
+                delta.removed_agents.insert(lease.executor_id);
+            }
+        }
+    }
+
     pub fn apply(&mut self, event: AllocationEvent, now: DateTime<Utc>) -> AllocationDelta {
         let mut delta = AllocationDelta::default();
         match event {
@@ -783,6 +1517,7 @@ impl AllocationState {
             } => self.apply_comment(&comment_node_id, &task_node_id, artifact, &mut delta),
         }
         self.allocate(now, &mut delta);
+        self.allocate_vnext(now, &mut delta);
         delta
     }
 
@@ -809,7 +1544,27 @@ impl AllocationState {
             }
             self.release(&lease_id, &mut delta);
         }
+        let mut vnext_expired = self
+            .vnext_active
+            .values()
+            .filter(|lease| lease.expires_at.as_str() <= now_text.as_str())
+            .map(|lease| (lease.expires_at.clone(), lease.lease_id.clone()))
+            .collect::<Vec<_>>();
+        vnext_expired.sort();
+        for (_, lease_id) in vnext_expired {
+            if let Some(assignment_source) = self
+                .vnext_active
+                .get(&lease_id)
+                .map(|lease| lease.assignment_source_key.clone())
+            {
+                if let Some(assignment) = self.vnext_assignments.get_mut(&assignment_source) {
+                    assignment.eligible = true;
+                }
+            }
+            self.release_vnext(&lease_id, &mut delta);
+        }
         self.allocate(now, &mut delta);
+        self.allocate_vnext(now, &mut delta);
         delta
     }
 
@@ -896,6 +1651,7 @@ impl AllocationState {
             delta.affected_agents.insert(id);
         }
         self.allocate(now, &mut delta);
+        self.allocate_vnext(now, &mut delta);
         delta
     }
 
@@ -935,7 +1691,23 @@ impl AllocationState {
                             && entry.eligible
                             && !self.task_active(&entry.task_node_id)
                     })
-                    .count();
+                    .count()
+                    + self
+                        .vnext_assignments
+                        .values()
+                        .filter(|assignment| {
+                            assignment.eligible
+                                && assignment.permitted_executors.contains(id)
+                                && !self
+                                    .vnext_active
+                                    .values()
+                                    .any(|lease| lease.task_id == assignment.task_id)
+                                && !self
+                                    .vnext_dispatched
+                                    .values()
+                                    .any(|lease| lease.task_id == assignment.task_id)
+                        })
+                        .count();
                 let available = agent.configured.then(|| {
                     (1..=agent.configured_slots)
                         .filter(|slot| !occupied.contains(slot))
@@ -959,6 +1731,8 @@ impl AllocationState {
     fn restatement(&self) -> AllocationDelta {
         AllocationDelta {
             started: self.active.values().cloned().collect(),
+            vnext_started: self.vnext_active.values().cloned().collect(),
+            vnext_historical: self.vnext_dispatched.values().cloned().collect(),
             affected_agents: self.agents.keys().cloned().collect(),
             ..AllocationDelta::default()
         }
@@ -1454,6 +2228,12 @@ impl AllocationState {
             .values()
             .filter(|lease| lease.agent_id == agent)
             .map(|lease| lease.slot_number)
+            .chain(
+                self.vnext_active
+                    .values()
+                    .filter(|lease| lease.executor_id == agent)
+                    .map(|lease| lease.slot_number),
+            )
             .collect()
     }
 
