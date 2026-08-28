@@ -16,6 +16,7 @@ mod aggregate_update_tests;
 mod chained_optional_tests;
 mod nested_aggregate_lifecycle_tests;
 mod row_signature_tests;
+mod solution_endpoint_consistency_tests;
 
 use std::sync::Arc;
 

@@ -188,6 +188,16 @@ async fn try_complete_solution(
     while let Some((slot_num, element)) = solution.slot_cursors.pop_front() {
         solution.mark_slot_solved(slot_num, element.clone());
 
+        if !path
+            .segments
+            .iter()
+            .filter(|segment| segment.contains_slot(slot_num))
+            .all(|segment| path_segment_is_consistent(segment, &solution))
+        {
+            cmd_tx.send(SolutionStreamCommand::Unsolvable).unwrap();
+            return;
+        }
+
         if let Some(hash) = solution.get_solution_signature() {
             cmd_tx
                 .send(SolutionStreamCommand::Complete((hash, solution)))
@@ -327,6 +337,57 @@ async fn try_complete_solution(
     cmd_tx.send(SolutionStreamCommand::Unsolvable).unwrap();
 }
 
+fn path_segment_is_consistent(
+    segment: &match_path::MatchPathSegment,
+    solution: &MatchPathSolution,
+) -> bool {
+    let Some(relation) = solution.solved_slots.get(&segment.relation_slot) else {
+        return true;
+    };
+    let Some(relation) = relation else {
+        return true;
+    };
+    let Element::Relation {
+        in_node, out_node, ..
+    } = relation.as_ref()
+    else {
+        return false;
+    };
+
+    let start = match solution.solved_slots.get(&segment.start_slot) {
+        None => return true,
+        Some(Some(start)) => start,
+        Some(None) => return false,
+    };
+    let end = match solution.solved_slots.get(&segment.end_slot) {
+        None => return true,
+        Some(Some(end)) => end,
+        Some(None) => return false,
+    };
+    let (
+        Element::Node {
+            metadata: start, ..
+        },
+        Element::Node { metadata: end, .. },
+    ) = (start.as_ref(), end.as_ref())
+    else {
+        return false;
+    };
+
+    match segment.direction {
+        drasi_query_ast::ast::Direction::Right => {
+            in_node == &start.reference && out_node == &end.reference
+        }
+        drasi_query_ast::ast::Direction::Left => {
+            out_node == &start.reference && in_node == &end.reference
+        }
+        drasi_query_ast::ast::Direction::Either => {
+            (in_node == &start.reference && out_node == &end.reference)
+                || (out_node == &start.reference && in_node == &end.reference)
+        }
+    }
+}
+
 #[tracing::instrument(skip_all, err, level = "debug")]
 async fn get_adjacent_elements(
     element_index: Arc<dyn ElementIndex>,
@@ -443,5 +504,148 @@ fn merge_relation_match<'b>(
             });
             Ok(slots.len() - 1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{ElementMetadata, ElementPropertyMap, ElementReference};
+    use drasi_query_ast::ast::Direction;
+
+    fn node(id: &str) -> Arc<Element> {
+        Arc::new(Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("test", id),
+                labels: Arc::new([]),
+                effective_from: 0,
+            },
+            properties: ElementPropertyMap::new(),
+        })
+    }
+
+    fn relation(id: &str, from: &str, to: &str) -> Arc<Element> {
+        Arc::new(Element::Relation {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("test", id),
+                labels: Arc::new([]),
+                effective_from: 0,
+            },
+            in_node: ElementReference::new("test", from),
+            out_node: ElementReference::new("test", to),
+            properties: ElementPropertyMap::new(),
+        })
+    }
+
+    fn solution(
+        start: Arc<Element>,
+        relation: Arc<Element>,
+        end: Arc<Element>,
+    ) -> MatchPathSolution {
+        let mut solution = MatchPathSolution::new(3, 0);
+        solution.mark_slot_solved(0, Some(start));
+        solution.mark_slot_solved(1, Some(relation));
+        solution.mark_slot_solved(2, Some(end));
+        solution
+    }
+
+    fn segment(direction: Direction) -> match_path::MatchPathSegment {
+        match_path::MatchPathSegment {
+            start_slot: 0,
+            relation_slot: 1,
+            end_slot: 2,
+            direction,
+        }
+    }
+
+    #[test]
+    fn path_segment_validates_outgoing_and_incoming_endpoints() {
+        let forward = solution(node("a"), relation("r", "a", "b"), node("b"));
+        let reverse = solution(node("b"), relation("r", "a", "b"), node("a"));
+
+        assert!(path_segment_is_consistent(
+            &segment(Direction::Right),
+            &forward
+        ));
+        assert!(!path_segment_is_consistent(
+            &segment(Direction::Right),
+            &reverse
+        ));
+        assert!(path_segment_is_consistent(
+            &segment(Direction::Left),
+            &reverse
+        ));
+        assert!(!path_segment_is_consistent(
+            &segment(Direction::Left),
+            &forward
+        ));
+    }
+
+    #[test]
+    fn path_segment_accepts_either_physical_orientation() {
+        let forward = solution(node("a"), relation("r", "a", "b"), node("b"));
+        let reverse = solution(node("b"), relation("r", "a", "b"), node("a"));
+
+        assert!(path_segment_is_consistent(
+            &segment(Direction::Either),
+            &forward
+        ));
+        assert!(path_segment_is_consistent(
+            &segment(Direction::Either),
+            &reverse
+        ));
+    }
+
+    #[test]
+    fn path_segment_requires_physical_self_loop_for_repeated_node_slot() {
+        for direction in [Direction::Right, Direction::Left, Direction::Either] {
+            let mut valid = MatchPathSolution::new(2, 0);
+            valid.mark_slot_solved(0, Some(node("a")));
+            valid.mark_slot_solved(1, Some(relation("loop", "a", "a")));
+            let segment = match_path::MatchPathSegment {
+                start_slot: 0,
+                relation_slot: 1,
+                end_slot: 0,
+                direction,
+            };
+            assert!(path_segment_is_consistent(&segment, &valid));
+
+            let mut invalid = MatchPathSolution::new(2, 0);
+            invalid.mark_slot_solved(0, Some(node("a")));
+            invalid.mark_slot_solved(1, Some(relation("edge", "a", "b")));
+            assert!(!path_segment_is_consistent(&segment, &invalid));
+        }
+    }
+
+    #[test]
+    fn path_segment_rejects_wrong_element_kinds_and_accepts_optional_default() {
+        let wrong_kind = solution(node("a"), node("not-a-relation"), node("b"));
+        assert!(!path_segment_is_consistent(
+            &segment(Direction::Right),
+            &wrong_kind
+        ));
+
+        let mut optional_default = MatchPathSolution::new(3, 0);
+        optional_default.mark_slot_solved(0, Some(node("a")));
+        optional_default.mark_slot_solved(1, None);
+        optional_default.mark_slot_solved(2, Some(node("b")));
+        assert!(path_segment_is_consistent(
+            &segment(Direction::Right),
+            &optional_default
+        ));
+
+        let mut partial = MatchPathSolution::new(3, 0);
+        partial.mark_slot_solved(0, Some(node("a")));
+        partial.mark_slot_solved(1, Some(relation("r", "a", "b")));
+        assert!(path_segment_is_consistent(
+            &segment(Direction::Right),
+            &partial
+        ));
+
+        partial.mark_slot_solved(2, None);
+        assert!(!path_segment_is_consistent(
+            &segment(Direction::Right),
+            &partial
+        ));
     }
 }
