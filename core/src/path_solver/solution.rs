@@ -89,49 +89,82 @@ impl MatchPathSolution {
         self.refresh_signature();
     }
 
-    pub(crate) fn into_optional_fallback(
-        mut self,
+    pub(crate) fn unresolved_optional_clause(&self, match_path: &MatchPath) -> Option<usize> {
+        match_path
+            .clauses
+            .iter()
+            .enumerate()
+            .find(|(clause_id, clause)| {
+                clause.optional
+                    && !self.defaulted_clauses.contains(clause_id)
+                    && clause
+                        .introduced_slots
+                        .iter()
+                        .any(|slot_num| !self.solved_slots.contains_key(slot_num))
+            })
+            .map(|(clause_id, _)| clause_id)
+    }
+
+    pub(crate) fn default_clause_for_continuation(
+        &mut self,
         match_path: &MatchPath,
-        failed_clause: Option<usize>,
-    ) -> Option<MatchPathSolution> {
-        let mut defaulted = false;
-        if let Some(clause_id) = failed_clause {
-            let clause = &match_path.clauses[clause_id];
-            if !clause.optional {
-                return None;
-            }
-            for slot_num in &clause.introduced_slots {
-                self.solved_slots.insert(*slot_num, None);
-            }
-            self.defaulted_clauses.insert(clause_id);
-            defaulted = true;
+        clause_id: usize,
+    ) -> bool {
+        if !match_path.clauses[clause_id].optional || !self.defaulted_clauses.insert(clause_id) {
+            return false;
         }
-        for (slot_num, slot) in match_path.slots.iter().enumerate() {
-            if self.solved_slots.contains_key(&slot_num) {
+
+        for slot_num in &match_path.clauses[clause_id].introduced_slots {
+            self.solved_slots.insert(*slot_num, None);
+        }
+
+        // A later clause is blocked only when it reuses a null introduced by an
+        // earlier clause. Unrelated later cursors remain available to resume.
+        for downstream_id in clause_id + 1..match_path.clauses.len() {
+            let downstream = &match_path.clauses[downstream_id];
+            if !downstream.optional || self.defaulted_clauses.contains(&downstream_id) {
                 continue;
             }
-            if !match_path.clauses[slot.introduction_clause].optional {
-                return None;
-            }
-            self.solved_slots.insert(slot_num, None);
-            defaulted = true;
-        }
-        self.canonicalize_optional_defaults(match_path);
-        for clause in &match_path.clauses {
-            if clause.optional {
-                defaulted |= clause
-                    .introduced_slots
-                    .iter()
-                    .any(|slot_num| matches!(self.solved_slots.get(slot_num), Some(None)));
-            } else if !clause
-                .slots
-                .iter()
-                .all(|slot_num| matches!(self.solved_slots.get(slot_num), Some(Some(_))))
-            {
-                return None;
+            let blocked = downstream.slots.iter().any(|slot_num| {
+                match_path.slots[*slot_num].introduction_clause < downstream_id
+                    && matches!(self.solved_slots.get(slot_num), Some(None))
+            });
+            if blocked {
+                self.defaulted_clauses.insert(downstream_id);
+                for slot_num in &downstream.introduced_slots {
+                    self.solved_slots.insert(*slot_num, None);
+                }
             }
         }
-        defaulted.then_some(self)
+
+        let defaulted_clauses = &self.defaulted_clauses;
+        let slots = &match_path.slots;
+        self.slot_cursors.retain(|(slot_num, _)| {
+            !defaulted_clauses.contains(&slots[*slot_num].introduction_clause)
+        });
+        self.solution_signature = None;
+        self.refresh_signature();
+        true
+    }
+
+    pub(crate) fn continuation_signature(&self) -> SolutionSignature {
+        let mut hasher = SpookyHasher::default();
+        for (slot_num, value) in &self.solved_slots {
+            slot_num.hash(&mut hasher);
+            hash_element(value, &mut hasher);
+        }
+        let mut defaulted_clauses = self.defaulted_clauses.iter().collect::<Vec<_>>();
+        defaulted_clauses.sort_unstable();
+        for clause_id in defaulted_clauses {
+            clause_id.hash(&mut hasher);
+        }
+        let mut cursors = self.slot_cursors.iter().collect::<Vec<_>>();
+        cursors.sort_by_key(|(slot_num, _)| *slot_num);
+        for (slot_num, value) in cursors {
+            slot_num.hash(&mut hasher);
+            hash_element(value, &mut hasher);
+        }
+        hasher.finish()
     }
 
     pub(crate) fn clause_is_real(&self, match_path: &MatchPath, clause_id: usize) -> bool {
@@ -183,14 +216,6 @@ impl MatchPathSolution {
             .into_iter()
             .filter(|(clause_id, _)| anchor_clauses.contains(clause_id))
             .collect()
-    }
-
-    pub(crate) fn default_clause(&mut self, match_path: &MatchPath, clause_id: usize) {
-        self.defaulted_clauses.insert(clause_id);
-        for slot_num in &match_path.clauses[clause_id].introduced_slots {
-            self.solved_slots.insert(*slot_num, None);
-        }
-        self.canonicalize_optional_defaults(match_path);
     }
 
     pub(crate) fn upstream_signature(&self, match_path: &MatchPath, clause_id: usize) -> u64 {

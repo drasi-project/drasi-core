@@ -78,34 +78,80 @@ impl MatchPathSolver {
         let mut start_solution = MatchPathSolution::new(total_slots, anchor_slot);
         start_solution.enqueue_slot(anchor_slot, Some(anchor_element));
 
-        let sol_stream =
-            create_solution_stream(start_solution, path.clone(), self.element_index.clone()).await;
-
         let mut candidates = HashMap::new();
-        tokio::pin!(sol_stream);
+        let mut pending = vec![start_solution];
+        let mut successful_attempts = HashSet::new();
 
-        while let Some(o) = sol_stream.next().await {
-            match o {
-                Ok(SolveOutcome::Complete(solution)) => {
-                    insert_candidate(&mut candidates, solution);
-                }
-                Ok(SolveOutcome::Unsolvable {
-                    solution,
-                    failed_clause,
-                }) => {
-                    if let Some(fallback) = solution.into_optional_fallback(&path, failed_clause) {
-                        if let Some(fallback) = stabilize_optional_fallback(fallback, &path) {
-                            let anchor_clause = path.slots[anchor_slot].introduction_clause;
-                            if !path.clauses[anchor_clause].optional
-                                || matches!(fallback.solved_slots.get(&anchor_slot), Some(Some(_)))
-                            {
-                                insert_candidate(&mut candidates, fallback);
-                            }
-                        }
+        while !pending.is_empty() {
+            // Drain every concrete branch in this round before deciding which
+            // clause/upstream attempts require a null continuation.
+            let sol_stream =
+                create_solution_stream(pending, path.clone(), self.element_index.clone()).await;
+            tokio::pin!(sol_stream);
+            let mut failed_attempts = BTreeMap::<
+                (usize, solution::SolutionSignature),
+                BTreeMap<solution::SolutionSignature, MatchPathSolution>,
+            >::new();
+
+            while let Some(outcome) = sol_stream.next().await {
+                let (solution, failed_clause) = match outcome? {
+                    SolveOutcome::Complete(solution) => {
+                        record_successful_attempts(
+                            &mut successful_attempts,
+                            &solution,
+                            &path,
+                            None,
+                        );
+                        insert_candidate(&mut candidates, solution);
+                        continue;
                     }
+                    SolveOutcome::Unsolvable {
+                        solution,
+                        failed_clause,
+                    } => (solution, failed_clause),
+                };
+
+                record_successful_attempts(
+                    &mut successful_attempts,
+                    &solution,
+                    &path,
+                    failed_clause,
+                );
+                let Some(failed_clause) =
+                    failed_clause.or_else(|| solution.unresolved_optional_clause(&path))
+                else {
+                    continue;
+                };
+                if !path.clauses[failed_clause].optional {
+                    continue;
                 }
-                Err(e) => return Err(e),
+                let attempt = (
+                    failed_clause,
+                    solution.upstream_signature(&path, failed_clause),
+                );
+                let mut continuation = solution;
+                if !continuation.default_clause_for_continuation(&path, failed_clause) {
+                    continue;
+                }
+                let anchor_clause = path.slots[anchor_slot].introduction_clause;
+                if path.clauses[anchor_clause].optional
+                    && !matches!(continuation.solved_slots.get(&anchor_slot), Some(Some(_)))
+                {
+                    continue;
+                }
+                insert_continuation(failed_attempts.entry(attempt).or_default(), continuation);
             }
+
+            let mut continuations = BTreeMap::new();
+            for (attempt, attempt_continuations) in failed_attempts {
+                if successful_attempts.contains(&attempt) {
+                    continue;
+                }
+                for continuation in attempt_continuations.into_values() {
+                    insert_continuation(&mut continuations, continuation);
+                }
+            }
+            pending = continuations.into_values().collect();
         }
 
         let mut candidates = candidates.into_values().collect::<Vec<_>>();
@@ -160,6 +206,36 @@ fn insert_candidate(
     }
 }
 
+fn insert_continuation(
+    continuations: &mut BTreeMap<solution::SolutionSignature, MatchPathSolution>,
+    continuation: MatchPathSolution,
+) {
+    let signature = continuation.continuation_signature();
+    match continuations.get_mut(&signature) {
+        Some(existing) => existing.merge_anchor_provenance(&continuation),
+        None => {
+            continuations.insert(signature, continuation);
+        }
+    }
+}
+
+fn record_successful_attempts(
+    successful_attempts: &mut HashSet<(usize, solution::SolutionSignature)>,
+    solution: &MatchPathSolution,
+    path: &match_path::MatchPath,
+    failed_clause: Option<usize>,
+) {
+    for (clause_id, clause) in path.clauses.iter().enumerate() {
+        if clause.optional
+            && Some(clause_id) != failed_clause
+            && solution.clause_is_real(path, clause_id)
+            && clause_segments_are_consistent(path, solution, clause_id)
+        {
+            successful_attempts.insert((clause_id, solution.upstream_signature(path, clause_id)));
+        }
+    }
+}
+
 #[allow(dead_code)]
 enum SolutionStreamCommand {
     Partial(MatchPathSolution),
@@ -181,7 +257,7 @@ enum SolveOutcome {
 }
 
 async fn create_solution_stream(
-    initial_sol: MatchPathSolution,
+    initial_solutions: Vec<MatchPathSolution>,
     path: Arc<match_path::MatchPath>,
     element_index: Arc<dyn ElementIndex>,
 ) -> impl Stream<Item = Result<SolveOutcome, EvaluationError>> {
@@ -190,7 +266,9 @@ async fn create_solution_stream(
 
     stream! {
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<SolutionStreamCommand>();
-        cmd_tx.send(SolutionStreamCommand::Partial(initial_sol)).unwrap();
+        for solution in initial_solutions {
+            cmd_tx.send(SolutionStreamCommand::Partial(solution)).unwrap();
+        }
         let mut inflight = 0;
 
         #[cfg(feature = "parallel_solver")]
@@ -288,7 +366,7 @@ async fn try_complete_solution(
                         .flat_map(|clause| &clause.slots)
                         .all(|slot_num| solution.is_slot_solved(*slot_num))
             })
-            .find(|segment| !path_segment_is_consistent(segment, &solution))
+            .find(|segment| !solution_segment_is_consistent(&path, segment, &solution))
             .map(|segment| segment.clause_id);
         if failed_clause.is_some() {
             cmd_tx
@@ -304,7 +382,7 @@ async fn try_complete_solution(
             if let Some(failed_clause) = path
                 .segments
                 .iter()
-                .find(|segment| !path_segment_is_consistent(segment, &solution))
+                .find(|segment| !solution_segment_is_consistent(&path, segment, &solution))
                 .map(|segment| segment.clause_id)
             {
                 cmd_tx
@@ -450,6 +528,26 @@ async fn try_complete_solution(
             }
         }
     }
+    if let Some(hash) = solution.get_solution_signature() {
+        if let Some(failed_clause) = path
+            .segments
+            .iter()
+            .find(|segment| !solution_segment_is_consistent(&path, segment, &solution))
+            .map(|segment| segment.clause_id)
+        {
+            cmd_tx
+                .send(SolutionStreamCommand::Unsolvable {
+                    solution,
+                    failed_clause: Some(failed_clause),
+                })
+                .unwrap();
+        } else {
+            cmd_tx
+                .send(SolutionStreamCommand::Complete((hash, solution)))
+                .unwrap();
+        }
+        return;
+    }
     cmd_tx
         .send(SolutionStreamCommand::Unsolvable {
             solution,
@@ -458,28 +556,25 @@ async fn try_complete_solution(
         .unwrap();
 }
 
-fn stabilize_optional_fallback(
-    mut solution: MatchPathSolution,
+fn clause_segments_are_consistent(
     path: &match_path::MatchPath,
-) -> Option<MatchPathSolution> {
-    loop {
-        let inconsistent_clause = path
-            .segments
-            .iter()
-            .filter(|segment| {
-                !path.clauses[segment.clause_id].optional
-                    || solution.clause_is_real(path, segment.clause_id)
-            })
-            .find(|segment| !path_segment_is_consistent(segment, &solution))
-            .map(|segment| segment.clause_id);
-        let Some(clause_id) = inconsistent_clause else {
-            return Some(solution);
-        };
-        if !path.clauses[clause_id].optional {
-            return None;
-        }
-        solution.default_clause(path, clause_id);
-    }
+    solution: &MatchPathSolution,
+    clause_id: usize,
+) -> bool {
+    path.segments
+        .iter()
+        .filter(|segment| segment.clause_id == clause_id)
+        .all(|segment| path_segment_is_consistent(segment, solution))
+}
+
+fn solution_segment_is_consistent(
+    path: &match_path::MatchPath,
+    segment: &match_path::MatchPathSegment,
+    solution: &MatchPathSolution,
+) -> bool {
+    (path.clauses[segment.clause_id].optional
+        && solution.defaulted_clauses.contains(&segment.clause_id))
+        || path_segment_is_consistent(segment, solution)
 }
 
 fn path_segment_is_consistent(

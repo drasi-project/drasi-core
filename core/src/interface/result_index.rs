@@ -25,7 +25,7 @@ use crate::evaluation::functions::aggregation::ValueAccumulator;
 
 use super::IndexError;
 
-pub const RESULT_INDEX_STATE_VERSION: u64 = 4;
+pub const RESULT_INDEX_STATE_VERSION: u64 = 5;
 
 #[async_trait]
 pub trait ResultIndex: AccumulatorIndex + ResultSequenceCounter {
