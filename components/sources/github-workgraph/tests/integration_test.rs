@@ -95,6 +95,7 @@ impl Harness {
             repositories: Vec::new(),
             agent_config: None,
             lease_trust: None,
+            workflow_definition: None,
             webhook: WebhookConfig {
                 host: "127.0.0.1".into(),
                 port,
@@ -422,6 +423,7 @@ async fn agent_harness(server: &wiremock::MockServer) -> Harness {
             token: "read-only-token".into(),
             api_base_url: format!("{}/graphql", server.uri()),
         }),
+        workflow_definition: None,
         webhook: WebhookConfig {
             host: "127.0.0.1".into(),
             port,
@@ -1437,6 +1439,7 @@ async fn source_start_fails_when_the_configured_agent_file_cannot_be_read() {
             token: "read-only-token".into(),
             api_base_url: format!("{}/graphql", server.uri()),
         }),
+        workflow_definition: None,
         webhook: WebhookConfig {
             host: "127.0.0.1".into(),
             port,

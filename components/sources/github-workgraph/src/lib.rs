@@ -21,6 +21,7 @@ pub mod descriptor;
 pub mod lease_ledger;
 pub mod mapping;
 pub mod source;
+pub mod vnext;
 pub mod webhook;
 pub mod workgraph;
 

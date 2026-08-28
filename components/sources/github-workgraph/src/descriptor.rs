@@ -137,7 +137,6 @@ fn default_body_limit() -> ConfigValueUsize {
 fn default_agent_api_base_url() -> ConfigValueString {
     ConfigValue::Static(DEFAULT_AGENT_API_BASE_URL.to_string())
 }
-
 #[derive(OpenApi)]
 #[openapi(components(schemas(
     GitHubWorkGraphSourceConfigDto,
@@ -179,6 +178,13 @@ impl SourcePluginDescriptor for GitHubWorkGraphSourceDescriptor {
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
+        if config_json.get("workflowDefinition").is_some() {
+            anyhow::bail!(
+                "workflowDefinition is not supported via dynamic plugin descriptor; \
+                 the WorkGraphProjector callback must be injected programmatically \
+                 via GitHubWorkGraphSourceBuilder::with_workgraph_projector()"
+            );
+        }
         let dto: GitHubWorkGraphSourceConfigDto = serde_json::from_value(config_json.clone())
             .context("Invalid GitHub WorkGraph source configuration JSON")?;
         match &dto.webhook.secret {
@@ -245,6 +251,7 @@ impl SourcePluginDescriptor for GitHubWorkGraphSourceDescriptor {
             repositories,
             agent_config,
             lease_trust,
+            workflow_definition: None,
             webhook: WebhookConfig {
                 host: mapper.resolve_string(&dto.webhook.host).await?,
                 port: mapper.resolve_typed(&dto.webhook.port).await?,

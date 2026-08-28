@@ -2467,6 +2467,7 @@ fn config_requires_exact_task_type_id_and_name() {
         repositories: vec![],
         agent_config: None,
         lease_trust: None,
+        workflow_definition: None,
         webhook: WebhookConfig {
             secret: "secret".to_string(),
             lease_validation_token: "validation-token".to_string(),
@@ -2565,6 +2566,7 @@ fn descriptor_exposes_task_type_and_graph_schema() {
     assert_eq!(descriptor.config_version(), "3.0.0");
     assert!(schema.contains("taskIssueType"));
     assert!(schema.contains("agentConfig"));
+    assert!(!schema.contains("workflowDefinition"));
     assert!(!schema.contains("workerConfig"));
     assert!(NODE_LABELS.contains(&"WorkGraphTask"));
     assert!(NODE_LABELS.contains(&"WorkGraphTaskAssignment"));
@@ -4720,4 +4722,308 @@ async fn restart_restates_the_exact_active_lease_and_corruption_fails_closed() {
         )
         .await
         .is_err());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VNext tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+mod vnext_tests {
+    use crate::config::{GitHubWorkGraphSourceConfig, WorkflowDefinitionConfig};
+    use crate::descriptor::GitHubWorkGraphSourceDescriptor;
+    use crate::source::GitHubWorkGraphSourceBuilder;
+    use crate::vnext::*;
+    use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
+
+    // ── Marker recognition ──────────────────────────────────────────────
+
+    #[test]
+    fn vnext_task_marker_recognized() {
+        let body = "WorkGraphTask/v3\n{\"some\":\"json\"}";
+        assert!(body.starts_with(VNEXT_TASK_MARKER));
+    }
+
+    #[test]
+    fn vnext_task_marker_v2_not_recognized() {
+        let body = "WorkGraphTask/v2\n{\"some\":\"json\"}";
+        assert!(!body.starts_with(VNEXT_TASK_MARKER));
+    }
+
+    #[test]
+    fn vnext_lifecycle_markers() {
+        assert!(is_vnext_lifecycle_marker(
+            "WorkGraphTaskAssign/v1\nsome body"
+        ));
+        assert!(is_vnext_lifecycle_marker(
+            "WorkGraphTaskDispatch/v1\nsome body"
+        ));
+        assert!(is_vnext_lifecycle_marker(
+            "WorkGraphTaskResult/v1\nsome body"
+        ));
+        assert!(is_vnext_lifecycle_marker(
+            "WorkGraphTaskEvaluate/v1\nsome body"
+        ));
+        assert!(!is_vnext_lifecycle_marker(
+            "WorkGraphTaskAssignment/v1\nfoo"
+        ));
+        assert!(!is_vnext_lifecycle_marker("ordinary comment"));
+    }
+
+    #[test]
+    fn lifecycle_trust_role_assign_dispatch_are_assigner() {
+        assert_eq!(
+            lifecycle_trust_role("WorkGraphTaskAssign/v1\nfoo"),
+            Some(LifecycleTrustRole::Assigner)
+        );
+        assert_eq!(
+            lifecycle_trust_role("WorkGraphTaskDispatch/v1\nfoo"),
+            Some(LifecycleTrustRole::Assigner)
+        );
+    }
+
+    #[test]
+    fn lifecycle_trust_role_result_evaluate_are_reporter() {
+        assert_eq!(
+            lifecycle_trust_role("WorkGraphTaskResult/v1\nfoo"),
+            Some(LifecycleTrustRole::Reporter)
+        );
+        assert_eq!(
+            lifecycle_trust_role("WorkGraphTaskEvaluate/v1\nfoo"),
+            Some(LifecycleTrustRole::Reporter)
+        );
+    }
+
+    #[test]
+    fn lifecycle_trust_role_ordinary_is_none() {
+        assert_eq!(lifecycle_trust_role("just a comment"), None);
+    }
+
+    // ── Definition source key ───────────────────────────────────────────
+
+    #[test]
+    fn definition_source_key_deterministic() {
+        let key1 = definition_source_key("myorg/myrepo", "refs/heads/main", "path/to/def.body");
+        let key2 = definition_source_key("myorg/myrepo", "refs/heads/main", "path/to/def.body");
+        assert_eq!(key1, key2);
+        assert_eq!(
+            key1,
+            "github:definition:myorg/myrepo:refs/heads/main:path/to/def.body"
+        );
+    }
+
+    #[test]
+    fn definition_source_key_differs_for_different_path() {
+        let key1 = definition_source_key("org/repo", "refs/heads/main", "a.body");
+        let key2 = definition_source_key("org/repo", "refs/heads/main", "b.body");
+        assert_ne!(key1, key2);
+    }
+
+    // ── Document types serde ────────────────────────────────────────────
+
+    #[test]
+    fn task_document_roundtrip() {
+        let doc = TaskDocument {
+            source_key: "MDExOklzc3VlNTI=".to_string(),
+            body: "WorkGraphTask/v3\n{}".to_string(),
+            is_open: true,
+            state_reason: "".to_string(),
+            parent_source_key: Some("MDExOklzc3VlNTM=".to_string()),
+        };
+        let json = serde_json::to_string(&doc).unwrap();
+        let parsed: TaskDocument = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.source_key, doc.source_key);
+        assert_eq!(parsed.parent_source_key, doc.parent_source_key);
+        assert!(parsed.is_open);
+    }
+
+    #[test]
+    fn lifecycle_artifact_document_roundtrip() {
+        let doc = LifecycleArtifactDocument {
+            source_key: "comment-node-1".to_string(),
+            task_source_key: "issue-node-1".to_string(),
+            body: "WorkGraphTaskAssign/v1\n{}".to_string(),
+        };
+        let json = serde_json::to_string(&doc).unwrap();
+        let parsed: LifecycleArtifactDocument = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.source_key, doc.source_key);
+        assert_eq!(parsed.task_source_key, doc.task_source_key);
+    }
+
+    #[test]
+    fn projection_input_upsert_task_serde() {
+        let input = ProjectionInput::UpsertTask(TaskDocument {
+            source_key: "node1".to_string(),
+            body: "WorkGraphTask/v3\ndata".to_string(),
+            is_open: true,
+            state_reason: "".to_string(),
+            parent_source_key: None,
+        });
+        let json = serde_json::to_string(&input).unwrap();
+        let parsed: ProjectionInput = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ProjectionInput::UpsertTask(t) => {
+                assert_eq!(t.source_key, "node1");
+                assert!(t.is_open);
+            }
+            _ => panic!("expected UpsertTask"),
+        }
+    }
+
+    #[test]
+    fn projection_input_delete_task_serde() {
+        let input = ProjectionInput::DeleteTask {
+            source_key: "node1".to_string(),
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let parsed: ProjectionInput = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ProjectionInput::DeleteTask { source_key } => assert_eq!(source_key, "node1"),
+            _ => panic!("expected DeleteTask"),
+        }
+    }
+
+    // ── GitHub issue locator ────────────────────────────────────────────
+
+    #[test]
+    fn locator_upsert_serde() {
+        let locator = GitHubIssueLocator {
+            source_key: "node1".to_string(),
+            repository_owner: "myorg".to_string(),
+            repository_name: "myrepo".to_string(),
+            issue_number: 42,
+            issue_node_id: "node1".to_string(),
+        };
+        let input = ProjectionInput::UpsertLocator(locator);
+        let json = serde_json::to_string(&input).unwrap();
+        let parsed: ProjectionInput = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ProjectionInput::UpsertLocator(loc) => {
+                assert_eq!(loc.repository_owner, "myorg");
+                assert_eq!(loc.issue_number, 42);
+            }
+            _ => panic!("expected UpsertLocator"),
+        }
+    }
+
+    // ── Config validation ───────────────────────────────────────────────
+
+    #[test]
+    fn workflow_definition_config_default_path() {
+        let config = WorkflowDefinitionConfig::default();
+        assert_eq!(
+            config.path,
+            ".github/workgraph/workflows/issue-lifecycle-vnext.body"
+        );
+    }
+
+    #[test]
+    fn workflow_definition_config_validation_missing_repository() {
+        let config = WorkflowDefinitionConfig {
+            repository: "".to_string(),
+            ..WorkflowDefinitionConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn workflow_definition_config_validation_missing_token() {
+        let config = WorkflowDefinitionConfig {
+            repository: "acme/repo".to_string(),
+            token: "".to_string(),
+            ..WorkflowDefinitionConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    // ── Builder validation ──────────────────────────────────────────────
+
+    #[test]
+    fn builder_fails_without_projector_when_definition_configured() {
+        let config = GitHubWorkGraphSourceConfig {
+            organization: "acme".to_string(),
+            task_issue_type: crate::config::TaskIssueType {
+                id: "IT_test".to_string(),
+                name: "WorkGraphTask".to_string(),
+            },
+            repositories: vec![],
+            agent_config: None,
+            lease_trust: None,
+            workflow_definition: Some(WorkflowDefinitionConfig {
+                repository: "acme/repo".to_string(),
+                r#ref: "main".to_string(),
+                token: "tok".to_string(),
+                ..WorkflowDefinitionConfig::default()
+            }),
+            webhook: crate::config::WebhookConfig {
+                secret: "s".to_string(),
+                lease_validation_token: "v".to_string(),
+                ..crate::config::WebhookConfig::default()
+            },
+            durability: drasi_lib::DurabilityConfig {
+                enabled: true,
+                ..drasi_lib::DurabilityConfig::default()
+            },
+        };
+        let result = GitHubWorkGraphSourceBuilder::new("test")
+            .with_config(config)
+            .build();
+        assert!(result.is_err());
+        let err = match result {
+            Ok(_) => panic!("should fail without projector"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("WorkGraphProjector"),
+            "error should mention projector: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_descriptor_rejects_programmatic_projector_config_clearly() {
+        let error = match GitHubWorkGraphSourceDescriptor
+            .create_source(
+                "test",
+                &serde_json::json!({"workflowDefinition": {}}),
+                false,
+            )
+            .await
+        {
+            Ok(_) => panic!("dynamic descriptor cannot inject a projector"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("with_workgraph_projector"));
+    }
+
+    // ── Webhook normalization helpers ────────────────────────────────────
+
+    #[test]
+    fn extract_issue_locator_from_payload() {
+        use crate::webhook::extract_issue_locator;
+        let issue = serde_json::json!({
+            "node_id": "MDExOklzc3VlMQ==",
+            "number": 42
+        });
+        let payload = serde_json::json!({
+            "repository": {
+                "full_name": "myorg/myrepo"
+            }
+        });
+        let locator = extract_issue_locator(&issue, &payload).unwrap();
+        assert_eq!(locator.source_key, "MDExOklzc3VlMQ==");
+        assert_eq!(locator.repository_owner, "myorg");
+        assert_eq!(locator.repository_name, "myrepo");
+        assert_eq!(locator.issue_number, 42);
+        assert_eq!(locator.issue_node_id, "MDExOklzc3VlMQ==");
+    }
+
+    #[test]
+    fn item_is_open_checks_state() {
+        use crate::webhook::item_is_open;
+        let open = serde_json::json!({"state": "open"});
+        let closed = serde_json::json!({"state": "closed"});
+        let missing = serde_json::json!({});
+        assert!(item_is_open(&open));
+        assert!(!item_is_open(&closed));
+        assert!(item_is_open(&missing));
+    }
 }

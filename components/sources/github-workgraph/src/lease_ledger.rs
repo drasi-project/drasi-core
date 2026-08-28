@@ -5,6 +5,7 @@ use crate::agents::{
     AgentDefinition, AgentFile, AgentFileContent, AgentFileLocation, MAX_AGENT_SLOTS,
 };
 use crate::mapping::{agent_changes, allocation_changes, set_artifact_trusted, AgentProjection};
+use crate::vnext::{PreparedProjectionCommit, ProjectionInput, TaskDocument, WorkGraphProjector};
 use crate::workgraph::{slot_id, Outcome, TaskType};
 use anyhow::{Context, Result as AnyResult};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -17,9 +18,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
+/// Version 2 is accepted during upgrade; version 3 is the canonical version.
+const PREVIOUS_VERSION: u8 = 2;
 const STATE_KEY: &str = "allocator:state";
 const DELIVERY_PREFIX: &str = "delivery:";
+const VNEXT_ORIGIN_PREFIX: &str = "vnext-origin:";
+
+fn vnext_origin_key(origin_id: &str) -> String {
+    let digest = Sha256::digest(origin_id.as_bytes());
+    format!("{VNEXT_ORIGIN_PREFIX}{}", hex::encode(digest))
+}
 
 #[derive(Clone, Debug)]
 pub enum AllocationEvent {
@@ -189,6 +198,23 @@ pub struct AllocationState {
     comments: BTreeMap<String, StoredArtifact>,
     active: BTreeMap<String, ActiveLease>,
     pub pending: Vec<SourceChange>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pending_offset: usize,
+    /// Opaque bounded checkpoint of the current VNext projector state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    vnext_checkpoint: Vec<u8>,
+    /// Materialized task documents used to preserve parent linkage without
+    /// parsing VNext bodies or scanning projector history.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    vnext_tasks: BTreeMap<String, TaskDocument>,
+    /// Origins staged with pending WAL changes but not yet finalized into
+    /// their separate durable dedupe key.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pending_vnext_origins: BTreeSet<String>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 pub struct Allocator {
@@ -196,6 +222,7 @@ pub struct Allocator {
     store: Arc<dyn StateStoreProvider>,
     wal: Arc<dyn WalProvider>,
     gate: Mutex<()>,
+    pending_vnext_commits: Mutex<BTreeMap<String, Box<dyn PreparedProjectionCommit>>>,
 }
 
 impl Allocator {
@@ -209,6 +236,7 @@ impl Allocator {
             store,
             wal,
             gate: Mutex::new(()),
+            pending_vnext_commits: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -377,10 +405,19 @@ impl Allocator {
             None => AllocationState::default(),
         };
         state.validate().map_err(anyhow::Error::msg)?;
+        // Upgrade version 2 → 3. New VNext fields have serde defaults.
+        if state.version == PREVIOUS_VERSION {
+            state.version = VERSION;
+        }
         if !state.pending.is_empty() {
-            self.append(&state.pending).await?;
-            state.pending.clear();
-            self.save(&state).await?;
+            self.append_pending(&mut state).await?;
+            let commits = {
+                let mut pending = self.pending_vnext_commits.lock().await;
+                std::mem::take(&mut *pending)
+            };
+            for (_, commit) in commits {
+                commit.commit().await;
+            }
         }
         Ok(state)
     }
@@ -395,9 +432,29 @@ impl Allocator {
             .map_err(anyhow::Error::msg)
             .context("allocator transition produced invalid state")?;
         state.pending = changes;
+        state.pending_offset = 0;
         self.save(state).await?;
-        let appended = self.append(&state.pending).await?;
+        self.append_pending(state).await
+    }
+
+    async fn append_pending(&self, state: &mut AllocationState) -> AnyResult<usize> {
+        let start = state.pending_offset;
+        while state.pending_offset < state.pending.len() {
+            self.wal
+                .append(&self.source_id, &state.pending[state.pending_offset])
+                .await
+                .map_err(|error| match error {
+                    WalError::CapacityExhausted(message) => {
+                        anyhow::anyhow!("source WAL capacity exhausted: {message}")
+                    }
+                    error => anyhow::anyhow!("source WAL append failed: {error}"),
+                })?;
+            state.pending_offset += 1;
+            self.save(state).await?;
+        }
+        let appended = state.pending_offset.saturating_sub(start);
         state.pending.clear();
+        state.pending_offset = 0;
         self.save(state).await?;
         Ok(appended)
     }
@@ -427,6 +484,127 @@ impl Allocator {
             .await
             .context("failed to persist allocator state")
     }
+
+    // ── VNext projection methods ──────────────────────────────────────────
+
+    /// Process a VNext projection input through the injected projector.
+    ///
+    /// Atomically stage the bounded projector checkpoint and pending changes,
+    /// append the ordered WAL batch, then commit the prepared projector state.
+    pub async fn ingest_vnext(
+        &self,
+        projector: &dyn WorkGraphProjector,
+        inputs: Vec<ProjectionInput>,
+        effective_from: u64,
+        origin_id: &str,
+    ) -> AnyResult<(usize, Option<String>)> {
+        let _guard = self.gate.lock().await;
+        let mut state = self.ready_state().await?;
+        let origin_key = vnext_origin_key(origin_id);
+
+        if self
+            .store
+            .contains_key(&self.source_id, &origin_key)
+            .await?
+        {
+            if state.pending_vnext_origins.remove(origin_id) {
+                self.save(&state).await?;
+            }
+            return Ok((0, None));
+        }
+        if state.pending_vnext_origins.contains(origin_id) {
+            self.store
+                .set(&self.source_id, &origin_key, Vec::new())
+                .await?;
+            state.pending_vnext_origins.remove(origin_id);
+            self.save(&state).await?;
+            return Ok((0, None));
+        }
+
+        let prepared = projector.prepare(inputs.clone(), effective_from).await?;
+        anyhow::ensure!(
+            !prepared.checkpoint.is_empty(),
+            "VNext projector returned an empty recovery checkpoint"
+        );
+        let rejection = prepared.rejection.clone();
+
+        for input in &inputs {
+            match input {
+                ProjectionInput::UpsertTask(document) => {
+                    state
+                        .vnext_tasks
+                        .insert(document.source_key.clone(), document.clone());
+                }
+                ProjectionInput::DeleteTask { source_key } => {
+                    state.vnext_tasks.remove(source_key);
+                }
+                _ => {}
+            }
+        }
+        state.vnext_checkpoint = prepared.checkpoint;
+        state.pending_vnext_origins.insert(origin_id.to_string());
+        state.pending = prepared.changes.clone();
+        state.pending_offset = 0;
+        self.save(&state).await?;
+        self.pending_vnext_commits
+            .lock()
+            .await
+            .insert(origin_id.to_string(), prepared.commit);
+
+        let appended = self.append_pending(&mut state).await?;
+
+        let commit = self
+            .pending_vnext_commits
+            .lock()
+            .await
+            .remove(origin_id)
+            .expect("prepared VNext commit accompanies a successful append");
+        commit.commit().await;
+        self.store
+            .set(&self.source_id, &origin_key, Vec::new())
+            .await?;
+        state.pending_vnext_origins.remove(origin_id);
+        self.save(&state).await?;
+
+        Ok((appended, rejection))
+    }
+
+    /// Return the bounded durable VNext projector checkpoint.
+    pub async fn vnext_checkpoint(&self) -> AnyResult<Vec<u8>> {
+        let _guard = self.gate.lock().await;
+        let mut state = self.ready_state().await?;
+        if !state.pending_vnext_origins.is_empty() {
+            for origin_id in &state.pending_vnext_origins {
+                self.store
+                    .set(&self.source_id, &vnext_origin_key(origin_id), Vec::new())
+                    .await?;
+            }
+            state.pending_vnext_origins.clear();
+            self.save(&state).await?;
+        }
+        Ok(state.vnext_checkpoint.clone())
+    }
+
+    /// Check if a VNext origin ID was already processed.
+    pub async fn vnext_origin_completed(&self, origin_id: &str) -> AnyResult<bool> {
+        let _guard = self.gate.lock().await;
+        let state = self.ready_state().await?;
+        if state.pending_vnext_origins.contains(origin_id) {
+            return Ok(true);
+        }
+        self.store
+            .contains_key(&self.source_id, &vnext_origin_key(origin_id))
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Return the latest accepted task document, preserving parent linkage
+    /// across ordinary issue updates that do not carry sub-issue metadata.
+    pub async fn latest_vnext_task(&self, source_key: &str) -> AnyResult<Option<TaskDocument>> {
+        let _guard = self.gate.lock().await;
+        let state = self.ready_state().await?;
+        Ok(state.vnext_tasks.get(source_key).cloned())
+    }
 }
 
 impl Default for AllocationState {
@@ -439,14 +617,25 @@ impl Default for AllocationState {
             comments: BTreeMap::new(),
             active: BTreeMap::new(),
             pending: Vec::new(),
+            pending_offset: 0,
+            vnext_checkpoint: Vec::new(),
+            vnext_tasks: BTreeMap::new(),
+            pending_vnext_origins: BTreeSet::new(),
         }
     }
 }
 
 impl AllocationState {
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != VERSION {
-            return Err(format!("allocator state version must equal {VERSION}"));
+        if self.version != VERSION && self.version != PREVIOUS_VERSION {
+            return Err(format!(
+                "allocator state version must equal {VERSION} (or {PREVIOUS_VERSION} for upgrade)"
+            ));
+        }
+        if self.pending_offset > self.pending.len()
+            || (self.pending.is_empty() && self.pending_offset != 0)
+        {
+            return Err("allocator pending WAL offset is invalid".to_string());
         }
         let mut tasks = BTreeSet::new();
         let mut slots = BTreeSet::new();

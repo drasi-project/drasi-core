@@ -305,6 +305,73 @@ impl AgentConfig {
     }
 }
 
+/// Default path for the VNext workflow definition file.
+pub const DEFAULT_WORKFLOW_DEFINITION_PATH: &str =
+    ".github/workgraph/workflows/issue-lifecycle-vnext.body";
+
+/// Configuration for fetching the bounded VNext workflow definition from a
+/// GitHub repository file.
+///
+/// The fields mirror [`AgentConfig`] and use the same validation and
+/// transport ([`crate::agent_client::AgentFileClient`]).
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowDefinitionConfig {
+    /// `owner/name` of the repository holding the definition file.
+    pub repository: String,
+    /// The exact git ref (normally a branch such as `main`).
+    pub r#ref: String,
+    /// Repository-relative path of the definition file.
+    #[serde(default = "default_workflow_definition_path")]
+    pub path: String,
+    /// A read-only GitHub credential used to read the file.
+    pub token: String,
+    /// GraphQL API endpoint. Override for GitHub Enterprise Server.
+    #[serde(default = "default_agent_api_base_url")]
+    pub api_base_url: String,
+}
+
+fn default_workflow_definition_path() -> String {
+    DEFAULT_WORKFLOW_DEFINITION_PATH.to_string()
+}
+
+impl Default for WorkflowDefinitionConfig {
+    fn default() -> Self {
+        Self {
+            repository: String::new(),
+            r#ref: String::new(),
+            path: default_workflow_definition_path(),
+            token: String::new(),
+            api_base_url: default_agent_api_base_url(),
+        }
+    }
+}
+
+impl WorkflowDefinitionConfig {
+    /// Build an [`AgentFileLocation`] for reuse with the generalized fetch
+    /// client.
+    pub fn location(&self) -> AgentFileLocation {
+        AgentFileLocation {
+            repository: self.repository.clone(),
+            r#ref: self.r#ref.clone(),
+            path: self.path.clone(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.location().validate()?;
+        ensure!(
+            !self.token.trim().is_empty(),
+            "workflowDefinition.token cannot be empty"
+        );
+        ensure!(
+            !self.api_base_url.trim().is_empty(),
+            "workflowDefinition.apiBaseUrl cannot be empty"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GitHubWorkGraphSourceConfig {
@@ -329,6 +396,13 @@ pub struct GitHubWorkGraphSourceConfig {
     pub webhook: WebhookConfig,
     #[serde(default, with = "DurabilityConfigDef")]
     pub durability: DurabilityConfig,
+    /// VNext workflow definition file configuration.
+    ///
+    /// When present, the source fetches and projects the definition at
+    /// startup and on matching push deliveries. Requires a
+    /// `WorkGraphProjector` to be injected via the builder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_definition: Option<WorkflowDefinitionConfig>,
 }
 
 impl Default for GitHubWorkGraphSourceConfig {
@@ -344,6 +418,7 @@ impl Default for GitHubWorkGraphSourceConfig {
                 enabled: true,
                 ..DurabilityConfig::default()
             },
+            workflow_definition: None,
         }
     }
 }
@@ -391,6 +466,22 @@ impl GitHubWorkGraphSourceConfig {
             );
         }
         RepositoryFilter::new(org, &self.repositories)?;
+        if let Some(workflow_definition) = &self.workflow_definition {
+            workflow_definition.validate()?;
+            let (owner, name) = workflow_definition
+                .repository
+                .split_once('/')
+                .expect("validated repository contains one slash");
+            ensure!(
+                owner.eq_ignore_ascii_case(org),
+                "workflowDefinition.repository must belong to the configured organization"
+            );
+            let filter = RepositoryFilter::new(org, &self.repositories)?;
+            ensure!(
+                filter.includes_name(name),
+                "workflowDefinition.repository must be included by repositories"
+            );
+        }
         Ok(())
     }
 
