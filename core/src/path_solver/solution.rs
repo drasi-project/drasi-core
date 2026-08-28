@@ -150,6 +150,41 @@ impl MatchPathSolution {
         self.anchor_slots.extend(&other.anchor_slots);
     }
 
+    pub(crate) fn optional_clause_memberships(
+        &self,
+        match_path: &MatchPath,
+    ) -> Vec<(usize, SolutionSignature)> {
+        match_path
+            .clauses
+            .iter()
+            .enumerate()
+            .filter(|(clause_id, clause)| {
+                clause.optional && self.clause_is_real(match_path, *clause_id)
+            })
+            .map(|(clause_id, _)| (clause_id, self.upstream_signature(match_path, clause_id)))
+            .collect()
+    }
+
+    pub(crate) fn optional_anchor_memberships(
+        &self,
+        match_path: &MatchPath,
+    ) -> Vec<(usize, SolutionSignature)> {
+        let anchor_clauses = self
+            .anchor_slots
+            .iter()
+            .map(|slot_num| match_path.slots[*slot_num].introduction_clause)
+            .filter(|clause_id| {
+                match_path.clauses[*clause_id].optional
+                    && self.clause_is_real(match_path, *clause_id)
+            })
+            .collect::<HashSet<_>>();
+
+        self.optional_clause_memberships(match_path)
+            .into_iter()
+            .filter(|(clause_id, _)| anchor_clauses.contains(clause_id))
+            .collect()
+    }
+
     pub(crate) fn default_clause(&mut self, match_path: &MatchPath, clause_id: usize) {
         self.defaulted_clauses.insert(clause_id);
         for slot_num in &match_path.clauses[clause_id].introduced_slots {

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::Debug,
     future::Future,
     hash::{Hash, Hasher},
@@ -32,12 +32,14 @@ use tokio::{
 use crate::{
     evaluation::{
         context::{ChangeContext, QueryPartEvaluationContext, QueryVariables},
+        functions::aggregation::ValueAccumulator,
+        variable_value::VariableValue,
         EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock,
         QueryPartEvaluator,
     },
     interface::{
         ElementIndex, FutureQueue, FutureQueueConsumer, IndexError, MiddlewareError, QueryClock,
-        ResultIndex, SessionControl, SessionGuard,
+        ResultIndex, ResultKey, ResultOwner, SessionControl, SessionGuard,
     },
     middleware::SourceMiddlewarePipelineCollection,
     models::{Element, SourceChange},
@@ -197,6 +199,7 @@ impl ContinuousQuery {
         let mut result = Vec::new();
 
         for change in changes {
+            let result_start = result.len();
             let base_variables = QueryVariables::new(); //todo: get query parameters
             let after_clock = Arc::new(InstantQueryClock::from_source_change(&change));
 
@@ -265,6 +268,8 @@ impl ContinuousQuery {
             for ctx in aggregation_results.into_result_vec() {
                 result.push(ctx);
             }
+            let source_results = result.split_off(result_start);
+            result.extend(collapse_same_signature_replacements(source_results));
         }
 
         Ok(result)
@@ -292,11 +297,6 @@ impl ContinuousQuery {
                     .await?;
 
                 for (signature, solution) in solutions {
-                    if let Some(blank_optional_solution) =
-                        solution.get_empty_optional_solution(&self.match_path)
-                    {
-                        before_change_solutions.insert(signature, blank_optional_solution);
-                    }
                     after_change_solutions.insert(signature, solution);
                 }
 
@@ -359,12 +359,6 @@ impl ContinuousQuery {
                         .resolve_solutions(element.clone(), affinity_slots, false)
                         .await?;
                     for (signature, solution) in solutions {
-                        if let Some(blank_optional_solution) =
-                            solution.get_empty_optional_solution(&self.match_path)
-                        {
-                            after_change_solutions.insert(signature, blank_optional_solution);
-                        }
-
                         before_change_solutions.insert(signature, solution);
                     }
                     result.before_clock = Some(before_clock);
@@ -426,6 +420,12 @@ impl ContinuousQuery {
             }
         }
 
+        self.reconcile_optional_lifecycle(
+            &mut before_change_solutions,
+            &mut after_change_solutions,
+        )
+        .await?;
+
         for (sig, before_sol) in &before_change_solutions {
             match after_change_solutions.get(sig) {
                 Some(after_sol) => result.changes.push((
@@ -459,6 +459,198 @@ impl ContinuousQuery {
         }
 
         Ok(result)
+    }
+
+    async fn reconcile_optional_lifecycle(
+        &self,
+        before: &mut HashMap<u64, MatchPathSolution>,
+        after: &mut HashMap<u64, MatchPathSolution>,
+    ) -> Result<(), EvaluationError> {
+        // Raw path cardinality controls clause defaults; aggregate cardinality later
+        // controls projected groups. Both are needed because one raw match can fan
+        // out across independent OPTIONAL clauses before projection.
+        let before_signatures = before
+            .values()
+            .filter_map(|solution| solution.get_solution_signature())
+            .collect::<HashSet<_>>();
+        let after_signatures = after
+            .values()
+            .filter_map(|solution| solution.get_solution_signature())
+            .collect::<HashSet<_>>();
+
+        let mut removed = before
+            .iter()
+            .filter(|(_, solution)| {
+                solution
+                    .get_solution_signature()
+                    .is_some_and(|signature| !after_signatures.contains(&signature))
+            })
+            .map(|(key, solution)| (*key, solution.clone()))
+            .collect::<Vec<_>>();
+        let mut added = after
+            .iter()
+            .filter(|(_, solution)| {
+                solution
+                    .get_solution_signature()
+                    .is_some_and(|signature| !before_signatures.contains(&signature))
+            })
+            .map(|(key, solution)| (*key, solution.clone()))
+            .collect::<Vec<_>>();
+        removed.sort_by_key(|(key, _)| *key);
+        added.sort_by_key(|(key, _)| *key);
+
+        let removed_memberships = membership_counts(&removed, &self.match_path);
+        let added_memberships = membership_counts(&added, &self.match_path);
+        let membership_keys = removed_memberships
+            .keys()
+            .chain(added_memberships.keys())
+            .copied()
+            .collect::<HashSet<_>>();
+        let mut current_counts = HashMap::new();
+        for membership in membership_keys {
+            current_counts.insert(
+                membership,
+                self.read_path_match_cardinality(membership).await?,
+            );
+        }
+
+        let mut claimed_after_defaults = HashSet::new();
+        for (_, solution) in &removed {
+            let Some(default) = solution.get_empty_optional_solution(&self.match_path) else {
+                continue;
+            };
+            let anchor_memberships = solution.optional_anchor_memberships(&self.match_path);
+            if anchor_memberships.is_empty() {
+                continue;
+            }
+            let all_drained = anchor_memberships.iter().all(|membership| {
+                current_counts.get(membership).copied().unwrap_or_default()
+                    - removed_memberships
+                        .get(membership)
+                        .copied()
+                        .unwrap_or_default()
+                    + added_memberships
+                        .get(membership)
+                        .copied()
+                        .unwrap_or_default()
+                    == 0
+            });
+            let default_signature = default
+                .get_solution_signature()
+                .ok_or(EvaluationError::InvalidContext)?;
+            if all_drained && claimed_after_defaults.insert(default_signature) {
+                after.insert(default_signature, default);
+            }
+        }
+
+        let mut claimed_before_defaults = HashSet::new();
+        for (_, solution) in &added {
+            let Some(default) = solution.get_empty_optional_solution(&self.match_path) else {
+                continue;
+            };
+            let anchor_memberships = solution.optional_anchor_memberships(&self.match_path);
+            if anchor_memberships.is_empty() {
+                continue;
+            }
+            let was_empty = anchor_memberships
+                .iter()
+                .all(|membership| current_counts.get(membership).copied().unwrap_or_default() == 0);
+            let default_signature = default
+                .get_solution_signature()
+                .ok_or(EvaluationError::InvalidContext)?;
+            if was_empty && claimed_before_defaults.insert(default_signature) {
+                before.insert(default_signature, default);
+            }
+        }
+
+        let final_before = before
+            .values()
+            .filter_map(|solution| {
+                solution
+                    .get_solution_signature()
+                    .map(|signature| (signature, solution.clone()))
+            })
+            .collect::<HashMap<_, _>>();
+        let final_after = after
+            .values()
+            .filter_map(|solution| {
+                solution
+                    .get_solution_signature()
+                    .map(|signature| (signature, solution.clone()))
+            })
+            .collect::<HashMap<_, _>>();
+        let final_removed = final_before
+            .iter()
+            .filter(|(signature, _)| !final_after.contains_key(signature))
+            .map(|(signature, solution)| (*signature, solution.clone()))
+            .collect::<Vec<_>>();
+        let final_added = final_after
+            .iter()
+            .filter(|(signature, _)| !final_before.contains_key(signature))
+            .map(|(signature, solution)| (*signature, solution.clone()))
+            .collect::<Vec<_>>();
+        let final_removed_memberships = membership_counts(&final_removed, &self.match_path);
+        let final_added_memberships = membership_counts(&final_added, &self.match_path);
+        let final_keys = final_removed_memberships
+            .keys()
+            .chain(final_added_memberships.keys())
+            .copied()
+            .collect::<HashSet<_>>();
+
+        for membership in final_keys {
+            let current = match current_counts.get(&membership) {
+                Some(current) => *current,
+                None => self.read_path_match_cardinality(membership).await?,
+            };
+            let next = current
+                - final_removed_memberships
+                    .get(&membership)
+                    .copied()
+                    .unwrap_or_default()
+                + final_added_memberships
+                    .get(&membership)
+                    .copied()
+                    .unwrap_or_default();
+            if next < 0 {
+                return Err(EvaluationError::CorruptData);
+            }
+            self.write_path_match_cardinality(membership, next).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn read_path_match_cardinality(
+        &self,
+        (clause_id, signature): (usize, u64),
+    ) -> Result<i64, EvaluationError> {
+        match self
+            .result_index
+            .get(
+                &path_match_cardinality_key(clause_id, signature),
+                &ResultOwner::QueryState,
+            )
+            .await?
+        {
+            Some(ValueAccumulator::Count { value }) if value >= 0 => Ok(value),
+            Some(_) => Err(EvaluationError::CorruptData),
+            None => Ok(0),
+        }
+    }
+
+    async fn write_path_match_cardinality(
+        &self,
+        (clause_id, signature): (usize, u64),
+        value: i64,
+    ) -> Result<(), EvaluationError> {
+        self.result_index
+            .set(
+                path_match_cardinality_key(clause_id, signature),
+                ResultOwner::QueryState,
+                (value != 0).then_some(ValueAccumulator::Count { value }),
+            )
+            .await?;
+        Ok(())
     }
 
     async fn resolve_solutions(
@@ -936,7 +1128,81 @@ fn extract_grouping_value_hash(grouping_keys: &Vec<String>, variables: &QueryVar
             None => 0.hash(&mut hasher),
         };
     }
+
     hasher.finish()
+}
+
+fn membership_counts(
+    solutions: &[(u64, MatchPathSolution)],
+    match_path: &MatchPath,
+) -> HashMap<(usize, u64), i64> {
+    let mut counts = HashMap::new();
+    let mut seen = HashSet::new();
+    for (_, solution) in solutions {
+        let Some(solution_signature) = solution.get_solution_signature() else {
+            continue;
+        };
+        for membership in solution.optional_clause_memberships(match_path) {
+            if seen.insert((solution_signature, membership)) {
+                *counts.entry(membership).or_default() += 1;
+            }
+        }
+    }
+    counts
+}
+
+fn path_match_cardinality_key(clause_id: usize, signature: u64) -> ResultKey {
+    ResultKey::GroupBy(Arc::new(vec![
+        VariableValue::String("__path_match_cardinality".to_string()),
+        VariableValue::String(clause_id.to_string()),
+        VariableValue::String(signature.to_string()),
+    ]))
+}
+
+fn collapse_same_signature_replacements(
+    contexts: Vec<QueryPartEvaluationContext>,
+) -> Vec<QueryPartEvaluationContext> {
+    let mut result = Vec::with_capacity(contexts.len());
+    let mut removals = HashMap::new();
+
+    for context in contexts {
+        match context {
+            QueryPartEvaluationContext::Removing {
+                before,
+                row_signature,
+            } => {
+                removals.insert(row_signature, result.len());
+                result.push(QueryPartEvaluationContext::Removing {
+                    before,
+                    row_signature,
+                });
+            }
+            QueryPartEvaluationContext::Adding {
+                after,
+                row_signature,
+            } => {
+                if let Some(index) = removals.remove(&row_signature) {
+                    let QueryPartEvaluationContext::Removing { before, .. } =
+                        std::mem::replace(&mut result[index], QueryPartEvaluationContext::Noop)
+                    else {
+                        unreachable!()
+                    };
+                    result[index] = QueryPartEvaluationContext::Updating {
+                        before,
+                        after,
+                        row_signature,
+                    };
+                } else {
+                    result.push(QueryPartEvaluationContext::Adding {
+                        after,
+                        row_signature,
+                    });
+                }
+            }
+            context => result.push(context),
+        }
+    }
+    result
 }
 
 #[cfg(test)]
