@@ -574,6 +574,7 @@ pub struct GitHubWorkGraphSourceBuilder {
     auto_start: bool,
     state_store: Option<Arc<dyn StateStoreProvider>>,
     projector: Option<Arc<dyn WorkGraphProjector>>,
+    raw_config: Option<serde_json::Value>,
 }
 
 impl GitHubWorkGraphSourceBuilder {
@@ -584,6 +585,7 @@ impl GitHubWorkGraphSourceBuilder {
             auto_start: true,
             state_store: None,
             projector: None,
+            raw_config: None,
         }
     }
     pub fn with_config(mut self, config: GitHubWorkGraphSourceConfig) -> Self {
@@ -596,6 +598,15 @@ impl GitHubWorkGraphSourceBuilder {
     }
     pub fn with_state_store(mut self, state_store: Arc<dyn StateStoreProvider>) -> Self {
         self.state_store = Some(state_store);
+        self
+    }
+    /// Preserve the unresolved configuration used to construct this Source.
+    ///
+    /// Custom descriptors should pass their original JSON so `properties()`
+    /// retains `SecretReference` values instead of serializing resolved
+    /// secrets.
+    pub fn with_raw_config(mut self, raw_config: serde_json::Value) -> Self {
+        self.raw_config = Some(raw_config);
         self
     }
     /// Inject the VNext graph projector. Required when
@@ -628,7 +639,7 @@ impl GitHubWorkGraphSourceBuilder {
         if let Some(state_store) = self.state_store {
             params = params.with_state_store(state_store);
         }
-        Ok(GitHubWorkGraphSource {
+        let mut source = GitHubWorkGraphSource {
             base: SourceBase::new(params)?,
             config,
             repository_filter,
@@ -639,6 +650,10 @@ impl GitHubWorkGraphSourceBuilder {
             notify: Arc::new(Notify::new()),
             replay_gate: Arc::new(Mutex::new(())),
             startup_subscriptions_complete: Arc::new(AtomicBool::new(true)),
-        })
+        };
+        if let Some(raw_config) = self.raw_config {
+            source.base.set_raw_config(raw_config);
+        }
+        Ok(source)
     }
 }

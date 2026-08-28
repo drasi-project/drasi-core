@@ -5719,6 +5719,7 @@ mod vnext_tests {
     use crate::descriptor::GitHubWorkGraphSourceDescriptor;
     use crate::source::GitHubWorkGraphSourceBuilder;
     use crate::vnext::*;
+    use drasi_lib::sources::Source;
     use drasi_plugin_sdk::prelude::SourcePluginDescriptor;
 
     // ── Marker recognition ──────────────────────────────────────────────
@@ -5994,6 +5995,125 @@ mod vnext_tests {
             err.contains("WorkGraphProjector"),
             "error should mention projector: {err}"
         );
+    }
+
+    #[test]
+    fn builder_preserves_raw_secret_references_for_custom_descriptors() {
+        let raw_config = serde_json::json!({
+            "organization": "acme",
+            "taskIssueType": {"id": "IT_test", "name": "WorkGraphTask"},
+            "webhook": {
+                "secret": {"kind": "Secret", "name": "webhook-signing"},
+                "leaseValidationToken": {"kind": "Secret", "name": "lease-validation"}
+            },
+            "durability": {
+                "enabled": true,
+                "maxEvents": 1000,
+                "capacityPolicy": "RejectIncoming"
+            }
+        });
+        let config = GitHubWorkGraphSourceConfig {
+            organization: "acme".to_string(),
+            task_issue_type: crate::config::TaskIssueType {
+                id: "IT_test".to_string(),
+                name: "WorkGraphTask".to_string(),
+            },
+            webhook: crate::config::WebhookConfig {
+                secret: "resolved-webhook-secret".to_string(),
+                lease_validation_token: "resolved-validation-secret".to_string(),
+                ..crate::config::WebhookConfig::default()
+            },
+            durability: drasi_lib::DurabilityConfig {
+                enabled: true,
+                ..drasi_lib::DurabilityConfig::default()
+            },
+            ..GitHubWorkGraphSourceConfig::default()
+        };
+        let source = GitHubWorkGraphSourceBuilder::new("custom")
+            .with_config(config)
+            .with_raw_config(raw_config)
+            .build()
+            .unwrap();
+
+        let properties = source.properties();
+        assert_eq!(
+            properties["webhook"]["secret"],
+            serde_json::json!({"kind": "Secret", "name": "webhook-signing"})
+        );
+        assert_eq!(
+            properties["webhook"]["leaseValidationToken"],
+            serde_json::json!({"kind": "Secret", "name": "lease-validation"})
+        );
+        assert_ne!(
+            properties["webhook"]["secret"],
+            serde_json::json!("resolved-webhook-secret")
+        );
+        let serialized = serde_json::to_string(&properties).unwrap();
+        assert!(!serialized.contains("resolved-webhook-secret"));
+        assert!(!serialized.contains("resolved-validation-secret"));
+    }
+
+    #[tokio::test]
+    async fn descriptor_properties_round_trip_secret_references_without_resolved_values() {
+        struct TestSecretResolver;
+
+        #[async_trait::async_trait]
+        impl drasi_plugin_sdk::resolver::ValueResolver for TestSecretResolver {
+            async fn resolve_to_string(
+                &self,
+                value: &drasi_plugin_sdk::ConfigValue<String>,
+            ) -> Result<String, drasi_plugin_sdk::resolver::ResolverError> {
+                match value {
+                    drasi_plugin_sdk::ConfigValue::Secret { name } if name.starts_with("same-") => {
+                        Ok("shared-secret-value".to_string())
+                    }
+                    drasi_plugin_sdk::ConfigValue::Secret { name } => {
+                        Ok(format!("resolved-{name}"))
+                    }
+                    _ => Err(drasi_plugin_sdk::resolver::ResolverError::WrongResolverType),
+                }
+            }
+        }
+
+        drasi_plugin_sdk::resolver::register_secret_resolver(std::sync::Arc::new(
+            TestSecretResolver,
+        ));
+        let original = serde_json::json!({
+            "organization": "acme",
+            "taskIssueType": {"id": "IT_test", "name": "WorkGraphTask"},
+            "webhook": {
+                "secret": {"kind": "Secret", "name": "webhook-signing"},
+                "leaseValidationToken": {"kind": "Secret", "name": "lease-validation"}
+            },
+            "durability": {
+                "enabled": true,
+                "maxEvents": 1000,
+                "capacityPolicy": "RejectIncoming"
+            }
+        });
+        let descriptor = GitHubWorkGraphSourceDescriptor;
+        let source = descriptor
+            .create_source("initial", &original, false)
+            .await
+            .unwrap();
+        let persisted = serde_json::to_value(source.properties()).unwrap();
+        let reloaded = descriptor
+            .create_source("reloaded", &persisted, false)
+            .await
+            .unwrap();
+        let reloaded_properties = serde_json::to_value(reloaded.properties()).unwrap();
+
+        assert_eq!(
+            reloaded_properties["webhook"]["secret"],
+            original["webhook"]["secret"]
+        );
+        assert_eq!(
+            reloaded_properties["webhook"]["leaseValidationToken"],
+            original["webhook"]["leaseValidationToken"]
+        );
+        let serialized = reloaded_properties.to_string();
+        assert!(!serialized.contains("resolved-webhook-signing"));
+        assert!(!serialized.contains("resolved-lease-validation"));
     }
 
     #[tokio::test]

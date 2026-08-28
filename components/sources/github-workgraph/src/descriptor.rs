@@ -265,11 +265,11 @@ impl SourcePluginDescriptor for GitHubWorkGraphSourceDescriptor {
             durability: dto.durability.clone(),
         };
         config.validate()?;
-        let mut source = GitHubWorkGraphSourceBuilder::new(id)
+        let source = GitHubWorkGraphSourceBuilder::new(id)
             .with_config(config)
             .with_auto_start(auto_start)
+            .with_raw_config(config_json.clone())
             .build()?;
-        source.base.set_raw_config(config_json.clone());
         Ok(Box::new(source))
     }
 }
