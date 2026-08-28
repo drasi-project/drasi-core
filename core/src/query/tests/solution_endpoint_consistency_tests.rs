@@ -75,6 +75,63 @@ RETURN run.id AS run, parent.id AS parent,
   child.id AS child, declares.id AS declares, taskFor.id AS taskFor
 ";
 
+const CYCLIC_OPTIONAL_QUERY: &str = "
+MATCH
+  (run:Run)<-[:IN_RUN]-(parent:Task)-[:INSTANCE_OF]->
+  (parentDefinition:Definition)
+MATCH
+  (parentDefinition)-[:DECLARES_CHILD]->(childDefinition:Definition)
+OPTIONAL MATCH
+  (childDefinition)<-[:INSTANCE_OF]-(child:Task)-[:TASK_FOR]->(parent)
+  -[:IN_RUN]->(run)<-[:IN_RUN]-(child)
+RETURN run.id AS run, parent.id AS parent,
+  childDefinition.id AS childDefinition, count(child) AS realizationCount
+";
+
+const COMMA_OPTIONAL_QUERY: &str = "
+MATCH (parent:Parent)
+OPTIONAL MATCH
+  (parent)-[:HAS_CHILD]->(child:Child),
+  (child)-[:HAS_DETAIL]->(detail:Detail)
+RETURN parent.id AS parent, count(child) AS childCount,
+  count(detail) AS detailCount
+";
+
+const INDEPENDENT_OPTIONAL_QUERY: &str = "
+MATCH (parent:Parent)
+OPTIONAL MATCH (parent)-[:HAS_CHILD]->(child:Child)
+OPTIONAL MATCH (parent)-[:HAS_NOTE]->(memo:Note)
+RETURN parent.id AS parent, count(child) AS childCount,
+  count(memo) AS noteCount
+";
+
+const REUSED_BINDINGS_OPTIONAL_QUERY: &str = "
+MATCH (a:Point)-[link:LINK]->(b:Point)
+OPTIONAL MATCH (a)<-[link]-(b)
+RETURN a.id AS a, b.id AS b
+";
+
+const TWO_REUSED_BINDINGS_OPTIONAL_QUERY: &str = "
+MATCH (a:Point)-[link:LINK]->(b:Point)
+OPTIONAL MATCH (a)<-[link]-(b)
+OPTIONAL MATCH (a)-[link]->(a)
+RETURN a.id AS a, b.id AS b
+";
+
+const DEFERRED_SEGMENT_OPTIONAL_QUERY: &str = "
+MATCH (a:Point)-[:BASE]->(b:Point)
+OPTIONAL MATCH (a)-[link:LINK]->(x:Point)<-[link]-(b)
+RETURN a.id AS a, b.id AS b, link.id AS link, x.id AS x
+";
+
+const MULTI_AFFINITY_OPTIONAL_QUERY: &str = "
+MATCH (parent:Parent)
+OPTIONAL MATCH (parent)-[:LINK]->(left:Child)
+OPTIONAL MATCH (parent)-[:LINK]->(right:Child)
+RETURN parent.id AS parent, count(left) AS leftCount,
+  count(right) AS rightCount
+";
+
 struct MaterializedQuery {
     query: ContinuousQuery,
     rows: HashMap<u64, QueryVariables>,
@@ -321,6 +378,11 @@ fn integer_value(row: &QueryVariables, key: &str) -> i64 {
     }
 }
 
+fn only_count(subject: &MaterializedQuery, key: &str) -> i64 {
+    assert_eq!(subject.rows.len(), 1);
+    integer_value(subject.rows.values().next().unwrap(), key)
+}
+
 fn realization_count(
     subject: &MaterializedQuery,
     run: &str,
@@ -366,6 +428,210 @@ async fn build_single_run(query: &str) -> MaterializedQuery {
     process_all(&mut subject, definition_events()).await;
     process_all(&mut subject, run_events("one", 10)).await;
     subject
+}
+
+#[tokio::test]
+async fn later_optional_anchor_cannot_complete_an_earlier_defaulted_clause() {
+    for _ in 0..20 {
+        let events = run_events("one", 10);
+        let mut aggregate = MaterializedQuery::new(AGGREGATE_QUERY).await;
+        process_all(&mut aggregate, definition_events()).await;
+        process_all(&mut aggregate, events[..6].to_vec()).await;
+        aggregate.process(events[7].clone()).await;
+        aggregate.process(task_for("one", "parent", 18)).await;
+        aggregate.process(events[6].clone()).await;
+        assert_eq!(
+            realization_count(&aggregate, "one-run", "one-parent", "child-definition-a"),
+            1
+        );
+
+        let mut raw = MaterializedQuery::new(RAW_QUERY).await;
+        process_all(&mut raw, definition_events()).await;
+        process_all(&mut raw, events[..6].to_vec()).await;
+        raw.process(events[7].clone()).await;
+        raw.process(task_for("one", "parent", 18)).await;
+        raw.process(events[6].clone()).await;
+        assert_eq!(raw.rows.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn every_relationship_order_converges_to_one_raw_solution() {
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        for _ in 0..20 {
+            let events = run_events("one", 10);
+            let relationships = [
+                events[6].clone(),
+                events[7].clone(),
+                task_for("one", "parent", 18),
+            ];
+            let mut subject = MaterializedQuery::new(RAW_QUERY).await;
+            process_all(&mut subject, definition_events()).await;
+            process_all(&mut subject, events[..6].to_vec()).await;
+            for index in order {
+                subject.process(relationships[index].clone()).await;
+            }
+            assert_eq!(subject.rows.len(), 1, "relationship order {order:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn cyclic_optional_keeps_defaults_when_local_candidates_fail_globally() {
+    let mut subject = MaterializedQuery::new(CYCLIC_OPTIONAL_QUERY).await;
+    process_all(&mut subject, definition_events()).await;
+    let events = run_events("one", 10);
+    process_all(&mut subject, events[..5].to_vec()).await;
+
+    assert_eq!(subject.rows.len(), 2);
+    assert_eq!(
+        realization_count(&subject, "one-run", "one-parent", "child-definition-a"),
+        0
+    );
+    assert_eq!(
+        realization_count(&subject, "one-run", "one-parent", "child-definition-b"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn comma_separated_optional_patterns_succeed_or_default_together() {
+    let mut subject = MaterializedQuery::new(COMMA_OPTIONAL_QUERY).await;
+    subject
+        .process(node("parent", "Parent", 1, json!({"id": "parent"})))
+        .await;
+    assert_eq!(only_count(&subject, "childCount"), 0);
+
+    subject
+        .process(node("child", "Child", 2, json!({"id": "child"})))
+        .await;
+    subject
+        .process(relation("parent-child", "HAS_CHILD", 3, "parent", "child"))
+        .await;
+    assert_eq!(only_count(&subject, "childCount"), 0);
+    assert_eq!(only_count(&subject, "detailCount"), 0);
+
+    subject
+        .process(node("detail", "Detail", 4, json!({"id": "detail"})))
+        .await;
+    subject
+        .process(relation("child-detail", "HAS_DETAIL", 5, "child", "detail"))
+        .await;
+    assert_eq!(only_count(&subject, "childCount"), 1);
+    assert_eq!(only_count(&subject, "detailCount"), 1);
+}
+
+#[tokio::test]
+async fn independent_later_optional_clause_remains_eligible() {
+    let mut subject = MaterializedQuery::new(INDEPENDENT_OPTIONAL_QUERY).await;
+    subject
+        .process(node("parent", "Parent", 1, json!({"id": "parent"})))
+        .await;
+    subject
+        .process(node("note", "Note", 2, json!({"id": "note"})))
+        .await;
+    subject
+        .process(relation("parent-note", "HAS_NOTE", 3, "parent", "note"))
+        .await;
+
+    assert_eq!(only_count(&subject, "childCount"), 0);
+    assert_eq!(only_count(&subject, "noteCount"), 1);
+}
+
+#[tokio::test]
+async fn optional_clause_with_only_reused_bindings_can_default() {
+    let mut subject = MaterializedQuery::new(REUSED_BINDINGS_OPTIONAL_QUERY).await;
+    process_all(
+        &mut subject,
+        vec![
+            node("a", "Point", 1, json!({"id": "a"})),
+            node("b", "Point", 2, json!({"id": "b"})),
+            relation("a-b", "LINK", 3, "a", "b"),
+        ],
+    )
+    .await;
+
+    assert_eq!(subject.rows.len(), 1);
+    let row = subject.rows.values().next().unwrap();
+    assert_eq!(row.get("a"), Some(&VariableValue::from("a")));
+    assert_eq!(row.get("b"), Some(&VariableValue::from("b")));
+}
+
+#[tokio::test]
+async fn every_failed_reused_binding_clause_defaults() {
+    let mut subject = MaterializedQuery::new(TWO_REUSED_BINDINGS_OPTIONAL_QUERY).await;
+    process_all(
+        &mut subject,
+        vec![
+            node("a", "Point", 1, json!({"id": "a"})),
+            node("b", "Point", 2, json!({"id": "b"})),
+            relation("a-b", "LINK", 3, "a", "b"),
+        ],
+    )
+    .await;
+
+    assert_eq!(subject.rows.len(), 1);
+    let row = subject.rows.values().next().unwrap();
+    assert_eq!(row.get("a"), Some(&VariableValue::from("a")));
+    assert_eq!(row.get("b"), Some(&VariableValue::from("b")));
+}
+
+#[tokio::test]
+async fn completed_solution_rechecks_deferred_optional_segments() {
+    let mut subject = MaterializedQuery::new(DEFERRED_SEGMENT_OPTIONAL_QUERY).await;
+    process_all(
+        &mut subject,
+        vec![
+            node("a", "Point", 1, json!({"id": "a"})),
+            node("x", "Point", 2, json!({"id": "x"})),
+            relation("link", "LINK", 3, "a", "x"),
+            relation("base", "BASE", 4, "a", "b"),
+            node("b", "Point", 5, json!({"id": "b"})),
+        ],
+    )
+    .await;
+
+    assert_eq!(subject.rows.len(), 1);
+    let row = subject.rows.values().next().unwrap();
+    assert_eq!(row.get("a"), Some(&VariableValue::from("a")));
+    assert_eq!(row.get("b"), Some(&VariableValue::from("b")));
+    assert_eq!(row.get("link"), Some(&VariableValue::Null));
+    assert_eq!(row.get("x"), Some(&VariableValue::Null));
+}
+
+#[tokio::test]
+async fn duplicate_affinity_merges_all_affected_optional_clauses() {
+    let mut subject = MaterializedQuery::new(MULTI_AFFINITY_OPTIONAL_QUERY).await;
+    subject
+        .process(node("parent", "Parent", 1, json!({"id": "parent"})))
+        .await;
+    subject
+        .process(node("child", "Child", 2, json!({"id": "child"})))
+        .await;
+    let changes = subject
+        .process(relation("parent-child", "LINK", 3, "parent", "child"))
+        .await;
+
+    assert_eq!(only_count(&subject, "leftCount"), 1);
+    assert_eq!(only_count(&subject, "rightCount"), 1);
+    assert!(matches!(
+        changes.as_slice(),
+        [QueryPartEvaluationContext::Aggregation {
+            before: Some(before),
+            after,
+            ..
+        }] if integer_value(before, "leftCount") == 0
+            && integer_value(before, "rightCount") == 0
+            && integer_value(after, "leftCount") == 1
+            && integer_value(after, "rightCount") == 1
+    ));
 }
 
 #[tokio::test]

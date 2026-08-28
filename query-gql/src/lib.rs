@@ -394,11 +394,11 @@ peg::parser! {
         rule match_clause() -> Vec<MatchClause>
             = kw_match() __+ items:( (start:node()
                     path:( (__* e:relation() __* n:node() { (e, n) }) ** "" ) {
-                    MatchClause { start, path, optional: false }
+                    MatchClause { start, path, optional: false, clause_id: usize::MAX }
                 }) ++ (__* "," __*) ) { items }
             / kw_optional() __+ kw_match() __+ items:( (start:node()
                 path:( (__* e:relation() __* n:node() { (e, n) }) ** "" ) {
-                    MatchClause { start, path, optional: true }
+                    MatchClause { start, path, optional: true, clause_id: usize::MAX }
                 }) ++ (__* "," __*) ) { items }
 
         // e.g. 'WHERE a.name <> b.name', 'WHERE a.age > b.age AND a.age <= 42'
@@ -415,7 +415,20 @@ peg::parser! {
 
         rule match_with_where() -> (Vec<MatchClause>, Vec<Expression>)
             = ms:(match_clause() ++ (__+)) __*
-            w:where_clause()? { (ms.into_iter().flatten().collect(), w.into_iter().collect()) }
+            w:where_clause()? {
+                (
+                    ms.into_iter()
+                        .enumerate()
+                        .flat_map(|(clause_id, clauses)| {
+                            clauses.into_iter().map(move |mut clause| {
+                                clause.clause_id = clause_id;
+                                clause
+                            })
+                        })
+                        .collect(),
+                    w.into_iter().collect(),
+                )
+            }
 
         rule part(config: &dyn QueryConfiguration) -> Vec<QueryPart>
               = __*
@@ -550,8 +563,18 @@ fn build_query_parts(
 ) -> Result<Vec<QueryPart>, QueryParseError> {
     let mut match_clauses = Vec::new();
     let mut where_clauses = Vec::new();
-    for (m, ws) in match_and_where {
-        match_clauses.extend(m);
+    let mut next_clause_id = 0;
+    for (mut clauses, ws) in match_and_where {
+        let clause_count = clauses
+            .iter()
+            .map(|clause| clause.clause_id)
+            .max()
+            .map_or(0, |max_id| max_id + 1);
+        for clause in &mut clauses {
+            clause.clause_id += next_clause_id;
+        }
+        next_clause_id += clause_count;
+        match_clauses.extend(clauses);
         where_clauses.extend(ws);
     }
     let mut query_parts = Vec::new();

@@ -148,6 +148,7 @@ fn match_clause() {
                         )
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::expression_property(
@@ -190,6 +191,7 @@ fn match_clause() {
                         )
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::expression_property(
@@ -211,6 +213,7 @@ fn match_clause() {
                         NodeMatch::new(Annotation::empty(), vec!["LABEL_ONLY".into()], vec![]),
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::expression_property(
@@ -250,6 +253,7 @@ fn match_clause() {
                         )
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -281,6 +285,7 @@ fn multiple_match_clauses() {
                         NodeMatch::with_annotation(Annotation::new("wh".into()), "Warehouse".into())
                     )],
                     optional: false,
+                    clause_id: 0,
                   },
                   MatchClause {
                     start: NodeMatch::with_annotation(Annotation::new("i".into()), "Item".into()),
@@ -289,6 +294,7 @@ fn multiple_match_clauses() {
                         NodeMatch::with_annotation(Annotation::new("c".into()), "Component".into())
                     )],
                     optional: false,
+                    clause_id: 0,
                   }
                 ],
                 where_clauses: vec![],
@@ -312,6 +318,7 @@ fn optional_match_clauses() {
                         NodeMatch::with_annotation(Annotation::new("wh".into()), "Warehouse".into())
                     )],
                     optional: false,
+                    clause_id: 0,
                   },
                   MatchClause {
                     start: NodeMatch::without_label(Annotation::new("t".into())),
@@ -320,12 +327,30 @@ fn optional_match_clauses() {
                         NodeMatch::with_annotation(Annotation::new("c".into()), "Component".into())
                     )],
                     optional: true,
+                    clause_id: 1,
                   }
                 ],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::expression_property(UnaryExpression::ident("t"), "name".into())]),
             }]
         })
+    );
+}
+
+#[test]
+fn comma_patterns_share_their_syntactic_clause_id() {
+    let query = cypher::query(
+        "MATCH (a:A) OPTIONAL MATCH (a)-[:R]->(b:B), (b)-[:S]->(c:C) RETURN a",
+        &TEST_CONFIG,
+    )
+    .unwrap();
+    let clauses = &query.parts[0].match_clauses;
+    assert_eq!(
+        clauses
+            .iter()
+            .map(|clause| clause.clause_id)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 1]
     );
 }
 
@@ -343,6 +368,7 @@ fn where_clauses() {
                         NodeMatch::with_annotation(Annotation::new("b".into()), "Person".into())
                     )],
                     optional: false,
+                    clause_id: 0,
                   }
                 ],
                 where_clauses: vec![BinaryExpression::or(BinaryExpression::and(
@@ -374,6 +400,7 @@ fn with_clauses_non_aggregating() {
                         NodeMatch::with_annotation(Annotation::new("wh".into()), "Warehouse".into())
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![BinaryExpression::eq(
                   UnaryExpression::expression_property(UnaryExpression::ident("t"), "category".into()),
@@ -683,6 +710,7 @@ fn test_reflex_query_with_comment() {
                 )
             ],
             optional: false,
+            clause_id: 0,
         }
     );
 

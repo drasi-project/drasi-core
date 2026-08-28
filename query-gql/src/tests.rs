@@ -172,6 +172,7 @@ fn explicit_group_by_subset_of_keys_projected() {
                             NodeMatch::with_annotation(Annotation::new("z".into()), "Zone".into())
                         )],
                         optional: false,
+                        clause_id: 0,
                     }],
                     where_clauses: vec![],
                     return_clause: ProjectionClause::GroupBy {
@@ -327,6 +328,7 @@ fn group_by_with_account_id_and_count() {
                         NodeMatch::new(Annotation::new("b".into()), vec![], vec![])
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::GroupBy {
@@ -491,6 +493,7 @@ fn group_by_and_where_on_vehicles() {
                         },
                     ),],
                     optional: false,
+                    clause_id: 0,
                 },],
                 where_clauses: vec![BinaryExpression::eq(
                     UnaryExpression::expression_property(
@@ -541,6 +544,7 @@ fn simple_let_assignment() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -598,6 +602,7 @@ fn multiple_let_variables_in_one_clause() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -682,6 +687,7 @@ fn chained_let_clauses_preserving_all_variables() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -779,6 +785,7 @@ fn test_let_with_where_clause() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![BinaryExpression::eq(
                     UnaryExpression::expression_property(
@@ -834,6 +841,7 @@ fn let_with_conditionals() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -896,6 +904,7 @@ fn chained_lets_with_multiple_new_variables() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -999,6 +1008,7 @@ fn group_by_let_defined_variable() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -1092,6 +1102,7 @@ fn multiple_let_variables_in_group_by() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -1202,6 +1213,7 @@ fn group_by_let_defined_variable_with_less_projected_columns() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -1297,6 +1309,7 @@ fn implicit_grouping_with_let() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -1385,6 +1398,7 @@ fn implicit_grouping_with_multiple_let() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -1493,6 +1507,7 @@ fn let_variable_not_used_in_group_by_or_return() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -1577,6 +1592,7 @@ fn simple_yield() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -1650,6 +1666,7 @@ fn yield_single_identifier() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::ident("v")]),
@@ -1695,6 +1712,7 @@ fn yield_with_let_and_chained_yield() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -1798,6 +1816,7 @@ fn yield_with_where() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![BinaryExpression::eq(
                     UnaryExpression::expression_property(
@@ -1882,6 +1901,7 @@ fn yield_with_group_by() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -1972,6 +1992,7 @@ fn yield_with_group_by_fewer_columns_projected() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -2076,6 +2097,7 @@ fn yield_let_and_group_by_together() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![BinaryExpression::eq(
                     UnaryExpression::expression_property(
@@ -2221,6 +2243,7 @@ fn yield_then_let() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -2299,6 +2322,7 @@ fn simple_filter() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::ident("v")]),
@@ -2366,6 +2390,7 @@ fn multiple_filters() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::ident("v")]),
@@ -2445,6 +2470,7 @@ fn filter_with_let() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -2511,6 +2537,7 @@ fn filter_let_return_vehicle() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::ident("v")]),
@@ -2589,6 +2616,7 @@ fn filter_yield_return_color() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::ident("v")]),
@@ -2655,6 +2683,7 @@ fn yield_filter_return_color() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -2725,6 +2754,7 @@ fn filter_let_yield_return_color_highmileage() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::ident("v")]),
@@ -2816,6 +2846,7 @@ fn filter_yield_let_return_color_highmileage() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::ident("v")]),
@@ -2911,6 +2942,7 @@ fn let_filter_yield_return_color_highmileage() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -2993,6 +3025,7 @@ fn let_yield_filter_return_color_highmileage() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -3075,6 +3108,7 @@ fn yield_filter_let_return_color_highmileage() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -3164,6 +3198,7 @@ fn yield_let_filter_return_color_highmileage() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -3266,6 +3301,7 @@ fn where_and_filter_together() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![BinaryExpression::eq(
                     UnaryExpression::expression_property(
@@ -3363,6 +3399,7 @@ fn let_filter_group_by_together() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -3470,6 +3507,7 @@ fn let_filter_yield_with_param() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -3563,6 +3601,7 @@ fn filter_filter_let_filter() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::ident("v")]),
@@ -3698,6 +3737,7 @@ fn multiple_match_comma_match_where() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 },
                 // MATCH (director:Person)-[:DIRECTED]->(movie)
                 MatchClause {
@@ -3725,6 +3765,7 @@ fn multiple_match_comma_match_where() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 },
             ],
             // WHERE director.age > 60
@@ -3805,6 +3846,7 @@ fn multiple_match_match_where() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 },
                 // Second MATCH clause
                 MatchClause {
@@ -3832,6 +3874,7 @@ fn multiple_match_match_where() {
                         },
                     )],
                     optional: false,
+                    clause_id: 1,
                 },
             ],
             // WHERE clause: movie.budget > 100000000
@@ -3914,6 +3957,7 @@ fn multiple_match_where_match_where_let_filter_return() {
                             },
                         )],
                         optional: false,
+                        clause_id: 0,
                     },
                     MatchClause {
                         start: NodeMatch {
@@ -3940,6 +3984,7 @@ fn multiple_match_where_match_where_let_filter_return() {
                             },
                         )],
                         optional: false,
+                        clause_id: 1,
                     },
                 ],
                 where_clauses: vec![BinaryExpression::gt(
@@ -4006,6 +4051,23 @@ fn multiple_match_where_match_where_let_filter_return() {
 }
 
 #[test]
+fn comma_patterns_share_their_syntactic_clause_id() {
+    let query = gql::query(
+        "MATCH (a:A) OPTIONAL MATCH (a)-[:R]->(b:B), (b)-[:S]->(c:C) RETURN a",
+        &TEST_CONFIG,
+    )
+    .unwrap();
+    let clauses = &query.parts[0].match_clauses;
+    assert_eq!(
+        clauses
+            .iter()
+            .map(|clause| clause.clause_id)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 1]
+    );
+}
+
+#[test]
 fn match_with_where_inside_match() {
     let query = "MATCH (a:Person WHERE a.name = 'Andy')-[:KNOWS]->(b:Person WHERE b.age > minAge)
     RETURN b.name AS name";
@@ -4051,6 +4113,7 @@ fn match_with_where_inside_match() {
                     },
                 )],
                 optional: false,
+                clause_id: 0,
             }],
             where_clauses: vec![],
             return_clause: ProjectionClause::Item(vec![UnaryExpression::alias(
@@ -4084,6 +4147,7 @@ fn test_cast_function_parsing() {
                 },
                 path: vec![],
                 optional: false,
+                clause_id: 0,
             }],
             where_clauses: vec![],
             return_clause: ProjectionClause::Item(vec![UnaryExpression::alias(
@@ -4133,6 +4197,7 @@ fn test_next_basic_filter_and_return() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![UnaryExpression::ident("v")]),
@@ -4203,6 +4268,7 @@ fn test_next_filter_zone_return_vehicle_color() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -4281,6 +4347,7 @@ fn test_next_yield_alias() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -4354,6 +4421,7 @@ fn test_next_yield_let_complex() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -4449,6 +4517,7 @@ fn test_next_multiple_segments_with_groupby() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -4554,6 +4623,7 @@ fn test_next_groupby_more_than_return() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -4684,6 +4754,7 @@ fn test_next_with_relation_yield() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -4764,6 +4835,7 @@ fn test_next_post_aggregation_filter() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::GroupBy {
@@ -4864,6 +4936,7 @@ fn test_next_let_return() {
                         },
                     )],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![
@@ -4979,6 +5052,7 @@ fn test_yield_with_case_expression() {
                     },
                     path: vec![],
                     optional: false,
+                    clause_id: 0,
                 }],
                 where_clauses: vec![],
                 return_clause: ProjectionClause::Item(vec![

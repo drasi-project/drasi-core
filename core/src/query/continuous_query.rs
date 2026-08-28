@@ -473,16 +473,32 @@ impl ContinuousQuery {
                 .await?;
         }
 
-        let mut result = HashMap::new();
+        let mut result: HashMap<u64, MatchPathSolution> = HashMap::new();
 
         for slot_num in affinity_slots {
             let solution = self
                 .path_solver
                 .solve(self.match_path.clone(), anchor_element.clone(), slot_num)
                 .await?;
-            result.extend(solution);
+            for (signature, candidate) in solution {
+                match result.get_mut(&signature) {
+                    Some(existing)
+                        if self.match_path.slots[existing.anchor_slot].introduction_clause
+                            <= self.match_path.slots[candidate.anchor_slot].introduction_clause =>
+                    {
+                        existing.merge_anchor_provenance(&candidate);
+                    }
+                    Some(existing) => {
+                        let mut candidate = candidate;
+                        candidate.merge_anchor_provenance(existing);
+                        result.insert(signature, candidate);
+                    }
+                    _ => {
+                        result.insert(signature, candidate);
+                    }
+                }
+            }
         }
-
         Ok(result)
     }
 

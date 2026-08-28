@@ -779,9 +779,10 @@ mod tests {
                 out_slots: vec![],
                 paths: HashSet::from([0]),
                 optional: false,
+                introduction_clause: 0,
             }],
-            optional_paths: HashSet::new(),
             segments: vec![],
+            clauses: vec![],
         }
     }
 

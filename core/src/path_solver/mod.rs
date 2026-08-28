@@ -81,19 +81,82 @@ impl MatchPathSolver {
         let sol_stream =
             create_solution_stream(start_solution, path.clone(), self.element_index.clone()).await;
 
-        let mut result = HashMap::new();
+        let mut candidates = HashMap::new();
         tokio::pin!(sol_stream);
 
         while let Some(o) = sol_stream.next().await {
             match o {
-                Ok((hash, solution)) => {
-                    result.insert(hash, solution);
+                Ok(SolveOutcome::Complete(solution)) => {
+                    insert_candidate(&mut candidates, solution);
+                }
+                Ok(SolveOutcome::Unsolvable {
+                    solution,
+                    failed_clause,
+                }) => {
+                    if let Some(fallback) = solution.into_optional_fallback(&path, failed_clause) {
+                        if let Some(fallback) = stabilize_optional_fallback(fallback, &path) {
+                            let anchor_clause = path.slots[anchor_slot].introduction_clause;
+                            if !path.clauses[anchor_clause].optional
+                                || matches!(fallback.solved_slots.get(&anchor_slot), Some(Some(_)))
+                            {
+                                insert_candidate(&mut candidates, fallback);
+                            }
+                        }
+                    }
                 }
                 Err(e) => return Err(e),
             }
         }
 
+        let mut candidates = candidates.into_values().collect::<Vec<_>>();
+        for solution in &mut candidates {
+            solution.canonicalize_optional_defaults(&path);
+        }
+        candidates.retain(|solution| {
+            solution.anchor_slots.iter().any(|slot_num| {
+                let clause_id = path.slots[*slot_num].introduction_clause;
+                !path.clauses[clause_id].optional
+                    || matches!(solution.solved_slots.get(slot_num), Some(Some(_)))
+            })
+        });
+        for (clause_id, clause) in path.clauses.iter().enumerate() {
+            if !clause.optional {
+                continue;
+            }
+            let real_upstream = candidates
+                .iter()
+                .filter(|solution| solution.clause_is_real(&path, clause_id))
+                .map(|solution| solution.upstream_signature(&path, clause_id))
+                .collect::<HashSet<_>>();
+            candidates.retain(|solution| {
+                solution.clause_is_real(&path, clause_id)
+                    || !real_upstream.contains(&solution.upstream_signature(&path, clause_id))
+            });
+        }
+
+        let mut result = HashMap::new();
+        for solution in candidates {
+            if let Some(signature) = solution.get_solution_signature() {
+                result.insert(signature, solution);
+            }
+        }
         Ok(result)
+    }
+}
+
+fn insert_candidate(
+    candidates: &mut HashMap<u64, MatchPathSolution>,
+    candidate: MatchPathSolution,
+) {
+    let Some(signature) = candidate.get_solution_signature() else {
+        return;
+    };
+    match candidates.get(&signature) {
+        Some(existing)
+            if existing.defaulted_clause_count() <= candidate.defaulted_clause_count() => {}
+        _ => {
+            candidates.insert(signature, candidate);
+        }
     }
 }
 
@@ -103,14 +166,25 @@ enum SolutionStreamCommand {
     Complete((u64, MatchPathSolution)),
     Error(EvaluationError),
     Panic(JoinError),
-    Unsolvable,
+    Unsolvable {
+        solution: MatchPathSolution,
+        failed_clause: Option<usize>,
+    },
+}
+
+enum SolveOutcome {
+    Complete(MatchPathSolution),
+    Unsolvable {
+        solution: MatchPathSolution,
+        failed_clause: Option<usize>,
+    },
 }
 
 async fn create_solution_stream(
     initial_sol: MatchPathSolution,
     path: Arc<match_path::MatchPath>,
     element_index: Arc<dyn ElementIndex>,
-) -> impl Stream<Item = Result<(u64, MatchPathSolution), EvaluationError>> {
+) -> impl Stream<Item = Result<SolveOutcome, EvaluationError>> {
     #[cfg(feature = "parallel_solver")]
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_SOLUTIONS));
 
@@ -157,7 +231,8 @@ async fn create_solution_stream(
                 },
                 SolutionStreamCommand::Complete((hash, solution)) => {
                     inflight -= 1;
-                    yield Ok((hash, solution));
+                    let _ = hash;
+                    yield Ok(SolveOutcome::Complete(solution));
                 },
                 SolutionStreamCommand::Error(e) => {
                     yield Err(e);
@@ -166,8 +241,15 @@ async fn create_solution_stream(
                 SolutionStreamCommand::Panic(e) => {
                     panic!("Error in solution task: {e:?}");
                 },
-                SolutionStreamCommand::Unsolvable => {
+                SolutionStreamCommand::Unsolvable {
+                    solution,
+                    failed_clause,
+                } => {
                     inflight -= 1;
+                    yield Ok(SolveOutcome::Unsolvable {
+                        solution,
+                        failed_clause,
+                    });
                 },
             }
 
@@ -185,20 +267,54 @@ async fn try_complete_solution(
     element_index: Arc<dyn ElementIndex>,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<SolutionStreamCommand>,
 ) {
-    while let Some((slot_num, element)) = solution.slot_cursors.pop_front() {
+    while !solution.slot_cursors.is_empty() {
+        let cursor_index = solution
+            .slot_cursors
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, (slot_num, _))| (path.slots[*slot_num].introduction_clause, *slot_num))
+            .map(|(index, _)| index)
+            .unwrap();
+        let (slot_num, element) = solution.slot_cursors.remove(cursor_index).unwrap();
         solution.mark_slot_solved(slot_num, element.clone());
 
-        if !path
+        let failed_clause = path
             .segments
             .iter()
-            .filter(|segment| segment.contains_slot(slot_num))
-            .all(|segment| path_segment_is_consistent(segment, &solution))
-        {
-            cmd_tx.send(SolutionStreamCommand::Unsolvable).unwrap();
+            .filter(|segment| {
+                segment.contains_slot(slot_num)
+                    && path.clauses[..segment.clause_id]
+                        .iter()
+                        .flat_map(|clause| &clause.slots)
+                        .all(|slot_num| solution.is_slot_solved(*slot_num))
+            })
+            .find(|segment| !path_segment_is_consistent(segment, &solution))
+            .map(|segment| segment.clause_id);
+        if failed_clause.is_some() {
+            cmd_tx
+                .send(SolutionStreamCommand::Unsolvable {
+                    solution,
+                    failed_clause,
+                })
+                .unwrap();
             return;
         }
 
         if let Some(hash) = solution.get_solution_signature() {
+            if let Some(failed_clause) = path
+                .segments
+                .iter()
+                .find(|segment| !path_segment_is_consistent(segment, &solution))
+                .map(|segment| segment.clause_id)
+            {
+                cmd_tx
+                    .send(SolutionStreamCommand::Unsolvable {
+                        solution,
+                        failed_clause: Some(failed_clause),
+                    })
+                    .unwrap();
+                return;
+            }
             cmd_tx
                 .send(SolutionStreamCommand::Complete((hash, solution)))
                 .unwrap();
@@ -206,7 +322,7 @@ async fn try_complete_solution(
         }
 
         let slot = &path.slots[slot_num];
-        let mut alt_by_slot = HashMap::new();
+        let mut alt_by_slot = BTreeMap::new();
 
         for out_slot in &slot.out_slots {
             if solution.is_slot_solved(*out_slot) {
@@ -334,7 +450,36 @@ async fn try_complete_solution(
             }
         }
     }
-    cmd_tx.send(SolutionStreamCommand::Unsolvable).unwrap();
+    cmd_tx
+        .send(SolutionStreamCommand::Unsolvable {
+            solution,
+            failed_clause: None,
+        })
+        .unwrap();
+}
+
+fn stabilize_optional_fallback(
+    mut solution: MatchPathSolution,
+    path: &match_path::MatchPath,
+) -> Option<MatchPathSolution> {
+    loop {
+        let inconsistent_clause = path
+            .segments
+            .iter()
+            .filter(|segment| {
+                !path.clauses[segment.clause_id].optional
+                    || solution.clause_is_real(path, segment.clause_id)
+            })
+            .find(|segment| !path_segment_is_consistent(segment, &solution))
+            .map(|segment| segment.clause_id);
+        let Some(clause_id) = inconsistent_clause else {
+            return Some(solution);
+        };
+        if !path.clauses[clause_id].optional {
+            return None;
+        }
+        solution.default_clause(path, clause_id);
+    }
 }
 
 fn path_segment_is_consistent(
@@ -436,6 +581,7 @@ fn merge_node_match<'b>(
     slots: &'b mut Vec<match_path::MatchPathSlot>,
     alias_map: &'b mut HashMap<Arc<str>, usize>,
     path_index: usize,
+    clause_id: usize,
     optional: bool,
 ) -> Result<usize, EvaluationError> {
     match &mtch.annotation.name {
@@ -451,6 +597,7 @@ fn merge_node_match<'b>(
                     out_slots: Vec::new(),
                     optional,
                     paths: HashSet::from([path_index]),
+                    introduction_clause: clause_id,
                 });
                 alias_map.insert(alias.clone(), slots.len() - 1);
                 Ok(slots.len() - 1)
@@ -463,6 +610,7 @@ fn merge_node_match<'b>(
                 out_slots: Vec::new(),
                 optional,
                 paths: HashSet::from([path_index]),
+                introduction_clause: clause_id,
             });
             Ok(slots.len() - 1)
         }
@@ -474,6 +622,7 @@ fn merge_relation_match<'b>(
     slots: &'b mut Vec<match_path::MatchPathSlot>,
     alias_map: &'b mut HashMap<Arc<str>, usize>,
     path_index: usize,
+    clause_id: usize,
     optional: bool,
 ) -> Result<usize, EvaluationError> {
     match &mtch.annotation.name {
@@ -489,6 +638,7 @@ fn merge_relation_match<'b>(
                     out_slots: Vec::new(),
                     optional,
                     paths: HashSet::from([path_index]),
+                    introduction_clause: clause_id,
                 });
                 alias_map.insert(alias.clone(), slots.len() - 1);
                 Ok(slots.len() - 1)
@@ -501,6 +651,7 @@ fn merge_relation_match<'b>(
                 out_slots: Vec::new(),
                 optional,
                 paths: HashSet::from([path_index]),
+                introduction_clause: clause_id,
             });
             Ok(slots.len() - 1)
         }
@@ -555,6 +706,8 @@ mod tests {
             relation_slot: 1,
             end_slot: 2,
             direction,
+            pattern_id: 0,
+            clause_id: 0,
         }
     }
 
@@ -607,6 +760,8 @@ mod tests {
                 relation_slot: 1,
                 end_slot: 0,
                 direction,
+                pattern_id: 0,
+                clause_id: 0,
             };
             assert!(path_segment_is_consistent(&segment, &valid));
 

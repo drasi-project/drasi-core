@@ -43,6 +43,10 @@ pub struct MatchClause {
     pub start: NodeMatch,
     pub path: Vec<(RelationMatch, NodeMatch)>,
     pub optional: bool,
+    /// Zero-based syntactic MATCH/OPTIONAL MATCH clause within its query part.
+    ///
+    /// Comma-separated patterns in one clause share this identifier.
+    pub clause_id: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
