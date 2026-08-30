@@ -205,15 +205,17 @@ impl TrustedIdentity {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct LeaseTrust {
+pub struct ProtocolTrust {
+    pub task_creators: Vec<TrustedIdentity>,
     #[serde(rename = "assigners")]
     pub dispatchers: Vec<TrustedIdentity>,
     pub reporters: Vec<TrustedIdentity>,
 }
 
-impl LeaseTrust {
+impl ProtocolTrust {
     pub fn validate(&self) -> Result<()> {
         for (name, identities) in [
+            ("protocolTrust.taskCreators", &self.task_creators),
             ("protocolTrust.assigners", &self.dispatchers),
             ("protocolTrust.reporters", &self.reporters),
         ] {
@@ -239,6 +241,12 @@ impl LeaseTrust {
             .any(|identity| identity.matches(author))
     }
 
+    pub fn is_task_creator(&self, author: Option<&Value>) -> bool {
+        self.task_creators
+            .iter()
+            .any(|identity| identity.matches(author))
+    }
+
     pub fn is_reporter(&self, author: Option<&Value>) -> bool {
         self.reporters
             .iter()
@@ -256,7 +264,7 @@ pub struct AgentConfig {
     /// The exact repository-relative path of the agent file.
     pub path: String,
     /// A read-only GitHub credential used only to read the agent file. It is
-    /// the same bearer-token mechanism the bootstrapper already uses.
+    /// a dedicated read-only bearer token.
     pub token: String,
     /// GraphQL API endpoint. Override for GitHub Enterprise Server.
     #[serde(default = "default_agent_api_base_url")]
@@ -305,11 +313,11 @@ impl AgentConfig {
     }
 }
 
-/// Default path for the VNext workflow definition file.
+/// Default path for the WorkGraph workflow definition file.
 pub const DEFAULT_WORKFLOW_DEFINITION_PATH: &str =
-    ".github/workgraph/workflows/issue-lifecycle-vnext.body";
+    ".github/workgraph/workflows/issue-lifecycle-v1.body";
 
-/// Configuration for fetching the bounded VNext workflow definition from a
+/// Configuration for fetching the bounded WorkGraph workflow definition from a
 /// GitHub repository file.
 ///
 /// The fields mirror [`AgentConfig`] and use the same validation and
@@ -392,11 +400,11 @@ pub struct GitHubWorkGraphSourceConfig {
         rename = "protocolTrust",
         skip_serializing_if = "Option::is_none"
     )]
-    pub lease_trust: Option<LeaseTrust>,
+    pub protocol_trust: Option<ProtocolTrust>,
     pub webhook: WebhookConfig,
     #[serde(default, with = "DurabilityConfigDef")]
     pub durability: DurabilityConfig,
-    /// VNext workflow definition file configuration.
+    /// WorkGraph workflow definition file configuration.
     ///
     /// When present, the source fetches and projects the definition at
     /// startup and on matching push deliveries. Requires a
@@ -412,7 +420,7 @@ impl Default for GitHubWorkGraphSourceConfig {
             task_issue_type: TaskIssueType::default(),
             repositories: Vec::new(),
             agent_config: None,
-            lease_trust: None,
+            protocol_trust: None,
             webhook: WebhookConfig::default(),
             durability: DurabilityConfig {
                 enabled: true,
@@ -458,8 +466,8 @@ impl GitHubWorkGraphSourceConfig {
         if let Some(agent_config) = &self.agent_config {
             agent_config.validate()?;
         }
-        if let Some(lease_trust) = &self.lease_trust {
-            lease_trust.validate()?;
+        if let Some(protocol_trust) = &self.protocol_trust {
+            protocol_trust.validate()?;
             ensure!(
                 self.agent_config.is_some(),
                 "protocolTrust requires agentConfig"

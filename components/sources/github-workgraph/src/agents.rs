@@ -27,7 +27,7 @@
 //! Every rejection is an explicit [`WorkGraphError`]. A malformed or missing
 //! required agent file must never degrade into a silently empty agent pool.
 
-use crate::workgraph::{slot_id, WorkGraphError};
+use crate::model::{slot_id, WorkGraphError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 

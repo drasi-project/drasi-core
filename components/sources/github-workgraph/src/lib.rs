@@ -20,16 +20,13 @@ pub mod config;
 pub mod descriptor;
 pub mod lease_ledger;
 pub mod mapping;
+pub mod model;
+pub mod protocol;
 pub mod source;
-pub mod vnext;
 pub mod webhook;
-pub mod workgraph;
 
 pub use config::GitHubWorkGraphSourceConfig;
 pub use source::{GitHubWorkGraphSource, GitHubWorkGraphSourceBuilder};
-
-#[cfg(test)]
-mod tests;
 
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(

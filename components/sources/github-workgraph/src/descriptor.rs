@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::config::{
-    AgentConfig, GitHubWorkGraphSourceConfig, LeaseTrust, TaskIssueType, TrustedIdentity,
+    AgentConfig, GitHubWorkGraphSourceConfig, ProtocolTrust, TaskIssueType, TrustedIdentity,
     WebhookConfig, DEFAULT_AGENT_API_BASE_URL, DEFAULT_BODY_LIMIT_BYTES,
 };
 use crate::GitHubWorkGraphSourceBuilder;
@@ -38,7 +38,7 @@ pub struct GitHubWorkGraphSourceConfigDto {
         rename = "protocolTrust",
         skip_serializing_if = "Option::is_none"
     )]
-    pub lease_trust: Option<LeaseTrustDto>,
+    pub protocol_trust: Option<ProtocolTrustDto>,
     pub webhook: WebhookConfigDto,
     #[serde(default, with = "crate::config::DurabilityConfigDef")]
     #[schema(value_type = DurabilityConfigSchema)]
@@ -47,7 +47,8 @@ pub struct GitHubWorkGraphSourceConfigDto {
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct LeaseTrustDto {
+pub struct ProtocolTrustDto {
+    pub task_creators: Vec<TrustedIdentityDto>,
     #[serde(rename = "assigners")]
     pub dispatchers: Vec<TrustedIdentityDto>,
     pub reporters: Vec<TrustedIdentityDto>,
@@ -142,7 +143,7 @@ fn default_agent_api_base_url() -> ConfigValueString {
     GitHubWorkGraphSourceConfigDto,
     TaskIssueTypeDto,
     AgentConfigDto,
-    LeaseTrustDto,
+    ProtocolTrustDto,
     TrustedIdentityDto,
     WebhookConfigDto,
     ConfigValueStringSchema,
@@ -162,7 +163,7 @@ impl SourcePluginDescriptor for GitHubWorkGraphSourceDescriptor {
         "github-workgraph"
     }
     fn config_version(&self) -> &str {
-        "3.0.0"
+        "1.0.0"
     }
     fn config_schema_name(&self) -> &str {
         "source.github_workgraph.GitHubWorkGraphSourceConfig"
@@ -220,10 +221,10 @@ impl SourcePluginDescriptor for GitHubWorkGraphSourceDescriptor {
             }
             None => None,
         };
-        let lease_trust = match &dto.lease_trust {
+        let protocol_trust = match &dto.protocol_trust {
             Some(trust) => {
                 let mut resolved = Vec::new();
-                for identities in [&trust.dispatchers, &trust.reporters] {
+                for identities in [&trust.task_creators, &trust.dispatchers, &trust.reporters] {
                     let mut out = Vec::with_capacity(identities.len());
                     for identity in identities {
                         out.push(TrustedIdentity {
@@ -235,7 +236,9 @@ impl SourcePluginDescriptor for GitHubWorkGraphSourceDescriptor {
                 }
                 let reporters = resolved.pop().unwrap_or_default();
                 let dispatchers = resolved.pop().unwrap_or_default();
-                Some(LeaseTrust {
+                let task_creators = resolved.pop().unwrap_or_default();
+                Some(ProtocolTrust {
+                    task_creators,
                     dispatchers,
                     reporters,
                 })
@@ -250,7 +253,7 @@ impl SourcePluginDescriptor for GitHubWorkGraphSourceDescriptor {
             },
             repositories,
             agent_config,
-            lease_trust,
+            protocol_trust,
             workflow_definition: None,
             webhook: WebhookConfig {
                 host: mapper.resolve_string(&dto.webhook.host).await?,

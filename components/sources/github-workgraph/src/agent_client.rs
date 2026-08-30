@@ -21,7 +21,7 @@
 //! separate service, transport, or credential store is introduced.
 
 use crate::agents::{error_code, AgentFileContent, AgentFileLocation, MAX_AGENT_FILE_BYTES};
-use crate::workgraph::WorkGraphError;
+use crate::model::WorkGraphError;
 use anyhow::{anyhow, bail, Context, Result};
 use log::warn;
 use reqwest::Client;

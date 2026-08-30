@@ -16,7 +16,7 @@ use crate::agent_sync::AgentSync;
 use crate::config::{GitHubWorkGraphSourceConfig, RepositoryFilter};
 use crate::lease_ledger::Allocator;
 use crate::mapping::{NODE_LABELS, RELATION_LABELS};
-use crate::vnext::WorkGraphProjector;
+use crate::protocol::WorkGraphProjector;
 use crate::webhook::{serve, IngressParams};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -47,8 +47,8 @@ const TASK_GRACE: Duration = Duration::from_secs(3);
 // prevents unbounded retention in standalone hosts that omit that hook.
 const PRUNING_FENCE_FALLBACK: Duration = Duration::from_secs(60);
 const FRESH_RESET_INSTRUCTION: &str =
-    "clear the entire Source state namespace (including VNext origin dedupe records) and Source \
-     WAL, then replay all VNext inputs";
+    "clear the entire Source state namespace (including WorkGraph origin dedupe records) and Source \
+     WAL, then replay all WorkGraph inputs";
 
 async fn report(base: &SourceBase, status: ComponentStatus, message: &str) {
     base.set_status(status, Some(message.to_string())).await;
@@ -187,19 +187,19 @@ impl Source for GitHubWorkGraphSource {
             .recover(chrono::Utc::now().timestamp_millis().max(0) as u64)
             .await?;
 
-        // ── VNext projector startup ──────────────────────────────────────
+        // ── WorkGraph projector startup ──────────────────────────────────────
         // If a projector was injected, restore it from durable records and
         // then fetch+project the configured definition document before any
         // delivery is accepted.
         if let Some(projector) = &self.projector {
-            let checkpoint = allocator.vnext_checkpoint().await?;
+            let checkpoint = allocator.workgraph_checkpoint().await?;
             if !checkpoint.is_empty() {
                 projector
                     .restore(&checkpoint)
                     .await
-                    .context("Failed to restore VNext projector from its durable checkpoint")?;
+                    .context("Failed to restore WorkGraph projector from its durable checkpoint")?;
                 info!(
-                    "[{}] restored VNext projector from a {}-byte durable checkpoint",
+                    "[{}] restored WorkGraph projector from a {}-byte durable checkpoint",
                     self.base.id,
                     checkpoint.len()
                 );
@@ -208,7 +208,7 @@ impl Source for GitHubWorkGraphSource {
             // Fetch the definition document and project it.
             if let Some(wf_config) = &self.config.workflow_definition {
                 use crate::agent_client::AgentFileClient;
-                use crate::vnext::{definition_source_key, DefinitionDocument, ProjectionInput};
+                use crate::protocol::{definition_source_key, DefinitionDocument, ProjectionInput};
 
                 let client = AgentFileClient::new(&wf_config.token, &wf_config.api_base_url)
                     .context("Failed to build workflow definition file client")?;
@@ -233,7 +233,7 @@ impl Source for GitHubWorkGraphSource {
                 });
 
                 let (appended, rejection) = allocator
-                    .ingest_vnext(projector.as_ref(), vec![input], effective_from, &origin_id)
+                    .ingest_workgraph(projector.as_ref(), vec![input], effective_from, &origin_id)
                     .await
                     .context("Failed to project startup workflow definition")?;
 
@@ -294,7 +294,7 @@ impl Source for GitHubWorkGraphSource {
             organization: self.config.organization.clone(),
             repository_filter: self.repository_filter.clone(),
             task_issue_type: self.config.task_issue_type.clone(),
-            lease_trust: self.config.lease_trust.clone(),
+            protocol_trust: self.config.protocol_trust.clone(),
             path: self.config.webhook.path.clone(),
             secret: self.config.webhook.secret.clone(),
             lease_validation_token: self.config.webhook.lease_validation_token.clone(),
@@ -656,7 +656,7 @@ impl GitHubWorkGraphSourceBuilder {
         self.raw_config = Some(raw_config);
         self
     }
-    /// Inject the VNext graph projector. Required when
+    /// Inject the WorkGraph graph projector. Required when
     /// `workflow_definition` is configured.
     pub fn with_workgraph_projector(mut self, projector: Arc<dyn WorkGraphProjector>) -> Self {
         self.projector = Some(projector);

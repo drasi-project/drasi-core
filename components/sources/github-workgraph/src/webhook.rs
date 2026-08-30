@@ -13,10 +13,9 @@
 // limitations under the License.
 
 use crate::agent_sync::{push_touches_agent_file, AgentSync, AgentSyncError};
-use crate::config::{LeaseTrust, RepositoryFilter, TaskIssueType, WorkflowDefinitionConfig};
+use crate::config::{ProtocolTrust, RepositoryFilter, TaskIssueType, WorkflowDefinitionConfig};
 use crate::lease_ledger::Allocator;
-use crate::mapping::{ConvertError, Converter};
-use crate::vnext::WorkGraphProjector;
+use crate::protocol::WorkGraphProjector;
 use anyhow::{anyhow, Context, Result};
 use axum::body::Bytes;
 use axum::extract::State;
@@ -27,8 +26,8 @@ use axum::{Json, Router};
 use hmac::{Hmac, Mac};
 use log::{debug, error, info, warn};
 use serde::Deserialize;
-use serde_json::json;
-use sha2::Sha256;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
@@ -41,7 +40,7 @@ pub struct IngressParams {
     pub organization: String,
     pub repository_filter: RepositoryFilter,
     pub task_issue_type: TaskIssueType,
-    pub lease_trust: Option<LeaseTrust>,
+    pub protocol_trust: Option<ProtocolTrust>,
     pub path: String,
     pub secret: String,
     pub lease_validation_token: String,
@@ -59,30 +58,37 @@ struct IngressState {
     organization: String,
     repository_filter: RepositoryFilter,
     task_issue_type: TaskIssueType,
-    lease_trust: Option<LeaseTrust>,
+    protocol_trust: Option<ProtocolTrust>,
     secret: Vec<u8>,
     lease_validation_token: Vec<u8>,
     allocator: Arc<Allocator>,
     agent_sync: Option<Arc<AgentSync>>,
     projector: Option<Arc<dyn WorkGraphProjector>>,
     workflow_definition: Option<WorkflowDefinitionConfig>,
+    admission_client: Option<AdmissionClient>,
     projection_gate: Mutex<()>,
     notify: Arc<Notify>,
 }
 
 pub async fn serve(listener: TcpListener, params: IngressParams) -> Result<()> {
+    let admission_client = params
+        .workflow_definition
+        .as_ref()
+        .map(AdmissionClient::new)
+        .transpose()?;
     let state = Arc::new(IngressState {
         source_id: params.source_id,
         organization: params.organization,
         repository_filter: params.repository_filter,
         task_issue_type: params.task_issue_type,
-        lease_trust: params.lease_trust,
+        protocol_trust: params.protocol_trust,
         secret: params.secret.into_bytes(),
         lease_validation_token: params.lease_validation_token.into_bytes(),
         allocator: params.allocator,
         agent_sync: params.agent_sync,
         projector: params.projector,
         workflow_definition: params.workflow_definition,
+        admission_client,
         projection_gate: Mutex::new(()),
         notify: params.notify,
     });
@@ -106,11 +112,12 @@ pub async fn serve(listener: TcpListener, params: IngressParams) -> Result<()> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LeaseValidation {
-    task_node_id: String,
+    task_id: String,
     lease_id: String,
-    assignment_comment_node_id: String,
-    agent_id: String,
+    assignment_id: String,
+    executor_id: String,
     slot_id: String,
+    claim_id: String,
 }
 
 type Rejection = (StatusCode, String);
@@ -165,14 +172,21 @@ async fn validate_lease(
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
+    if request.claim_id.is_empty()
+        || request.claim_id.len() > 256
+        || request.claim_id.chars().any(char::is_whitespace)
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     match state
         .allocator
-        .validate_active(
-            &request.task_node_id,
+        .claim_active(
+            &request.task_id,
             &request.lease_id,
-            &request.assignment_comment_node_id,
-            &request.agent_id,
+            &request.assignment_id,
+            &request.executor_id,
             &request.slot_id,
+            &request.claim_id,
             chrono::Utc::now(),
         )
         .await
@@ -180,10 +194,11 @@ async fn validate_lease(
         Ok(Some(active)) => (
             StatusCode::OK,
             Json(json!({
-                "leaseId": active.lease_id, "taskNodeId": active.task_node_id,
-                "assignmentCommentNodeId": active.assignment_comment_node_id,
-                "agentId": active.agent_id, "slotId": active.slot_id,
-                "taskType": active.task_type, "acquiredAt": active.acquired_at,
+                "leaseId": active.lease_id, "taskId": active.task_id,
+                "assignmentId": active.assignment_id,
+                "executorId": active.executor_id, "slotId": active.slot_id,
+                "claimId": request.claim_id,
+                "acquiredAt": active.acquired_at,
                 "expiresAt": active.expires_at
             })),
         )
@@ -225,23 +240,20 @@ async fn handle_delivery(
     }
     let effective_from = chrono::Utc::now().timestamp_millis().max(0) as u64;
 
-    // ── VNext normalization attempt ──────────────────────────────────
-    // If a projector is available, try to normalize the event as a VNext
-    // input. If it matches, project through the projector and return early.
-    // Otherwise, fall through to the existing Converter.
+    // WorkGraph v1 is the sole issue/comment/sub-issue projection path.
     if let Some(projector) = &state.projector {
         let _projection_guard = state.projection_gate.lock().await;
-        match try_vnext_normalization(state, event_type, &payload).await {
+        match try_workgraph_normalization(state, event_type, delivery_id, &payload).await {
             Ok(Some(inputs)) => {
-                let origin_id = format!("delivery:{delivery_id}:vnext");
+                let origin_id = format!("delivery:{delivery_id}:workgraph");
                 let (appended, rejection) = state
                     .allocator
-                    .ingest_vnext(projector.as_ref(), inputs, effective_from, &origin_id)
+                    .ingest_workgraph(projector.as_ref(), inputs, effective_from, &origin_id)
                     .await
                     .map_err(|error| store_unavailable(source_id, error))?;
                 if let Some(rejection) = &rejection {
                     warn!(
-                        "[{source_id}] delivery {delivery_id} VNext projection rejected: \
+                        "[{source_id}] delivery {delivery_id} WorkGraph projection rejected: \
                          {rejection}"
                     );
                 }
@@ -250,64 +262,30 @@ async fn handle_delivery(
                 }
                 return Ok(Some(appended));
             }
-            Ok(None) => {
-                // Not a VNext event; fall through to existing Converter.
-            }
-            Err(VNextNormError::Untrusted(msg)) => {
-                warn!("[{source_id}] delivery {delivery_id} untrusted VNext lifecycle: {msg}");
+            Ok(None) => return Ok(None),
+            Err(WorkGraphNormError::Untrusted(msg)) => {
+                warn!("[{source_id}] delivery {delivery_id} untrusted WorkGraph lifecycle: {msg}");
                 return Ok(None);
             }
-            Err(VNextNormError::Forbidden(msg)) => {
+            Err(WorkGraphNormError::Forbidden(msg)) => {
                 warn!("[{source_id}] rejected delivery {delivery_id}: {msg}");
                 return reject(StatusCode::FORBIDDEN, msg);
             }
-            Err(VNextNormError::InvalidPayload(msg)) => {
-                warn!("[{source_id}] delivery {delivery_id} invalid VNext payload: {msg}");
+            Err(WorkGraphNormError::InvalidPayload(msg)) => {
+                warn!("[{source_id}] delivery {delivery_id} invalid WorkGraph payload: {msg}");
                 return reject(StatusCode::UNPROCESSABLE_ENTITY, msg);
+            }
+            Err(WorkGraphNormError::Unavailable(msg)) => {
+                error!("[{source_id}] delivery {delivery_id} could not verify admission: {msg}");
+                return reject(StatusCode::SERVICE_UNAVAILABLE, msg);
             }
         }
     }
 
-    let converter = Converter::new(
-        source_id,
-        &state.organization,
-        &state.task_issue_type,
-        effective_from,
-    )
-    .with_repository_filter(&state.repository_filter);
-    let converter = match &state.lease_trust {
-        Some(lease_trust) => converter.with_lease_trust(lease_trust),
-        None => converter,
-    };
-    let conversion = match converter.convert(event_type, &payload) {
-        Ok(Some(conversion)) => conversion,
-        Ok(None) => {
-            debug!("[{source_id}] delivery {delivery_id} ({event_type}) has no graph change");
-            return Ok(None);
-        }
-        Err(ConvertError::OrganizationMismatch(m)) => {
-            warn!("[{source_id}] rejected delivery {delivery_id}: {m}");
-            return reject(StatusCode::FORBIDDEN, m);
-        }
-        Err(ConvertError::InvalidPayload(m)) => {
-            warn!("[{source_id}] invalid delivery {delivery_id}: {m}");
-            return reject(StatusCode::UNPROCESSABLE_ENTITY, m);
-        }
-    };
-    let changes = conversion.changes;
-    let appended = match conversion.allocation {
-        Some(event) => state
-            .allocator
-            .ingest(delivery_id, event, changes, effective_from)
-            .await
-            .map(|(appended, _)| appended),
-        None => state.allocator.append_delivery(delivery_id, &changes).await,
-    }
-    .map_err(|error| store_unavailable(source_id, error))?;
-    if appended > 0 {
-        state.notify.notify_one();
-    }
-    Ok(Some(appended))
+    debug!(
+        "[{source_id}] delivery {delivery_id} ({event_type}) ignored because no WorkGraph projector is configured"
+    );
+    Ok(None)
 }
 
 /// Converge the agent graph when a `push` touched the exact configured
@@ -434,7 +412,7 @@ async fn handle_push(
     Ok(Some(total_appended))
 }
 
-// ── VNext push definition convergence ────────────────────────────────────
+// ── WorkGraph push definition convergence ────────────────────────────────────
 
 /// Check whether the push payload modified the exact configured definition
 /// file path (not just the same repository/ref).
@@ -475,7 +453,7 @@ async fn converge_definition_on_push(
     );
 
     use crate::agent_client::AgentFileClient;
-    use crate::vnext::{definition_source_key, DefinitionDocument, ProjectionInput};
+    use crate::protocol::{definition_source_key, DefinitionDocument, ProjectionInput};
 
     let client = AgentFileClient::new(&wf_config.token, &wf_config.api_base_url)
         .map_err(|e| store_unavailable(source_id, e))?;
@@ -505,7 +483,7 @@ async fn converge_definition_on_push(
 
     let (appended, rejection) = state
         .allocator
-        .ingest_vnext(projector.as_ref(), vec![input], effective_from, &origin_id)
+        .ingest_workgraph(projector.as_ref(), vec![input], effective_from, &origin_id)
         .await
         .map_err(|e| store_unavailable(source_id, e))?;
 
@@ -519,83 +497,200 @@ async fn converge_definition_on_push(
     Ok(Some(appended))
 }
 
-// ── VNext event normalization ────────────────────────────────────────────
+// ── WorkGraph event normalization ────────────────────────────────────────────
 
 #[derive(Debug)]
-enum VNextNormError {
+enum WorkGraphNormError {
     Untrusted(String),
     Forbidden(String),
     InvalidPayload(String),
+    Unavailable(String),
 }
 
-/// Attempt to normalize a webhook event as VNext input(s).
+#[derive(Clone)]
+struct AdmissionClient {
+    http: reqwest::Client,
+    api_url: String,
+}
+
+impl AdmissionClient {
+    fn new(config: &WorkflowDefinitionConfig) -> Result<Self> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("bearer {}", config.token))
+                .context("invalid GitHub token header value")?,
+        );
+        headers.insert(
+            reqwest::header::USER_AGENT,
+            reqwest::header::HeaderValue::from_static("drasi-github-workgraph-admission"),
+        );
+        Ok(Self {
+            http: reqwest::Client::builder()
+                .default_headers(headers)
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .context("failed to build GitHub admission client")?,
+            api_url: config.api_base_url.clone(),
+        })
+    }
+
+    async fn has_admission_label(&self, node_id: &str) -> Result<bool> {
+        let response = self
+            .http
+            .post(&self.api_url)
+            .json(&json!({
+                "query": "query($id: ID!) { node(id: $id) { ... on Issue { labels(first: 100) { nodes { name } pageInfo { hasNextPage } } } } }",
+                "variables": {"id": node_id}
+            }))
+            .send()
+            .await
+            .context("authoritative Root Issue lookup failed")?
+            .error_for_status()
+            .context("authoritative Root Issue lookup returned an error")?;
+        let payload: Value = response
+            .json()
+            .await
+            .context("authoritative Root Issue lookup returned invalid JSON")?;
+        if payload
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| !errors.is_empty())
+        {
+            anyhow::bail!("authoritative Root Issue lookup returned GraphQL errors");
+        }
+        let labels = payload
+            .pointer("/data/node/labels")
+            .ok_or_else(|| anyhow!("authoritative Root Issue lookup did not return an Issue"))?;
+        let admitted = labels
+            .get("nodes")
+            .and_then(Value::as_array)
+            .context("authoritative Root Issue labels are missing")?
+            .iter()
+            .any(|label| {
+                label.get("name").and_then(Value::as_str) == Some(WORKGRAPH_ADMISSION_LABEL)
+            });
+        if !admitted
+            && labels
+                .pointer("/pageInfo/hasNextPage")
+                .and_then(Value::as_bool)
+                == Some(true)
+        {
+            anyhow::bail!("authoritative Root Issue label set exceeds 100 entries");
+        }
+        Ok(admitted)
+    }
+}
+
+/// Attempt to normalize a webhook event as WorkGraph input(s).
 ///
-/// Returns `Ok(Some(inputs))` if the event matched VNext patterns,
-/// `Ok(None)` if it should fall through to the existing Converter,
-/// or `Err` for VNext-specific rejections (untrusted, invalid).
-async fn try_vnext_normalization(
+/// Returns `Ok(Some(inputs))` if the event matched WorkGraph patterns,
+/// `Ok(None)` if the delivery is not part of the WorkGraph v1 protocol,
+/// or `Err` for WorkGraph-specific rejections (untrusted, invalid).
+async fn try_workgraph_normalization(
     state: &IngressState,
     event_type: &str,
+    delivery_id: &str,
     payload: &serde_json::Value,
-) -> Result<Option<Vec<crate::vnext::ProjectionInput>>, VNextNormError> {
-    use crate::vnext::*;
+) -> Result<Option<Vec<crate::protocol::ProjectionInput>>, WorkGraphNormError> {
+    use crate::protocol::*;
 
     match event_type {
-        "issues" => try_vnext_issue(state, payload).await,
-        "issue_comment" => try_vnext_comment(state, payload),
-        "sub_issues" => try_vnext_sub_issue(state, payload).await,
+        "issues" => try_workgraph_issue(state, delivery_id, payload).await,
+        "issue_comment" => try_workgraph_comment(state, payload),
+        "sub_issues" => try_workgraph_sub_issue(state, payload).await,
         _ => Ok(None),
     }
 }
 
-fn authorize_vnext_repository(
+fn authorize_workgraph_repository(
     state: &IngressState,
     payload: &serde_json::Value,
     repository: Option<&serde_json::Value>,
-) -> Result<(), VNextNormError> {
+) -> Result<(), WorkGraphNormError> {
     let login = payload
         .pointer("/organization/login")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
-            VNextNormError::InvalidPayload(
+            WorkGraphNormError::InvalidPayload(
                 "payload has no 'organization.login'; configure an organization webhook"
                     .to_string(),
             )
         })?;
     if !login.eq_ignore_ascii_case(&state.organization) {
-        return Err(VNextNormError::Forbidden(format!(
+        return Err(WorkGraphNormError::Forbidden(format!(
             "delivery organization '{login}' does not match configured organization '{}'",
             state.organization
         )));
     }
     let repository = repository
         .or_else(|| payload.get("repository"))
-        .ok_or_else(|| VNextNormError::InvalidPayload("missing 'repository'".to_string()))?;
+        .ok_or_else(|| WorkGraphNormError::InvalidPayload("missing 'repository'".to_string()))?;
     let included = state
         .repository_filter
         .includes_repository(repository)
-        .map_err(|error| VNextNormError::InvalidPayload(error.to_string()))?;
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
     if !included {
-        return Err(VNextNormError::Forbidden(
+        return Err(WorkGraphNormError::Forbidden(
             "delivery repository is outside the configured repository filter".to_string(),
         ));
     }
     Ok(())
 }
 
-/// Normalize an issue event with a `WorkGraphTask/v3` body marker.
-async fn try_vnext_issue(
+const WORKGRAPH_ADMISSION_LABEL: &str = "workgraph";
+
+fn issue_has_admission_label(issue: &serde_json::Value) -> bool {
+    issue
+        .get("labels")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|labels| {
+            labels.iter().any(|label| {
+                label.get("name").and_then(serde_json::Value::as_str)
+                    == Some(WORKGRAPH_ADMISSION_LABEL)
+            })
+        })
+}
+
+fn authoritative_issue_revision(issue: &serde_json::Value) -> Result<i64, WorkGraphNormError> {
+    let value = issue
+        .get("updated_at")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            WorkGraphNormError::InvalidPayload("issue event is missing 'updated_at'".to_string())
+        })?;
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|value| value.timestamp_millis())
+        .map_err(|error| {
+            WorkGraphNormError::InvalidPayload(format!(
+                "issue event has invalid 'updated_at': {error}"
+            ))
+        })
+}
+
+fn admission_generation_id(root_issue_id: &str, delivery_id: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"workgraph-v1-admission-generation\0");
+    digest.update(root_issue_id.as_bytes());
+    digest.update([0]);
+    digest.update(delivery_id.as_bytes());
+    format!("wga-{}", hex::encode(digest.finalize()))
+}
+
+/// Normalize either a labeled Root Issue or an authorized generated task.
+async fn try_workgraph_issue(
     state: &IngressState,
+    delivery_id: &str,
     payload: &serde_json::Value,
-) -> Result<Option<Vec<crate::vnext::ProjectionInput>>, VNextNormError> {
-    use crate::vnext::*;
+) -> Result<Option<Vec<crate::protocol::ProjectionInput>>, WorkGraphNormError> {
+    use crate::protocol::*;
 
     let action = payload
         .get("action")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     let issue = payload.get("issue").ok_or_else(|| {
-        VNextNormError::InvalidPayload("issues event missing 'issue'".to_string())
+        WorkGraphNormError::InvalidPayload("issues event missing 'issue'".to_string())
     })?;
     let body = issue
         .get("body")
@@ -604,34 +699,84 @@ async fn try_vnext_issue(
     let node_id = issue
         .get("node_id")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| VNextNormError::InvalidPayload("issue missing 'node_id'".to_string()))?;
+        .ok_or_else(|| WorkGraphNormError::InvalidPayload("issue missing 'node_id'".to_string()))?;
 
-    // Only normalize issues whose body begins with the v3 marker.
-    let current_vnext = body.starts_with(VNEXT_TASK_MARKER);
-    let previous_vnext = payload
+    let current_workgraph = body.starts_with(WORKGRAPH_TASK_MARKER);
+    let previous_workgraph = payload
         .pointer("/changes/body/from")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|body| body.starts_with(VNEXT_TASK_MARKER));
-    if !current_vnext && !previous_vnext {
-        return Ok(None);
-    }
-
-    authorize_vnext_repository(state, payload, None)?;
-    let removed_type_matches = payload
-        .get("type")
-        .is_some_and(|issue_type| state.task_issue_type.matches(Some(issue_type)));
-    if !state.task_issue_type.matches(issue.get("type"))
-        && !matches!(action, "untyped" | "deleted" | "transferred")
-        && !removed_type_matches
+        .is_some_and(|body| body.starts_with(WORKGRAPH_TASK_MARKER));
+    let admitted = issue_has_admission_label(issue);
+    let admission_added = action == "labeled"
+        && payload
+            .pointer("/label/name")
+            .and_then(serde_json::Value::as_str)
+            == Some(WORKGRAPH_ADMISSION_LABEL);
+    let admission_retracted = action == "unlabeled"
+        && payload
+            .pointer("/label/name")
+            .and_then(serde_json::Value::as_str)
+            == Some(WORKGRAPH_ADMISSION_LABEL);
+    authorize_workgraph_repository(state, payload, None)?;
+    let previous_task = state
+        .allocator
+        .latest_workgraph_task(node_id)
+        .await
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
+    let previous_root = state
+        .allocator
+        .latest_workgraph_root_issue(node_id)
+        .await
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
+    let previous_revision = state
+        .allocator
+        .latest_workgraph_issue_revision(node_id)
+        .await
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
+    let revision = if admitted
+        || admission_retracted
+        || previous_root.is_some()
+        || previous_revision.is_some()
+        || current_workgraph
+        || previous_workgraph
+        || previous_task.is_some()
     {
-        return Ok(None);
-    }
+        let revision = authoritative_issue_revision(issue)?;
+        if let Some(previous) = previous_revision {
+            if revision < previous {
+                return Ok(None);
+            }
+            if revision == previous && admitted != previous_root.is_some() {
+                let client = state.admission_client.as_ref().ok_or_else(|| {
+                    WorkGraphNormError::Unavailable(
+                        "equal-revision admission transition requires an authoritative GitHub read"
+                            .to_string(),
+                    )
+                })?;
+                let authoritative = client
+                    .has_admission_label(node_id)
+                    .await
+                    .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?;
+                if authoritative != admitted {
+                    return Ok(None);
+                }
+            }
+        }
+        Some(revision)
+    } else {
+        None
+    };
+    let mut inputs = revision
+        .map(|revision| {
+            vec![ProjectionInput::RecordIssueRevision {
+                source_key: node_id.to_string(),
+                revision,
+            }]
+        })
+        .unwrap_or_default();
 
-    let mut inputs = Vec::new();
-
-    match action {
-        "deleted" | "transferred" | "untyped" => {
-            // Delete the task.
+    if matches!(action, "deleted" | "transferred") {
+        if previous_task.is_some() || previous_workgraph {
             inputs.push(ProjectionInput::DeleteTask {
                 source_key: node_id.to_string(),
             });
@@ -639,95 +784,210 @@ async fn try_vnext_issue(
                 source_key: node_id.to_string(),
             });
         }
-        _ if current_vnext => {
-            // opened, edited, closed, reopened, labeled, unlabeled, etc.
-            let is_open = item_is_open(issue);
-            let state_reason = issue
+        if previous_root.is_some() {
+            inputs.push(ProjectionInput::DeleteRootIssue {
+                source_key: node_id.to_string(),
+            });
+        }
+        return Ok(Some(inputs));
+    }
+
+    if admitted {
+        let locator = extract_issue_locator(issue, payload).ok_or_else(|| {
+            WorkGraphNormError::InvalidPayload(
+                "admitted Root Issue is missing its repository locator".to_string(),
+            )
+        })?;
+        let repository_node_id = payload
+            .pointer("/repository/node_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                WorkGraphNormError::InvalidPayload(
+                    "admitted Root Issue repository is missing 'node_id'".to_string(),
+                )
+            })?;
+        let begins_new_generation = previous_root.is_none()
+            || admission_added
+                && revision.is_some_and(|revision| {
+                    previous_revision.is_none_or(|previous| revision > previous)
+                });
+        let admission_id = if begins_new_generation {
+            admission_generation_id(node_id, delivery_id)
+        } else {
+            previous_root
+                .as_ref()
+                .expect("an existing generation supplies its admission ID")
+                .admission_id
+                .clone()
+        };
+        let admitted_title = if begins_new_generation {
+            issue
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        } else {
+            previous_root
+                .as_ref()
+                .expect("an existing generation supplies its frozen title")
+                .title
+                .clone()
+        };
+        let admitted_body = if begins_new_generation {
+            body.to_string()
+        } else {
+            previous_root
+                .as_ref()
+                .expect("an existing generation supplies its frozen body")
+                .body
+                .clone()
+        };
+        inputs.push(ProjectionInput::UpsertRootIssue(RootIssueDocument {
+            source_key: node_id.to_string(),
+            repository_owner: locator.repository_owner,
+            repository_name: locator.repository_name,
+            repository_node_id: repository_node_id.to_string(),
+            issue_number: locator.issue_number,
+            title: admitted_title,
+            body: admitted_body,
+            is_open: item_is_open(issue),
+            admission_id,
+        }));
+
+        if previous_task.is_some() {
+            inputs.push(ProjectionInput::DeleteTask {
+                source_key: node_id.to_string(),
+            });
+            inputs.push(ProjectionInput::DeleteLocator {
+                source_key: node_id.to_string(),
+            });
+        }
+
+        return Ok(Some(inputs));
+    }
+
+    // Admission retraction must not be blocked by a task-shaped replacement body.
+    if previous_root.is_some() {
+        inputs.push(ProjectionInput::DeleteRootIssue {
+            source_key: node_id.to_string(),
+        });
+        return Ok(Some(inputs));
+    }
+
+    if current_workgraph || previous_workgraph || previous_task.is_some() {
+        let typed = state.task_issue_type.matches(issue.get("type"));
+        if !current_workgraph || !typed || action == "untyped" {
+            inputs.push(ProjectionInput::DeleteTask {
+                source_key: node_id.to_string(),
+            });
+            inputs.push(ProjectionInput::DeleteLocator {
+                source_key: node_id.to_string(),
+            });
+            return Ok(Some(inputs));
+        }
+
+        let Some(protocol_trust) = &state.protocol_trust else {
+            return Err(WorkGraphNormError::Untrusted(format!(
+                "WorkGraph task {node_id}: no protocolTrust configured"
+            )));
+        };
+        let creator = issue.get("user");
+        let editor = payload.get("sender");
+        if !protocol_trust.is_task_creator(creator) || !protocol_trust.is_task_creator(editor) {
+            return Err(WorkGraphNormError::Untrusted(format!(
+                "WorkGraph task {node_id}: creator or webhook actor is not a trusted task creator"
+            )));
+        }
+
+        let task_doc = TaskDocument {
+            source_key: node_id.to_string(),
+            body: body.to_string(),
+            is_open: item_is_open(issue),
+            state_reason: issue
                 .get("state_reason")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("")
-                .to_string();
-            let previous = state
-                .allocator
-                .latest_vnext_task(node_id)
-                .await
-                .map_err(|error| VNextNormError::InvalidPayload(error.to_string()))?;
-            let task_doc = TaskDocument {
-                source_key: node_id.to_string(),
-                body: body.to_string(),
-                is_open,
-                state_reason,
-                parent_source_key: previous.and_then(|document| document.parent_source_key),
-            };
-            inputs.push(ProjectionInput::UpsertTask(task_doc));
-
-            // Also emit a locator so Dogfood can resolve the issue.
-            if let Some(locator) = extract_issue_locator(issue, payload) {
-                inputs.push(ProjectionInput::UpsertLocator(locator));
-            }
+                .to_string(),
+            parent_source_key: previous_task.and_then(|document| document.parent_source_key),
+        };
+        inputs.push(ProjectionInput::UpsertTask(task_doc));
+        if let Some(locator) = extract_issue_locator(issue, payload) {
+            inputs.push(ProjectionInput::UpsertLocator(locator));
         }
-        _ => {
-            inputs.push(ProjectionInput::DeleteTask {
-                source_key: node_id.to_string(),
-            });
-            inputs.push(ProjectionInput::DeleteLocator {
-                source_key: node_id.to_string(),
-            });
-        }
+        return Ok(Some(inputs));
     }
 
-    Ok(Some(inputs))
+    if inputs.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(inputs))
+    }
 }
 
-/// Normalize an issue_comment event with a VNext lifecycle marker.
-fn try_vnext_comment(
+/// Normalize an issue_comment event with a WorkGraph lifecycle marker.
+fn try_workgraph_comment(
     state: &IngressState,
     payload: &serde_json::Value,
-) -> Result<Option<Vec<crate::vnext::ProjectionInput>>, VNextNormError> {
-    use crate::vnext::*;
+) -> Result<Option<Vec<crate::protocol::ProjectionInput>>, WorkGraphNormError> {
+    use crate::protocol::*;
 
     let action = payload
         .get("action")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     let comment = payload.get("comment").ok_or_else(|| {
-        VNextNormError::InvalidPayload("issue_comment event missing 'comment'".to_string())
+        WorkGraphNormError::InvalidPayload("issue_comment event missing 'comment'".to_string())
     })?;
     let comment_id = comment
         .get("node_id")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| VNextNormError::InvalidPayload("comment missing 'node_id'".to_string()))?;
+        .ok_or_else(|| {
+            WorkGraphNormError::InvalidPayload("comment missing 'node_id'".to_string())
+        })?;
     let body = comment
         .get("body")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
+    let previous_workgraph = payload
+        .pointer("/changes/body/from")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(is_workgraph_lifecycle_marker);
 
-    // Only handle VNext lifecycle markers.
-    let trust_role = match lifecycle_trust_role(body) {
-        Some(role) => role,
-        None => return Ok(None),
+    if action == "deleted"
+        || (action == "edited" && lifecycle_trust_role(body).is_none() && previous_workgraph)
+    {
+        authorize_workgraph_repository(state, payload, None)?;
+        return Ok(Some(vec![ProjectionInput::DeleteLifecycleArtifact {
+            source_key: comment_id.to_string(),
+        }]));
+    }
+
+    // Only handle WorkGraph lifecycle markers.
+    let Some(trust_role) = lifecycle_trust_role(body) else {
+        return Ok(None);
     };
 
     let issue = payload.get("issue").ok_or_else(|| {
-        VNextNormError::InvalidPayload("issue_comment missing 'issue'".to_string())
+        WorkGraphNormError::InvalidPayload("issue_comment missing 'issue'".to_string())
     })?;
     let task_node_id = issue
         .get("node_id")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| VNextNormError::InvalidPayload("issue missing 'node_id'".to_string()))?;
+        .ok_or_else(|| WorkGraphNormError::InvalidPayload("issue missing 'node_id'".to_string()))?;
     let task_body = issue
         .get("body")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
-    if !task_body.starts_with(VNEXT_TASK_MARKER)
+    if !task_body.starts_with(WORKGRAPH_TASK_MARKER)
         || !state.task_issue_type.matches(issue.get("type"))
     {
         return Ok(None);
     }
-    authorize_vnext_repository(state, payload, None)?;
+    authorize_workgraph_repository(state, payload, None)?;
 
     // Trust check: reuse the existing anti-confused-deputy logic.
-    if let Some(lease_trust) = &state.lease_trust {
+    if let Some(protocol_trust) = &state.protocol_trust {
         let author = comment.get("user");
         // On edit, sender is the editor.
         let editor_identity = (action == "edited")
@@ -741,58 +1001,48 @@ fn try_vnext_comment(
         let unattributed_edit =
             editor.is_none() && comment.get("updated_at") != comment.get("created_at");
 
-        let role_check: fn(&LeaseTrust, Option<&serde_json::Value>) -> bool = match trust_role {
+        let role_check: fn(&ProtocolTrust, Option<&serde_json::Value>) -> bool = match trust_role {
             LifecycleTrustRole::Assigner => |trust, identity| trust.is_assigner(identity),
             LifecycleTrustRole::Reporter => |trust, identity| trust.is_reporter(identity),
         };
 
         let trusted = !unattributed_edit
-            && role_check(lease_trust, author)
-            && editor.is_none_or(|e| role_check(lease_trust, Some(e)));
+            && role_check(protocol_trust, author)
+            && editor.is_none_or(|e| role_check(protocol_trust, Some(e)));
 
         if !trusted {
             let role_name = match trust_role {
                 LifecycleTrustRole::Assigner => "assigner",
                 LifecycleTrustRole::Reporter => "reporter",
             };
-            return Err(VNextNormError::Untrusted(format!(
-                "VNext lifecycle comment {comment_id} on {task_node_id}: author/editor not \
+            return Err(WorkGraphNormError::Untrusted(format!(
+                "WorkGraph lifecycle comment {comment_id} on {task_node_id}: author/editor not \
                  trusted as {role_name}"
             )));
         }
     } else {
-        return Err(VNextNormError::Untrusted(format!(
-            "VNext lifecycle comment {comment_id} on {task_node_id}: no protocolTrust configured"
+        return Err(WorkGraphNormError::Untrusted(format!(
+            "WorkGraph lifecycle comment {comment_id} on {task_node_id}: no protocolTrust configured"
         )));
     }
 
     let mut inputs = Vec::new();
-
-    match action {
-        "deleted" => {
-            inputs.push(ProjectionInput::DeleteLifecycleArtifact {
-                source_key: comment_id.to_string(),
-            });
-        }
-        _ => {
-            let artifact = LifecycleArtifactDocument {
-                source_key: comment_id.to_string(),
-                task_source_key: task_node_id.to_string(),
-                body: body.to_string(),
-            };
-            inputs.push(ProjectionInput::UpsertLifecycleArtifact(artifact));
-        }
-    }
+    let artifact = LifecycleArtifactDocument {
+        source_key: comment_id.to_string(),
+        task_source_key: task_node_id.to_string(),
+        body: body.to_string(),
+    };
+    inputs.push(ProjectionInput::UpsertLifecycleArtifact(artifact));
 
     Ok(Some(inputs))
 }
 
 /// Normalize a sub_issues event (add/remove child parent relationship).
-async fn try_vnext_sub_issue(
+async fn try_workgraph_sub_issue(
     state: &IngressState,
     payload: &serde_json::Value,
-) -> Result<Option<Vec<crate::vnext::ProjectionInput>>, VNextNormError> {
-    use crate::vnext::*;
+) -> Result<Option<Vec<crate::protocol::ProjectionInput>>, WorkGraphNormError> {
+    use crate::protocol::*;
 
     let action = payload
         .get("action")
@@ -811,36 +1061,85 @@ async fn try_vnext_sub_issue(
     let child_node_id = sub_issue
         .get("node_id")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| VNextNormError::InvalidPayload("sub_issue missing 'node_id'".to_string()))?;
+        .ok_or_else(|| {
+            WorkGraphNormError::InvalidPayload("sub_issue missing 'node_id'".to_string())
+        })?;
     let parent_node_id = parent_issue
         .get("node_id")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
-            VNextNormError::InvalidPayload("parent_issue missing 'node_id'".to_string())
+            WorkGraphNormError::InvalidPayload("parent_issue missing 'node_id'".to_string())
         })?;
     let child_repository = payload
         .get("sub_issue_repo")
         .or_else(|| payload.get("repository"));
-    authorize_vnext_repository(state, payload, child_repository)?;
-    let previous = state
-        .allocator
-        .latest_vnext_task(child_node_id)
-        .await
-        .map_err(|error| VNextNormError::InvalidPayload(error.to_string()))?;
-    if !state.task_issue_type.matches(sub_issue.get("type")) && previous.is_none() {
+    authorize_workgraph_repository(state, payload, child_repository)?;
+    if issue_has_admission_label(sub_issue) {
         return Ok(None);
     }
-
-    let parent_source_key = match action {
-        "sub_issue_added" | "parent_issue_added" => Some(parent_node_id.to_string()),
-        "sub_issue_removed" | "parent_issue_removed" => None,
+    let previous_root = state
+        .allocator
+        .latest_workgraph_root_issue(child_node_id)
+        .await
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
+    let previous_revision = state
+        .allocator
+        .latest_workgraph_issue_revision(child_node_id)
+        .await
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
+    let revision = authoritative_issue_revision(sub_issue)?;
+    if previous_revision.is_some_and(|previous| revision < previous) {
+        return Ok(None);
+    }
+    if previous_root.is_some() {
+        let client = state.admission_client.as_ref().ok_or_else(|| {
+            WorkGraphNormError::Unavailable(
+                "Root Issue hierarchy transition requires an authoritative GitHub read".to_string(),
+            )
+        })?;
+        if client
+            .has_admission_label(child_node_id)
+            .await
+            .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?
+        {
+            return Ok(None);
+        }
+    }
+    let previous = state
+        .allocator
+        .latest_workgraph_task(child_node_id)
+        .await
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
+    let adding_parent = match action {
+        "sub_issue_added" | "parent_issue_added" => true,
+        "sub_issue_removed" | "parent_issue_removed" => false,
         _ => return Ok(None),
     };
+    if adding_parent {
+        if !state.task_issue_type.matches(sub_issue.get("type")) {
+            return Ok(None);
+        }
+        let Some(protocol_trust) = &state.protocol_trust else {
+            return Err(WorkGraphNormError::Untrusted(format!(
+                "WorkGraph task {child_node_id}: no protocolTrust configured"
+            )));
+        };
+        if !protocol_trust.is_task_creator(sub_issue.get("user"))
+            || !protocol_trust.is_task_creator(payload.get("sender"))
+        {
+            return Err(WorkGraphNormError::Untrusted(format!(
+                "WorkGraph task {child_node_id}: creator or hierarchy actor is not a trusted task creator"
+            )));
+        }
+    } else if previous.is_none() {
+        return Ok(None);
+    }
+    let parent_source_key = adding_parent.then(|| parent_node_id.to_string());
 
     let child_body = sub_issue
         .get("body")
         .and_then(serde_json::Value::as_str)
-        .filter(|body| body.starts_with(VNEXT_TASK_MARKER))
+        .filter(|body| body.starts_with(WORKGRAPH_TASK_MARKER))
         .map(str::to_string)
         .or_else(|| previous.as_ref().map(|document| document.body.clone()));
     let Some(child_body) = child_body else {
@@ -870,6 +1169,15 @@ async fn try_vnext_sub_issue(
     };
 
     let mut inputs = Vec::new();
+    inputs.push(ProjectionInput::RecordIssueRevision {
+        source_key: child_node_id.to_string(),
+        revision,
+    });
+    if previous_root.is_some() {
+        inputs.push(ProjectionInput::DeleteRootIssue {
+            source_key: child_node_id.to_string(),
+        });
+    }
     inputs.push(ProjectionInput::UpsertTask(task_doc));
     // Also emit a locator for the child.
     if let Some(locator) = extract_issue_locator_from_repository(sub_issue, child_repository) {
@@ -891,20 +1199,20 @@ pub fn item_is_open(item: &serde_json::Value) -> bool {
 pub fn extract_issue_locator(
     issue: &serde_json::Value,
     payload: &serde_json::Value,
-) -> Option<crate::vnext::GitHubIssueLocator> {
+) -> Option<crate::protocol::GitHubIssueLocator> {
     extract_issue_locator_from_repository(issue, payload.get("repository"))
 }
 
 fn extract_issue_locator_from_repository(
     issue: &serde_json::Value,
     repository: Option<&serde_json::Value>,
-) -> Option<crate::vnext::GitHubIssueLocator> {
+) -> Option<crate::protocol::GitHubIssueLocator> {
     let node_id = issue.get("node_id")?.as_str()?;
     let number = issue.get("number")?.as_u64()?;
     let repo = repository?;
     let full_name = repo.get("full_name")?.as_str()?;
     let (owner, name) = full_name.split_once('/')?;
-    Some(crate::vnext::GitHubIssueLocator {
+    Some(crate::protocol::GitHubIssueLocator {
         source_key: node_id.to_string(),
         repository_owner: owner.to_string(),
         repository_name: name.to_string(),
@@ -937,12 +1245,12 @@ pub fn verify_signature(secret: &[u8], body: &[u8], signature_header: &str) -> R
 }
 
 #[cfg(test)]
-mod vnext_tests {
+mod workgraph_tests {
     use super::*;
     use crate::config::{TaskIssueType, TrustedIdentity};
-    use crate::vnext::{
+    use crate::protocol::{
         PreparedProjection, PreparedProjectionCommit, ProjectionInput, TaskDocument,
-        VNextAllocatorProjection, VNextTaskBinding,
+        WorkGraphAllocatorProjection, WorkGraphTaskBinding,
     };
     use async_trait::async_trait;
     use drasi_core::models::{
@@ -989,7 +1297,7 @@ mod vnext_tests {
             let tasks = inputs
                 .iter()
                 .filter_map(|input| match input {
-                    ProjectionInput::UpsertTask(document) => Some(VNextTaskBinding {
+                    ProjectionInput::UpsertTask(document) => Some(WorkGraphTaskBinding {
                         source_key: document.source_key.clone(),
                         task_id: document.source_key.clone(),
                         task_element_id: format!("task:{}", document.source_key),
@@ -1014,9 +1322,9 @@ mod vnext_tests {
                 .collect();
             Ok(PreparedProjection {
                 changes,
-                allocator: VNextAllocatorProjection {
+                allocator: WorkGraphAllocatorProjection {
                     tasks,
-                    ..VNextAllocatorProjection::default()
+                    ..WorkGraphAllocatorProjection::default()
                 },
                 rejection: None,
                 state_changed: true,
@@ -1090,7 +1398,7 @@ mod vnext_tests {
     }
 
     async fn ingress_state(
-        trust: Option<LeaseTrust>,
+        trust: Option<ProtocolTrust>,
     ) -> (TempDir, Arc<RecordingProjector>, IngressState) {
         let temp = TempDir::new().expect("tempdir");
         let store = Arc::new(MemoryStateStoreProvider::new());
@@ -1112,13 +1420,14 @@ mod vnext_tests {
                     id: "IT_task".to_string(),
                     name: "WorkGraphTask".to_string(),
                 },
-                lease_trust: trust,
+                protocol_trust: trust,
                 secret: b"secret".to_vec(),
                 lease_validation_token: b"validation".to_vec(),
                 allocator,
                 agent_sync: None,
                 projector: Some(projector.clone()),
                 workflow_definition: None,
+                admission_client: None,
                 projection_gate: Mutex::new(()),
                 notify: Arc::new(Notify::new()),
             },
@@ -1132,7 +1441,9 @@ mod vnext_tests {
             "number": 7,
             "body": body,
             "state": "open",
+            "updated_at": "2026-08-01T00:00:00Z",
             "state_reason": null,
+            "user": {"node_id": "U_creator", "login": "task-creator"},
             "type": {"node_id": "IT_task", "name": "WorkGraphTask"}
         })
     }
@@ -1141,53 +1452,444 @@ mod vnext_tests {
         json!({
             "action": action,
             "organization": {"login": "acme"},
-            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "repository": {
+                "name": "widgets",
+                "full_name": "acme/widgets",
+                "node_id": "R_widgets"
+            },
+            "sender": {"node_id": "U_creator", "login": "task-creator"},
             "issue": issue
         })
     }
 
+    fn root_issue(labels: &[&str]) -> serde_json::Value {
+        json!({
+            "id": 41,
+            "node_id": "I_root",
+            "number": 6,
+            "title": "Root Issue",
+            "body": "Coordinate this work.",
+            "state": "open",
+            "updated_at": "2026-08-01T00:00:00Z",
+            "state_reason": null,
+            "labels": labels.iter().map(|name| json!({"name": name})).collect::<Vec<_>>()
+        })
+    }
+
+    fn task_trust() -> ProtocolTrust {
+        ProtocolTrust {
+            task_creators: vec![TrustedIdentity {
+                id: "U_creator".to_string(),
+                login: "task-creator".to_string(),
+            }],
+            dispatchers: vec![TrustedIdentity {
+                id: "U_dispatch".to_string(),
+                login: "dispatcher".to_string(),
+            }],
+            reporters: vec![TrustedIdentity {
+                id: "U_reporter".to_string(),
+                login: "reporter".to_string(),
+            }],
+        }
+    }
+
     #[tokio::test]
     async fn authorized_task_normalizes_as_one_task_and_locator_batch() {
-        let (_temp, _projector, state) = ingress_state(None).await;
-        let inputs = try_vnext_issue(
+        let (_temp, _projector, state) = ingress_state(Some(task_trust())).await;
+        let inputs = try_workgraph_issue(
             &state,
+            "delivery-1",
             &payload(
                 "opened",
-                task_issue("I_task", "WorkGraphTask/v3\n\n```json\n{}\n```\n"),
+                task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n"),
             ),
         )
         .await
         .expect("normalize")
-        .expect("VNext task");
-        assert_eq!(inputs.len(), 2);
-        assert!(matches!(&inputs[0], ProjectionInput::UpsertTask(_)));
-        assert!(matches!(&inputs[1], ProjectionInput::UpsertLocator(locator)
+        .expect("WorkGraph task");
+        assert_eq!(inputs.len(), 3);
+        assert!(matches!(
+            &inputs[0],
+            ProjectionInput::RecordIssueRevision { source_key, .. }
+                if source_key == "I_task"
+        ));
+        assert!(matches!(&inputs[1], ProjectionInput::UpsertTask(_)));
+        assert!(matches!(&inputs[2], ProjectionInput::UpsertLocator(locator)
             if locator.repository_owner == "acme"
                 && locator.repository_name == "widgets"
                 && locator.issue_number == 7));
     }
 
     #[tokio::test]
-    async fn durable_projection_batch_is_committed_and_deduplicated_once() {
+    async fn task_requires_exact_trusted_creator_and_webhook_actor() {
+        let (_temp, _projector, state) = ingress_state(Some(task_trust())).await;
+        let mut event = payload(
+            "opened",
+            task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n"),
+        );
+        event["issue"]["user"]["login"] = json!("other");
+        assert!(matches!(
+            try_workgraph_issue(&state, "delivery-1", &event).await,
+            Err(WorkGraphNormError::Untrusted(_))
+        ));
+
+        let mut event = payload(
+            "opened",
+            task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n"),
+        );
+        event["sender"]["node_id"] = json!("U_other");
+        assert!(matches!(
+            try_workgraph_issue(&state, "delivery-2", &event).await,
+            Err(WorkGraphNormError::Untrusted(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn root_issue_label_removal_and_readdition_create_a_fresh_generation() {
         let (_temp, projector, state) = ingress_state(None).await;
-        let inputs = try_vnext_issue(
+        assert!(try_workgraph_issue(
             &state,
+            "ignored",
+            &payload("opened", root_issue(&["WorkGraph"]))
+        )
+        .await
+        .expect("normalize")
+        .is_none());
+
+        let first = try_workgraph_issue(
+            &state,
+            "delivery-1",
+            &payload("labeled", root_issue(&["workgraph"])),
+        )
+        .await
+        .expect("normalize")
+        .expect("admitted Root Issue");
+        let first_admission = first
+            .iter()
+            .find_map(|input| match input {
+                ProjectionInput::UpsertRootIssue(document) => {
+                    assert_eq!(document.source_key, "I_root");
+                    Some(document.admission_id.clone())
+                }
+                _ => None,
+            })
+            .expect("Root Issue upsert");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), first, 1, "root-1")
+            .await
+            .expect("persist first admission");
+
+        let mut task_shaped_root = root_issue(&[]);
+        task_shaped_root["body"] = json!("WorkGraphTask/v1\n\n```json\n{}\n```\n");
+        task_shaped_root["type"] = json!({"node_id": "IT_task", "name": "WorkGraphTask"});
+        task_shaped_root["updated_at"] = json!("2026-08-01T00:01:00Z");
+        let removed = try_workgraph_issue(
+            &state,
+            "delivery-2",
+            &payload("unlabeled", task_shaped_root),
+        )
+        .await
+        .expect("normalize")
+        .expect("retract Root Issue");
+        assert!(removed.iter().any(|input| matches!(
+            input,
+            ProjectionInput::DeleteRootIssue { source_key } if source_key == "I_root"
+        )));
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), removed, 2, "root-2")
+            .await
+            .expect("persist retraction");
+
+        let mut readmitted = root_issue(&["workgraph"]);
+        readmitted["updated_at"] = json!("2026-08-01T00:02:00Z");
+        let second = try_workgraph_issue(&state, "delivery-3", &payload("labeled", readmitted))
+            .await
+            .expect("normalize")
+            .expect("readmit Root Issue");
+        let second_admission = second
+            .iter()
+            .find_map(|input| match input {
+                ProjectionInput::UpsertRootIssue(document) => Some(document.admission_id.clone()),
+                _ => None,
+            })
+            .expect("Root Issue upsert");
+        assert_ne!(first_admission, second_admission);
+    }
+
+    #[tokio::test]
+    async fn admission_label_takes_precedence_over_task_marker() {
+        let (_temp, _projector, state) = ingress_state(None).await;
+        let mut issue = task_issue("I_root", "WorkGraphTask/v1\n\n```json\n{}\n```\n");
+        issue["title"] = json!("Root Issue");
+        issue["labels"] = json!([{"name": "workgraph"}]);
+
+        let inputs = try_workgraph_issue(&state, "delivery-1", &payload("labeled", issue))
+            .await
+            .expect("normalize")
+            .expect("admitted Root Issue");
+        assert_eq!(inputs.len(), 2);
+        assert!(inputs.iter().any(|input| matches!(
+            input,
+            ProjectionInput::UpsertRootIssue(document)
+                if document.source_key == "I_root"
+                    && document
+                        .body
+                        .starts_with(crate::protocol::WORKGRAPH_TASK_MARKER)
+        )));
+    }
+
+    #[tokio::test]
+    async fn reordered_readmission_starts_a_fresh_generation_before_delayed_retraction() {
+        let (_temp, projector, state) = ingress_state(None).await;
+        let admitted = try_workgraph_issue(
+            &state,
+            "delivery-1",
+            &payload("labeled", root_issue(&["workgraph"])),
+        )
+        .await
+        .expect("normalize initial admission")
+        .expect("initial admission");
+        let first_admission = admitted
+            .iter()
+            .find_map(|input| match input {
+                ProjectionInput::UpsertRootIssue(document) => Some(document.admission_id.clone()),
+                _ => None,
+            })
+            .expect("initial Root Issue");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), admitted, 1, "root-1")
+            .await
+            .expect("persist initial admission");
+
+        let mut readmitted = root_issue(&["workgraph"]);
+        readmitted["title"] = json!("Readmitted Root Issue");
+        readmitted["updated_at"] = json!("2026-08-01T00:02:00Z");
+        let mut event = payload("labeled", readmitted);
+        event["label"] = json!({"name": "workgraph"});
+        let inputs = try_workgraph_issue(&state, "delivery-3", &event)
+            .await
+            .expect("normalize reordered readmission")
+            .expect("reordered readmission");
+        let second = inputs
+            .iter()
+            .find_map(|input| match input {
+                ProjectionInput::UpsertRootIssue(document) => Some(document),
+                _ => None,
+            })
+            .expect("replacement Root Issue");
+        assert_ne!(second.admission_id, first_admission);
+        assert_eq!(second.title, "Readmitted Root Issue");
+        let second_admission = second.admission_id.clone();
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), inputs, 2, "root-3")
+            .await
+            .expect("persist reordered readmission");
+
+        let mut removed = root_issue(&[]);
+        removed["updated_at"] = json!("2026-08-01T00:01:00Z");
+        let mut delayed = payload("unlabeled", removed);
+        delayed["label"] = json!({"name": "workgraph"});
+        assert!(try_workgraph_issue(&state, "delivery-2", &delayed)
+            .await
+            .expect("normalize delayed retraction")
+            .is_none());
+        assert_eq!(
+            state
+                .allocator
+                .latest_workgraph_root_issue("I_root")
+                .await
+                .expect("read Root Issue")
+                .expect("Root Issue remains admitted")
+                .admission_id,
+            second_admission
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_task_issue_event_cannot_reopen_a_closed_task() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        let body = "WorkGraphTask/v1\n\n```json\n{}\n```\n";
+        let opened = try_workgraph_issue(
+            &state,
+            "delivery-1",
+            &payload("opened", task_issue("I_task", body)),
+        )
+        .await
+        .expect("normalize task")
+        .expect("task inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), opened, 1, "task-1")
+            .await
+            .expect("persist task");
+
+        let mut closed_issue = task_issue("I_task", body);
+        closed_issue["state"] = json!("closed");
+        closed_issue["updated_at"] = json!("2026-08-01T00:03:00Z");
+        let closed = try_workgraph_issue(&state, "delivery-3", &payload("closed", closed_issue))
+            .await
+            .expect("normalize close")
+            .expect("close inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), closed, 2, "task-3")
+            .await
+            .expect("persist close");
+
+        let mut stale_open = task_issue("I_task", body);
+        stale_open["updated_at"] = json!("2026-08-01T00:02:00Z");
+        assert!(
+            try_workgraph_issue(&state, "delivery-2", &payload("reopened", stale_open),)
+                .await
+                .expect("normalize stale reopen")
+                .is_none()
+        );
+        assert!(
+            !state
+                .allocator
+                .latest_workgraph_task("I_task")
+                .await
+                .expect("read task")
+                .expect("task remains")
+                .is_open
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_labeled_delivery_cannot_resurrect_a_retracted_root_issue() {
+        let (_temp, projector, state) = ingress_state(None).await;
+        let admitted = try_workgraph_issue(
+            &state,
+            "delivery-1",
+            &payload("labeled", root_issue(&["workgraph"])),
+        )
+        .await
+        .expect("normalize admission")
+        .expect("admission inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), admitted, 1, "root-1")
+            .await
+            .expect("persist admission");
+
+        let mut retracted = root_issue(&[]);
+        retracted["updated_at"] = json!("2026-08-01T00:02:00Z");
+        let retraction =
+            try_workgraph_issue(&state, "delivery-2", &payload("unlabeled", retracted))
+                .await
+                .expect("normalize retraction")
+                .expect("retraction inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), retraction, 2, "root-2")
+            .await
+            .expect("persist retraction");
+
+        let mut stale = root_issue(&["workgraph"]);
+        stale["updated_at"] = json!("2026-08-01T00:01:00Z");
+        assert!(
+            try_workgraph_issue(&state, "delivery-stale", &payload("labeled", stale))
+                .await
+                .expect("normalize stale delivery")
+                .is_none()
+        );
+        assert!(state
+            .allocator
+            .latest_workgraph_root_issue("I_root")
+            .await
+            .expect("read Root Issue")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn unseen_admission_retraction_tombstones_an_older_label_delivery() {
+        let (_temp, projector, state) = ingress_state(None).await;
+        let mut retracted = root_issue(&[]);
+        retracted["updated_at"] = json!("2026-08-01T00:02:00Z");
+        let mut event = payload("unlabeled", retracted);
+        event["label"] = json!({"name": "workgraph"});
+        let tombstone = try_workgraph_issue(&state, "delivery-2", &event)
+            .await
+            .expect("normalize retraction")
+            .expect("revision tombstone");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), tombstone, 1, "root-2")
+            .await
+            .expect("persist revision tombstone");
+
+        let mut stale = root_issue(&["workgraph"]);
+        stale["updated_at"] = json!("2026-08-01T00:01:00Z");
+        assert!(
+            try_workgraph_issue(&state, "delivery-1", &payload("labeled", stale))
+                .await
+                .expect("normalize stale delivery")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn admitted_root_issue_content_is_frozen_for_its_generation() {
+        let (_temp, projector, state) = ingress_state(None).await;
+        let admitted = try_workgraph_issue(
+            &state,
+            "delivery-1",
+            &payload("labeled", root_issue(&["workgraph"])),
+        )
+        .await
+        .expect("normalize admission")
+        .expect("admission inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), admitted, 1, "root-1")
+            .await
+            .expect("persist admission");
+
+        let mut edited = root_issue(&["workgraph"]);
+        edited["title"] = json!("Changed title");
+        edited["body"] = json!("Changed body");
+        edited["updated_at"] = json!("2026-08-01T00:01:00Z");
+        let inputs = try_workgraph_issue(&state, "delivery-2", &payload("edited", edited))
+            .await
+            .expect("normalize edit")
+            .expect("Root Issue update");
+        let document = inputs
+            .iter()
+            .find_map(|input| match input {
+                ProjectionInput::UpsertRootIssue(document) => Some(document),
+                _ => None,
+            })
+            .expect("Root Issue document");
+        assert_eq!(document.title, "Root Issue");
+        assert_eq!(document.body, "Coordinate this work.");
+    }
+
+    #[tokio::test]
+    async fn durable_projection_batch_is_committed_and_deduplicated_once() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        let inputs = try_workgraph_issue(
+            &state,
+            "delivery-1",
             &payload(
                 "opened",
-                task_issue("I_task", "WorkGraphTask/v3\n\n```json\n{}\n```\n"),
+                task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n"),
             ),
         )
         .await
         .expect("normalize")
-        .expect("VNext task");
+        .expect("WorkGraph task");
         let first = state
             .allocator
-            .ingest_vnext(projector.as_ref(), inputs.clone(), 7, "delivery-1")
+            .ingest_workgraph(projector.as_ref(), inputs.clone(), 7, "delivery-1")
             .await
             .expect("first projection");
         let duplicate = state
             .allocator
-            .ingest_vnext(projector.as_ref(), inputs, 7, "delivery-1")
+            .ingest_workgraph(projector.as_ref(), inputs, 7, "delivery-1")
             .await
             .expect("duplicate projection");
         assert_eq!(first.0, 0);
@@ -1195,14 +1897,14 @@ mod vnext_tests {
         assert_eq!(projector.committed.lock().await.len(), 1);
         let checkpoint = state
             .allocator
-            .vnext_checkpoint()
+            .workgraph_checkpoint()
             .await
             .expect("durable checkpoint");
         assert_eq!(
             serde_json::from_slice::<Vec<ProjectionInput>>(&checkpoint)
                 .expect("decode checkpoint")
                 .len(),
-            2
+            3
         );
         let restarted = RecordingProjector::default();
         restarted
@@ -1236,13 +1938,13 @@ mod vnext_tests {
         };
 
         assert!(allocator
-            .ingest_vnext(&projector, vec![input], 7, "delivery-1")
+            .ingest_workgraph(&projector, vec![input], 7, "delivery-1")
             .await
             .is_err());
         assert!(projector.committed.lock().await.is_empty());
 
         let checkpoint = allocator
-            .vnext_checkpoint()
+            .workgraph_checkpoint()
             .await
             .expect("pending WAL recovery");
         assert!(!checkpoint.is_empty());
@@ -1255,22 +1957,22 @@ mod vnext_tests {
         let (_temp, _projector, state) = ingress_state(None).await;
         let mut event = payload(
             "opened",
-            task_issue("I_task", "WorkGraphTask/v3\n\n```json\n{}\n```\n"),
+            task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n"),
         );
         event["repository"] = json!({"name": "other", "full_name": "acme/other"});
         assert!(matches!(
-            try_vnext_issue(&state, &event).await,
-            Err(VNextNormError::Forbidden(_))
+            try_workgraph_issue(&state, "delivery-1", &event).await,
+            Err(WorkGraphNormError::Forbidden(_))
         ));
     }
 
     #[tokio::test]
     async fn issue_update_preserves_parent_from_durable_projection_history() {
-        let (_temp, projector, state) = ingress_state(None).await;
-        let body = "WorkGraphTask/v3\n\n```json\n{}\n```\n";
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        let body = "WorkGraphTask/v1\n\n```json\n{}\n```\n";
         state
             .allocator
-            .ingest_vnext(
+            .ingest_workgraph(
                 projector.as_ref(),
                 vec![ProjectionInput::UpsertTask(TaskDocument {
                     source_key: "I_child".to_string(),
@@ -1285,21 +1987,25 @@ mod vnext_tests {
             .await
             .expect("seed task");
 
-        let inputs = try_vnext_issue(&state, &payload("edited", task_issue("I_child", body)))
-            .await
-            .expect("normalize")
-            .expect("VNext task");
-        assert!(matches!(
-            &inputs[0],
+        let inputs = try_workgraph_issue(
+            &state,
+            "delivery-1",
+            &payload("edited", task_issue("I_child", body)),
+        )
+        .await
+        .expect("normalize")
+        .expect("WorkGraph task");
+        assert!(inputs.iter().any(|input| matches!(
+            input,
             ProjectionInput::UpsertTask(document)
                 if document.parent_source_key.as_deref() == Some("I_parent")
-        ));
+        )));
     }
 
     #[tokio::test]
     async fn lifecycle_artifact_requires_trust_and_preserves_exact_body() {
         let body = "WorkGraphTaskAssign/v1\n\n```json\n{\"operationId\":\"op\"}\n```\n";
-        let issue = task_issue("I_task", "WorkGraphTask/v3\n\n```json\n{}\n```\n");
+        let issue = task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n");
         let event = json!({
             "action": "created",
             "organization": {"login": "acme"},
@@ -1315,11 +2021,15 @@ mod vnext_tests {
         });
         let (_temp, _projector, untrusted) = ingress_state(None).await;
         assert!(matches!(
-            try_vnext_comment(&untrusted, &event),
-            Err(VNextNormError::Untrusted(_))
+            try_workgraph_comment(&untrusted, &event),
+            Err(WorkGraphNormError::Untrusted(_))
         ));
 
-        let trust = LeaseTrust {
+        let trust = ProtocolTrust {
+            task_creators: vec![TrustedIdentity {
+                id: "U_creator".to_string(),
+                login: "task-creator".to_string(),
+            }],
             dispatchers: vec![TrustedIdentity {
                 id: "U_dispatch".to_string(),
                 login: "dispatcher".to_string(),
@@ -1327,7 +2037,7 @@ mod vnext_tests {
             reporters: Vec::new(),
         };
         let (_temp, _projector, trusted) = ingress_state(Some(trust)).await;
-        let inputs = try_vnext_comment(&trusted, &event)
+        let inputs = try_workgraph_comment(&trusted, &event)
             .expect("normalize")
             .expect("lifecycle artifact");
         assert!(matches!(
@@ -1340,12 +2050,50 @@ mod vnext_tests {
     }
 
     #[tokio::test]
+    async fn editing_away_lifecycle_marker_retracts_without_requiring_new_trust() {
+        let (_temp, _projector, state) = ingress_state(None).await;
+        let event = json!({
+            "action": "edited",
+            "organization": {"login": "acme"},
+            "repository": {
+                "name": "widgets",
+                "full_name": "acme/widgets",
+                "node_id": "R_widgets"
+            },
+            "sender": {"node_id": "U_other", "login": "other"},
+            "issue": task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n"),
+            "comment": {
+                "node_id": "IC_assign",
+                "body": "ordinary comment",
+                "user": {"node_id": "U_dispatch", "login": "dispatcher"},
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:01:00Z"
+            },
+            "changes": {
+                "body": {
+                    "from": "WorkGraphTaskAssign/v1\n\n```json\n{\"operationId\":\"op\"}\n```\n"
+                }
+            }
+        });
+
+        let inputs = try_workgraph_comment(&state, &event)
+            .expect("normalize")
+            .expect("retract lifecycle artifact");
+        assert_eq!(
+            inputs,
+            vec![ProjectionInput::DeleteLifecycleArtifact {
+                source_key: "IC_assign".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
     async fn sub_issue_removal_reuses_document_and_clears_parent() {
         let (_temp, projector, state) = ingress_state(None).await;
-        let body = "WorkGraphTask/v3\n\n```json\n{}\n```\n";
+        let body = "WorkGraphTask/v1\n\n```json\n{}\n```\n";
         state
             .allocator
-            .ingest_vnext(
+            .ingest_workgraph(
                 projector.as_ref(),
                 vec![ProjectionInput::UpsertTask(TaskDocument {
                     source_key: "I_child".to_string(),
@@ -1367,17 +2115,303 @@ mod vnext_tests {
             "sub_issue": {
                 "node_id": "I_child",
                 "number": 7,
+                "updated_at": "2026-08-01T00:01:00Z",
                 "type": {"node_id": "IT_task", "name": "WorkGraphTask"}
             }
         });
-        let inputs = try_vnext_sub_issue(&state, &event)
+        let inputs = try_workgraph_sub_issue(&state, &event)
             .await
             .expect("normalize")
             .expect("sub-issue task");
-        assert!(matches!(
-            &inputs[0],
+        assert!(inputs.iter().any(|input| matches!(
+            input,
             ProjectionInput::UpsertTask(document)
                 if document.body == body && document.parent_source_key.is_none()
+        )));
+    }
+
+    #[tokio::test]
+    async fn sub_issue_event_cannot_reclassify_an_admitted_root_issue() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "node": {
+                        "labels": {
+                            "nodes": [{"name": "workgraph"}],
+                            "pageInfo": {"hasNextPage": false}
+                        }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+        let (_temp, projector, mut state) = ingress_state(None).await;
+        state.admission_client = Some(
+            AdmissionClient::new(&WorkflowDefinitionConfig {
+                token: "token".to_string(),
+                api_base_url: server.uri(),
+                ..WorkflowDefinitionConfig::default()
+            })
+            .expect("admission client"),
+        );
+        let admitted = try_workgraph_issue(
+            &state,
+            "delivery-1",
+            &payload("labeled", root_issue(&["workgraph"])),
+        )
+        .await
+        .expect("normalize admission")
+        .expect("admission inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), admitted, 1, "root-1")
+            .await
+            .expect("persist admission");
+        let event = json!({
+            "action": "sub_issue_added",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "parent_issue": {"node_id": "I_parent"},
+            "sub_issue": {
+                "node_id": "I_root",
+                "number": 6,
+                "body": "WorkGraphTask/v1\n\n```json\n{}\n```\n",
+                "updated_at": "2026-08-01T00:01:00Z",
+                "type": {"node_id": "IT_task", "name": "WorkGraphTask"}
+            }
+        });
+
+        assert!(try_workgraph_sub_issue(&state, &event)
+            .await
+            .expect("normalize hierarchy event")
+            .is_none());
+        assert!(state
+            .allocator
+            .latest_workgraph_task("I_root")
+            .await
+            .expect("read task")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn newer_authoritative_sub_issue_transition_replaces_stale_root_classification() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "node": {
+                        "labels": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": false}
+                        }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+        let (_temp, projector, mut state) = ingress_state(Some(task_trust())).await;
+        state.admission_client = Some(
+            AdmissionClient::new(&WorkflowDefinitionConfig {
+                token: "token".to_string(),
+                api_base_url: server.uri(),
+                ..WorkflowDefinitionConfig::default()
+            })
+            .expect("admission client"),
+        );
+        let admitted = try_workgraph_issue(
+            &state,
+            "delivery-1",
+            &payload("labeled", root_issue(&["workgraph"])),
+        )
+        .await
+        .expect("normalize admission")
+        .expect("admission inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), admitted, 1, "root-1")
+            .await
+            .expect("persist admission");
+
+        let body = "WorkGraphTask/v1\n\n```json\n{}\n```\n";
+        let mut child = task_issue("I_root", body);
+        child["updated_at"] = json!("2026-08-01T00:02:00Z");
+        let event = json!({
+            "action": "sub_issue_added",
+            "organization": {"login": "acme"},
+            "repository": {
+                "name": "widgets",
+                "full_name": "acme/widgets",
+                "node_id": "R_widgets"
+            },
+            "sender": {"node_id": "U_creator", "login": "task-creator"},
+            "parent_issue": {"node_id": "I_parent"},
+            "sub_issue": child
+        });
+        let transition = try_workgraph_sub_issue(&state, &event)
+            .await
+            .expect("normalize authoritative hierarchy transition")
+            .expect("hierarchy transition");
+        assert!(transition.iter().any(|input| matches!(
+            input,
+            ProjectionInput::DeleteRootIssue { source_key } if source_key == "I_root"
+        )));
+        assert!(transition.iter().any(|input| matches!(
+            input,
+            ProjectionInput::UpsertTask(document)
+                if document.source_key == "I_root"
+                    && document.parent_source_key.as_deref() == Some("I_parent")
+        )));
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), transition, 2, "task-2")
+            .await
+            .expect("persist hierarchy transition");
+        assert!(state
+            .allocator
+            .latest_workgraph_root_issue("I_root")
+            .await
+            .expect("read Root Issue")
+            .is_none());
+        assert_eq!(
+            state
+                .allocator
+                .latest_workgraph_task("I_root")
+                .await
+                .expect("read task")
+                .expect("task classification")
+                .parent_source_key
+                .as_deref(),
+            Some("I_parent")
+        );
+
+        let mut delayed_root = root_issue(&["workgraph"]);
+        delayed_root["updated_at"] = json!("2026-08-01T00:01:00Z");
+        assert!(
+            try_workgraph_issue(&state, "delivery-stale", &payload("labeled", delayed_root),)
+                .await
+                .expect("normalize stale Root Issue")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn equal_revision_readmission_uses_authoritative_github_state() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "node": {
+                        "labels": {
+                            "nodes": [{"name": "workgraph"}],
+                            "pageInfo": {"hasNextPage": false}
+                        }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+        let (_temp, projector, mut state) = ingress_state(None).await;
+        state.admission_client = Some(
+            AdmissionClient::new(&WorkflowDefinitionConfig {
+                token: "token".to_string(),
+                api_base_url: server.uri(),
+                ..WorkflowDefinitionConfig::default()
+            })
+            .expect("admission client"),
+        );
+        let admitted = try_workgraph_issue(
+            &state,
+            "delivery-1",
+            &payload("labeled", root_issue(&["workgraph"])),
+        )
+        .await
+        .expect("normalize admission")
+        .expect("admission inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), admitted, 1, "root-1")
+            .await
+            .expect("persist admission");
+
+        let mut removed = root_issue(&[]);
+        removed["updated_at"] = json!("2026-08-01T00:01:00Z");
+        let retraction = try_workgraph_issue(&state, "delivery-2", &payload("unlabeled", removed))
+            .await
+            .expect("normalize retraction")
+            .expect("retraction inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), retraction, 2, "root-2")
+            .await
+            .expect("persist retraction");
+
+        let mut readmitted = root_issue(&["workgraph"]);
+        readmitted["updated_at"] = json!("2026-08-01T00:01:00Z");
+        assert!(
+            try_workgraph_issue(&state, "delivery-3", &payload("labeled", readmitted))
+                .await
+                .expect("normalize equal-revision readmission")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn labeled_root_issue_payload_cannot_be_projected_as_a_sub_issue_task() {
+        let (_temp, _projector, state) = ingress_state(None).await;
+        let event = json!({
+            "action": "sub_issue_added",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "parent_issue": {"node_id": "I_parent"},
+            "sub_issue": {
+                "node_id": "I_root",
+                "number": 6,
+                "body": "WorkGraphTask/v1\n\n```json\n{}\n```\n",
+                "labels": [{"name": "workgraph"}],
+                "type": {"node_id": "IT_task", "name": "WorkGraphTask"}
+            }
+        });
+
+        assert!(try_workgraph_sub_issue(&state, &event)
+            .await
+            .expect("normalize hierarchy event")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn sub_issue_addition_requires_trusted_task_creator_and_actor() {
+        let (_temp, _projector, state) = ingress_state(Some(task_trust())).await;
+        let event = json!({
+            "action": "sub_issue_added",
+            "organization": {"login": "acme"},
+            "repository": {
+                "name": "widgets",
+                "full_name": "acme/widgets",
+                "node_id": "R_widgets"
+            },
+            "sender": {"node_id": "U_creator", "login": "task-creator"},
+            "parent_issue": {"node_id": "I_root"},
+            "sub_issue": task_issue(
+                "I_child",
+                "WorkGraphTask/v1\n\n```json\n{}\n```\n"
+            )
+        });
+        let inputs = try_workgraph_sub_issue(&state, &event)
+            .await
+            .expect("normalize")
+            .expect("sub-issue task");
+        assert!(inputs.iter().any(|input| matches!(
+            input,
+            ProjectionInput::UpsertTask(document)
+                if document.parent_source_key.as_deref() == Some("I_root")
+        )));
+
+        let mut untrusted = event;
+        untrusted["sender"]["login"] = json!("other");
+        assert!(matches!(
+            try_workgraph_sub_issue(&state, &untrusted).await,
+            Err(WorkGraphNormError::Untrusted(_))
         ));
     }
 
@@ -1407,7 +2441,7 @@ mod vnext_tests {
         state.workflow_definition = Some(WorkflowDefinitionConfig {
             repository: "acme/widgets".to_string(),
             r#ref: "main".to_string(),
-            path: ".github/workgraph/workflows/issue-lifecycle-vnext.body".to_string(),
+            path: ".github/workgraph/workflows/issue-lifecycle-v1.body".to_string(),
             token: "token".to_string(),
             api_base_url: server.uri(),
         });
@@ -1417,7 +2451,7 @@ mod vnext_tests {
             "repository": {"name": "widgets", "full_name": "acme/widgets"},
             "commits": [{
                 "added": [],
-                "modified": [".github/workgraph/workflows/issue-lifecycle-vnext.body"],
+                "modified": [".github/workgraph/workflows/issue-lifecycle-v1.body"],
                 "removed": []
             }],
             "size": 1
@@ -1435,7 +2469,7 @@ mod vnext_tests {
             ProjectionInput::UpsertDefinition(document)
                 if document.body == body
                     && document.source_key
-                        == "github:definition:acme/widgets:main:.github/workgraph/workflows/issue-lifecycle-vnext.body"
+                        == "github:definition:acme/widgets:main:.github/workgraph/workflows/issue-lifecycle-v1.body"
         ));
     }
 }
