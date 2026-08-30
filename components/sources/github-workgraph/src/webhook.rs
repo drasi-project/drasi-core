@@ -513,6 +513,12 @@ struct AdmissionClient {
     api_url: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct TaskIssueState {
+    document: crate::protocol::TaskDocument,
+    task_typed: bool,
+}
+
 impl AdmissionClient {
     fn new(config: &WorkflowDefinitionConfig) -> Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
@@ -647,6 +653,123 @@ impl AdmissionClient {
             }))
     }
 
+    async fn task_issue_state(
+        &self,
+        node_id: &str,
+        task_issue_type: &crate::config::TaskIssueType,
+    ) -> Result<TaskIssueState> {
+        let response = self
+            .http
+            .post(&self.api_url)
+            .json(&json!({
+                "query": "query($id: ID!) { node(id: $id) { ... on Issue { id body state stateReason issueType { id name } parent { id } labels(first: 100) { nodes { name } pageInfo { hasNextPage } } } } }",
+                "variables": {"id": node_id}
+            }))
+            .send()
+            .await
+            .context("authoritative task state lookup failed")?
+            .error_for_status()
+            .context("authoritative task state lookup returned an error")?;
+        let payload: Value = response
+            .json()
+            .await
+            .context("authoritative task state lookup returned invalid JSON")?;
+        if payload
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| !errors.is_empty())
+        {
+            anyhow::bail!("authoritative task state lookup returned GraphQL errors");
+        }
+        let issue = payload
+            .pointer("/data/node")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("authoritative task state lookup did not return an Issue"))?;
+        anyhow::ensure!(
+            issue.get("id").and_then(Value::as_str) == Some(node_id),
+            "authoritative task state lookup returned the wrong Issue"
+        );
+        let labels = issue
+            .get("labels")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("authoritative task state lookup omitted labels"))?;
+        if labels
+            .get("pageInfo")
+            .and_then(Value::as_object)
+            .and_then(|page_info| page_info.get("hasNextPage"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            anyhow::bail!("authoritative task label set exceeds 100 entries");
+        }
+        let mut workgraph_labels = labels
+            .get("nodes")
+            .and_then(Value::as_array)
+            .context("authoritative task state labels are missing")?
+            .iter()
+            .map(|label| {
+                label
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .context("authoritative task state contains an invalid label")
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|label| label.starts_with("workgraph:"))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        workgraph_labels.sort();
+        let workgraph_include = !workgraph_labels.iter().any(|label| {
+            matches!(
+                label.as_str(),
+                WORKGRAPH_IGNORE_LABEL | WORKGRAPH_ERROR_LABEL
+            )
+        });
+        let parent_source_key = match issue.get("parent") {
+            Some(Value::Null) => None,
+            Some(parent) => Some(
+                parent
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .context("authoritative task state returned an invalid parent")?
+                    .to_string(),
+            ),
+            None => anyhow::bail!("authoritative task state lookup omitted the parent field"),
+        };
+        let is_open = match issue.get("state").and_then(Value::as_str) {
+            Some("OPEN") => true,
+            Some("CLOSED") => false,
+            _ => anyhow::bail!("authoritative task state lookup returned an invalid state"),
+        };
+        let issue_type = issue.get("issueType");
+        let task_typed = issue_type.is_some_and(|issue_type| {
+            issue_type.get("id").and_then(Value::as_str) == Some(task_issue_type.id.as_str())
+                && issue_type.get("name").and_then(Value::as_str)
+                    == Some(task_issue_type.name.as_str())
+        });
+        Ok(TaskIssueState {
+            document: crate::protocol::TaskDocument {
+                source_key: node_id.to_string(),
+                body: issue
+                    .get("body")
+                    .and_then(Value::as_str)
+                    .context("authoritative task state lookup omitted the body")?
+                    .to_string(),
+                is_open,
+                state_reason: issue
+                    .get("stateReason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_ascii_lowercase(),
+                parent_source_key,
+                workgraph_labels,
+                workgraph_include,
+            },
+            task_typed,
+        })
+    }
+
     async fn parent_issue_node_id(&self, node_id: &str) -> Result<Option<String>> {
         let response = self
             .http
@@ -769,6 +892,35 @@ fn issue_workgraph_labels(issue: &serde_json::Value) -> (Vec<String>, bool) {
         )
     });
     (labels, included)
+}
+
+fn task_issue_state(
+    issue: &serde_json::Value,
+    source_key: &str,
+    parent_source_key: Option<String>,
+    task_issue_type: &crate::config::TaskIssueType,
+) -> TaskIssueState {
+    let (workgraph_labels, workgraph_include) = issue_workgraph_labels(issue);
+    TaskIssueState {
+        document: crate::protocol::TaskDocument {
+            source_key: source_key.to_string(),
+            body: issue
+                .get("body")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            is_open: item_is_open(issue),
+            state_reason: issue
+                .get("state_reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            parent_source_key,
+            workgraph_labels,
+            workgraph_include,
+        },
+        task_typed: task_issue_type.matches(issue.get("type")),
+    }
 }
 
 fn normalize_github_issue(
@@ -955,25 +1107,6 @@ async fn try_workgraph_issue(
                 }
             }
             if revision == previous
-                && previous_task
-                    .as_ref()
-                    .is_some_and(|task| task.workgraph_include != workgraph_include)
-            {
-                let client = state.admission_client.as_ref().ok_or_else(|| {
-                    WorkGraphNormError::Unavailable(
-                        "equal-revision task inclusion transition requires an authoritative GitHub read"
-                            .to_string(),
-                    )
-                })?;
-                let authoritative = client
-                    .workgraph_include(node_id)
-                    .await
-                    .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?;
-                if authoritative != workgraph_include {
-                    return Ok(None);
-                }
-            }
-            if revision == previous
                 && previous_root
                     .as_ref()
                     .is_some_and(|root| root.workgraph_include != workgraph_include)
@@ -995,6 +1128,31 @@ async fn try_workgraph_issue(
         }
         Some(revision)
     };
+    if revision == previous_revision {
+        if let Some(previous) = previous_task.as_ref() {
+            let incoming = task_issue_state(
+                issue,
+                node_id,
+                previous.parent_source_key.clone(),
+                &state.task_issue_type,
+            );
+            if incoming.document != *previous || !incoming.task_typed {
+                let client = state.admission_client.as_ref().ok_or_else(|| {
+                    WorkGraphNormError::Unavailable(
+                        "equal-revision task state transition requires an authoritative GitHub read"
+                            .to_string(),
+                    )
+                })?;
+                let authoritative = client
+                    .task_issue_state(node_id, &state.task_issue_type)
+                    .await
+                    .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?;
+                if authoritative != incoming {
+                    return Ok(None);
+                }
+            }
+        }
+    }
     let mut inputs = revision
         .map(|revision| {
             vec![ProjectionInput::RecordIssueRevision {
@@ -1148,23 +1306,16 @@ async fn try_workgraph_issue(
             )));
         }
 
-        let (workgraph_labels, workgraph_include) = issue_workgraph_labels(issue);
         inputs.push(ProjectionInput::DeleteGitHubIssue {
             source_key: node_id.to_string(),
         });
-        let task_doc = TaskDocument {
-            source_key: node_id.to_string(),
-            body: body.to_string(),
-            is_open: item_is_open(issue),
-            state_reason: issue
-                .get("state_reason")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            parent_source_key: previous_task.and_then(|document| document.parent_source_key),
-            workgraph_labels,
-            workgraph_include,
-        };
+        let task_doc = task_issue_state(
+            issue,
+            node_id,
+            previous_task.and_then(|document| document.parent_source_key),
+            &state.task_issue_type,
+        )
+        .document;
         inputs.push(ProjectionInput::UpsertTask(task_doc));
         if let Some(locator) = extract_issue_locator(issue, payload) {
             inputs.push(ProjectionInput::UpsertLocator(locator));
@@ -1411,25 +1562,6 @@ async fn try_workgraph_sub_issue(
             })
             .unwrap_or_else(|| (Vec::new(), true))
     };
-    if previous_revision == Some(revision)
-        && previous
-            .as_ref()
-            .is_some_and(|task| task.workgraph_include != workgraph_include)
-    {
-        let client = state.admission_client.as_ref().ok_or_else(|| {
-            WorkGraphNormError::Unavailable(
-                "equal-revision task hierarchy inclusion conflict requires an authoritative GitHub read"
-                    .to_string(),
-            )
-        })?;
-        let authoritative = client
-            .workgraph_include(child_node_id)
-            .await
-            .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?;
-        if authoritative != workgraph_include {
-            return Ok(None);
-        }
-    }
     if previous_root.is_some() {
         let client = state.admission_client.as_ref().ok_or_else(|| {
             WorkGraphNormError::Unavailable(
@@ -1517,6 +1649,29 @@ async fn try_workgraph_sub_issue(
         workgraph_labels,
         workgraph_include,
     };
+    if previous_revision == Some(revision)
+        && previous
+            .as_ref()
+            .is_some_and(|previous| previous != &task_doc)
+    {
+        let client = state.admission_client.as_ref().ok_or_else(|| {
+            WorkGraphNormError::Unavailable(
+                "equal-revision task hierarchy state transition requires an authoritative GitHub read"
+                    .to_string(),
+            )
+        })?;
+        let incoming = TaskIssueState {
+            document: task_doc.clone(),
+            task_typed: state.task_issue_type.matches(sub_issue.get("type")),
+        };
+        let authoritative = client
+            .task_issue_state(child_node_id, &state.task_issue_type)
+            .await
+            .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?;
+        if authoritative != incoming {
+            return Ok(None);
+        }
+    }
 
     let mut inputs = Vec::new();
     inputs.push(ProjectionInput::RecordIssueRevision {
@@ -2397,6 +2552,109 @@ mod workgraph_tests {
                 .expect("task remains")
                 .is_open
         );
+    }
+
+    #[tokio::test]
+    async fn authoritative_close_wins_equal_revision_reopen_in_both_delivery_orders() {
+        let body = "WorkGraphTask/v1\n\n```json\n{}\n```\n";
+        for close_first in [true, false] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": {
+                        "node": {
+                            "id": "I_task",
+                            "body": body,
+                            "state": "CLOSED",
+                            "stateReason": "COMPLETED",
+                            "issueType": {"id": "IT_task", "name": "WorkGraphTask"},
+                            "parent": null,
+                            "labels": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": false}
+                            }
+                        }
+                    }
+                })))
+                .expect(2)
+                .mount(&server)
+                .await;
+            let (_temp, projector, mut state) = ingress_state(Some(task_trust())).await;
+            state.admission_client = Some(
+                AdmissionClient::new(&WorkflowDefinitionConfig {
+                    token: "token".to_string(),
+                    api_base_url: server.uri(),
+                    ..WorkflowDefinitionConfig::default()
+                })
+                .expect("admission client"),
+            );
+            let opened = try_workgraph_issue(
+                &state,
+                "delivery-open",
+                &payload("opened", task_issue("I_task", body)),
+            )
+            .await
+            .expect("normalize initial open")
+            .expect("initial task inputs");
+            state
+                .allocator
+                .ingest_workgraph(projector.as_ref(), opened, 1, "equal-open")
+                .await
+                .expect("persist initial open");
+
+            let mut closed_issue = task_issue("I_task", body);
+            closed_issue["state"] = json!("closed");
+            closed_issue["state_reason"] = json!("completed");
+            closed_issue["updated_at"] = json!("2026-08-01T00:01:00Z");
+            let close = payload("closed", closed_issue);
+            let mut reopened_issue = task_issue("I_task", body);
+            reopened_issue["updated_at"] = json!("2026-08-01T00:01:00Z");
+            let reopen = payload("reopened", reopened_issue);
+            let deliveries = if close_first {
+                [("delivery-close", &close), ("delivery-reopen", &reopen)]
+            } else {
+                [("delivery-reopen", &reopen), ("delivery-close", &close)]
+            };
+            for (index, (delivery_id, delivery)) in deliveries.into_iter().enumerate() {
+                if let Some(inputs) = try_workgraph_issue(&state, delivery_id, delivery)
+                    .await
+                    .expect("normalize equal-revision delivery")
+                {
+                    state
+                        .allocator
+                        .ingest_workgraph(
+                            projector.as_ref(),
+                            inputs,
+                            index as u64 + 2,
+                            &format!("{delivery_id}-{close_first}"),
+                        )
+                        .await
+                        .expect("persist equal-revision delivery");
+                }
+            }
+
+            let task = state
+                .allocator
+                .latest_workgraph_task("I_task")
+                .await
+                .expect("read durable task")
+                .expect("task remains");
+            assert!(!task.is_open);
+            assert_eq!(task.state_reason, "completed");
+            assert!(try_workgraph_issue(&state, "delivery-replay", &reopen)
+                .await
+                .expect("normalize replayed reopen")
+                .is_none());
+            assert!(
+                !state
+                    .allocator
+                    .latest_workgraph_task("I_task")
+                    .await
+                    .expect("read task after replay")
+                    .expect("task remains after replay")
+                    .is_open
+            );
+        }
     }
 
     #[tokio::test]
