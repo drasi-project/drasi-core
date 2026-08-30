@@ -194,7 +194,10 @@ async fn validate_lease(
         Ok(Some(active)) => (
             StatusCode::OK,
             Json(json!({
-                "leaseId": active.lease_id, "taskId": active.task_id,
+                "leaseId": active.lease_id,
+                "rootIssueId": active.root_issue_id,
+                "workflowRunId": active.workflow_run_id,
+                "taskId": active.task_id,
                 "assignmentId": active.assignment_id,
                 "executorId": active.executor_id, "slotId": active.slot_id,
                 "claimId": request.claim_id,
@@ -578,6 +581,17 @@ impl AdmissionClient {
             .any(|label| {
                 label.get("name").and_then(Value::as_str) == Some(WORKGRAPH_ADMISSION_LABEL)
             });
+        let excluded = labels
+            .get("nodes")
+            .and_then(Value::as_array)
+            .context("authoritative Root Issue labels are missing")?
+            .iter()
+            .any(|label| {
+                matches!(
+                    label.get("name").and_then(Value::as_str),
+                    Some(WORKGRAPH_IGNORE_LABEL | WORKGRAPH_ERROR_LABEL)
+                )
+            });
         if !admitted
             && labels
                 .pointer("/pageInfo/hasNextPage")
@@ -595,7 +609,57 @@ impl AdmissionClient {
             .get("body")
             .and_then(Value::as_str)
             .is_some_and(|body| body.starts_with(crate::protocol::WORKGRAPH_TASK_MARKER));
-        Ok(admitted && !task_typed && !task_marked)
+        Ok(admitted && !excluded && !task_typed && !task_marked)
+    }
+
+    async fn workgraph_include(&self, node_id: &str) -> Result<bool> {
+        let response = self
+            .http
+            .post(&self.api_url)
+            .json(&json!({
+                "query": "query($id: ID!) { node(id: $id) { ... on Issue { labels(first: 100) { nodes { name } pageInfo { hasNextPage } } } } }",
+                "variables": {"id": node_id}
+            }))
+            .send()
+            .await
+            .context("authoritative task inclusion lookup failed")?
+            .error_for_status()
+            .context("authoritative task inclusion lookup returned an error")?;
+        let payload: Value = response
+            .json()
+            .await
+            .context("authoritative task inclusion lookup returned invalid JSON")?;
+        if payload
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| !errors.is_empty())
+        {
+            anyhow::bail!("authoritative task inclusion lookup returned GraphQL errors");
+        }
+        let labels = payload
+            .pointer("/data/node/labels")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("authoritative task inclusion lookup omitted labels"))?;
+        if labels
+            .get("pageInfo")
+            .and_then(Value::as_object)
+            .and_then(|page_info| page_info.get("hasNextPage"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            anyhow::bail!("authoritative task label set exceeds 100 entries");
+        }
+        Ok(!labels
+            .get("nodes")
+            .and_then(Value::as_array)
+            .context("authoritative task inclusion labels are missing")?
+            .iter()
+            .any(|label| {
+                matches!(
+                    label.get("name").and_then(Value::as_str),
+                    Some(WORKGRAPH_IGNORE_LABEL | WORKGRAPH_ERROR_LABEL)
+                )
+            }))
     }
 
     async fn parent_issue_node_id(&self, node_id: &str) -> Result<Option<String>> {
@@ -699,6 +763,89 @@ fn authorize_workgraph_repository(
 }
 
 const WORKGRAPH_ADMISSION_LABEL: &str = "workgraph";
+const WORKGRAPH_IGNORE_LABEL: &str = "workgraph:ignore";
+const WORKGRAPH_ERROR_LABEL: &str = "workgraph:error";
+
+fn issue_workgraph_labels(issue: &serde_json::Value) -> (Vec<String>, bool) {
+    let mut labels = issue
+        .get("labels")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|label| label.get("name").and_then(serde_json::Value::as_str))
+        .filter(|name| name.starts_with("workgraph:"))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    labels.sort();
+    let included = !labels.iter().any(|name| {
+        matches!(
+            name.as_str(),
+            WORKGRAPH_IGNORE_LABEL | WORKGRAPH_ERROR_LABEL
+        )
+    });
+    (labels, included)
+}
+
+fn normalize_github_issue(
+    issue: &serde_json::Value,
+    payload: &serde_json::Value,
+) -> Result<crate::protocol::GitHubIssueDocument, WorkGraphNormError> {
+    let locator = extract_issue_locator(issue, payload).ok_or_else(|| {
+        WorkGraphNormError::InvalidPayload(
+            "GitHub Issue is missing its repository locator".to_string(),
+        )
+    })?;
+    if locator.issue_database_id > i64::MAX as u64 || locator.issue_number > i64::MAX as u64 {
+        return Err(WorkGraphNormError::InvalidPayload(
+            "GitHub Issue numeric identity exceeds the supported range".to_string(),
+        ));
+    }
+    let repository_node_id = payload
+        .pointer("/repository/node_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            WorkGraphNormError::InvalidPayload(
+                "GitHub Issue repository is missing 'node_id'".to_string(),
+            )
+        })?;
+    let labels = issue
+        .get("labels")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|label| label.get("name").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect();
+    let (workgraph_labels, workgraph_include) = issue_workgraph_labels(issue);
+    Ok(crate::protocol::GitHubIssueDocument {
+        source_key: locator.source_key,
+        repository_owner: locator.repository_owner,
+        repository_name: locator.repository_name,
+        repository_node_id: repository_node_id.to_string(),
+        issue_database_id: locator.issue_database_id,
+        issue_number: locator.issue_number,
+        title: issue
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        body: issue
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        is_open: item_is_open(issue),
+        state_reason: issue
+            .get("state_reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        labels,
+        workgraph_labels,
+        workgraph_include,
+    })
+}
 
 fn issue_is_root_candidate(
     issue: &serde_json::Value,
@@ -774,13 +921,10 @@ async fn try_workgraph_issue(
         .pointer("/changes/body/from")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|body| body.starts_with(WORKGRAPH_TASK_MARKER));
-    let labeled_root_candidate = issue_is_root_candidate(issue, &state.task_issue_type);
+    let (_, workgraph_include) = issue_workgraph_labels(issue);
+    let labeled_root_candidate =
+        workgraph_include && issue_is_root_candidate(issue, &state.task_issue_type);
     let admission_added = action == "labeled"
-        && payload
-            .pointer("/label/name")
-            .and_then(serde_json::Value::as_str)
-            == Some(WORKGRAPH_ADMISSION_LABEL);
-    let admission_retracted = action == "unlabeled"
         && payload
             .pointer("/label/name")
             .and_then(serde_json::Value::as_str)
@@ -805,14 +949,7 @@ async fn try_workgraph_issue(
         .latest_workgraph_issue_revision(node_id)
         .await
         .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
-    let revision = if admitted
-        || admission_retracted
-        || previous_root.is_some()
-        || previous_revision.is_some()
-        || current_workgraph
-        || previous_workgraph
-        || previous_task.is_some()
-    {
+    let revision = {
         let revision = authoritative_issue_revision(issue)?;
         if let Some(previous) = previous_revision {
             if revision < previous {
@@ -833,10 +970,27 @@ async fn try_workgraph_issue(
                     return Ok(None);
                 }
             }
+            if revision == previous
+                && previous_task
+                    .as_ref()
+                    .is_some_and(|task| task.workgraph_include != workgraph_include)
+            {
+                let client = state.admission_client.as_ref().ok_or_else(|| {
+                    WorkGraphNormError::Unavailable(
+                        "equal-revision task inclusion transition requires an authoritative GitHub read"
+                            .to_string(),
+                    )
+                })?;
+                let authoritative = client
+                    .workgraph_include(node_id)
+                    .await
+                    .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?;
+                if authoritative != workgraph_include {
+                    return Ok(None);
+                }
+            }
         }
         Some(revision)
-    } else {
-        None
     };
     let mut inputs = revision
         .map(|revision| {
@@ -848,6 +1002,11 @@ async fn try_workgraph_issue(
         .unwrap_or_default();
 
     if matches!(action, "deleted" | "transferred") {
+        if previous_task.is_none() && !previous_workgraph {
+            inputs.push(ProjectionInput::DeleteGitHubIssue {
+                source_key: node_id.to_string(),
+            });
+        }
         if previous_task.is_some() || previous_workgraph {
             inputs.push(ProjectionInput::DeleteTask {
                 source_key: node_id.to_string(),
@@ -865,6 +1024,9 @@ async fn try_workgraph_issue(
     }
 
     if admitted {
+        inputs.push(ProjectionInput::UpsertGitHubIssue(normalize_github_issue(
+            issue, payload,
+        )?));
         let locator = extract_issue_locator(issue, payload).ok_or_else(|| {
             WorkGraphNormError::InvalidPayload(
                 "admitted Root Issue is missing its repository locator".to_string(),
@@ -941,6 +1103,15 @@ async fn try_workgraph_issue(
 
     // Admission retraction must not be blocked by a task-shaped replacement body.
     if previous_root.is_some() {
+        if item_is_open(issue) {
+            inputs.push(ProjectionInput::UpsertGitHubIssue(normalize_github_issue(
+                issue, payload,
+            )?));
+        } else {
+            inputs.push(ProjectionInput::DeleteGitHubIssue {
+                source_key: node_id.to_string(),
+            });
+        }
         inputs.push(ProjectionInput::DeleteRootIssue {
             source_key: node_id.to_string(),
         });
@@ -972,6 +1143,10 @@ async fn try_workgraph_issue(
             )));
         }
 
+        let (workgraph_labels, workgraph_include) = issue_workgraph_labels(issue);
+        inputs.push(ProjectionInput::DeleteGitHubIssue {
+            source_key: node_id.to_string(),
+        });
         let task_doc = TaskDocument {
             source_key: node_id.to_string(),
             body: body.to_string(),
@@ -982,6 +1157,8 @@ async fn try_workgraph_issue(
                 .unwrap_or("")
                 .to_string(),
             parent_source_key: previous_task.and_then(|document| document.parent_source_key),
+            workgraph_labels,
+            workgraph_include,
         };
         inputs.push(ProjectionInput::UpsertTask(task_doc));
         if let Some(locator) = extract_issue_locator(issue, payload) {
@@ -990,11 +1167,16 @@ async fn try_workgraph_issue(
         return Ok(Some(inputs));
     }
 
-    if inputs.is_empty() {
-        Ok(None)
+    if item_is_open(issue) {
+        inputs.push(ProjectionInput::UpsertGitHubIssue(normalize_github_issue(
+            issue, payload,
+        )?));
     } else {
-        Ok(Some(inputs))
+        inputs.push(ProjectionInput::DeleteGitHubIssue {
+            source_key: node_id.to_string(),
+        });
     }
+    Ok(Some(inputs))
 }
 
 /// Normalize an issue_comment event with a WorkGraph lifecycle marker.
@@ -1286,12 +1468,27 @@ async fn try_workgraph_sub_issue(
         })
         .unwrap_or_default();
 
+    let (workgraph_labels, workgraph_include) = if sub_issue.get("labels").is_some() {
+        issue_workgraph_labels(sub_issue)
+    } else {
+        previous
+            .as_ref()
+            .map(|document| {
+                (
+                    document.workgraph_labels.clone(),
+                    document.workgraph_include,
+                )
+            })
+            .unwrap_or_else(|| (Vec::new(), true))
+    };
     let task_doc = TaskDocument {
         source_key: child_node_id.to_string(),
         body: child_body,
         is_open,
         state_reason,
         parent_source_key,
+        workgraph_labels,
+        workgraph_include,
     };
 
     let mut inputs = Vec::new();
@@ -1431,6 +1628,8 @@ mod workgraph_tests {
                         source_key: document.source_key.clone(),
                         task_id: document.source_key.clone(),
                         task_element_id: format!("task:{}", document.source_key),
+                        root_issue_id: "root".to_string(),
+                        workflow_run_id: "run".to_string(),
                     }),
                     _ => None,
                 })
@@ -1654,17 +1853,118 @@ mod workgraph_tests {
         .await
         .expect("normalize")
         .expect("WorkGraph task");
-        assert_eq!(inputs.len(), 3);
+        assert_eq!(inputs.len(), 4);
         assert!(matches!(
             &inputs[0],
             ProjectionInput::RecordIssueRevision { source_key, .. }
                 if source_key == "I_task"
         ));
-        assert!(matches!(&inputs[1], ProjectionInput::UpsertTask(_)));
-        assert!(matches!(&inputs[2], ProjectionInput::UpsertLocator(locator)
+        assert!(matches!(
+            &inputs[1],
+            ProjectionInput::DeleteGitHubIssue { source_key } if source_key == "I_task"
+        ));
+        assert!(matches!(&inputs[2], ProjectionInput::UpsertTask(_)));
+        assert!(matches!(&inputs[3], ProjectionInput::UpsertLocator(locator)
             if locator.repository_owner == "acme"
                 && locator.repository_name == "widgets"
                 && locator.issue_number == 7));
+    }
+
+    #[tokio::test]
+    async fn task_inclusion_uses_only_exact_case_sensitive_exclusion_labels() {
+        for (labels, expected_labels, expected_include) in [
+            (vec![], vec![], true),
+            (vec!["workgraph:custom"], vec!["workgraph:custom"], true),
+            (
+                vec!["workgraph:Error", "workgraph:custom"],
+                vec!["workgraph:Error", "workgraph:custom"],
+                true,
+            ),
+            (
+                vec!["workgraph:ignore", "workgraph:custom"],
+                vec!["workgraph:custom", "workgraph:ignore"],
+                false,
+            ),
+            (
+                vec!["workgraph:error", "workgraph:ignore"],
+                vec!["workgraph:error", "workgraph:ignore"],
+                false,
+            ),
+        ] {
+            let (_temp, _projector, state) = ingress_state(Some(task_trust())).await;
+            let mut issue = task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n");
+            issue["labels"] = serde_json::Value::Array(
+                labels
+                    .into_iter()
+                    .map(|name| json!({"name": name}))
+                    .collect(),
+            );
+            let inputs = try_workgraph_issue(&state, "delivery-labels", &payload("opened", issue))
+                .await
+                .expect("normalize")
+                .expect("WorkGraph task");
+            let task = inputs
+                .iter()
+                .find_map(|input| match input {
+                    ProjectionInput::UpsertTask(task) => Some(task),
+                    _ => None,
+                })
+                .expect("task document");
+            assert_eq!(task.workgraph_labels, expected_labels);
+            assert_eq!(task.workgraph_include, expected_include);
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_issue_projects_sorted_workgraph_labels_and_exact_inclusion() {
+        for (labels, expected_labels, expected_include) in [
+            (
+                vec!["workgraph:custom", "workgraph:Error"],
+                vec!["workgraph:Error", "workgraph:custom"],
+                true,
+            ),
+            (
+                vec!["workgraph:ignore", "workgraph:custom"],
+                vec!["workgraph:custom", "workgraph:ignore"],
+                false,
+            ),
+            (
+                vec!["workgraph:error", "workgraph:Error"],
+                vec!["workgraph:Error", "workgraph:error"],
+                false,
+            ),
+        ] {
+            let (_temp, _projector, state) = ingress_state(None).await;
+            let inputs = try_workgraph_issue(
+                &state,
+                "generic-labels",
+                &payload("labeled", root_issue(&labels)),
+            )
+            .await
+            .expect("normalize")
+            .expect("generic Issue");
+            let issue = inputs
+                .iter()
+                .find_map(|input| match input {
+                    ProjectionInput::UpsertGitHubIssue(issue) => Some(issue),
+                    _ => None,
+                })
+                .expect("generic Issue document");
+            assert_eq!(issue.workgraph_labels, expected_labels);
+            assert_eq!(issue.workgraph_include, expected_include);
+            let changes = crate::mapping::generic_issue_changes("source", 1, &inputs);
+            assert!(changes.iter().any(|change| matches!(
+                change,
+                SourceChange::Update {
+                    element: Element::Node {
+                        metadata,
+                        properties
+                    }
+                } if metadata.reference.element_id.as_ref() == "I_root"
+                    && properties.get("workgraphInclude")
+                        == Some(&drasi_core::models::ElementValue::Bool(expected_include))
+            )));
+        }
     }
 
     #[tokio::test]
@@ -1694,14 +1994,23 @@ mod workgraph_tests {
     #[tokio::test]
     async fn root_issue_label_removal_and_readdition_create_a_fresh_generation() {
         let (_temp, projector, state) = ingress_state(None).await;
-        assert!(try_workgraph_issue(
+        let generic = try_workgraph_issue(
             &state,
             "ignored",
-            &payload("opened", root_issue(&["WorkGraph"]))
+            &payload("opened", root_issue(&["WorkGraph"])),
         )
         .await
         .expect("normalize")
-        .is_none());
+        .expect("generic Issue");
+        assert!(matches!(
+            generic.as_slice(),
+            [
+                ProjectionInput::RecordIssueRevision { .. },
+                ProjectionInput::UpsertGitHubIssue(document)
+            ]
+                if document.workgraph_include
+                && document.workgraph_labels.is_empty()
+        ));
 
         let first = try_workgraph_issue(
             &state,
@@ -1799,6 +2108,8 @@ mod workgraph_tests {
                     is_open: true,
                     state_reason: String::new(),
                     parent_source_key: Some("I_root".to_string()),
+                    workgraph_labels: Vec::new(),
+                    workgraph_include: true,
                 })],
                 1,
                 "seed-untyped-task",
@@ -2076,7 +2387,7 @@ mod workgraph_tests {
             .ingest_workgraph(projector.as_ref(), inputs, 7, "delivery-1")
             .await
             .expect("duplicate projection");
-        assert_eq!(first.0, 0);
+        assert_eq!(first.0, 1);
         assert_eq!(duplicate.0, 0);
         assert_eq!(projector.committed.lock().await.len(), 1);
         let checkpoint = state
@@ -2164,6 +2475,8 @@ mod workgraph_tests {
                     is_open: true,
                     state_reason: String::new(),
                     parent_source_key: Some("I_parent".to_string()),
+                    workgraph_labels: Vec::new(),
+                    workgraph_include: true,
                 })],
                 1,
                 "seed",
@@ -2293,6 +2606,8 @@ mod workgraph_tests {
                     is_open: true,
                     state_reason: String::new(),
                     parent_source_key: Some("I_parent".to_string()),
+                    workgraph_labels: Vec::new(),
+                    workgraph_include: true,
                 })],
                 1,
                 "seed",
@@ -2352,6 +2667,8 @@ mod workgraph_tests {
                         is_open: true,
                         state_reason: String::new(),
                         parent_source_key: Some("I_parent".to_string()),
+                        workgraph_labels: Vec::new(),
+                        workgraph_include: true,
                     }),
                     ProjectionInput::UpsertLocator(GitHubIssueLocator {
                         source_key: "I_child".to_string(),
@@ -2396,6 +2713,8 @@ mod workgraph_tests {
                 is_open: true,
                 state_reason: String::new(),
                 parent_source_key: None,
+                workgraph_labels: Vec::new(),
+                workgraph_include: true,
             })]
         );
         state
@@ -2471,6 +2790,8 @@ mod workgraph_tests {
                         is_open: true,
                         state_reason: String::new(),
                         parent_source_key: Some("I_parent".to_string()),
+                        workgraph_labels: Vec::new(),
+                        workgraph_include: true,
                     }),
                     ProjectionInput::UpsertLocator(GitHubIssueLocator {
                         source_key: "I_child".to_string(),
@@ -2540,6 +2861,8 @@ mod workgraph_tests {
                     is_open: true,
                     state_reason: String::new(),
                     parent_source_key: Some("I_parent_b".to_string()),
+                    workgraph_labels: Vec::new(),
+                    workgraph_include: true,
                 })],
                 1,
                 "seed-new-parent",
@@ -2605,6 +2928,8 @@ mod workgraph_tests {
                         is_open: true,
                         state_reason: String::new(),
                         parent_source_key: Some("I_parent".to_string()),
+                        workgraph_labels: Vec::new(),
+                        workgraph_include: true,
                     }),
                     ProjectionInput::UpsertLocator(GitHubIssueLocator {
                         source_key: "I_child".to_string(),
@@ -3001,6 +3326,8 @@ mod workgraph_tests {
                     is_open: true,
                     state_reason: String::new(),
                     parent_source_key: None,
+                    workgraph_labels: Vec::new(),
+                    workgraph_include: true,
                 })],
                 1,
                 "seed-untyped-hierarchy-task",

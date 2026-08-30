@@ -36,6 +36,11 @@ configured exact creator and webhook-actor trust checks.
 Generated WorkGraphTask Issues are never Root Issues, even if they carry the
 admission label.
 
+Every ordinary Issue is also projected directly as a normalized `GitHubIssue`.
+Its sorted `workgraphLabels` namespace is case-sensitive. Only exact
+`workgraph:ignore` and `workgraph:error` labels set `workgraphInclude` to false;
+similarly spelled labels do not.
+
 Core normalizes authenticated GitHub documents, persists delivery deduplication,
 owns agent-slot leasing, and exposes an object-safe projector boundary. The
 definition and task body semantics are implemented by the injected v1 projector;
@@ -106,8 +111,11 @@ POST {webhook.path}/lease/validate
 Authorization: Bearer <leaseValidationToken>
 ```
 
-Its request and successful response use the canonical v1 allocation fields:
-`taskId`, `leaseId`, `assignmentId`, `executorId`, `slotId`, and `claimId`.
+Its request uses the canonical v1 allocation fields: `taskId`, `leaseId`,
+`assignmentId`, `executorId`, `slotId`, and `claimId`. Source-owned task,
+Assign, Lease, Dispatch, Result, and Evaluate representations additionally
+carry `rootIssueId` and `workflowRunId` alongside `taskId`, so root and run
+lookups do not require a graph traversal.
 The first claim durably reserves that active Dispatch Lease for one Result writer;
 a competing claim is rejected.
 An active `WorkGraphTaskLease` remains active and occupies its slot after
@@ -118,7 +126,7 @@ expiry makes the Lease historical and allocates a fresh retry attempt.
 
 The source advertises only the current v1 schema:
 
-- Nodes: `WorkGraphRootIssue`, `WorkflowDefinition`, `TaskDefinition`,
+- Nodes: `GitHubIssue`, `WorkGraphRootIssue`, `WorkflowDefinition`, `TaskDefinition`,
   `WorkflowRun`, `WorkGraphTask`, `WorkGraphTaskAssign`,
   `WorkGraphTaskDispatch`, `WorkGraphTaskResult`,
   `WorkGraphTaskEvaluate`, `WorkGraphTaskArtifact`,

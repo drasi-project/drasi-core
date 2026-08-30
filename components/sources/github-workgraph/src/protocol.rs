@@ -107,6 +107,29 @@ pub struct RootIssueDocument {
     pub admission_id: String,
 }
 
+/// An ordinary GitHub Issue normalized by Core for generic Source projection.
+///
+/// WorkGraph protocol interpretation remains projector-owned. Core only
+/// supplies authenticated GitHub identity, content, state, and exact label
+/// inclusion metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitHubIssueDocument {
+    pub source_key: String,
+    pub repository_owner: String,
+    pub repository_name: String,
+    pub repository_node_id: String,
+    pub issue_database_id: u64,
+    pub issue_number: u64,
+    pub title: String,
+    pub body: String,
+    pub is_open: bool,
+    pub state_reason: String,
+    pub labels: Vec<String>,
+    pub workgraph_labels: Vec<String>,
+    pub workgraph_include: bool,
+}
+
 /// A WorkGraph task document derived from a GitHub issue whose body begins with
 /// `WorkGraphTask/v1\n`.
 ///
@@ -121,6 +144,10 @@ pub struct TaskDocument {
     pub is_open: bool,
     pub state_reason: String,
     pub parent_source_key: Option<String>,
+    /// Sorted, case-sensitive `workgraph:` labels from the source Issue.
+    pub workgraph_labels: Vec<String>,
+    /// False only for the exact `workgraph:ignore` or `workgraph:error` label.
+    pub workgraph_include: bool,
 }
 
 /// A WorkGraph lifecycle artifact from a GitHub issue comment whose body begins
@@ -156,6 +183,8 @@ pub enum ProjectionInput {
     DeleteDefinition { source_key: String },
     UpsertRootIssue(RootIssueDocument),
     DeleteRootIssue { source_key: String },
+    UpsertGitHubIssue(GitHubIssueDocument),
+    DeleteGitHubIssue { source_key: String },
     UpsertTask(TaskDocument),
     DeleteTask { source_key: String },
     UpsertLifecycleArtifact(LifecycleArtifactDocument),
@@ -176,12 +205,16 @@ pub struct WorkGraphAllocatorProjection {
     pub tasks: Vec<WorkGraphTaskBinding>,
     pub assignments: Vec<WorkGraphAssignmentBinding>,
     pub dispatches: Vec<WorkGraphDispatchBinding>,
+    pub results: Vec<WorkGraphResultBinding>,
+    pub evaluations: Vec<WorkGraphEvaluateBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkGraphTaskBinding {
     pub source_key: String,
+    pub root_issue_id: String,
+    pub workflow_run_id: String,
     pub task_id: String,
     pub task_element_id: String,
 }
@@ -191,6 +224,8 @@ pub struct WorkGraphTaskBinding {
 pub struct WorkGraphAssignmentBinding {
     pub source_key: String,
     pub task_source_key: String,
+    pub root_issue_id: String,
+    pub workflow_run_id: String,
     pub task_id: String,
     pub assignment_id: String,
     pub permitted_executors: Vec<String>,
@@ -201,11 +236,38 @@ pub struct WorkGraphAssignmentBinding {
 pub struct WorkGraphDispatchBinding {
     pub source_key: String,
     pub task_source_key: String,
+    pub root_issue_id: String,
+    pub workflow_run_id: String,
     pub task_id: String,
     pub assignment_id: String,
     pub lease_id: String,
     pub executor_id: String,
     pub slot_id: String,
+}
+
+/// Identity-bearing Result representation used by Core to validate direct
+/// task/root/run lookup without parsing the projector-owned payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkGraphResultBinding {
+    pub source_key: String,
+    pub task_source_key: String,
+    pub root_issue_id: String,
+    pub workflow_run_id: String,
+    pub task_id: String,
+    pub lease_id: String,
+}
+
+/// Identity-bearing Evaluate representation used by Core to validate direct
+/// task/root/run lookup without parsing the projector-owned payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkGraphEvaluateBinding {
+    pub source_key: String,
+    pub task_source_key: String,
+    pub root_issue_id: String,
+    pub workflow_run_id: String,
+    pub task_id: String,
 }
 
 // ── Object-safe projector trait ───────────────────────────────────────────

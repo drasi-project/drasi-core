@@ -11,8 +11,10 @@ use crate::lease_ledger::{AgentRuntime, AllocationDelta, WorkGraphActiveLease};
 use crate::model::{
     agent_config_error_element_id, agent_element_id, agent_slot_element_id, slot_id, WorkGraphError,
 };
+use crate::protocol::ProjectionInput;
 
-pub const NODE_LABELS: [&str; 14] = [
+pub const NODE_LABELS: [&str; 15] = [
+    "GitHubIssue",
     "WorkGraphRootIssue",
     "WorkflowDefinition",
     "TaskDefinition",
@@ -236,10 +238,58 @@ pub fn allocation_changes(
     changes.values
 }
 
+pub fn generic_issue_changes(
+    source_id: &str,
+    effective_from: u64,
+    inputs: &[ProjectionInput],
+) -> Vec<SourceChange> {
+    let mut changes = Changes::new(source_id, effective_from);
+    for input in inputs {
+        match input {
+            ProjectionInput::UpsertGitHubIssue(issue) => {
+                let mut properties = ElementPropertyMap::new();
+                properties.text("nodeId", &issue.source_key);
+                properties.insert(
+                    "databaseId",
+                    ElementValue::Integer(issue.issue_database_id as i64),
+                );
+                properties.insert("number", ElementValue::Integer(issue.issue_number as i64));
+                properties.text("repositoryOwner", &issue.repository_owner);
+                properties.text("repositoryName", &issue.repository_name);
+                properties.text("repositoryNodeId", &issue.repository_node_id);
+                properties.text("title", &issue.title);
+                properties.text("body", &issue.body);
+                properties.insert("isOpen", ElementValue::Bool(issue.is_open));
+                properties.text("stateReason", &issue.state_reason);
+                properties.insert(
+                    "labels",
+                    ElementValue::from(&serde_json::json!(issue.labels)),
+                );
+                properties.insert(
+                    "workgraphLabels",
+                    ElementValue::from(&serde_json::json!(issue.workgraph_labels)),
+                );
+                properties.insert(
+                    "workgraphInclude",
+                    ElementValue::Bool(issue.workgraph_include),
+                );
+                changes.node(Update, &issue.source_key, "GitHubIssue", properties);
+            }
+            ProjectionInput::DeleteGitHubIssue { source_key } => {
+                changes.delete(source_key, "GitHubIssue");
+            }
+            _ => {}
+        }
+    }
+    changes.values
+}
+
 fn upsert_workgraph_lease(changes: &mut Changes<'_>, lease: &WorkGraphActiveLease, active: bool) {
     let element_id = workgraph_lease_element_id(&lease.lease_id);
     let mut properties = ElementPropertyMap::new();
     properties.text("leaseId", &lease.lease_id);
+    properties.text("rootIssueId", &lease.root_issue_id);
+    properties.text("workflowRunId", &lease.workflow_run_id);
     properties.text("taskId", &lease.task_id);
     properties.text("assignmentId", &lease.assignment_id);
     properties.text("executorId", &lease.executor_id);
@@ -258,6 +308,8 @@ fn upsert_workgraph_lease(changes: &mut Changes<'_>, lease: &WorkGraphActiveLeas
     for (artifact_name, artifact_id) in workgraph_lease_artifact_details(lease) {
         let artifact_element = workgraph_lease_artifact_element_id(&lease.lease_id, artifact_name);
         let mut properties = ElementPropertyMap::new();
+        properties.text("rootIssueId", &lease.root_issue_id);
+        properties.text("workflowRunId", &lease.workflow_run_id);
         properties.text("taskId", &lease.task_id);
         properties.text("leaseId", &lease.lease_id);
         properties.text("artifactName", artifact_name);
