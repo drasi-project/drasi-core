@@ -143,6 +143,7 @@ pub struct GitHubIssueLocator {
     pub source_key: String,
     pub repository_owner: String,
     pub repository_name: String,
+    pub issue_database_id: u64,
     pub issue_number: u64,
     pub issue_node_id: String,
 }

@@ -19,10 +19,8 @@
 //! *desired* agent capacity only; Assignments are GitHub comments and active
 //! Leases are synthetic Source state.
 //!
-//! This module owns parsing and validation exactly once. Both the streaming
-//! Source (on a relevant `push`) and the bootstrapper (before it projects any
-//! task artifact) call [`parse_agent_file`], so a file that one accepts the
-//! other accepts identically.
+//! This module owns parsing and validation exactly once. Source startup and
+//! relevant live `push` deliveries both call [`parse_agent_file`].
 //!
 //! Every rejection is an explicit [`WorkGraphError`]. A malformed or missing
 //! required agent file must never degrade into a silently empty agent pool.

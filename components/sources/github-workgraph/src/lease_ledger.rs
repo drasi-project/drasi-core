@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const VERSION: u8 = 8;
+const VERSION: u8 = 9;
 const STATE_KEY: &str = "allocator:state";
 const DELIVERY_PREFIX: &str = "delivery:";
 const WORKGRAPH_ORIGIN_PREFIX: &str = "workgraph-origin:";
@@ -157,6 +157,9 @@ pub struct AllocationState {
     /// Latest authoritative GitHub revision observed for a Root Issue or task Issue.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workgraph_issue_revisions: BTreeMap<String, i64>,
+    /// Numeric GitHub database issue IDs mapped to their GraphQL node IDs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workgraph_issue_database_ids: BTreeMap<u64, String>,
     /// Current authenticated lifecycle documents used to validate directives
     /// emitted later when out-of-order dependencies become available.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -437,8 +440,13 @@ impl Allocator {
             "WorkGraph projector returned an empty recovery checkpoint"
         );
         let mut rejection = prepared.rejection.clone();
-        let (mut next_root_issues, mut next_issue_revisions, mut next_tasks, mut next_artifacts) =
-            stage_workgraph_documents(&state, &accepted_inputs);
+        let (
+            mut next_root_issues,
+            mut next_issue_revisions,
+            mut next_issue_database_ids,
+            mut next_tasks,
+            mut next_artifacts,
+        ) = stage_workgraph_documents(&state, &accepted_inputs);
         let mut candidate = state.clone();
         let transition =
             validate_workgraph_projection(&prepared.allocator, &next_tasks, &next_artifacts)
@@ -469,6 +477,7 @@ impl Allocator {
                 (
                     next_root_issues,
                     next_issue_revisions,
+                    next_issue_database_ids,
                     next_tasks,
                     next_artifacts,
                 ) = stage_workgraph_documents(&state, &accepted_inputs);
@@ -494,6 +503,7 @@ impl Allocator {
         state.workgraph_tasks = next_tasks;
         state.workgraph_root_issues = next_root_issues;
         state.workgraph_issue_revisions = next_issue_revisions;
+        state.workgraph_issue_database_ids = next_issue_database_ids;
         state.workgraph_artifacts = next_artifacts;
         state.workgraph_checkpoint = prepared.checkpoint;
         state
@@ -585,6 +595,19 @@ impl Allocator {
         let state = self.ready_state().await?;
         Ok(state.workgraph_issue_revisions.get(source_key).copied())
     }
+
+    /// Resolve a numeric GitHub database issue ID to its GraphQL node ID.
+    pub async fn workgraph_issue_node_id(
+        &self,
+        issue_database_id: u64,
+    ) -> AnyResult<Option<String>> {
+        let _guard = self.gate.lock().await;
+        let state = self.ready_state().await?;
+        Ok(state
+            .workgraph_issue_database_ids
+            .get(&issue_database_id)
+            .cloned())
+    }
 }
 
 fn stage_workgraph_documents(
@@ -593,21 +616,30 @@ fn stage_workgraph_documents(
 ) -> (
     BTreeMap<String, RootIssueDocument>,
     BTreeMap<String, i64>,
+    BTreeMap<u64, String>,
     BTreeMap<String, TaskDocument>,
     BTreeMap<String, LifecycleArtifactDocument>,
 ) {
     let mut root_issues = state.workgraph_root_issues.clone();
     let mut issue_revisions = state.workgraph_issue_revisions.clone();
+    let mut issue_database_ids = state.workgraph_issue_database_ids.clone();
     let mut tasks = state.workgraph_tasks.clone();
     let mut artifacts = state.workgraph_artifacts.clone();
     apply_workgraph_documents(
         inputs,
         &mut root_issues,
         &mut issue_revisions,
+        &mut issue_database_ids,
         &mut tasks,
         &mut artifacts,
     );
-    (root_issues, issue_revisions, tasks, artifacts)
+    (
+        root_issues,
+        issue_revisions,
+        issue_database_ids,
+        tasks,
+        artifacts,
+    )
 }
 
 fn append_rejection(rejection: &mut Option<String>, next: Option<String>) {
@@ -649,6 +681,7 @@ fn apply_workgraph_documents(
     inputs: &[ProjectionInput],
     root_issues: &mut BTreeMap<String, RootIssueDocument>,
     issue_revisions: &mut BTreeMap<String, i64>,
+    issue_database_ids: &mut BTreeMap<u64, String>,
     tasks: &mut BTreeMap<String, TaskDocument>,
     artifacts: &mut BTreeMap<String, LifecycleArtifactDocument>,
 ) {
@@ -671,6 +704,12 @@ fn apply_workgraph_documents(
             }
             ProjectionInput::DeleteTask { source_key } => {
                 tasks.remove(source_key);
+            }
+            ProjectionInput::UpsertLocator(locator) => {
+                issue_database_ids.insert(locator.issue_database_id, locator.source_key.clone());
+            }
+            ProjectionInput::DeleteLocator { source_key } => {
+                issue_database_ids.retain(|_, value| value != source_key);
             }
             ProjectionInput::UpsertLifecycleArtifact(document) => {
                 artifacts.insert(document.source_key.clone(), document.clone());
@@ -830,6 +869,7 @@ impl Default for AllocationState {
             workgraph_tasks: BTreeMap::new(),
             workgraph_root_issues: BTreeMap::new(),
             workgraph_issue_revisions: BTreeMap::new(),
+            workgraph_issue_database_ids: BTreeMap::new(),
             workgraph_artifacts: BTreeMap::new(),
             pending_workgraph_origins: BTreeSet::new(),
         }
@@ -861,6 +901,18 @@ impl AllocationState {
             {
                 return Err("WorkGraph task identity state is invalid or duplicated".into());
             }
+        }
+        if self
+            .workgraph_issue_database_ids
+            .iter()
+            .any(|(database_id, source_key)| {
+                *database_id == 0
+                    || source_key.trim().is_empty()
+                    || !(self.workgraph_tasks.contains_key(source_key)
+                        || self.workgraph_root_issues.contains_key(source_key))
+            })
+        {
+            return Err("WorkGraph issue database ID index is invalid".into());
         }
         let mut canonical_assignment_ids = BTreeSet::new();
         for (source_key, assignment) in &self.workgraph_assignments {
@@ -1798,6 +1850,51 @@ mod tests {
             }],
             dispatches,
         }
+    }
+
+    #[tokio::test]
+    async fn issue_database_id_index_survives_allocator_recreation() {
+        let mut state = AllocationState::default();
+        state.workgraph_tasks.insert(
+            "I_child".to_string(),
+            TaskDocument {
+                source_key: "I_child".to_string(),
+                body: "WorkGraphTask/v1\n\n```json\n{}\n```\n".to_string(),
+                is_open: true,
+                state_reason: String::new(),
+                parent_source_key: Some("I_parent".to_string()),
+            },
+        );
+        state
+            .workgraph_issue_database_ids
+            .insert(42, "I_child".to_string());
+        state.validate().expect("database ID index is valid");
+
+        let temp = TempDir::new().expect("tempdir");
+        let store = Arc::new(MemoryStateStoreProvider::new());
+        store
+            .set(
+                "source",
+                STATE_KEY,
+                serde_json::to_vec(&state).expect("serialize state"),
+            )
+            .await
+            .expect("persist state");
+        let wal = Arc::new(RedbWalProvider::new(temp.path().join("wal")));
+        wal.register("source", WriteAheadLogConfig::default())
+            .await
+            .expect("register WAL");
+
+        let allocator = Allocator::new("source".to_string(), store, wal);
+
+        assert_eq!(
+            allocator
+                .workgraph_issue_node_id(42)
+                .await
+                .expect("restore database ID index")
+                .as_deref(),
+            Some("I_child")
+        );
     }
 
     #[tokio::test]

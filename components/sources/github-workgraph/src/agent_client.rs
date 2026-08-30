@@ -12,13 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The single agent-file fetch path, shared by the streaming Source and the
-//! bootstrapper.
+//! The single agent-file fetch path used by the streaming Source.
 //!
-//! It reuses the established GitHub GraphQL v4 host abstraction: the same
-//! endpoint, the same bearer credential mechanism, and the same retry/backoff
-//! conventions the bootstrapper already uses for Issues and Pull Requests. No
-//! separate service, transport, or credential store is introduced.
+//! It uses the GitHub GraphQL v4 endpoint, bearer credential mechanism, and
+//! bounded retry/backoff without introducing another service or credential store.
 
 use crate::agents::{error_code, AgentFileContent, AgentFileLocation, MAX_AGENT_FILE_BYTES};
 use crate::model::WorkGraphError;

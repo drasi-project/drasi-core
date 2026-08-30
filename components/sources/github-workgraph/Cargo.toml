@@ -51,9 +51,6 @@ subtle = "2"
 tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
-drasi-functions-cypher.workspace = true
-drasi-query-cypher.workspace = true
-drasi-state-store-redb = { path = "../../state_stores/redb" }
 drasi-wal-redb = { path = "../../wals/redb" }
 tempfile = "3"
 wiremock = "0.6"

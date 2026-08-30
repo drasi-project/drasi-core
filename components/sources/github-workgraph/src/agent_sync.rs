@@ -22,9 +22,8 @@
 //! * the webhook ingress converges again whenever a `push` touches the exact
 //!   configured repository, ref, and path.
 //!
-//! Both paths reuse [`crate::mapping::agent_changes`], which the bootstrapper
-//! also uses, so a configuration that bootstrap projects one way can never be
-//! projected a different way by a live delivery.
+//! Both paths reuse [`crate::mapping::agent_changes`], so startup and live
+//! delivery project the configuration identically.
 //!
 //! # The retirement ledger
 //!
@@ -35,8 +34,8 @@
 //! the Source's own durable state store, next to the delivery dedupe markers.
 //!
 //! The ledger is Source-local by design, and that is its documented bounded
-//! limitation: a clean bootstrap builds a fresh snapshot from the configured
-//! file alone, so slots retired before that bootstrap are not re-materialized.
+//! limitation: a clean Source state builds a fresh snapshot from the configured
+//! file alone, so slots retired before that reset are not re-materialized.
 
 use crate::agent_client::{AgentFileClient, AgentFileError};
 use crate::agents::{parse_agent_file, AgentFileLocation};

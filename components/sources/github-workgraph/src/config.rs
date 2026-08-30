@@ -332,7 +332,8 @@ pub struct WorkflowDefinitionConfig {
     /// Repository-relative path of the definition file.
     #[serde(default = "default_workflow_definition_path")]
     pub path: String,
-    /// A read-only GitHub credential used to read the file.
+    /// A read-only GitHub credential used to read the file and authoritative
+    /// Issue-label state during ambiguous webhook ordering transitions.
     pub token: String,
     /// GraphQL API endpoint. Override for GitHub Enterprise Server.
     #[serde(default = "default_agent_api_base_url")]

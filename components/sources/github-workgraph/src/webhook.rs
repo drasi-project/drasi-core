@@ -535,12 +535,16 @@ impl AdmissionClient {
         })
     }
 
-    async fn has_admission_label(&self, node_id: &str) -> Result<bool> {
+    async fn is_root_candidate(
+        &self,
+        node_id: &str,
+        task_issue_type: &crate::config::TaskIssueType,
+    ) -> Result<bool> {
         let response = self
             .http
             .post(&self.api_url)
             .json(&json!({
-                "query": "query($id: ID!) { node(id: $id) { ... on Issue { labels(first: 100) { nodes { name } pageInfo { hasNextPage } } } } }",
+                "query": "query($id: ID!) { node(id: $id) { ... on Issue { body issueType { id name } labels(first: 100) { nodes { name } pageInfo { hasNextPage } } } } }",
                 "variables": {"id": node_id}
             }))
             .send()
@@ -559,9 +563,13 @@ impl AdmissionClient {
         {
             anyhow::bail!("authoritative Root Issue lookup returned GraphQL errors");
         }
-        let labels = payload
-            .pointer("/data/node/labels")
+        let issue = payload
+            .pointer("/data/node")
+            .and_then(Value::as_object)
             .ok_or_else(|| anyhow!("authoritative Root Issue lookup did not return an Issue"))?;
+        let labels = issue
+            .get("labels")
+            .ok_or_else(|| anyhow!("authoritative Root Issue labels are missing"))?;
         let admitted = labels
             .get("nodes")
             .and_then(Value::as_array)
@@ -578,7 +586,59 @@ impl AdmissionClient {
         {
             anyhow::bail!("authoritative Root Issue label set exceeds 100 entries");
         }
-        Ok(admitted)
+        let task_typed = issue.get("issueType").is_some_and(|issue_type| {
+            issue_type.get("id").and_then(Value::as_str) == Some(task_issue_type.id.as_str())
+                && issue_type.get("name").and_then(Value::as_str)
+                    == Some(task_issue_type.name.as_str())
+        });
+        let task_marked = issue
+            .get("body")
+            .and_then(Value::as_str)
+            .is_some_and(|body| body.starts_with(crate::protocol::WORKGRAPH_TASK_MARKER));
+        Ok(admitted && !task_typed && !task_marked)
+    }
+
+    async fn parent_issue_node_id(&self, node_id: &str) -> Result<Option<String>> {
+        let response = self
+            .http
+            .post(&self.api_url)
+            .json(&json!({
+                "query": "query($id: ID!) { node(id: $id) { ... on Issue { parent { id } } } }",
+                "variables": {"id": node_id}
+            }))
+            .send()
+            .await
+            .context("authoritative task parent lookup failed")?
+            .error_for_status()
+            .context("authoritative task parent lookup returned an error")?;
+        let payload: Value = response
+            .json()
+            .await
+            .context("authoritative task parent lookup returned invalid JSON")?;
+        if payload
+            .get("errors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| !errors.is_empty())
+        {
+            anyhow::bail!("authoritative task parent lookup returned GraphQL errors");
+        }
+        let issue = payload
+            .pointer("/data/node")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("authoritative task parent lookup did not return an Issue"))?;
+        match issue.get("parent") {
+            Some(Value::Null) => Ok(None),
+            Some(parent) => parent
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .map(Some)
+                .ok_or_else(|| {
+                    anyhow!("authoritative task parent lookup returned an invalid parent")
+                }),
+            None => anyhow::bail!("authoritative task parent lookup omitted the parent field"),
+        }
     }
 }
 
@@ -640,16 +700,24 @@ fn authorize_workgraph_repository(
 
 const WORKGRAPH_ADMISSION_LABEL: &str = "workgraph";
 
-fn issue_has_admission_label(issue: &serde_json::Value) -> bool {
-    issue
-        .get("labels")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|labels| {
-            labels.iter().any(|label| {
-                label.get("name").and_then(serde_json::Value::as_str)
-                    == Some(WORKGRAPH_ADMISSION_LABEL)
+fn issue_is_root_candidate(
+    issue: &serde_json::Value,
+    task_issue_type: &crate::config::TaskIssueType,
+) -> bool {
+    !task_issue_type.matches(issue.get("type"))
+        && !issue
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|body| body.starts_with(crate::protocol::WORKGRAPH_TASK_MARKER))
+        && issue
+            .get("labels")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|labels| {
+                labels.iter().any(|label| {
+                    label.get("name").and_then(serde_json::Value::as_str)
+                        == Some(WORKGRAPH_ADMISSION_LABEL)
+                })
             })
-        })
 }
 
 fn authoritative_issue_revision(issue: &serde_json::Value) -> Result<i64, WorkGraphNormError> {
@@ -706,7 +774,7 @@ async fn try_workgraph_issue(
         .pointer("/changes/body/from")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|body| body.starts_with(WORKGRAPH_TASK_MARKER));
-    let admitted = issue_has_admission_label(issue);
+    let labeled_root_candidate = issue_is_root_candidate(issue, &state.task_issue_type);
     let admission_added = action == "labeled"
         && payload
             .pointer("/label/name")
@@ -723,6 +791,10 @@ async fn try_workgraph_issue(
         .latest_workgraph_task(node_id)
         .await
         .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
+    let admitted = labeled_root_candidate
+        && !current_workgraph
+        && !previous_workgraph
+        && previous_task.is_none();
     let previous_root = state
         .allocator
         .latest_workgraph_root_issue(node_id)
@@ -754,7 +826,7 @@ async fn try_workgraph_issue(
                     )
                 })?;
                 let authoritative = client
-                    .has_admission_label(node_id)
+                    .is_root_candidate(node_id, &state.task_issue_type)
                     .await
                     .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?;
                 if authoritative != admitted {
@@ -1049,32 +1121,75 @@ async fn try_workgraph_sub_issue(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
 
-    // sub_issues events have parent_issue and sub_issue.
-    let parent_issue = payload.get("parent_issue");
-    let sub_issue = payload.get("sub_issue");
-
-    let (parent_issue, sub_issue) = match (parent_issue, sub_issue) {
-        (Some(p), Some(s)) => (p, s),
+    let adding_parent = match action {
+        "sub_issue_added" | "parent_issue_added" => true,
+        "sub_issue_removed" | "parent_issue_removed" => false,
         _ => return Ok(None),
     };
 
+    let parent_issue = payload.get("parent_issue");
+    let sub_issue = payload.get("sub_issue");
+    let event_parent_node_id = parent_issue
+        .and_then(|issue| issue.get("node_id"))
+        .and_then(serde_json::Value::as_str);
+    let child_repository = payload
+        .get("sub_issue_repo")
+        .or_else(|| payload.get("repository"));
+    authorize_workgraph_repository(state, payload, child_repository)?;
+
+    if !adding_parent && sub_issue.is_none() {
+        let Some(issue_database_id) = payload
+            .get("sub_issue_id")
+            .and_then(serde_json::Value::as_u64)
+        else {
+            return Ok(None);
+        };
+        let child_node_id = state
+            .allocator
+            .workgraph_issue_node_id(issue_database_id)
+            .await
+            .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?
+            .ok_or_else(|| {
+                WorkGraphNormError::Unavailable(format!(
+                    "sub_issue_removed references unknown GitHub database ID {issue_database_id}"
+                ))
+            })?;
+        let mut previous = state
+            .allocator
+            .latest_workgraph_task(&child_node_id)
+            .await
+            .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?
+            .ok_or_else(|| {
+                WorkGraphNormError::Unavailable(format!(
+                    "sub_issue_removed task {child_node_id} is missing from durable state"
+                ))
+            })?;
+        let client = state.admission_client.as_ref().ok_or_else(|| {
+            WorkGraphNormError::Unavailable(
+                "sparse task hierarchy removal requires an authoritative GitHub read".to_string(),
+            )
+        })?;
+        let authoritative_parent = client
+            .parent_issue_node_id(&child_node_id)
+            .await
+            .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?;
+        if previous.parent_source_key == authoritative_parent {
+            return Ok(None);
+        }
+        previous.parent_source_key = authoritative_parent;
+        return Ok(Some(vec![ProjectionInput::UpsertTask(previous)]));
+    }
+
+    let Some(sub_issue) = sub_issue else {
+        return Ok(None);
+    };
     let child_node_id = sub_issue
         .get("node_id")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
             WorkGraphNormError::InvalidPayload("sub_issue missing 'node_id'".to_string())
         })?;
-    let parent_node_id = parent_issue
-        .get("node_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            WorkGraphNormError::InvalidPayload("parent_issue missing 'node_id'".to_string())
-        })?;
-    let child_repository = payload
-        .get("sub_issue_repo")
-        .or_else(|| payload.get("repository"));
-    authorize_workgraph_repository(state, payload, child_repository)?;
-    if issue_has_admission_label(sub_issue) {
+    if issue_is_root_candidate(sub_issue, &state.task_issue_type) {
         return Ok(None);
     }
     let previous_root = state
@@ -1088,9 +1203,6 @@ async fn try_workgraph_sub_issue(
         .await
         .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
     let revision = authoritative_issue_revision(sub_issue)?;
-    if previous_revision.is_some_and(|previous| revision < previous) {
-        return Ok(None);
-    }
     if previous_root.is_some() {
         let client = state.admission_client.as_ref().ok_or_else(|| {
             WorkGraphNormError::Unavailable(
@@ -1098,7 +1210,7 @@ async fn try_workgraph_sub_issue(
             )
         })?;
         if client
-            .has_admission_label(child_node_id)
+            .is_root_candidate(child_node_id, &state.task_issue_type)
             .await
             .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?
         {
@@ -1110,13 +1222,25 @@ async fn try_workgraph_sub_issue(
         .latest_workgraph_task(child_node_id)
         .await
         .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
-    let adding_parent = match action {
-        "sub_issue_added" | "parent_issue_added" => true,
-        "sub_issue_removed" | "parent_issue_removed" => false,
-        _ => return Ok(None),
+    let parent_source_key = if previous.is_some() || event_parent_node_id.is_none() {
+        let client = state.admission_client.as_ref().ok_or_else(|| {
+            WorkGraphNormError::Unavailable(
+                "task hierarchy transition requires an authoritative GitHub read".to_string(),
+            )
+        })?;
+        client
+            .parent_issue_node_id(child_node_id)
+            .await
+            .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?
+    } else {
+        adding_parent.then(|| {
+            event_parent_node_id
+                .expect("the non-authoritative path requires an event parent")
+                .to_string()
+        })
     };
-    if adding_parent {
-        if !state.task_issue_type.matches(sub_issue.get("type")) {
+    if adding_parent && parent_source_key.is_some() {
+        if previous.is_none() && !state.task_issue_type.matches(sub_issue.get("type")) {
             return Ok(None);
         }
         let Some(protocol_trust) = &state.protocol_trust else {
@@ -1134,29 +1258,31 @@ async fn try_workgraph_sub_issue(
     } else if previous.is_none() {
         return Ok(None);
     }
-    let parent_source_key = adding_parent.then(|| parent_node_id.to_string());
-
-    let child_body = sub_issue
-        .get("body")
-        .and_then(serde_json::Value::as_str)
-        .filter(|body| body.starts_with(WORKGRAPH_TASK_MARKER))
-        .map(str::to_string)
-        .or_else(|| previous.as_ref().map(|document| document.body.clone()));
+    let child_body = previous
+        .as_ref()
+        .map(|document| document.body.clone())
+        .or_else(|| {
+            sub_issue
+                .get("body")
+                .and_then(serde_json::Value::as_str)
+                .filter(|body| body.starts_with(WORKGRAPH_TASK_MARKER))
+                .map(str::to_string)
+        });
     let Some(child_body) = child_body else {
         return Ok(None);
     };
-    let is_open = sub_issue.get("state").map_or_else(
-        || previous.as_ref().is_none_or(|document| document.is_open),
-        |_| item_is_open(sub_issue),
-    );
-    let state_reason = sub_issue
-        .get("state_reason")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
+    let is_open = previous
+        .as_ref()
+        .map(|document| document.is_open)
+        .unwrap_or_else(|| item_is_open(sub_issue));
+    let state_reason = previous
+        .as_ref()
+        .map(|document| document.state_reason.clone())
         .or_else(|| {
-            previous
-                .as_ref()
-                .map(|document| document.state_reason.clone())
+            sub_issue
+                .get("state_reason")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
         })
         .unwrap_or_default();
 
@@ -1169,10 +1295,12 @@ async fn try_workgraph_sub_issue(
     };
 
     let mut inputs = Vec::new();
-    inputs.push(ProjectionInput::RecordIssueRevision {
-        source_key: child_node_id.to_string(),
-        revision,
-    });
+    if previous_revision.is_none_or(|previous| revision >= previous) {
+        inputs.push(ProjectionInput::RecordIssueRevision {
+            source_key: child_node_id.to_string(),
+            revision,
+        });
+    }
     if previous_root.is_some() {
         inputs.push(ProjectionInput::DeleteRootIssue {
             source_key: child_node_id.to_string(),
@@ -1207,6 +1335,7 @@ fn extract_issue_locator_from_repository(
     issue: &serde_json::Value,
     repository: Option<&serde_json::Value>,
 ) -> Option<crate::protocol::GitHubIssueLocator> {
+    let database_id = issue.get("id")?.as_u64()?;
     let node_id = issue.get("node_id")?.as_str()?;
     let number = issue.get("number")?.as_u64()?;
     let repo = repository?;
@@ -1216,6 +1345,7 @@ fn extract_issue_locator_from_repository(
         source_key: node_id.to_string(),
         repository_owner: owner.to_string(),
         repository_name: name.to_string(),
+        issue_database_id: database_id,
         issue_number: number,
         issue_node_id: node_id.to_string(),
     })
@@ -1249,8 +1379,8 @@ mod workgraph_tests {
     use super::*;
     use crate::config::{TaskIssueType, TrustedIdentity};
     use crate::protocol::{
-        PreparedProjection, PreparedProjectionCommit, ProjectionInput, TaskDocument,
-        WorkGraphAllocatorProjection, WorkGraphTaskBinding,
+        GitHubIssueLocator, PreparedProjection, PreparedProjectionCommit, ProjectionInput,
+        TaskDocument, WorkGraphAllocatorProjection, WorkGraphTaskBinding,
     };
     use async_trait::async_trait;
     use drasi_core::models::{
@@ -1462,6 +1592,23 @@ mod workgraph_tests {
         })
     }
 
+    fn signed_headers(event: &str, delivery: &str, body: &[u8]) -> HeaderMap {
+        let mut mac = HmacSha256::new_from_slice(b"secret").expect("HMAC key");
+        mac.update(body);
+        let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-hub-signature-256",
+            signature.parse().expect("signature header"),
+        );
+        headers.insert(
+            "x-github-delivery",
+            delivery.parse().expect("delivery header"),
+        );
+        headers.insert("x-github-event", event.parse().expect("event header"));
+        headers
+    }
+
     fn root_issue(labels: &[&str]) -> serde_json::Value {
         json!({
             "id": 41,
@@ -1619,8 +1766,8 @@ mod workgraph_tests {
     }
 
     #[tokio::test]
-    async fn admission_label_takes_precedence_over_task_marker() {
-        let (_temp, _projector, state) = ingress_state(None).await;
+    async fn generated_task_is_never_admitted_as_a_root_issue() {
+        let (_temp, _projector, state) = ingress_state(Some(task_trust())).await;
         let mut issue = task_issue("I_root", "WorkGraphTask/v1\n\n```json\n{}\n```\n");
         issue["title"] = json!("Root Issue");
         issue["labels"] = json!([{"name": "workgraph"}]);
@@ -1628,16 +1775,53 @@ mod workgraph_tests {
         let inputs = try_workgraph_issue(&state, "delivery-1", &payload("labeled", issue))
             .await
             .expect("normalize")
-            .expect("admitted Root Issue");
-        assert_eq!(inputs.len(), 2);
+            .expect("generated task");
+        assert!(!inputs
+            .iter()
+            .any(|input| matches!(input, ProjectionInput::UpsertRootIssue(_))));
         assert!(inputs.iter().any(|input| matches!(
             input,
-            ProjectionInput::UpsertRootIssue(document)
-                if document.source_key == "I_root"
-                    && document
-                        .body
-                        .starts_with(crate::protocol::WORKGRAPH_TASK_MARKER)
+            ProjectionInput::UpsertTask(document) if document.source_key == "I_root"
         )));
+    }
+
+    #[tokio::test]
+    async fn untyped_labeled_task_is_retracted_instead_of_admitted() {
+        let (_temp, projector, state) = ingress_state(None).await;
+        let body = "WorkGraphTask/v1\n\n```json\n{}\n```\n";
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![ProjectionInput::UpsertTask(TaskDocument {
+                    source_key: "I_task".to_string(),
+                    body: body.to_string(),
+                    is_open: true,
+                    state_reason: String::new(),
+                    parent_source_key: Some("I_root".to_string()),
+                })],
+                1,
+                "seed-untyped-task",
+            )
+            .await
+            .expect("seed task");
+        let mut issue = task_issue("I_task", body);
+        issue["labels"] = json!([{"name": "workgraph"}]);
+        issue["type"] = serde_json::Value::Null;
+        issue["updated_at"] = json!("2026-08-01T00:01:00Z");
+
+        let inputs = try_workgraph_issue(&state, "delivery-1", &payload("untyped", issue))
+            .await
+            .expect("normalize")
+            .expect("task retraction");
+
+        assert!(inputs.iter().any(|input| matches!(
+            input,
+            ProjectionInput::DeleteTask { source_key } if source_key == "I_task"
+        )));
+        assert!(!inputs
+            .iter()
+            .any(|input| matches!(input, ProjectionInput::UpsertRootIssue(_))));
     }
 
     #[tokio::test]
@@ -2089,7 +2273,15 @@ mod workgraph_tests {
 
     #[tokio::test]
     async fn sub_issue_removal_reuses_document_and_clears_parent() {
-        let (_temp, projector, state) = ingress_state(None).await;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"node": {"parent": null}}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_temp, projector, mut state) = ingress_state(None).await;
         let body = "WorkGraphTask/v1\n\n```json\n{}\n```\n";
         state
             .allocator
@@ -2107,11 +2299,18 @@ mod workgraph_tests {
             )
             .await
             .expect("seed task");
+        state.admission_client = Some(
+            AdmissionClient::new(&WorkflowDefinitionConfig {
+                token: "token".to_string(),
+                api_base_url: server.uri(),
+                ..WorkflowDefinitionConfig::default()
+            })
+            .expect("admission client"),
+        );
         let event = json!({
             "action": "parent_issue_removed",
             "organization": {"login": "acme"},
             "repository": {"name": "widgets", "full_name": "acme/widgets"},
-            "parent_issue": {"node_id": "I_parent"},
             "sub_issue": {
                 "node_id": "I_child",
                 "number": 7,
@@ -2131,12 +2330,339 @@ mod workgraph_tests {
     }
 
     #[tokio::test]
+    async fn sparse_sub_issue_removal_resolves_durable_database_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"node": {"parent": null}}
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let (_temp, projector, mut state) = ingress_state(None).await;
+        let body = "WorkGraphTask/v1\n\n```json\n{}\n```\n";
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![
+                    ProjectionInput::UpsertTask(TaskDocument {
+                        source_key: "I_child".to_string(),
+                        body: body.to_string(),
+                        is_open: true,
+                        state_reason: String::new(),
+                        parent_source_key: Some("I_parent".to_string()),
+                    }),
+                    ProjectionInput::UpsertLocator(GitHubIssueLocator {
+                        source_key: "I_child".to_string(),
+                        repository_owner: "acme".to_string(),
+                        repository_name: "widgets".to_string(),
+                        issue_database_id: 42,
+                        issue_number: 7,
+                        issue_node_id: "I_child".to_string(),
+                    }),
+                ],
+                1,
+                "seed-sparse-removal",
+            )
+            .await
+            .expect("seed task and locator");
+        state.admission_client = Some(
+            AdmissionClient::new(&WorkflowDefinitionConfig {
+                token: "token".to_string(),
+                api_base_url: server.uri(),
+                ..WorkflowDefinitionConfig::default()
+            })
+            .expect("admission client"),
+        );
+        let event = json!({
+            "action": "sub_issue_removed",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "parent_issue": {"node_id": "I_parent"},
+            "sub_issue_id": 42
+        });
+
+        let inputs = try_workgraph_sub_issue(&state, &event)
+            .await
+            .expect("normalize sparse removal")
+            .expect("task parent retraction");
+
+        assert_eq!(
+            inputs,
+            vec![ProjectionInput::UpsertTask(TaskDocument {
+                source_key: "I_child".to_string(),
+                body: body.to_string(),
+                is_open: true,
+                state_reason: String::new(),
+                parent_source_key: None,
+            })]
+        );
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), inputs, 2, "apply-sparse-removal")
+            .await
+            .expect("persist parent retraction");
+        let stale_addition = json!({
+            "action": "sub_issue_added",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "parent_issue": {"node_id": "I_parent"},
+            "sub_issue": {
+                "id": 42,
+                "node_id": "I_child",
+                "number": 7,
+                "body": body,
+                "state": "open",
+                "updated_at": "2026-08-01T00:00:00Z",
+                "type": {"node_id": "IT_task", "name": "WorkGraphTask"}
+            }
+        });
+
+        let stale_inputs = try_workgraph_sub_issue(&state, &stale_addition)
+            .await
+            .expect("authoritatively reject stale addition")
+            .expect("revision bookkeeping");
+        assert!(!stale_inputs.iter().any(|input| matches!(
+            input,
+            ProjectionInput::UpsertTask(document)
+                if document.parent_source_key.as_deref() == Some("I_parent")
+        )));
+    }
+
+    #[tokio::test]
+    async fn sparse_sub_issue_removal_fails_closed_for_unknown_database_id() {
+        let (_temp, _projector, state) = ingress_state(None).await;
+        let event = json!({
+            "action": "sub_issue_removed",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "parent_issue": {"node_id": "I_parent"},
+            "sub_issue_id": 999
+        });
+
+        let error = try_workgraph_sub_issue(&state, &event)
+            .await
+            .expect_err("unknown database ID must be retryable");
+
+        assert!(matches!(error, WorkGraphNormError::Unavailable(message)
+            if message.contains("database ID 999")));
+    }
+
+    #[tokio::test]
+    async fn delayed_sparse_removal_preserves_authoritatively_restored_parent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"node": {"parent": {"id": "I_parent"}}}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_temp, projector, mut state) = ingress_state(None).await;
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![
+                    ProjectionInput::UpsertTask(TaskDocument {
+                        source_key: "I_child".to_string(),
+                        body: "WorkGraphTask/v1\n\n```json\n{}\n```\n".to_string(),
+                        is_open: true,
+                        state_reason: String::new(),
+                        parent_source_key: Some("I_parent".to_string()),
+                    }),
+                    ProjectionInput::UpsertLocator(GitHubIssueLocator {
+                        source_key: "I_child".to_string(),
+                        repository_owner: "acme".to_string(),
+                        repository_name: "widgets".to_string(),
+                        issue_database_id: 42,
+                        issue_number: 7,
+                        issue_node_id: "I_child".to_string(),
+                    }),
+                ],
+                1,
+                "seed-restored-parent",
+            )
+            .await
+            .expect("seed task and locator");
+        state.admission_client = Some(
+            AdmissionClient::new(&WorkflowDefinitionConfig {
+                token: "token".to_string(),
+                api_base_url: server.uri(),
+                ..WorkflowDefinitionConfig::default()
+            })
+            .expect("admission client"),
+        );
+        let event = json!({
+            "action": "sub_issue_removed",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "parent_issue": {"node_id": "I_parent"},
+            "sub_issue_id": 42
+        });
+
+        assert!(try_workgraph_sub_issue(&state, &event)
+            .await
+            .expect("reconcile delayed removal")
+            .is_none());
+        assert_eq!(
+            state
+                .allocator
+                .latest_workgraph_task("I_child")
+                .await
+                .expect("read task")
+                .and_then(|task| task.parent_source_key)
+                .as_deref(),
+            Some("I_parent")
+        );
+    }
+
+    #[tokio::test]
+    async fn delayed_full_removal_converges_to_new_authoritative_parent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"node": {"parent": {"id": "I_parent_b"}}}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_temp, projector, mut state) = ingress_state(None).await;
+        let body = "WorkGraphTask/v1\n\n```json\n{}\n```\n";
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![ProjectionInput::UpsertTask(TaskDocument {
+                    source_key: "I_child".to_string(),
+                    body: body.to_string(),
+                    is_open: true,
+                    state_reason: String::new(),
+                    parent_source_key: Some("I_parent_b".to_string()),
+                })],
+                1,
+                "seed-new-parent",
+            )
+            .await
+            .expect("seed task");
+        state.admission_client = Some(
+            AdmissionClient::new(&WorkflowDefinitionConfig {
+                token: "token".to_string(),
+                api_base_url: server.uri(),
+                ..WorkflowDefinitionConfig::default()
+            })
+            .expect("admission client"),
+        );
+        let event = json!({
+            "action": "sub_issue_removed",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "parent_issue": {"node_id": "I_parent_a"},
+            "sub_issue": {
+                "id": 42,
+                "node_id": "I_child",
+                "number": 7,
+                "body": body,
+                "state": "open",
+                "updated_at": "2026-08-01T00:00:00Z",
+                "type": {"node_id": "IT_task", "name": "WorkGraphTask"}
+            }
+        });
+
+        let inputs = try_workgraph_sub_issue(&state, &event)
+            .await
+            .expect("reconcile delayed full removal")
+            .expect("task projection");
+
+        assert!(inputs.iter().any(|input| matches!(
+            input,
+            ProjectionInput::UpsertTask(document)
+                if document.parent_source_key.as_deref() == Some("I_parent_b")
+        )));
+    }
+
+    #[tokio::test]
+    async fn signed_sparse_removal_commits_once_and_clears_parent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"node": {"parent": null}}
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let (_temp, projector, mut state) = ingress_state(None).await;
+        let body = "WorkGraphTask/v1\n\n```json\n{}\n```\n";
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![
+                    ProjectionInput::UpsertTask(TaskDocument {
+                        source_key: "I_child".to_string(),
+                        body: body.to_string(),
+                        is_open: true,
+                        state_reason: String::new(),
+                        parent_source_key: Some("I_parent".to_string()),
+                    }),
+                    ProjectionInput::UpsertLocator(GitHubIssueLocator {
+                        source_key: "I_child".to_string(),
+                        repository_owner: "acme".to_string(),
+                        repository_name: "widgets".to_string(),
+                        issue_database_id: 42,
+                        issue_number: 7,
+                        issue_node_id: "I_child".to_string(),
+                    }),
+                ],
+                1,
+                "seed-signed-removal",
+            )
+            .await
+            .expect("seed task and locator");
+        state.admission_client = Some(
+            AdmissionClient::new(&WorkflowDefinitionConfig {
+                token: "token".to_string(),
+                api_base_url: server.uri(),
+                ..WorkflowDefinitionConfig::default()
+            })
+            .expect("admission client"),
+        );
+        let payload = json!({
+            "action": "sub_issue_removed",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "parent_issue": {"node_id": "I_parent"},
+            "sub_issue_id": 42
+        });
+        let body = serde_json::to_vec(&payload).expect("serialize payload");
+        let headers = signed_headers("sub_issues", "sparse-removal", &body);
+
+        handle_delivery(&state, &headers, &body)
+            .await
+            .expect("signed sparse removal");
+        assert!(handle_delivery(&state, &headers, &body)
+            .await
+            .expect("deduplicate removal")
+            .is_none());
+        let committed = projector.committed.lock().await;
+        assert!(committed.last().is_some_and(|inputs| matches!(
+            inputs.as_slice(),
+            [ProjectionInput::UpsertTask(document)]
+                if document.source_key == "I_child"
+                    && document.parent_source_key.is_none()
+        )));
+    }
+
+    #[tokio::test]
     async fn sub_issue_event_cannot_reclassify_an_admitted_root_issue() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": {
                     "node": {
+                        "body": "ordinary issue",
+                        "issueType": null,
                         "labels": {
                             "nodes": [{"name": "workgraph"}],
                             "pageInfo": {"hasNextPage": false}
@@ -2201,6 +2727,8 @@ mod workgraph_tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": {
                     "node": {
+                        "body": "ordinary issue",
+                        "issueType": null,
                         "labels": {
                             "nodes": [],
                             "pageInfo": {"hasNextPage": false}
@@ -2302,6 +2830,8 @@ mod workgraph_tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": {
                     "node": {
+                        "body": "ordinary issue",
+                        "issueType": null,
                         "labels": {
                             "nodes": [{"name": "workgraph"}],
                             "pageInfo": {"hasNextPage": false}
@@ -2357,26 +2887,163 @@ mod workgraph_tests {
     }
 
     #[tokio::test]
-    async fn labeled_root_issue_payload_cannot_be_projected_as_a_sub_issue_task() {
-        let (_temp, _projector, state) = ingress_state(None).await;
+    async fn equal_revision_task_conversion_retracts_root_classification() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "node": {
+                        "body": "WorkGraphTask/v1\n\n```json\n{}\n```\n",
+                        "issueType": {"id": "IT_task", "name": "WorkGraphTask"},
+                        "labels": {
+                            "nodes": [{"name": "workgraph"}],
+                            "pageInfo": {"hasNextPage": false}
+                        }
+                    }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_temp, projector, mut state) = ingress_state(None).await;
+        state.admission_client = Some(
+            AdmissionClient::new(&WorkflowDefinitionConfig {
+                token: "token".to_string(),
+                api_base_url: server.uri(),
+                ..WorkflowDefinitionConfig::default()
+            })
+            .expect("admission client"),
+        );
+        let admitted = try_workgraph_issue(
+            &state,
+            "delivery-1",
+            &payload("labeled", root_issue(&["workgraph"])),
+        )
+        .await
+        .expect("normalize admission")
+        .expect("admission");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), admitted, 1, "seed-root")
+            .await
+            .expect("persist root");
+        let mut converted = task_issue("I_root", "WorkGraphTask/v1\n\n```json\n{}\n```\n");
+        converted["labels"] = json!([{"name": "workgraph"}]);
+
+        let inputs = try_workgraph_issue(&state, "delivery-2", &payload("typed", converted))
+            .await
+            .expect("normalize equal-revision conversion")
+            .expect("root retraction");
+
+        assert!(inputs.iter().any(|input| matches!(
+            input,
+            ProjectionInput::DeleteRootIssue { source_key } if source_key == "I_root"
+        )));
+        assert!(!inputs
+            .iter()
+            .any(|input| matches!(input, ProjectionInput::UpsertRootIssue(_))));
+    }
+
+    #[tokio::test]
+    async fn labeled_generated_task_remains_a_sub_issue_task() {
+        let (_temp, _projector, state) = ingress_state(Some(task_trust())).await;
         let event = json!({
             "action": "sub_issue_added",
             "organization": {"login": "acme"},
             "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "sender": {"node_id": "U_creator", "login": "task-creator"},
             "parent_issue": {"node_id": "I_parent"},
             "sub_issue": {
+                "id": 41,
                 "node_id": "I_root",
                 "number": 6,
                 "body": "WorkGraphTask/v1\n\n```json\n{}\n```\n",
+                "state": "open",
+                "state_reason": null,
+                "updated_at": "2026-08-01T00:00:00Z",
+                "user": {"node_id": "U_creator", "login": "task-creator"},
                 "labels": [{"name": "workgraph"}],
                 "type": {"node_id": "IT_task", "name": "WorkGraphTask"}
             }
         });
 
-        assert!(try_workgraph_sub_issue(&state, &event)
+        let inputs = try_workgraph_sub_issue(&state, &event)
             .await
             .expect("normalize hierarchy event")
-            .is_none());
+            .expect("generated sub-issue task");
+        assert!(inputs.iter().any(|input| matches!(
+            input,
+            ProjectionInput::UpsertTask(document)
+                if document.source_key == "I_root"
+                    && document.parent_source_key.as_deref() == Some("I_parent")
+        )));
+    }
+
+    #[tokio::test]
+    async fn task_marked_prior_task_converges_hierarchy_when_type_is_missing() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"node": {"parent": {"id": "I_parent"}}}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_temp, projector, mut state) = ingress_state(Some(task_trust())).await;
+        let body = "WorkGraphTask/v1\n\n```json\n{}\n```\n";
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![ProjectionInput::UpsertTask(TaskDocument {
+                    source_key: "I_task".to_string(),
+                    body: body.to_string(),
+                    is_open: true,
+                    state_reason: String::new(),
+                    parent_source_key: None,
+                })],
+                1,
+                "seed-untyped-hierarchy-task",
+            )
+            .await
+            .expect("seed task");
+        state.admission_client = Some(
+            AdmissionClient::new(&WorkflowDefinitionConfig {
+                token: "token".to_string(),
+                api_base_url: server.uri(),
+                ..WorkflowDefinitionConfig::default()
+            })
+            .expect("admission client"),
+        );
+        let event = json!({
+            "action": "sub_issue_added",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "sender": {"node_id": "U_creator", "login": "task-creator"},
+            "parent_issue": {"node_id": "I_parent"},
+            "sub_issue": {
+                "id": 42,
+                "node_id": "I_task",
+                "number": 7,
+                "body": body,
+                "state": "open",
+                "updated_at": "2026-08-01T00:00:00Z",
+                "user": {"node_id": "U_creator", "login": "task-creator"},
+                "labels": [{"name": "workgraph"}],
+                "type": null
+            }
+        });
+
+        let inputs = try_workgraph_sub_issue(&state, &event)
+            .await
+            .expect("normalize hierarchy")
+            .expect("task hierarchy update");
+
+        assert!(inputs.iter().any(|input| matches!(
+            input,
+            ProjectionInput::UpsertTask(document)
+                if document.parent_source_key.as_deref() == Some("I_parent")
+        )));
     }
 
     #[tokio::test]
