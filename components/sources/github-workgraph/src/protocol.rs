@@ -105,6 +105,10 @@ pub struct RootIssueDocument {
     pub body: String,
     pub is_open: bool,
     pub admission_id: String,
+    /// Sorted, case-sensitive `workgraph:` labels from the source Issue.
+    pub workgraph_labels: Vec<String>,
+    /// False only for the exact `workgraph:ignore` or `workgraph:error` label.
+    pub workgraph_include: bool,
 }
 
 /// An ordinary GitHub Issue normalized by Core for generic Source projection.

@@ -47,6 +47,26 @@ definition and task body semantics are implemented by the injected v1 projector;
 the Dogfooding `github-workgraph-v1` wrapper supplies that projector and owns the
 `wg-` queries and runtime configuration.
 
+### Projector consumer update required
+
+Consumers of this Wave 1 projector API must make these source changes before
+they compile:
+
+- handle `UpsertGitHubIssue` and `DeleteGitHubIssue` when exhaustively matching
+  `ProjectionInput` (Core consumes these before calling `prepare`, so the arms
+  are defensive);
+- consume `workgraphLabels` and `workgraphInclude` on `TaskDocument` and
+  `RootIssueDocument`, retaining the Root Issue and its admission generation
+  while excluded;
+- populate `rootIssueId` and `workflowRunId` on task, assignment, and dispatch
+  bindings;
+- populate the `results` and `evaluations` allocator projection collections
+  with the corresponding identity-bearing bindings.
+
+This is a single v1 contract change. No alternate wire format or compatibility
+projection is provided. The lease-validation HTTP response remains unchanged
+until the reporter and endpoint can be updated together.
+
 ## Configuration
 
 ```yaml

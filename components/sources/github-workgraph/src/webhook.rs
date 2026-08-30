@@ -194,10 +194,7 @@ async fn validate_lease(
         Ok(Some(active)) => (
             StatusCode::OK,
             Json(json!({
-                "leaseId": active.lease_id,
-                "rootIssueId": active.root_issue_id,
-                "workflowRunId": active.workflow_run_id,
-                "taskId": active.task_id,
+                "leaseId": active.lease_id, "taskId": active.task_id,
                 "assignmentId": active.assignment_id,
                 "executorId": active.executor_id, "slotId": active.slot_id,
                 "claimId": request.claim_id,
@@ -581,22 +578,10 @@ impl AdmissionClient {
             .any(|label| {
                 label.get("name").and_then(Value::as_str) == Some(WORKGRAPH_ADMISSION_LABEL)
             });
-        let excluded = labels
-            .get("nodes")
-            .and_then(Value::as_array)
-            .context("authoritative Root Issue labels are missing")?
-            .iter()
-            .any(|label| {
-                matches!(
-                    label.get("name").and_then(Value::as_str),
-                    Some(WORKGRAPH_IGNORE_LABEL | WORKGRAPH_ERROR_LABEL)
-                )
-            });
-        if !admitted
-            && labels
-                .pointer("/pageInfo/hasNextPage")
-                .and_then(Value::as_bool)
-                == Some(true)
+        if labels
+            .pointer("/pageInfo/hasNextPage")
+            .and_then(Value::as_bool)
+            == Some(true)
         {
             anyhow::bail!("authoritative Root Issue label set exceeds 100 entries");
         }
@@ -609,7 +594,7 @@ impl AdmissionClient {
             .get("body")
             .and_then(Value::as_str)
             .is_some_and(|body| body.starts_with(crate::protocol::WORKGRAPH_TASK_MARKER));
-        Ok(admitted && !excluded && !task_typed && !task_marked)
+        Ok(admitted && !task_typed && !task_marked)
     }
 
     async fn workgraph_include(&self, node_id: &str) -> Result<bool> {
@@ -921,9 +906,8 @@ async fn try_workgraph_issue(
         .pointer("/changes/body/from")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|body| body.starts_with(WORKGRAPH_TASK_MARKER));
-    let (_, workgraph_include) = issue_workgraph_labels(issue);
-    let labeled_root_candidate =
-        workgraph_include && issue_is_root_candidate(issue, &state.task_issue_type);
+    let (workgraph_labels, workgraph_include) = issue_workgraph_labels(issue);
+    let labeled_root_candidate = issue_is_root_candidate(issue, &state.task_issue_type);
     let admission_added = action == "labeled"
         && payload
             .pointer("/label/name")
@@ -978,6 +962,25 @@ async fn try_workgraph_issue(
                 let client = state.admission_client.as_ref().ok_or_else(|| {
                     WorkGraphNormError::Unavailable(
                         "equal-revision task inclusion transition requires an authoritative GitHub read"
+                            .to_string(),
+                    )
+                })?;
+                let authoritative = client
+                    .workgraph_include(node_id)
+                    .await
+                    .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?;
+                if authoritative != workgraph_include {
+                    return Ok(None);
+                }
+            }
+            if revision == previous
+                && previous_root
+                    .as_ref()
+                    .is_some_and(|root| root.workgraph_include != workgraph_include)
+            {
+                let client = state.admission_client.as_ref().ok_or_else(|| {
+                    WorkGraphNormError::Unavailable(
+                        "equal-revision Root Issue inclusion transition requires an authoritative GitHub read"
                             .to_string(),
                     )
                 })?;
@@ -1087,6 +1090,8 @@ async fn try_workgraph_issue(
             body: admitted_body,
             is_open: item_is_open(issue),
             admission_id,
+            workgraph_labels,
+            workgraph_include,
         }));
 
         if previous_task.is_some() {
@@ -1385,6 +1390,46 @@ async fn try_workgraph_sub_issue(
         .await
         .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
     let revision = authoritative_issue_revision(sub_issue)?;
+    if previous_revision.is_some_and(|previous| revision < previous) {
+        return Ok(None);
+    }
+    let previous = state
+        .allocator
+        .latest_workgraph_task(child_node_id)
+        .await
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
+    let (workgraph_labels, workgraph_include) = if sub_issue.get("labels").is_some() {
+        issue_workgraph_labels(sub_issue)
+    } else {
+        previous
+            .as_ref()
+            .map(|document| {
+                (
+                    document.workgraph_labels.clone(),
+                    document.workgraph_include,
+                )
+            })
+            .unwrap_or_else(|| (Vec::new(), true))
+    };
+    if previous_revision == Some(revision)
+        && previous
+            .as_ref()
+            .is_some_and(|task| task.workgraph_include != workgraph_include)
+    {
+        let client = state.admission_client.as_ref().ok_or_else(|| {
+            WorkGraphNormError::Unavailable(
+                "equal-revision task hierarchy inclusion conflict requires an authoritative GitHub read"
+                    .to_string(),
+            )
+        })?;
+        let authoritative = client
+            .workgraph_include(child_node_id)
+            .await
+            .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?;
+        if authoritative != workgraph_include {
+            return Ok(None);
+        }
+    }
     if previous_root.is_some() {
         let client = state.admission_client.as_ref().ok_or_else(|| {
             WorkGraphNormError::Unavailable(
@@ -1399,11 +1444,6 @@ async fn try_workgraph_sub_issue(
             return Ok(None);
         }
     }
-    let previous = state
-        .allocator
-        .latest_workgraph_task(child_node_id)
-        .await
-        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
     let parent_source_key = if previous.is_some() || event_parent_node_id.is_none() {
         let client = state.admission_client.as_ref().ok_or_else(|| {
             WorkGraphNormError::Unavailable(
@@ -1468,19 +1508,6 @@ async fn try_workgraph_sub_issue(
         })
         .unwrap_or_default();
 
-    let (workgraph_labels, workgraph_include) = if sub_issue.get("labels").is_some() {
-        issue_workgraph_labels(sub_issue)
-    } else {
-        previous
-            .as_ref()
-            .map(|document| {
-                (
-                    document.workgraph_labels.clone(),
-                    document.workgraph_include,
-                )
-            })
-            .unwrap_or_else(|| (Vec::new(), true))
-    };
     let task_doc = TaskDocument {
         source_key: child_node_id.to_string(),
         body: child_body,
@@ -1492,12 +1519,10 @@ async fn try_workgraph_sub_issue(
     };
 
     let mut inputs = Vec::new();
-    if previous_revision.is_none_or(|previous| revision >= previous) {
-        inputs.push(ProjectionInput::RecordIssueRevision {
-            source_key: child_node_id.to_string(),
-            revision,
-        });
-    }
+    inputs.push(ProjectionInput::RecordIssueRevision {
+        source_key: child_node_id.to_string(),
+        revision,
+    });
     if previous_root.is_some() {
         inputs.push(ProjectionInput::DeleteRootIssue {
             source_key: child_node_id.to_string(),
@@ -1916,6 +1941,55 @@ mod workgraph_tests {
     }
 
     #[tokio::test]
+    async fn delayed_issue_delivery_cannot_overwrite_newer_exclusion_state() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![
+                    ProjectionInput::RecordIssueRevision {
+                        source_key: "I_task".to_string(),
+                        revision: chrono::DateTime::parse_from_rfc3339("2026-08-02T00:00:00Z")
+                            .expect("revision")
+                            .timestamp_millis(),
+                    },
+                    ProjectionInput::UpsertTask(TaskDocument {
+                        source_key: "I_task".to_string(),
+                        body: "WorkGraphTask/v1\n\n```json\n{}\n```\n".to_string(),
+                        is_open: true,
+                        state_reason: String::new(),
+                        parent_source_key: Some("I_root".to_string()),
+                        workgraph_labels: vec!["workgraph:ignore".to_string()],
+                        workgraph_include: false,
+                    }),
+                ],
+                1,
+                "newer-issue-exclusion",
+            )
+            .await
+            .expect("persist newer exclusion");
+
+        let mut delayed = task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n");
+        delayed["labels"] = json!([]);
+        delayed["updated_at"] = json!("2026-08-01T00:00:00Z");
+        assert!(try_workgraph_issue(
+            &state,
+            "delayed-before-exclusion",
+            &payload("edited", delayed),
+        )
+        .await
+        .expect("ignore stale delivery")
+        .is_none());
+        assert!(state
+            .allocator
+            .latest_workgraph_task("I_task")
+            .await
+            .expect("read durable task")
+            .is_some_and(|task| !task.workgraph_include));
+    }
+
+    #[tokio::test]
     async fn generic_issue_projects_sorted_workgraph_labels_and_exact_inclusion() {
         for (labels, expected_labels, expected_include) in [
             (
@@ -2072,6 +2146,77 @@ mod workgraph_tests {
             })
             .expect("Root Issue upsert");
         assert_ne!(first_admission, second_admission);
+    }
+
+    #[tokio::test]
+    async fn root_exclusion_preserves_admission_generation_and_projects_an_excluded_upsert() {
+        let (_temp, projector, state) = ingress_state(None).await;
+        let admitted = try_workgraph_issue(
+            &state,
+            "root-admitted",
+            &payload("labeled", root_issue(&["workgraph"])),
+        )
+        .await
+        .expect("normalize")
+        .expect("admit Root Issue");
+        let admission_id = admitted
+            .iter()
+            .find_map(|input| match input {
+                ProjectionInput::UpsertRootIssue(root) => Some(root.admission_id.clone()),
+                _ => None,
+            })
+            .expect("Root Issue upsert");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), admitted, 1, "root-admitted")
+            .await
+            .expect("persist admission");
+
+        let mut excluded_issue = root_issue(&["workgraph", "workgraph:ignore"]);
+        excluded_issue["updated_at"] = json!("2026-08-01T00:01:00Z");
+        let excluded =
+            try_workgraph_issue(&state, "root-excluded", &payload("labeled", excluded_issue))
+                .await
+                .expect("normalize")
+                .expect("exclude Root Issue");
+        assert!(!excluded
+            .iter()
+            .any(|input| matches!(input, ProjectionInput::DeleteRootIssue { .. })));
+        assert!(excluded.iter().any(|input| matches!(
+            input,
+            ProjectionInput::UpsertRootIssue(root)
+                if root.admission_id == admission_id && !root.workgraph_include
+        )));
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), excluded, 2, "root-excluded")
+            .await
+            .expect("persist exclusion");
+        assert!(state
+            .allocator
+            .latest_workgraph_root_issue("I_root")
+            .await
+            .expect("read Root Issue")
+            .is_some_and(|root| { root.admission_id == admission_id && !root.workgraph_include }));
+
+        let mut reincluded_issue = root_issue(&["workgraph"]);
+        reincluded_issue["updated_at"] = json!("2026-08-01T00:02:00Z");
+        let reincluded = try_workgraph_issue(
+            &state,
+            "root-reincluded",
+            &payload("unlabeled", reincluded_issue),
+        )
+        .await
+        .expect("normalize")
+        .expect("re-include Root Issue");
+        assert!(!reincluded
+            .iter()
+            .any(|input| matches!(input, ProjectionInput::DeleteRootIssue { .. })));
+        assert!(reincluded.iter().any(|input| matches!(
+            input,
+            ProjectionInput::UpsertRootIssue(root)
+                if root.admission_id == admission_id && root.workgraph_include
+        )));
     }
 
     #[tokio::test]
@@ -3371,6 +3516,75 @@ mod workgraph_tests {
             ProjectionInput::UpsertTask(document)
                 if document.parent_source_key.as_deref() == Some("I_parent")
         )));
+    }
+
+    #[tokio::test]
+    async fn delayed_sub_issue_delivery_cannot_overwrite_newer_exclusion_state() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        let excluded = TaskDocument {
+            source_key: "I_child".to_string(),
+            body: "WorkGraphTask/v1\n\n```json\n{}\n```\n".to_string(),
+            is_open: true,
+            state_reason: String::new(),
+            parent_source_key: Some("I_root".to_string()),
+            workgraph_labels: vec!["workgraph:ignore".to_string()],
+            workgraph_include: false,
+        };
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![
+                    ProjectionInput::RecordIssueRevision {
+                        source_key: "I_child".to_string(),
+                        revision: chrono::DateTime::parse_from_rfc3339("2026-08-02T00:00:00Z")
+                            .expect("revision")
+                            .timestamp_millis(),
+                    },
+                    ProjectionInput::UpsertTask(excluded),
+                    ProjectionInput::UpsertLocator(GitHubIssueLocator {
+                        source_key: "I_child".to_string(),
+                        repository_owner: "acme".to_string(),
+                        repository_name: "widgets".to_string(),
+                        issue_database_id: 42,
+                        issue_number: 7,
+                        issue_node_id: "I_child".to_string(),
+                    }),
+                ],
+                1,
+                "newer-exclusion",
+            )
+            .await
+            .expect("persist newer exclusion");
+
+        let mut child = task_issue("I_child", "WorkGraphTask/v1\n\n```json\n{}\n```\n");
+        child["labels"] = json!([]);
+        child["updated_at"] = json!("2026-08-01T00:00:00Z");
+        let delayed = json!({
+            "action": "sub_issue_added",
+            "organization": {"login": "acme"},
+            "repository": {
+                "name": "widgets",
+                "full_name": "acme/widgets",
+                "node_id": "R_widgets"
+            },
+            "sender": {"node_id": "U_creator", "login": "task-creator"},
+            "parent_issue": {"node_id": "I_root"},
+            "sub_issue": child
+        });
+
+        assert!(try_workgraph_sub_issue(&state, &delayed)
+            .await
+            .expect("ignore stale delivery")
+            .is_none());
+        assert!(state
+            .allocator
+            .latest_workgraph_task("I_child")
+            .await
+            .expect("read durable task")
+            .is_some_and(
+                |task| !task.workgraph_include && task.workgraph_labels == ["workgraph:ignore"]
+            ));
     }
 
     #[tokio::test]

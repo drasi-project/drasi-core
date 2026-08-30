@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const VERSION: u8 = 10;
+const VERSION: u8 = 11;
 const STATE_KEY: &str = "allocator:state";
 const DELIVERY_PREFIX: &str = "delivery:";
 const WORKGRAPH_ORIGIN_PREFIX: &str = "workgraph-origin:";
@@ -462,9 +462,10 @@ impl Allocator {
         let transition =
             validate_workgraph_projection(&prepared.allocator, &next_tasks, &next_artifacts)
                 .and_then(|()| {
-                    candidate.reconcile_workgraph(
+                    candidate.reconcile_workgraph_with_roots(
                         prepared.allocator.clone(),
                         &next_tasks,
+                        &next_root_issues,
                         effective_from,
                         Utc::now(),
                     )
@@ -494,9 +495,10 @@ impl Allocator {
                 ) = stage_workgraph_documents(&state, &accepted_inputs);
                 candidate = state.clone();
                 validate_workgraph_projection(&prepared.allocator, &next_tasks, &next_artifacts)?;
-                candidate.reconcile_workgraph(
+                candidate.reconcile_workgraph_with_roots(
                     prepared.allocator.clone(),
                     &next_tasks,
+                    &next_root_issues,
                     effective_from,
                     Utc::now(),
                 )?
@@ -915,6 +917,15 @@ fn valid_workgraph_id(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= MAX_WORKGRAPH_ID_LENGTH
 }
 
+fn valid_workgraph_inclusion(labels: &[String], included: bool) -> bool {
+    labels.iter().all(|label| label.starts_with("workgraph:"))
+        && labels.windows(2).all(|pair| pair[0] <= pair[1])
+        && included
+            == !labels
+                .iter()
+                .any(|label| matches!(label.as_str(), "workgraph:ignore" | "workgraph:error"))
+}
+
 fn workgraph_assignment_matches(
     state: &WorkGraphAssignmentState,
     desired: &WorkGraphAssignmentBinding,
@@ -1006,6 +1017,16 @@ impl AllocationState {
             })
         {
             return Err("WorkGraph issue database ID index is invalid".into());
+        }
+        if self
+            .workgraph_tasks
+            .values()
+            .any(|task| !valid_workgraph_inclusion(&task.workgraph_labels, task.workgraph_include))
+            || self.workgraph_root_issues.values().any(|root| {
+                !valid_workgraph_inclusion(&root.workgraph_labels, root.workgraph_include)
+            })
+        {
+            return Err("WorkGraph inclusion state is invalid".into());
         }
         let mut canonical_assignment_ids = BTreeSet::new();
         for (source_key, assignment) in &self.workgraph_assignments {
@@ -1200,12 +1221,47 @@ impl AllocationState {
         effective_from: u64,
         now: DateTime<Utc>,
     ) -> AnyResult<AllocationDelta> {
+        self.reconcile_workgraph_with_roots(
+            projection,
+            task_documents,
+            &BTreeMap::new(),
+            effective_from,
+            now,
+        )
+    }
+
+    fn reconcile_workgraph_with_roots(
+        &mut self,
+        projection: WorkGraphAllocatorProjection,
+        task_documents: &BTreeMap<String, TaskDocument>,
+        root_issues: &BTreeMap<String, RootIssueDocument>,
+        effective_from: u64,
+        now: DateTime<Utc>,
+    ) -> AnyResult<AllocationDelta> {
         let mut delta = AllocationDelta::default();
-        let excluded_tasks = task_documents
+        let root_excluded = |root_issue_id: &str| {
+            root_issues
+                .get(root_issue_id)
+                .is_some_and(|root| !root.workgraph_include)
+        };
+        let mut excluded_tasks = task_documents
             .iter()
             .filter(|(_, document)| !document.workgraph_include)
-            .map(|(source_key, _)| source_key.as_str())
+            .map(|(source_key, _)| source_key.clone())
             .collect::<BTreeSet<_>>();
+        excluded_tasks.extend(
+            projection
+                .tasks
+                .iter()
+                .filter(|binding| root_excluded(&binding.root_issue_id))
+                .map(|binding| binding.source_key.clone()),
+        );
+        excluded_tasks.extend(
+            self.workgraph_task_identities
+                .iter()
+                .filter(|(_, task)| root_excluded(&task.root_issue_id))
+                .map(|(source_key, _)| source_key.clone()),
+        );
         let newly_stale = self
             .workgraph_assignments
             .iter()
@@ -1254,6 +1310,8 @@ impl AllocationState {
             let document = task_documents
                 .get(&binding.source_key)
                 .expect("projection provenance was validated");
+            let workgraph_include =
+                document.workgraph_include && !root_excluded(&binding.root_issue_id);
             let identity_changed = self
                 .workgraph_task_identities
                 .get(&binding.source_key)
@@ -1281,12 +1339,12 @@ impl AllocationState {
                     task_id: binding.task_id.clone(),
                     task_element_id: binding.task_element_id.clone(),
                     is_open: document.is_open,
-                    workgraph_include: document.workgraph_include,
+                    workgraph_include,
                 },
             );
             if !document.is_open {
                 self.deactivate_workgraph_task(&binding.source_key, &mut delta);
-            } else if !document.workgraph_include {
+            } else if !workgraph_include {
                 self.exclude_workgraph_task(&binding.source_key, &mut delta);
             }
         }
@@ -1313,7 +1371,15 @@ impl AllocationState {
             .map(|(source_key, _)| source_key.clone())
             .collect::<Vec<_>>()
         {
-            self.retract_workgraph_assignment(&source_key, &mut delta);
+            let preserve_history = self
+                .workgraph_assignments
+                .get(&source_key)
+                .and_then(|assignment| {
+                    self.workgraph_task_identities
+                        .get(&assignment.task_source_key)
+                })
+                .is_some_and(|task| !task.workgraph_include);
+            self.retract_workgraph_assignment(&source_key, preserve_history, &mut delta);
         }
         for assignment in projection.assignments.iter().filter(|assignment| {
             !excluded_tasks.contains(assignment.task_source_key.as_str())
@@ -1449,7 +1515,12 @@ impl AllocationState {
         Ok(delta)
     }
 
-    fn retract_workgraph_assignment(&mut self, source_key: &str, delta: &mut AllocationDelta) {
+    fn retract_workgraph_assignment(
+        &mut self,
+        source_key: &str,
+        preserve_history: bool,
+        delta: &mut AllocationDelta,
+    ) {
         let Some(assignment) = self.workgraph_assignments.remove(source_key) else {
             return;
         };
@@ -1461,7 +1532,9 @@ impl AllocationState {
             .collect::<Vec<_>>()
         {
             if let Some(lease) = self.workgraph_dispatched.remove(&dispatch_source) {
-                delta.workgraph_historical_ended.push(lease);
+                if !preserve_history {
+                    delta.workgraph_historical_ended.push(lease);
+                }
             }
         }
         let leases = self
@@ -1535,7 +1608,7 @@ impl AllocationState {
             .map(|(source, _)| source.clone())
             .collect::<Vec<_>>()
         {
-            self.retract_workgraph_assignment(&assignment_source, delta);
+            self.retract_workgraph_assignment(&assignment_source, false, delta);
         }
         for dispatch_source in self
             .workgraph_dispatched
@@ -1618,7 +1691,7 @@ impl AllocationState {
             .map(|lease| lease.lease_id.clone())
             .collect::<Vec<_>>();
         for lease_id in leases {
-            self.release_workgraph(&lease_id, false, delta);
+            self.cancel_workgraph_lease(&lease_id, delta);
         }
         for assignment in self
             .workgraph_assignments
@@ -1762,6 +1835,39 @@ impl AllocationState {
         } else {
             delta.workgraph_ended.push(lease.clone());
         }
+
+        if let Some(agent) = self
+            .agents
+            .get_mut(&lease.executor_id)
+            .filter(|agent| agent.retiring_slots.contains(&lease.slot_number))
+        {
+            agent.retiring_slots.remove(&lease.slot_number);
+            delta
+                .removed_slots
+                .insert((lease.executor_id.clone(), lease.slot_number));
+            if !agent.configured && agent.retiring_slots.is_empty() {
+                self.agents.remove(&lease.executor_id);
+                delta.removed_agents.insert(lease.executor_id);
+            }
+        }
+    }
+
+    fn cancel_workgraph_lease(&mut self, lease_id: &str, delta: &mut AllocationDelta) {
+        let Some(mut lease) = self.workgraph_active.remove(lease_id) else {
+            return;
+        };
+        self.workgraph_result_claims.remove(lease_id);
+        lease.completed = false;
+        delta.affected_agents.insert(lease.executor_id.clone());
+        if let Some(dispatched) = self
+            .workgraph_dispatched
+            .values_mut()
+            .find(|dispatched| dispatched.lease_id == lease.lease_id)
+        {
+            *dispatched = lease.clone();
+        }
+        delta.workgraph_released.push(lease.clone());
+        delta.workgraph_historical.push(lease.clone());
         if let Some(agent) = self
             .agents
             .get_mut(&lease.executor_id)
@@ -2068,6 +2174,25 @@ mod tests {
             is_open: true,
             state_reason: String::new(),
             parent_source_key: Some("root".to_string()),
+            workgraph_labels: (!workgraph_include)
+                .then(|| "workgraph:ignore".to_string())
+                .into_iter()
+                .collect(),
+            workgraph_include,
+        }
+    }
+
+    fn root_document(workgraph_include: bool) -> RootIssueDocument {
+        RootIssueDocument {
+            source_key: "root".to_string(),
+            repository_owner: "acme".to_string(),
+            repository_name: "widgets".to_string(),
+            repository_node_id: "repository".to_string(),
+            issue_number: 1,
+            title: "Root".to_string(),
+            body: "Root body".to_string(),
+            is_open: true,
+            admission_id: "generation".to_string(),
             workgraph_labels: (!workgraph_include)
                 .then(|| "workgraph:ignore".to_string())
                 .into_iter()
@@ -2535,9 +2660,10 @@ mod tests {
             now,
         );
         let included = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let included_roots = BTreeMap::from([("root".to_string(), root_document(true))]);
         let mut desired = projection(Vec::new());
         state
-            .reconcile_workgraph(desired.clone(), &included, 1, now)
+            .reconcile_workgraph_with_roots(desired.clone(), &included, &included_roots, 1, now)
             .expect("initial allocation");
         let first = state
             .workgraph_active
@@ -2559,9 +2685,10 @@ mod tests {
             slot_id: first.slot_id.clone(),
         });
         state
-            .reconcile_workgraph(
+            .reconcile_workgraph_with_roots(
                 desired.clone(),
                 &included,
+                &included_roots,
                 2,
                 now + chrono::Duration::seconds(1),
             )
@@ -2571,11 +2698,12 @@ mod tests {
             .get(&first.lease_id)
             .is_some_and(|lease| lease.has_dispatch));
 
-        let excluded = BTreeMap::from([("issue".to_string(), task_document(false))]);
+        let excluded_roots = BTreeMap::from([("root".to_string(), root_document(false))]);
         let delta = state
-            .reconcile_workgraph(
+            .reconcile_workgraph_with_roots(
                 desired.clone(),
-                &excluded,
+                &included,
+                &excluded_roots,
                 3,
                 now + chrono::Duration::seconds(2),
             )
@@ -2585,6 +2713,12 @@ mod tests {
             .workgraph_released
             .iter()
             .any(|lease| lease.lease_id == first.lease_id && !lease.completed));
+        assert!(delta
+            .workgraph_historical
+            .iter()
+            .any(|lease| lease.lease_id == first.lease_id && !lease.completed));
+        assert!(delta.workgraph_ended.is_empty());
+        assert!(delta.workgraph_historical_ended.is_empty());
         assert!(state
             .workgraph_stale_authorizations
             .contains("assignment-comment"));
@@ -2601,7 +2735,7 @@ mod tests {
             serde_json::from_slice(&bytes).expect("restore durable state");
         restarted.validate().expect("restored state");
         restarted
-            .reconcile_workgraph(desired.clone(), &included, 4, now)
+            .reconcile_workgraph_with_roots(desired.clone(), &included, &included_roots, 4, now)
             .expect("re-include task");
         assert!(restarted.workgraph_active.is_empty());
 
@@ -2609,7 +2743,7 @@ mod tests {
         fresh.assignments[0].source_key = "assignment-comment-fresh".to_string();
         fresh.assignments[0].assignment_id = "assignment-fresh".to_string();
         restarted
-            .reconcile_workgraph(fresh, &included, 5, now)
+            .reconcile_workgraph_with_roots(fresh, &included, &included_roots, 5, now)
             .expect("fresh authorization");
         let fresh_lease = restarted
             .workgraph_active
@@ -2619,7 +2753,7 @@ mod tests {
         assert_ne!(fresh_lease.lease_id, desired.assignments[0].assignment_id);
 
         restarted
-            .reconcile_workgraph(desired, &included, 6, now)
+            .reconcile_workgraph_with_roots(desired, &included, &included_roots, 6, now)
             .expect("reordered stale authorization");
         assert!(restarted.workgraph_active.is_empty());
         restarted.validate().expect("final state");
