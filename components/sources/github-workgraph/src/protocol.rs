@@ -23,6 +23,7 @@
 //! * `WorkGraphTaskDispatch/v1`
 //! * `WorkGraphTaskResult/v1`
 //! * `WorkGraphTaskEvaluate/v1`
+//! * `WorkGraphTaskRoute/v1`
 //!
 //! Core does **not** parse WorkGraph JSON semantics; the projector does.
 
@@ -42,6 +43,11 @@ pub const WORKGRAPH_ASSIGN_MARKER: &str = "WorkGraphTaskAssign/v1\n";
 pub const WORKGRAPH_DISPATCH_MARKER: &str = "WorkGraphTaskDispatch/v1\n";
 pub const WORKGRAPH_RESULT_MARKER: &str = "WorkGraphTaskResult/v1\n";
 pub const WORKGRAPH_EVALUATE_MARKER: &str = "WorkGraphTaskEvaluate/v1\n";
+pub const WORKGRAPH_ROUTE_MARKER: &str = "WorkGraphTaskRoute/v1\n";
+
+pub const WORKGRAPH_EVALUATION_ACCEPTED: &str = "accepted";
+pub const WORKGRAPH_EVALUATION_REJECTED: &str = "rejected";
+pub const WORKGRAPH_ROUTE_REWORK: &str = "rework";
 
 /// Returns true if `body` begins with any WorkGraph lifecycle artifact marker.
 pub fn is_workgraph_lifecycle_marker(body: &str) -> bool {
@@ -49,17 +55,19 @@ pub fn is_workgraph_lifecycle_marker(body: &str) -> bool {
         || body.starts_with(WORKGRAPH_DISPATCH_MARKER)
         || body.starts_with(WORKGRAPH_RESULT_MARKER)
         || body.starts_with(WORKGRAPH_EVALUATE_MARKER)
+        || body.starts_with(WORKGRAPH_ROUTE_MARKER)
 }
 
 /// Returns the lifecycle marker kind for trust classification.
 ///
-/// `Assign` and `Dispatch` use assigner trust; `Result` and `Evaluate` use
-/// reporter trust.
+/// `Assign` and `Dispatch` use assigner trust; `Result`, `Evaluate`, and
+/// `Route` use reporter trust.
 pub fn lifecycle_trust_role(body: &str) -> Option<LifecycleTrustRole> {
     if body.starts_with(WORKGRAPH_ASSIGN_MARKER) || body.starts_with(WORKGRAPH_DISPATCH_MARKER) {
         Some(LifecycleTrustRole::Assigner)
     } else if body.starts_with(WORKGRAPH_RESULT_MARKER)
         || body.starts_with(WORKGRAPH_EVALUATE_MARKER)
+        || body.starts_with(WORKGRAPH_ROUTE_MARKER)
     {
         Some(LifecycleTrustRole::Reporter)
     } else {
@@ -72,7 +80,7 @@ pub fn lifecycle_trust_role(body: &str) -> Option<LifecycleTrustRole> {
 pub enum LifecycleTrustRole {
     /// Assign/Dispatch — requires assigner trust.
     Assigner,
-    /// Result/Evaluate — requires reporter trust.
+    /// Result/Evaluate/Route — requires reporter trust.
     Reporter,
 }
 
@@ -230,6 +238,7 @@ pub struct WorkGraphAllocatorProjection {
     pub dispatches: Vec<WorkGraphDispatchBinding>,
     pub results: Vec<WorkGraphResultBinding>,
     pub evaluations: Vec<WorkGraphEvaluateBinding>,
+    pub routes: Vec<WorkGraphRouteBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,7 +287,9 @@ pub struct WorkGraphResultBinding {
     pub root_issue_id: String,
     pub workflow_run_id: String,
     pub task_id: String,
+    pub result_id: String,
     pub lease_id: String,
+    pub attempt: u64,
 }
 
 /// Identity-bearing Evaluate representation used by Core to validate direct
@@ -291,6 +302,29 @@ pub struct WorkGraphEvaluateBinding {
     pub root_issue_id: String,
     pub workflow_run_id: String,
     pub task_id: String,
+    pub result_id: String,
+    pub evaluation_id: String,
+    pub attempt: u64,
+    pub verdict: String,
+}
+
+/// Identity-bearing Route representation. Core does not parse Route bodies;
+/// the injected projector supplies these canonical fields after selecting the
+/// authoritative Result/Evaluation chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkGraphRouteBinding {
+    pub source_key: String,
+    pub task_source_key: String,
+    pub root_issue_id: String,
+    pub workflow_run_id: String,
+    pub task_id: String,
+    pub result_id: String,
+    pub evaluation_id: String,
+    pub route_id: String,
+    pub action: String,
+    pub attempt: u64,
+    pub max_attempts: u64,
 }
 
 // ── Object-safe projector trait ───────────────────────────────────────────

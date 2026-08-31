@@ -9,8 +9,10 @@ use crate::model::slot_id;
 use crate::protocol::{
     LifecycleArtifactDocument, PreparedProjectionCommit, ProjectionInput, RootIssueDocument,
     TaskDocument, WorkGraphAllocatorProjection, WorkGraphAssignmentBinding,
-    WorkGraphDispatchBinding, WorkGraphProjector, WORKGRAPH_ASSIGN_MARKER,
-    WORKGRAPH_DISPATCH_MARKER, WORKGRAPH_EVALUATE_MARKER, WORKGRAPH_RESULT_MARKER,
+    WorkGraphDispatchBinding, WorkGraphProjector, WorkGraphRouteBinding, WORKGRAPH_ASSIGN_MARKER,
+    WORKGRAPH_DISPATCH_MARKER, WORKGRAPH_EVALUATE_MARKER, WORKGRAPH_EVALUATION_ACCEPTED,
+    WORKGRAPH_EVALUATION_REJECTED, WORKGRAPH_RESULT_MARKER, WORKGRAPH_ROUTE_MARKER,
+    WORKGRAPH_ROUTE_REWORK,
 };
 use anyhow::{Context, Result as AnyResult};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -23,12 +25,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const VERSION: u8 = 13;
+const VERSION: u8 = 14;
 const STATE_KEY: &str = "allocator:state";
 const DELIVERY_PREFIX: &str = "delivery:";
 const WORKGRAPH_ORIGIN_PREFIX: &str = "workgraph-origin:";
 const MAX_WORKGRAPH_ID_LENGTH: usize = 256;
 const MAX_WORKGRAPH_PERMITTED_EXECUTORS: usize = 64;
+const MAX_WORKGRAPH_ATTEMPTS: u64 = 64;
 
 fn workgraph_origin_key(origin_id: &str) -> String {
     let digest = Sha256::digest(origin_id.as_bytes());
@@ -61,6 +64,7 @@ pub struct WorkGraphActiveLease {
     pub executor_id: String,
     pub slot_id: String,
     pub slot_number: u32,
+    pub attempt: u64,
     pub acquired_at: String,
     pub expires_at: String,
     pub has_dispatch: bool,
@@ -128,6 +132,7 @@ struct WorkGraphAssignmentState {
     permitted_executors: Vec<String>,
     queued_at: u64,
     next_attempt: u64,
+    max_attempts: u64,
     eligible: bool,
 }
 
@@ -139,6 +144,21 @@ struct WorkGraphAuthorizationState {
     cutoff_revision: i64,
     transition_revision: i64,
     included: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkGraphRouteState {
+    task_source_key: String,
+    root_issue_id: String,
+    workflow_run_id: String,
+    task_id: String,
+    result_id: String,
+    evaluation_id: String,
+    route_id: String,
+    action: String,
+    attempt: u64,
+    max_attempts: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +178,8 @@ pub struct AllocationState {
     workgraph_dispatched: BTreeMap<String, WorkGraphActiveLease>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workgraph_result_claims: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workgraph_routes: BTreeMap<String, WorkGraphRouteState>,
     pub pending: Vec<SourceChange>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pending_offset: usize,
@@ -919,7 +941,14 @@ fn validate_workgraph_projection(
         );
     }
 
+    let dispatches_by_lease = projection
+        .dispatches
+        .iter()
+        .map(|dispatch| (dispatch.lease_id.as_str(), dispatch))
+        .collect::<BTreeMap<_, _>>();
     let mut result_sources = BTreeSet::new();
+    let mut result_ids = BTreeSet::new();
+    let mut result_leases = BTreeSet::new();
     for result in &projection.results {
         let document = artifacts
             .get(&result.source_key)
@@ -927,17 +956,31 @@ fn validate_workgraph_projection(
         let task = task_bindings
             .get(result.task_source_key.as_str())
             .context("WorkGraph Result has no accepted task binding")?;
+        let dispatch = dispatches_by_lease
+            .get(result.lease_id.as_str())
+            .context("WorkGraph Result has no selected Dispatch")?;
         anyhow::ensure!(
             result_sources.insert(&result.source_key)
+                && result_ids.insert(&result.result_id)
+                && result_leases.insert(&result.lease_id)
                 && document.task_source_key == result.task_source_key
                 && document.body.starts_with(WORKGRAPH_RESULT_MARKER)
                 && task.root_issue_id == result.root_issue_id
                 && task.workflow_run_id == result.workflow_run_id
                 && task.task_id == result.task_id
+                && dispatch.task_source_key == result.task_source_key
+                && dispatch.root_issue_id == result.root_issue_id
+                && dispatch.workflow_run_id == result.workflow_run_id
+                && dispatch.task_id == result.task_id
+                && result.attempt > 0
+                && result.attempt <= MAX_WORKGRAPH_ATTEMPTS
+                && result.lease_id
+                    == make_lease_id(&result.task_id, &dispatch.assignment_id, result.attempt,)
                 && [
                     &result.root_issue_id,
                     &result.workflow_run_id,
                     &result.task_id,
+                    &result.result_id,
                     &result.lease_id,
                 ]
                 .into_iter()
@@ -946,7 +989,14 @@ fn validate_workgraph_projection(
         );
     }
 
+    let results_by_id = projection
+        .results
+        .iter()
+        .map(|result| (result.result_id.as_str(), result))
+        .collect::<BTreeMap<_, _>>();
     let mut evaluation_sources = BTreeSet::new();
+    let mut evaluation_ids = BTreeSet::new();
+    let mut evaluated_results = BTreeSet::new();
     for evaluation in &projection.evaluations {
         let document = artifacts
             .get(&evaluation.source_key)
@@ -954,21 +1004,104 @@ fn validate_workgraph_projection(
         let task = task_bindings
             .get(evaluation.task_source_key.as_str())
             .context("WorkGraph Evaluate has no accepted task binding")?;
+        let result = results_by_id
+            .get(evaluation.result_id.as_str())
+            .context("WorkGraph Evaluate has no selected Result")?;
         anyhow::ensure!(
             evaluation_sources.insert(&evaluation.source_key)
+                && evaluation_ids.insert(&evaluation.evaluation_id)
+                && evaluated_results.insert(&evaluation.result_id)
                 && document.task_source_key == evaluation.task_source_key
                 && document.body.starts_with(WORKGRAPH_EVALUATE_MARKER)
                 && task.root_issue_id == evaluation.root_issue_id
                 && task.workflow_run_id == evaluation.workflow_run_id
                 && task.task_id == evaluation.task_id
+                && result.task_source_key == evaluation.task_source_key
+                && result.root_issue_id == evaluation.root_issue_id
+                && result.workflow_run_id == evaluation.workflow_run_id
+                && result.task_id == evaluation.task_id
+                && result.attempt == evaluation.attempt
+                && matches!(
+                    evaluation.verdict.as_str(),
+                    WORKGRAPH_EVALUATION_ACCEPTED | WORKGRAPH_EVALUATION_REJECTED
+                )
                 && [
                     &evaluation.root_issue_id,
                     &evaluation.workflow_run_id,
                     &evaluation.task_id,
+                    &evaluation.result_id,
+                    &evaluation.evaluation_id,
+                    &evaluation.verdict,
                 ]
                 .into_iter()
                 .all(|value| valid_workgraph_id(value)),
             "WorkGraph allocator projection contains an invalid or duplicate Evaluate"
+        );
+    }
+
+    let evaluations_by_id = projection
+        .evaluations
+        .iter()
+        .map(|evaluation| (evaluation.evaluation_id.as_str(), evaluation))
+        .collect::<BTreeMap<_, _>>();
+    let mut route_sources = BTreeSet::new();
+    let mut route_ids = BTreeSet::new();
+    let mut routed_evaluations = BTreeSet::new();
+    let mut routed_tasks = BTreeSet::new();
+    for route in &projection.routes {
+        let document = artifacts
+            .get(&route.source_key)
+            .context("WorkGraph Route has no authenticated artifact")?;
+        let task = task_bindings
+            .get(route.task_source_key.as_str())
+            .context("WorkGraph Route has no accepted task binding")?;
+        let result = results_by_id
+            .get(route.result_id.as_str())
+            .context("WorkGraph Route has no selected Result")?;
+        let evaluation = evaluations_by_id
+            .get(route.evaluation_id.as_str())
+            .context("WorkGraph Route has no selected Evaluation")?;
+        let rework = route.action == WORKGRAPH_ROUTE_REWORK;
+        anyhow::ensure!(
+            route_sources.insert(&route.source_key)
+                && route_ids.insert(&route.route_id)
+                && routed_evaluations.insert(&route.evaluation_id)
+                && routed_tasks.insert(&route.task_source_key)
+                && document.task_source_key == route.task_source_key
+                && document.body.starts_with(WORKGRAPH_ROUTE_MARKER)
+                && task.root_issue_id == route.root_issue_id
+                && task.workflow_run_id == route.workflow_run_id
+                && task.task_id == route.task_id
+                && result.task_source_key == route.task_source_key
+                && result.root_issue_id == route.root_issue_id
+                && result.workflow_run_id == route.workflow_run_id
+                && result.task_id == route.task_id
+                && result.attempt == route.attempt
+                && evaluation.task_source_key == route.task_source_key
+                && evaluation.root_issue_id == route.root_issue_id
+                && evaluation.workflow_run_id == route.workflow_run_id
+                && evaluation.task_id == route.task_id
+                && evaluation.result_id == route.result_id
+                && evaluation.attempt == route.attempt
+                && (!rework || evaluation.verdict == WORKGRAPH_EVALUATION_REJECTED)
+                && (evaluation.verdict != WORKGRAPH_EVALUATION_ACCEPTED || !rework)
+                && route.attempt > 0
+                && route.max_attempts > 0
+                && route.max_attempts <= MAX_WORKGRAPH_ATTEMPTS
+                && route.attempt <= route.max_attempts
+                && (!rework || route.attempt < route.max_attempts)
+                && [
+                    &route.root_issue_id,
+                    &route.workflow_run_id,
+                    &route.task_id,
+                    &route.result_id,
+                    &route.evaluation_id,
+                    &route.route_id,
+                    &route.action,
+                ]
+                .into_iter()
+                .all(|value| valid_workgraph_id(value)),
+            "WorkGraph allocator projection contains an invalid, stale, or duplicate Route"
         );
     }
     Ok(())
@@ -1025,6 +1158,7 @@ impl Default for AllocationState {
             workgraph_active: BTreeMap::new(),
             workgraph_dispatched: BTreeMap::new(),
             workgraph_result_claims: BTreeMap::new(),
+            workgraph_routes: BTreeMap::new(),
             pending: Vec::new(),
             pending_offset: 0,
             workgraph_checkpoint: Vec::new(),
@@ -1257,9 +1391,39 @@ impl AllocationState {
             }
             current
         });
-        projection
+        projection.results.retain(|result| {
+            !removed_leases.contains(&result.lease_id)
+                && self.artifact_is_current(&result.task_source_key, &result.source_key)
+        });
+        let result_ids = projection
             .results
-            .retain(|result| !removed_leases.contains(&result.lease_id));
+            .iter()
+            .map(|result| result.result_id.as_str())
+            .collect::<BTreeSet<_>>();
+        projection.evaluations.retain(|evaluation| {
+            result_ids.contains(evaluation.result_id.as_str())
+                && self.artifact_is_current(&evaluation.task_source_key, &evaluation.source_key)
+        });
+        let evaluation_ids = projection
+            .evaluations
+            .iter()
+            .map(|evaluation| evaluation.evaluation_id.as_str())
+            .collect::<BTreeSet<_>>();
+        projection.routes.retain(|route| {
+            result_ids.contains(route.result_id.as_str())
+                && evaluation_ids.contains(route.evaluation_id.as_str())
+                && self.artifact_is_current(&route.task_source_key, &route.source_key)
+        });
+    }
+
+    fn artifact_is_current(&self, task_source_key: &str, source_key: &str) -> bool {
+        self.workgraph_authorizations
+            .get(task_source_key)
+            .filter(|authorization| authorization.included)
+            .zip(self.workgraph_artifact_generations.get(source_key))
+            .is_some_and(|(authorization, artifact_generation)| {
+                authorization.generation == *artifact_generation
+            })
     }
     pub fn validate(&self) -> Result<(), String> {
         if self.version != VERSION {
@@ -1372,6 +1536,9 @@ impl AllocationState {
                     .copied()
                     .unwrap_or_default()
                     != assignment.next_attempt
+                || assignment.max_attempts == 0
+                || assignment.max_attempts > MAX_WORKGRAPH_ATTEMPTS
+                || assignment.next_attempt > assignment.max_attempts
             {
                 return Err("WorkGraph assignment state violates canonical invariants".into());
             }
@@ -1403,14 +1570,10 @@ impl AllocationState {
                 || !assignment.permitted_executors.contains(&lease.executor_id)
                 || assignment.eligible
                 || assignment.next_attempt == 0
+                || lease.attempt != assignment.next_attempt
                 || lease.completed
                 || !lease.completion_eligible
-                || lease_id
-                    != &make_lease_id(
-                        &lease.task_id,
-                        &lease.assignment_id,
-                        assignment.next_attempt,
-                    )
+                || lease_id != &make_lease_id(&lease.task_id, &lease.assignment_id, lease.attempt)
                 || lease.slot_id != slot_id(&lease.executor_id, lease.slot_number)
                 || !task.is_open
                 || !task.workgraph_include
@@ -1453,6 +1616,8 @@ impl AllocationState {
                 || assignment.assignment_id != lease.assignment_id
                 || !assignment.permitted_executors.contains(&lease.executor_id)
                 || !lease.has_dispatch
+                || lease.attempt == 0
+                || lease.attempt > assignment.next_attempt
                 || (lease.completed && !lease.completion_eligible)
                 || lease.slot_number == 0
                 || lease.slot_id != slot_id(&lease.executor_id, lease.slot_number)
@@ -1512,6 +1677,27 @@ impl AllocationState {
             })
         {
             return Err("WorkGraph Result claim does not identify an active Dispatch lease".into());
+        }
+        if self.workgraph_routes.iter().any(|(source_key, route)| {
+            source_key.trim().is_empty()
+                || route.attempt == 0
+                || route.attempt > MAX_WORKGRAPH_ATTEMPTS
+                || route.max_attempts == 0
+                || route.max_attempts > MAX_WORKGRAPH_ATTEMPTS
+                || [
+                    &route.task_source_key,
+                    &route.root_issue_id,
+                    &route.workflow_run_id,
+                    &route.task_id,
+                    &route.result_id,
+                    &route.evaluation_id,
+                    &route.route_id,
+                    &route.action,
+                ]
+                .into_iter()
+                .any(|value| !valid_workgraph_id(value))
+        }) {
+            return Err("WorkGraph applied Route state is invalid".into());
         }
         if self.agents.iter().any(|(id, agent)| {
             id != &agent.agent_id
@@ -1577,6 +1763,17 @@ impl AllocationState {
                 .filter(|(_, task)| root_excluded(&task.root_issue_id))
                 .map(|(source_key, _)| source_key.clone()),
         );
+        let routed_tasks = projection
+            .routes
+            .iter()
+            .map(|route| route.task_source_key.clone())
+            .chain(
+                self.workgraph_routes
+                    .values()
+                    .filter(|route| route.action != WORKGRAPH_ROUTE_REWORK)
+                    .map(|route| route.task_source_key.clone()),
+            )
+            .collect::<BTreeSet<_>>();
         let newly_stale = self
             .workgraph_assignments
             .iter()
@@ -1711,7 +1908,9 @@ impl AllocationState {
                     .workgraph_active
                     .values()
                     .any(|lease| lease.assignment_source_key == assignment.source_key);
-                let eligible = task_open && !owned;
+                let eligible = task_open
+                    && !owned
+                    && !routed_tasks.contains(assignment.task_source_key.as_str());
                 if state.eligible != eligible {
                     state.eligible = eligible;
                     delta
@@ -1740,7 +1939,10 @@ impl AllocationState {
                     permitted_executors: assignment.permitted_executors.clone(),
                     queued_at: effective_from,
                     next_attempt,
-                    eligible: task.is_open && task.workgraph_include,
+                    max_attempts: MAX_WORKGRAPH_ATTEMPTS,
+                    eligible: task.is_open
+                        && task.workgraph_include
+                        && !routed_tasks.contains(assignment.task_source_key.as_str()),
                 },
             );
             delta
@@ -1826,8 +2028,94 @@ impl AllocationState {
                 .insert(dispatch.source_key.clone(), lease);
         }
 
+        for route in &projection.routes {
+            self.apply_workgraph_route(route, &projection, now, &mut delta)?;
+        }
         self.allocate_workgraph(now, &mut delta);
         Ok(delta)
+    }
+
+    fn apply_workgraph_route(
+        &mut self,
+        route: &WorkGraphRouteBinding,
+        projection: &WorkGraphAllocatorProjection,
+        now: DateTime<Utc>,
+        delta: &mut AllocationDelta,
+    ) -> AnyResult<()> {
+        let state = WorkGraphRouteState {
+            task_source_key: route.task_source_key.clone(),
+            root_issue_id: route.root_issue_id.clone(),
+            workflow_run_id: route.workflow_run_id.clone(),
+            task_id: route.task_id.clone(),
+            result_id: route.result_id.clone(),
+            evaluation_id: route.evaluation_id.clone(),
+            route_id: route.route_id.clone(),
+            action: route.action.clone(),
+            attempt: route.attempt,
+            max_attempts: route.max_attempts,
+        };
+        if self
+            .workgraph_routes
+            .get(&route.source_key)
+            .is_some_and(|applied| applied == &state)
+        {
+            return Ok(());
+        }
+
+        let result = projection
+            .results
+            .iter()
+            .find(|result| result.result_id == route.result_id)
+            .expect("Route Result chain was validated");
+        let dispatch = projection
+            .dispatches
+            .iter()
+            .find(|dispatch| dispatch.lease_id == result.lease_id)
+            .expect("Route Dispatch chain was validated");
+        let Some(active) = self
+            .workgraph_active
+            .get(&dispatch.lease_id)
+            .filter(|lease| {
+                lease.has_dispatch
+                    && lease.task_source_key == route.task_source_key
+                    && lease.task_id == route.task_id
+                    && lease.attempt == route.attempt
+            })
+            .cloned()
+        else {
+            // An otherwise valid chain for a concluded attempt is retained as
+            // history, but it can never affect the currently selected lease.
+            return Ok(());
+        };
+
+        if let Some(lease) = self.workgraph_active.get_mut(&active.lease_id) {
+            lease.completion_eligible = route.action != WORKGRAPH_ROUTE_REWORK;
+        }
+        self.release_workgraph(&active.lease_id, false, delta);
+        self.workgraph_routes
+            .insert(route.source_key.clone(), state);
+
+        let Some(assignment) = self
+            .workgraph_assignments
+            .get_mut(&active.assignment_source_key)
+        else {
+            return Ok(());
+        };
+        assignment.max_attempts = route.max_attempts;
+        assignment.eligible = route.action == WORKGRAPH_ROUTE_REWORK;
+        delta
+            .affected_agents
+            .extend(assignment.permitted_executors.iter().cloned());
+        if route.action == WORKGRAPH_ROUTE_REWORK {
+            self.allocate_workgraph_preferred(
+                &active.assignment_source_key,
+                &active.executor_id,
+                active.slot_number,
+                now,
+                delta,
+            );
+        }
+        Ok(())
     }
 
     fn retract_workgraph_assignment(
@@ -1890,6 +2178,7 @@ impl AllocationState {
             .values()
             .any(|active| active.assignment_source_key == lease.assignment_source_key);
         if !assignment_active {
+            let terminal_route = self.task_has_terminal_route(&lease.task_source_key);
             if let Some(assignment) = self
                 .workgraph_assignments
                 .get_mut(&lease.assignment_source_key)
@@ -1897,7 +2186,8 @@ impl AllocationState {
                 let eligible = self
                     .workgraph_task_identities
                     .get(&assignment.task_source_key)
-                    .is_some_and(|task| task.is_open && task.workgraph_include);
+                    .is_some_and(|task| task.is_open && task.workgraph_include)
+                    && !terminal_route;
                 if assignment.eligible != eligible {
                     assignment.eligible = eligible;
                     delta
@@ -1938,6 +2228,8 @@ impl AllocationState {
         }
         if remove_identity {
             self.workgraph_task_identities.remove(source_key);
+            self.workgraph_routes
+                .retain(|_, route| route.task_source_key != source_key);
         } else if let Some(task) = self.workgraph_task_identities.get_mut(source_key) {
             task.is_open = false;
         }
@@ -1999,6 +2291,8 @@ impl AllocationState {
     }
 
     fn exclude_workgraph_task(&mut self, source_key: &str, delta: &mut AllocationDelta) {
+        self.workgraph_routes
+            .retain(|_, route| route.task_source_key != source_key);
         let leases = self
             .workgraph_active
             .values()
@@ -2056,6 +2350,7 @@ impl AllocationState {
                 .iter()
                 .filter(|(_, assignment)| {
                     assignment.eligible
+                        && assignment.next_attempt < assignment.max_attempts
                         && assignment.permitted_executors.contains(&executor_id)
                         && !self
                             .workgraph_active
@@ -2118,6 +2413,7 @@ impl AllocationState {
                 executor_id: executor_id.clone(),
                 slot_id: slot,
                 slot_number,
+                attempt: assignment.next_attempt,
                 acquired_at: timestamp(now),
                 expires_at: timestamp(
                     now + chrono::Duration::seconds(agent.lease_duration_seconds),
@@ -2130,6 +2426,93 @@ impl AllocationState {
             delta.workgraph_started.push(lease);
             delta.affected_agents.extend(affected_executors);
         }
+    }
+
+    fn task_has_terminal_route(&self, task_source_key: &str) -> bool {
+        self.workgraph_routes.values().any(|route| {
+            route.task_source_key == task_source_key && route.action != WORKGRAPH_ROUTE_REWORK
+        })
+    }
+
+    fn allocate_workgraph_preferred(
+        &mut self,
+        assignment_source_key: &str,
+        executor_id: &str,
+        slot_number: u32,
+        now: DateTime<Utc>,
+        delta: &mut AllocationDelta,
+    ) {
+        let slot = slot_id(executor_id, slot_number);
+        let available = self.agents.get(executor_id).is_some_and(|agent| {
+            agent.configured && slot_number > 0 && slot_number <= agent.configured_slots
+        }) && !self
+            .workgraph_active
+            .values()
+            .any(|lease| lease.slot_id == slot);
+        let eligible = self
+            .workgraph_assignments
+            .get(assignment_source_key)
+            .is_some_and(|assignment| {
+                assignment.eligible
+                    && assignment.next_attempt < assignment.max_attempts
+                    && assignment
+                        .permitted_executors
+                        .iter()
+                        .any(|id| id == executor_id)
+                    && self
+                        .workgraph_task_identities
+                        .get(&assignment.task_source_key)
+                        .is_some_and(|task| task.is_open && task.workgraph_include)
+            });
+        if !available || !eligible {
+            return;
+        }
+
+        let assignment = self
+            .workgraph_assignments
+            .get_mut(assignment_source_key)
+            .expect("eligible preferred assignment exists");
+        let attempt = self
+            .workgraph_assignment_attempts
+            .entry(assignment.assignment_id.clone())
+            .or_insert(assignment.next_attempt);
+        *attempt += 1;
+        assignment.next_attempt = *attempt;
+        assignment.eligible = false;
+        let lease_id = make_lease_id(
+            &assignment.task_id,
+            &assignment.assignment_id,
+            assignment.next_attempt,
+        );
+        let task = self
+            .workgraph_task_identities
+            .get(&assignment.task_source_key)
+            .expect("preferred assignment task exists");
+        let agent = &self.agents[executor_id];
+        let lease = WorkGraphActiveLease {
+            lease_id: lease_id.clone(),
+            task_source_key: assignment.task_source_key.clone(),
+            root_issue_id: assignment.root_issue_id.clone(),
+            workflow_run_id: assignment.workflow_run_id.clone(),
+            task_id: assignment.task_id.clone(),
+            task_element_id: task.task_element_id.clone(),
+            assignment_source_key: assignment_source_key.to_string(),
+            assignment_id: assignment.assignment_id.clone(),
+            executor_id: executor_id.to_string(),
+            slot_id: slot,
+            slot_number,
+            attempt: assignment.next_attempt,
+            acquired_at: timestamp(now),
+            expires_at: timestamp(now + chrono::Duration::seconds(agent.lease_duration_seconds)),
+            has_dispatch: false,
+            completed: false,
+            completion_eligible: true,
+        };
+        self.workgraph_active.insert(lease_id, lease.clone());
+        delta.workgraph_started.push(lease);
+        delta
+            .affected_agents
+            .extend(assignment.permitted_executors.iter().cloned());
     }
 
     fn release_workgraph(&mut self, lease_id: &str, completed: bool, delta: &mut AllocationDelta) {
@@ -2215,8 +2598,13 @@ impl AllocationState {
                 .get(&lease_id)
                 .map(|lease| lease.assignment_source_key.clone())
             {
+                let terminal_route = self
+                    .workgraph_active
+                    .get(&lease_id)
+                    .is_some_and(|lease| self.task_has_terminal_route(&lease.task_source_key));
                 if let Some(assignment) = self.workgraph_assignments.get_mut(&assignment_source) {
-                    assignment.eligible = true;
+                    assignment.eligible =
+                        !terminal_route && assignment.next_attempt < assignment.max_attempts;
                     delta
                         .affected_agents
                         .extend(assignment.permitted_executors.iter().cloned());
@@ -2322,6 +2710,7 @@ impl AllocationState {
                     .values()
                     .filter(|assignment| {
                         assignment.eligible
+                            && assignment.next_attempt < assignment.max_attempts
                             && assignment.permitted_executors.contains(id)
                             && !self
                                 .workgraph_active
@@ -2394,7 +2783,7 @@ mod tests {
     use super::*;
     use crate::protocol::{
         PreparedProjection, PreparedProjectionCommit, WorkGraphEvaluateBinding,
-        WorkGraphResultBinding, WorkGraphTaskBinding,
+        WorkGraphResultBinding, WorkGraphRouteBinding, WorkGraphTaskBinding,
     };
     use async_trait::async_trait;
     use chrono::TimeZone;
@@ -2479,6 +2868,7 @@ mod tests {
             dispatches,
             results: Vec::new(),
             evaluations: Vec::new(),
+            routes: Vec::new(),
         }
     }
 
@@ -2514,6 +2904,127 @@ mod tests {
                 .collect(),
             workgraph_include,
         }
+    }
+
+    fn dispatch_binding(
+        lease: &WorkGraphActiveLease,
+        source_key: &str,
+    ) -> WorkGraphDispatchBinding {
+        WorkGraphDispatchBinding {
+            source_key: source_key.to_string(),
+            task_source_key: lease.task_source_key.clone(),
+            root_issue_id: lease.root_issue_id.clone(),
+            workflow_run_id: lease.workflow_run_id.clone(),
+            task_id: lease.task_id.clone(),
+            assignment_id: lease.assignment_id.clone(),
+            lease_id: lease.lease_id.clone(),
+            executor_id: lease.executor_id.clone(),
+            slot_id: lease.slot_id.clone(),
+        }
+    }
+
+    fn projection_with_route(
+        lease: &WorkGraphActiveLease,
+        dispatch_source: &str,
+        route_source: &str,
+        verdict: &str,
+        action: &str,
+        max_attempts: u64,
+    ) -> WorkGraphAllocatorProjection {
+        let suffix = lease.attempt.to_string();
+        let result_id = format!("result-{suffix}");
+        let evaluation_id = format!("evaluation-{suffix}");
+        let mut desired = projection(vec![dispatch_binding(lease, dispatch_source)]);
+        desired.results.push(WorkGraphResultBinding {
+            source_key: format!("result-comment-{suffix}"),
+            task_source_key: lease.task_source_key.clone(),
+            root_issue_id: lease.root_issue_id.clone(),
+            workflow_run_id: lease.workflow_run_id.clone(),
+            task_id: lease.task_id.clone(),
+            result_id: result_id.clone(),
+            lease_id: lease.lease_id.clone(),
+            attempt: lease.attempt,
+        });
+        desired.evaluations.push(WorkGraphEvaluateBinding {
+            source_key: format!("evaluation-comment-{suffix}"),
+            task_source_key: lease.task_source_key.clone(),
+            root_issue_id: lease.root_issue_id.clone(),
+            workflow_run_id: lease.workflow_run_id.clone(),
+            task_id: lease.task_id.clone(),
+            result_id: result_id.clone(),
+            evaluation_id: evaluation_id.clone(),
+            attempt: lease.attempt,
+            verdict: verdict.to_string(),
+        });
+        desired.routes.push(WorkGraphRouteBinding {
+            source_key: route_source.to_string(),
+            task_source_key: lease.task_source_key.clone(),
+            root_issue_id: lease.root_issue_id.clone(),
+            workflow_run_id: lease.workflow_run_id.clone(),
+            task_id: lease.task_id.clone(),
+            result_id,
+            evaluation_id,
+            route_id: format!("route-{suffix}"),
+            action: action.to_string(),
+            attempt: lease.attempt,
+            max_attempts,
+        });
+        desired
+    }
+
+    fn lifecycle_artifacts_for_projection(
+        projection: &WorkGraphAllocatorProjection,
+    ) -> BTreeMap<String, LifecycleArtifactDocument> {
+        projection
+            .assignments
+            .iter()
+            .map(|binding| {
+                (
+                    &binding.source_key,
+                    &binding.task_source_key,
+                    WORKGRAPH_ASSIGN_MARKER,
+                )
+            })
+            .chain(projection.dispatches.iter().map(|binding| {
+                (
+                    &binding.source_key,
+                    &binding.task_source_key,
+                    WORKGRAPH_DISPATCH_MARKER,
+                )
+            }))
+            .chain(projection.results.iter().map(|binding| {
+                (
+                    &binding.source_key,
+                    &binding.task_source_key,
+                    WORKGRAPH_RESULT_MARKER,
+                )
+            }))
+            .chain(projection.evaluations.iter().map(|binding| {
+                (
+                    &binding.source_key,
+                    &binding.task_source_key,
+                    WORKGRAPH_EVALUATE_MARKER,
+                )
+            }))
+            .chain(projection.routes.iter().map(|binding| {
+                (
+                    &binding.source_key,
+                    &binding.task_source_key,
+                    WORKGRAPH_ROUTE_MARKER,
+                )
+            }))
+            .map(|(source_key, task_source_key, marker)| {
+                (
+                    source_key.clone(),
+                    LifecycleArtifactDocument {
+                        source_key: source_key.clone(),
+                        task_source_key: task_source_key.clone(),
+                        body: marker.to_string(),
+                        created_at_revision: 1,
+                    },
+                )
+            })
+            .collect()
     }
 
     #[tokio::test]
@@ -3437,24 +3948,37 @@ mod tests {
     #[test]
     fn prior_allocator_schema_is_rejected_explicitly() {
         let mut encoded = serde_json::to_value(AllocationState::default()).expect("encode state");
-        encoded["version"] = serde_json::json!(12);
+        encoded["version"] = serde_json::json!(13);
         let state: AllocationState = serde_json::from_value(encoded).expect("decode old state");
         assert!(state
             .validate()
-            .expect_err("schema 12 must be rejected")
-            .contains("version must equal 13"));
+            .expect_err("schema 13 must be rejected")
+            .contains("version must equal 14"));
     }
 
     #[test]
     fn all_action_bindings_validate_direct_root_run_and_task_identities() {
-        let mut desired = projection(Vec::new());
+        let lease_id = make_lease_id("task", "assignment", 1);
+        let mut desired = projection(vec![WorkGraphDispatchBinding {
+            source_key: "dispatch-comment".to_string(),
+            task_source_key: "issue".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: "run".to_string(),
+            task_id: "task".to_string(),
+            assignment_id: "assignment".to_string(),
+            lease_id: lease_id.clone(),
+            executor_id: "executor".to_string(),
+            slot_id: "executor:1".to_string(),
+        }]);
         desired.results.push(WorkGraphResultBinding {
             source_key: "result-comment".to_string(),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
             workflow_run_id: "run".to_string(),
             task_id: "task".to_string(),
-            lease_id: "lease".to_string(),
+            result_id: "result".to_string(),
+            lease_id,
+            attempt: 1,
         });
         desired.evaluations.push(WorkGraphEvaluateBinding {
             source_key: "evaluate-comment".to_string(),
@@ -3462,9 +3986,35 @@ mod tests {
             root_issue_id: "root".to_string(),
             workflow_run_id: "run".to_string(),
             task_id: "task".to_string(),
+            result_id: "result".to_string(),
+            evaluation_id: "evaluation".to_string(),
+            attempt: 1,
+            verdict: WORKGRAPH_EVALUATION_ACCEPTED.to_string(),
+        });
+        desired.routes.push(WorkGraphRouteBinding {
+            source_key: "route-comment".to_string(),
+            task_source_key: "issue".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: "run".to_string(),
+            task_id: "task".to_string(),
+            result_id: "result".to_string(),
+            evaluation_id: "evaluation".to_string(),
+            route_id: "route".to_string(),
+            action: "complete".to_string(),
+            attempt: 1,
+            max_attempts: 3,
         });
         let tasks = BTreeMap::from([("issue".to_string(), task_document(true))]);
         let artifacts = BTreeMap::from([
+            (
+                "dispatch-comment".to_string(),
+                LifecycleArtifactDocument {
+                    source_key: "dispatch-comment".to_string(),
+                    task_source_key: "issue".to_string(),
+                    body: format!("{WORKGRAPH_DISPATCH_MARKER}\n"),
+                    created_at_revision: 1,
+                },
+            ),
             (
                 "assignment-comment".to_string(),
                 LifecycleArtifactDocument {
@@ -3492,6 +4042,15 @@ mod tests {
                     created_at_revision: 1,
                 },
             ),
+            (
+                "route-comment".to_string(),
+                LifecycleArtifactDocument {
+                    source_key: "route-comment".to_string(),
+                    task_source_key: "issue".to_string(),
+                    body: format!("{WORKGRAPH_ROUTE_MARKER}\n"),
+                    created_at_revision: 1,
+                },
+            ),
         ]);
 
         validate_workgraph_projection(&desired, &tasks, &artifacts)
@@ -3499,9 +4058,373 @@ mod tests {
         let encoded = serde_json::to_value(&desired).expect("serialize projection");
         assert_eq!(encoded["results"][0]["rootIssueId"], "root");
         assert_eq!(encoded["evaluations"][0]["workflowRunId"], "run");
+        assert_eq!(encoded["routes"][0]["evaluationId"], "evaluation");
 
         desired.evaluations[0].workflow_run_id = "other-run".to_string();
         assert!(validate_workgraph_projection(&desired, &tasks, &artifacts).is_err());
+    }
+
+    #[test]
+    fn rejected_rework_releases_selected_attempt_and_reuses_assignment_slot() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("timestamp");
+        let documents = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let mut state = AllocationState::default();
+        state.sync_agents(
+            &AgentFile {
+                version: 1,
+                agents: vec![AgentDefinition {
+                    agent_id: "executor".to_string(),
+                    slots: 1,
+                    lease_duration: "PT1M".to_string(),
+                    lease_duration_seconds: 60,
+                }],
+            },
+            now,
+        );
+        state
+            .reconcile_workgraph(projection(Vec::new()), &documents, 1, now)
+            .expect("allocate first attempt");
+        let first = state
+            .workgraph_active
+            .values()
+            .next()
+            .cloned()
+            .expect("first lease");
+        let routed = projection_with_route(
+            &first,
+            "dispatch-1",
+            "route-1",
+            WORKGRAPH_EVALUATION_REJECTED,
+            WORKGRAPH_ROUTE_REWORK,
+            2,
+        );
+        state
+            .reconcile_workgraph(routed.clone(), &documents, 2, now)
+            .expect("apply rejected rework route");
+
+        let second = state.workgraph_active.values().next().expect("fresh lease");
+        assert_ne!(second.lease_id, first.lease_id);
+        assert_eq!(second.attempt, 2);
+        assert_eq!(second.assignment_id, first.assignment_id);
+        assert_eq!(second.executor_id, first.executor_id);
+        assert_eq!(second.slot_id, first.slot_id);
+        assert!(!second.has_dispatch);
+        assert!(state
+            .workgraph_dispatched
+            .get("dispatch-1")
+            .is_some_and(|lease| !lease.completed && !lease.completion_eligible));
+
+        state
+            .reconcile_workgraph(routed, &documents, 3, now)
+            .expect("replaying Route is idempotent");
+        assert_eq!(state.workgraph_active.len(), 1);
+        assert_eq!(
+            state
+                .workgraph_assignment_attempts
+                .get("assignment")
+                .copied(),
+            Some(2)
+        );
+        state.expire(now + chrono::Duration::minutes(2));
+        assert!(state.workgraph_active.is_empty());
+        assert!(!state.workgraph_assignments["assignment-comment"].eligible);
+        state.validate().expect("rework state");
+    }
+
+    #[test]
+    fn accepted_route_releases_lease_without_redispatch() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("timestamp");
+        let documents = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let mut state = AllocationState::default();
+        state.sync_agents(
+            &AgentFile {
+                version: 1,
+                agents: vec![AgentDefinition {
+                    agent_id: "executor".to_string(),
+                    slots: 1,
+                    lease_duration: "PT1M".to_string(),
+                    lease_duration_seconds: 60,
+                }],
+            },
+            now,
+        );
+        state
+            .reconcile_workgraph(projection(Vec::new()), &documents, 1, now)
+            .expect("allocate");
+        let lease = state
+            .workgraph_active
+            .values()
+            .next()
+            .cloned()
+            .expect("active lease");
+        let routed = projection_with_route(
+            &lease,
+            "dispatch-1",
+            "route-1",
+            WORKGRAPH_EVALUATION_ACCEPTED,
+            "complete",
+            3,
+        );
+        state
+            .reconcile_workgraph(routed.clone(), &documents, 2, now)
+            .expect("apply accepted route");
+        assert!(state.workgraph_active.is_empty());
+        assert!(!state.workgraph_assignments["assignment-comment"].eligible);
+
+        let encoded = serde_json::to_vec(&state).expect("checkpoint allocator");
+        state = serde_json::from_slice(&encoded).expect("restart allocator");
+        state.validate().expect("restored accepted route state");
+        state
+            .reconcile_workgraph(routed, &documents, 3, now)
+            .expect("accepted Route replay after restart");
+        assert!(state.workgraph_active.is_empty());
+        assert_eq!(state.workgraph_assignment_attempts["assignment"], 1);
+        state
+            .reconcile_workgraph(projection(Vec::new()), &documents, 4, now)
+            .expect("temporary projection gap remains fail closed");
+        assert!(state.workgraph_active.is_empty());
+        assert!(!state.workgraph_assignments["assignment-comment"].eligible);
+        state.validate().expect("accepted route state");
+    }
+
+    #[test]
+    fn stale_prior_route_cannot_release_rework_attempt() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("timestamp");
+        let documents = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let mut state = AllocationState::default();
+        state.sync_agents(
+            &AgentFile {
+                version: 1,
+                agents: vec![AgentDefinition {
+                    agent_id: "executor".to_string(),
+                    slots: 1,
+                    lease_duration: "PT1M".to_string(),
+                    lease_duration_seconds: 60,
+                }],
+            },
+            now,
+        );
+        state
+            .reconcile_workgraph(projection(Vec::new()), &documents, 1, now)
+            .expect("allocate");
+        let first = state
+            .workgraph_active
+            .values()
+            .next()
+            .cloned()
+            .expect("first lease");
+        let route = projection_with_route(
+            &first,
+            "dispatch-1",
+            "route-1",
+            WORKGRAPH_EVALUATION_REJECTED,
+            WORKGRAPH_ROUTE_REWORK,
+            3,
+        );
+        state
+            .reconcile_workgraph(route, &documents, 2, now)
+            .expect("rework");
+        let second_id = state
+            .workgraph_active
+            .values()
+            .next()
+            .expect("second lease")
+            .lease_id
+            .clone();
+        let stale = projection_with_route(
+            &first,
+            "dispatch-1",
+            "late-route-1",
+            WORKGRAPH_EVALUATION_REJECTED,
+            WORKGRAPH_ROUTE_REWORK,
+            3,
+        );
+        state
+            .reconcile_workgraph(stale, &documents, 3, now)
+            .expect("stale Route is retained but inert");
+        assert_eq!(
+            state.workgraph_active.keys().cloned().collect::<Vec<_>>(),
+            vec![second_id]
+        );
+        assert!(!state.workgraph_routes.contains_key("late-route-1"));
+    }
+
+    #[test]
+    fn route_validation_rejects_wrong_chain_and_rework_at_attempt_limit() {
+        let lease = WorkGraphActiveLease {
+            lease_id: make_lease_id("task", "assignment", 1),
+            task_source_key: "issue".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: "run".to_string(),
+            task_id: "task".to_string(),
+            task_element_id: "task-element".to_string(),
+            assignment_source_key: "assignment-comment".to_string(),
+            assignment_id: "assignment".to_string(),
+            executor_id: "executor".to_string(),
+            slot_id: "executor:1".to_string(),
+            slot_number: 1,
+            attempt: 1,
+            acquired_at: "2026-01-01T00:00:00.000Z".to_string(),
+            expires_at: "2026-01-01T00:01:00.000Z".to_string(),
+            has_dispatch: true,
+            completed: false,
+            completion_eligible: true,
+        };
+        let mut desired = projection_with_route(
+            &lease,
+            "dispatch-1",
+            "route-1",
+            WORKGRAPH_EVALUATION_REJECTED,
+            WORKGRAPH_ROUTE_REWORK,
+            2,
+        );
+        let tasks = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let artifacts = lifecycle_artifacts_for_projection(&desired);
+        validate_workgraph_projection(&desired, &tasks, &artifacts).expect("valid chain");
+
+        desired.routes[0].result_id = "other-result".to_string();
+        assert!(validate_workgraph_projection(&desired, &tasks, &artifacts).is_err());
+        desired.routes[0].result_id = "result-1".to_string();
+        desired.routes[0].max_attempts = 1;
+        assert!(validate_workgraph_projection(&desired, &tasks, &artifacts).is_err());
+        desired.routes[0].action = "error".to_string();
+        validate_workgraph_projection(&desired, &tasks, &artifacts)
+            .expect("bounded workflow may signal its error Route at the limit");
+        desired.routes[0].action = WORKGRAPH_ROUTE_REWORK.to_string();
+        desired.routes[0].max_attempts = 2;
+        desired.evaluations[0].verdict = WORKGRAPH_EVALUATION_ACCEPTED.to_string();
+        assert!(validate_workgraph_projection(&desired, &tasks, &artifacts).is_err());
+    }
+
+    #[test]
+    fn route_document_arriving_first_survives_restart_and_later_converges() {
+        let lease = WorkGraphActiveLease {
+            lease_id: make_lease_id("task", "assignment", 1),
+            task_source_key: "issue".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: "run".to_string(),
+            task_id: "task".to_string(),
+            task_element_id: "task-element".to_string(),
+            assignment_source_key: "assignment-comment".to_string(),
+            assignment_id: "assignment".to_string(),
+            executor_id: "executor".to_string(),
+            slot_id: "executor:1".to_string(),
+            slot_number: 1,
+            attempt: 1,
+            acquired_at: "2026-01-01T00:00:00.000Z".to_string(),
+            expires_at: "2026-01-01T00:01:00.000Z".to_string(),
+            has_dispatch: true,
+            completed: false,
+            completion_eligible: true,
+        };
+        let desired = projection_with_route(
+            &lease,
+            "dispatch-1",
+            "route-1",
+            WORKGRAPH_EVALUATION_ACCEPTED,
+            "complete",
+            3,
+        );
+        let complete_artifacts = lifecycle_artifacts_for_projection(&desired);
+        let route = complete_artifacts["route-1"].clone();
+        let (_, _, _, _, _, artifacts) = stage_workgraph_documents(
+            &AllocationState::default(),
+            &[ProjectionInput::UpsertLifecycleArtifact(route)],
+        );
+        assert_eq!(artifacts.len(), 1);
+
+        let mut restarted = AllocationState::default();
+        restarted.workgraph_artifacts = artifacts;
+        restarted = serde_json::from_slice(
+            &serde_json::to_vec(&restarted).expect("checkpoint out-of-order Route"),
+        )
+        .expect("restart before dependencies");
+        let mut tasks = BTreeMap::new();
+        let mut artifacts = restarted.workgraph_artifacts.clone();
+        apply_workgraph_documents(
+            &complete_artifacts
+                .values()
+                .filter(|artifact| artifact.source_key != "route-1")
+                .cloned()
+                .map(ProjectionInput::UpsertLifecycleArtifact)
+                .chain(std::iter::once(ProjectionInput::UpsertTask(task_document(
+                    true,
+                ))))
+                .collect::<Vec<_>>(),
+            &mut BTreeMap::new(),
+            &mut BTreeMap::new(),
+            &mut BTreeMap::new(),
+            &mut BTreeMap::new(),
+            &mut tasks,
+            &mut artifacts,
+        );
+        validate_workgraph_projection(&desired, &tasks, &artifacts)
+            .expect("full authoritative chain converges");
+    }
+
+    #[test]
+    fn stale_generation_fences_result_evaluation_and_route_chain() {
+        let lease = WorkGraphActiveLease {
+            lease_id: make_lease_id("task", "assignment", 1),
+            task_source_key: "issue".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: "run".to_string(),
+            task_id: "task".to_string(),
+            task_element_id: "task-element".to_string(),
+            assignment_source_key: "assignment-comment".to_string(),
+            assignment_id: "assignment".to_string(),
+            executor_id: "executor".to_string(),
+            slot_id: "executor:1".to_string(),
+            slot_number: 1,
+            attempt: 1,
+            acquired_at: "2026-01-01T00:00:00.000Z".to_string(),
+            expires_at: "2026-01-01T00:01:00.000Z".to_string(),
+            has_dispatch: true,
+            completed: false,
+            completion_eligible: true,
+        };
+        let mut desired = projection_with_route(
+            &lease,
+            "dispatch-1",
+            "route-1",
+            WORKGRAPH_EVALUATION_REJECTED,
+            WORKGRAPH_ROUTE_REWORK,
+            3,
+        );
+        let mut state = AllocationState::default();
+        state.workgraph_authorizations.insert(
+            "issue".to_string(),
+            WorkGraphAuthorizationState {
+                root_issue_id: "root".to_string(),
+                generation: 2,
+                cutoff_revision: 20,
+                transition_revision: 20,
+                included: true,
+            },
+        );
+        state.workgraph_artifacts = lifecycle_artifacts_for_projection(&desired);
+        state.workgraph_artifact_generations.extend(
+            state
+                .workgraph_artifacts
+                .keys()
+                .map(|source_key| (source_key.clone(), 1)),
+        );
+
+        state.fence_stale_workgraph_authorizations(&mut desired);
+        assert!(desired.assignments.is_empty());
+        assert!(desired.dispatches.is_empty());
+        assert!(desired.results.is_empty());
+        assert!(desired.evaluations.is_empty());
+        assert!(desired.routes.is_empty());
     }
 
     #[test]

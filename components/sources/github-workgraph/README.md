@@ -14,6 +14,7 @@ Core recognizes these exact body prefixes:
 - `WorkGraphTaskDispatch/v1`
 - `WorkGraphTaskResult/v1`
 - `WorkGraphTaskEvaluate/v1`
+- `WorkGraphTaskRoute/v1`
 
 An ordinary user-created Issue carrying the exact, case-sensitive `workgraph`
 label and not matching the configured task Issue Type is a **Root Issue**.
@@ -62,6 +63,8 @@ they compile:
   bindings;
 - populate the `results` and `evaluations` allocator projection collections
   with the corresponding identity-bearing bindings.
+- populate `routes` with the canonical selected Result/Evaluation chain,
+  action, attempt, and configured attempt bound.
 - preserve `createdAtRevision` on lifecycle artifacts and
   `stateFingerprint`/`authorizationTransition` on issue revision records when
   matching projection inputs.
@@ -70,8 +73,9 @@ This is a single v1 contract change. No alternate wire format or compatibility
 projection is provided. The lease-validation HTTP response remains unchanged
 until the reporter and endpoint can be updated together.
 
-Allocator state schema 13 durably records Issue-state fingerprints and
-authorization generations/cutoffs. Older state is rejected explicitly rather
+Allocator state schema 14 durably records Issue-state fingerprints,
+authorization generations/cutoffs, and applied Route decisions.
+Older state is rejected explicitly rather
 than migrated.
 
 ## Configuration
@@ -140,7 +144,7 @@ Authorization: Bearer <leaseValidationToken>
 
 Its request uses the canonical v1 allocation fields: `taskId`, `leaseId`,
 `assignmentId`, `executorId`, `slotId`, and `claimId`. Source-owned task,
-Assign, Lease, Dispatch, Result, and Evaluate representations additionally
+Assign, Lease, Dispatch, Result, Evaluate, and Route representations additionally
 carry `rootIssueId` and `workflowRunId` alongside `taskId`, so root and run
 lookups do not require a graph traversal.
 The first claim durably reserves that active Dispatch Lease for one Result writer;
@@ -156,12 +160,12 @@ The source advertises only the current v1 schema:
 - Nodes: `GitHubIssue`, `WorkGraphRootIssue`, `WorkflowDefinition`, `TaskDefinition`,
   `WorkflowRun`, `WorkGraphTask`, `WorkGraphTaskAssign`,
   `WorkGraphTaskDispatch`, `WorkGraphTaskResult`,
-  `WorkGraphTaskEvaluate`, `WorkGraphTaskArtifact`,
+  `WorkGraphTaskEvaluate`, `WorkGraphTaskRoute`, `WorkGraphTaskArtifact`,
   `WorkGraphTaskLease`, `WorkGraphAgent`, `WorkGraphAgentSlot`, and
   `WorkGraphError`.
 - Relations: `HAS_ROOT`, `HAS_TASK`, `DECLARES_CHILD`, `USES_DEFINITION`,
   `INSTANCE_OF`, `IN_RUN`, `TASK_FOR`, `ROOT_TASK_FOR`, `RUN_FOR`,
-  `ASSIGNS`, `DISPATCHES`, `RESULT_FOR`, `RESULT_FROM_LEASE`, `EVALUATES`,
+  `ASSIGNS`, `DISPATCHES`, `RESULT_FOR`, `RESULT_FROM_LEASE`, `EVALUATES`, `ROUTES`,
   `ARTIFACT_FOR`, `HAS_SLOT`, `LEASE_FOR`, and `LEASES_SLOT`.
 
 State is durable and fail-closed. Unsupported persisted state must be cleared

@@ -13,7 +13,7 @@ use crate::model::{
 };
 use crate::protocol::ProjectionInput;
 
-pub const NODE_LABELS: [&str; 15] = [
+pub const NODE_LABELS: [&str; 16] = [
     "GitHubIssue",
     "WorkGraphRootIssue",
     "WorkflowDefinition",
@@ -24,6 +24,7 @@ pub const NODE_LABELS: [&str; 15] = [
     "WorkGraphTaskDispatch",
     "WorkGraphTaskResult",
     "WorkGraphTaskEvaluate",
+    "WorkGraphTaskRoute",
     "WorkGraphTaskArtifact",
     "WorkGraphTaskLease",
     "WorkGraphAgent",
@@ -31,7 +32,7 @@ pub const NODE_LABELS: [&str; 15] = [
     "WorkGraphError",
 ];
 
-pub const RELATION_LABELS: [&str; 18] = [
+pub const RELATION_LABELS: [&str; 19] = [
     "HAS_ROOT",
     "HAS_TASK",
     "DECLARES_CHILD",
@@ -46,6 +47,7 @@ pub const RELATION_LABELS: [&str; 18] = [
     "RESULT_FOR",
     "RESULT_FROM_LEASE",
     "EVALUATES",
+    "ROUTES",
     "ARTIFACT_FOR",
     "HAS_SLOT",
     "LEASE_FOR",
@@ -294,6 +296,7 @@ fn upsert_workgraph_lease(changes: &mut Changes<'_>, lease: &WorkGraphActiveLeas
     properties.text("assignmentId", &lease.assignment_id);
     properties.text("executorId", &lease.executor_id);
     properties.text("slotId", &lease.slot_id);
+    properties.insert("attempt", ElementValue::Integer(lease.attempt as i64));
     properties.text("acquiredAt", &lease.acquired_at);
     properties.text("expiresAt", &lease.expires_at);
     properties.insert("active", ElementValue::Bool(active));

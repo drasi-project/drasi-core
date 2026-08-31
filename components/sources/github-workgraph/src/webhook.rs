@@ -3624,6 +3624,46 @@ mod workgraph_tests {
     }
 
     #[tokio::test]
+    async fn route_artifact_uses_reporter_trust_and_preserves_task_source_key() {
+        let body = "WorkGraphTaskRoute/v1\n\n```json\n{\"routeId\":\"route-1\"}\n```\n";
+        let event = json!({
+            "action": "created",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "issue": task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n"),
+            "comment": {
+                "node_id": "IC_route",
+                "body": body,
+                "user": {"node_id": "U_report", "login": "reporter"},
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }
+        });
+        let trust = ProtocolTrust {
+            task_creators: vec![TrustedIdentity {
+                id: "U_creator".to_string(),
+                login: "task-creator".to_string(),
+            }],
+            dispatchers: Vec::new(),
+            reporters: vec![TrustedIdentity {
+                id: "U_report".to_string(),
+                login: "reporter".to_string(),
+            }],
+        };
+        let (_temp, _projector, state) = ingress_state(Some(trust)).await;
+        let inputs = try_workgraph_comment(&state, &event)
+            .expect("normalize Route")
+            .expect("Route artifact");
+        assert!(matches!(
+            &inputs[0],
+            ProjectionInput::UpsertLifecycleArtifact(document)
+                if document.source_key == "IC_route"
+                    && document.task_source_key == "I_task"
+                    && document.body == body
+        ));
+    }
+
+    #[tokio::test]
     async fn editing_away_lifecycle_marker_retracts_without_requiring_new_trust() {
         let (_temp, _projector, state) = ingress_state(None).await;
         let event = json!({
