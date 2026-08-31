@@ -120,6 +120,20 @@ struct LeaseValidation {
     claim_id: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LeaseValidationResponse {
+    lease_id: String,
+    task_id: String,
+    assignment_id: String,
+    attempt: u64,
+    executor_id: String,
+    slot_id: String,
+    claim_id: String,
+    acquired_at: String,
+    expires_at: String,
+}
+
 type Rejection = (StatusCode, String);
 
 fn reject<T>(code: StatusCode, message: impl Into<String>) -> Result<T, Rejection> {
@@ -193,14 +207,17 @@ async fn validate_lease(
     {
         Ok(Some(active)) => (
             StatusCode::OK,
-            Json(json!({
-                "leaseId": active.lease_id, "taskId": active.task_id,
-                "assignmentId": active.assignment_id,
-                "executorId": active.executor_id, "slotId": active.slot_id,
-                "claimId": request.claim_id,
-                "acquiredAt": active.acquired_at,
-                "expiresAt": active.expires_at
-            })),
+            Json(LeaseValidationResponse {
+                lease_id: active.lease_id,
+                task_id: active.task_id,
+                assignment_id: active.assignment_id,
+                attempt: active.attempt,
+                executor_id: active.executor_id,
+                slot_id: active.slot_id,
+                claim_id: request.claim_id,
+                acquired_at: active.acquired_at,
+                expires_at: active.expires_at,
+            }),
         )
             .into_response(),
         Ok(None) => StatusCode::CONFLICT.into_response(),
@@ -2257,6 +2274,46 @@ mod workgraph_tests {
     struct RecordingCommit {
         inputs: Vec<ProjectionInput>,
         committed: Arc<Mutex<Vec<Vec<ProjectionInput>>>>,
+    }
+
+    #[test]
+    fn lease_validation_response_includes_authoritative_numeric_attempt() {
+        let response = serde_json::to_value(LeaseValidationResponse {
+            lease_id: "lease-2".to_string(),
+            task_id: "task".to_string(),
+            assignment_id: "assignment".to_string(),
+            attempt: 2,
+            executor_id: "executor".to_string(),
+            slot_id: "executor/1".to_string(),
+            claim_id: "result-claim".to_string(),
+            acquired_at: "2026-08-30T20:00:00Z".to_string(),
+            expires_at: "2026-08-30T20:05:00Z".to_string(),
+        })
+        .expect("serialize lease validation response");
+
+        assert_eq!(response["attempt"], json!(2));
+        assert_eq!(
+            response
+                .as_object()
+                .expect("response object")
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                "acquiredAt",
+                "assignmentId",
+                "attempt",
+                "claimId",
+                "executorId",
+                "expiresAt",
+                "leaseId",
+                "slotId",
+                "taskId",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+        );
     }
 
     #[async_trait]

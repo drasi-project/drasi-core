@@ -161,7 +161,11 @@ Assign, Lease, Dispatch, Result, Evaluate, and Route representations additionall
 carry `rootIssueId` and `workflowRunId` alongside `taskId`, so root and run
 lookups do not require a graph traversal.
 The first claim durably reserves that active Dispatch Lease for one Result writer;
-a competing claim is rejected.
+a competing claim is rejected. A successful response contains `leaseId`,
+`taskId`, `assignmentId`, `attempt`, `executorId`, `slotId`, `claimId`,
+`acquiredAt`, and `expiresAt`. `attempt` is the authoritative one-based active
+Lease attempt (bounded to 64, and therefore a safe JSON integer). JSON object
+field ordering is not part of the contract.
 An active `WorkGraphTaskLease` remains active and occupies its slot after
 Dispatch acceptance. Its `hasDispatch` property records that exact transition;
 expiry makes the Lease historical and allocates a fresh retry attempt.
