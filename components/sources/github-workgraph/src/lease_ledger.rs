@@ -70,6 +70,8 @@ pub struct WorkGraphActiveLease {
     pub has_dispatch: bool,
     pub completed: bool,
     pub completion_eligible: bool,
+    #[serde(default)]
+    pub route_selected: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1816,6 +1818,7 @@ impl AllocationState {
                 || assignment.next_attempt == 0
                 || lease.attempt != assignment.next_attempt
                 || lease.completed
+                || lease.route_selected
                 || !lease.completion_eligible
                 || lease_id != &make_lease_id(&lease.task_id, &lease.assignment_id, lease.attempt)
                 || lease.slot_id != slot_id(&lease.executor_id, lease.slot_number)
@@ -1837,7 +1840,7 @@ impl AllocationState {
             }
         }
         let mut dispatched_lease_ids = BTreeSet::new();
-        let mut completed_workgraph_tasks = BTreeSet::new();
+        let mut selected_workgraph_tasks = BTreeSet::new();
         for (dispatch_source, lease) in &self.workgraph_dispatched {
             let assignment = self
                 .workgraph_assignments
@@ -1863,6 +1866,14 @@ impl AllocationState {
                 || lease.attempt == 0
                 || lease.attempt > assignment.next_attempt
                 || (lease.completed && !lease.completion_eligible)
+                || (lease.route_selected
+                    && (!lease.completion_eligible
+                        || (task.is_open
+                            && !self.workgraph_routes.values().any(|route| {
+                                route.task_source_key == lease.task_source_key
+                                    && route.attempt == lease.attempt
+                                    && route.action != WORKGRAPH_ROUTE_REWORK
+                            }))))
                 || lease.slot_number == 0
                 || lease.slot_id != slot_id(&lease.executor_id, lease.slot_number)
                 || [
@@ -1878,8 +1889,9 @@ impl AllocationState {
                     .workgraph_active
                     .get(&lease.lease_id)
                     .is_some_and(|active| active != lease)
-                || (lease.completed
-                    && (!completed_workgraph_tasks.insert(&lease.task_source_key) || task.is_open))
+                || ((lease.completed || lease.route_selected)
+                    && !selected_workgraph_tasks.insert(&lease.task_source_key))
+                || (lease.completed && task.is_open)
             {
                 return Err("WorkGraph dispatched lease violates canonical invariants".into());
             }
@@ -1905,7 +1917,7 @@ impl AllocationState {
         if self
             .workgraph_active
             .values()
-            .any(|lease| completed_workgraph_tasks.contains(&lease.task_source_key))
+            .any(|lease| selected_workgraph_tasks.contains(&lease.task_source_key))
         {
             return Err("WorkGraph task has multiple selected leases".into());
         }
@@ -2388,6 +2400,18 @@ impl AllocationState {
         {
             if route.action == WORKGRAPH_ROUTE_REWORK {
                 self.restore_workgraph_rework(&state, now, delta);
+            } else if let Some(lease) = self
+                .workgraph_dispatched
+                .get_mut(&dispatch.source_key)
+                .filter(|lease| {
+                    lease.task_source_key == route.task_source_key
+                        && lease.attempt == route.attempt
+                        && !lease.completed
+                        && !lease.route_selected
+                })
+            {
+                lease.route_selected = true;
+                delta.workgraph_historical.push(lease.clone());
             }
             return Ok(());
         }
@@ -2419,6 +2443,7 @@ impl AllocationState {
 
         if let Some(lease) = self.workgraph_active.get_mut(&active.lease_id) {
             lease.completion_eligible = route.action != WORKGRAPH_ROUTE_REWORK;
+            lease.route_selected = route.action != WORKGRAPH_ROUTE_REWORK;
         }
         self.release_workgraph(&active.lease_id, false, delta);
         delta
@@ -2685,6 +2710,14 @@ impl AllocationState {
     fn exclude_workgraph_task(&mut self, source_key: &str, delta: &mut AllocationDelta) {
         self.workgraph_routes
             .retain(|_, route| route.task_source_key != source_key);
+        for lease in self
+            .workgraph_dispatched
+            .values_mut()
+            .filter(|lease| lease.task_source_key == source_key && lease.route_selected)
+        {
+            lease.route_selected = false;
+            delta.workgraph_historical.push(lease.clone());
+        }
         let leases = self
             .workgraph_active
             .values()
@@ -2714,6 +2747,7 @@ impl AllocationState {
         }) {
             lease.completed = false;
             lease.completion_eligible = false;
+            lease.route_selected = false;
             delta.workgraph_historical.push(lease.clone());
         }
     }
@@ -2813,6 +2847,7 @@ impl AllocationState {
                 has_dispatch: false,
                 completed: false,
                 completion_eligible: true,
+                route_selected: false,
             };
             self.workgraph_active.insert(lease_id, lease.clone());
             delta.workgraph_started.push(lease);
@@ -2899,6 +2934,7 @@ impl AllocationState {
             has_dispatch: false,
             completed: false,
             completion_eligible: true,
+            route_selected: false,
         };
         self.workgraph_active.insert(lease_id, lease.clone());
         delta.workgraph_started.push(lease);
@@ -4583,13 +4619,24 @@ mod tests {
             .expect("apply accepted route");
         assert!(state.workgraph_active.is_empty());
         assert!(!state.workgraph_assignments["assignment-comment"].eligible);
+        assert!(state.workgraph_dispatched["dispatch-1"].route_selected);
 
+        state
+            .workgraph_dispatched
+            .get_mut("dispatch-1")
+            .expect("routed dispatch")
+            .route_selected = false;
         let encoded = serde_json::to_vec(&state).expect("checkpoint allocator");
         state = serde_json::from_slice(&encoded).expect("restart allocator");
         state.validate().expect("restored accepted route state");
-        state
+        let replay = state
             .reconcile_workgraph(routed, &documents, 3, now)
             .expect("accepted Route replay after restart");
+        assert!(state.workgraph_dispatched["dispatch-1"].route_selected);
+        assert!(replay
+            .workgraph_historical
+            .iter()
+            .any(|lease| lease.route_selected));
         assert!(state.workgraph_active.is_empty());
         assert_eq!(state.workgraph_assignment_attempts["assignment"], 1);
         state
@@ -5016,6 +5063,19 @@ mod tests {
         assert!(!lease_states
             .iter()
             .any(|value| **value == drasi_core::models::ElementValue::Bool(true)));
+        let selected_states = changes
+            .iter()
+            .filter_map(|change| match change {
+                SourceChange::Update {
+                    element: drasi_core::models::Element::Node { properties, .. },
+                    ..
+                } => properties.get("selected"),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(selected_states
+            .iter()
+            .any(|value| **value == drasi_core::models::ElementValue::Bool(true)));
     }
 
     #[test]
@@ -5111,6 +5171,7 @@ mod tests {
             has_dispatch: true,
             completed: false,
             completion_eligible: true,
+            route_selected: false,
         };
         let mut desired = projection_with_route(
             &lease,
@@ -5158,6 +5219,7 @@ mod tests {
             has_dispatch: true,
             completed: false,
             completion_eligible: true,
+            route_selected: false,
         };
         let desired = projection_with_route(
             &lease,
@@ -5224,6 +5286,7 @@ mod tests {
             has_dispatch: true,
             completed: false,
             completion_eligible: true,
+            route_selected: false,
         };
         let mut desired = projection_with_route(
             &lease,

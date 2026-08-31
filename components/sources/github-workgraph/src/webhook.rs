@@ -2309,6 +2309,7 @@ mod workgraph_tests {
             has_dispatch: true,
             completed: false,
             completion_eligible: false,
+            route_selected: false,
         };
         let response = serde_json::to_value(LeaseValidationResponse::from_active(
             active,

@@ -306,7 +306,10 @@ fn upsert_workgraph_lease(changes: &mut Changes<'_>, lease: &WorkGraphActiveLeas
         "completionEligible",
         ElementValue::Bool(lease.completion_eligible),
     );
-    properties.insert("selected", ElementValue::Bool(active || lease.completed));
+    properties.insert(
+        "selected",
+        ElementValue::Bool(active || lease.completed || lease.route_selected),
+    );
     changes.node(Update, &element_id, NODE_WORKGRAPH_TASK_LEASE, properties);
     for (artifact_name, artifact_id) in workgraph_lease_artifact_details(lease) {
         let artifact_element = workgraph_lease_artifact_element_id(&lease.lease_id, artifact_name);
