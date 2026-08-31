@@ -85,7 +85,7 @@ they compile:
 This is a single v1 contract change. No alternate wire format or compatibility
 projection is provided.
 
-Allocator state schema 17 durably records Issue and lifecycle-comment revisions,
+Allocator state schema 18 durably records Issue and lifecycle-comment revisions,
 authorization generations/cutoffs, generation-bound applied Route decisions,
 and Root Issue comment revision tombstones.
 Older state is rejected explicitly rather

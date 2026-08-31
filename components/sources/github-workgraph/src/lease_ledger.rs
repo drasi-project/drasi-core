@@ -25,11 +25,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const VERSION: u8 = 17;
+const VERSION: u8 = 18;
 const STATE_KEY: &str = "allocator:state";
 const DELIVERY_PREFIX: &str = "delivery:";
 const WORKGRAPH_ORIGIN_PREFIX: &str = "workgraph-origin:";
 const MAX_WORKGRAPH_ID_LENGTH: usize = 256;
+const WORKGRAPH_TASK_ID_PREFIX: &str = "workgraph-v1:task:sha256:";
 const MAX_WORKGRAPH_PERMITTED_EXECUTORS: usize = 64;
 pub(crate) const MAX_WORKGRAPH_ATTEMPTS: u64 = 64;
 
@@ -1076,7 +1077,7 @@ fn validate_workgraph_projection(
                 && valid_workgraph_id(&task.source_key)
                 && valid_workgraph_id(&task.root_issue_id)
                 && valid_workgraph_id(&task.workflow_run_id)
-                && valid_workgraph_id(&task.task_id)
+                && valid_workgraph_task_id(&task.task_id)
                 && valid_workgraph_id(&task.task_element_id)
                 && task_ids.insert(&task.task_id)
                 && task_elements.insert(&task.task_element_id),
@@ -1331,6 +1332,17 @@ fn validate_workgraph_projection(
 
 fn valid_workgraph_id(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= MAX_WORKGRAPH_ID_LENGTH
+}
+
+fn valid_workgraph_task_id(value: &str) -> bool {
+    value
+        .strip_prefix(WORKGRAPH_TASK_ID_PREFIX)
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
 }
 
 fn valid_workgraph_inclusion(labels: &[String], included: bool) -> bool {
@@ -1681,7 +1693,7 @@ impl AllocationState {
             if source_key.trim().is_empty()
                 || !valid_workgraph_id(&task.root_issue_id)
                 || !valid_workgraph_id(&task.workflow_run_id)
-                || task.task_id.trim().is_empty()
+                || !valid_workgraph_task_id(&task.task_id)
                 || task.task_element_id.trim().is_empty()
                 || !canonical_task_ids.insert(&task.task_id)
                 || !canonical_task_elements.insert(&task.task_element_id)
@@ -3290,6 +3302,11 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::Mutex as TokioMutex;
 
+    const TEST_TASK_ID: &str =
+        "workgraph-v1:task:sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    const TEST_TASK_2_ID: &str =
+        "workgraph-v1:task:sha256:2222222222222222222222222222222222222222222222222222222222222222";
+
     struct RecordingDispatchProjector {
         committed: Arc<TokioMutex<Vec<Vec<ProjectionInput>>>>,
         replacement: WorkGraphDispatchBinding,
@@ -3348,7 +3365,7 @@ mod tests {
         WorkGraphAllocatorProjection {
             tasks: vec![WorkGraphTaskBinding {
                 source_key: "issue".to_string(),
-                task_id: "task".to_string(),
+                task_id: TEST_TASK_ID.to_string(),
                 task_element_id: "task-element".to_string(),
                 root_issue_id: "root".to_string(),
                 workflow_run_id: "run".to_string(),
@@ -3356,7 +3373,7 @@ mod tests {
             assignments: vec![WorkGraphAssignmentBinding {
                 source_key: "assignment-comment".to_string(),
                 task_source_key: "issue".to_string(),
-                task_id: "task".to_string(),
+                task_id: TEST_TASK_ID.to_string(),
                 assignment_id: "assignment".to_string(),
                 permitted_executors: vec!["executor".to_string()],
                 root_issue_id: "root".to_string(),
@@ -3633,7 +3650,7 @@ mod tests {
         let accepted_dispatch = WorkGraphDispatchBinding {
             source_key: "dispatch-comment".to_string(),
             task_source_key: "issue".to_string(),
-            task_id: "task".to_string(),
+            task_id: TEST_TASK_ID.to_string(),
             assignment_id: "assignment".to_string(),
             lease_id: lease.lease_id.clone(),
             executor_id: "executor".to_string(),
@@ -3723,7 +3740,7 @@ mod tests {
             .is_some_and(|message| message.contains("active Source lease")));
         assert!(allocator
             .claim_active(
-                "task",
+                TEST_TASK_ID,
                 &lease.lease_id,
                 "assignment",
                 "executor",
@@ -3804,7 +3821,7 @@ mod tests {
         let dispatch = WorkGraphDispatchBinding {
             source_key: "dispatch-comment-1".to_string(),
             task_source_key: "issue".to_string(),
-            task_id: "task".to_string(),
+            task_id: TEST_TASK_ID.to_string(),
             assignment_id: "assignment".to_string(),
             lease_id: first.lease_id.clone(),
             executor_id: "executor".to_string(),
@@ -3831,7 +3848,7 @@ mod tests {
             .expect("accept dispatch");
         assert!(state
             .workgraph_active_exact(
-                "task",
+                TEST_TASK_ID,
                 &first.lease_id,
                 "assignment",
                 "executor",
@@ -3865,7 +3882,7 @@ mod tests {
         assert!(!second.completed);
         assert!(state
             .workgraph_active_exact(
-                "task",
+                TEST_TASK_ID,
                 &first.lease_id,
                 "assignment",
                 "executor",
@@ -3875,7 +3892,7 @@ mod tests {
             .is_none());
         assert!(state
             .workgraph_active_exact(
-                "task",
+                TEST_TASK_ID,
                 &second.lease_id,
                 "assignment",
                 "executor",
@@ -3968,7 +3985,7 @@ mod tests {
                 projection(vec![WorkGraphDispatchBinding {
                     source_key: "dispatch-comment-1".to_string(),
                     task_source_key: "issue".to_string(),
-                    task_id: "task".to_string(),
+                    task_id: TEST_TASK_ID.to_string(),
                     assignment_id: "assignment".to_string(),
                     lease_id: first.lease_id.clone(),
                     executor_id: "executor".to_string(),
@@ -4030,7 +4047,7 @@ mod tests {
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
             workflow_run_id: "run".to_string(),
-            task_id: "task".to_string(),
+            task_id: TEST_TASK_ID.to_string(),
             assignment_id: "assignment".to_string(),
             lease_id: first.lease_id.clone(),
             executor_id: "executor".to_string(),
@@ -4208,7 +4225,7 @@ mod tests {
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
             workflow_run_id: "run".to_string(),
-            task_id: "task".to_string(),
+            task_id: TEST_TASK_ID.to_string(),
             assignment_id: "assignment".to_string(),
             lease_id: "unseen-old-lease".to_string(),
             executor_id: "executor".to_string(),
@@ -4459,7 +4476,7 @@ mod tests {
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
             workflow_run_id: "run".to_string(),
-            task_id: "task".to_string(),
+            task_id: TEST_TASK_ID.to_string(),
             assignment_id: "assignment".to_string(),
             lease_id: lease.lease_id.clone(),
             executor_id: "executor".to_string(),
@@ -4484,18 +4501,18 @@ mod tests {
         assert!(state
             .validate()
             .expect_err("schema 15 must be rejected")
-            .contains("version must equal 17"));
+            .contains("version must equal 18"));
     }
 
     #[test]
     fn all_action_bindings_validate_direct_root_run_and_task_identities() {
-        let lease_id = make_lease_id("task", "assignment", 1);
+        let lease_id = make_lease_id(TEST_TASK_ID, "assignment", 1);
         let mut desired = projection(vec![WorkGraphDispatchBinding {
             source_key: "dispatch-comment".to_string(),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
             workflow_run_id: "run".to_string(),
-            task_id: "task".to_string(),
+            task_id: TEST_TASK_ID.to_string(),
             assignment_id: "assignment".to_string(),
             lease_id: lease_id.clone(),
             executor_id: "executor".to_string(),
@@ -4506,7 +4523,7 @@ mod tests {
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
             workflow_run_id: "run".to_string(),
-            task_id: "task".to_string(),
+            task_id: TEST_TASK_ID.to_string(),
             result_id: "result".to_string(),
             lease_id,
             attempt: 1,
@@ -4516,7 +4533,7 @@ mod tests {
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
             workflow_run_id: "run".to_string(),
-            task_id: "task".to_string(),
+            task_id: TEST_TASK_ID.to_string(),
             result_id: "result".to_string(),
             evaluation_id: "evaluation".to_string(),
             attempt: 1,
@@ -4527,7 +4544,7 @@ mod tests {
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
             workflow_run_id: "run".to_string(),
-            task_id: "task".to_string(),
+            task_id: TEST_TASK_ID.to_string(),
             result_id: "result".to_string(),
             evaluation_id: "evaluation".to_string(),
             route_id: "route".to_string(),
@@ -5249,11 +5266,11 @@ mod tests {
     #[test]
     fn route_validation_rejects_wrong_chain_and_rework_at_attempt_limit() {
         let lease = WorkGraphActiveLease {
-            lease_id: make_lease_id("task", "assignment", 1),
+            lease_id: make_lease_id(TEST_TASK_ID, "assignment", 1),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
             workflow_run_id: "run".to_string(),
-            task_id: "task".to_string(),
+            task_id: TEST_TASK_ID.to_string(),
             task_element_id: "task-element".to_string(),
             assignment_source_key: "assignment-comment".to_string(),
             assignment_id: "assignment".to_string(),
@@ -5297,11 +5314,11 @@ mod tests {
     #[test]
     fn route_document_arriving_first_survives_restart_and_later_converges() {
         let lease = WorkGraphActiveLease {
-            lease_id: make_lease_id("task", "assignment", 1),
+            lease_id: make_lease_id(TEST_TASK_ID, "assignment", 1),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
             workflow_run_id: "run".to_string(),
-            task_id: "task".to_string(),
+            task_id: TEST_TASK_ID.to_string(),
             task_element_id: "task-element".to_string(),
             assignment_source_key: "assignment-comment".to_string(),
             assignment_id: "assignment".to_string(),
@@ -5367,11 +5384,11 @@ mod tests {
     #[test]
     fn stale_generation_fences_result_evaluation_and_route_chain() {
         let lease = WorkGraphActiveLease {
-            lease_id: make_lease_id("task", "assignment", 1),
+            lease_id: make_lease_id(TEST_TASK_ID, "assignment", 1),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
             workflow_run_id: "run".to_string(),
-            task_id: "task".to_string(),
+            task_id: TEST_TASK_ID.to_string(),
             task_element_id: "task-element".to_string(),
             assignment_source_key: "assignment-comment".to_string(),
             assignment_id: "assignment".to_string(),
@@ -5474,7 +5491,7 @@ mod tests {
         let mut queued = projection(Vec::new());
         queued.tasks.push(WorkGraphTaskBinding {
             source_key: "issue-2".to_string(),
-            task_id: "task-2".to_string(),
+            task_id: TEST_TASK_2_ID.to_string(),
             task_element_id: "task-element-2".to_string(),
             root_issue_id: "root".to_string(),
             workflow_run_id: "run".to_string(),
@@ -5482,7 +5499,7 @@ mod tests {
         queued.assignments.push(WorkGraphAssignmentBinding {
             source_key: "assignment-comment-2".to_string(),
             task_source_key: "issue-2".to_string(),
-            task_id: "task-2".to_string(),
+            task_id: TEST_TASK_2_ID.to_string(),
             assignment_id: "assignment-2".to_string(),
             permitted_executors: vec!["executor".to_string()],
             root_issue_id: "root".to_string(),

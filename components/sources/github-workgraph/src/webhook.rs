@@ -2398,6 +2398,13 @@ mod workgraph_tests {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    fn test_task_id(seed: &str) -> String {
+        format!(
+            "workgraph-v1:task:sha256:{:x}",
+            Sha256::digest(seed.as_bytes())
+        )
+    }
+
     #[derive(Default)]
     struct RecordingProjector {
         committed: Arc<Mutex<Vec<Vec<ProjectionInput>>>>,
@@ -2417,7 +2424,7 @@ mod workgraph_tests {
             task_source_key: "task-source".to_string(),
             root_issue_id: "root".to_string(),
             workflow_run_id: "run".to_string(),
-            task_id: "task".to_string(),
+            task_id: test_task_id("task"),
             task_element_id: "task-element".to_string(),
             assignment_source_key: "assignment-source".to_string(),
             assignment_id: "assignment".to_string(),
@@ -2483,7 +2490,7 @@ mod workgraph_tests {
                 .filter_map(|input| match input {
                     ProjectionInput::UpsertTask(document) => Some(WorkGraphTaskBinding {
                         source_key: document.source_key.clone(),
-                        task_id: document.source_key.clone(),
+                        task_id: test_task_id(&document.source_key),
                         task_element_id: format!("task:{}", document.source_key),
                         root_issue_id: "root".to_string(),
                         workflow_run_id: "run".to_string(),
