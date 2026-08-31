@@ -255,6 +255,10 @@ pub enum ProjectionInput {
         source_key: String,
         root_issue_id: String,
         admission_id: String,
+        repository_owner: String,
+        repository_name: String,
+        repository_node_id: String,
+        issue_number: u64,
         updated_at_revision: i64,
     },
 }

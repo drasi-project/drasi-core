@@ -1597,18 +1597,10 @@ async fn try_workgraph_comment(
                 source_key: comment_id.to_string(),
             });
         }
-        if let Some(previous) = prior_root_comment.filter(|previous| {
-            should_accept_root_comment_revision(previous, updated_at_revision, "", true)
-        }) {
-            let document = previous
-                .document
-                .expect("a non-tombstoned Root Issue comment has a document");
-            inputs.push(ProjectionInput::DeleteRootIssueComment {
-                source_key: comment_id.to_string(),
-                root_issue_id: document.root_issue_id,
-                admission_id: document.admission_id,
-                updated_at_revision,
-            });
+        if let Some(previous) = prior_root_comment
+            .filter(|previous| should_accept_root_comment_tombstone(previous, updated_at_revision))
+        {
+            inputs.push(root_comment_deletion(&previous, updated_at_revision));
         }
         return Ok((!inputs.is_empty()).then_some(inputs));
     }
@@ -1622,18 +1614,10 @@ async fn try_workgraph_comment(
 
     if let Some(trust_role) = current_trust_role {
         authorize_workgraph_repository(state, payload, None)?;
-        if let Some(previous) = prior_root_comment.filter(|previous| {
-            should_accept_root_comment_revision(previous, updated_at_revision, "", true)
-        }) {
-            let document = previous
-                .document
-                .expect("a non-tombstoned Root Issue comment has a document");
-            inputs.push(ProjectionInput::DeleteRootIssueComment {
-                source_key: comment_id.to_string(),
-                root_issue_id: document.root_issue_id,
-                admission_id: document.admission_id,
-                updated_at_revision,
-            });
+        if let Some(previous) = prior_root_comment
+            .filter(|previous| should_accept_root_comment_tombstone(previous, updated_at_revision))
+        {
+            inputs.push(root_comment_deletion(&previous, updated_at_revision));
         }
         normalize_lifecycle_artifact(
             state,
@@ -1659,15 +1643,30 @@ async fn try_workgraph_comment(
         return Ok((!inputs.is_empty()).then_some(inputs));
     };
     authorize_workgraph_repository(state, payload, None)?;
+    if !root_comment_issue_matches_cached_admission(state, payload, issue, &root).await? {
+        return Ok((!inputs.is_empty()).then_some(inputs));
+    }
+    if action == "edited" {
+        let editor = comment
+            .get("editor")
+            .filter(|editor| !editor.is_null())
+            .or_else(|| payload.get("sender").filter(|sender| !sender.is_null()));
+        if editor.is_none_or(identity_is_bot_or_agent) {
+            if let Some(previous) = prior_root_comment.as_ref().filter(|previous| {
+                should_accept_root_comment_tombstone(previous, updated_at_revision)
+            }) {
+                inputs.push(root_comment_deletion(previous, updated_at_revision));
+            }
+            return Ok((!inputs.is_empty()).then_some(inputs));
+        }
+    }
     let author = comment.get("user").ok_or_else(|| {
         WorkGraphNormError::InvalidPayload("Root Issue comment has no author".to_string())
     })?;
     let author_id = required_string(author, "node_id", "Root Issue comment author")?;
     let author_type = required_string(author, "type", "Root Issue comment author")?;
     let author_login = required_string(author, "login", "Root Issue comment author")?;
-    if author_type.eq_ignore_ascii_case("bot")
-        || author_login.to_ascii_lowercase().ends_with("[bot]")
-    {
+    if identity_is_bot_or_agent(author) {
         return Ok((!inputs.is_empty()).then_some(inputs));
     }
     if body.len() > MAX_ROOT_ISSUE_COMMENT_BODY_BYTES {
@@ -1697,14 +1696,13 @@ async fn try_workgraph_comment(
     }
     let fingerprint = root_comment_fingerprint(&document)
         .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
-    if prior_root_comment.as_ref().is_none_or(|previous| {
-        should_accept_root_comment_revision(
-            previous,
-            document.updated_at_revision,
-            &fingerprint,
-            false,
-        )
-    }) {
+    let accept = match prior_root_comment.as_ref() {
+        Some(previous) => {
+            should_accept_root_comment_upsert(previous, document.updated_at_revision, &fingerprint)?
+        }
+        None => true,
+    };
+    if accept {
         inputs.push(ProjectionInput::UpsertRootIssueComment(document));
     }
     Ok((!inputs.is_empty()).then_some(inputs))
@@ -1785,16 +1783,48 @@ fn normalize_lifecycle_artifact(
     Ok(())
 }
 
-fn should_accept_root_comment_revision(
+fn should_accept_root_comment_tombstone(
+    previous: &RootIssueCommentRevisionState,
+    revision: i64,
+) -> bool {
+    revision > previous.revision || revision == previous.revision && !previous.tombstone
+}
+
+fn should_accept_root_comment_upsert(
     previous: &RootIssueCommentRevisionState,
     revision: i64,
     fingerprint: &str,
-    tombstone: bool,
-) -> bool {
-    revision > previous.revision
-        || revision == previous.revision
-            && !previous.tombstone
-            && (tombstone || fingerprint > previous.fingerprint.as_str())
+) -> Result<bool, WorkGraphNormError> {
+    if previous.tombstone || revision < previous.revision {
+        return Ok(false);
+    }
+    if revision > previous.revision {
+        return Ok(true);
+    }
+    if fingerprint == previous.fingerprint {
+        return Ok(false);
+    }
+    Err(WorkGraphNormError::Unavailable(
+        "equal-revision Root Issue comment content is ambiguous; redeliver after an authoritative \
+         comment read"
+            .to_string(),
+    ))
+}
+
+fn root_comment_deletion(
+    previous: &RootIssueCommentRevisionState,
+    updated_at_revision: i64,
+) -> crate::protocol::ProjectionInput {
+    crate::protocol::ProjectionInput::DeleteRootIssueComment {
+        source_key: previous.identity.source_key.clone(),
+        root_issue_id: previous.identity.root_issue_id.clone(),
+        admission_id: previous.identity.admission_id.clone(),
+        repository_owner: previous.identity.repository_owner.clone(),
+        repository_name: previous.identity.repository_name.clone(),
+        repository_node_id: previous.identity.repository_node_id.clone(),
+        issue_number: previous.identity.issue_number,
+        updated_at_revision,
+    }
 }
 
 fn required_string<'a>(
@@ -1809,6 +1839,71 @@ fn required_string<'a>(
         .ok_or_else(|| {
             WorkGraphNormError::InvalidPayload(format!("{subject} is missing non-empty '{field}'"))
         })
+}
+
+fn identity_is_bot_or_agent(identity: &Value) -> bool {
+    identity
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("bot"))
+        || identity
+            .get("login")
+            .and_then(Value::as_str)
+            .is_some_and(|login| login.to_ascii_lowercase().ends_with("[bot]"))
+}
+
+async fn root_comment_issue_matches_cached_admission(
+    state: &IngressState,
+    payload: &Value,
+    issue: &Value,
+    root: &crate::protocol::RootIssueDocument,
+) -> Result<bool, WorkGraphNormError> {
+    if !root.is_open
+        || !root.workgraph_include
+        || !issue_is_root_candidate(issue, &state.task_issue_type)
+        || !item_is_open(issue)
+    {
+        return Ok(false);
+    }
+    let locator = extract_issue_locator(issue, payload).ok_or_else(|| {
+        WorkGraphNormError::InvalidPayload(
+            "Root Issue comment payload is missing its repository locator".to_string(),
+        )
+    })?;
+    let repository_node_id = payload
+        .pointer("/repository/node_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let (workgraph_labels, workgraph_include) = issue_workgraph_labels(issue);
+    let payload_matches = locator.source_key == root.source_key
+        && locator.repository_owner == root.repository_owner
+        && locator.repository_name == root.repository_name
+        && locator.issue_number == root.issue_number
+        && repository_node_id == root.repository_node_id
+        && workgraph_labels == root.workgraph_labels
+        && workgraph_include == root.workgraph_include;
+    let revision = authoritative_issue_revision(issue)?;
+    let cached_revision = state
+        .allocator
+        .latest_workgraph_issue_revision(&root.source_key)
+        .await
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?
+        .ok_or_else(|| {
+            WorkGraphNormError::Unavailable(
+                "Root Issue comment arrived before its admission revision was durable".to_string(),
+            )
+        })?;
+    if revision < cached_revision {
+        return Ok(false);
+    }
+    if revision > cached_revision || !payload_matches {
+        return Err(WorkGraphNormError::Unavailable(
+            "Root Issue comment admission snapshot is ambiguous; redeliver after the Issue state \
+             converges"
+                .to_string(),
+        ));
+    }
+    Ok(true)
 }
 
 /// Normalize a sub_issues event (add/remove child parent relationship).
@@ -2392,6 +2487,40 @@ mod workgraph_tests {
             .ingest_workgraph(projector, inputs, 1, "seed-root")
             .await
             .expect("persist root");
+    }
+
+    fn human_root_comment_event(
+        comment_id: &str,
+        action: &str,
+        body: &str,
+        updated_at: &str,
+    ) -> Value {
+        json!({
+            "action": action,
+            "organization": {"login": "acme"},
+            "repository": {
+                "name": "widgets",
+                "full_name": "acme/widgets",
+                "node_id": "R_widgets"
+            },
+            "sender": {
+                "node_id": "U_human",
+                "type": "User",
+                "login": "octocat"
+            },
+            "issue": root_issue(&["workgraph"]),
+            "comment": {
+                "node_id": comment_id,
+                "body": body,
+                "user": {
+                    "node_id": "U_human",
+                    "type": "User",
+                    "login": "octocat"
+                },
+                "created_at": "2026-08-01T00:01:00Z",
+                "updated_at": updated_at
+            }
+        })
     }
 
     fn task_trust() -> ProtocolTrust {
@@ -3851,28 +3980,8 @@ mod workgraph_tests {
     async fn human_root_comment_is_durable_revision_fenced_and_retractable() {
         let (_temp, projector, state) = ingress_state(None).await;
         seed_root_issue(&state, projector.as_ref()).await;
-        let comment_event = |action: &str, body: &str, updated_at: &str| {
-            json!({
-                "action": action,
-                "organization": {"login": "acme"},
-                "repository": {
-                    "name": "widgets",
-                    "full_name": "acme/widgets",
-                    "node_id": "R_widgets"
-                },
-                "issue": root_issue(&["workgraph"]),
-                "comment": {
-                    "node_id": "IC_human",
-                    "body": body,
-                    "user": {
-                        "node_id": "U_human",
-                        "type": "User",
-                        "login": "octocat"
-                    },
-                    "created_at": "2026-08-01T00:01:00Z",
-                    "updated_at": updated_at
-                }
-            })
+        let comment_event = |action, body, updated_at| {
+            human_root_comment_event("IC_human", action, body, updated_at)
         };
 
         let created = comment_event("created", "resume with option B", "2026-08-01T00:01:00Z");
@@ -3938,6 +4047,7 @@ mod workgraph_tests {
                 root_issue_id,
                 admission_id: _,
                 updated_at_revision: 1_785_542_580_000,
+                ..
             }] if source_key == "IC_human" && root_issue_id == "I_root"
         ));
         let commit_count = committed.len();
@@ -3994,6 +4104,249 @@ mod workgraph_tests {
             Ok(None)
         ));
         assert_eq!(projector.committed.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn human_comment_changed_to_lifecycle_marker_keeps_deletion_tombstone() {
+        let (_temp, projector, state) = ingress_state(None).await;
+        seed_root_issue(&state, projector.as_ref()).await;
+        let created = human_root_comment_event(
+            "IC_transition",
+            "created",
+            "human evidence",
+            "2026-08-01T00:01:00Z",
+        );
+        let body = serde_json::to_vec(&created).expect("encode creation");
+        handle_delivery(
+            &state,
+            &signed_headers("issue_comment", "transition-created", &body),
+            &body,
+        )
+        .await
+        .expect("create human evidence");
+
+        let marker = human_root_comment_event(
+            "IC_transition",
+            "edited",
+            "WorkGraphTaskRoute/v1\n\n```json\n{}\n```",
+            "2026-08-01T00:02:00Z",
+        );
+        let body = serde_json::to_vec(&marker).expect("encode marker edit");
+        handle_delivery(
+            &state,
+            &signed_headers("issue_comment", "transition-marker", &body),
+            &body,
+        )
+        .await
+        .expect("retract human evidence");
+        assert!(state
+            .allocator
+            .latest_workgraph_root_comment_revision("IC_transition")
+            .await
+            .expect("read tombstone")
+            .is_some_and(|revision| revision.tombstone));
+
+        let mut deleted = marker;
+        deleted["action"] = json!("deleted");
+        deleted["comment"]["updated_at"] = json!("2026-08-01T00:03:00Z");
+        let body = serde_json::to_vec(&deleted).expect("encode newer deletion");
+        handle_delivery(
+            &state,
+            &signed_headers("issue_comment", "transition-deleted", &body),
+            &body,
+        )
+        .await
+        .expect("advance existing tombstone");
+        let revision = state
+            .allocator
+            .latest_workgraph_root_comment_revision("IC_transition")
+            .await
+            .expect("read advanced tombstone")
+            .expect("tombstone");
+        assert!(revision.tombstone);
+        assert_eq!(revision.identity.repository_node_id, "R_widgets");
+        assert_eq!(revision.revision, 1_785_542_580_000);
+
+        let later = human_root_comment_event(
+            "IC_transition",
+            "edited",
+            "must not return",
+            "2026-08-01T00:04:00Z",
+        );
+        let body = serde_json::to_vec(&later).expect("encode later edit");
+        assert!(matches!(
+            handle_delivery(
+                &state,
+                &signed_headers("issue_comment", "transition-later", &body),
+                &body,
+            )
+            .await,
+            Ok(None)
+        ));
+    }
+
+    #[tokio::test]
+    async fn bot_edit_retracts_prior_human_root_comment_evidence() {
+        let (_temp, projector, state) = ingress_state(None).await;
+        seed_root_issue(&state, projector.as_ref()).await;
+        let created =
+            human_root_comment_event("IC_bot_edit", "created", "human", "2026-08-01T00:01:00Z");
+        let body = serde_json::to_vec(&created).expect("encode creation");
+        handle_delivery(
+            &state,
+            &signed_headers("issue_comment", "bot-edit-created", &body),
+            &body,
+        )
+        .await
+        .expect("create evidence");
+
+        let mut edited = human_root_comment_event(
+            "IC_bot_edit",
+            "edited",
+            "agent edit",
+            "2026-08-01T00:02:00Z",
+        );
+        edited["sender"] = json!({
+            "node_id": "BOT_agent",
+            "type": "Bot",
+            "login": "copilot-swe-agent[bot]"
+        });
+        let body = serde_json::to_vec(&edited).expect("encode bot edit");
+        handle_delivery(
+            &state,
+            &signed_headers("issue_comment", "bot-edit", &body),
+            &body,
+        )
+        .await
+        .expect("retract bot-edited evidence");
+        assert!(state
+            .allocator
+            .latest_workgraph_root_comment_revision("IC_bot_edit")
+            .await
+            .expect("read revision")
+            .is_some_and(|revision| revision.tombstone && revision.document.is_none()));
+    }
+
+    #[tokio::test]
+    async fn equal_revision_different_human_comment_content_fails_closed_in_both_orders() {
+        for (first, second) in [("alpha", "omega"), ("omega", "alpha")] {
+            let (_temp, projector, state) = ingress_state(None).await;
+            seed_root_issue(&state, projector.as_ref()).await;
+            let first_event =
+                human_root_comment_event("IC_equal", "created", first, "2026-08-01T00:01:00Z");
+            let body = serde_json::to_vec(&first_event).expect("encode first");
+            handle_delivery(
+                &state,
+                &signed_headers("issue_comment", "equal-first", &body),
+                &body,
+            )
+            .await
+            .expect("accept first content");
+
+            let second_event =
+                human_root_comment_event("IC_equal", "edited", second, "2026-08-01T00:01:00Z");
+            let body = serde_json::to_vec(&second_event).expect("encode conflicting edit");
+            assert!(matches!(
+                handle_delivery(
+                    &state,
+                    &signed_headers("issue_comment", "equal-second", &body),
+                    &body,
+                )
+                .await,
+                Err((StatusCode::SERVICE_UNAVAILABLE, _))
+            ));
+            let revision = state
+                .allocator
+                .latest_workgraph_root_comment_revision("IC_equal")
+                .await
+                .expect("read evidence")
+                .expect("evidence");
+            assert_eq!(revision.document.expect("active evidence").body, first);
+        }
+    }
+
+    #[tokio::test]
+    async fn delayed_comment_snapshot_cannot_bind_to_readmitted_root_generation() {
+        let (_temp, projector, state) = ingress_state(None).await;
+        seed_root_issue(&state, projector.as_ref()).await;
+        let old_comment = human_root_comment_event(
+            "IC_old_generation",
+            "created",
+            "resume",
+            "2026-08-01T00:04:00Z",
+        );
+
+        let mut removed_issue = root_issue(&[]);
+        removed_issue["updated_at"] = json!("2026-08-01T00:02:00Z");
+        let mut removed = payload("unlabeled", removed_issue);
+        removed["label"] = json!({"name": "workgraph"});
+        let inputs = try_workgraph_issue(&state, "root-removed", &removed)
+            .await
+            .expect("normalize removal")
+            .expect("removal inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), inputs, 2, "root-removed")
+            .await
+            .expect("persist removal");
+
+        let mut readmitted_issue = root_issue(&["workgraph"]);
+        readmitted_issue["updated_at"] = json!("2026-08-01T00:03:00Z");
+        let mut readmitted = payload("labeled", readmitted_issue);
+        readmitted["label"] = json!({"name": "workgraph"});
+        let inputs = try_workgraph_issue(&state, "root-readmitted", &readmitted)
+            .await
+            .expect("normalize readmission")
+            .expect("readmission inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), inputs, 3, "root-readmitted")
+            .await
+            .expect("persist readmission");
+        let admission_id = state
+            .allocator
+            .latest_workgraph_root_issue("I_root")
+            .await
+            .expect("read root")
+            .expect("readmitted root")
+            .admission_id;
+
+        let body = serde_json::to_vec(&old_comment).expect("encode delayed comment");
+        assert!(matches!(
+            handle_delivery(
+                &state,
+                &signed_headers("issue_comment", "old-generation-comment", &body),
+                &body,
+            )
+            .await,
+            Ok(None)
+        ));
+
+        let mut current = human_root_comment_event(
+            "IC_new_generation",
+            "created",
+            "resume",
+            "2026-08-01T00:04:00Z",
+        );
+        current["issue"]["updated_at"] = json!("2026-08-01T00:03:00Z");
+        let body = serde_json::to_vec(&current).expect("encode current comment");
+        handle_delivery(
+            &state,
+            &signed_headers("issue_comment", "new-generation-comment", &body),
+            &body,
+        )
+        .await
+        .expect("accept current generation comment");
+        let revision = state
+            .allocator
+            .latest_workgraph_root_comment_revision("IC_new_generation")
+            .await
+            .expect("read comment")
+            .expect("current comment");
+        assert_eq!(
+            revision.document.expect("active comment").admission_id,
+            admission_id
+        );
     }
 
     #[tokio::test]

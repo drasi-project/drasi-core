@@ -52,9 +52,11 @@ Human-authored comments on an admitted Root Issue are supplied to that projector
 as `UpsertRootIssueComment` evidence. The document carries the comment source
 key, direct `rootIssueId`, `admissionId`, repository locator, issue number,
 author ID/type/login, body, and immutable creation/current update revisions.
-Edits replace the document and deletes emit `DeleteRootIssueComment`; Core
-persists revision tombstones and ignores bot-authored comments. Qualification as
-wait/resume evidence remains entirely projector-owned.
+Edits replace the document and deletes emit `DeleteRootIssueComment` with
+`sourceKey`, `rootIssueId`, `admissionId`, `repositoryOwner`, `repositoryName`,
+`repositoryNodeId`, `issueNumber`, and `updatedAtRevision`. Core persists
+locator-bearing revision tombstones and retracts comments edited by bots.
+Qualification as wait/resume evidence remains entirely projector-owned.
 
 ### Projector consumer update required
 
@@ -83,7 +85,7 @@ This is a single v1 contract change. No alternate wire format or compatibility
 projection is provided. The lease-validation HTTP response remains unchanged
 until the reporter and endpoint can be updated together.
 
-Allocator state schema 15 durably records Issue-state fingerprints,
+Allocator state schema 16 durably records Issue-state fingerprints,
 authorization generations/cutoffs, generation-bound applied Route decisions,
 and Root Issue comment revision tombstones.
 Older state is rejected explicitly rather

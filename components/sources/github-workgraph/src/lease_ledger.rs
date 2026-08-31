@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const VERSION: u8 = 15;
+const VERSION: u8 = 16;
 const STATE_KEY: &str = "allocator:state";
 const DELIVERY_PREFIX: &str = "delivery:";
 const WORKGRAPH_ORIGIN_PREFIX: &str = "workgraph-origin:";
@@ -85,9 +85,36 @@ pub struct AgentRuntime {
 #[derive(Clone, Debug)]
 pub(crate) struct RootIssueCommentRevisionState {
     pub document: Option<RootIssueCommentDocument>,
+    pub identity: RootIssueCommentIdentity,
     pub revision: i64,
     pub fingerprint: String,
     pub tombstone: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RootIssueCommentIdentity {
+    pub source_key: String,
+    pub root_issue_id: String,
+    pub admission_id: String,
+    pub repository_owner: String,
+    pub repository_name: String,
+    pub repository_node_id: String,
+    pub issue_number: u64,
+}
+
+impl From<&RootIssueCommentDocument> for RootIssueCommentIdentity {
+    fn from(document: &RootIssueCommentDocument) -> Self {
+        Self {
+            source_key: document.source_key.clone(),
+            root_issue_id: document.root_issue_id.clone(),
+            admission_id: document.admission_id.clone(),
+            repository_owner: document.repository_owner.clone(),
+            repository_name: document.repository_name.clone(),
+            repository_node_id: document.repository_node_id.clone(),
+            issue_number: document.issue_number,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,8 +239,8 @@ pub struct AllocationState {
     workgraph_root_comment_revisions: BTreeMap<String, i64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workgraph_root_comment_fingerprints: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    workgraph_root_comment_tombstones: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workgraph_root_comment_tombstones: BTreeMap<String, RootIssueCommentIdentity>,
     /// Latest authoritative GitHub revision observed for a Root Issue or task Issue.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workgraph_issue_revisions: BTreeMap<String, i64>,
@@ -710,9 +737,22 @@ impl Allocator {
             .get(source_key)
             .map(|revision| RootIssueCommentRevisionState {
                 document: state.workgraph_root_comments.get(source_key).cloned(),
+                identity: state
+                    .workgraph_root_comments
+                    .get(source_key)
+                    .map(RootIssueCommentIdentity::from)
+                    .or_else(|| {
+                        state
+                            .workgraph_root_comment_tombstones
+                            .get(source_key)
+                            .cloned()
+                    })
+                    .expect("validated Root Issue comment revision has identity"),
                 revision: *revision,
                 fingerprint: state.workgraph_root_comment_fingerprints[source_key].clone(),
-                tombstone: state.workgraph_root_comment_tombstones.contains(source_key),
+                tombstone: state
+                    .workgraph_root_comment_tombstones
+                    .contains_key(source_key),
             }))
     }
 
@@ -806,7 +846,7 @@ type RootCommentDocuments = (
     BTreeMap<String, RootIssueCommentDocument>,
     BTreeMap<String, i64>,
     BTreeMap<String, String>,
-    BTreeSet<String>,
+    BTreeMap<String, RootIssueCommentIdentity>,
 );
 
 fn stage_root_comment_documents(
@@ -830,6 +870,10 @@ fn stage_root_comment_documents(
                 source_key,
                 root_issue_id,
                 admission_id,
+                repository_owner,
+                repository_name,
+                repository_node_id,
+                issue_number,
                 updated_at_revision,
             } => {
                 comments.remove(source_key);
@@ -838,7 +882,18 @@ fn stage_root_comment_documents(
                     source_key.clone(),
                     root_comment_tombstone_fingerprint(root_issue_id, admission_id),
                 );
-                tombstones.insert(source_key.clone());
+                tombstones.insert(
+                    source_key.clone(),
+                    RootIssueCommentIdentity {
+                        source_key: source_key.clone(),
+                        root_issue_id: root_issue_id.clone(),
+                        admission_id: admission_id.clone(),
+                        repository_owner: repository_owner.clone(),
+                        repository_name: repository_name.clone(),
+                        repository_node_id: repository_node_id.clone(),
+                        issue_number: *issue_number,
+                    },
+                );
             }
             _ => {}
         }
@@ -1277,7 +1332,7 @@ impl Default for AllocationState {
             workgraph_root_comments: BTreeMap::new(),
             workgraph_root_comment_revisions: BTreeMap::new(),
             workgraph_root_comment_fingerprints: BTreeMap::new(),
-            workgraph_root_comment_tombstones: BTreeSet::new(),
+            workgraph_root_comment_tombstones: BTreeMap::new(),
             workgraph_issue_revisions: BTreeMap::new(),
             workgraph_issue_state_fingerprints: BTreeMap::new(),
             workgraph_issue_database_ids: BTreeMap::new(),
@@ -1606,7 +1661,9 @@ impl AllocationState {
                 .iter()
                 .any(|(source_key, comment)| {
                     comment.source_key != *source_key
-                        || self.workgraph_root_comment_tombstones.contains(source_key)
+                        || self
+                            .workgraph_root_comment_tombstones
+                            .contains_key(source_key)
                         || self
                             .workgraph_root_comment_revisions
                             .get(source_key)
@@ -1614,6 +1671,7 @@ impl AllocationState {
                         || comment.created_at_revision < 0
                         || comment.updated_at_revision < comment.created_at_revision
                         || comment.body.len() > MAX_ROOT_ISSUE_COMMENT_BODY_BYTES
+                        || comment.issue_number == 0
                         || [
                             &comment.source_key,
                             &comment.root_issue_id,
@@ -1631,11 +1689,23 @@ impl AllocationState {
             || self
                 .workgraph_root_comment_tombstones
                 .iter()
-                .any(|source_key| {
+                .any(|(source_key, identity)| {
                     self.workgraph_root_comments.contains_key(source_key)
                         || !self
                             .workgraph_root_comment_revisions
                             .contains_key(source_key)
+                        || identity.source_key != *source_key
+                        || identity.issue_number == 0
+                        || [
+                            &identity.source_key,
+                            &identity.root_issue_id,
+                            &identity.admission_id,
+                            &identity.repository_owner,
+                            &identity.repository_name,
+                            &identity.repository_node_id,
+                        ]
+                        .into_iter()
+                        .any(|value| !valid_workgraph_id(value))
                 })
             || self
                 .workgraph_root_comment_revisions
@@ -2179,6 +2249,15 @@ impl AllocationState {
             if self.workgraph_dispatched.contains_key(&dispatch.source_key) {
                 continue;
             }
+            let applied_route_replay = projection.routes.iter().any(|route| {
+                self.workgraph_routes.contains_key(&route.source_key)
+                    && projection.results.iter().any(|result| {
+                        result.result_id == route.result_id && result.lease_id == dispatch.lease_id
+                    })
+            });
+            if applied_route_replay {
+                continue;
+            }
             let mut lease = self
                 .workgraph_active
                 .get(&dispatch.lease_id)
@@ -2273,6 +2352,11 @@ impl AllocationState {
                     .find(|lease| lease.lease_id == dispatch.lease_id)
             })
             .map(|lease| lease.slot_number)
+            .or_else(|| {
+                self.workgraph_routes
+                    .get(&route.source_key)
+                    .map(|applied| applied.retry_slot_number)
+            })
             .unwrap_or_default();
         let assignment_source_key = self
             .workgraph_assignments
@@ -2318,8 +2402,18 @@ impl AllocationState {
             })
             .cloned()
         else {
-            // An otherwise valid chain for a concluded attempt is retained as
-            // history, but it can never affect the currently selected lease.
+            // A late rework decision is retained and may restore queue
+            // eligibility, but it can never release a newer selected lease.
+            if route.action == WORKGRAPH_ROUTE_REWORK
+                && !self
+                    .workgraph_routes
+                    .get(&route.source_key)
+                    .is_some_and(|applied| applied.action != WORKGRAPH_ROUTE_REWORK)
+            {
+                self.workgraph_routes
+                    .insert(route.source_key.clone(), state.clone());
+                self.restore_workgraph_rework(&state, now, delta);
+            }
             return Ok(());
         };
 
@@ -2367,6 +2461,24 @@ impl AllocationState {
         now: DateTime<Utc>,
         delta: &mut AllocationDelta,
     ) {
+        let current_generation = self
+            .workgraph_authorizations
+            .get(&route.task_source_key)
+            .is_some_and(|authorization| {
+                authorization.included
+                    && authorization.root_issue_id == route.root_issue_id
+                    && authorization.generation == route.authorization_generation
+            });
+        let actionable_task = self
+            .workgraph_task_identities
+            .get(&route.task_source_key)
+            .is_some_and(|task| task.is_open && task.workgraph_include);
+        if !current_generation
+            || !actionable_task
+            || self.task_has_terminal_route(&route.task_source_key)
+        {
+            return;
+        }
         if self
             .workgraph_active
             .values()
@@ -4241,12 +4353,12 @@ mod tests {
     #[test]
     fn prior_allocator_schema_is_rejected_explicitly() {
         let mut encoded = serde_json::to_value(AllocationState::default()).expect("encode state");
-        encoded["version"] = serde_json::json!(14);
+        encoded["version"] = serde_json::json!(15);
         let state: AllocationState = serde_json::from_value(encoded).expect("decode old state");
         assert!(state
             .validate()
-            .expect_err("schema 14 must be rejected")
-            .contains("version must equal 15"));
+            .expect_err("schema 15 must be rejected")
+            .contains("version must equal 16"));
     }
 
     #[test]
@@ -4651,6 +4763,196 @@ mod tests {
     }
 
     #[test]
+    fn late_rework_after_expiry_is_persisted_without_releasing_newer_lease() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("timestamp");
+        let documents = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let mut state = AllocationState::default();
+        authorize_task(&mut state, 1);
+        state.sync_agents(
+            &AgentFile {
+                version: 1,
+                agents: vec![AgentDefinition {
+                    agent_id: "executor".to_string(),
+                    slots: 1,
+                    lease_duration: "PT1M".to_string(),
+                    lease_duration_seconds: 60,
+                }],
+            },
+            now,
+        );
+        state
+            .reconcile_workgraph(projection(Vec::new()), &documents, 1, now)
+            .expect("allocate");
+        let first = state
+            .workgraph_active
+            .values()
+            .next()
+            .cloned()
+            .expect("first lease");
+        state
+            .reconcile_workgraph(
+                projection(vec![dispatch_binding(&first, "dispatch-1")]),
+                &documents,
+                2,
+                now,
+            )
+            .expect("accept Dispatch");
+        let later = now + chrono::Duration::minutes(2);
+        state.expire(later);
+        let newer = state
+            .workgraph_active
+            .values()
+            .next()
+            .cloned()
+            .expect("expiry retry");
+        assert!(newer.attempt > first.attempt);
+
+        let late = projection_with_route(
+            &first,
+            "dispatch-1",
+            "late-route-1",
+            WORKGRAPH_EVALUATION_REJECTED,
+            WORKGRAPH_ROUTE_REWORK,
+            4,
+        );
+        state
+            .reconcile_workgraph(late, &documents, 3, later)
+            .expect("retain late valid rework");
+        assert_eq!(
+            state.workgraph_active.keys().cloned().collect::<Vec<_>>(),
+            vec![newer.lease_id]
+        );
+        let decision = &state.workgraph_routes["late-route-1"];
+        assert_eq!(decision.attempt, 1);
+        assert_eq!(decision.max_attempts, 4);
+        assert_eq!(decision.authorization_generation, 1);
+        assert!(!state.task_has_terminal_route("issue"));
+        state.validate().expect("late rework state");
+    }
+
+    #[test]
+    fn replayed_rework_cannot_override_later_terminal_route() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("timestamp");
+        let documents = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let mut state = AllocationState::default();
+        authorize_task(&mut state, 1);
+        state.sync_agents(
+            &AgentFile {
+                version: 1,
+                agents: vec![AgentDefinition {
+                    agent_id: "executor".to_string(),
+                    slots: 1,
+                    lease_duration: "PT1M".to_string(),
+                    lease_duration_seconds: 60,
+                }],
+            },
+            now,
+        );
+        state
+            .reconcile_workgraph(projection(Vec::new()), &documents, 1, now)
+            .expect("allocate");
+        let first = state
+            .workgraph_active
+            .values()
+            .next()
+            .cloned()
+            .expect("first lease");
+        let rework = projection_with_route(
+            &first,
+            "dispatch-1",
+            "route-1",
+            WORKGRAPH_EVALUATION_REJECTED,
+            WORKGRAPH_ROUTE_REWORK,
+            4,
+        );
+        state
+            .reconcile_workgraph(rework.clone(), &documents, 2, now)
+            .expect("apply rework");
+        let retry = state
+            .workgraph_active
+            .values()
+            .next()
+            .cloned()
+            .expect("retry lease");
+        let terminal = projection_with_route(
+            &retry,
+            "dispatch-2",
+            "route-2",
+            WORKGRAPH_EVALUATION_ACCEPTED,
+            "complete",
+            4,
+        );
+        state
+            .reconcile_workgraph(terminal, &documents, 3, now)
+            .expect("apply terminal Route");
+        assert!(state.workgraph_active.is_empty());
+        assert!(state.task_has_terminal_route("issue"));
+
+        state
+            .reconcile_workgraph(rework, &documents, 4, now)
+            .expect("replay old rework");
+        assert!(state.workgraph_active.is_empty());
+        assert!(!state.workgraph_assignments["assignment-comment"].eligible);
+        state.validate().expect("terminal supersedes rework");
+    }
+
+    #[test]
+    fn replayed_rework_cannot_reopen_closed_task() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("timestamp");
+        let mut documents = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let mut state = AllocationState::default();
+        authorize_task(&mut state, 1);
+        state.sync_agents(
+            &AgentFile {
+                version: 1,
+                agents: vec![AgentDefinition {
+                    agent_id: "executor".to_string(),
+                    slots: 1,
+                    lease_duration: "PT1M".to_string(),
+                    lease_duration_seconds: 60,
+                }],
+            },
+            now,
+        );
+        state
+            .reconcile_workgraph(projection(Vec::new()), &documents, 1, now)
+            .expect("allocate");
+        let first = state
+            .workgraph_active
+            .values()
+            .next()
+            .cloned()
+            .expect("first lease");
+        let rework = projection_with_route(
+            &first,
+            "dispatch-1",
+            "route-1",
+            WORKGRAPH_EVALUATION_REJECTED,
+            WORKGRAPH_ROUTE_REWORK,
+            4,
+        );
+        state
+            .reconcile_workgraph(rework.clone(), &documents, 2, now)
+            .expect("apply rework");
+        documents.get_mut("issue").expect("task").is_open = false;
+        state
+            .reconcile_workgraph(rework, &documents, 3, now)
+            .expect("close while replaying rework");
+        assert!(state.workgraph_active.is_empty());
+        assert!(!state.workgraph_assignments["assignment-comment"].eligible);
+        state.validate().expect("closed task remains closed");
+    }
+
+    #[test]
     fn dispatch_and_terminal_route_coalesce_to_inactive_historical_delta() {
         let now = Utc
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
@@ -4779,7 +5081,14 @@ mod tests {
             state.workgraph_active.keys().cloned().collect::<Vec<_>>(),
             vec![second_id]
         );
-        assert!(!state.workgraph_routes.contains_key("late-route-1"));
+        assert_eq!(
+            state
+                .workgraph_routes
+                .get("late-route-1")
+                .expect("late rework decision")
+                .attempt,
+            1
+        );
     }
 
     #[test]
