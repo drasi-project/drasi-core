@@ -14,7 +14,10 @@
 
 use crate::agent_sync::{push_touches_agent_file, AgentSync, AgentSyncError};
 use crate::config::{ProtocolTrust, RepositoryFilter, TaskIssueType, WorkflowDefinitionConfig};
-use crate::lease_ledger::{root_comment_fingerprint, Allocator, RootIssueCommentRevisionState};
+use crate::lease_ledger::{
+    root_comment_fingerprint, Allocator, RootIssueCommentRevisionState, WorkGraphActiveLease,
+    MAX_WORKGRAPH_ATTEMPTS,
+};
 use crate::protocol::WorkGraphProjector;
 use anyhow::{anyhow, Context, Result};
 use axum::body::Bytes;
@@ -134,6 +137,23 @@ struct LeaseValidationResponse {
     expires_at: String,
 }
 
+impl LeaseValidationResponse {
+    fn from_active(active: WorkGraphActiveLease, claim_id: String) -> Self {
+        debug_assert!((1..=MAX_WORKGRAPH_ATTEMPTS).contains(&active.attempt));
+        Self {
+            lease_id: active.lease_id,
+            task_id: active.task_id,
+            assignment_id: active.assignment_id,
+            attempt: active.attempt,
+            executor_id: active.executor_id,
+            slot_id: active.slot_id,
+            claim_id,
+            acquired_at: active.acquired_at,
+            expires_at: active.expires_at,
+        }
+    }
+}
+
 type Rejection = (StatusCode, String);
 
 fn reject<T>(code: StatusCode, message: impl Into<String>) -> Result<T, Rejection> {
@@ -207,17 +227,10 @@ async fn validate_lease(
     {
         Ok(Some(active)) => (
             StatusCode::OK,
-            Json(LeaseValidationResponse {
-                lease_id: active.lease_id,
-                task_id: active.task_id,
-                assignment_id: active.assignment_id,
-                attempt: active.attempt,
-                executor_id: active.executor_id,
-                slot_id: active.slot_id,
-                claim_id: request.claim_id,
-                acquired_at: active.acquired_at,
-                expires_at: active.expires_at,
-            }),
+            Json(LeaseValidationResponse::from_active(
+                active,
+                request.claim_id,
+            )),
         )
             .into_response(),
         Ok(None) => StatusCode::CONFLICT.into_response(),
@@ -2278,17 +2291,29 @@ mod workgraph_tests {
 
     #[test]
     fn lease_validation_response_includes_authoritative_numeric_attempt() {
-        let response = serde_json::to_value(LeaseValidationResponse {
+        let active = WorkGraphActiveLease {
             lease_id: "lease-2".to_string(),
+            task_source_key: "task-source".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: "run".to_string(),
             task_id: "task".to_string(),
+            task_element_id: "task-element".to_string(),
+            assignment_source_key: "assignment-source".to_string(),
             assignment_id: "assignment".to_string(),
             attempt: 2,
             executor_id: "executor".to_string(),
             slot_id: "executor/1".to_string(),
-            claim_id: "result-claim".to_string(),
+            slot_number: 1,
             acquired_at: "2026-08-30T20:00:00Z".to_string(),
             expires_at: "2026-08-30T20:05:00Z".to_string(),
-        })
+            has_dispatch: true,
+            completed: false,
+            completion_eligible: false,
+        };
+        let response = serde_json::to_value(LeaseValidationResponse::from_active(
+            active,
+            "result-claim".to_string(),
+        ))
         .expect("serialize lease validation response");
 
         assert_eq!(response["attempt"], json!(2));

@@ -31,7 +31,7 @@ const DELIVERY_PREFIX: &str = "delivery:";
 const WORKGRAPH_ORIGIN_PREFIX: &str = "workgraph-origin:";
 const MAX_WORKGRAPH_ID_LENGTH: usize = 256;
 const MAX_WORKGRAPH_PERMITTED_EXECUTORS: usize = 64;
-const MAX_WORKGRAPH_ATTEMPTS: u64 = 64;
+pub(crate) const MAX_WORKGRAPH_ATTEMPTS: u64 = 64;
 
 fn workgraph_origin_key(origin_id: &str) -> String {
     let digest = Sha256::digest(origin_id.as_bytes());
