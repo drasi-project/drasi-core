@@ -48,6 +48,14 @@ definition and task body semantics are implemented by the injected v1 projector;
 the Dogfooding `github-workgraph-v1` wrapper supplies that projector and owns the
 `wg-` queries and runtime configuration.
 
+Human-authored comments on an admitted Root Issue are supplied to that projector
+as `UpsertRootIssueComment` evidence. The document carries the comment source
+key, direct `rootIssueId`, `admissionId`, repository locator, issue number,
+author ID/type/login, body, and immutable creation/current update revisions.
+Edits replace the document and deletes emit `DeleteRootIssueComment`; Core
+persists revision tombstones and ignores bot-authored comments. Qualification as
+wait/resume evidence remains entirely projector-owned.
+
 ### Projector consumer update required
 
 Consumers of this Wave 1 projector API must make these source changes before
@@ -56,6 +64,8 @@ they compile:
 - handle `UpsertGitHubIssue` and `DeleteGitHubIssue` when exhaustively matching
   `ProjectionInput` (Core consumes these before calling `prepare`, so the arms
   are defensive);
+- handle `UpsertRootIssueComment` and `DeleteRootIssueComment` as
+  generation-bound wait/resume evidence inputs;
 - consume `workgraphLabels` and `workgraphInclude` on `TaskDocument` and
   `RootIssueDocument`, retaining the Root Issue and its admission generation
   while excluded;
@@ -73,8 +83,9 @@ This is a single v1 contract change. No alternate wire format or compatibility
 projection is provided. The lease-validation HTTP response remains unchanged
 until the reporter and endpoint can be updated together.
 
-Allocator state schema 14 durably records Issue-state fingerprints,
-authorization generations/cutoffs, and applied Route decisions.
+Allocator state schema 15 durably records Issue-state fingerprints,
+authorization generations/cutoffs, generation-bound applied Route decisions,
+and Root Issue comment revision tombstones.
 Older state is rejected explicitly rather
 than migrated.
 

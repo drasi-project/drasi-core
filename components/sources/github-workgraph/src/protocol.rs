@@ -45,9 +45,14 @@ pub const WORKGRAPH_RESULT_MARKER: &str = "WorkGraphTaskResult/v1\n";
 pub const WORKGRAPH_EVALUATE_MARKER: &str = "WorkGraphTaskEvaluate/v1\n";
 pub const WORKGRAPH_ROUTE_MARKER: &str = "WorkGraphTaskRoute/v1\n";
 
+/// Canonical accepted evaluator verdict.
 pub const WORKGRAPH_EVALUATION_ACCEPTED: &str = "accepted";
+/// Canonical rejected evaluator verdict.
 pub const WORKGRAPH_EVALUATION_REJECTED: &str = "rejected";
+/// Canonical Route action that requests another bounded worker attempt.
 pub const WORKGRAPH_ROUTE_REWORK: &str = "rework";
+/// Maximum human Root Issue comment body forwarded to the projector.
+pub const MAX_ROOT_ISSUE_COMMENT_BODY_BYTES: usize = 64 * 1024;
 
 /// Returns true if `body` begins with any WorkGraph lifecycle artifact marker.
 pub fn is_workgraph_lifecycle_marker(body: &str) -> bool {
@@ -189,6 +194,29 @@ pub struct GitHubIssueLocator {
     pub issue_node_id: String,
 }
 
+/// A human-authored comment on the currently admitted Root Issue generation.
+///
+/// Core authenticates and normalizes this bounded evidence but does not assign
+/// workflow meaning to it. The injected projector decides whether it qualifies
+/// as wait/resume evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RootIssueCommentDocument {
+    pub source_key: String,
+    pub root_issue_id: String,
+    pub admission_id: String,
+    pub repository_owner: String,
+    pub repository_name: String,
+    pub repository_node_id: String,
+    pub issue_number: u64,
+    pub author_id: String,
+    pub author_type: String,
+    pub author_login: String,
+    pub body: String,
+    pub created_at_revision: i64,
+    pub updated_at_revision: i64,
+}
+
 /// A normalized input for the WorkGraph projection.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProjectionInput {
@@ -221,6 +249,13 @@ pub enum ProjectionInput {
     UpsertLocator(GitHubIssueLocator),
     DeleteLocator {
         source_key: String,
+    },
+    UpsertRootIssueComment(RootIssueCommentDocument),
+    DeleteRootIssueComment {
+        source_key: String,
+        root_issue_id: String,
+        admission_id: String,
+        updated_at_revision: i64,
     },
 }
 
