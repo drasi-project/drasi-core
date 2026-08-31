@@ -3307,6 +3307,19 @@ mod tests {
     const TEST_TASK_2_ID: &str =
         "workgraph-v1:task:sha256:2222222222222222222222222222222222222222222222222222222222222222";
 
+    #[test]
+    fn workgraph_task_ids_require_the_canonical_namespace() {
+        assert!(valid_workgraph_task_id(TEST_TASK_ID));
+        for invalid in [
+            "task",
+            "wgt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "workgraph-v1:task:sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "workgraph-v1:task:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(!valid_workgraph_task_id(invalid));
+        }
+    }
+
     struct RecordingDispatchProjector {
         committed: Arc<TokioMutex<Vec<Vec<ProjectionInput>>>>,
         replacement: WorkGraphDispatchBinding,
