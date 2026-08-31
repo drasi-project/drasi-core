@@ -1324,6 +1324,24 @@ async fn try_workgraph_issue(
         .latest_workgraph_task(node_id)
         .await
         .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
+    let typed = state.task_issue_type.matches(issue.get("type"));
+    let previous_parent_source_key = previous_task
+        .as_ref()
+        .and_then(|task| task.parent_source_key.clone());
+    let task_parent_source_key = if current_workgraph && typed && action == "opened" {
+        match previous_parent_source_key {
+            Some(parent) => Some(parent),
+            None => match &state.admission_client {
+                Some(client) => client
+                    .parent_issue_node_id(node_id)
+                    .await
+                    .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?,
+                None => None,
+            },
+        }
+    } else {
+        previous_parent_source_key
+    };
     let admitted = labeled_root_candidate
         && !current_workgraph
         && !previous_workgraph
@@ -1346,9 +1364,7 @@ async fn try_workgraph_issue(
     let incoming_state = issue_authority_state(
         issue,
         payload.get("repository"),
-        previous_task
-            .as_ref()
-            .and_then(|task| task.parent_source_key.clone()),
+        task_parent_source_key.clone(),
         &state.task_issue_type,
         matches!(action, "deleted" | "transferred"),
     )?;
@@ -1516,7 +1532,6 @@ async fn try_workgraph_issue(
     }
 
     if current_workgraph || previous_workgraph || previous_task.is_some() {
-        let typed = state.task_issue_type.matches(issue.get("type"));
         if !current_workgraph || !typed || action == "untyped" {
             if item_is_open(issue) {
                 inputs.push(ProjectionInput::UpsertGitHubIssue(normalize_github_issue(
@@ -1552,11 +1567,7 @@ async fn try_workgraph_issue(
         inputs.push(ProjectionInput::DeleteGitHubIssue {
             source_key: node_id.to_string(),
         });
-        let task_doc = task_document(
-            issue,
-            node_id,
-            previous_task.and_then(|document| document.parent_source_key),
-        );
+        let task_doc = task_document(issue, node_id, task_parent_source_key);
         inputs.push(ProjectionInput::UpsertTask(task_doc));
         if let Some(locator) = extract_issue_locator(issue, payload) {
             inputs.push(ProjectionInput::UpsertLocator(locator));
@@ -2527,6 +2538,65 @@ mod workgraph_tests {
         })
     }
 
+    #[tokio::test]
+    async fn new_task_issue_uses_authoritative_parent_after_hierarchy_delivery() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"node": {"parent": {"id": "I_root"}}}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_temp, _projector, mut state) = ingress_state(Some(task_trust())).await;
+        state.admission_client = Some(
+            AdmissionClient::new(&WorkflowDefinitionConfig {
+                token: "token".to_string(),
+                api_base_url: server.uri(),
+                ..WorkflowDefinitionConfig::default()
+            })
+            .expect("admission client"),
+        );
+        let body = "WorkGraphTask/v1\n\n```json\n{}\n```\n";
+
+        let inputs = try_workgraph_issue(
+            &state,
+            "task-opened",
+            &payload("opened", task_issue("I_task", body)),
+        )
+        .await
+        .expect("normalize task Issue")
+        .expect("task projection");
+
+        assert!(inputs.iter().any(|input| matches!(
+            input,
+            ProjectionInput::UpsertTask(document)
+                if document.parent_source_key.as_deref() == Some("I_root")
+        )));
+        let fingerprint = inputs
+            .iter()
+            .find_map(|input| match input {
+                ProjectionInput::RecordIssueRevision {
+                    state_fingerprint, ..
+                } => Some(state_fingerprint),
+                _ => None,
+            })
+            .expect("Issue revision fingerprint");
+        assert_eq!(
+            fingerprint,
+            &issue_authority_state(
+                &task_issue("I_task", body),
+                payload("opened", task_issue("I_task", body)).get("repository"),
+                Some("I_root".to_string()),
+                &state.task_issue_type,
+                false,
+            )
+            .expect("authoritative task state")
+            .fingerprint()
+            .expect("authoritative task fingerprint")
+        );
+    }
+
     fn signed_headers(event: &str, delivery: &str, body: &[u8]) -> HeaderMap {
         let mut mac = HmacSha256::new_from_slice(b"secret").expect("HMAC key");
         mac.update(body);
@@ -3327,7 +3397,7 @@ mod workgraph_tests {
                         }
                     }
                 })))
-                .expect(2)
+                .expect(3)
                 .mount(&server)
                 .await;
             let (_temp, projector, mut state) = ingress_state(Some(task_trust())).await;
@@ -3567,7 +3637,7 @@ mod workgraph_tests {
                         }
                     }
                 })))
-                .expect(2)
+                .expect(3)
                 .mount(&server)
                 .await;
             let (_temp, projector, mut state) = ingress_state(Some(task_trust())).await;
