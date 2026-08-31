@@ -188,6 +188,7 @@ pub enum ProjectionInput {
         source_key: String,
         revision: i64,
         state_fingerprint: String,
+        authorization_transition: bool,
     },
     UpsertDefinition(DefinitionDocument),
     DeleteDefinition {

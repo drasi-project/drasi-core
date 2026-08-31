@@ -1074,7 +1074,7 @@ fn issue_is_root_candidate(
 
 fn issue_authority_state(
     issue: &serde_json::Value,
-    payload: &serde_json::Value,
+    repository: Option<&serde_json::Value>,
     parent_source_key: Option<String>,
     task_issue_type: &crate::config::TaskIssueType,
     absent: bool,
@@ -1082,7 +1082,7 @@ fn issue_authority_state(
     if absent {
         return Ok(IssueAuthorityState::Absent);
     }
-    let locator = extract_issue_locator(issue, payload);
+    let locator = extract_issue_locator_from_repository(issue, repository);
     let source_key = issue
         .get("node_id")
         .and_then(Value::as_str)
@@ -1090,17 +1090,14 @@ fn issue_authority_state(
         .ok_or_else(|| {
             WorkGraphNormError::InvalidPayload("Issue state is missing 'node_id'".to_string())
         })?;
-    let repository_owner = payload
-        .pointer("/repository/owner/login")
-        .or_else(|| payload.pointer("/organization/login"))
+    let repository_full_name = repository
+        .and_then(|repository| repository.get("full_name"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    let repository_name = payload
-        .pointer("/repository/name")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let repository_node_id = payload
-        .pointer("/repository/node_id")
+    let (repository_owner, repository_name) =
+        repository_full_name.split_once('/').unwrap_or(("", ""));
+    let repository_node_id = repository
+        .and_then(|repository| repository.get("node_id"))
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .unwrap_or("");
@@ -1262,6 +1259,13 @@ async fn try_workgraph_issue(
         .and_then(serde_json::Value::as_str)
         .is_some_and(|body| body.starts_with(WORKGRAPH_TASK_MARKER));
     let (workgraph_labels, workgraph_include) = issue_workgraph_labels(issue);
+    let exclusion_label_event = payload
+        .pointer("/label/name")
+        .and_then(Value::as_str)
+        .is_some_and(|label| matches!(label, WORKGRAPH_IGNORE_LABEL | WORKGRAPH_ERROR_LABEL));
+    let authorization_transition = exclusion_label_event
+        && ((action == "labeled" && !workgraph_include)
+            || (action == "unlabeled" && workgraph_include));
     let labeled_root_candidate = issue_is_root_candidate(issue, &state.task_issue_type);
     let admission_added = action == "labeled"
         && payload
@@ -1295,7 +1299,7 @@ async fn try_workgraph_issue(
         .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
     let incoming_state = issue_authority_state(
         issue,
-        payload,
+        payload.get("repository"),
         previous_task
             .as_ref()
             .and_then(|task| task.parent_source_key.clone()),
@@ -1341,6 +1345,7 @@ async fn try_workgraph_issue(
                 source_key: node_id.to_string(),
                 revision,
                 state_fingerprint: incoming_state_fingerprint,
+                authorization_transition,
             }]
         })
         .unwrap_or_default();
@@ -1467,6 +1472,15 @@ async fn try_workgraph_issue(
     if current_workgraph || previous_workgraph || previous_task.is_some() {
         let typed = state.task_issue_type.matches(issue.get("type"));
         if !current_workgraph || !typed || action == "untyped" {
+            if item_is_open(issue) {
+                inputs.push(ProjectionInput::UpsertGitHubIssue(normalize_github_issue(
+                    issue, payload,
+                )?));
+            } else {
+                inputs.push(ProjectionInput::DeleteGitHubIssue {
+                    source_key: node_id.to_string(),
+                });
+            }
             inputs.push(ProjectionInput::DeleteTask {
                 source_key: node_id.to_string(),
             });
@@ -1838,7 +1852,7 @@ async fn try_workgraph_sub_issue(
     };
     let incoming_state = issue_authority_state(
         sub_issue,
-        payload,
+        child_repository,
         task_doc.parent_source_key.clone(),
         &state.task_issue_type,
         false,
@@ -1872,6 +1886,7 @@ async fn try_workgraph_sub_issue(
         source_key: child_node_id.to_string(),
         revision,
         state_fingerprint: incoming_state_fingerprint,
+        authorization_transition: false,
     });
     if previous_root.is_some() {
         inputs.push(ProjectionInput::DeleteRootIssue {
@@ -2246,6 +2261,74 @@ mod workgraph_tests {
     }
 
     #[tokio::test]
+    async fn task_and_generic_issue_classification_transitions_are_atomic() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        let task_body = "WorkGraphTask/v1\n\n```json\n{}\n```\n";
+        let task = try_workgraph_issue(
+            &state,
+            "task-first",
+            &payload("opened", task_issue("I_task", task_body)),
+        )
+        .await
+        .expect("normalize task")
+        .expect("task inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), task, 1, "task-first")
+            .await
+            .expect("persist task");
+
+        let mut ordinary = task_issue("I_task", "ordinary issue");
+        ordinary["updated_at"] = json!("2026-08-01T00:01:00Z");
+        let mut task_to_generic = payload("edited", ordinary);
+        task_to_generic["changes"] = json!({"body": {"from": task_body}});
+        let task_to_generic = try_workgraph_issue(&state, "task-to-generic", &task_to_generic)
+            .await
+            .expect("normalize task to generic")
+            .expect("task to generic inputs");
+        assert!(task_to_generic.iter().any(|input| matches!(
+            input,
+            ProjectionInput::DeleteTask { source_key } if source_key == "I_task"
+        )));
+        assert!(task_to_generic.iter().any(|input| matches!(
+            input,
+            ProjectionInput::DeleteLocator { source_key } if source_key == "I_task"
+        )));
+        assert!(task_to_generic.iter().any(|input| matches!(
+            input,
+            ProjectionInput::UpsertGitHubIssue(issue)
+                if issue.source_key == "I_task" && issue.body == "ordinary issue"
+        )));
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), task_to_generic, 2, "task-to-generic")
+            .await
+            .expect("persist generic classification");
+
+        let mut restored_task = task_issue("I_task", task_body);
+        restored_task["updated_at"] = json!("2026-08-01T00:02:00Z");
+        let mut generic_to_task = payload("edited", restored_task);
+        generic_to_task["changes"] = json!({"body": {"from": "ordinary issue"}});
+        let generic_to_task = try_workgraph_issue(&state, "generic-to-task", &generic_to_task)
+            .await
+            .expect("normalize generic to task")
+            .expect("generic to task inputs");
+        assert!(generic_to_task.iter().any(|input| matches!(
+            input,
+            ProjectionInput::DeleteGitHubIssue { source_key } if source_key == "I_task"
+        )));
+        assert!(generic_to_task.iter().any(|input| matches!(
+            input,
+            ProjectionInput::UpsertTask(task)
+                if task.source_key == "I_task" && task.body == task_body
+        )));
+        assert!(generic_to_task.iter().any(|input| matches!(
+            input,
+            ProjectionInput::UpsertLocator(locator) if locator.source_key == "I_task"
+        )));
+    }
+
+    #[tokio::test]
     async fn task_inclusion_uses_only_exact_case_sensitive_exclusion_labels() {
         for (labels, expected_labels, expected_include) in [
             (vec![], vec![], true),
@@ -2304,6 +2387,7 @@ mod workgraph_tests {
                             .expect("revision")
                             .timestamp_millis(),
                         state_fingerprint: "0".repeat(64),
+                        authorization_transition: false,
                     },
                     ProjectionInput::UpsertTask(TaskDocument {
                         source_key: "I_task".to_string(),
@@ -2525,11 +2609,12 @@ mod workgraph_tests {
 
         let mut excluded_issue = root_issue(&["workgraph", "workgraph:ignore"]);
         excluded_issue["updated_at"] = json!("2026-08-01T00:01:00Z");
-        let excluded =
-            try_workgraph_issue(&state, "root-excluded", &payload("labeled", excluded_issue))
-                .await
-                .expect("normalize")
-                .expect("exclude Root Issue");
+        let mut exclusion = payload("labeled", excluded_issue);
+        exclusion["label"] = json!({"name": "workgraph:ignore"});
+        let excluded = try_workgraph_issue(&state, "root-excluded", &exclusion)
+            .await
+            .expect("normalize")
+            .expect("exclude Root Issue");
         assert!(!excluded
             .iter()
             .any(|input| matches!(input, ProjectionInput::DeleteRootIssue { .. })));
@@ -2537,6 +2622,13 @@ mod workgraph_tests {
             input,
             ProjectionInput::UpsertRootIssue(root)
                 if root.admission_id == admission_id && !root.workgraph_include
+        )));
+        assert!(excluded.iter().any(|input| matches!(
+            input,
+            ProjectionInput::RecordIssueRevision {
+                authorization_transition: true,
+                ..
+            }
         )));
         state
             .allocator
@@ -2552,14 +2644,12 @@ mod workgraph_tests {
 
         let mut reincluded_issue = root_issue(&["workgraph"]);
         reincluded_issue["updated_at"] = json!("2026-08-01T00:02:00Z");
-        let reincluded = try_workgraph_issue(
-            &state,
-            "root-reincluded",
-            &payload("unlabeled", reincluded_issue),
-        )
-        .await
-        .expect("normalize")
-        .expect("re-include Root Issue");
+        let mut reinclusion = payload("unlabeled", reincluded_issue);
+        reinclusion["label"] = json!({"name": "workgraph:ignore"});
+        let reincluded = try_workgraph_issue(&state, "root-reincluded", &reinclusion)
+            .await
+            .expect("normalize")
+            .expect("re-include Root Issue");
         assert!(!reincluded
             .iter()
             .any(|input| matches!(input, ProjectionInput::DeleteRootIssue { .. })));
@@ -2568,6 +2658,69 @@ mod workgraph_tests {
             ProjectionInput::UpsertRootIssue(root)
                 if root.admission_id == admission_id && root.workgraph_include
         )));
+        assert!(reincluded.iter().any(|input| matches!(
+            input,
+            ProjectionInput::RecordIssueRevision {
+                authorization_transition: true,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn newer_explicit_reinclude_fences_delayed_older_exclusion() {
+        let (_temp, projector, state) = ingress_state(None).await;
+        let admitted = try_workgraph_issue(
+            &state,
+            "root-admitted",
+            &payload("labeled", root_issue(&["workgraph"])),
+        )
+        .await
+        .expect("normalize admission")
+        .expect("admission inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), admitted, 1, "root-admitted")
+            .await
+            .expect("persist admission");
+
+        let mut reincluded_issue = root_issue(&["workgraph"]);
+        reincluded_issue["updated_at"] = json!("2026-08-01T00:02:00Z");
+        let mut reinclusion = payload("unlabeled", reincluded_issue);
+        reinclusion["label"] = json!({"name": "workgraph:ignore"});
+        let reincluded = try_workgraph_issue(&state, "newer-reinclude", &reinclusion)
+            .await
+            .expect("normalize explicit re-inclusion")
+            .expect("re-inclusion inputs");
+        assert!(reincluded.iter().any(|input| matches!(
+            input,
+            ProjectionInput::RecordIssueRevision {
+                authorization_transition: true,
+                ..
+            }
+        )));
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), reincluded, 2, "newer-reinclude")
+            .await
+            .expect("persist re-inclusion fence");
+
+        let mut excluded_issue = root_issue(&["workgraph", "workgraph:ignore"]);
+        excluded_issue["updated_at"] = json!("2026-08-01T00:01:00Z");
+        let mut delayed_exclusion = payload("labeled", excluded_issue);
+        delayed_exclusion["label"] = json!({"name": "workgraph:ignore"});
+        assert!(
+            try_workgraph_issue(&state, "older-exclusion", &delayed_exclusion)
+                .await
+                .expect("normalize delayed exclusion")
+                .is_none()
+        );
+        assert!(state
+            .allocator
+            .latest_workgraph_root_issue("I_root")
+            .await
+            .expect("read Root Issue")
+            .is_some_and(|root| root.workgraph_include));
     }
 
     #[tokio::test]
@@ -2969,7 +3122,7 @@ mod workgraph_tests {
                 }
                 let expected = issue_authority_state(
                     &reopened_issue,
-                    &reopen,
+                    reopen.get("repository"),
                     None,
                     &state.task_issue_type,
                     false,
@@ -4344,6 +4497,7 @@ mod workgraph_tests {
                             .expect("revision")
                             .timestamp_millis(),
                         state_fingerprint: "0".repeat(64),
+                        authorization_transition: false,
                     },
                     ProjectionInput::UpsertTask(excluded),
                     ProjectionInput::UpsertLocator(GitHubIssueLocator {
@@ -4425,6 +4579,71 @@ mod workgraph_tests {
             try_workgraph_sub_issue(&state, &untrusted).await,
             Err(WorkGraphNormError::Untrusted(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn cross_repository_sub_issue_fingerprint_uses_child_repository() {
+        let (_temp, _projector, mut state) = ingress_state(Some(task_trust())).await;
+        state.repository_filter =
+            RepositoryFilter::new("acme", &["widgets".to_string(), "child".to_string()])
+                .expect("repository filter");
+        let child_repository = json!({
+            "name": "child",
+            "full_name": "acme/child",
+            "node_id": "R_child"
+        });
+        let event = json!({
+            "action": "sub_issue_added",
+            "organization": {"login": "acme"},
+            "repository": {
+                "name": "widgets",
+                "full_name": "acme/widgets",
+                "node_id": "R_widgets"
+            },
+            "sub_issue_repo": child_repository,
+            "sender": {"node_id": "U_creator", "login": "task-creator"},
+            "parent_issue": {"node_id": "I_root"},
+            "sub_issue": task_issue(
+                "I_child",
+                "WorkGraphTask/v1\n\n```json\n{}\n```\n"
+            )
+        });
+        let inputs = try_workgraph_sub_issue(&state, &event)
+            .await
+            .expect("normalize cross-repository hierarchy")
+            .expect("cross-repository task inputs");
+        let fingerprint = inputs
+            .iter()
+            .find_map(|input| match input {
+                ProjectionInput::RecordIssueRevision {
+                    state_fingerprint, ..
+                } => Some(state_fingerprint.as_str()),
+                _ => None,
+            })
+            .expect("state fingerprint");
+        let child = event.get("sub_issue").expect("child Issue");
+        let expected = issue_authority_state(
+            child,
+            event.get("sub_issue_repo"),
+            Some("I_root".to_string()),
+            &state.task_issue_type,
+            false,
+        )
+        .expect("child repository state")
+        .fingerprint()
+        .expect("child repository fingerprint");
+        let parent = issue_authority_state(
+            child,
+            event.get("repository"),
+            Some("I_root".to_string()),
+            &state.task_issue_type,
+            false,
+        )
+        .expect("parent repository state")
+        .fingerprint()
+        .expect("parent repository fingerprint");
+        assert_eq!(fingerprint, expected);
+        assert_ne!(fingerprint, parent);
     }
 
     #[tokio::test]

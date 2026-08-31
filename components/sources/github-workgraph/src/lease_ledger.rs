@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const VERSION: u8 = 12;
+const VERSION: u8 = 13;
 const STATE_KEY: &str = "allocator:state";
 const DELIVERY_PREFIX: &str = "delivery:";
 const WORKGRAPH_ORIGIN_PREFIX: &str = "workgraph-origin:";
@@ -137,6 +137,7 @@ struct WorkGraphAuthorizationState {
     root_issue_id: String,
     generation: u64,
     cutoff_revision: i64,
+    transition_revision: i64,
     included: bool,
 }
 
@@ -775,6 +776,7 @@ fn apply_workgraph_documents(
                 source_key,
                 revision,
                 state_fingerprint,
+                ..
             } => {
                 issue_revisions.insert(source_key.clone(), *revision);
                 issue_state_fingerprints.insert(source_key.clone(), state_fingerprint.clone());
@@ -1050,6 +1052,18 @@ impl AllocationState {
         artifacts: &BTreeMap<String, LifecycleArtifactDocument>,
         inputs: &[ProjectionInput],
     ) {
+        let explicit_transitions = inputs
+            .iter()
+            .filter_map(|input| match input {
+                ProjectionInput::RecordIssueRevision {
+                    source_key,
+                    revision,
+                    authorization_transition: true,
+                    ..
+                } => Some((source_key.as_str(), *revision)),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
         let desired = projection
             .tasks
             .iter()
@@ -1066,7 +1080,17 @@ impl AllocationState {
                 .workgraph_authorizations
                 .get_mut(&source_key)
                 .expect("selected authorization exists");
-            if authorization.included {
+            let explicit_transition = explicit_transitions
+                .get(source_key.as_str())
+                .copied()
+                .unwrap_or_default()
+                .max(
+                    explicit_transitions
+                        .get(authorization.root_issue_id.as_str())
+                        .copied()
+                        .unwrap_or_default(),
+                );
+            if authorization.included || explicit_transition > authorization.transition_revision {
                 authorization.generation += 1;
                 authorization.cutoff_revision = authorization.cutoff_revision.max(
                     issue_revisions
@@ -1080,6 +1104,8 @@ impl AllocationState {
                                 .unwrap_or_default(),
                         ),
                 );
+                authorization.transition_revision =
+                    authorization.transition_revision.max(explicit_transition);
                 authorization.included = false;
             }
         }
@@ -1101,15 +1127,28 @@ impl AllocationState {
                         .copied()
                         .unwrap_or_default(),
                 );
+            let explicit_transition = explicit_transitions
+                .get(binding.source_key.as_str())
+                .copied()
+                .unwrap_or_default()
+                .max(
+                    explicit_transitions
+                        .get(binding.root_issue_id.as_str())
+                        .copied()
+                        .unwrap_or_default(),
+                );
             match self.workgraph_authorizations.get_mut(&binding.source_key) {
                 Some(authorization)
                     if authorization.included != included
-                        || authorization.root_issue_id != binding.root_issue_id =>
+                        || authorization.root_issue_id != binding.root_issue_id
+                        || explicit_transition > authorization.transition_revision =>
                 {
                     authorization.root_issue_id = binding.root_issue_id.clone();
                     authorization.generation += 1;
                     authorization.cutoff_revision =
                         authorization.cutoff_revision.max(transition_revision);
+                    authorization.transition_revision =
+                        authorization.transition_revision.max(explicit_transition);
                     authorization.included = included;
                 }
                 Some(_) => {}
@@ -1119,9 +1158,10 @@ impl AllocationState {
                         WorkGraphAuthorizationState {
                             root_issue_id: binding.root_issue_id.clone(),
                             generation: 1,
-                            cutoff_revision: (!included)
+                            cutoff_revision: (!included || explicit_transition > 0)
                                 .then_some(transition_revision)
                                 .unwrap_or_default(),
+                            transition_revision: explicit_transition,
                             included,
                         },
                     );
@@ -1144,7 +1184,8 @@ impl AllocationState {
             .filter(|artifact| {
                 !self
                     .workgraph_artifact_generations
-                    .contains_key(&artifact.source_key)
+                    .get(&artifact.source_key)
+                    .is_some_and(|generation| *generation > 0)
             })
             .cloned()
             .collect::<Vec<_>>()
@@ -1277,6 +1318,8 @@ impl AllocationState {
                     || !valid_workgraph_id(&authorization.root_issue_id)
                     || authorization.generation == 0
                     || authorization.cutoff_revision < 0
+                    || authorization.transition_revision < 0
+                    || authorization.transition_revision > authorization.cutoff_revision
             })
             || self
                 .workgraph_artifact_generations
@@ -3160,14 +3203,246 @@ mod tests {
     }
 
     #[test]
+    fn explicit_reinclude_fences_prior_generation_in_both_delivery_orders() {
+        for exclusion_first in [true, false] {
+            let mut state = AllocationState::default();
+            let tasks = BTreeMap::from([("issue".to_string(), task_document(true))]);
+            let included_roots = BTreeMap::from([("root".to_string(), root_document(true))]);
+            let excluded_roots = BTreeMap::from([("root".to_string(), root_document(false))]);
+            let mut task_only = projection(Vec::new());
+            task_only.assignments.clear();
+            let mut revisions =
+                BTreeMap::from([("issue".to_string(), 100), ("root".to_string(), 100)]);
+            state.refresh_workgraph_authorizations(
+                &task_only,
+                &tasks,
+                &included_roots,
+                &revisions,
+                &BTreeMap::new(),
+                &[],
+            );
+
+            if exclusion_first {
+                revisions.insert("root".to_string(), 200);
+                state.refresh_workgraph_authorizations(
+                    &task_only,
+                    &tasks,
+                    &excluded_roots,
+                    &revisions,
+                    &BTreeMap::new(),
+                    &[ProjectionInput::RecordIssueRevision {
+                        source_key: "root".to_string(),
+                        revision: 200,
+                        state_fingerprint: "0".repeat(64),
+                        authorization_transition: true,
+                    }],
+                );
+            }
+            revisions.insert("root".to_string(), 300);
+            state.refresh_workgraph_authorizations(
+                &task_only,
+                &tasks,
+                &included_roots,
+                &revisions,
+                &BTreeMap::new(),
+                &[ProjectionInput::RecordIssueRevision {
+                    source_key: "root".to_string(),
+                    revision: 300,
+                    state_fingerprint: "1".repeat(64),
+                    authorization_transition: true,
+                }],
+            );
+
+            let authorization = &state.workgraph_authorizations["issue"];
+            assert!(authorization.included);
+            assert_eq!(authorization.cutoff_revision, 300);
+            assert_eq!(
+                authorization.generation,
+                if exclusion_first { 3 } else { 2 }
+            );
+            let old = LifecycleArtifactDocument {
+                source_key: "old-assignment".to_string(),
+                task_source_key: "issue".to_string(),
+                body: format!("{WORKGRAPH_ASSIGN_MARKER}\n"),
+                created_at_revision: 150,
+            };
+            let artifacts = BTreeMap::from([("old-assignment".to_string(), old.clone())]);
+            let mut desired = projection(Vec::new());
+            desired.assignments[0].source_key = "old-assignment".to_string();
+            state.refresh_workgraph_authorizations(
+                &desired,
+                &tasks,
+                &included_roots,
+                &revisions,
+                &artifacts,
+                &[ProjectionInput::UpsertLifecycleArtifact(old)],
+            );
+            state.fence_stale_workgraph_authorizations(&mut desired);
+            assert!(desired.assignments.is_empty());
+        }
+    }
+
+    #[test]
+    fn assignment_delivered_before_task_converges_when_authorization_arrives() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("timestamp");
+        let mut state = AllocationState::default();
+        state.sync_agents(
+            &AgentFile {
+                version: 1,
+                agents: vec![AgentDefinition {
+                    agent_id: "executor".to_string(),
+                    slots: 1,
+                    lease_duration: "PT1M".to_string(),
+                    lease_duration_seconds: 60,
+                }],
+            },
+            now,
+        );
+        let artifact = LifecycleArtifactDocument {
+            source_key: "assignment-comment".to_string(),
+            task_source_key: "issue".to_string(),
+            body: format!("{WORKGRAPH_ASSIGN_MARKER}\n"),
+            created_at_revision: 200,
+        };
+        let artifacts = BTreeMap::from([("assignment-comment".to_string(), artifact.clone())]);
+        state.refresh_workgraph_authorizations(
+            &WorkGraphAllocatorProjection::default(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &artifacts,
+            &[ProjectionInput::UpsertLifecycleArtifact(artifact)],
+        );
+        state.workgraph_artifacts = artifacts.clone();
+        assert_eq!(
+            state.workgraph_artifact_generations["assignment-comment"],
+            0
+        );
+
+        let tasks = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let roots = BTreeMap::from([("root".to_string(), root_document(true))]);
+        let revisions = BTreeMap::from([("issue".to_string(), 100), ("root".to_string(), 100)]);
+        let mut desired = projection(Vec::new());
+        state.refresh_workgraph_authorizations(
+            &desired,
+            &tasks,
+            &roots,
+            &revisions,
+            &artifacts,
+            &[],
+        );
+        state.fence_stale_workgraph_authorizations(&mut desired);
+        assert_eq!(desired.assignments.len(), 1);
+        state
+            .reconcile_workgraph_with_roots(desired, &tasks, &roots, 1, now)
+            .expect("allocate retained assignment");
+        assert_eq!(state.workgraph_active.len(), 1);
+    }
+
+    #[test]
+    fn dispatch_delivered_before_task_converges_after_assignment_allocation() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("timestamp");
+        let mut state = AllocationState::default();
+        state.sync_agents(
+            &AgentFile {
+                version: 1,
+                agents: vec![AgentDefinition {
+                    agent_id: "executor".to_string(),
+                    slots: 1,
+                    lease_duration: "PT1M".to_string(),
+                    lease_duration_seconds: 60,
+                }],
+            },
+            now,
+        );
+        let assignment = LifecycleArtifactDocument {
+            source_key: "assignment-comment".to_string(),
+            task_source_key: "issue".to_string(),
+            body: format!("{WORKGRAPH_ASSIGN_MARKER}\n"),
+            created_at_revision: 200,
+        };
+        let dispatch = LifecycleArtifactDocument {
+            source_key: "dispatch-comment".to_string(),
+            task_source_key: "issue".to_string(),
+            body: format!("{WORKGRAPH_DISPATCH_MARKER}\n"),
+            created_at_revision: 210,
+        };
+        let artifacts = BTreeMap::from([
+            ("assignment-comment".to_string(), assignment.clone()),
+            ("dispatch-comment".to_string(), dispatch.clone()),
+        ]);
+        state.refresh_workgraph_authorizations(
+            &WorkGraphAllocatorProjection::default(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &artifacts,
+            &[
+                ProjectionInput::UpsertLifecycleArtifact(assignment),
+                ProjectionInput::UpsertLifecycleArtifact(dispatch),
+            ],
+        );
+        state.workgraph_artifacts = artifacts.clone();
+
+        let tasks = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let roots = BTreeMap::from([("root".to_string(), root_document(true))]);
+        let revisions = BTreeMap::from([("issue".to_string(), 100), ("root".to_string(), 100)]);
+        let mut assignment_projection = projection(Vec::new());
+        state.refresh_workgraph_authorizations(
+            &assignment_projection,
+            &tasks,
+            &roots,
+            &revisions,
+            &artifacts,
+            &[],
+        );
+        state.fence_stale_workgraph_authorizations(&mut assignment_projection);
+        state
+            .reconcile_workgraph_with_roots(assignment_projection, &tasks, &roots, 1, now)
+            .expect("allocate retained assignment");
+        let lease = state
+            .workgraph_active
+            .values()
+            .next()
+            .cloned()
+            .expect("active lease");
+        let mut dispatch_projection = projection(vec![WorkGraphDispatchBinding {
+            source_key: "dispatch-comment".to_string(),
+            task_source_key: "issue".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: "run".to_string(),
+            task_id: "task".to_string(),
+            assignment_id: "assignment".to_string(),
+            lease_id: lease.lease_id.clone(),
+            executor_id: "executor".to_string(),
+            slot_id: lease.slot_id,
+        }]);
+        state.fence_stale_workgraph_authorizations(&mut dispatch_projection);
+        assert_eq!(dispatch_projection.dispatches.len(), 1);
+        state
+            .reconcile_workgraph_with_roots(dispatch_projection, &tasks, &roots, 2, now)
+            .expect("accept retained Dispatch");
+        assert!(state
+            .workgraph_active
+            .get(&lease.lease_id)
+            .is_some_and(|active| active.has_dispatch));
+    }
+
+    #[test]
     fn prior_allocator_schema_is_rejected_explicitly() {
         let mut encoded = serde_json::to_value(AllocationState::default()).expect("encode state");
-        encoded["version"] = serde_json::json!(11);
+        encoded["version"] = serde_json::json!(12);
         let state: AllocationState = serde_json::from_value(encoded).expect("decode old state");
         assert!(state
             .validate()
-            .expect_err("schema 11 must be rejected")
-            .contains("version must equal 12"));
+            .expect_err("schema 12 must be rejected")
+            .contains("version must equal 13"));
     }
 
     #[test]
