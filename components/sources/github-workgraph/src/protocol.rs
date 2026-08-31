@@ -165,6 +165,8 @@ pub struct LifecycleArtifactDocument {
     pub source_key: String,
     pub task_source_key: String,
     pub body: String,
+    /// Immutable GitHub comment creation time as Unix milliseconds.
+    pub created_at_revision: i64,
 }
 
 /// GitHub locator metadata carried separately from the task protocol document.
@@ -182,19 +184,35 @@ pub struct GitHubIssueLocator {
 /// A normalized input for the WorkGraph projection.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProjectionInput {
-    RecordIssueRevision { source_key: String, revision: i64 },
+    RecordIssueRevision {
+        source_key: String,
+        revision: i64,
+        state_fingerprint: String,
+    },
     UpsertDefinition(DefinitionDocument),
-    DeleteDefinition { source_key: String },
+    DeleteDefinition {
+        source_key: String,
+    },
     UpsertRootIssue(RootIssueDocument),
-    DeleteRootIssue { source_key: String },
+    DeleteRootIssue {
+        source_key: String,
+    },
     UpsertGitHubIssue(GitHubIssueDocument),
-    DeleteGitHubIssue { source_key: String },
+    DeleteGitHubIssue {
+        source_key: String,
+    },
     UpsertTask(TaskDocument),
-    DeleteTask { source_key: String },
+    DeleteTask {
+        source_key: String,
+    },
     UpsertLifecycleArtifact(LifecycleArtifactDocument),
-    DeleteLifecycleArtifact { source_key: String },
+    DeleteLifecycleArtifact {
+        source_key: String,
+    },
     UpsertLocator(GitHubIssueLocator),
-    DeleteLocator { source_key: String },
+    DeleteLocator {
+        source_key: String,
+    },
 }
 
 /// Complete bounded allocator projection derived by the trusted WorkGraph

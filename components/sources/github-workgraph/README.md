@@ -62,10 +62,16 @@ they compile:
   bindings;
 - populate the `results` and `evaluations` allocator projection collections
   with the corresponding identity-bearing bindings.
+- preserve `createdAtRevision` on lifecycle artifacts and
+  `stateFingerprint` on issue revision records when matching projection inputs.
 
 This is a single v1 contract change. No alternate wire format or compatibility
 projection is provided. The lease-validation HTTP response remains unchanged
 until the reporter and endpoint can be updated together.
+
+Allocator state schema 12 durably records Issue-state fingerprints and
+authorization generations/cutoffs. Older state is rejected explicitly rather
+than migrated.
 
 ## Configuration
 
