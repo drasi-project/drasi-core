@@ -3,6 +3,11 @@ name: Publish Plugins
 on:
   workflow_dispatch:
     inputs:
+      plugin:
+        description: 'Publish a single plugin (crate name or type/kind, e.g. drasi-source-otel or source/otel). Leave empty for all.'
+        required: false
+        type: string
+        default: ''
       pre_release:
         description: 'Pre-release label (e.g., "dev.1", "rc.1"). Leave empty for stable release.'
         required: false
@@ -56,6 +61,11 @@ on:
           - execute
   workflow_call:
     inputs:
+      plugin:
+        description: 'Publish a single plugin (crate name or type/kind, e.g. drasi-source-otel or source/otel). Leave empty for all.'
+        required: false
+        type: string
+        default: ''
       pre_release:
         description: 'Pre-release label (e.g., "dev.1", "rc.1"). Leave empty for stable release.'
         required: false
@@ -417,7 +427,13 @@ jobs:
             echo "${TOOLCHAIN_ENV}=${PWD}/ci/cmake/librdkafka-features.cmake" >> "$GITHUB_ENV"
             export "${TOOLCHAIN_ENV}=${PWD}/ci/cmake/librdkafka-features.cmake"
           fi
-          cargo run -p xtask -- build-plugins --release --target "$BUILD_TARGET"
+          
+          ARGS=(build-plugins --release --target "$BUILD_TARGET")
+          if [ -n "${{ inputs.plugin }}" ]; then
+            ARGS+=(--plugin "${{ inputs.plugin }}")
+          fi
+          
+          cargo run -p xtask -- "${ARGS[@]}"
 
       - name: Verify glibc floor (-gnu plugins)
         if: matrix.zigbuild
@@ -503,6 +519,9 @@ jobs:
           elif [ -n "$INPUT_PRE_RELEASE" ]; then
             ARGS+=(--pre-release "$INPUT_PRE_RELEASE")
           fi
+          if [ -n "${{ inputs.plugin }}" ]; then
+            ARGS+=(--plugin "${{ inputs.plugin }}")
+          fi
           cargo run -p xtask -- publish-plugins "${ARGS[@]}"
 
       - name: Publish plugins (dry run)
@@ -529,6 +548,9 @@ jobs:
             ARGS+=(--tag "$INPUT_TAG")
           elif [ -n "$INPUT_PRE_RELEASE" ]; then
             ARGS+=(--pre-release "$INPUT_PRE_RELEASE")
+          fi
+          if [ -n "${{ inputs.plugin }}" ]; then
+            ARGS+=(--plugin "${{ inputs.plugin }}")
           fi
           cargo run -p xtask -- publish-plugins "${ARGS[@]}"
 
