@@ -82,8 +82,7 @@ they compile:
   matching projection inputs.
 
 This is a single v1 contract change. No alternate wire format or compatibility
-projection is provided. The lease-validation HTTP response remains unchanged
-until the reporter and endpoint can be updated together.
+projection is provided.
 
 Allocator state schema 16 durably records Issue-state fingerprints,
 authorization generations/cutoffs, generation-bound applied Route decisions,
