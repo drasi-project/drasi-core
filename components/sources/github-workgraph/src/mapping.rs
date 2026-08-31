@@ -13,7 +13,7 @@ use crate::model::{
 };
 use crate::protocol::ProjectionInput;
 
-pub const NODE_LABELS: [&str; 16] = [
+pub const NODE_LABELS: [&str; 17] = [
     "GitHubIssue",
     "WorkGraphRootIssue",
     "WorkflowDefinition",
@@ -25,6 +25,7 @@ pub const NODE_LABELS: [&str; 16] = [
     "WorkGraphTaskResult",
     "WorkGraphTaskEvaluate",
     "WorkGraphTaskRoute",
+    "WorkGraphTaskError",
     "WorkGraphTaskArtifact",
     "WorkGraphTaskLease",
     "WorkGraphAgent",
@@ -32,7 +33,7 @@ pub const NODE_LABELS: [&str; 16] = [
     "WorkGraphError",
 ];
 
-pub const RELATION_LABELS: [&str; 19] = [
+pub const RELATION_LABELS: [&str; 20] = [
     "HAS_ROOT",
     "HAS_TASK",
     "DECLARES_CHILD",
@@ -48,6 +49,7 @@ pub const RELATION_LABELS: [&str; 19] = [
     "RESULT_FROM_LEASE",
     "EVALUATES",
     "ROUTES",
+    "ERROR_FOR",
     "ARTIFACT_FOR",
     "HAS_SLOT",
     "LEASE_FOR",

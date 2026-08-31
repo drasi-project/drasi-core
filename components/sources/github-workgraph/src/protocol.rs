@@ -19,11 +19,12 @@
 //! implements. Core recognizes exact marker prefixes only:
 //!
 //! * `WorkGraphTask/v1` — task body marker
-//! * `WorkGraphTaskAssign/v1` — lifecycle artifact markers
+//! * `WorkGraphTaskAssignment/v1` — lifecycle artifact markers
 //! * `WorkGraphTaskDispatch/v1`
 //! * `WorkGraphTaskResult/v1`
-//! * `WorkGraphTaskEvaluate/v1`
+//! * `WorkGraphTaskEvaluation/v1`
 //! * `WorkGraphTaskRoute/v1`
+//! * `WorkGraphTaskError/v1`
 //!
 //! Core does **not** parse WorkGraph JSON semantics; the projector does.
 
@@ -39,11 +40,12 @@ use std::sync::Arc;
 pub const WORKGRAPH_TASK_MARKER: &str = "WorkGraphTask/v1\n";
 
 /// Comment body prefixes for WorkGraph lifecycle artifacts.
-pub const WORKGRAPH_ASSIGN_MARKER: &str = "WorkGraphTaskAssign/v1\n";
+pub const WORKGRAPH_ASSIGNMENT_MARKER: &str = "WorkGraphTaskAssignment/v1\n";
 pub const WORKGRAPH_DISPATCH_MARKER: &str = "WorkGraphTaskDispatch/v1\n";
 pub const WORKGRAPH_RESULT_MARKER: &str = "WorkGraphTaskResult/v1\n";
-pub const WORKGRAPH_EVALUATE_MARKER: &str = "WorkGraphTaskEvaluate/v1\n";
+pub const WORKGRAPH_EVALUATION_MARKER: &str = "WorkGraphTaskEvaluation/v1\n";
 pub const WORKGRAPH_ROUTE_MARKER: &str = "WorkGraphTaskRoute/v1\n";
+pub const WORKGRAPH_ERROR_MARKER: &str = "WorkGraphTaskError/v1\n";
 
 /// Canonical accepted evaluator verdict.
 pub const WORKGRAPH_EVALUATION_ACCEPTED: &str = "accepted";
@@ -56,23 +58,26 @@ pub const MAX_ROOT_ISSUE_COMMENT_BODY_BYTES: usize = 64 * 1024;
 
 /// Returns true if `body` begins with any WorkGraph lifecycle artifact marker.
 pub fn is_workgraph_lifecycle_marker(body: &str) -> bool {
-    body.starts_with(WORKGRAPH_ASSIGN_MARKER)
+    body.starts_with(WORKGRAPH_ASSIGNMENT_MARKER)
         || body.starts_with(WORKGRAPH_DISPATCH_MARKER)
         || body.starts_with(WORKGRAPH_RESULT_MARKER)
-        || body.starts_with(WORKGRAPH_EVALUATE_MARKER)
+        || body.starts_with(WORKGRAPH_EVALUATION_MARKER)
         || body.starts_with(WORKGRAPH_ROUTE_MARKER)
+        || body.starts_with(WORKGRAPH_ERROR_MARKER)
 }
 
 /// Returns the lifecycle marker kind for trust classification.
 ///
-/// `Assign` and `Dispatch` use assigner trust; `Result`, `Evaluate`, and
-/// `Route` use reporter trust.
+/// `Assignment` and `Dispatch` use assigner trust; `Result`, `Evaluation`,
+/// `Route`, and `Error` use reporter trust.
 pub fn lifecycle_trust_role(body: &str) -> Option<LifecycleTrustRole> {
-    if body.starts_with(WORKGRAPH_ASSIGN_MARKER) || body.starts_with(WORKGRAPH_DISPATCH_MARKER) {
+    if body.starts_with(WORKGRAPH_ASSIGNMENT_MARKER) || body.starts_with(WORKGRAPH_DISPATCH_MARKER)
+    {
         Some(LifecycleTrustRole::Assigner)
     } else if body.starts_with(WORKGRAPH_RESULT_MARKER)
-        || body.starts_with(WORKGRAPH_EVALUATE_MARKER)
+        || body.starts_with(WORKGRAPH_EVALUATION_MARKER)
         || body.starts_with(WORKGRAPH_ROUTE_MARKER)
+        || body.starts_with(WORKGRAPH_ERROR_MARKER)
     {
         Some(LifecycleTrustRole::Reporter)
     } else {
@@ -83,9 +88,9 @@ pub fn lifecycle_trust_role(body: &str) -> Option<LifecycleTrustRole> {
 /// Trust role for lifecycle artifact author/editor checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleTrustRole {
-    /// Assign/Dispatch — requires assigner trust.
+    /// Assignment/Dispatch — requires assigner trust.
     Assigner,
-    /// Result/Evaluate/Route — requires reporter trust.
+    /// Result/Evaluation/Route/Error — requires reporter trust.
     Reporter,
 }
 
@@ -180,6 +185,8 @@ pub struct LifecycleArtifactDocument {
     pub body: String,
     /// Immutable GitHub comment creation time as Unix milliseconds.
     pub created_at_revision: i64,
+    /// Latest authoritative GitHub comment update time as Unix milliseconds.
+    pub updated_at_revision: i64,
 }
 
 /// GitHub locator metadata carried separately from the task protocol document.
@@ -245,6 +252,7 @@ pub enum ProjectionInput {
     UpsertLifecycleArtifact(LifecycleArtifactDocument),
     DeleteLifecycleArtifact {
         source_key: String,
+        updated_at_revision: i64,
     },
     UpsertLocator(GitHubIssueLocator),
     DeleteLocator {

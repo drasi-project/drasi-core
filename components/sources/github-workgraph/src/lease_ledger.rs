@@ -10,8 +10,8 @@ use crate::protocol::{
     LifecycleArtifactDocument, PreparedProjectionCommit, ProjectionInput, RootIssueCommentDocument,
     RootIssueDocument, TaskDocument, WorkGraphAllocatorProjection, WorkGraphAssignmentBinding,
     WorkGraphDispatchBinding, WorkGraphProjector, WorkGraphRouteBinding,
-    MAX_ROOT_ISSUE_COMMENT_BODY_BYTES, WORKGRAPH_ASSIGN_MARKER, WORKGRAPH_DISPATCH_MARKER,
-    WORKGRAPH_EVALUATE_MARKER, WORKGRAPH_EVALUATION_ACCEPTED, WORKGRAPH_EVALUATION_REJECTED,
+    MAX_ROOT_ISSUE_COMMENT_BODY_BYTES, WORKGRAPH_ASSIGNMENT_MARKER, WORKGRAPH_DISPATCH_MARKER,
+    WORKGRAPH_EVALUATION_ACCEPTED, WORKGRAPH_EVALUATION_MARKER, WORKGRAPH_EVALUATION_REJECTED,
     WORKGRAPH_RESULT_MARKER, WORKGRAPH_ROUTE_MARKER, WORKGRAPH_ROUTE_REWORK,
 };
 use anyhow::{Context, Result as AnyResult};
@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const VERSION: u8 = 16;
+const VERSION: u8 = 17;
 const STATE_KEY: &str = "allocator:state";
 const DELIVERY_PREFIX: &str = "delivery:";
 const WORKGRAPH_ORIGIN_PREFIX: &str = "workgraph-origin:";
@@ -90,6 +90,13 @@ pub(crate) struct RootIssueCommentRevisionState {
     pub identity: RootIssueCommentIdentity,
     pub revision: i64,
     pub fingerprint: String,
+    pub tombstone: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LifecycleArtifactRevisionState {
+    pub document: Option<LifecycleArtifactDocument>,
+    pub revision: i64,
     pub tombstone: bool,
 }
 
@@ -256,6 +263,10 @@ pub struct AllocationState {
     /// emitted later when out-of-order dependencies become available.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workgraph_artifacts: BTreeMap<String, LifecycleArtifactDocument>,
+    /// Latest authoritative GitHub revision for each lifecycle comment, retained
+    /// after deletion to fence delayed webhook deliveries.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workgraph_artifact_revisions: BTreeMap<String, i64>,
     /// Durable task generations and timestamp cutoffs for actionable lifecycle evidence.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workgraph_authorizations: BTreeMap<String, WorkGraphAuthorizationState>,
@@ -549,6 +560,7 @@ impl Allocator {
             mut next_issue_database_ids,
             mut next_tasks,
             mut next_artifacts,
+            mut next_artifact_revisions,
         ) = stage_workgraph_documents(&state, &accepted_inputs);
         let (
             mut next_root_comments,
@@ -600,6 +612,7 @@ impl Allocator {
                     next_issue_database_ids,
                     next_tasks,
                     next_artifacts,
+                    next_artifact_revisions,
                 ) = stage_workgraph_documents(&state, &accepted_inputs);
                 (
                     next_root_comments,
@@ -647,6 +660,7 @@ impl Allocator {
         state.workgraph_issue_state_fingerprints = next_issue_state_fingerprints;
         state.workgraph_issue_database_ids = next_issue_database_ids;
         state.workgraph_artifacts = next_artifacts;
+        state.workgraph_artifact_revisions = next_artifact_revisions;
         state.workgraph_checkpoint = prepared.checkpoint;
         state
             .pending_workgraph_origins
@@ -758,6 +772,22 @@ impl Allocator {
             }))
     }
 
+    pub(crate) async fn latest_workgraph_lifecycle_artifact_revision(
+        &self,
+        source_key: &str,
+    ) -> AnyResult<Option<LifecycleArtifactRevisionState>> {
+        let _guard = self.gate.lock().await;
+        let state = self.ready_state().await?;
+        Ok(state
+            .workgraph_artifact_revisions
+            .get(source_key)
+            .map(|revision| LifecycleArtifactRevisionState {
+                document: state.workgraph_artifacts.get(source_key).cloned(),
+                revision: *revision,
+                tombstone: !state.workgraph_artifacts.contains_key(source_key),
+            }))
+    }
+
     /// Return the latest authoritative GitHub revision observed for a Root Issue or task Issue.
     pub async fn latest_workgraph_issue_revision(
         &self,
@@ -818,6 +848,7 @@ fn stage_workgraph_documents(
     BTreeMap<u64, String>,
     BTreeMap<String, TaskDocument>,
     BTreeMap<String, LifecycleArtifactDocument>,
+    BTreeMap<String, i64>,
 ) {
     let mut root_issues = state.workgraph_root_issues.clone();
     let mut issue_revisions = state.workgraph_issue_revisions.clone();
@@ -825,6 +856,7 @@ fn stage_workgraph_documents(
     let mut issue_database_ids = state.workgraph_issue_database_ids.clone();
     let mut tasks = state.workgraph_tasks.clone();
     let mut artifacts = state.workgraph_artifacts.clone();
+    let mut artifact_revisions = state.workgraph_artifact_revisions.clone();
     apply_workgraph_documents(
         inputs,
         &mut root_issues,
@@ -833,6 +865,7 @@ fn stage_workgraph_documents(
         &mut issue_database_ids,
         &mut tasks,
         &mut artifacts,
+        &mut artifact_revisions,
     );
     (
         root_issues,
@@ -841,6 +874,7 @@ fn stage_workgraph_documents(
         issue_database_ids,
         tasks,
         artifacts,
+        artifact_revisions,
     )
 }
 
@@ -939,6 +973,7 @@ fn rejected_dispatch_retraction(inputs: &[ProjectionInput]) -> Option<Vec<Projec
                 found_dispatch = true;
                 fallback.push(ProjectionInput::DeleteLifecycleArtifact {
                     source_key: document.source_key.clone(),
+                    updated_at_revision: document.updated_at_revision,
                 });
             }
             ProjectionInput::RecordIssueRevision { .. } | ProjectionInput::UpsertLocator(_) => {
@@ -958,6 +993,7 @@ fn apply_workgraph_documents(
     issue_database_ids: &mut BTreeMap<u64, String>,
     tasks: &mut BTreeMap<String, TaskDocument>,
     artifacts: &mut BTreeMap<String, LifecycleArtifactDocument>,
+    artifact_revisions: &mut BTreeMap<String, i64>,
 ) {
     for input in inputs {
         match input {
@@ -989,10 +1025,29 @@ fn apply_workgraph_documents(
                 issue_database_ids.retain(|_, value| value != source_key);
             }
             ProjectionInput::UpsertLifecycleArtifact(document) => {
-                artifacts.insert(document.source_key.clone(), document.clone());
+                let current = artifact_revisions.get(&document.source_key).copied();
+                let apply = current.is_none_or(|revision| {
+                    document.updated_at_revision > revision
+                        || document.updated_at_revision == revision
+                            && artifacts.get(&document.source_key) == Some(document)
+                });
+                if apply {
+                    artifacts.insert(document.source_key.clone(), document.clone());
+                    artifact_revisions
+                        .insert(document.source_key.clone(), document.updated_at_revision);
+                }
             }
-            ProjectionInput::DeleteLifecycleArtifact { source_key } => {
-                artifacts.remove(source_key);
+            ProjectionInput::DeleteLifecycleArtifact {
+                source_key,
+                updated_at_revision,
+            } => {
+                if artifact_revisions
+                    .get(source_key)
+                    .is_none_or(|revision| updated_at_revision >= revision)
+                {
+                    artifacts.remove(source_key);
+                    artifact_revisions.insert(source_key.clone(), *updated_at_revision);
+                }
             }
             _ => {}
         }
@@ -1048,7 +1103,7 @@ fn validate_workgraph_projection(
             .context("WorkGraph assignment has no accepted task binding")?;
         anyhow::ensure!(
             document.task_source_key == assignment.task_source_key
-                && document.body.starts_with(WORKGRAPH_ASSIGN_MARKER)
+                && document.body.starts_with(WORKGRAPH_ASSIGNMENT_MARKER)
                 && task.root_issue_id == assignment.root_issue_id
                 && task.workflow_run_id == assignment.workflow_run_id
                 && task.task_id == assignment.task_id
@@ -1179,7 +1234,7 @@ fn validate_workgraph_projection(
                 && evaluation_ids.insert(&evaluation.evaluation_id)
                 && evaluated_results.insert(&evaluation.result_id)
                 && document.task_source_key == evaluation.task_source_key
-                && document.body.starts_with(WORKGRAPH_EVALUATE_MARKER)
+                && document.body.starts_with(WORKGRAPH_EVALUATION_MARKER)
                 && task.root_issue_id == evaluation.root_issue_id
                 && task.workflow_run_id == evaluation.workflow_run_id
                 && task.task_id == evaluation.task_id
@@ -1339,6 +1394,7 @@ impl Default for AllocationState {
             workgraph_issue_state_fingerprints: BTreeMap::new(),
             workgraph_issue_database_ids: BTreeMap::new(),
             workgraph_artifacts: BTreeMap::new(),
+            workgraph_artifact_revisions: BTreeMap::new(),
             workgraph_authorizations: BTreeMap::new(),
             workgraph_artifact_generations: BTreeMap::new(),
             workgraph_stale_authorizations: BTreeSet::new(),
@@ -1479,7 +1535,8 @@ impl AllocationState {
                 !matches!(
                     input,
                     ProjectionInput::DeleteLifecycleArtifact {
-                        source_key: deleted
+                        source_key: deleted,
+                        ..
                     } if deleted == source_key
                 )
             })
@@ -1737,8 +1794,20 @@ impl AllocationState {
                 .any(|source_key| !self.workgraph_artifacts.contains_key(source_key))
             || self
                 .workgraph_artifacts
+                .iter()
+                .any(|(source_key, artifact)| {
+                    artifact.source_key != *source_key
+                        || artifact.created_at_revision < 0
+                        || artifact.updated_at_revision < artifact.created_at_revision
+                        || self
+                            .workgraph_artifact_revisions
+                            .get(source_key)
+                            .is_none_or(|revision| *revision != artifact.updated_at_revision)
+                })
+            || self
+                .workgraph_artifact_revisions
                 .values()
-                .any(|artifact| artifact.created_at_revision < 0)
+                .any(|revision| *revision < 0)
         {
             return Err("WorkGraph authorization generation state is invalid".into());
         }
@@ -3410,7 +3479,7 @@ mod tests {
                 (
                     &binding.source_key,
                     &binding.task_source_key,
-                    WORKGRAPH_ASSIGN_MARKER,
+                    WORKGRAPH_ASSIGNMENT_MARKER,
                 )
             })
             .chain(projection.dispatches.iter().map(|binding| {
@@ -3431,7 +3500,7 @@ mod tests {
                 (
                     &binding.source_key,
                     &binding.task_source_key,
-                    WORKGRAPH_EVALUATE_MARKER,
+                    WORKGRAPH_EVALUATION_MARKER,
                 )
             }))
             .chain(projection.routes.iter().map(|binding| {
@@ -3449,10 +3518,19 @@ mod tests {
                         task_source_key: task_source_key.clone(),
                         body: marker.to_string(),
                         created_at_revision: 1,
+                        updated_at_revision: 1,
                     },
                 )
             })
             .collect()
+    }
+
+    fn refresh_artifact_revisions(state: &mut AllocationState) {
+        state.workgraph_artifact_revisions = state
+            .workgraph_artifacts
+            .iter()
+            .map(|(source_key, artifact)| (source_key.clone(), artifact.updated_at_revision))
+            .collect();
     }
 
     fn authorize_task(state: &mut AllocationState, generation: u64) {
@@ -3578,8 +3656,9 @@ mod tests {
                 LifecycleArtifactDocument {
                     source_key: "assignment-comment".to_string(),
                     task_source_key: "issue".to_string(),
-                    body: format!("{WORKGRAPH_ASSIGN_MARKER}\n"),
+                    body: format!("{WORKGRAPH_ASSIGNMENT_MARKER}\n"),
                     created_at_revision: 1,
+                    updated_at_revision: 1,
                 },
             ),
             (
@@ -3589,9 +3668,11 @@ mod tests {
                     task_source_key: "issue".to_string(),
                     body: format!("{WORKGRAPH_DISPATCH_MARKER}\n"),
                     created_at_revision: 1,
+                    updated_at_revision: 1,
                 },
             ),
         ]);
+        refresh_artifact_revisions(&mut state);
         state.workgraph_checkpoint = vec![1];
         state.validate().expect("seed state is valid");
 
@@ -3623,6 +3704,7 @@ mod tests {
             task_source_key: "issue".to_string(),
             body: format!("{WORKGRAPH_DISPATCH_MARKER}\nreplacement"),
             created_at_revision: 1,
+            updated_at_revision: 2,
         };
 
         let (_, rejection) = allocator
@@ -3673,7 +3755,7 @@ mod tests {
         assert_eq!(commits.len(), 2);
         assert!(commits.iter().all(|inputs| matches!(
             inputs.as_slice(),
-            [ProjectionInput::DeleteLifecycleArtifact { source_key }]
+            [ProjectionInput::DeleteLifecycleArtifact { source_key, .. }]
                 if source_key == "dispatch-comment"
         )));
     }
@@ -4103,14 +4185,16 @@ mod tests {
         let assignment_artifact = LifecycleArtifactDocument {
             source_key: "assignment-comment".to_string(),
             task_source_key: "issue".to_string(),
-            body: format!("{WORKGRAPH_ASSIGN_MARKER}\n"),
+            body: format!("{WORKGRAPH_ASSIGNMENT_MARKER}\n"),
             created_at_revision: 150,
+            updated_at_revision: 150,
         };
         let dispatch_artifact = LifecycleArtifactDocument {
             source_key: "dispatch-comment".to_string(),
             task_source_key: "issue".to_string(),
             body: format!("{WORKGRAPH_DISPATCH_MARKER}\n"),
             created_at_revision: 150,
+            updated_at_revision: 150,
         };
         let artifacts = BTreeMap::from([
             (
@@ -4215,8 +4299,9 @@ mod tests {
             let old = LifecycleArtifactDocument {
                 source_key: "old-assignment".to_string(),
                 task_source_key: "issue".to_string(),
-                body: format!("{WORKGRAPH_ASSIGN_MARKER}\n"),
+                body: format!("{WORKGRAPH_ASSIGNMENT_MARKER}\n"),
                 created_at_revision: 150,
+                updated_at_revision: 150,
             };
             let artifacts = BTreeMap::from([("old-assignment".to_string(), old.clone())]);
             let mut desired = projection(Vec::new());
@@ -4256,8 +4341,9 @@ mod tests {
         let artifact = LifecycleArtifactDocument {
             source_key: "assignment-comment".to_string(),
             task_source_key: "issue".to_string(),
-            body: format!("{WORKGRAPH_ASSIGN_MARKER}\n"),
+            body: format!("{WORKGRAPH_ASSIGNMENT_MARKER}\n"),
             created_at_revision: 200,
+            updated_at_revision: 200,
         };
         let artifacts = BTreeMap::from([("assignment-comment".to_string(), artifact.clone())]);
         state.refresh_workgraph_authorizations(
@@ -4269,6 +4355,7 @@ mod tests {
             &[ProjectionInput::UpsertLifecycleArtifact(artifact)],
         );
         state.workgraph_artifacts = artifacts.clone();
+        refresh_artifact_revisions(&mut state);
         assert_eq!(
             state.workgraph_artifact_generations["assignment-comment"],
             0
@@ -4316,14 +4403,16 @@ mod tests {
         let assignment = LifecycleArtifactDocument {
             source_key: "assignment-comment".to_string(),
             task_source_key: "issue".to_string(),
-            body: format!("{WORKGRAPH_ASSIGN_MARKER}\n"),
+            body: format!("{WORKGRAPH_ASSIGNMENT_MARKER}\n"),
             created_at_revision: 200,
+            updated_at_revision: 200,
         };
         let dispatch = LifecycleArtifactDocument {
             source_key: "dispatch-comment".to_string(),
             task_source_key: "issue".to_string(),
             body: format!("{WORKGRAPH_DISPATCH_MARKER}\n"),
             created_at_revision: 210,
+            updated_at_revision: 210,
         };
         let artifacts = BTreeMap::from([
             ("assignment-comment".to_string(), assignment.clone()),
@@ -4341,6 +4430,7 @@ mod tests {
             ],
         );
         state.workgraph_artifacts = artifacts.clone();
+        refresh_artifact_revisions(&mut state);
 
         let tasks = BTreeMap::from([("issue".to_string(), task_document(true))]);
         let roots = BTreeMap::from([("root".to_string(), root_document(true))]);
@@ -4394,7 +4484,7 @@ mod tests {
         assert!(state
             .validate()
             .expect_err("schema 15 must be rejected")
-            .contains("version must equal 16"));
+            .contains("version must equal 17"));
     }
 
     #[test]
@@ -4454,6 +4544,7 @@ mod tests {
                     task_source_key: "issue".to_string(),
                     body: format!("{WORKGRAPH_DISPATCH_MARKER}\n"),
                     created_at_revision: 1,
+                    updated_at_revision: 1,
                 },
             ),
             (
@@ -4461,8 +4552,9 @@ mod tests {
                 LifecycleArtifactDocument {
                     source_key: "assignment-comment".to_string(),
                     task_source_key: "issue".to_string(),
-                    body: format!("{WORKGRAPH_ASSIGN_MARKER}\n"),
+                    body: format!("{WORKGRAPH_ASSIGNMENT_MARKER}\n"),
                     created_at_revision: 1,
+                    updated_at_revision: 1,
                 },
             ),
             (
@@ -4472,6 +4564,7 @@ mod tests {
                     task_source_key: "issue".to_string(),
                     body: format!("{WORKGRAPH_RESULT_MARKER}\n"),
                     created_at_revision: 1,
+                    updated_at_revision: 1,
                 },
             ),
             (
@@ -4479,8 +4572,9 @@ mod tests {
                 LifecycleArtifactDocument {
                     source_key: "evaluate-comment".to_string(),
                     task_source_key: "issue".to_string(),
-                    body: format!("{WORKGRAPH_EVALUATE_MARKER}\n"),
+                    body: format!("{WORKGRAPH_EVALUATION_MARKER}\n"),
                     created_at_revision: 1,
+                    updated_at_revision: 1,
                 },
             ),
             (
@@ -4490,6 +4584,7 @@ mod tests {
                     task_source_key: "issue".to_string(),
                     body: format!("{WORKGRAPH_ROUTE_MARKER}\n"),
                     created_at_revision: 1,
+                    updated_at_revision: 1,
                 },
             ),
         ]);
@@ -5231,7 +5326,7 @@ mod tests {
         );
         let complete_artifacts = lifecycle_artifacts_for_projection(&desired);
         let route = complete_artifacts["route-1"].clone();
-        let (_, _, _, _, _, artifacts) = stage_workgraph_documents(
+        let (_, _, _, _, _, artifacts, artifact_revisions) = stage_workgraph_documents(
             &AllocationState::default(),
             &[ProjectionInput::UpsertLifecycleArtifact(route)],
         );
@@ -5239,12 +5334,14 @@ mod tests {
 
         let mut restarted = AllocationState::default();
         restarted.workgraph_artifacts = artifacts;
+        restarted.workgraph_artifact_revisions = artifact_revisions;
         restarted = serde_json::from_slice(
             &serde_json::to_vec(&restarted).expect("checkpoint out-of-order Route"),
         )
         .expect("restart before dependencies");
         let mut tasks = BTreeMap::new();
         let mut artifacts = restarted.workgraph_artifacts.clone();
+        let mut artifact_revisions = restarted.workgraph_artifact_revisions.clone();
         apply_workgraph_documents(
             &complete_artifacts
                 .values()
@@ -5261,6 +5358,7 @@ mod tests {
             &mut BTreeMap::new(),
             &mut tasks,
             &mut artifacts,
+            &mut artifact_revisions,
         );
         validate_workgraph_projection(&desired, &tasks, &artifacts)
             .expect("full authoritative chain converges");
@@ -5308,6 +5406,7 @@ mod tests {
             },
         );
         state.workgraph_artifacts = lifecycle_artifacts_for_projection(&desired);
+        refresh_artifact_revisions(&mut state);
         state.workgraph_artifact_generations.extend(
             state
                 .workgraph_artifacts

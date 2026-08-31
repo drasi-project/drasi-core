@@ -10,11 +10,12 @@ does not poll GitHub or synthesize webhook events.
 Core recognizes these exact body prefixes:
 
 - `WorkGraphTask/v1`
-- `WorkGraphTaskAssign/v1`
+- `WorkGraphTaskAssignment/v1`
 - `WorkGraphTaskDispatch/v1`
 - `WorkGraphTaskResult/v1`
-- `WorkGraphTaskEvaluate/v1`
+- `WorkGraphTaskEvaluation/v1`
 - `WorkGraphTaskRoute/v1`
+- `WorkGraphTaskError/v1`
 
 An ordinary user-created Issue carrying the exact, case-sensitive `workgraph`
 label and not matching the configured task Issue Type is a **Root Issue**.
@@ -84,7 +85,7 @@ they compile:
 This is a single v1 contract change. No alternate wire format or compatibility
 projection is provided.
 
-Allocator state schema 16 durably records Issue-state fingerprints,
+Allocator state schema 17 durably records Issue and lifecycle-comment revisions,
 authorization generations/cutoffs, generation-bound applied Route decisions,
 and Root Issue comment revision tombstones.
 Older state is rejected explicitly rather

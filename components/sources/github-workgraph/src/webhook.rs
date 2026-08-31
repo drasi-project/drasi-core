@@ -15,10 +15,10 @@
 use crate::agent_sync::{push_touches_agent_file, AgentSync, AgentSyncError};
 use crate::config::{ProtocolTrust, RepositoryFilter, TaskIssueType, WorkflowDefinitionConfig};
 use crate::lease_ledger::{
-    root_comment_fingerprint, Allocator, RootIssueCommentRevisionState, WorkGraphActiveLease,
-    MAX_WORKGRAPH_ATTEMPTS,
+    root_comment_fingerprint, Allocator, LifecycleArtifactRevisionState,
+    RootIssueCommentRevisionState, WorkGraphActiveLease, MAX_WORKGRAPH_ATTEMPTS,
 };
-use crate::protocol::WorkGraphProjector;
+use crate::protocol::{LifecycleArtifactDocument, WorkGraphProjector};
 use anyhow::{anyhow, Context, Result};
 use axum::body::Bytes;
 use axum::extract::State;
@@ -1611,10 +1611,11 @@ async fn try_workgraph_comment(
         .get("body")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
-    let previous_workgraph = payload
+    let previous_trust_role = payload
         .pointer("/changes/body/from")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(is_workgraph_lifecycle_marker);
+        .and_then(lifecycle_trust_role);
+    let previous_workgraph = previous_trust_role.is_some();
     let issue = payload.get("issue").ok_or_else(|| {
         WorkGraphNormError::InvalidPayload("issue_comment missing 'issue'".to_string())
     })?;
@@ -1627,15 +1628,29 @@ async fn try_workgraph_comment(
         .latest_workgraph_root_comment_revision(comment_id)
         .await
         .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
+    let prior_lifecycle_artifact = state
+        .allocator
+        .latest_workgraph_lifecycle_artifact_revision(comment_id)
+        .await
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
     let updated_at_revision = comment_updated_revision(comment)?;
     let current_trust_role = lifecycle_trust_role(body);
     let mut inputs = Vec::new();
 
     if action == "deleted" {
         authorize_workgraph_repository(state, payload, None)?;
-        if previous_workgraph || current_trust_role.is_some() {
+        if (previous_workgraph || current_trust_role.is_some())
+            && (prior_lifecycle_artifact.is_some()
+                || current_trust_role
+                    .or(previous_trust_role)
+                    .is_some_and(|role| lifecycle_author_is_trusted(state, comment, role)))
+            && prior_lifecycle_artifact.as_ref().is_none_or(|previous| {
+                should_accept_lifecycle_tombstone(previous, updated_at_revision)
+            })
+        {
             inputs.push(ProjectionInput::DeleteLifecycleArtifact {
                 source_key: comment_id.to_string(),
+                updated_at_revision,
             });
         }
         if let Some(previous) = prior_root_comment
@@ -1646,10 +1661,20 @@ async fn try_workgraph_comment(
         return Ok((!inputs.is_empty()).then_some(inputs));
     }
 
-    if action == "edited" && current_trust_role.is_none() && previous_workgraph {
+    if action == "edited"
+        && current_trust_role.is_none()
+        && previous_workgraph
+        && (prior_lifecycle_artifact.is_some()
+            || previous_trust_role
+                .is_some_and(|role| lifecycle_author_is_trusted(state, comment, role)))
+        && prior_lifecycle_artifact
+            .as_ref()
+            .is_none_or(|previous| should_accept_lifecycle_tombstone(previous, updated_at_revision))
+    {
         authorize_workgraph_repository(state, payload, None)?;
         inputs.push(ProjectionInput::DeleteLifecycleArtifact {
             source_key: comment_id.to_string(),
+            updated_at_revision,
         });
     }
 
@@ -1660,7 +1685,7 @@ async fn try_workgraph_comment(
         {
             inputs.push(root_comment_deletion(&previous, updated_at_revision));
         }
-        normalize_lifecycle_artifact(
+        let normalization = normalize_lifecycle_artifact(
             state,
             payload,
             comment,
@@ -1671,7 +1696,46 @@ async fn try_workgraph_comment(
             issue_node_id,
             trust_role,
             &mut inputs,
-        )?;
+        );
+        match normalization {
+            Ok(()) => {}
+            Err(WorkGraphNormError::Untrusted(message))
+                if action == "edited" && previous_workgraph =>
+            {
+                if (prior_lifecycle_artifact.is_some()
+                    || previous_trust_role
+                        .is_some_and(|role| lifecycle_author_is_trusted(state, comment, role)))
+                    && prior_lifecycle_artifact.as_ref().is_none_or(|previous| {
+                        should_accept_lifecycle_tombstone(previous, updated_at_revision)
+                    })
+                {
+                    warn!(
+                        "[{}] retracted lifecycle artifact {comment_id} after an untrusted \
+                         lifecycle-to-lifecycle edit: {message}",
+                        state.source_id
+                    );
+                    inputs.push(ProjectionInput::DeleteLifecycleArtifact {
+                        source_key: comment_id.to_string(),
+                        updated_at_revision,
+                    });
+                }
+                return Ok((!inputs.is_empty()).then_some(inputs));
+            }
+            Err(error) => return Err(error),
+        }
+        if let Some(position) = inputs
+            .iter()
+            .position(|input| matches!(input, ProjectionInput::UpsertLifecycleArtifact(_)))
+        {
+            let ProjectionInput::UpsertLifecycleArtifact(document) = &inputs[position] else {
+                unreachable!()
+            };
+            if let Some(previous) = &prior_lifecycle_artifact {
+                if !should_accept_lifecycle_upsert(previous, document)? {
+                    inputs.remove(position);
+                }
+            }
+        }
         return Ok((!inputs.is_empty()).then_some(inputs));
     }
 
@@ -1819,9 +1883,55 @@ fn normalize_lifecycle_artifact(
         task_source_key: task_node_id.to_string(),
         body: body.to_string(),
         created_at_revision: lifecycle_created_revision(comment)?,
+        updated_at_revision: comment_updated_revision(comment)?,
     };
     inputs.push(ProjectionInput::UpsertLifecycleArtifact(artifact));
     Ok(())
+}
+
+fn should_accept_lifecycle_tombstone(
+    previous: &LifecycleArtifactRevisionState,
+    revision: i64,
+) -> bool {
+    revision > previous.revision || revision == previous.revision && !previous.tombstone
+}
+
+fn lifecycle_author_is_trusted(
+    state: &IngressState,
+    comment: &serde_json::Value,
+    role: crate::protocol::LifecycleTrustRole,
+) -> bool {
+    let author = comment.get("user");
+    state
+        .protocol_trust
+        .as_ref()
+        .is_some_and(|trust| match role {
+            crate::protocol::LifecycleTrustRole::Assigner => trust.is_assigner(author),
+            crate::protocol::LifecycleTrustRole::Reporter => trust.is_reporter(author),
+        })
+}
+
+fn should_accept_lifecycle_upsert(
+    previous: &LifecycleArtifactRevisionState,
+    document: &LifecycleArtifactDocument,
+) -> Result<bool, WorkGraphNormError> {
+    if document.updated_at_revision < previous.revision {
+        return Ok(false);
+    }
+    if document.updated_at_revision > previous.revision {
+        return Ok(true);
+    }
+    if previous.tombstone {
+        return Ok(false);
+    }
+    if previous.document.as_ref() == Some(document) {
+        return Ok(false);
+    }
+    Err(WorkGraphNormError::Unavailable(
+        "equal-revision WorkGraph lifecycle comment content is ambiguous; redeliver after an \
+         authoritative comment read"
+            .to_string(),
+    ))
 }
 
 fn should_accept_root_comment_tombstone(
@@ -4041,7 +4151,7 @@ mod workgraph_tests {
 
     #[tokio::test]
     async fn lifecycle_artifact_requires_trust_and_preserves_exact_body() {
-        let body = "WorkGraphTaskAssign/v1\n\n```json\n{\"operationId\":\"op\"}\n```\n";
+        let body = "WorkGraphTaskAssignment/v1\n\n```json\n{\"operationId\":\"op\"}\n```\n";
         let issue = task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n");
         let event = json!({
             "action": "created",
@@ -4127,6 +4237,243 @@ mod workgraph_tests {
                     && document.task_source_key == "I_task"
                     && document.body == body
         ));
+    }
+
+    #[tokio::test]
+    async fn signed_error_artifact_requires_reporter_trust() {
+        let body = "WorkGraphTaskError/v1\n\n```json\n{\"id\":\"error-1\"}\n```\n";
+        let event = json!({
+            "action": "created",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "issue": task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n"),
+            "comment": {
+                "node_id": "IC_error",
+                "body": body,
+                "user": {"node_id": "U_report", "login": "reporter"},
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }
+        });
+        let encoded = serde_json::to_vec(&event).expect("encode Error webhook");
+
+        let (_temp, untrusted_projector, untrusted) = ingress_state(None).await;
+        assert!(matches!(
+            handle_delivery(
+                &untrusted,
+                &signed_headers("issue_comment", "error-untrusted", &encoded),
+                &encoded,
+            )
+            .await,
+            Ok(None)
+        ));
+        assert!(untrusted_projector.committed.lock().await.is_empty());
+
+        let trust = ProtocolTrust {
+            task_creators: vec![TrustedIdentity {
+                id: "U_creator".to_string(),
+                login: "task-creator".to_string(),
+            }],
+            dispatchers: Vec::new(),
+            reporters: vec![TrustedIdentity {
+                id: "U_report".to_string(),
+                login: "reporter".to_string(),
+            }],
+        };
+        let (_temp, projector, trusted) = ingress_state(Some(trust)).await;
+        assert!(matches!(
+            handle_delivery(
+                &trusted,
+                &signed_headers("issue_comment", "error-trusted", &encoded),
+                &encoded,
+            )
+            .await,
+            Ok(Some(_))
+        ));
+        let committed = projector.committed.lock().await;
+        assert!(matches!(
+            committed.last().expect("Error commit").as_slice(),
+            [ProjectionInput::UpsertLifecycleArtifact(document)]
+                if document.source_key == "IC_error"
+                    && document.task_source_key == "I_task"
+                    && document.body == body
+        ));
+    }
+
+    #[tokio::test]
+    async fn untrusted_cross_role_edit_retracts_the_prior_lifecycle_artifact() {
+        let assignment = "WorkGraphTaskAssignment/v1\n\n```json\n{\"id\":\"assignment-1\"}\n```\n";
+        let error = "WorkGraphTaskError/v1\n\n```json\n{\"id\":\"error-1\"}\n```\n";
+        let trust = ProtocolTrust {
+            task_creators: vec![TrustedIdentity {
+                id: "U_creator".to_string(),
+                login: "task-creator".to_string(),
+            }],
+            dispatchers: vec![TrustedIdentity {
+                id: "U_dispatch".to_string(),
+                login: "dispatcher".to_string(),
+            }],
+            reporters: vec![TrustedIdentity {
+                id: "U_report".to_string(),
+                login: "reporter".to_string(),
+            }],
+        };
+        let (_temp, projector, state) = ingress_state(Some(trust)).await;
+        let created = json!({
+            "action": "created",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "issue": task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n"),
+            "comment": {
+                "node_id": "IC_cross_role",
+                "body": assignment,
+                "user": {"node_id": "U_dispatch", "login": "dispatcher"},
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }
+        });
+        let encoded = serde_json::to_vec(&created).expect("encode Assignment webhook");
+        assert!(matches!(
+            handle_delivery(
+                &state,
+                &signed_headers("issue_comment", "cross-role-created", &encoded),
+                &encoded,
+            )
+            .await,
+            Ok(Some(_))
+        ));
+
+        let edited = json!({
+            "action": "edited",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "issue": task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n"),
+            "comment": {
+                "node_id": "IC_cross_role",
+                "body": error,
+                "user": {"node_id": "U_dispatch", "login": "dispatcher"},
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:01:00Z"
+            },
+            "sender": {"node_id": "U_dispatch", "login": "dispatcher"},
+            "changes": {"body": {"from": assignment}}
+        });
+        let encoded = serde_json::to_vec(&edited).expect("encode Error edit webhook");
+        assert!(matches!(
+            handle_delivery(
+                &state,
+                &signed_headers("issue_comment", "cross-role-edited", &encoded),
+                &encoded,
+            )
+            .await,
+            Ok(Some(_))
+        ));
+        let committed = projector.committed.lock().await;
+        assert!(matches!(
+            committed.last().expect("edit commit").as_slice(),
+            [ProjectionInput::DeleteLifecycleArtifact { source_key, .. }]
+                if source_key == "IC_cross_role"
+        ));
+        drop(committed);
+
+        let restored = json!({
+            "action": "edited",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "issue": task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n"),
+            "comment": {
+                "node_id": "IC_cross_role",
+                "body": assignment,
+                "user": {"node_id": "U_dispatch", "login": "dispatcher"},
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:02:00Z"
+            },
+            "sender": {"node_id": "U_dispatch", "login": "dispatcher"},
+            "changes": {"body": {"from": error}}
+        });
+        let encoded = serde_json::to_vec(&restored).expect("encode restored Assignment");
+        let restored_result = handle_delivery(
+            &state,
+            &signed_headers("issue_comment", "cross-role-restored", &encoded),
+            &encoded,
+        )
+        .await
+        .expect("restore Assignment");
+        assert!(restored_result.is_some());
+        let commit_count = projector.committed.lock().await.len();
+
+        let delayed = json!({
+            "action": "edited",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "issue": task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n"),
+            "comment": {
+                "node_id": "IC_cross_role",
+                "body": error,
+                "user": {"node_id": "U_dispatch", "login": "dispatcher"},
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:01:30Z"
+            },
+            "sender": {"node_id": "U_dispatch", "login": "dispatcher"},
+            "changes": {"body": {"from": assignment}}
+        });
+        let encoded = serde_json::to_vec(&delayed).expect("encode delayed Error edit");
+        assert!(matches!(
+            handle_delivery(
+                &state,
+                &signed_headers("issue_comment", "cross-role-delayed", &encoded),
+                &encoded,
+            )
+            .await,
+            Ok(None)
+        ));
+        assert_eq!(projector.committed.lock().await.len(), commit_count);
+    }
+
+    #[tokio::test]
+    async fn untrusted_deletion_without_prior_artifact_does_not_create_a_tombstone() {
+        let trust = ProtocolTrust {
+            task_creators: vec![TrustedIdentity {
+                id: "U_creator".to_string(),
+                login: "task-creator".to_string(),
+            }],
+            dispatchers: Vec::new(),
+            reporters: vec![TrustedIdentity {
+                id: "U_report".to_string(),
+                login: "reporter".to_string(),
+            }],
+        };
+        let (_temp, projector, state) = ingress_state(Some(trust)).await;
+        let event = json!({
+            "action": "deleted",
+            "organization": {"login": "acme"},
+            "repository": {"name": "widgets", "full_name": "acme/widgets"},
+            "issue": task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n"),
+            "comment": {
+                "node_id": "IC_untrusted_deleted",
+                "body": "WorkGraphTaskError/v1\n\n```json\n{\"id\":\"error-1\"}\n```\n",
+                "user": {"node_id": "U_other", "login": "other"},
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:01:00Z"
+            }
+        });
+        let encoded = serde_json::to_vec(&event).expect("encode untrusted deletion");
+        assert!(matches!(
+            handle_delivery(
+                &state,
+                &signed_headers("issue_comment", "untrusted-deleted", &encoded),
+                &encoded,
+            )
+            .await,
+            Ok(None)
+        ));
+        assert!(projector.committed.lock().await.is_empty());
+        assert!(state
+            .allocator
+            .latest_workgraph_lifecycle_artifact_revision("IC_untrusted_deleted")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -4504,7 +4851,26 @@ mod workgraph_tests {
 
     #[tokio::test]
     async fn editing_away_lifecycle_marker_retracts_without_requiring_new_trust() {
-        let (_temp, _projector, state) = ingress_state(None).await;
+        let (_temp, projector, state) = ingress_state(None).await;
+        let previous = "WorkGraphTaskAssignment/v1\n\n```json\n{\"operationId\":\"op\"}\n```\n";
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![ProjectionInput::UpsertLifecycleArtifact(
+                    LifecycleArtifactDocument {
+                        source_key: "IC_assign".to_string(),
+                        task_source_key: "I_task".to_string(),
+                        body: previous.to_string(),
+                        created_at_revision: 1_767_225_600_000,
+                        updated_at_revision: 1_767_225_600_000,
+                    },
+                )],
+                1,
+                "seed-lifecycle-artifact",
+            )
+            .await
+            .expect("seed accepted lifecycle artifact");
         let event = json!({
             "action": "edited",
             "organization": {"login": "acme"},
@@ -4524,7 +4890,7 @@ mod workgraph_tests {
             },
             "changes": {
                 "body": {
-                    "from": "WorkGraphTaskAssign/v1\n\n```json\n{\"operationId\":\"op\"}\n```\n"
+                    "from": previous
                 }
             }
         });
@@ -4537,6 +4903,7 @@ mod workgraph_tests {
             inputs,
             vec![ProjectionInput::DeleteLifecycleArtifact {
                 source_key: "IC_assign".to_string(),
+                updated_at_revision: 1_767_225_660_000,
             }]
         );
     }
