@@ -18,7 +18,7 @@ use crate::lease_ledger::{
     root_comment_fingerprint, Allocator, LifecycleArtifactRevisionState,
     RootIssueCommentRevisionState, WorkGraphActiveLease, MAX_WORKGRAPH_ATTEMPTS,
 };
-use crate::protocol::{LifecycleArtifactDocument, WorkGraphProjector};
+use crate::protocol::{derive_workgraph_id, LifecycleArtifactDocument, WorkGraphProjector};
 use anyhow::{anyhow, Context, Result};
 use axum::body::Bytes;
 use axum::extract::State;
@@ -1267,12 +1267,7 @@ fn comment_updated_revision(comment: &serde_json::Value) -> Result<i64, WorkGrap
 }
 
 fn admission_generation_id(root_issue_id: &str, delivery_id: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"workgraph-v1-admission-generation\0");
-    digest.update(root_issue_id.as_bytes());
-    digest.update([0]);
-    digest.update(delivery_id.as_bytes());
-    format!("wga-{}", hex::encode(digest.finalize()))
+    derive_workgraph_id("admission", &[root_issue_id, delivery_id])
 }
 
 /// Normalize either a labeled Root Issue or an authorized generated task.
@@ -2380,8 +2375,8 @@ mod workgraph_tests {
     use super::*;
     use crate::config::{TaskIssueType, TrustedIdentity};
     use crate::protocol::{
-        GitHubIssueLocator, PreparedProjection, PreparedProjectionCommit, ProjectionInput,
-        TaskDocument, WorkGraphAllocatorProjection, WorkGraphTaskBinding,
+        derive_workgraph_id, GitHubIssueLocator, PreparedProjection, PreparedProjectionCommit,
+        ProjectionInput, TaskDocument, WorkGraphAllocatorProjection, WorkGraphTaskBinding,
     };
     use async_trait::async_trait;
     use drasi_core::models::{
@@ -2399,10 +2394,16 @@ mod workgraph_tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_task_id(seed: &str) -> String {
-        format!(
-            "workgraph-v1:task:sha256:{:x}",
-            Sha256::digest(seed.as_bytes())
-        )
+        derive_workgraph_id("task", &[seed])
+    }
+
+    #[test]
+    fn admission_generation_uses_canonical_cross_vector() {
+        assert_eq!(
+            admission_generation_id("I_root", "delivery-123"),
+            "urn:drasi:workgraph:id:v1:admission:sha256:\
+             c9bf2ec95516dc3e0168f7e977291e590f2c5443230db669faf4496f5bf89b61"
+        );
     }
 
     #[derive(Default)]
@@ -2419,15 +2420,17 @@ mod workgraph_tests {
 
     #[test]
     fn lease_validation_response_includes_authoritative_numeric_attempt() {
+        let task_id = test_task_id("task");
+        let assignment_id = derive_workgraph_id("assignment", &["assignment"]);
         let active = WorkGraphActiveLease {
-            lease_id: "lease-2".to_string(),
+            lease_id: derive_workgraph_id("lease", &[&task_id, &assignment_id, "2"]),
             task_source_key: "task-source".to_string(),
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
-            task_id: test_task_id("task"),
+            workflow_run_id: derive_workgraph_id("workflow-run", &["run"]),
+            task_id,
             task_element_id: "task-element".to_string(),
             assignment_source_key: "assignment-source".to_string(),
-            assignment_id: "assignment".to_string(),
+            assignment_id,
             attempt: 2,
             executor_id: "executor".to_string(),
             slot_id: "executor/1".to_string(),
@@ -2493,7 +2496,7 @@ mod workgraph_tests {
                         task_id: test_task_id(&document.source_key),
                         task_element_id: format!("task:{}", document.source_key),
                         root_issue_id: "root".to_string(),
-                        workflow_run_id: "run".to_string(),
+                        workflow_run_id: derive_workgraph_id("workflow-run", &["run"]),
                     }),
                     _ => None,
                 })
@@ -4510,7 +4513,10 @@ mod workgraph_tests {
             .expect("normalized Root Issue comment");
         assert_eq!(document.source_key, "IC_human");
         assert_eq!(document.root_issue_id, "I_root");
-        assert_eq!(document.admission_id.len(), 68);
+        assert!(crate::protocol::is_typed_workgraph_id(
+            &document.admission_id,
+            "admission"
+        ));
         assert_eq!(document.repository_owner, "acme");
         assert_eq!(document.repository_name, "widgets");
         assert_eq!(document.repository_node_id, "R_widgets");

@@ -26,6 +26,18 @@ tombstones so delayed deliveries cannot resurrect a removed generation. The titl
 and body are frozen for the generation; changing either requires removing and
 re-adding the label. The source does not perform GitHub cleanup writes.
 
+Every WorkGraph-owned ID has the exact grammar
+`urn:drasi:workgraph:id:v1:<type>:sha256:<64 lowercase hex>`. The digest is
+SHA-256 over the UTF-8 sequence
+`["urn:drasi:workgraph:id:v1", type, ...semanticInputs]`, with each part
+preceded by its unsigned 64-bit big-endian byte length. Core derives admission
+IDs from `(rootIssueId, deliveryId)` and lease IDs from
+`(taskId, assignmentId, decimalAttempt)`.
+At typed protocol boundaries Core requires the corresponding `task`,
+`assignment`, `lease`, `result`, `evaluation`, `route`, or `workflow-run`
+identifier. GitHub node IDs, configured agent/slot IDs, and human
+`workflowDefinitionId` values remain external and unchanged.
+
 The hierarchy is:
 
 ```text
@@ -85,7 +97,7 @@ they compile:
 This is a single v1 contract change. No alternate wire format or compatibility
 projection is provided.
 
-Allocator state schema 18 durably records Issue and lifecycle-comment revisions,
+Allocator state schema 19 durably records Issue and lifecycle-comment revisions,
 authorization generations/cutoffs, generation-bound applied Route decisions,
 and Root Issue comment revision tombstones.
 Older state is rejected explicitly rather

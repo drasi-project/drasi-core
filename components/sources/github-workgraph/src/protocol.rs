@@ -31,6 +31,7 @@
 use async_trait::async_trait;
 use drasi_core::models::SourceChange;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
 use std::sync::Arc;
 
@@ -55,6 +56,42 @@ pub const WORKGRAPH_EVALUATION_REJECTED: &str = "rejected";
 pub const WORKGRAPH_ROUTE_REWORK: &str = "rework";
 /// Maximum human Root Issue comment body forwarded to the projector.
 pub const MAX_ROOT_ISSUE_COMMENT_BODY_BYTES: usize = 64 * 1024;
+
+/// Namespace shared by every WorkGraph-owned canonical identifier.
+pub const WORKGRAPH_ID_NAMESPACE: &str = "urn:drasi:workgraph:id:v1";
+
+/// Derive a canonical typed WorkGraph identifier.
+///
+/// The digest covers the namespace, type, and semantic inputs in order. Each
+/// UTF-8 part is framed by its unsigned 64-bit big-endian byte length.
+pub fn derive_workgraph_id(id_type: &str, semantic_inputs: &[&str]) -> String {
+    let mut digest = Sha256::new();
+    for part in std::iter::once(WORKGRAPH_ID_NAMESPACE)
+        .chain(std::iter::once(id_type))
+        .chain(semantic_inputs.iter().copied())
+    {
+        let bytes = part.as_bytes();
+        let length = u64::try_from(bytes.len()).expect("WorkGraph ID input length fits in u64");
+        digest.update(length.to_be_bytes());
+        digest.update(bytes);
+    }
+    format!(
+        "{WORKGRAPH_ID_NAMESPACE}:{id_type}:sha256:{}",
+        hex::encode(digest.finalize())
+    )
+}
+
+/// Return whether `value` has the exact canonical grammar for `id_type`.
+pub fn is_typed_workgraph_id(value: &str, id_type: &str) -> bool {
+    value
+        .strip_prefix(&format!("{WORKGRAPH_ID_NAMESPACE}:{id_type}:sha256:"))
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
 
 /// Returns true if `body` begins with any WorkGraph lifecycle artifact marker.
 pub fn is_workgraph_lifecycle_marker(body: &str) -> bool {
@@ -478,5 +515,39 @@ impl fmt::Display for WorkGraphTrustRejection {
                 write!(f, "issue body does not begin with WorkGraph task marker")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod id_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_id_cross_vectors_match() {
+        assert_eq!(
+            derive_workgraph_id("admission", &["I_root", "delivery-123"]),
+            "urn:drasi:workgraph:id:v1:admission:sha256:\
+             c9bf2ec95516dc3e0168f7e977291e590f2c5443230db669faf4496f5bf89b61"
+        );
+        assert_eq!(
+            derive_workgraph_id("lease", &["task-α", "assignment-β", "42"]),
+            "urn:drasi:workgraph:id:v1:lease:sha256:\
+             fdb83caf2b77a5b61b70c62d9cdb3111d7a2dbe10b57a99f3a5997634ee81a68"
+        );
+    }
+
+    #[test]
+    fn typed_id_validation_is_exact() {
+        let task = derive_workgraph_id("task", &["semantic"]);
+        assert!(is_typed_workgraph_id(&task, "task"));
+        assert!(!is_typed_workgraph_id(&task, "assignment"));
+        assert!(!is_typed_workgraph_id(
+            &task.replace("c7f491", "C7F491"),
+            "task"
+        ));
+        assert!(!is_typed_workgraph_id(
+            "urn:drasi:workgraph:id:v1:task:sha256:abc",
+            "task"
+        ));
     }
 }

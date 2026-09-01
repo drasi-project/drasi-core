@@ -7,8 +7,9 @@ use crate::agents::{
 use crate::mapping::{agent_changes, allocation_changes, generic_issue_changes, AgentProjection};
 use crate::model::slot_id;
 use crate::protocol::{
-    LifecycleArtifactDocument, PreparedProjectionCommit, ProjectionInput, RootIssueCommentDocument,
-    RootIssueDocument, TaskDocument, WorkGraphAllocatorProjection, WorkGraphAssignmentBinding,
+    derive_workgraph_id, is_typed_workgraph_id, LifecycleArtifactDocument,
+    PreparedProjectionCommit, ProjectionInput, RootIssueCommentDocument, RootIssueDocument,
+    TaskDocument, WorkGraphAllocatorProjection, WorkGraphAssignmentBinding,
     WorkGraphDispatchBinding, WorkGraphProjector, WorkGraphRouteBinding,
     MAX_ROOT_ISSUE_COMMENT_BODY_BYTES, WORKGRAPH_ASSIGNMENT_MARKER, WORKGRAPH_DISPATCH_MARKER,
     WORKGRAPH_EVALUATION_ACCEPTED, WORKGRAPH_EVALUATION_MARKER, WORKGRAPH_EVALUATION_REJECTED,
@@ -25,12 +26,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const VERSION: u8 = 18;
+const VERSION: u8 = 19;
 const STATE_KEY: &str = "allocator:state";
 const DELIVERY_PREFIX: &str = "delivery:";
 const WORKGRAPH_ORIGIN_PREFIX: &str = "workgraph-origin:";
 const MAX_WORKGRAPH_ID_LENGTH: usize = 256;
-const WORKGRAPH_TASK_ID_PREFIX: &str = "workgraph-v1:task:sha256:";
 const MAX_WORKGRAPH_PERMITTED_EXECUTORS: usize = 64;
 pub(crate) const MAX_WORKGRAPH_ATTEMPTS: u64 = 64;
 
@@ -1076,8 +1076,8 @@ fn validate_workgraph_projection(
             tasks.contains_key(&task.source_key)
                 && valid_workgraph_id(&task.source_key)
                 && valid_workgraph_id(&task.root_issue_id)
-                && valid_workgraph_id(&task.workflow_run_id)
-                && valid_workgraph_task_id(&task.task_id)
+                && valid_typed_workgraph_id(&task.workflow_run_id, "workflow-run")
+                && valid_typed_workgraph_id(&task.task_id, "task")
                 && valid_workgraph_id(&task.task_element_id)
                 && task_ids.insert(&task.task_id)
                 && task_elements.insert(&task.task_element_id),
@@ -1108,7 +1108,7 @@ fn validate_workgraph_projection(
                 && task.root_issue_id == assignment.root_issue_id
                 && task.workflow_run_id == assignment.workflow_run_id
                 && task.task_id == assignment.task_id
-                && valid_workgraph_id(&assignment.assignment_id)
+                && valid_typed_workgraph_id(&assignment.assignment_id, "assignment")
                 && assignment_ids.insert(&assignment.assignment_id)
                 && !assignment.permitted_executors.is_empty()
                 && assignment.permitted_executors.len() <= MAX_WORKGRAPH_PERMITTED_EXECUTORS
@@ -1149,17 +1149,13 @@ fn validate_workgraph_projection(
                 && assignment
                     .permitted_executors
                     .contains(&dispatch.executor_id)
-                && [
-                    &dispatch.task_id,
-                    &dispatch.root_issue_id,
-                    &dispatch.workflow_run_id,
-                    &dispatch.assignment_id,
-                    &dispatch.lease_id,
-                    &dispatch.executor_id,
-                    &dispatch.slot_id,
-                ]
-                .into_iter()
-                .all(|value| valid_workgraph_id(value)),
+                && valid_typed_workgraph_id(&dispatch.task_id, "task")
+                && valid_workgraph_id(&dispatch.root_issue_id)
+                && valid_typed_workgraph_id(&dispatch.workflow_run_id, "workflow-run")
+                && valid_typed_workgraph_id(&dispatch.assignment_id, "assignment")
+                && valid_typed_workgraph_id(&dispatch.lease_id, "lease")
+                && valid_workgraph_id(&dispatch.executor_id)
+                && valid_workgraph_id(&dispatch.slot_id),
             "WorkGraph allocator projection contains an invalid or duplicate dispatch"
         );
     }
@@ -1199,15 +1195,11 @@ fn validate_workgraph_projection(
                 && result.attempt <= MAX_WORKGRAPH_ATTEMPTS
                 && result.lease_id
                     == make_lease_id(&result.task_id, &dispatch.assignment_id, result.attempt,)
-                && [
-                    &result.root_issue_id,
-                    &result.workflow_run_id,
-                    &result.task_id,
-                    &result.result_id,
-                    &result.lease_id,
-                ]
-                .into_iter()
-                .all(|value| valid_workgraph_id(value)),
+                && valid_workgraph_id(&result.root_issue_id)
+                && valid_typed_workgraph_id(&result.workflow_run_id, "workflow-run")
+                && valid_typed_workgraph_id(&result.task_id, "task")
+                && valid_typed_workgraph_id(&result.result_id, "result")
+                && valid_typed_workgraph_id(&result.lease_id, "lease"),
             "WorkGraph allocator projection contains an invalid or duplicate Result"
         );
     }
@@ -1248,16 +1240,12 @@ fn validate_workgraph_projection(
                     evaluation.verdict.as_str(),
                     WORKGRAPH_EVALUATION_ACCEPTED | WORKGRAPH_EVALUATION_REJECTED
                 )
-                && [
-                    &evaluation.root_issue_id,
-                    &evaluation.workflow_run_id,
-                    &evaluation.task_id,
-                    &evaluation.result_id,
-                    &evaluation.evaluation_id,
-                    &evaluation.verdict,
-                ]
-                .into_iter()
-                .all(|value| valid_workgraph_id(value)),
+                && valid_workgraph_id(&evaluation.root_issue_id)
+                && valid_typed_workgraph_id(&evaluation.workflow_run_id, "workflow-run")
+                && valid_typed_workgraph_id(&evaluation.task_id, "task")
+                && valid_typed_workgraph_id(&evaluation.result_id, "result")
+                && valid_typed_workgraph_id(&evaluation.evaluation_id, "evaluation")
+                && valid_workgraph_id(&evaluation.verdict),
             "WorkGraph allocator projection contains an invalid or duplicate Evaluate"
         );
     }
@@ -1313,17 +1301,13 @@ fn validate_workgraph_projection(
                 && route.max_attempts <= MAX_WORKGRAPH_ATTEMPTS
                 && route.attempt <= route.max_attempts
                 && (!rework || route.attempt < route.max_attempts)
-                && [
-                    &route.root_issue_id,
-                    &route.workflow_run_id,
-                    &route.task_id,
-                    &route.result_id,
-                    &route.evaluation_id,
-                    &route.route_id,
-                    &route.action,
-                ]
-                .into_iter()
-                .all(|value| valid_workgraph_id(value)),
+                && valid_workgraph_id(&route.root_issue_id)
+                && valid_typed_workgraph_id(&route.workflow_run_id, "workflow-run")
+                && valid_typed_workgraph_id(&route.task_id, "task")
+                && valid_typed_workgraph_id(&route.result_id, "result")
+                && valid_typed_workgraph_id(&route.evaluation_id, "evaluation")
+                && valid_typed_workgraph_id(&route.route_id, "route")
+                && valid_workgraph_id(&route.action),
             "WorkGraph allocator projection contains an invalid, stale, or duplicate Route"
         );
     }
@@ -1334,15 +1318,8 @@ fn valid_workgraph_id(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= MAX_WORKGRAPH_ID_LENGTH
 }
 
-fn valid_workgraph_task_id(value: &str) -> bool {
-    value
-        .strip_prefix(WORKGRAPH_TASK_ID_PREFIX)
-        .is_some_and(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+fn valid_typed_workgraph_id(value: &str, id_type: &str) -> bool {
+    value.len() <= MAX_WORKGRAPH_ID_LENGTH && is_typed_workgraph_id(value, id_type)
 }
 
 fn valid_workgraph_inclusion(labels: &[String], included: bool) -> bool {
@@ -1692,8 +1669,8 @@ impl AllocationState {
         for (source_key, task) in &self.workgraph_task_identities {
             if source_key.trim().is_empty()
                 || !valid_workgraph_id(&task.root_issue_id)
-                || !valid_workgraph_id(&task.workflow_run_id)
-                || !valid_workgraph_task_id(&task.task_id)
+                || !valid_typed_workgraph_id(&task.workflow_run_id, "workflow-run")
+                || !valid_typed_workgraph_id(&task.task_id, "task")
                 || task.task_element_id.trim().is_empty()
                 || !canonical_task_ids.insert(&task.task_id)
                 || !canonical_task_elements.insert(&task.task_element_id)
@@ -1719,6 +1696,7 @@ impl AllocationState {
             .any(|task| !valid_workgraph_inclusion(&task.workgraph_labels, task.workgraph_include))
             || self.workgraph_root_issues.values().any(|root| {
                 !valid_workgraph_inclusion(&root.workgraph_labels, root.workgraph_include)
+                    || !valid_typed_workgraph_id(&root.admission_id, "admission")
             })
         {
             return Err("WorkGraph inclusion state is invalid".into());
@@ -1743,10 +1721,10 @@ impl AllocationState {
                         || comment.updated_at_revision < comment.created_at_revision
                         || comment.body.len() > MAX_ROOT_ISSUE_COMMENT_BODY_BYTES
                         || comment.issue_number == 0
+                        || !valid_typed_workgraph_id(&comment.admission_id, "admission")
                         || [
                             &comment.source_key,
                             &comment.root_issue_id,
-                            &comment.admission_id,
                             &comment.repository_owner,
                             &comment.repository_name,
                             &comment.repository_node_id,
@@ -1767,10 +1745,10 @@ impl AllocationState {
                             .contains_key(source_key)
                         || identity.source_key != *source_key
                         || identity.issue_number == 0
+                        || !valid_typed_workgraph_id(&identity.admission_id, "admission")
                         || [
                             &identity.source_key,
                             &identity.root_issue_id,
-                            &identity.admission_id,
                             &identity.repository_owner,
                             &identity.repository_name,
                             &identity.repository_node_id,
@@ -1845,7 +1823,7 @@ impl AllocationState {
                 .iter()
                 .collect::<BTreeSet<_>>();
             if source_key.trim().is_empty()
-                || assignment.assignment_id.trim().is_empty()
+                || !valid_typed_workgraph_id(&assignment.assignment_id, "assignment")
                 || assignment.task_id != task.task_id
                 || assignment.root_issue_id != task.root_issue_id
                 || assignment.workflow_run_id != task.workflow_run_id
@@ -1946,6 +1924,8 @@ impl AllocationState {
                 || !lease.has_dispatch
                 || lease.attempt == 0
                 || lease.attempt > assignment.next_attempt
+                || lease.lease_id
+                    != make_lease_id(&lease.task_id, &lease.assignment_id, lease.attempt)
                 || (lease.completed && !lease.completion_eligible)
                 || (lease.route_selected
                     && (!lease.completion_eligible
@@ -1957,15 +1937,12 @@ impl AllocationState {
                             }))))
                 || lease.slot_number == 0
                 || lease.slot_id != slot_id(&lease.executor_id, lease.slot_number)
-                || [
-                    &lease.lease_id,
-                    &lease.task_id,
-                    &lease.assignment_id,
-                    &lease.executor_id,
-                    &lease.slot_id,
-                ]
-                .into_iter()
-                .any(|value| !valid_workgraph_id(value))
+                || !valid_typed_workgraph_id(&lease.lease_id, "lease")
+                || !valid_typed_workgraph_id(&lease.task_id, "task")
+                || !valid_typed_workgraph_id(&lease.assignment_id, "assignment")
+                || !valid_typed_workgraph_id(&lease.workflow_run_id, "workflow-run")
+                || !valid_workgraph_id(&lease.executor_id)
+                || !valid_workgraph_id(&lease.slot_id)
                 || self
                     .workgraph_active
                     .get(&lease.lease_id)
@@ -2032,20 +2009,16 @@ impl AllocationState {
                             && authorization.root_issue_id == route.root_issue_id
                             && authorization.generation == route.authorization_generation
                     })
-                || [
-                    &route.task_source_key,
-                    &route.assignment_source_key,
-                    &route.assignment_id,
-                    &route.root_issue_id,
-                    &route.workflow_run_id,
-                    &route.task_id,
-                    &route.result_id,
-                    &route.evaluation_id,
-                    &route.route_id,
-                    &route.action,
-                ]
-                .into_iter()
-                .any(|value| !valid_workgraph_id(value))
+                || !valid_workgraph_id(&route.task_source_key)
+                || !valid_workgraph_id(&route.assignment_source_key)
+                || !valid_typed_workgraph_id(&route.assignment_id, "assignment")
+                || !valid_workgraph_id(&route.root_issue_id)
+                || !valid_typed_workgraph_id(&route.workflow_run_id, "workflow-run")
+                || !valid_typed_workgraph_id(&route.task_id, "task")
+                || !valid_typed_workgraph_id(&route.result_id, "result")
+                || !valid_typed_workgraph_id(&route.evaluation_id, "evaluation")
+                || !valid_typed_workgraph_id(&route.route_id, "route")
+                || !valid_workgraph_id(&route.action)
         }) {
             return Err("WorkGraph applied Route state is invalid".into());
         }
@@ -3282,9 +3255,7 @@ fn timestamp(value: DateTime<Utc>) -> String {
 }
 
 fn make_lease_id(task: &str, assignment: &str, attempt: u64) -> String {
-    hex::encode(Sha256::digest(
-        format!("{task}\0{assignment}\0{attempt}").as_bytes(),
-    ))
+    derive_workgraph_id("lease", &[task, assignment, &attempt.to_string()])
 }
 
 #[cfg(test)]
@@ -3303,21 +3274,40 @@ mod tests {
     use tokio::sync::Mutex as TokioMutex;
 
     const TEST_TASK_ID: &str =
-        "workgraph-v1:task:sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        "urn:drasi:workgraph:id:v1:task:sha256:1111111111111111111111111111111111111111111111111111111111111111";
     const TEST_TASK_2_ID: &str =
-        "workgraph-v1:task:sha256:2222222222222222222222222222222222222222222222222222222222222222";
+        "urn:drasi:workgraph:id:v1:task:sha256:2222222222222222222222222222222222222222222222222222222222222222";
+
+    fn test_id(id_type: &str, seed: &str) -> String {
+        derive_workgraph_id(id_type, &[seed])
+    }
 
     #[test]
-    fn workgraph_task_ids_require_the_canonical_namespace() {
-        assert!(valid_workgraph_task_id(TEST_TASK_ID));
+    fn workgraph_typed_ids_require_exact_type_and_canonical_namespace() {
+        assert!(valid_typed_workgraph_id(TEST_TASK_ID, "task"));
+        assert!(!valid_typed_workgraph_id(TEST_TASK_ID, "assignment"));
         for invalid in [
             "task",
             "wgt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "workgraph-v1:task:sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            "workgraph-v1:task:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "urn:drasi:workgraph:id:v1:task:sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "urn:drasi:workgraph:id:v1:task:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ] {
-            assert!(!valid_workgraph_task_id(invalid));
+            assert!(!valid_typed_workgraph_id(invalid, "task"));
         }
+    }
+
+    #[test]
+    fn lease_id_uses_canonical_cross_vector_and_decimal_attempt() {
+        assert_eq!(
+            make_lease_id("task-α", "assignment-β", 42),
+            "urn:drasi:workgraph:id:v1:lease:sha256:\
+             fdb83caf2b77a5b61b70c62d9cdb3111d7a2dbe10b57a99f3a5997634ee81a68"
+        );
+        assert_ne!(
+            make_lease_id("task-α", "assignment-β", 42),
+            make_lease_id("task-α", "assignment-β", 4)
+        );
     }
 
     struct RecordingDispatchProjector {
@@ -3381,16 +3371,16 @@ mod tests {
                 task_id: TEST_TASK_ID.to_string(),
                 task_element_id: "task-element".to_string(),
                 root_issue_id: "root".to_string(),
-                workflow_run_id: "run".to_string(),
+                workflow_run_id: test_id("workflow-run", "run"),
             }],
             assignments: vec![WorkGraphAssignmentBinding {
                 source_key: "assignment-comment".to_string(),
                 task_source_key: "issue".to_string(),
                 task_id: TEST_TASK_ID.to_string(),
-                assignment_id: "assignment".to_string(),
+                assignment_id: test_id("assignment", "assignment"),
                 permitted_executors: vec!["executor".to_string()],
                 root_issue_id: "root".to_string(),
-                workflow_run_id: "run".to_string(),
+                workflow_run_id: test_id("workflow-run", "run"),
             }],
             dispatches,
             results: Vec::new(),
@@ -3424,7 +3414,7 @@ mod tests {
             title: "Root".to_string(),
             body: "Root body".to_string(),
             is_open: true,
-            admission_id: "generation".to_string(),
+            admission_id: test_id("admission", "generation"),
             workgraph_labels: (!workgraph_include)
                 .then(|| "workgraph:ignore".to_string())
                 .into_iter()
@@ -3459,8 +3449,8 @@ mod tests {
         max_attempts: u64,
     ) -> WorkGraphAllocatorProjection {
         let suffix = lease.attempt.to_string();
-        let result_id = format!("result-{suffix}");
-        let evaluation_id = format!("evaluation-{suffix}");
+        let result_id = test_id("result", &format!("result-{suffix}"));
+        let evaluation_id = test_id("evaluation", &format!("evaluation-{suffix}"));
         let mut desired = projection(vec![dispatch_binding(lease, dispatch_source)]);
         desired.results.push(WorkGraphResultBinding {
             source_key: format!("result-comment-{suffix}"),
@@ -3491,7 +3481,7 @@ mod tests {
             task_id: lease.task_id.clone(),
             result_id,
             evaluation_id,
-            route_id: format!("route-{suffix}"),
+            route_id: test_id("route", &format!("route-{suffix}")),
             action: action.to_string(),
             attempt: lease.attempt,
             max_attempts,
@@ -3664,12 +3654,12 @@ mod tests {
             source_key: "dispatch-comment".to_string(),
             task_source_key: "issue".to_string(),
             task_id: TEST_TASK_ID.to_string(),
-            assignment_id: "assignment".to_string(),
+            assignment_id: test_id("assignment", "assignment"),
             lease_id: lease.lease_id.clone(),
             executor_id: "executor".to_string(),
             slot_id: lease.slot_id.clone(),
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
         };
         state
             .reconcile_workgraph(
@@ -3725,7 +3715,7 @@ mod tests {
         let projector = RecordingDispatchProjector {
             committed: committed.clone(),
             replacement: WorkGraphDispatchBinding {
-                lease_id: "not-the-active-lease".to_string(),
+                lease_id: test_id("lease", "not-the-active-lease"),
                 ..accepted_dispatch
             },
         };
@@ -3755,7 +3745,7 @@ mod tests {
             .claim_active(
                 TEST_TASK_ID,
                 &lease.lease_id,
-                "assignment",
+                &test_id("assignment", "assignment"),
                 "executor",
                 &lease.slot_id,
                 "claim",
@@ -3835,12 +3825,12 @@ mod tests {
             source_key: "dispatch-comment-1".to_string(),
             task_source_key: "issue".to_string(),
             task_id: TEST_TASK_ID.to_string(),
-            assignment_id: "assignment".to_string(),
+            assignment_id: test_id("assignment", "assignment"),
             lease_id: first.lease_id.clone(),
             executor_id: "executor".to_string(),
             slot_id: first.slot_id.clone(),
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
         };
         let mut expired = state.clone();
         assert!(expired
@@ -3863,7 +3853,7 @@ mod tests {
             .workgraph_active_exact(
                 TEST_TASK_ID,
                 &first.lease_id,
-                "assignment",
+                &test_id("assignment", "assignment"),
                 "executor",
                 &first.slot_id,
                 now + chrono::Duration::seconds(1),
@@ -3897,7 +3887,7 @@ mod tests {
             .workgraph_active_exact(
                 TEST_TASK_ID,
                 &first.lease_id,
-                "assignment",
+                &test_id("assignment", "assignment"),
                 "executor",
                 &first.slot_id,
                 now + chrono::Duration::seconds(61),
@@ -3907,7 +3897,7 @@ mod tests {
             .workgraph_active_exact(
                 TEST_TASK_ID,
                 &second.lease_id,
-                "assignment",
+                &test_id("assignment", "assignment"),
                 "executor",
                 &second.slot_id,
                 now + chrono::Duration::seconds(61),
@@ -3999,12 +3989,12 @@ mod tests {
                     source_key: "dispatch-comment-1".to_string(),
                     task_source_key: "issue".to_string(),
                     task_id: TEST_TASK_ID.to_string(),
-                    assignment_id: "assignment".to_string(),
+                    assignment_id: test_id("assignment", "assignment"),
                     lease_id: first.lease_id.clone(),
                     executor_id: "executor".to_string(),
                     slot_id: first.slot_id.clone(),
                     root_issue_id: "root".to_string(),
-                    workflow_run_id: "run".to_string(),
+                    workflow_run_id: test_id("workflow-run", "run"),
                 }]),
                 &closed_documents,
                 6,
@@ -4054,14 +4044,14 @@ mod tests {
             .cloned()
             .expect("active lease");
         assert_eq!(first.root_issue_id, "root");
-        assert_eq!(first.workflow_run_id, "run");
+        assert_eq!(first.workflow_run_id, test_id("workflow-run", "run"));
         desired.dispatches.push(WorkGraphDispatchBinding {
             source_key: "dispatch-comment".to_string(),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
             task_id: TEST_TASK_ID.to_string(),
-            assignment_id: "assignment".to_string(),
+            assignment_id: test_id("assignment", "assignment"),
             lease_id: first.lease_id.clone(),
             executor_id: "executor".to_string(),
             slot_id: first.slot_id.clone(),
@@ -4237,10 +4227,10 @@ mod tests {
             source_key: "dispatch-comment".to_string(),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
             task_id: TEST_TASK_ID.to_string(),
-            assignment_id: "assignment".to_string(),
-            lease_id: "unseen-old-lease".to_string(),
+            assignment_id: test_id("assignment", "assignment"),
+            lease_id: test_id("lease", "unseen-old-lease"),
             executor_id: "executor".to_string(),
             slot_id: "executor:1".to_string(),
         }]);
@@ -4488,9 +4478,9 @@ mod tests {
             source_key: "dispatch-comment".to_string(),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
             task_id: TEST_TASK_ID.to_string(),
-            assignment_id: "assignment".to_string(),
+            assignment_id: test_id("assignment", "assignment"),
             lease_id: lease.lease_id.clone(),
             executor_id: "executor".to_string(),
             slot_id: lease.slot_id,
@@ -4509,24 +4499,24 @@ mod tests {
     #[test]
     fn prior_allocator_schema_is_rejected_explicitly() {
         let mut encoded = serde_json::to_value(AllocationState::default()).expect("encode state");
-        encoded["version"] = serde_json::json!(15);
+        encoded["version"] = serde_json::json!(18);
         let state: AllocationState = serde_json::from_value(encoded).expect("decode old state");
         assert!(state
             .validate()
-            .expect_err("schema 15 must be rejected")
-            .contains("version must equal 18"));
+            .expect_err("schema 18 must be rejected")
+            .contains("version must equal 19"));
     }
 
     #[test]
     fn all_action_bindings_validate_direct_root_run_and_task_identities() {
-        let lease_id = make_lease_id(TEST_TASK_ID, "assignment", 1);
+        let lease_id = make_lease_id(TEST_TASK_ID, &test_id("assignment", "assignment"), 1);
         let mut desired = projection(vec![WorkGraphDispatchBinding {
             source_key: "dispatch-comment".to_string(),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
             task_id: TEST_TASK_ID.to_string(),
-            assignment_id: "assignment".to_string(),
+            assignment_id: test_id("assignment", "assignment"),
             lease_id: lease_id.clone(),
             executor_id: "executor".to_string(),
             slot_id: "executor:1".to_string(),
@@ -4535,9 +4525,9 @@ mod tests {
             source_key: "result-comment".to_string(),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
             task_id: TEST_TASK_ID.to_string(),
-            result_id: "result".to_string(),
+            result_id: test_id("result", "result"),
             lease_id,
             attempt: 1,
         });
@@ -4545,10 +4535,10 @@ mod tests {
             source_key: "evaluate-comment".to_string(),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
             task_id: TEST_TASK_ID.to_string(),
-            result_id: "result".to_string(),
-            evaluation_id: "evaluation".to_string(),
+            result_id: test_id("result", "result"),
+            evaluation_id: test_id("evaluation", "evaluation"),
             attempt: 1,
             verdict: WORKGRAPH_EVALUATION_ACCEPTED.to_string(),
         });
@@ -4556,11 +4546,11 @@ mod tests {
             source_key: "route-comment".to_string(),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
             task_id: TEST_TASK_ID.to_string(),
-            result_id: "result".to_string(),
-            evaluation_id: "evaluation".to_string(),
-            route_id: "route".to_string(),
+            result_id: test_id("result", "result"),
+            evaluation_id: test_id("evaluation", "evaluation"),
+            route_id: test_id("route", "route"),
             action: "complete".to_string(),
             attempt: 1,
             max_attempts: 3,
@@ -4623,11 +4613,107 @@ mod tests {
             .expect("matching direct identities");
         let encoded = serde_json::to_value(&desired).expect("serialize projection");
         assert_eq!(encoded["results"][0]["rootIssueId"], "root");
-        assert_eq!(encoded["evaluations"][0]["workflowRunId"], "run");
-        assert_eq!(encoded["routes"][0]["evaluationId"], "evaluation");
+        assert_eq!(
+            encoded["evaluations"][0]["workflowRunId"],
+            test_id("workflow-run", "run")
+        );
+        assert_eq!(
+            encoded["routes"][0]["evaluationId"],
+            test_id("evaluation", "evaluation")
+        );
 
         desired.evaluations[0].workflow_run_id = "other-run".to_string();
         assert!(validate_workgraph_projection(&desired, &tasks, &artifacts).is_err());
+    }
+
+    #[test]
+    fn every_known_projection_id_boundary_rejects_a_wrong_type() {
+        let tasks = BTreeMap::from([("issue".to_string(), task_document(true))]);
+
+        let mut task_wrong = projection(Vec::new());
+        let wrong_task = test_id("assignment", "wrong-task");
+        task_wrong.tasks[0].task_id = wrong_task.clone();
+        task_wrong.assignments[0].task_id = wrong_task;
+        assert!(validate_workgraph_projection(
+            &task_wrong,
+            &tasks,
+            &lifecycle_artifacts_for_projection(&task_wrong)
+        )
+        .is_err());
+
+        let mut run_wrong = projection(Vec::new());
+        let wrong_run = test_id("route", "wrong-run");
+        run_wrong.tasks[0].workflow_run_id = wrong_run.clone();
+        run_wrong.assignments[0].workflow_run_id = wrong_run;
+        assert!(validate_workgraph_projection(
+            &run_wrong,
+            &tasks,
+            &lifecycle_artifacts_for_projection(&run_wrong)
+        )
+        .is_err());
+
+        let mut assignment_wrong = projection(Vec::new());
+        assignment_wrong.assignments[0].assignment_id = test_id("task", "wrong-assignment");
+        assert!(validate_workgraph_projection(
+            &assignment_wrong,
+            &tasks,
+            &lifecycle_artifacts_for_projection(&assignment_wrong)
+        )
+        .is_err());
+
+        let assignment_id = test_id("assignment", "assignment");
+        let lease = WorkGraphActiveLease {
+            lease_id: make_lease_id(TEST_TASK_ID, &assignment_id, 1),
+            task_source_key: "issue".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
+            task_id: TEST_TASK_ID.to_string(),
+            task_element_id: "task-element".to_string(),
+            assignment_source_key: "assignment-comment".to_string(),
+            assignment_id,
+            executor_id: "executor".to_string(),
+            slot_id: "executor:1".to_string(),
+            slot_number: 1,
+            attempt: 1,
+            acquired_at: "2026-01-01T00:00:00.000Z".to_string(),
+            expires_at: "2026-01-01T00:01:00.000Z".to_string(),
+            has_dispatch: true,
+            completed: false,
+            completion_eligible: true,
+            route_selected: false,
+        };
+        let complete = projection_with_route(
+            &lease,
+            "dispatch-comment",
+            "route-comment",
+            WORKGRAPH_EVALUATION_ACCEPTED,
+            "complete",
+            3,
+        );
+        let artifacts = lifecycle_artifacts_for_projection(&complete);
+        validate_workgraph_projection(&complete, &tasks, &artifacts).expect("valid typed baseline");
+
+        let mut lease_wrong = complete.clone();
+        lease_wrong.dispatches[0].lease_id = test_id("task", "wrong-lease");
+        lease_wrong.results[0].lease_id = lease_wrong.dispatches[0].lease_id.clone();
+        assert!(validate_workgraph_projection(&lease_wrong, &tasks, &artifacts).is_err());
+
+        let mut result_wrong = complete.clone();
+        let wrong_result = test_id("task", "wrong-result");
+        result_wrong.results[0].result_id = wrong_result.clone();
+        result_wrong.evaluations[0].result_id = wrong_result.clone();
+        result_wrong.routes[0].result_id = wrong_result;
+        assert!(validate_workgraph_projection(&result_wrong, &tasks, &artifacts).is_err());
+
+        let mut evaluation_wrong = complete.clone();
+        let wrong_evaluation = test_id("result", "wrong-evaluation");
+        evaluation_wrong.evaluations[0].evaluation_id = wrong_evaluation.clone();
+        evaluation_wrong.routes[0].evaluation_id = wrong_evaluation;
+        assert!(validate_workgraph_projection(&evaluation_wrong, &tasks, &artifacts).is_err());
+
+        let mut route_wrong = complete;
+        route_wrong.routes[0].route_id = test_id("evaluation", "wrong-route");
+        assert!(validate_workgraph_projection(&route_wrong, &tasks, &artifacts).is_err());
     }
 
     #[test]
@@ -4691,7 +4777,7 @@ mod tests {
         assert_eq!(
             state
                 .workgraph_assignment_attempts
-                .get("assignment")
+                .get(&test_id("assignment", "assignment"))
                 .copied(),
             Some(2)
         );
@@ -4763,7 +4849,10 @@ mod tests {
             .iter()
             .any(|lease| lease.route_selected));
         assert!(state.workgraph_active.is_empty());
-        assert_eq!(state.workgraph_assignment_attempts["assignment"], 1);
+        assert_eq!(
+            state.workgraph_assignment_attempts[&test_id("assignment", "assignment")],
+            1
+        );
         state
             .reconcile_workgraph(projection(Vec::new()), &documents, 4, now)
             .expect("temporary projection gap remains fail closed");
@@ -5279,14 +5368,14 @@ mod tests {
     #[test]
     fn route_validation_rejects_wrong_chain_and_rework_at_attempt_limit() {
         let lease = WorkGraphActiveLease {
-            lease_id: make_lease_id(TEST_TASK_ID, "assignment", 1),
+            lease_id: make_lease_id(TEST_TASK_ID, &test_id("assignment", "assignment"), 1),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
             task_id: TEST_TASK_ID.to_string(),
             task_element_id: "task-element".to_string(),
             assignment_source_key: "assignment-comment".to_string(),
-            assignment_id: "assignment".to_string(),
+            assignment_id: test_id("assignment", "assignment"),
             executor_id: "executor".to_string(),
             slot_id: "executor:1".to_string(),
             slot_number: 1,
@@ -5312,7 +5401,7 @@ mod tests {
 
         desired.routes[0].result_id = "other-result".to_string();
         assert!(validate_workgraph_projection(&desired, &tasks, &artifacts).is_err());
-        desired.routes[0].result_id = "result-1".to_string();
+        desired.routes[0].result_id = test_id("result", "result-1");
         desired.routes[0].max_attempts = 1;
         assert!(validate_workgraph_projection(&desired, &tasks, &artifacts).is_err());
         desired.routes[0].action = "error".to_string();
@@ -5327,14 +5416,14 @@ mod tests {
     #[test]
     fn route_document_arriving_first_survives_restart_and_later_converges() {
         let lease = WorkGraphActiveLease {
-            lease_id: make_lease_id(TEST_TASK_ID, "assignment", 1),
+            lease_id: make_lease_id(TEST_TASK_ID, &test_id("assignment", "assignment"), 1),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
             task_id: TEST_TASK_ID.to_string(),
             task_element_id: "task-element".to_string(),
             assignment_source_key: "assignment-comment".to_string(),
-            assignment_id: "assignment".to_string(),
+            assignment_id: test_id("assignment", "assignment"),
             executor_id: "executor".to_string(),
             slot_id: "executor:1".to_string(),
             slot_number: 1,
@@ -5397,14 +5486,14 @@ mod tests {
     #[test]
     fn stale_generation_fences_result_evaluation_and_route_chain() {
         let lease = WorkGraphActiveLease {
-            lease_id: make_lease_id(TEST_TASK_ID, "assignment", 1),
+            lease_id: make_lease_id(TEST_TASK_ID, &test_id("assignment", "assignment"), 1),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
             task_id: TEST_TASK_ID.to_string(),
             task_element_id: "task-element".to_string(),
             assignment_source_key: "assignment-comment".to_string(),
-            assignment_id: "assignment".to_string(),
+            assignment_id: test_id("assignment", "assignment"),
             executor_id: "executor".to_string(),
             slot_id: "executor:1".to_string(),
             slot_number: 1,
@@ -5507,16 +5596,16 @@ mod tests {
             task_id: TEST_TASK_2_ID.to_string(),
             task_element_id: "task-element-2".to_string(),
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
         });
         queued.assignments.push(WorkGraphAssignmentBinding {
             source_key: "assignment-comment-2".to_string(),
             task_source_key: "issue-2".to_string(),
             task_id: TEST_TASK_2_ID.to_string(),
-            assignment_id: "assignment-2".to_string(),
+            assignment_id: test_id("assignment", "assignment-2"),
             permitted_executors: vec!["executor".to_string()],
             root_issue_id: "root".to_string(),
-            workflow_run_id: "run".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
         });
         let delta = state
             .reconcile_workgraph(queued, &documents, 2, now + chrono::Duration::seconds(1))
