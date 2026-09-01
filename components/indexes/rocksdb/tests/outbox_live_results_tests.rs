@@ -21,10 +21,12 @@
 
 use std::sync::Arc;
 
-use drasi_core::interface::{LiveResultsWriter, OutboxWriter, RowMutation};
+use drasi_core::interface::{
+    LiveResultsWriter, OutboxWriter, RowMutation, SessionControl, SessionGuard,
+};
 use drasi_index_rocksdb::{
     open_unified_db, RocksDbLiveResultsWriter, RocksDbMemoryBudget, RocksDbOutboxWriter,
-    RocksIndexOptions,
+    RocksDbSessionControl, RocksDbSessionState, RocksIndexOptions,
 };
 use tempfile::TempDir;
 
@@ -34,13 +36,23 @@ fn open_db(path: &str, query_id: &str) -> Arc<drasi_index_rocksdb::IndexDb> {
     open_unified_db(path, query_id, &options).expect("Failed to open RocksDB")
 }
 
+fn outbox_writer(db: Arc<drasi_index_rocksdb::IndexDb>) -> RocksDbOutboxWriter {
+    let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+    RocksDbOutboxWriter::new(db, session_state)
+}
+
+fn live_writer(db: Arc<drasi_index_rocksdb::IndexDb>) -> RocksDbLiveResultsWriter {
+    let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+    RocksDbLiveResultsWriter::new(db, session_state)
+}
+
 // ─── OutboxWriter Tests ──────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_outbox_append_and_read() {
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
-    let writer = RocksDbOutboxWriter::new(db);
+    let writer = outbox_writer(db);
 
     writer.append("q1", 1, b"hello").await.unwrap();
     writer.append("q1", 2, b"world").await.unwrap();
@@ -66,7 +78,7 @@ async fn test_outbox_append_and_read() {
 async fn test_outbox_read_latest_sequence() {
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
-    let writer = RocksDbOutboxWriter::new(db);
+    let writer = outbox_writer(db);
 
     assert_eq!(writer.read_latest_sequence("q1").await.unwrap(), None);
 
@@ -83,7 +95,7 @@ async fn test_outbox_read_latest_sequence() {
 async fn test_outbox_clear() {
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
-    let writer = RocksDbOutboxWriter::new(db);
+    let writer = outbox_writer(db);
 
     writer.append("q1", 1, b"data1").await.unwrap();
     writer.append("q1", 2, b"data2").await.unwrap();
@@ -98,7 +110,7 @@ async fn test_outbox_clear() {
 async fn test_outbox_trim_to_capacity() {
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
-    let writer = RocksDbOutboxWriter::new(db);
+    let writer = outbox_writer(db);
 
     for i in 1..=10 {
         writer.append("q1", i, b"data").await.unwrap();
@@ -119,7 +131,7 @@ async fn test_outbox_trim_to_capacity() {
 async fn test_outbox_trim_no_op() {
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
-    let writer = RocksDbOutboxWriter::new(db);
+    let writer = outbox_writer(db);
 
     writer.append("q1", 1, b"data").await.unwrap();
     let removed = writer.trim_to_capacity("q1", 5).await.unwrap();
@@ -130,7 +142,7 @@ async fn test_outbox_trim_no_op() {
 async fn test_outbox_isolation_between_queries() {
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
-    let writer = RocksDbOutboxWriter::new(db);
+    let writer = outbox_writer(db);
 
     writer.append("q1", 1, b"q1-data").await.unwrap();
     writer.append("q2", 1, b"q2-data").await.unwrap();
@@ -148,7 +160,7 @@ async fn test_outbox_persistence_across_reopen() {
     // Write data
     {
         let db = open_db(&path, "q1");
-        let writer = RocksDbOutboxWriter::new(db);
+        let writer = outbox_writer(db);
         writer.append("q1", 1, b"persisted").await.unwrap();
         writer.append("q1", 2, b"data").await.unwrap();
     }
@@ -156,7 +168,7 @@ async fn test_outbox_persistence_across_reopen() {
     // Re-open and verify
     {
         let db = open_db(&path, "q1");
-        let writer = RocksDbOutboxWriter::new(db);
+        let writer = outbox_writer(db);
         let entries = writer.read_from("q1", 0).await.unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0], (1, b"persisted".to_vec()));
@@ -171,7 +183,7 @@ async fn test_outbox_persistence_across_reopen() {
 async fn test_live_results_apply_upserts() {
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
-    let writer = RocksDbLiveResultsWriter::new(db);
+    let writer = live_writer(db);
 
     let mutations = vec![
         RowMutation {
@@ -194,7 +206,7 @@ async fn test_live_results_apply_upserts() {
 async fn test_live_results_apply_delete() {
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
-    let writer = RocksDbLiveResultsWriter::new(db);
+    let writer = live_writer(db);
 
     writer
         .apply_mutations(
@@ -225,7 +237,7 @@ async fn test_live_results_apply_delete() {
 async fn test_live_results_upsert_overwrites() {
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
-    let writer = RocksDbLiveResultsWriter::new(db);
+    let writer = live_writer(db);
 
     writer
         .apply_mutations(
@@ -257,7 +269,7 @@ async fn test_live_results_upsert_overwrites() {
 async fn test_live_results_clear() {
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
-    let writer = RocksDbLiveResultsWriter::new(db);
+    let writer = live_writer(db);
 
     writer
         .apply_mutations(
@@ -278,7 +290,7 @@ async fn test_live_results_clear() {
 async fn test_live_results_isolation_between_queries() {
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
-    let writer = RocksDbLiveResultsWriter::new(db);
+    let writer = live_writer(db);
 
     writer
         .apply_mutations(
@@ -314,7 +326,7 @@ async fn test_live_results_persistence_across_reopen() {
     // Write data
     {
         let db = open_db(&path, "q1");
-        let writer = RocksDbLiveResultsWriter::new(db);
+        let writer = live_writer(db);
         writer
             .apply_mutations(
                 "q1",
@@ -336,7 +348,7 @@ async fn test_live_results_persistence_across_reopen() {
     // Re-open and verify
     {
         let db = open_db(&path, "q1");
-        let writer = RocksDbLiveResultsWriter::new(db);
+        let writer = live_writer(db);
         assert_eq!(writer.row_count("q1").await.unwrap(), 2);
         let snapshot = writer.read_snapshot("q1").await.unwrap();
         assert_eq!(snapshot.len(), 2);
@@ -353,7 +365,7 @@ async fn test_live_results_atomic_batch() {
     // Verify that apply_mutations applies all mutations atomically
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
-    let writer = RocksDbLiveResultsWriter::new(db);
+    let writer = live_writer(db);
 
     // Insert 3 rows, delete 1, update 1 in a single batch
     writer
@@ -400,4 +412,56 @@ async fn test_live_results_atomic_batch() {
     snapshot_sorted.sort_by_key(|(sig, _)| *sig);
     assert_eq!(snapshot_sorted[0], (1, b"updated".to_vec()));
     assert_eq!(snapshot_sorted[1], (3, b"keep".to_vec()));
+}
+
+#[tokio::test]
+async fn test_outbox_and_live_results_roll_back_with_session() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_db(tmp.path().to_str().unwrap(), "q1");
+    let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+    let session_control: Arc<dyn SessionControl> =
+        Arc::new(RocksDbSessionControl::new(session_state.clone()));
+    let outbox = RocksDbOutboxWriter::new(db.clone(), session_state.clone());
+    let live = RocksDbLiveResultsWriter::new(db, session_state);
+
+    {
+        let guard = SessionGuard::begin(session_control.clone())
+            .await
+            .expect("begin");
+        outbox.append("q1", 1, b"staged").await.unwrap();
+        live.apply_mutations(
+            "q1",
+            &[RowMutation {
+                row_signature: 7,
+                data: Some(b"row"),
+            }],
+        )
+        .await
+        .unwrap();
+        drop(guard);
+    }
+
+    assert!(outbox.read_from("q1", 0).await.unwrap().is_empty());
+    assert_eq!(live.row_count("q1").await.unwrap(), 0);
+
+    {
+        let guard = SessionGuard::begin(session_control.clone())
+            .await
+            .expect("begin");
+        outbox.append("q1", 1, b"committed").await.unwrap();
+        live.apply_mutations(
+            "q1",
+            &[RowMutation {
+                row_signature: 7,
+                data: Some(b"row"),
+            }],
+        )
+        .await
+        .unwrap();
+        guard.commit().await.expect("commit");
+    }
+
+    let entries = outbox.read_from("q1", 0).await.unwrap();
+    assert_eq!(entries, vec![(1, b"committed".to_vec())]);
+    assert_eq!(live.row_count("q1").await.unwrap(), 1);
 }

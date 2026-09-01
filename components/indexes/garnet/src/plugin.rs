@@ -153,10 +153,15 @@ impl IndexBackendPlugin for GarnetIndexProvider {
         let checkpoint_store = Arc::new(GarnetCheckpointStore::new(
             query_id,
             connection.clone(),
-            session_state,
+            session_state.clone(),
         ));
-        let outbox_writer = Arc::new(GarnetOutboxWriter::new(query_id, connection.clone()));
-        let live_results_writer = Arc::new(GarnetLiveResultsWriter::new(query_id, connection));
+        let outbox_writer = Arc::new(
+            GarnetOutboxWriter::new(query_id, connection.clone())
+                .with_session_state(session_state.clone()),
+        );
+        let live_results_writer = Arc::new(
+            GarnetLiveResultsWriter::new(query_id, connection).with_session_state(session_state),
+        );
 
         Ok(CreatedIndexes {
             set: IndexSet {

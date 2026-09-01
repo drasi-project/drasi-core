@@ -353,6 +353,27 @@ impl CheckpointStore for RocksDbCheckpointStore {
         }
     }
 
+    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+        let db = self.db.clone();
+        let session_state = self.session_state.clone();
+        let key = format!("{RESULT_SEQUENCE_PREFIX}{query_id}");
+
+        let task = task::spawn_blocking(move || {
+            let cf = db
+                .cf_handle(STREAM_STATE_CF)
+                .expect("stream_state cf not found");
+            session_state.with_txn(|txn| {
+                txn.put_cf(&cf, &key, sequence.to_be_bytes())
+                    .map_err(IndexError::other)
+            })
+        });
+
+        match task.await {
+            Ok(v) => v,
+            Err(e) => Err(IndexError::other(e)),
+        }
+    }
+
     async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
         let db = self.db.clone();
         let key = format!("{RESULT_SEQUENCE_PREFIX}{query_id}");
