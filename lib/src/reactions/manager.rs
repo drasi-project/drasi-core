@@ -251,8 +251,10 @@ impl ReactionManager {
     /// Validate the reaction's startup configuration (§3 compatibility rules).
     ///
     /// 1. `is_durable=true` requires a durable state store
-    /// 2. `needs_snapshot_on_fresh_start=true` + `AutoSkipGap` → reject (contradictory)
-    /// 3. `needs_snapshot_on_fresh_start=false` + `AutoReset` → reject (AutoReset needs
+    /// 2. `is_durable=true` against any volatile subscribed query → reject
+    ///    (outbox/snapshot do not survive process crash)
+    /// 3. `needs_snapshot_on_fresh_start=true` + `AutoSkipGap` → reject (contradictory)
+    /// 4. `needs_snapshot_on_fresh_start=false` + `AutoReset` → reject (AutoReset needs
     ///    snapshot capability to re-bootstrap)
     async fn validate_startup_config(&self, reaction: &Arc<dyn Reaction>) -> Result<()> {
         let is_durable = reaction.is_durable();
@@ -261,31 +263,58 @@ impl ReactionManager {
 
         // Rule 1: durable reaction requires durable state store
         if is_durable {
-            let store = self.state_store.read().await;
-            match store.as_ref() {
-                None => {
-                    self.lifecycle_metrics
-                        .record_startup_rejection(StartupRejectionReason::DurableNoStore);
-                    return Err(anyhow::anyhow!(
-                        "Reaction '{}' requires a durable state store (is_durable=true), \
-                         but no state store is configured",
-                        reaction.id()
-                    ));
+            {
+                let store = self.state_store.read().await;
+                match store.as_ref() {
+                    None => {
+                        self.lifecycle_metrics
+                            .record_startup_rejection(StartupRejectionReason::DurableNoStore);
+                        return Err(anyhow::anyhow!(
+                            "Reaction '{}' requires a durable state store (is_durable=true), \
+                             but no state store is configured",
+                            reaction.id()
+                        ));
+                    }
+                    Some(s) if !s.is_durable() => {
+                        self.lifecycle_metrics
+                            .record_startup_rejection(StartupRejectionReason::DurableOnVolatile);
+                        return Err(anyhow::anyhow!(
+                            "Reaction '{}' requires a durable state store (is_durable=true), \
+                             but the configured state store is volatile",
+                            reaction.id()
+                        ));
+                    }
+                    _ => {}
                 }
-                Some(s) if !s.is_durable() => {
-                    self.lifecycle_metrics
-                        .record_startup_rejection(StartupRejectionReason::DurableOnVolatile);
-                    return Err(anyhow::anyhow!(
-                        "Reaction '{}' requires a durable state store (is_durable=true), \
-                         but the configured state store is volatile",
-                        reaction.id()
-                    ));
+            }
+
+            // Rule 2: durable reaction cannot subscribe to volatile queries.
+            // Re-checked on every start so a later backend change is still rejected.
+            let query_ids = reaction.query_ids();
+            if !query_ids.is_empty() {
+                let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "QueryProvider not injected - was ReactionManager initialized properly?"
+                    )
+                })?;
+                for query_id in &query_ids {
+                    let query = query_provider.get_query_instance(query_id).await?;
+                    if query.is_volatile() {
+                        self.lifecycle_metrics.record_startup_rejection(
+                            StartupRejectionReason::DurableOnVolatileQuery,
+                        );
+                        return Err(anyhow::anyhow!(
+                            "Reaction '{}' requires a persistent query (is_durable=true), \
+                             but subscribed query '{}' is volatile / non-durable",
+                            reaction.id(),
+                            query_id
+                        ));
+                    }
                 }
-                _ => {}
             }
         }
 
-        // Rule 2: snapshot + AutoSkipGap is contradictory
+        // Rule 3: snapshot + AutoSkipGap is contradictory
         if needs_snapshot && policy == ReactionRecoveryPolicy::AutoSkipGap {
             self.lifecycle_metrics
                 .record_startup_rejection(StartupRejectionReason::SnapshotSkipGap);
@@ -296,7 +325,7 @@ impl ReactionManager {
             ));
         }
 
-        // Rule 3: !snapshot + AutoReset is contradictory
+        // Rule 4: !snapshot + AutoReset is contradictory
         if !needs_snapshot && policy == ReactionRecoveryPolicy::AutoReset {
             self.lifecycle_metrics
                 .record_startup_rejection(StartupRejectionReason::NoSnapshotAutoReset);

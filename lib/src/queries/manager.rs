@@ -246,6 +246,17 @@ pub trait Query: Send + Sync {
         None
     }
 
+    /// Whether this query's index and output (outbox/snapshot) are volatile.
+    ///
+    /// Volatile queries do not survive a process crash, so a durable reaction
+    /// (`Reaction::is_durable() == true`) must not subscribe to them.
+    ///
+    /// Default is `true` (fail-safe): implementations that do not override this
+    /// are treated as volatile.
+    fn is_volatile(&self) -> bool {
+        true
+    }
+
     /// Release the persistent index-backend handles this query retains, **without**
     /// deleting any on-disk data.
     ///
@@ -2990,6 +3001,19 @@ impl Query for DrasiQuery {
 
     fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
         Some(self.output_metrics.clone())
+    }
+
+    fn is_volatile(&self) -> bool {
+        match self
+            .base
+            .config
+            .storage_backend
+            .as_ref()
+            .or_else(|| self.index_factory.default_backend())
+        {
+            Some(backend_ref) => self.index_factory.is_volatile(backend_ref),
+            None => true,
+        }
     }
 
     async fn release_persistent_handles(&self) {
