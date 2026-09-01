@@ -181,12 +181,12 @@ fn discover_dynamic_plugins(plugin_filter: Option<&str>) -> DiscoveryResult {
 
     let mut plugins: Vec<PluginInfo> = metadata
         .packages
-        .into_iter()
-        .filter(is_dynamic_plugin)
+        .iter()
+        .filter(|p| is_dynamic_plugin(p))
         .filter_map(|p| {
             let (plugin_type, kind) = parse_plugin_type_kind(&p.name)?;
             Some(PluginInfo {
-                package: p,
+                package: p.clone(),
                 plugin_type,
                 kind,
             })
