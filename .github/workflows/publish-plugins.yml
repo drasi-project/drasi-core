@@ -408,6 +408,8 @@ jobs:
 
       - name: Build plugins
         shell: bash
+        env:
+          INPUT_PLUGIN: ${{ inputs.plugin }}
         run: |
           # For -gnu targets, append the glibc-version suffix so cargo-zigbuild
           # pins the floor (e.g. x86_64-unknown-linux-gnu.2.28). xtask strips the
@@ -427,12 +429,14 @@ jobs:
             echo "${TOOLCHAIN_ENV}=${PWD}/ci/cmake/librdkafka-features.cmake" >> "$GITHUB_ENV"
             export "${TOOLCHAIN_ENV}=${PWD}/ci/cmake/librdkafka-features.cmake"
           fi
-          
-          ARGS=(build-plugins --release --target "$BUILD_TARGET")
-          if [ -n "${{ inputs.plugin }}" ]; then
-            ARGS+=(--plugin "${{ inputs.plugin }}")
+          if [ -n "$INPUT_PLUGIN" ] && ! [[ "$INPUT_PLUGIN" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid plugin format: $INPUT_PLUGIN" >&2; exit 1
           fi
-          
+          ARGS=(build-plugins --release --target "$BUILD_TARGET")
+          if [ -n "$INPUT_PLUGIN" ]; then
+            ARGS+=(--plugin "$INPUT_PLUGIN")
+          fi
+
           cargo run -p xtask -- "${ARGS[@]}"
 
       - name: Verify glibc floor (-gnu plugins)
@@ -491,6 +495,7 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_PRE_RELEASE: ${{ inputs.pre_release }}
           INPUT_SIGN: ${{ inputs.sign }}
+          INPUT_PLUGIN: ${{ inputs.plugin }}
           TARGET: ${{ matrix.target }}
           ARCH_SUFFIX: ${{ matrix.arch_suffix }}
           COSIGN_VERIFY_CERTIFICATE_IDENTITY: https://github.com/drasi-project/drasi-core/.github/workflows/publish-plugins.yml@refs/heads/main
@@ -507,6 +512,9 @@ jobs:
           if ! [[ "$INPUT_REGISTRY" =~ ^[A-Za-z0-9._/:-]+$ ]]; then
             echo "Invalid registry format: $INPUT_REGISTRY" >&2; exit 1
           fi
+          if [ -n "$INPUT_PLUGIN" ] && ! [[ "$INPUT_PLUGIN" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid plugin format: $INPUT_PLUGIN" >&2; exit 1
+          fi
           # Build the args as an array so each element is passed verbatim (no
           # word-splitting or globbing).
           ARGS=(--release --target "$TARGET" --registry "$INPUT_REGISTRY" --arch-suffix "$ARCH_SUFFIX")
@@ -519,8 +527,8 @@ jobs:
           elif [ -n "$INPUT_PRE_RELEASE" ]; then
             ARGS+=(--pre-release "$INPUT_PRE_RELEASE")
           fi
-          if [ -n "${{ inputs.plugin }}" ]; then
-            ARGS+=(--plugin "${{ inputs.plugin }}")
+          if [ -n "$INPUT_PLUGIN" ]; then
+            ARGS+=(--plugin "$INPUT_PLUGIN")
           fi
           cargo run -p xtask -- publish-plugins "${ARGS[@]}"
 
@@ -531,6 +539,7 @@ jobs:
           INPUT_REGISTRY: ${{ inputs.registry }}
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_PRE_RELEASE: ${{ inputs.pre_release }}
+          INPUT_PLUGIN: ${{ inputs.plugin }}
           TARGET: ${{ matrix.target }}
           ARCH_SUFFIX: ${{ matrix.arch_suffix }}
         run: |
@@ -543,14 +552,17 @@ jobs:
           if ! [[ "$INPUT_REGISTRY" =~ ^[A-Za-z0-9._/:-]+$ ]]; then
             echo "Invalid registry format: $INPUT_REGISTRY" >&2; exit 1
           fi
+          if [ -n "$INPUT_PLUGIN" ] && ! [[ "$INPUT_PLUGIN" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid plugin format: $INPUT_PLUGIN" >&2; exit 1
+          fi
           ARGS=(--release --target "$TARGET" --registry "$INPUT_REGISTRY" --arch-suffix "$ARCH_SUFFIX" --dry-run)
           if [ -n "$INPUT_TAG" ]; then
             ARGS+=(--tag "$INPUT_TAG")
           elif [ -n "$INPUT_PRE_RELEASE" ]; then
             ARGS+=(--pre-release "$INPUT_PRE_RELEASE")
           fi
-          if [ -n "${{ inputs.plugin }}" ]; then
-            ARGS+=(--plugin "${{ inputs.plugin }}")
+          if [ -n "$INPUT_PLUGIN" ]; then
+            ARGS+=(--plugin "$INPUT_PLUGIN")
           fi
           cargo run -p xtask -- publish-plugins "${ARGS[@]}"
 
