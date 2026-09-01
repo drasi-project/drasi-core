@@ -595,11 +595,19 @@ impl SourceBase {
         map.clear();
     }
 
-    /// Reset the sequence counter, typically after recovering from a checkpoint.
-    /// The next dispatched event will receive `sequence + 1`.
+    /// Raise the sequence counter to at least `sequence + 1`, typically after
+    /// recovering from a WAL-head/checkpoint restore. The next dispatched event
+    /// will receive at least `sequence + 1`.
+    ///
+    /// This uses `fetch_max`, so it **never lowers** the counter regardless of
+    /// call ordering. It is complementary to the resume-floor applied on
+    /// subscribe (see [`raise_sequence_floor`](Self::raise_sequence_floor)):
+    /// whichever floor is higher wins, so restart-monotonicity holds even if a
+    /// later WAL-head restore reports a lower head than an already-applied
+    /// resume floor.
     pub fn set_next_sequence(&self, sequence: u64) {
         self.next_sequence
-            .store(sequence.saturating_add(1), Ordering::Relaxed);
+            .fetch_max(sequence.saturating_add(1), Ordering::Relaxed);
     }
 
     /// Raise the per-source sequence counter to a floor derived from a resuming
@@ -613,6 +621,13 @@ impl SourceBase {
     ///
     /// `resume_sequence` is the last confirmed sequence `N`; the next event must
     /// be `> N`, so the counter floor is `N + 1`.
+    ///
+    /// Idempotent: the only effect is the atomic `fetch_max`, so calling this
+    /// more than once per subscription — or from more than one subscribe path —
+    /// is harmless. The subscribe paths (`subscribe_with_bootstrap_context`,
+    /// `subscribe_with_replay`) each call it once, and every concrete
+    /// `Source::subscribe()` routes to exactly one of those; this doc records
+    /// the invariant so future sources keep the call side-effect-free.
     fn raise_sequence_floor(&self, settings: &crate::config::SourceSubscriptionSettings) {
         if let Some(resume_seq) = settings.resume_sequence {
             let floor = resume_seq.saturating_add(1);
@@ -3295,6 +3310,31 @@ mod tests {
         assert!(
             map.contains_key(&1),
             "without resume_sequence the counter must start at 1 (got keys {:?})",
+            map.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// `set_next_sequence` (WAL-head restore) must never lower the counter, so a
+    /// later restore reporting a lower head cannot undo an already-applied
+    /// resume floor and reintroduce a restart-monotonicity regression.
+    #[tokio::test]
+    async fn test_set_next_sequence_never_lowers() {
+        let params = SourceBaseParams::new("set-seq-max").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        let _rx = base.create_streaming_receiver().await.unwrap();
+
+        // Restore to head 500 → next event should be 501.
+        base.set_next_sequence(500);
+        // A subsequent lower restore must be ignored (fetch_max).
+        base.set_next_sequence(100);
+
+        base.dispatch_event(make_event("set-seq-max", Some(&[0xAB])))
+            .await
+            .unwrap();
+        let map = base.sequence_position_map.read().await;
+        assert!(
+            map.contains_key(&501),
+            "set_next_sequence must never lower the counter (got keys {:?})",
             map.keys().collect::<Vec<_>>()
         );
     }

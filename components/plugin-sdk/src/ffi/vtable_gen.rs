@@ -798,7 +798,11 @@ pub fn build_source_vtable<T: Source + 'static>(
             Some(bytes::Bytes::copy_from_slice(slice))
         };
 
-        // 0 is the sentinel for "no checkpointed sequence" (real sequences start at 1).
+        // 0 is the sentinel for "no checkpointed sequence". Real sequences start
+        // at 1 (the framework counter initializes to 1 and assigns via fetch_add),
+        // so 0 never collides with a genuine checkpoint. Even if 0 were received,
+        // the resulting floor would be 0 + 1 = 1, which equals the default counter,
+        // so treating it as absent is a no-op — the sentinel is safe either way.
         let resume_sequence = if resume_sequence == 0 {
             None
         } else {
@@ -1197,7 +1201,11 @@ pub fn build_source_vtable_from_boxed(
             Some(bytes::Bytes::copy_from_slice(slice))
         };
 
-        // 0 is the sentinel for "no checkpointed sequence" (real sequences start at 1).
+        // 0 is the sentinel for "no checkpointed sequence". Real sequences start
+        // at 1 (the framework counter initializes to 1 and assigns via fetch_add),
+        // so 0 never collides with a genuine checkpoint. Even if 0 were received,
+        // the resulting floor would be 0 + 1 = 1, which equals the default counter,
+        // so treating it as absent is a no-op — the sentinel is safe either way.
         let resume_sequence = if resume_sequence == 0 {
             None
         } else {
