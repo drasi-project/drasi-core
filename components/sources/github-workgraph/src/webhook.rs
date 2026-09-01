@@ -4311,6 +4311,93 @@ mod workgraph_tests {
     }
 
     #[tokio::test]
+    async fn signed_fork_and_join_require_assigner_trust() {
+        for (marker, node_id, delivery_stub) in [
+            ("WorkGraphTaskFork/v1\n", "IC_fork", "fork"),
+            ("WorkGraphTaskJoin/v1\n", "IC_join", "join"),
+        ] {
+            let body = format!("{marker}\n```json\n{{\"id\":\"{delivery_stub}-1\"}}\n```\n");
+            let event = json!({
+                "action": "created",
+                "organization": {"login": "acme"},
+                "repository": {"name": "widgets", "full_name": "acme/widgets"},
+                "issue": task_issue("I_task", "WorkGraphTask/v1\n\n```json\n{}\n```\n"),
+                "comment": {
+                    "node_id": node_id,
+                    "body": body,
+                    "user": {"node_id": "U_dispatch", "login": "dispatcher"},
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z"
+                }
+            });
+            let encoded = serde_json::to_vec(&event).expect("encode Fork/Join webhook");
+
+            // A reporter-only trust set (no assigners) must reject Fork/Join.
+            let reporter_only = ProtocolTrust {
+                task_creators: vec![TrustedIdentity {
+                    id: "U_creator".to_string(),
+                    login: "task-creator".to_string(),
+                }],
+                dispatchers: Vec::new(),
+                reporters: vec![TrustedIdentity {
+                    id: "U_dispatch".to_string(),
+                    login: "dispatcher".to_string(),
+                }],
+            };
+            let (_temp, untrusted_projector, untrusted) = ingress_state(Some(reporter_only)).await;
+            assert!(matches!(
+                handle_delivery(
+                    &untrusted,
+                    &signed_headers(
+                        "issue_comment",
+                        &format!("{delivery_stub}-untrusted"),
+                        &encoded
+                    ),
+                    &encoded,
+                )
+                .await,
+                Ok(None)
+            ));
+            assert!(untrusted_projector.committed.lock().await.is_empty());
+
+            // The assigner trust role admits Fork/Join, exactly like Assignment.
+            let assigner_trust = ProtocolTrust {
+                task_creators: vec![TrustedIdentity {
+                    id: "U_creator".to_string(),
+                    login: "task-creator".to_string(),
+                }],
+                dispatchers: vec![TrustedIdentity {
+                    id: "U_dispatch".to_string(),
+                    login: "dispatcher".to_string(),
+                }],
+                reporters: Vec::new(),
+            };
+            let (_temp, projector, trusted) = ingress_state(Some(assigner_trust)).await;
+            assert!(matches!(
+                handle_delivery(
+                    &trusted,
+                    &signed_headers(
+                        "issue_comment",
+                        &format!("{delivery_stub}-trusted"),
+                        &encoded
+                    ),
+                    &encoded,
+                )
+                .await,
+                Ok(Some(_))
+            ));
+            let committed = projector.committed.lock().await;
+            assert!(matches!(
+                committed.last().expect("Fork/Join commit").as_slice(),
+                [ProjectionInput::UpsertLifecycleArtifact(document)]
+                    if document.source_key == node_id
+                        && document.task_source_key == "I_task"
+                        && document.body == body
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn untrusted_cross_role_edit_retracts_the_prior_lifecycle_artifact() {
         let assignment = "WorkGraphTaskAssignment/v1\n\n```json\n{\"id\":\"assignment-1\"}\n```\n";
         let error = "WorkGraphTaskError/v1\n\n```json\n{\"id\":\"error-1\"}\n```\n";

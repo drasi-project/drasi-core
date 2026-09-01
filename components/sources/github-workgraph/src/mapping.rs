@@ -13,7 +13,7 @@ use crate::model::{
 };
 use crate::protocol::ProjectionInput;
 
-pub const NODE_LABELS: [&str; 17] = [
+pub const NODE_LABELS: [&str; 19] = [
     "GitHubIssue",
     "WorkGraphRootIssue",
     "WorkflowDefinition",
@@ -21,6 +21,8 @@ pub const NODE_LABELS: [&str; 17] = [
     "WorkflowRun",
     "WorkGraphTask",
     "WorkGraphTaskAssign",
+    "WorkGraphTaskFork",
+    "WorkGraphTaskJoin",
     "WorkGraphTaskDispatch",
     "WorkGraphTaskResult",
     "WorkGraphTaskEvaluate",
@@ -33,7 +35,7 @@ pub const NODE_LABELS: [&str; 17] = [
     "WorkGraphError",
 ];
 
-pub const RELATION_LABELS: [&str; 20] = [
+pub const RELATION_LABELS: [&str; 26] = [
     "HAS_ROOT",
     "HAS_TASK",
     "DECLARES_CHILD",
@@ -43,7 +45,13 @@ pub const RELATION_LABELS: [&str; 20] = [
     "TASK_FOR",
     "ROOT_TASK_FOR",
     "RUN_FOR",
+    "ACTION_FOR",
     "ASSIGNS",
+    "FORK_CHILD",
+    "FORK_CHILD_DEFINITION",
+    "JOINS_FORK",
+    "JOIN_RESULT",
+    "JOIN_EVALUATION",
     "DISPATCHES",
     "RESULT_FOR",
     "RESULT_FROM_LEASE",
@@ -508,5 +516,70 @@ impl<'a> Changes<'a> {
         self.values.push(SourceChange::Delete {
             metadata: self.metadata(id, label),
         });
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn fork_and_join_nodes_are_allowlisted() {
+        for label in ["WorkGraphTaskFork", "WorkGraphTaskJoin"] {
+            assert!(
+                NODE_LABELS.contains(&label),
+                "{label} must be an advertised node label"
+            );
+        }
+    }
+
+    #[test]
+    fn fork_and_join_relations_are_allowlisted() {
+        for label in [
+            "ACTION_FOR",
+            "FORK_CHILD",
+            "FORK_CHILD_DEFINITION",
+            "JOINS_FORK",
+            "JOIN_RESULT",
+            "JOIN_EVALUATION",
+        ] {
+            assert!(
+                RELATION_LABELS.contains(&label),
+                "{label} must be an advertised relation label"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_specific_relations_are_unchanged() {
+        for label in [
+            "ASSIGNS",
+            "DISPATCHES",
+            "RESULT_FOR",
+            "RESULT_FROM_LEASE",
+            "EVALUATES",
+            "ROUTES",
+            "ERROR_FOR",
+        ] {
+            assert!(
+                RELATION_LABELS.contains(&label),
+                "{label} must remain an advertised relation label"
+            );
+        }
+    }
+
+    #[test]
+    fn label_allowlists_have_no_duplicates() {
+        assert_eq!(
+            NODE_LABELS.iter().collect::<BTreeSet<_>>().len(),
+            NODE_LABELS.len(),
+            "node labels must be unique"
+        );
+        assert_eq!(
+            RELATION_LABELS.iter().collect::<BTreeSet<_>>().len(),
+            RELATION_LABELS.len(),
+            "relation labels must be unique"
+        );
     }
 }

@@ -11,11 +11,21 @@ Core recognizes these exact body prefixes:
 
 - `WorkGraphTask/v1`
 - `WorkGraphTaskAssignment/v1`
+- `WorkGraphTaskFork/v1`
+- `WorkGraphTaskJoin/v1`
 - `WorkGraphTaskDispatch/v1`
 - `WorkGraphTaskResult/v1`
 - `WorkGraphTaskEvaluation/v1`
 - `WorkGraphTaskRoute/v1`
 - `WorkGraphTaskError/v1`
+
+The Assignment, Fork, Join, Dispatch, Result, Evaluation, Route, and Error
+comment markers are the **WorkGraphTaskActions**. Assignment, Fork, Join, and
+Dispatch are authored under the assigner trust role; Result, Evaluation, Route,
+and Error are authored under the reporter trust role. Fork and Join are recorded
+as lifecycle artifacts and do not directly affect lease allocation. Core
+recognizes the exact marker prefixes and enforces the trust role, but never
+parses a WorkGraphTaskAction JSON body.
 
 An ordinary user-created Issue carrying the exact, case-sensitive `workgraph`
 label and not matching the configured task Issue Type is a **Root Issue**.
@@ -188,13 +198,16 @@ The source advertises only the current v1 schema:
 
 - Nodes: `GitHubIssue`, `WorkGraphRootIssue`, `WorkflowDefinition`, `TaskDefinition`,
   `WorkflowRun`, `WorkGraphTask`, `WorkGraphTaskAssign`,
+  `WorkGraphTaskFork`, `WorkGraphTaskJoin`,
   `WorkGraphTaskDispatch`, `WorkGraphTaskResult`,
   `WorkGraphTaskEvaluate`, `WorkGraphTaskRoute`, `WorkGraphTaskArtifact`,
   `WorkGraphTaskLease`, `WorkGraphAgent`, `WorkGraphAgentSlot`, and
   `WorkGraphError`.
 - Relations: `HAS_ROOT`, `HAS_TASK`, `DECLARES_CHILD`, `USES_DEFINITION`,
   `INSTANCE_OF`, `IN_RUN`, `TASK_FOR`, `ROOT_TASK_FOR`, `RUN_FOR`,
-  `ASSIGNS`, `DISPATCHES`, `RESULT_FOR`, `RESULT_FROM_LEASE`, `EVALUATES`, `ROUTES`,
+  `ACTION_FOR`, `ASSIGNS`, `FORK_CHILD`, `FORK_CHILD_DEFINITION`, `JOINS_FORK`,
+  `JOIN_RESULT`, `JOIN_EVALUATION`, `DISPATCHES`, `RESULT_FOR`,
+  `RESULT_FROM_LEASE`, `EVALUATES`, `ROUTES`,
   `ARTIFACT_FOR`, `HAS_SLOT`, `LEASE_FOR`, and `LEASES_SLOT`.
 
 State is durable and fail-closed. Unsupported persisted state must be cleared

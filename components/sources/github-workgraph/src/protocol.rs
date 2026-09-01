@@ -20,6 +20,8 @@
 //!
 //! * `WorkGraphTask/v1` — task body marker
 //! * `WorkGraphTaskAssignment/v1` — lifecycle artifact markers
+//! * `WorkGraphTaskFork/v1`
+//! * `WorkGraphTaskJoin/v1`
 //! * `WorkGraphTaskDispatch/v1`
 //! * `WorkGraphTaskResult/v1`
 //! * `WorkGraphTaskEvaluation/v1`
@@ -42,6 +44,8 @@ pub const WORKGRAPH_TASK_MARKER: &str = "WorkGraphTask/v1\n";
 
 /// Comment body prefixes for WorkGraph lifecycle artifacts.
 pub const WORKGRAPH_ASSIGNMENT_MARKER: &str = "WorkGraphTaskAssignment/v1\n";
+pub const WORKGRAPH_FORK_MARKER: &str = "WorkGraphTaskFork/v1\n";
+pub const WORKGRAPH_JOIN_MARKER: &str = "WorkGraphTaskJoin/v1\n";
 pub const WORKGRAPH_DISPATCH_MARKER: &str = "WorkGraphTaskDispatch/v1\n";
 pub const WORKGRAPH_RESULT_MARKER: &str = "WorkGraphTaskResult/v1\n";
 pub const WORKGRAPH_EVALUATION_MARKER: &str = "WorkGraphTaskEvaluation/v1\n";
@@ -96,6 +100,8 @@ pub fn is_typed_workgraph_id(value: &str, id_type: &str) -> bool {
 /// Returns true if `body` begins with any WorkGraph lifecycle artifact marker.
 pub fn is_workgraph_lifecycle_marker(body: &str) -> bool {
     body.starts_with(WORKGRAPH_ASSIGNMENT_MARKER)
+        || body.starts_with(WORKGRAPH_FORK_MARKER)
+        || body.starts_with(WORKGRAPH_JOIN_MARKER)
         || body.starts_with(WORKGRAPH_DISPATCH_MARKER)
         || body.starts_with(WORKGRAPH_RESULT_MARKER)
         || body.starts_with(WORKGRAPH_EVALUATION_MARKER)
@@ -105,10 +111,13 @@ pub fn is_workgraph_lifecycle_marker(body: &str) -> bool {
 
 /// Returns the lifecycle marker kind for trust classification.
 ///
-/// `Assignment` and `Dispatch` use assigner trust; `Result`, `Evaluation`,
-/// `Route`, and `Error` use reporter trust.
+/// `Assignment`, `Fork`, `Join`, and `Dispatch` use assigner trust; `Result`,
+/// `Evaluation`, `Route`, and `Error` use reporter trust.
 pub fn lifecycle_trust_role(body: &str) -> Option<LifecycleTrustRole> {
-    if body.starts_with(WORKGRAPH_ASSIGNMENT_MARKER) || body.starts_with(WORKGRAPH_DISPATCH_MARKER)
+    if body.starts_with(WORKGRAPH_ASSIGNMENT_MARKER)
+        || body.starts_with(WORKGRAPH_FORK_MARKER)
+        || body.starts_with(WORKGRAPH_JOIN_MARKER)
+        || body.starts_with(WORKGRAPH_DISPATCH_MARKER)
     {
         Some(LifecycleTrustRole::Assigner)
     } else if body.starts_with(WORKGRAPH_RESULT_MARKER)
@@ -125,7 +134,7 @@ pub fn lifecycle_trust_role(body: &str) -> Option<LifecycleTrustRole> {
 /// Trust role for lifecycle artifact author/editor checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleTrustRole {
-    /// Assignment/Dispatch — requires assigner trust.
+    /// Assignment/Fork/Join/Dispatch — requires assigner trust.
     Assigner,
     /// Result/Evaluation/Route/Error — requires reporter trust.
     Reporter,
@@ -549,5 +558,63 @@ mod id_tests {
             "urn:drasi:workgraph:id:v1:task:sha256:abc",
             "task"
         ));
+    }
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::*;
+
+    #[test]
+    fn fork_and_join_markers_have_exact_spelling() {
+        assert_eq!(WORKGRAPH_FORK_MARKER, "WorkGraphTaskFork/v1\n");
+        assert_eq!(WORKGRAPH_JOIN_MARKER, "WorkGraphTaskJoin/v1\n");
+    }
+
+    #[test]
+    fn fork_and_join_are_recognized_lifecycle_markers() {
+        for marker in [
+            WORKGRAPH_ASSIGNMENT_MARKER,
+            WORKGRAPH_FORK_MARKER,
+            WORKGRAPH_JOIN_MARKER,
+            WORKGRAPH_DISPATCH_MARKER,
+            WORKGRAPH_RESULT_MARKER,
+            WORKGRAPH_EVALUATION_MARKER,
+            WORKGRAPH_ROUTE_MARKER,
+            WORKGRAPH_ERROR_MARKER,
+        ] {
+            assert!(
+                is_workgraph_lifecycle_marker(&format!("{marker}\n```json\n{{}}\n```\n")),
+                "{marker} must be a lifecycle marker"
+            );
+        }
+        assert!(!is_workgraph_lifecycle_marker(WORKGRAPH_TASK_MARKER));
+        // Similar-but-wrong spellings are not lifecycle markers.
+        assert!(!is_workgraph_lifecycle_marker("WorkGraphTaskFork/v2\nbody"));
+        assert!(!is_workgraph_lifecycle_marker(
+            "WorkGraphTaskJoins/v1\nbody"
+        ));
+    }
+
+    #[test]
+    fn fork_and_join_require_assigner_trust() {
+        assert_eq!(
+            lifecycle_trust_role(&format!("{WORKGRAPH_FORK_MARKER}body")),
+            Some(LifecycleTrustRole::Assigner)
+        );
+        assert_eq!(
+            lifecycle_trust_role(&format!("{WORKGRAPH_JOIN_MARKER}body")),
+            Some(LifecycleTrustRole::Assigner)
+        );
+        // Fork/Join match Assignment/Dispatch, not the reporter roles.
+        assert_eq!(
+            lifecycle_trust_role(&format!("{WORKGRAPH_ASSIGNMENT_MARKER}body")),
+            Some(LifecycleTrustRole::Assigner)
+        );
+        assert_eq!(
+            lifecycle_trust_role(&format!("{WORKGRAPH_RESULT_MARKER}body")),
+            Some(LifecycleTrustRole::Reporter)
+        );
+        assert_eq!(lifecycle_trust_role("not a marker"), None);
     }
 }
