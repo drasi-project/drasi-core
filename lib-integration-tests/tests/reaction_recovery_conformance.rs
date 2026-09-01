@@ -166,16 +166,30 @@ struct DurableRecordingReaction {
     base: ReactionBase,
     journal: SideEffectJournal,
     recovery_policy: ReactionRecoveryPolicy,
+    snapshot_on_fresh: bool,
 }
 
 impl DurableRecordingReaction {
     fn new(journal_path: PathBuf, recovery_policy: ReactionRecoveryPolicy) -> Self {
+        Self::with_snapshot(journal_path, recovery_policy, true)
+    }
+
+    fn trigger(journal_path: PathBuf, recovery_policy: ReactionRecoveryPolicy) -> Self {
+        Self::with_snapshot(journal_path, recovery_policy, false)
+    }
+
+    fn with_snapshot(
+        journal_path: PathBuf,
+        recovery_policy: ReactionRecoveryPolicy,
+        snapshot_on_fresh: bool,
+    ) -> Self {
         let params = ReactionBaseParams::new(REACTION_ID, vec![QUERY_ID.to_string()])
             .with_recovery_policy(recovery_policy);
         Self {
             base: ReactionBase::new(params),
             journal: SideEffectJournal::new(journal_path),
             recovery_policy,
+            snapshot_on_fresh,
         }
     }
 }
@@ -305,7 +319,7 @@ impl Reaction for DurableRecordingReaction {
     }
 
     fn needs_snapshot_on_fresh_start(&self) -> bool {
-        true
+        self.snapshot_on_fresh
     }
 
     fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
@@ -348,6 +362,7 @@ struct RecoveryFixture {
 struct FixtureOpts {
     query_policy: RecoveryPolicy,
     include_reaction: bool,
+    snapshot_on_fresh: bool,
 }
 
 impl Default for FixtureOpts {
@@ -355,6 +370,7 @@ impl Default for FixtureOpts {
         Self {
             query_policy: RecoveryPolicy::Strict,
             include_reaction: true,
+            snapshot_on_fresh: true,
         }
     }
 }
@@ -405,10 +421,12 @@ async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<R
         .with_wal_provider(wal);
 
     if opts.include_reaction {
-        builder = builder.with_reaction(DurableRecordingReaction::new(
-            paths.journal.clone(),
-            ReactionRecoveryPolicy::Strict,
-        ));
+        let reaction = if opts.snapshot_on_fresh {
+            DurableRecordingReaction::new(paths.journal.clone(), ReactionRecoveryPolicy::Strict)
+        } else {
+            DurableRecordingReaction::trigger(paths.journal.clone(), ReactionRecoveryPolicy::Strict)
+        };
+        builder = builder.with_reaction(reaction);
     }
 
     let core = builder.build().await?;
@@ -1099,6 +1117,7 @@ async fn recover_autoreset_phase(paths: &FixturePaths) -> Result<()> {
         FixtureOpts {
             query_policy: RecoveryPolicy::AutoReset,
             include_reaction: false,
+            ..Default::default()
         },
     )
     .await?;
@@ -1389,6 +1408,146 @@ async fn rocksdb_redb_corrupt_output_autoreset_wipes() -> Result<()> {
     Ok(())
 }
 
+async fn seed_trigger_fresh_phase(paths: &FixturePaths) -> Result<()> {
+    let fixture = build_fixture_opts(
+        paths,
+        FixtureOpts {
+            include_reaction: false,
+            ..Default::default()
+        },
+    )
+    .await?;
+    fixture.core.start().await?;
+    wait_for_status(&fixture.core, SOURCE_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Running).await?;
+
+    insert_person(&fixture.source, "p1", "Alice", true).await?;
+    insert_person(&fixture.source, "p2", "Bob", false).await?;
+    let snapshot = wait_for_snapshot_row(&fixture.core, &person("p2", "Bob", false)).await?;
+    assert_eq!(
+        snapshot.sequence, 2,
+        "seed query must reach sequence 2 before the process exits"
+    );
+
+    let query = query_instance(&fixture.core).await?;
+    let outbox = query.fetch_outbox(0).await?;
+    assert_eq!(
+        outbox
+            .results
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "seed outbox must retain sequences 1..=2 for the reconstructed process"
+    );
+    assert_eq!(outbox.latest_sequence, 2);
+
+    fixture.state_store.sync().await?;
+    assert!(paths.rocks.join(QUERY_ID).join("CURRENT").exists());
+
+    let readiness = SeedReadiness {
+        query_sequence: outbox.latest_sequence,
+        reaction_checkpoint: 0,
+        outbox_sequences: outbox
+            .results
+            .iter()
+            .map(|result| result.sequence)
+            .collect(),
+        journal_sequences: Vec::new(),
+    };
+    write_synced_file(&paths.ready, &serde_json::to_vec(&readiness)?)?;
+
+    std::process::exit(0);
+}
+
+async fn recover_trigger_fresh_phase(paths: &FixturePaths) -> Result<()> {
+    anyhow::ensure!(
+        paths.ready.exists(),
+        "seed_trigger_fresh phase did not publish its durability marker"
+    );
+
+    let fixture = build_fixture_opts(
+        paths,
+        FixtureOpts {
+            include_reaction: true,
+            snapshot_on_fresh: false,
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    let checkpoint_before_start = fixture
+        .state_store
+        .get(REACTION_ID, &format!("checkpoint:{QUERY_ID}"))
+        .await?;
+    anyhow::ensure!(
+        checkpoint_before_start.is_none(),
+        "reconstructed trigger must start with no checkpoint"
+    );
+
+    fixture.core.start().await?;
+    wait_for_status(&fixture.core, SOURCE_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
+
+    let startup_checkpoint = wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 2).await?;
+    assert_eq!(
+        startup_checkpoint.sequence, 2,
+        "fresh trigger must checkpoint at the reconstructed query head, not replay 1..=N"
+    );
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let historical = read_journal(&paths.journal)?;
+    assert!(
+        journal_sequences(&historical).is_empty(),
+        "fresh trigger must not replay retained sequences 1..=2, got {:?}",
+        journal_sequences(&historical)
+    );
+
+    insert_person(&fixture.source, "p3", "Carol", true).await?;
+    let live = wait_for_journal_sequences(&paths.journal, 1).await?;
+    assert_eq!(
+        journal_sequences(&live),
+        vec![3],
+        "the next live event after a reconstructed trigger must be sequence N+1 only"
+    );
+
+    let final_checkpoint = wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 3).await?;
+    assert_eq!(final_checkpoint.sequence, 3);
+
+    fixture.core.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_fresh_trigger_no_history_replay() -> Result<()> {
+    if std::env::var_os(PHASE_ENV).is_some() {
+        return Ok(());
+    }
+
+    let root = test_root()?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create test root {}", root.display()))?;
+    let paths = FixturePaths::under(&root);
+
+    let seed = run_phase("seed_trigger_fresh", &paths)?;
+    if !seed.status.success() {
+        let message = child_failure("seed_trigger_fresh", &seed);
+        let _ = std::fs::remove_dir_all(&root);
+        anyhow::bail!(message);
+    }
+
+    let recover = run_phase("recover_trigger_fresh", &paths)?;
+    let failure =
+        (!recover.status.success()).then(|| child_failure("recover_trigger_fresh", &recover));
+    let cleanup = std::fs::remove_dir_all(&root);
+    if let Some(message) = failure {
+        anyhow::bail!(message);
+    }
+    cleanup.with_context(|| format!("remove test root {}", root.display()))?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn rocksdb_redb_corrupt_outbox_payload_strict_fails_start() -> Result<()> {
     if std::env::var_os(PHASE_ENV).is_some() {
@@ -1468,6 +1627,12 @@ async fn reaction_recovery_conformance_phase() -> Result<()> {
         }
         Ok(phase) if phase == "recover_autoreset" => {
             recover_autoreset_phase(&FixturePaths::from_env()?).await
+        }
+        Ok(phase) if phase == "seed_trigger_fresh" => {
+            seed_trigger_fresh_phase(&FixturePaths::from_env()?).await
+        }
+        Ok(phase) if phase == "recover_trigger_fresh" => {
+            recover_trigger_fresh_phase(&FixturePaths::from_env()?).await
         }
         Ok(other) => anyhow::bail!("unknown conformance phase '{other}'"),
         Err(std::env::VarError::NotPresent) => Ok(()),
