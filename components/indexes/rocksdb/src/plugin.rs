@@ -251,9 +251,12 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
             session_state.clone(),
             options,
         ));
-        let checkpoint_store = Arc::new(RocksDbCheckpointStore::new(db.clone(), session_state));
-        let outbox_writer = Arc::new(RocksDbOutboxWriter::new(db.clone()));
-        let live_results_writer = Arc::new(RocksDbLiveResultsWriter::new(db));
+        let checkpoint_store = Arc::new(RocksDbCheckpointStore::new(
+            db.clone(),
+            session_state.clone(),
+        ));
+        let outbox_writer = Arc::new(RocksDbOutboxWriter::new(db.clone(), session_state.clone()));
+        let live_results_writer = Arc::new(RocksDbLiveResultsWriter::new(db, session_state));
 
         Ok(CreatedIndexes {
             set: IndexSet {

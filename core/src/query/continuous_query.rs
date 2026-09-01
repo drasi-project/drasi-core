@@ -119,9 +119,10 @@ impl ContinuousQuery {
     /// Process a source change with a pre-commit hook that runs inside the session.
     ///
     /// The hook executes after index updates but before the session commits,
-    /// allowing callers to stage additional writes (e.g. checkpoint data) into
-    /// the same atomic transaction. The change_lock is held for the entire
-    /// duration, preserving serialization.
+    /// allowing callers to stage additional writes (e.g. checkpoint data, outbox,
+    /// live results, result sequence) into the same atomic transaction. The hook
+    /// receives the evaluation results so output can be staged before commit.
+    /// The change_lock is held for the entire duration, preserving serialization.
     #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_source_change_with_hook<F, Fut>(
         &self,
@@ -129,7 +130,7 @@ impl ContinuousQuery {
         pre_commit_hook: F,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError>
     where
-        F: FnOnce() -> Fut + Send,
+        F: FnOnce(&[QueryPartEvaluationContext]) -> Fut + Send,
         Fut: Future<Output = Result<(), IndexError>> + Send,
     {
         let _lock = self.change_lock.lock().await;
@@ -138,7 +139,7 @@ impl ContinuousQuery {
         let changes = self.execute_source_middleware(change).await?;
         let result = self.process_changes_inner(changes).await?;
 
-        pre_commit_hook().await?;
+        pre_commit_hook(&result).await?;
         guard.commit().await?;
         Ok(result)
     }
@@ -152,6 +153,24 @@ impl ContinuousQuery {
     /// If a crash occurs before commit, the pop rolls back and the item stays in the queue.
     #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_due_futures(&self) -> Result<Option<DueFutureResult>, EvaluationError> {
+        self.process_due_futures_with_hook(|_results| async { Ok(()) })
+            .await
+    }
+
+    /// Process a due future with a pre-commit hook that runs inside the session.
+    ///
+    /// Same atomic pop-and-process semantics as [`process_due_futures`], but the
+    /// hook can stage output (result sequence, outbox, live results) before commit.
+    /// There is no source checkpoint — futures are not source events.
+    #[tracing::instrument(skip_all, err, level = "debug")]
+    pub async fn process_due_futures_with_hook<F, Fut>(
+        &self,
+        pre_commit_hook: F,
+    ) -> Result<Option<DueFutureResult>, EvaluationError>
+    where
+        F: FnOnce(&[QueryPartEvaluationContext]) -> Fut + Send,
+        Fut: Future<Output = Result<(), IndexError>> + Send,
+    {
         let _lock = self.change_lock.lock().await;
         let guard = SessionGuard::begin(self.session_control.clone()).await?;
 
@@ -168,6 +187,7 @@ impl ContinuousQuery {
         let change = SourceChange::Future { future_ref };
         let changes = self.execute_source_middleware(change).await?;
         let results = self.process_changes_inner(changes).await?;
+        pre_commit_hook(&results).await?;
         guard.commit().await?;
         Ok(Some(DueFutureResult { results, source_id }))
     }
