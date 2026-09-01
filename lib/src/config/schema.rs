@@ -189,8 +189,10 @@ pub struct SourceSubscriptionSettings {
     /// This is independent of `resume_from` (the store-native cursor position): native-
     /// cursor sources (postgres LSN, kafka offset, mysql binlog, …) restore their stream
     /// position from `resume_from` but do not otherwise recover the framework sequence,
-    /// which is what this field carries back. Sequence-as-position sources are unaffected
-    /// (their WAL-head restore already advances the counter; whichever floor is higher wins).
+    /// which is what this field carries back. Sequence-as-position sources (e.g. http,
+    /// grpc, application) are unaffected: their WAL-head restore (`set_next_sequence`)
+    /// already advances the counter directly, and whichever floor — WAL-head restore or
+    /// this field — is higher wins.
     pub resume_sequence: Option<u64>,
     /// If true, the query requests a shared `Arc<AtomicU64>` position handle in the
     /// `SubscriptionResponse` for reporting its durably-processed position back to the source.

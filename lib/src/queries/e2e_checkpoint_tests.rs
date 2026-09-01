@@ -454,6 +454,72 @@ async fn test_e2e_resume_sequence_carried_back() {
     core.stop_query("e2e-rs-q").await.unwrap();
 }
 
+/// Auto-reset must clear `resume_sequence` (not just `resume_from`): after a
+/// checkpoint exists, a forced auto-reset re-subscribe should hand the source a
+/// fresh-start `resume_sequence = None`, matching the cleared `resume_from`.
+#[tokio::test]
+#[serial]
+async fn test_e2e_auto_reset_clears_resume_sequence() {
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let core = build_e2e_lib("e2e-rs-reset", &tmp_dir, None).await.unwrap();
+
+    let source = E2eTestSource::new("rs-reset-src", true).unwrap();
+    let resume_sequence = source.last_resume_sequence();
+    let resume_from = source.last_resume_from();
+    let event_tx = source.event_sender();
+    let sub_count = source.subscribe_count_handle();
+    let remaining_failures = source.remaining_failures_handle();
+
+    core.add_source(source).await.unwrap();
+    core.start_source("rs-reset-src").await.unwrap();
+    wait_for_status(&core, "rs-reset-src", ComponentStatus::Running).await;
+
+    // First run: establish a checkpoint at sequence 3.
+    let query = make_persistent_query(
+        "rs-reset-q",
+        "rs-reset-src",
+        Some(RecoveryPolicy::AutoReset),
+    );
+    core.add_query(query).await.unwrap();
+    core.start_query("rs-reset-q").await.unwrap();
+    wait_for_status(&core, "rs-reset-q", ComponentStatus::Running).await;
+
+    send_event(&event_tx, "rs-reset-src", 1, b"pos-1").await;
+    send_event(&event_tx, "rs-reset-src", 2, b"pos-2").await;
+    send_event(&event_tx, "rs-reset-src", 3, b"pos-3").await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    core.stop_query("rs-reset-q").await.unwrap();
+    wait_for_status(&core, "rs-reset-q", ComponentStatus::Stopped).await;
+
+    // Force the next resubscribe to fail with PositionUnavailable so AutoReset
+    // clears persistent state and retries from a fresh bootstrap.
+    remaining_failures.store(1, std::sync::atomic::Ordering::Release);
+    let count_before = sub_count.load(Ordering::Acquire);
+
+    core.start_query("rs-reset-q").await.unwrap();
+    wait_for_status(&core, "rs-reset-q", ComponentStatus::Running).await;
+
+    // Two more subscribes: the failing resume attempt, then the auto-reset retry.
+    assert_eq!(
+        sub_count.load(Ordering::Acquire),
+        count_before + 2,
+        "AutoReset should retry after the failed resume"
+    );
+
+    // The retry is a fresh bootstrap: both resume signals cleared.
+    assert!(
+        resume_from.read().await.is_none(),
+        "AutoReset retry must clear resume_from"
+    );
+    assert!(
+        resume_sequence.read().await.is_none(),
+        "AutoReset retry must clear resume_sequence"
+    );
+
+    core.stop_query("rs-reset-q").await.unwrap();
+}
+
 #[tokio::test]
 #[serial]
 async fn test_e2e_volatile_query_no_checkpoints() {
