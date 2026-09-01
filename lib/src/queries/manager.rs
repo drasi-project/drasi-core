@@ -47,7 +47,8 @@ use crate::managers::{
 use crate::metrics::QueryOutputMetrics;
 use crate::queries::label_extractor::{LabelExtractor, QueryLabels};
 use crate::queries::output_state::{
-    FetchError, OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse,
+    reconcile_durable_output, DurableOutputInconsistency, FetchError, OutboxGap, OutboxResponse,
+    QueryOutputState, SnapshotResponse,
 };
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
@@ -524,6 +525,111 @@ async fn dispatch_query_results(
     }
 }
 
+/// Load durable live rows, outbox entries, and result sequence into in-memory
+/// `QueryOutputState` before the query accepts subscriptions or processes events.
+async fn load_durable_output(
+    query_id: &str,
+    checkpoint_store: &Arc<dyn CheckpointStore>,
+    outbox_writer: &Option<Arc<dyn OutboxWriter>>,
+    live_results_writer: &Option<Arc<dyn LiveResultsWriter>>,
+) -> Result<
+    (
+        im::HashMap<u64, serde_json::Value>,
+        Vec<Arc<crate::channels::QueryResult>>,
+        u64,
+    ),
+    DurableOutputInconsistency,
+> {
+    let stored_sequence = checkpoint_store
+        .read_result_sequence(query_id)
+        .await
+        .map_err(|e| DurableOutputInconsistency::ReadFailed {
+            message: format!("failed to read persisted result sequence: {e}"),
+        })?;
+
+    let raw_outbox = if let Some(writer) = outbox_writer {
+        writer
+            .read_from(query_id, 0)
+            .await
+            .map_err(|e| DurableOutputInconsistency::ReadFailed {
+                message: format!("failed to read durable outbox: {e}"),
+            })?
+    } else {
+        Vec::new()
+    };
+    let outbox_sequences: Vec<u64> = raw_outbox.iter().map(|(sequence, _)| *sequence).collect();
+
+    let mut live_rows_readable = true;
+    let mut raw_live_rows = Vec::new();
+    if let Some(writer) = live_results_writer {
+        match writer.read_snapshot(query_id).await {
+            Ok(rows) => raw_live_rows = rows,
+            Err(e) => {
+                warn!("Query '{query_id}' failed to read persistent live results: {e}");
+                live_rows_readable = false;
+            }
+        }
+    }
+
+    let as_of_sequence = reconcile_durable_output(
+        stored_sequence,
+        &outbox_sequences,
+        raw_live_rows.len(),
+        live_rows_readable,
+    )?;
+
+    let mut outbox_entries = Vec::with_capacity(raw_outbox.len());
+    for (sequence, data) in raw_outbox {
+        let mut result =
+            rmp_serde::from_slice::<crate::channels::QueryResult>(&data).map_err(|e| {
+                DurableOutputInconsistency::CorruptOutbox {
+                    sequence,
+                    message: e.to_string(),
+                }
+            })?;
+        result.sequence = sequence;
+        outbox_entries.push(Arc::new(result));
+    }
+
+    let mut results = im::HashMap::new();
+    for (sig, data) in raw_live_rows {
+        let value = rmp_serde::from_slice::<serde_json::Value>(&data).map_err(|e| {
+            DurableOutputInconsistency::CorruptLiveRow {
+                row_signature: sig,
+                message: e.to_string(),
+            }
+        })?;
+        results.insert(sig, value);
+    }
+
+    Ok((results, outbox_entries, as_of_sequence))
+}
+
+async fn wipe_durable_output(
+    query_id: &str,
+    checkpoint_store: &Arc<dyn CheckpointStore>,
+    outbox_writer: &Option<Arc<dyn OutboxWriter>>,
+    live_results_writer: &Option<Arc<dyn LiveResultsWriter>>,
+) -> anyhow::Result<()> {
+    if let Some(writer) = outbox_writer {
+        writer
+            .clear(query_id)
+            .await
+            .with_context(|| format!("Query '{query_id}' failed to clear durable outbox"))?;
+    }
+    if let Some(writer) = live_results_writer {
+        writer
+            .clear(query_id)
+            .await
+            .with_context(|| format!("Query '{query_id}' failed to clear durable live results"))?;
+    }
+    checkpoint_store
+        .write_result_sequence(query_id, 0)
+        .await
+        .with_context(|| format!("Query '{query_id}' failed to reset result sequence"))?;
+    Ok(())
+}
+
 pub struct DrasiQuery {
     // DrasiLib instance ID for log routing isolation
     instance_id: String,
@@ -977,6 +1083,7 @@ impl Query for DrasiQuery {
         // incorrect results.
         let mut subscription_settings = subscription_settings;
         let has_persistent_backend = checkpoint_store.is_persistent();
+        let mut hydrate_output = false;
         let mut checkpoint_sequences_per_source: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
         if has_persistent_backend {
@@ -1109,6 +1216,10 @@ impl Query for DrasiQuery {
                 }
             };
 
+            // Only hydrate and resume checkpoints when the config hash matched.
+            // A mismatch (or first run) starts at sequence 0 against empty output.
+            hydrate_output = config_matches;
+
             // Only read checkpoints if the config hash matched — otherwise we
             // cleared them above and a full bootstrap will run.
             if config_matches {
@@ -1152,6 +1263,90 @@ impl Query for DrasiQuery {
                         "Query '{}' failed to commit startup session: {e}",
                         self.base.config.id
                     );
+                }
+            }
+        }
+
+        // Hydrate in-memory QueryOutputState from durable storage BEFORE
+        // subscriptions or reactions run. After this, fetch_snapshot/fetch_outbox
+        // are memory-served; disk is write-only except this startup path.
+        if hydrate_output {
+            let already_populated_seq = self.output_state.read().await.as_of_sequence();
+            if already_populated_seq > 0 {
+                debug!(
+                    "Query '{}' in-memory output already populated (seq={already_populated_seq}); skipping durable hydrate",
+                    self.base.config.id
+                );
+            } else {
+                let outbox_writer = self.outbox_writer.read().await.clone();
+                let live_results_writer = self.live_results_writer.read().await.clone();
+                match load_durable_output(
+                    &self.base.config.id,
+                    &checkpoint_store,
+                    &outbox_writer,
+                    &live_results_writer,
+                )
+                .await
+                {
+                    Ok((results, outbox, as_of_sequence)) => {
+                        let mut state = self.output_state.write().await;
+                        state.hydrate(results, outbox, as_of_sequence);
+                        let earliest = state.outbox_earliest_seq().unwrap_or(0);
+                        self.output_metrics
+                            .record_live_results_count(state.results_len());
+                        self.output_metrics.update_outbox(
+                            state.outbox_len(),
+                            earliest,
+                            state.as_of_sequence(),
+                        );
+                        info!(
+                            "Query '{}' hydrated output state from durable storage: seq={}, live_rows={}, outbox={}",
+                            self.base.config.id,
+                            state.as_of_sequence(),
+                            state.results_len(),
+                            state.outbox_len()
+                        );
+                    }
+                    Err(inconsistency) => match self.resolved_recovery_policy {
+                        crate::recovery::RecoveryPolicy::Strict => {
+                            let msg = format!(
+                                "Query '{}' durable output is inconsistent: {inconsistency}. \
+                                 Refusing to start under Strict recovery policy.",
+                                self.base.config.id
+                            );
+                            error!("{msg}");
+                            self.base
+                                .set_status(ComponentStatus::Error, Some(msg.clone()))
+                                .await;
+                            return Err(anyhow::anyhow!(msg));
+                        }
+                        crate::recovery::RecoveryPolicy::AutoReset => {
+                            warn!(
+                                "Query '{}' durable output is inconsistent: {inconsistency}. \
+                                 AutoReset: wiping query output and continuing.",
+                                self.base.config.id
+                            );
+                            if let Err(e) = wipe_durable_output(
+                                &self.base.config.id,
+                                &checkpoint_store,
+                                &outbox_writer,
+                                &live_results_writer,
+                            )
+                            .await
+                            {
+                                let msg = format!(
+                                    "Query '{}' AutoReset failed to wipe durable output: {e}",
+                                    self.base.config.id
+                                );
+                                error!("{msg}");
+                                self.base
+                                    .set_status(ComponentStatus::Error, Some(msg.clone()))
+                                    .await;
+                                return Err(anyhow::anyhow!(msg));
+                            }
+                            self.output_state.write().await.reset();
+                        }
+                    },
                 }
             }
         }
@@ -2451,73 +2646,10 @@ impl Query for DrasiQuery {
         // Track snapshot fetch invocations
         self.output_metrics.record_snapshot_fetch();
 
-        let (results_clone, as_of_sequence) = {
-            let state = self.output_state.read().await;
-            (state.clone_results(), state.as_of_sequence())
-        };
-
-        // If in-memory state has results, return them directly
-        if !results_clone.is_empty() || as_of_sequence > 0 {
-            return Ok(SnapshotResponse::new(
-                results_clone,
-                as_of_sequence,
-                self.config_hash,
-            ));
-        }
-
-        // In-memory state is empty at sequence 0 — try persistent live results
-        let query_id = &self.base.config.id;
-        let live_writer = self.live_results_writer.read().await;
-        if let Some(writer) = live_writer.as_ref() {
-            let cp_store = self.checkpoint_store.read().await;
-            let persisted_seq = if let Some(store) = cp_store.as_ref() {
-                match store.read_result_sequence(query_id).await {
-                    Ok(Some(seq)) => seq,
-                    Ok(None) => 0,
-                    Err(e) => {
-                        warn!("Query '{query_id}' failed to read persisted result sequence: {e}");
-                        0
-                    }
-                }
-            } else {
-                0
-            };
-
-            if persisted_seq > 0 {
-                match writer.read_snapshot(query_id).await {
-                    Ok(rows) => {
-                        let mut results = im::HashMap::new();
-                        for (sig, data) in &rows {
-                            match rmp_serde::from_slice::<serde_json::Value>(data) {
-                                Ok(value) => {
-                                    results.insert(*sig, value);
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "Query '{query_id}' failed to deserialize live results row (sig={sig}): {e}"
-                                    );
-                                }
-                            }
-                        }
-                        // Return with persisted_seq even if rows is empty
-                        // (all rows deleted is a valid state).
-                        return Ok(SnapshotResponse::new(
-                            results,
-                            persisted_seq,
-                            self.config_hash,
-                        ));
-                    }
-                    Err(e) => {
-                        warn!("Query '{query_id}' failed to read persistent live results: {e}");
-                    }
-                }
-            }
-        }
-
-        // Nothing in persistent storage either — return empty
+        let state = self.output_state.read().await;
         Ok(SnapshotResponse::new(
-            results_clone,
-            as_of_sequence,
+            state.clone_results(),
+            state.as_of_sequence(),
             self.config_hash,
         ))
     }
