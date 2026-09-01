@@ -20,6 +20,8 @@ pub mod config;
 pub mod templates;
 
 pub use base::ReactionBase;
-pub use checkpoint_state::{batch_checkpoint_candidates, CheckpointState, FailureAction};
+pub use checkpoint_state::{
+    batch_checkpoint_candidates, persist_with_recovery_policy, CheckpointState, FailureAction,
+};
 pub use config::AdaptiveBatchConfig;
 pub use templates::{OperationType, QueryConfig, TemplateRouting, TemplateSpec};

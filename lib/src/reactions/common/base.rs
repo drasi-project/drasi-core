@@ -41,6 +41,7 @@ use crate::component_graph::ComponentStatusHandle;
 use crate::context::ReactionRuntimeContext;
 use crate::identity::IdentityProvider;
 use crate::reactions::checkpoint::ReactionCheckpoint;
+use crate::reactions::common::checkpoint_state::{persist_with_recovery_policy, FailureAction};
 use crate::recovery::ReactionRecoveryPolicy;
 use crate::state_store::StateStoreProvider;
 
@@ -496,11 +497,19 @@ impl ReactionBase {
     /// 1. Dequeues from the priority queue (blocks until available).
     /// 2. Checks the event's sequence against the persisted checkpoint —
     ///    events at or before the checkpoint are silently skipped (dedup).
-    /// 3. Calls `handler` with the event.
-    /// 4. On success, writes a new checkpoint with the event's sequence,
-    ///    preserving the `config_hash` from the initial checkpoint map
-    ///    (or 0 if no prior checkpoint exists for that query).
-    /// 5. Breaks when `shutdown_rx` fires.
+    /// 3. Calls `handler` with the event (the observable side effect).
+    /// 4. On handler success, writes a new checkpoint with the event's
+    ///    sequence. A crash between (3) and (4) replays the sequence on
+    ///    restart (at-least-once). Writing the checkpoint first would
+    ///    silently become at-most-once.
+    /// 5. Handler failure does **not** advance the durable checkpoint.
+    ///    `Strict` / `AutoReset` set the reaction to `Error` and stop so
+    ///    sequence `N` is retried on the next start. `AutoSkipGap` logs,
+    ///    advances past `N`, and continues.
+    /// 6. `write_checkpoint` failure follows [`ReactionRecoveryPolicy`]:
+    ///    `Strict` errors out, `AutoReset` retries with bounded backoff
+    ///    then errors, `AutoSkipGap` logs and continues.
+    /// 7. Breaks when `shutdown_rx` fires.
     ///
     /// # Arguments
     /// * `shutdown_rx` — receiver created via [`create_shutdown_channel`].
@@ -508,8 +517,8 @@ impl ReactionBase {
     ///   orchestration). The loop uses these for dedup and preserves each
     ///   query's `config_hash` when advancing the sequence.
     /// * `handler` — async function receiving a [`QueryResult`].  Return
-    ///   `Ok(())` to advance the checkpoint, or `Err` to leave it unchanged
-    ///   (the event will NOT be retried automatically).
+    ///   `Ok(())` to advance the checkpoint. `Err` leaves the durable
+    ///   checkpoint unchanged (see recovery policy above).
     pub async fn run_standard_loop<F, Fut>(
         &self,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -521,6 +530,9 @@ impl ReactionBase {
         Fut: std::future::Future<Output = Result<()>> + Send,
     {
         let mut checkpoints = initial_checkpoints;
+        let policy = self
+            .recovery_policy
+            .unwrap_or(ReactionRecoveryPolicy::Strict);
 
         loop {
             let event = tokio::select! {
@@ -545,30 +557,85 @@ impl ReactionBase {
                 }
             }
 
-            // Invoke the user-provided handler.
-            if let Err(e) = handler(Arc::clone(&event)).await {
-                error!(
-                    "[{}] Handler error for query={}, seq={}: {:#}",
-                    self.id, query_id, seq, e
-                );
-                // Don't advance the checkpoint — the event was not
-                // successfully processed.
-                continue;
+            // Invoke the user-provided side effect. The durable checkpoint
+            // advances only after this returns success.
+            match handler(Arc::clone(&event)).await {
+                Err(e) => {
+                    error!(
+                        "[{}] Handler error for query={}, seq={}: {:#}",
+                        self.id, query_id, seq, e
+                    );
+                    match FailureAction::from_policy(policy) {
+                        FailureAction::Stop => {
+                            self.set_status(
+                                ComponentStatus::Error,
+                                Some(format!(
+                                    "Side effect failed for query '{query_id}' (seq {seq}); \
+                                     stopped per recovery policy"
+                                )),
+                            )
+                            .await;
+                            return Err(e);
+                        }
+                        FailureAction::SkipAndContinue => {
+                            warn!(
+                                "[{}] Side effect failed for query={}, seq={}; skipping and \
+                                 advancing checkpoint per AutoSkipGap",
+                                self.id, query_id, seq
+                            );
+                            self.persist_loop_checkpoint(query_id, seq, &mut checkpoints, policy)
+                                .await?;
+                            continue;
+                        }
+                    }
+                }
+                Ok(()) => {
+                    self.persist_loop_checkpoint(query_id, seq, &mut checkpoints, policy)
+                        .await?;
+                }
             }
-
-            // Advance the checkpoint, preserving the config_hash from bootstrap.
-            let config_hash = checkpoints
-                .get(query_id)
-                .map(|cp| cp.config_hash)
-                .unwrap_or(0);
-            let cp = ReactionCheckpoint {
-                sequence: seq,
-                config_hash,
-            };
-            self.write_checkpoint(query_id, &cp).await?;
-            checkpoints.insert(query_id.clone(), cp);
         }
 
+        Ok(())
+    }
+
+    /// Persist `sequence` for `query_id` after a successful (or AutoSkipGap-
+    /// skipped) side effect. Preserves `config_hash` from the store, falling
+    /// back to the in-memory map. Write failures follow `policy`.
+    async fn persist_loop_checkpoint(
+        &self,
+        query_id: &str,
+        sequence: u64,
+        checkpoints: &mut std::collections::HashMap<String, ReactionCheckpoint>,
+        policy: ReactionRecoveryPolicy,
+    ) -> Result<()> {
+        let config_hash = match self.read_checkpoint(query_id).await {
+            Ok(Some(stored)) => stored.config_hash,
+            _ => checkpoints
+                .get(query_id)
+                .map(|cp| cp.config_hash)
+                .unwrap_or(0),
+        };
+        let cp = ReactionCheckpoint {
+            sequence,
+            config_hash,
+        };
+        if self.state_store().await.is_some() {
+            if let Err(e) =
+                persist_with_recovery_policy(policy, || self.write_checkpoint(query_id, &cp)).await
+            {
+                self.set_status(
+                    ComponentStatus::Error,
+                    Some(format!(
+                        "Checkpoint write failed for query '{query_id}' (seq {sequence}); \
+                         stopped per recovery policy"
+                    )),
+                )
+                .await;
+                return Err(e);
+            }
+        }
+        checkpoints.insert(query_id.to_string(), cp);
         Ok(())
     }
 }
@@ -1118,5 +1185,153 @@ mod tests {
         let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
         assert_eq!(cp.sequence, 7);
         assert_eq!(cp.config_hash, 42);
+    }
+
+    #[tokio::test]
+    async fn test_run_standard_loop_handler_error_does_not_advance_checkpoint() {
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
+
+        let params = ReactionBaseParams::new("loop-fail", vec!["q1".to_string()])
+            .with_recovery_policy(ReactionRecoveryPolicy::Strict);
+        let base = ReactionBase::new(params);
+
+        let store: Arc<dyn StateStoreProvider> =
+            Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let context = crate::context::ReactionRuntimeContext::new(
+            "test-instance",
+            "loop-fail",
+            Some(store),
+            update_tx,
+            None,
+        );
+        base.initialize(context).await;
+
+        let initial = ReactionCheckpoint {
+            sequence: 5,
+            config_hash: 42,
+        };
+        base.write_checkpoint("q1", &initial).await.unwrap();
+        let mut initial_checkpoints = std::collections::HashMap::new();
+        initial_checkpoints.insert("q1".to_string(), initial.clone());
+
+        let result = crate::channels::QueryResult {
+            query_id: "q1".to_string(),
+            sequence: 6,
+            timestamp: chrono::Utc::now(),
+            results: vec![],
+            metadata: Default::default(),
+            profiling: None,
+        };
+        base.enqueue_query_result(result).await.unwrap();
+
+        let shutdown_rx = base.create_shutdown_channel().await;
+        let base_clone = base.clone_shared();
+        let loop_handle = tokio::spawn(async move {
+            base_clone
+                .run_standard_loop(shutdown_rx, initial_checkpoints, |_event| async {
+                    Err(anyhow::anyhow!("injected side-effect failure"))
+                })
+                .await
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if base.get_status().await == ComponentStatus::Error {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("reaction did not enter Error after side-effect failure");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
+        assert_eq!(
+            cp.sequence, 5,
+            "side-effect failure must not advance the durable checkpoint"
+        );
+        assert_eq!(cp.config_hash, 42);
+
+        let loop_result = tokio::time::timeout(Duration::from_secs(2), loop_handle)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(loop_result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_standard_loop_autoskip_advances_past_failed_side_effect() {
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
+
+        let params = ReactionBaseParams::new("loop-skip", vec!["q1".to_string()])
+            .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap);
+        let base = ReactionBase::new(params);
+
+        let store: Arc<dyn StateStoreProvider> =
+            Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let context = crate::context::ReactionRuntimeContext::new(
+            "test-instance",
+            "loop-skip",
+            Some(store),
+            update_tx,
+            None,
+        );
+        base.initialize(context).await;
+
+        let initial = ReactionCheckpoint {
+            sequence: 5,
+            config_hash: 42,
+        };
+        base.write_checkpoint("q1", &initial).await.unwrap();
+        let mut initial_checkpoints = std::collections::HashMap::new();
+        initial_checkpoints.insert("q1".to_string(), initial);
+
+        let result = crate::channels::QueryResult {
+            query_id: "q1".to_string(),
+            sequence: 6,
+            timestamp: chrono::Utc::now(),
+            results: vec![],
+            metadata: Default::default(),
+            profiling: None,
+        };
+        base.enqueue_query_result(result).await.unwrap();
+
+        let shutdown_rx = base.create_shutdown_channel().await;
+        let base_clone = base.clone_shared();
+        let loop_handle = tokio::spawn(async move {
+            base_clone
+                .run_standard_loop(shutdown_rx, initial_checkpoints, |_event| async {
+                    Err(anyhow::anyhow!("injected side-effect failure"))
+                })
+                .await
+                .unwrap();
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let seq = base
+                .read_checkpoint("q1")
+                .await
+                .unwrap()
+                .map(|cp| cp.sequence)
+                .unwrap_or(0);
+            if seq >= 6 {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("AutoSkipGap did not advance past the failed side effect");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let _ = base.stop_common().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
+
+        let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
+        assert_eq!(cp.sequence, 6);
+        assert_eq!(cp.config_hash, 42);
+        assert_ne!(base.get_status().await, ComponentStatus::Error);
     }
 }
