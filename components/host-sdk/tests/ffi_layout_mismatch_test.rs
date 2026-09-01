@@ -121,6 +121,7 @@ async fn mock_source_change_stream_survives_layout_mismatch() {
         nodes: HashSet::new(),
         relations: HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: false,
     };
     let sub = source.subscribe(settings).await.expect("Should subscribe");
@@ -218,6 +219,7 @@ async fn mock_source_bootstrap_stream_survives_layout_mismatch() {
         nodes: HashSet::new(),
         relations: HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: false,
     };
     let sub = source.subscribe(settings).await.expect("Should subscribe");

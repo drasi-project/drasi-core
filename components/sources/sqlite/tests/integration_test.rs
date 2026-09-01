@@ -375,6 +375,7 @@ async fn sqlite_bootstrap_loads_existing_rows() {
         nodes: HashSet::from(["sensors".to_string()]),
         relations: HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: false,
     };
 

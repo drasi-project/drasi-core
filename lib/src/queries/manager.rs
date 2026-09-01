@@ -1119,6 +1119,7 @@ impl Query for DrasiQuery {
                                 checkpoint_sequences_per_source
                                     .insert(settings.source_id.clone(), cp.sequence);
                                 settings.request_position_handle = true;
+                                settings.resume_sequence = Some(cp.sequence);
                                 if let Some(pos) = &cp.source_position {
                                     settings.resume_from = Some(pos.clone());
                                 }
@@ -1291,6 +1292,7 @@ impl Query for DrasiQuery {
                 );
                 for (_, _, settings) in &mut sources_to_subscribe {
                     settings.resume_from = None;
+                    settings.resume_sequence = None;
                     settings.request_position_handle = has_persistent_backend;
                 }
                 // Reset per-loop accumulators

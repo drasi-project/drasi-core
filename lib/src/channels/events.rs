@@ -773,6 +773,7 @@ mod tests {
             nodes: HashSet::new(),
             relations: HashSet::new(),
             resume_from: Some(position_bytes.clone()),
+            resume_sequence: None,
             request_position_handle: true,
         };
         assert_eq!(settings.resume_from, Some(position_bytes));

@@ -602,6 +602,30 @@ impl SourceBase {
             .store(sequence.saturating_add(1), Ordering::Relaxed);
     }
 
+    /// Raise the per-source sequence counter to a floor derived from a resuming
+    /// query's checkpointed sequence, so framework-filled sequences after a
+    /// restart stay strictly above that query's dedup high-water.
+    ///
+    /// This uses `fetch_max`, so it never lowers the counter and, when multiple
+    /// queries resume with different floors, the highest one wins (per-subscriber
+    /// position filtering handles the overlap). It is complementary to
+    /// `set_next_sequence` (WAL-head restore): whichever floor is higher wins.
+    ///
+    /// `resume_sequence` is the last confirmed sequence `N`; the next event must
+    /// be `> N`, so the counter floor is `N + 1`.
+    fn raise_sequence_floor(&self, settings: &crate::config::SourceSubscriptionSettings) {
+        if let Some(resume_seq) = settings.resume_sequence {
+            let floor = resume_seq.saturating_add(1);
+            let prev = self.next_sequence.fetch_max(floor, Ordering::Relaxed);
+            if floor > prev {
+                debug!(
+                    "[{}] Raised next_sequence floor to {} for resuming query '{}' (was {})",
+                    self.id, floor, settings.query_id, prev
+                );
+            }
+        }
+    }
+
     /// Returns whether a bootstrap provider is configured for this source.
     ///
     /// CDC sources use this to decide whether their start task should
@@ -840,6 +864,11 @@ impl SourceBase {
             settings.request_position_handle
         );
 
+        // Restart monotonicity: raise the per-source sequence counter to at least
+        // the resuming query's checkpointed sequence + 1, so framework-filled
+        // sequences after a restart are not dropped by the query's dedup filter.
+        self.raise_sequence_floor(settings);
+
         // Record that an initial bootstrap was requested so each CDC source's
         // start task knows to wait for the snapshot boundary. Set *before* the
         // dispatcher is registered below so it is visible once the task's
@@ -961,6 +990,11 @@ impl SourceBase {
             "Query '{}' subscribing to {} source '{}' with WAL replay from seq {}",
             settings.query_id, source_type, self.id, resume_seq
         );
+
+        // Restart monotonicity: raise the sequence counter to the resuming query's
+        // checkpointed sequence + 1. Complementary to the WAL-head restore below;
+        // whichever floor is higher wins.
+        self.raise_sequence_floor(settings);
 
         // Hold dispatchers write lock to block live dispatch during setup.
         // This ensures no live events reach the new subscriber before replay.
@@ -1881,6 +1915,7 @@ mod tests {
             nodes: HashSet::new(),
             relations: HashSet::new(),
             resume_from,
+            resume_sequence: None,
             request_position_handle,
         }
     }
@@ -2913,6 +2948,7 @@ mod tests {
             source_id: "ph-init".to_string(),
             enable_bootstrap: false,
             resume_from: Some(Bytes::from_static(&[0x00, 0x01])),
+            resume_sequence: None,
             request_position_handle: true,
             nodes: Default::default(),
             relations: Default::default(),
@@ -2941,6 +2977,7 @@ mod tests {
             source_id: "ph-no-ls".to_string(),
             enable_bootstrap: true,
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: true,
             nodes: Default::default(),
             relations: Default::default(),
@@ -3157,5 +3194,108 @@ mod tests {
             .expect("event should be delivered, not suppressed by stale mark")
             .unwrap();
         assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x20]);
+    }
+
+    // =========================================================================
+    // Restart monotonicity: resume_sequence floor (issue #827)
+    // =========================================================================
+
+    fn resume_seq_settings(
+        source_id: &str,
+        query_id: &str,
+        resume_sequence: Option<u64>,
+    ) -> crate::config::SourceSubscriptionSettings {
+        crate::config::SourceSubscriptionSettings {
+            source_id: source_id.to_string(),
+            enable_bootstrap: false,
+            query_id: query_id.to_string(),
+            nodes: Default::default(),
+            relations: Default::default(),
+            resume_from: None,
+            resume_sequence,
+            request_position_handle: true,
+        }
+    }
+
+    /// A native-cursor source restarted after a checkpoint at N must produce its
+    /// next framework-filled sequence at N+1 (strictly above the dedup high-water),
+    /// so freshly stamped events are not wrongly dropped on replay.
+    #[tokio::test]
+    async fn test_resume_sequence_raises_counter_on_subscribe() {
+        let params = SourceBaseParams::new("resume-seq").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+
+        base.subscribe_with_bootstrap(&resume_seq_settings("resume-seq", "q1", Some(500)), "test")
+            .await
+            .unwrap();
+
+        // Next dispatched event is stamped with the floor N+1 = 501, not 1.
+        base.dispatch_event(make_event("resume-seq", Some(&[0xAB])))
+            .await
+            .unwrap();
+        let map = base.sequence_position_map.read().await;
+        assert!(
+            map.contains_key(&501),
+            "next filled-in sequence must be resume_sequence + 1 (got keys {:?})",
+            map.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            map.keys().all(|&s| s > 500),
+            "no sequence may be <= the checkpointed sequence"
+        );
+    }
+
+    /// The floor is applied with `fetch_max`: a later resuming query with a lower
+    /// checkpoint must never lower the counter, and the highest floor wins.
+    #[tokio::test]
+    async fn test_resume_sequence_floor_never_lowers_and_takes_max() {
+        let params = SourceBaseParams::new("resume-max").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+
+        // First query resumes at 500 → floor 501.
+        base.subscribe_with_bootstrap(&resume_seq_settings("resume-max", "q1", Some(500)), "test")
+            .await
+            .unwrap();
+        // Second query resumes lower (100) → must not lower the counter.
+        base.subscribe_with_bootstrap(&resume_seq_settings("resume-max", "q2", Some(100)), "test")
+            .await
+            .unwrap();
+        // Third query resumes higher (800) → floor raised to 801.
+        base.subscribe_with_bootstrap(&resume_seq_settings("resume-max", "q3", Some(800)), "test")
+            .await
+            .unwrap();
+
+        base.dispatch_event(make_event("resume-max", Some(&[0xAB])))
+            .await
+            .unwrap();
+        let map = base.sequence_position_map.read().await;
+        assert!(
+            map.contains_key(&801),
+            "counter must take the max floor across resuming queries (got keys {:?})",
+            map.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Without a resume_sequence (fresh start, or sequence-as-position sources
+    /// that rely on WAL-head restore), the counter is untouched and stamping
+    /// starts at 1 — no double-advance.
+    #[tokio::test]
+    async fn test_no_resume_sequence_leaves_counter_at_default() {
+        let params = SourceBaseParams::new("resume-none").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+
+        base.subscribe_with_bootstrap(&resume_seq_settings("resume-none", "q1", None), "test")
+            .await
+            .unwrap();
+
+        base.dispatch_event(make_event("resume-none", Some(&[0xAB])))
+            .await
+            .unwrap();
+        let map = base.sequence_position_map.read().await;
+        assert!(
+            map.contains_key(&1),
+            "without resume_sequence the counter must start at 1 (got keys {:?})",
+            map.keys().collect::<Vec<_>>()
+        );
     }
 }

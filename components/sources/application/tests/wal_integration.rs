@@ -80,6 +80,7 @@ fn fresh_settings(source_id: &str, query_id: &str) -> SourceSubscriptionSettings
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
+        resume_sequence: None,
         request_position_handle: true,
         resume_from: None,
     }
@@ -93,6 +94,7 @@ fn resume_settings(source_id: &str, query_id: &str, resume_seq: u64) -> SourceSu
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
+        resume_sequence: None,
         request_position_handle: true,
         resume_from: Some(bytes::Bytes::from(resume_seq.to_be_bytes().to_vec())),
     }
@@ -528,6 +530,7 @@ async fn test_resume_from_position_end_to_end() {
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
+        resume_sequence: None,
         request_position_handle: true,
         resume_from: None,
     };

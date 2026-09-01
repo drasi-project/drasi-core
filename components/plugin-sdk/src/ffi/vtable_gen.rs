@@ -773,6 +773,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         resume_from_ptr: *const u8,
         resume_from_len: u32,
         request_position_handle: bool,
+        resume_sequence: u64,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -797,6 +798,13 @@ pub fn build_source_vtable<T: Source + 'static>(
             Some(bytes::Bytes::copy_from_slice(slice))
         };
 
+        // 0 is the sentinel for "no checkpointed sequence" (real sequences start at 1).
+        let resume_sequence = if resume_sequence == 0 {
+            None
+        } else {
+            Some(resume_sequence)
+        };
+
         let settings = SourceSubscriptionSettings {
             source_id: source_id_str,
             enable_bootstrap,
@@ -804,6 +812,7 @@ pub fn build_source_vtable<T: Source + 'static>(
             nodes,
             relations,
             resume_from,
+            resume_sequence,
             request_position_handle,
         };
 
@@ -1163,6 +1172,7 @@ pub fn build_source_vtable_from_boxed(
         resume_from_ptr: *const u8,
         resume_from_len: u32,
         request_position_handle: bool,
+        resume_sequence: u64,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -1187,6 +1197,13 @@ pub fn build_source_vtable_from_boxed(
             Some(bytes::Bytes::copy_from_slice(slice))
         };
 
+        // 0 is the sentinel for "no checkpointed sequence" (real sequences start at 1).
+        let resume_sequence = if resume_sequence == 0 {
+            None
+        } else {
+            Some(resume_sequence)
+        };
+
         let settings = SourceSubscriptionSettings {
             source_id: source_id_str,
             enable_bootstrap,
@@ -1194,6 +1211,7 @@ pub fn build_source_vtable_from_boxed(
             nodes,
             relations,
             resume_from,
+            resume_sequence,
             request_position_handle,
         };
 

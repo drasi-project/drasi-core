@@ -1624,6 +1624,7 @@ mod source_trait {
             nodes: HashSet::new(),
             relations: HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: false,
         };
 

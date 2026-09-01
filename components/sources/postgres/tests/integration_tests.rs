@@ -1440,6 +1440,7 @@ fn subscription_settings(
         nodes: HashSet::new(),
         relations: HashSet::new(),
         resume_from,
+        resume_sequence: None,
         request_position_handle,
     }
 }

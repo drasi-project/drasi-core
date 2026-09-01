@@ -37,6 +37,7 @@ impl SubscriptionSettingsBuilder {
                 nodes: source_config.nodes.iter().cloned().collect(),
                 relations: source_config.relations.iter().cloned().collect(),
                 resume_from: None,
+                resume_sequence: None,
                 request_position_handle: false,
             })
             .collect();

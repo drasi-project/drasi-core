@@ -50,6 +50,8 @@ struct E2eTestSource {
     replay_capable: bool,
     /// Records the most recent `resume_from` received in subscribe().
     last_resume_from: Arc<RwLock<Option<Bytes>>>,
+    /// Records the most recent `resume_sequence` received in subscribe().
+    last_resume_sequence: Arc<RwLock<Option<u64>>>,
     /// Number of times subscribe was called.
     subscribe_count: Arc<AtomicU32>,
     /// Number of remaining subscribe failures (decremented each call).
@@ -66,6 +68,7 @@ impl E2eTestSource {
             base: SourceBase::new(SourceBaseParams::new(id))?,
             replay_capable,
             last_resume_from: Arc::new(RwLock::new(None)),
+            last_resume_sequence: Arc::new(RwLock::new(None)),
             subscribe_count: Arc::new(AtomicU32::new(0)),
             remaining_failures: Arc::new(AtomicU32::new(0)),
             position_handle_removed: Arc::new(AtomicU32::new(0)),
@@ -75,6 +78,10 @@ impl E2eTestSource {
 
     fn last_resume_from(&self) -> Arc<RwLock<Option<Bytes>>> {
         self.last_resume_from.clone()
+    }
+
+    fn last_resume_sequence(&self) -> Arc<RwLock<Option<u64>>> {
+        self.last_resume_sequence.clone()
     }
 
     fn subscribe_count_handle(&self) -> Arc<AtomicU32> {
@@ -156,6 +163,7 @@ impl Source for E2eTestSource {
 
         // Record what the query sent us
         *self.last_resume_from.write().await = settings.resume_from.clone();
+        *self.last_resume_sequence.write().await = settings.resume_sequence;
 
         // Check for injected failures
         if self
@@ -385,7 +393,67 @@ async fn test_e2e_checkpoint_round_trip() {
     core.stop_query("e2e-q").await.unwrap();
 }
 
-/// Volatile query (no storage backend) should never send resume_from.
+/// Restart monotonicity (issue #827): after a checkpoint at sequence N, the query
+/// manager must carry `resume_sequence = Some(N)` back to the source on resubscribe
+/// so a native-cursor source can raise its sequence counter above the dedup
+/// high-water. This verifies the QueryManager → source wiring end-to-end.
+#[tokio::test]
+#[serial]
+async fn test_e2e_resume_sequence_carried_back() {
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let core = build_e2e_lib("e2e-rs", &tmp_dir, None).await.unwrap();
+
+    let source = E2eTestSource::new("e2e-rs-src", true).unwrap();
+    let resume_sequence = source.last_resume_sequence();
+    let event_tx = source.event_sender();
+    let sub_count = source.subscribe_count_handle();
+
+    core.add_source(source).await.unwrap();
+    core.start_source("e2e-rs-src").await.unwrap();
+    wait_for_status(&core, "e2e-rs-src", ComponentStatus::Running).await;
+
+    let query = make_persistent_query("e2e-rs-q", "e2e-rs-src", None);
+    core.add_query(query).await.unwrap();
+    core.start_query("e2e-rs-q").await.unwrap();
+    wait_for_status(&core, "e2e-rs-q", ComponentStatus::Running).await;
+
+    // First start: no resume_sequence.
+    assert!(
+        resume_sequence.read().await.is_none(),
+        "First start should have no resume_sequence"
+    );
+    assert_eq!(sub_count.load(Ordering::Acquire), 1);
+
+    // Feed events; the last checkpointed sequence should be 3.
+    send_event(&event_tx, "e2e-rs-src", 1, b"pos-1").await;
+    send_event(&event_tx, "e2e-rs-src", 2, b"pos-2").await;
+    send_event(&event_tx, "e2e-rs-src", 3, b"pos-3").await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Stop and restart the query.
+    core.stop_query("e2e-rs-q").await.unwrap();
+    wait_for_status(&core, "e2e-rs-q", ComponentStatus::Stopped).await;
+    core.start_query("e2e-rs-q").await.unwrap();
+    wait_for_status(&core, "e2e-rs-q", ComponentStatus::Running).await;
+
+    assert_eq!(
+        sub_count.load(Ordering::Acquire),
+        2,
+        "Should have subscribed twice"
+    );
+
+    // After restart, the source must receive the checkpointed sequence so it can
+    // raise its counter above the dedup high-water.
+    let resumed_seq = *resume_sequence.read().await;
+    assert_eq!(
+        resumed_seq,
+        Some(3),
+        "After restart, resume_sequence must carry the last checkpointed sequence"
+    );
+
+    core.stop_query("e2e-rs-q").await.unwrap();
+}
+
 #[tokio::test]
 #[serial]
 async fn test_e2e_volatile_query_no_checkpoints() {
