@@ -1113,7 +1113,7 @@ async fn recover_autoreset_phase(paths: &FixturePaths) -> Result<()> {
     );
     assert!(
         wiped.people.is_empty(),
-        "AutoReset must wipe live rows; got {:?}",
+        "AutoReset must wipe live rows and graph indexes; leftover seed rows would mean output-only wipe left ResultIndex populated. got {:?}",
         wiped.people
     );
 
