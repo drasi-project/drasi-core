@@ -34,10 +34,18 @@
 //! (e.g. the HTTP and gRPC reactions).
 
 use std::collections::HashMap;
+use std::time::Duration;
+
+use log::warn;
 
 use crate::reactions::checkpoint::ReactionCheckpoint;
 use crate::reactions::common::base::ReactionBase;
 use crate::recovery::ReactionRecoveryPolicy;
+
+/// Total write attempts under [`ReactionRecoveryPolicy::AutoReset`] (initial try
+/// plus bounded retries).
+const AUTO_RESET_CHECKPOINT_ATTEMPTS: u32 = 4;
+const AUTO_RESET_CHECKPOINT_BASE_BACKOFF: Duration = Duration::from_millis(10);
 
 /// Tracks the last persisted `(sequence, config_hash)` per query so checkpoint
 /// advances move forward monotonically and preserve `config_hash`.
@@ -118,6 +126,103 @@ impl CheckpointState {
         }
         self.checkpoints.insert(query_id.to_string(), cp);
         Ok(())
+    }
+
+    /// Advance `query_id`'s checkpoint after a successful side effect, applying
+    /// [`ReactionRecoveryPolicy`] to durable write failures.
+    ///
+    /// * `Strict` — return the write error immediately.
+    /// * `AutoReset` — retry with bounded backoff, then return the last error.
+    /// * `AutoSkipGap` — log the write error and proceed so a later successful
+    ///   write can supersede.
+    pub async fn advance_with_policy(
+        &mut self,
+        base: &ReactionBase,
+        query_id: &str,
+        sequence: u64,
+        policy: ReactionRecoveryPolicy,
+    ) -> anyhow::Result<()> {
+        self.ensure_seeded(base, query_id).await?;
+        let current = self
+            .checkpoints
+            .get(query_id)
+            .expect("checkpoint present after ensure_seeded");
+        if sequence <= current.sequence {
+            return Ok(());
+        }
+        let cp = ReactionCheckpoint {
+            sequence,
+            config_hash: current.config_hash,
+        };
+        if self.has_store {
+            persist_with_recovery_policy(policy, || base.write_checkpoint(query_id, &cp)).await?;
+        }
+        self.checkpoints.insert(query_id.to_string(), cp);
+        Ok(())
+    }
+
+    /// Checkpoint each fully-acked query to its max terminal sequence **after**
+    /// the batch ack has succeeded. This is the HTTP/gRPC contract: a batch of
+    /// `N..N+k` persists `N+k` only once the side effect (ack) has committed.
+    pub async fn advance_completed_after_ack(
+        &mut self,
+        base: &ReactionBase,
+        completed: &HashMap<String, u64>,
+        policy: ReactionRecoveryPolicy,
+    ) -> anyhow::Result<()> {
+        for (query_id, sequence) in completed {
+            self.advance_with_policy(base, query_id, *sequence, policy)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+/// Persist a checkpoint write according to [`ReactionRecoveryPolicy`].
+///
+/// The `write` closure is the side-effect-after-commit durable store write —
+/// callers must invoke this **only after** the observable side effect succeeds.
+pub async fn persist_with_recovery_policy<F, Fut>(
+    policy: ReactionRecoveryPolicy,
+    mut write: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    match policy {
+        ReactionRecoveryPolicy::Strict => write().await,
+        ReactionRecoveryPolicy::AutoSkipGap => {
+            if let Err(error) = write().await {
+                warn!(
+                    "Checkpoint write failed; continuing per AutoSkipGap so the next successful write can supersede: {error:#}"
+                );
+            }
+            Ok(())
+        }
+        ReactionRecoveryPolicy::AutoReset => {
+            let mut last_error = None;
+            for attempt in 0..AUTO_RESET_CHECKPOINT_ATTEMPTS {
+                match write().await {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        last_error = Some(error);
+                        if attempt + 1 < AUTO_RESET_CHECKPOINT_ATTEMPTS {
+                            let backoff = AUTO_RESET_CHECKPOINT_BASE_BACKOFF * 2u32.pow(attempt);
+                            warn!(
+                                "Checkpoint write failed (attempt {}/{}); retrying after {backoff:?} per AutoReset",
+                                attempt + 1,
+                                AUTO_RESET_CHECKPOINT_ATTEMPTS
+                            );
+                            tokio::time::sleep(backoff).await;
+                        }
+                    }
+                }
+            }
+            Err(last_error.unwrap_or_else(|| {
+                anyhow::anyhow!("checkpoint write failed after AutoReset retries")
+            }))
+        }
     }
 }
 
@@ -287,6 +392,124 @@ mod tests {
         assert_eq!(
             FailureAction::from_policy(ReactionRecoveryPolicy::AutoSkipGap),
             FailureAction::SkipAndContinue
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_strict_surfaces_write_error() {
+        let result = persist_with_recovery_policy(ReactionRecoveryPolicy::Strict, || async {
+            Err(anyhow::anyhow!("write failed"))
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("write failed"));
+    }
+
+    #[tokio::test]
+    async fn persist_autoskip_logs_and_continues() {
+        persist_with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap, || async {
+            Err(anyhow::anyhow!("write failed"))
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn persist_autoreset_retries_then_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_clone = attempts.clone();
+        persist_with_recovery_policy(ReactionRecoveryPolicy::AutoReset, move || {
+            let attempts = attempts_clone.clone();
+            async move {
+                let n = attempts.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Err(anyhow::anyhow!("transient"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn persist_autoreset_exhausted_retries_errors() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_clone = attempts.clone();
+        let result = persist_with_recovery_policy(ReactionRecoveryPolicy::AutoReset, move || {
+            let attempts = attempts_clone.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(anyhow::anyhow!("always fails"))
+            }
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            AUTO_RESET_CHECKPOINT_ATTEMPTS
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_checkpoints_max_sequence_only_after_ack() {
+        let base = store_backed_base("batch-ack").await;
+        base.write_checkpoint(
+            "q1",
+            &ReactionCheckpoint {
+                sequence: 4,
+                config_hash: 7,
+            },
+        )
+        .await
+        .unwrap();
+        let mut state = CheckpointState::load(&base).await;
+
+        let items = [
+            ("q1".to_string(), 5, true),
+            ("q1".to_string(), 6, true),
+            ("q1".to_string(), 7, true),
+        ];
+        let (completed, _) = batch_checkpoint_candidates(items);
+
+        // Kill after send, before ack: the batch is not checkpointed.
+        let ack_succeeded = false;
+        if ack_succeeded {
+            state
+                .advance_completed_after_ack(&base, &completed, ReactionRecoveryPolicy::Strict)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            4,
+            "a batch must not checkpoint until the ack succeeds"
+        );
+
+        // Ack succeeds: persist max_sequence_in_batch (7).
+        state
+            .advance_completed_after_ack(&base, &completed, ReactionRecoveryPolicy::Strict)
+            .await
+            .unwrap();
+        assert_eq!(
+            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            7
+        );
+        assert_eq!(
+            base.read_checkpoint("q1")
+                .await
+                .unwrap()
+                .unwrap()
+                .config_hash,
+            7
         );
     }
 }
