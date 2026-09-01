@@ -17,12 +17,14 @@
 //! Uses a dedicated `outbox` column family with keys formatted as:
 //! `{query_id}:{sequence_u64_be}` (8-byte big-endian suffix for ordered iteration).
 //!
-//! Writes are standalone (not part of the session transaction) since outbox
-//! persistence happens after the index transaction commits.
+//! When a session is active, `append` stages into that transaction so outbox
+//! entries commit atomically with index writes, source checkpoints, live
+//! results, and the result sequence. Outside a session (tests, wipe/trim)
+//! writes go directly to the DB.
 
 use std::sync::Arc;
 
-use crate::IndexDb;
+use crate::{IndexDb, RocksDbSessionState};
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, OutboxWriter};
 use rocksdb::{ColumnFamilyDescriptor, IteratorMode};
@@ -69,14 +71,16 @@ fn make_prefix(query_id: &str) -> Vec<u8> {
 /// RocksDB-backed outbox writer.
 ///
 /// Stores serialized query results in a column family with ordered keys
-/// for efficient range reads and trimming.
+/// for efficient range reads and trimming. Shares `RocksDbSessionState`
+/// with the rest of the query so `append` can join the outer transaction.
 pub struct RocksDbOutboxWriter {
     db: Arc<IndexDb>,
+    session_state: Arc<RocksDbSessionState>,
 }
 
 impl RocksDbOutboxWriter {
-    pub fn new(db: Arc<IndexDb>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<IndexDb>, session_state: Arc<RocksDbSessionState>) -> Self {
+        Self { db, session_state }
     }
 }
 
@@ -84,12 +88,16 @@ impl RocksDbOutboxWriter {
 impl OutboxWriter for RocksDbOutboxWriter {
     async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let session_state = self.session_state.clone();
         let key = make_key(query_id, sequence);
         let data = data.to_vec();
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
-            db.put_cf(&cf, &key, &data).map_err(IndexError::other)
+            session_state.with_txn_or_db(
+                |txn| txn.put_cf(&cf, &key, &data).map_err(IndexError::other),
+                |db| db.put_cf(&cf, &key, &data).map_err(IndexError::other),
+            )
         })
         .await
         .map_err(IndexError::other)?
