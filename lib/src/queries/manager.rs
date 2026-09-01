@@ -1323,7 +1323,7 @@ impl Query for DrasiQuery {
                         crate::recovery::RecoveryPolicy::AutoReset => {
                             warn!(
                                 "Query '{}' durable output is inconsistent: {inconsistency}. \
-                                 AutoReset: wiping query output and continuing.",
+                                 AutoReset: wiping query output, indexes, and checkpoints, then rebuilding.",
                                 self.base.config.id
                             );
                             if let Err(e) = wipe_durable_output(
@@ -1344,7 +1344,81 @@ impl Query for DrasiQuery {
                                     .await;
                                 return Err(anyhow::anyhow!(msg));
                             }
+
+                            // Also wipe graph indexes and source checkpoints. Output-only
+                            // wipe would leave ResultIndex/element data populated while
+                            // QueryOutputState is empty, so snapshots would miss rows.
+                            if let Some(sc) = &session_control {
+                                if let Err(e) = sc.begin().await {
+                                    let msg = format!(
+                                        "Query '{}' AutoReset failed to begin session for rebuild: {e}",
+                                        self.base.config.id
+                                    );
+                                    error!("{msg}");
+                                    self.base
+                                        .set_status(ComponentStatus::Error, Some(msg.clone()))
+                                        .await;
+                                    return Err(anyhow::anyhow!(msg));
+                                }
+                            }
+                            if let Err(ie) = clear_persistent_indexes(
+                                &self.base.config.id,
+                                &element_index,
+                                &archive_index,
+                                &result_index,
+                                &future_queue,
+                            )
+                            .await
+                            {
+                                if let Some(sc) = &session_control {
+                                    let _ = sc.rollback();
+                                }
+                                let msg = format!(
+                                    "Query '{}' AutoReset failed to clear persistent indexes: {ie}",
+                                    self.base.config.id
+                                );
+                                error!("{msg}");
+                                self.base
+                                    .set_status(ComponentStatus::Error, Some(msg.clone()))
+                                    .await;
+                                return Err(anyhow::anyhow!(msg));
+                            }
+                            if let Err(ce) = checkpoint_store.clear_checkpoints().await {
+                                if let Some(sc) = &session_control {
+                                    let _ = sc.rollback();
+                                }
+                                let msg = format!(
+                                    "Query '{}' AutoReset failed to clear checkpoints: {ce}",
+                                    self.base.config.id
+                                );
+                                error!("{msg}");
+                                self.base
+                                    .set_status(ComponentStatus::Error, Some(msg.clone()))
+                                    .await;
+                                return Err(anyhow::anyhow!(msg));
+                            }
+                            let current_hash = super::compute_config_hash(&self.base.config);
+                            if let Err(he) = checkpoint_store.write_config_hash(current_hash).await
+                            {
+                                warn!(
+                                    "Query '{}' failed to write config hash during output AutoReset: {he}",
+                                    self.base.config.id
+                                );
+                            }
+                            if let Some(sc) = &session_control {
+                                if let Err(e) = sc.commit().await {
+                                    warn!(
+                                        "Query '{}' failed to commit output AutoReset session: {e}",
+                                        self.base.config.id
+                                    );
+                                }
+                            }
+
                             self.output_state.write().await.reset();
+                            checkpoint_sequences_per_source.clear();
+                            for settings in &mut subscription_settings {
+                                settings.resume_from = None;
+                            }
                         }
                     },
                 }
