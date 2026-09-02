@@ -1167,6 +1167,22 @@ async fn append_outbox_ahead(paths: &FixturePaths) -> Result<()> {
     Ok(())
 }
 
+async fn overwrite_outbox_with_garbage(paths: &FixturePaths, sequence: u64) -> Result<()> {
+    let provider = RocksDbIndexProvider::new(&paths.rocks, false, false);
+    let created = provider.create_indexes(QUERY_ID).await?;
+    let writer = created
+        .outbox_writer
+        .as_ref()
+        .context("RocksDB outbox writer missing")?;
+    writer
+        .append(QUERY_ID, sequence, b"corrupt-outbox-payload")
+        .await
+        .with_context(|| format!("overwrite outbox sequence {sequence} with garbage"))?;
+    drop(created);
+    drop(provider);
+    Ok(())
+}
+
 fn write_synced_file(path: &Path, contents: &[u8]) -> Result<()> {
     let mut file =
         File::create(path).with_context(|| format!("create synced file {}", path.display()))?;
@@ -1359,6 +1375,73 @@ async fn rocksdb_redb_corrupt_output_autoreset_wipes() -> Result<()> {
     }
 
     if let Err(error) = append_outbox_ahead(&paths).await {
+        let _ = std::fs::remove_dir_all(&root);
+        return Err(error);
+    }
+
+    let recover = run_phase("recover_autoreset", &paths)?;
+    let failure = (!recover.status.success()).then(|| child_failure("recover_autoreset", &recover));
+    let cleanup = std::fs::remove_dir_all(&root);
+    if let Some(message) = failure {
+        anyhow::bail!(message);
+    }
+    cleanup.with_context(|| format!("remove test root {}", root.display()))?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_corrupt_outbox_payload_strict_fails_start() -> Result<()> {
+    if std::env::var_os(PHASE_ENV).is_some() {
+        return Ok(());
+    }
+
+    let root = test_root()?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create test root {}", root.display()))?;
+    let paths = FixturePaths::under(&root);
+
+    let seed = run_phase("seed", &paths)?;
+    if !seed.status.success() {
+        let message = child_failure("seed", &seed);
+        let _ = std::fs::remove_dir_all(&root);
+        anyhow::bail!(message);
+    }
+
+    if let Err(error) = overwrite_outbox_with_garbage(&paths, 3).await {
+        let _ = std::fs::remove_dir_all(&root);
+        return Err(error);
+    }
+
+    let recover = run_phase("recover_strict_fail", &paths)?;
+    let failure =
+        (!recover.status.success()).then(|| child_failure("recover_strict_fail", &recover));
+    let cleanup = std::fs::remove_dir_all(&root);
+    if let Some(message) = failure {
+        anyhow::bail!(message);
+    }
+    cleanup.with_context(|| format!("remove test root {}", root.display()))?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_corrupt_outbox_payload_autoreset_wipes() -> Result<()> {
+    if std::env::var_os(PHASE_ENV).is_some() {
+        return Ok(());
+    }
+
+    let root = test_root()?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create test root {}", root.display()))?;
+    let paths = FixturePaths::under(&root);
+
+    let seed = run_phase("seed", &paths)?;
+    if !seed.status.success() {
+        let message = child_failure("seed", &seed);
+        let _ = std::fs::remove_dir_all(&root);
+        anyhow::bail!(message);
+    }
+
+    if let Err(error) = overwrite_outbox_with_garbage(&paths, 3).await {
         let _ = std::fs::remove_dir_all(&root);
         return Err(error);
     }
