@@ -234,3 +234,73 @@ async fn stop_query_same_config_preserves_output() -> Result<()> {
     core.stop().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn update_query_twice_in_quick_succession_does_not_lock() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let (core, handle) = build_core(&tmp, QUERY_V1).await?;
+
+    insert_person(&handle, "p1", "Alice", 30).await?;
+    assert_eq!(wait_for_seq(&core, 1).await?, 1);
+
+    core.update_query(QUERY_ID, persistent_query(QUERY_V2))
+        .await?;
+    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    core.update_query(QUERY_ID, persistent_query(QUERY_V1))
+        .await?;
+    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+
+    insert_person(&handle, "p2", "Bob", 25).await?;
+    assert_eq!(wait_for_seq(&core, 1).await?, 1);
+
+    core.stop().await?;
+    Ok(())
+}
+
+fn volatile_query(text: &str) -> drasi_lib::config::QueryConfig {
+    Query::cypher(QUERY_ID)
+        .query(text)
+        .from_source(SOURCE_ID)
+        .auto_start(true)
+        .enable_bootstrap(false)
+        .with_outbox_capacity(100)
+        .build()
+}
+
+#[tokio::test]
+async fn volatile_reconfigure_and_remove_succeed() -> Result<()> {
+    let (mock_source, handle) = MockSource::new(SOURCE_ID)?;
+    let core = DrasiLib::builder()
+        .with_id("query-output-wipe-volatile")
+        .with_source(mock_source)
+        .with_query(volatile_query(QUERY_V1))
+        .build()
+        .await?;
+    core.start().await?;
+    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+
+    insert_person(&handle, "p1", "Alice", 30).await?;
+    insert_person(&handle, "p2", "Bob", 25).await?;
+    assert_eq!(wait_for_seq(&core, 2).await?, 2);
+
+    core.update_query(QUERY_ID, volatile_query(QUERY_V2))
+        .await?;
+    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    let query = core
+        .query_manager()
+        .get_query_instance(QUERY_ID)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let snapshot = query.fetch_snapshot().await?;
+    assert_eq!(snapshot.as_of_sequence, 0);
+    assert!(snapshot.is_empty());
+
+    core.remove_query(QUERY_ID).await?;
+    core.add_query(volatile_query(QUERY_V1)).await?;
+    wait_for_status(&core, QUERY_ID, ComponentStatus::Running).await?;
+    insert_person(&handle, "p3", "Carol", 40).await?;
+    assert_eq!(wait_for_seq(&core, 1).await?, 1);
+
+    core.stop().await?;
+    Ok(())
+}

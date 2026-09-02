@@ -3546,13 +3546,22 @@ impl QueryManager {
                 ));
             }
 
+            // `reconfigure_component` stops the old runtime first. After that
+            // stop, drop its persistent index handles (e.g. RocksDB) before
+            // `provision_query` re-opens the same path. `stop()` keeps those
+            // handles so in-process resume can hydrate; reconfigure must
+            // release them or the new start fails with a process-exclusive lock.
+            let old_query_for_release = old_query.clone();
             crate::managers::lifecycle_helpers::reconfigure_component::<Arc<dyn Query>, _, _, _>(
                 &self.graph,
                 &id,
                 "query",
                 &old_query,
                 || async {},
-                || self.provision_query(new_config),
+                || async {
+                    old_query_for_release.release_persistent_handles().await;
+                    self.provision_query(new_config).await
+                },
                 || self.start_query(id.clone()),
             )
             .await
@@ -3592,8 +3601,11 @@ impl QueryManager {
         )
         .await?;
 
-        // After teardown: clear persistent indexes + checkpoints so a future
-        // query with the same ID starts fresh. Only needed for persistent backends.
+        // After teardown: clear persistent indexes, checkpoints, outbox, live
+        // results, and result sequence so a future query with the same ID starts
+        // at sequence 0. Only needed for persistent backends. `stop_query` does
+        // not take this path because in-process resume/hydration must keep the
+        // prior output (sequences continue at N+1).
         // Resolve the effective backend the same way as start-up so that queries
         // relying on the instance-wide default backend are also cleaned up.
         if let Some(config) = query_config {
@@ -3603,62 +3615,68 @@ impl QueryManager {
                 .or_else(|| self.index_factory.default_backend())
             {
                 if !self.index_factory.is_volatile(backend_ref) {
-                    info!("Query '{id}' removed — clearing persistent indexes and checkpoints");
-                    match self.index_factory.build(backend_ref, &id).await {
-                        Ok(created) => {
-                            // Wrap clearing in a session for transactional backends
-                            if let Err(e) = created.set.session_control.begin().await {
-                                warn!(
-                                    "Query '{id}' failed to begin session for removal cleanup: {e}"
-                                );
-                            } else {
-                                if let Some(checkpoint_store) = created.checkpoint_store.clone() {
-                                    let stores = DurableOutputStores {
-                                        checkpoint_store,
-                                        outbox_writer: created.outbox_writer.clone(),
-                                        live_results_writer: created.live_results_writer.clone(),
-                                    };
-                                    if let Err(e) = wipe_durable_output(&id, &stores, 0).await {
-                                        warn!(
-                                            "Query '{id}' failed to clear durable output on removal: {e}"
-                                        );
-                                    }
-                                }
+                    info!(
+                        "Query '{id}' removed — clearing persistent indexes, checkpoints, and output"
+                    );
+                    let created = self
+                        .index_factory
+                        .build(backend_ref, &id)
+                        .await
+                        .with_context(|| {
+                            format!("Query '{id}' failed to build indexes for cleanup on removal")
+                        })?;
+                    created.set.session_control.begin().await.with_context(|| {
+                        format!("Query '{id}' failed to begin session for removal cleanup")
+                    })?;
+                    if let Err(e) = clear_persistent_indexes(
+                        &id,
+                        &Some(created.set.element_index),
+                        &Some(created.set.archive_index),
+                        &Some(created.set.result_index),
+                        &Some(created.set.future_queue),
+                    )
+                    .await
+                    {
+                        warn!("Query '{id}' failed to clear persistent indexes on removal: {e}");
+                    }
 
-                                if let Err(e) = clear_persistent_indexes(
-                                    &id,
-                                    &Some(created.set.element_index),
-                                    &Some(created.set.archive_index),
-                                    &Some(created.set.result_index),
-                                    &Some(created.set.future_queue),
-                                )
-                                .await
-                                {
-                                    warn!(
-                                        "Query '{id}' failed to clear persistent indexes on removal: {e}"
-                                    );
-                                }
-
-                                if let Some(checkpoint_store) = created.checkpoint_store {
-                                    if let Err(e) = checkpoint_store.clear_checkpoints().await {
-                                        warn!(
-                                            "Query '{id}' failed to clear checkpoints on removal: {e}"
-                                        );
-                                    }
-                                }
-
-                                if let Err(e) = created.set.session_control.commit().await {
-                                    warn!(
-                                        "Query '{id}' failed to commit removal cleanup session: {e}"
-                                    );
-                                }
-                            }
+                    if let Some(checkpoint_store) = created.checkpoint_store {
+                        if let Err(e) = checkpoint_store.clear_checkpoints().await {
+                            warn!("Query '{id}' failed to clear checkpoints on removal: {e}");
                         }
-                        Err(e) => {
-                            warn!(
-                                "Query '{id}' failed to build indexes for cleanup on removal: {e}"
-                            );
+                        let stores = DurableOutputStores {
+                            checkpoint_store: checkpoint_store.clone(),
+                            outbox_writer: created.outbox_writer.clone(),
+                            live_results_writer: created.live_results_writer.clone(),
+                        };
+                        let generation = stores
+                            .checkpoint_store
+                            .read_output_generation(&id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .unwrap_or(0)
+                            .saturating_add(1);
+                        wipe_durable_output(&id, &stores, generation)
+                            .await
+                            .with_context(|| {
+                                format!("Query '{id}' failed to wipe durable output on removal")
+                            })?;
+                    } else {
+                        if let Some(writer) = &created.outbox_writer {
+                            writer.clear(&id).await.with_context(|| {
+                                format!("Query '{id}' failed to clear outbox on removal")
+                            })?;
                         }
+                        if let Some(writer) = &created.live_results_writer {
+                            writer.clear(&id).await.with_context(|| {
+                                format!("Query '{id}' failed to clear live results on removal")
+                            })?;
+                        }
+                    }
+
+                    if let Err(e) = created.set.session_control.commit().await {
+                        warn!("Query '{id}' failed to commit removal cleanup session: {e}");
                     }
                 }
             }
