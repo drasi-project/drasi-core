@@ -85,7 +85,7 @@ impl Source for GtfsRtSource {
 
         let config = self.config.clone();
         let source_id = self.base.id.clone();
-        let dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let state_store = self.base.state_store().await;
         let client = self.client.clone();
 
@@ -133,12 +133,8 @@ impl Source for GtfsRtSource {
                                             chrono::Utc::now(),
                                         );
 
-                                        if let Err(err) = SourceBase::dispatch_from_task(
-                                            dispatchers.clone(),
-                                            wrapper,
-                                            &source_id,
-                                        )
-                                        .await
+                                        if let Err(err) =
+                                            base.dispatch_event(wrapper).await
                                         {
                                             warn!("Failed to dispatch GTFS-RT change: {err}");
                                         }

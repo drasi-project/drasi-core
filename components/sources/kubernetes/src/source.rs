@@ -104,7 +104,7 @@ impl Source for KubernetesSource {
         info!("Starting Kubernetes source '{source_id}'");
 
         let config = self.config.clone();
-        let dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let status_handle = self.base.status_handle();
         let state_store = self.resolve_state_store().await;
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -127,7 +127,7 @@ impl Source for KubernetesSource {
         let task = tokio::spawn(
             async move {
                 let run_result =
-                    run_source_stream(&source_id, config, dispatchers, state_store, shutdown_rx)
+                    run_source_stream(&source_id, config, base, state_store, shutdown_rx)
                         .await;
 
                 if let Err(e) = run_result {
@@ -371,11 +371,7 @@ fn build_watch_targets(config: &KubernetesSourceConfig) -> Vec<WatchTarget> {
 async fn run_source_stream(
     source_id: &str,
     config: KubernetesSourceConfig,
-    dispatchers: Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
+    base: SourceBase,
     state_store: Option<Arc<dyn StateStoreProvider>>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
@@ -470,7 +466,7 @@ async fn run_source_stream(
                                     &config,
                                     &target,
                                     obj,
-                                    &dispatchers,
+                                    &base,
                                     &mut seen_uids,
                                 ).await?;
                             }
@@ -489,7 +485,7 @@ async fn run_source_stream(
                                     &config,
                                     &target,
                                     obj,
-                                    &dispatchers,
+                                    &base,
                                     &mut seen_uids,
                                 ).await?;
                             }
@@ -501,7 +497,7 @@ async fn run_source_stream(
                                     seen_uids.remove(&uid);
                                 }
                                 let changes = build_delete_changes(source_id, &target.kind, &obj, &config)?;
-                                dispatch_changes(source_id, dispatchers.clone(), changes).await?;
+                                dispatch_changes(source_id, &base, changes).await?;
                             }
                         }
                     }
@@ -524,11 +520,7 @@ async fn process_apply_object(
     config: &KubernetesSourceConfig,
     target: &WatchTarget,
     obj: DynamicObject,
-    dispatchers: &Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
+    base: &SourceBase,
     seen_uids: &mut HashSet<String>,
 ) -> Result<()> {
     let uid = extract_uid(&obj).ok_or_else(|| anyhow!("Apply event missing metadata.uid"))?;
@@ -540,17 +532,13 @@ async fn process_apply_object(
         build_update_changes(source_id, &target.kind, &obj, config)?
     };
 
-    dispatch_changes(source_id, dispatchers.clone(), changes).await?;
+    dispatch_changes(source_id, base, changes).await?;
     Ok(())
 }
 
 async fn dispatch_changes(
     source_id: &str,
-    dispatchers: Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
+    base: &SourceBase,
     changes: Vec<drasi_core::models::SourceChange>,
 ) -> Result<()> {
     for change in changes {
@@ -562,7 +550,7 @@ async fn dispatch_changes(
             chrono::Utc::now(),
             profile,
         );
-        SourceBase::dispatch_from_task(dispatchers.clone(), wrapper, source_id).await?;
+        base.dispatch_event(wrapper).await?;
     }
     Ok(())
 }

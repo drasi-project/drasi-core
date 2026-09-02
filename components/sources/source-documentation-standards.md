@@ -241,6 +241,15 @@ Each source should have tests for:
 5. **Config**: Test serialization, deserialization with defaults, validation
 6. **Event Transformation**: Test conversion from input format to SourceChange
 7. **Error Handling**: Test error cases and error messages
+8. **Sequence Stamping**: Add at least one test asserting that every event a
+   source emits carries a framework-assigned, strictly increasing `sequence`
+   (`1, 2, 3, ...`) — including when durability is **disabled**. Sources dispatch
+   through an owned `SourceBase` obtained via `clone_shared()` and call
+   [`dispatch_event`](#dispatching-from-a-background-task) so the framework stamps
+   the sequence; a regression that drops back to an unstamped dispatch path would
+   leave `sequence = None` and must be caught here. See
+   `components/sources/{http,grpc,application}/tests/wal_integration.rs`
+   (`test_*_sequence_stamped_without_durability`) for the canonical pattern.
 
 ### Test Organization
 

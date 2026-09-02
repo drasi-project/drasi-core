@@ -101,7 +101,7 @@ use crate::types::{parse_delta_changes, DataverseChange};
 ///
 /// # Fields
 ///
-/// - `base`: Common source functionality (dispatchers, status, lifecycle)
+/// - `base`: Common source functionality (base, status, lifecycle)
 /// - `config`: Dataverse-specific configuration (connection, entities, polling)
 pub struct DataverseSource {
     /// Base source implementation providing common functionality.
@@ -243,15 +243,7 @@ impl DataverseSource {
         entity_set_name: String,
         select: Option<String>,
         client: Arc<DataverseClient>,
-        dispatchers: Arc<
-            tokio::sync::RwLock<
-                Vec<
-                    Box<
-                        dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync,
-                    >,
-                >,
-            >,
-        >,
+        base: SourceBase,
         state_store: Option<Arc<dyn drasi_lib::StateStoreProvider>>,
         mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
         min_interval_ms: u64,
@@ -333,7 +325,7 @@ impl DataverseSource {
                 &entity_name,
                 &client,
                 delta_link.as_deref(),
-                &dispatchers,
+                &base,
             )
             .await
             {
@@ -419,15 +411,7 @@ impl DataverseSource {
         entity_name: &str,
         client: &DataverseClient,
         delta_link: Option<&str>,
-        dispatchers: &Arc<
-            tokio::sync::RwLock<
-                Vec<
-                    Box<
-                        dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync,
-                    >,
-                >,
-            >,
-        >,
+        base: &SourceBase,
     ) -> Result<(Option<String>, usize)> {
         let delta_link =
             delta_link.ok_or_else(|| anyhow::anyhow!("No delta link available for polling"))?;
@@ -471,9 +455,7 @@ impl DataverseSource {
                 profiling,
             );
 
-            if let Err(e) =
-                SourceBase::dispatch_from_task(dispatchers.clone(), wrapper, source_id).await
-            {
+            if let Err(e) = base.dispatch_event(wrapper).await {
                 log::error!("[{source_id}] Failed to dispatch change for {entity_name}: {e}");
             }
         }
@@ -693,7 +675,7 @@ impl Source for DataverseSource {
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
         let shutdown_tx = Arc::new(shutdown_tx);
 
-        let dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let state_store = self.base.state_store().await;
         let source_id = self.base.id.clone();
 
@@ -728,7 +710,7 @@ impl Source for DataverseSource {
             let source_id = source_id.clone();
             let entity_name = entity_name.clone();
             let client = client.clone();
-            let dispatchers = dispatchers.clone();
+            let base = base.clone_shared();
             let state_store = state_store.clone();
             let shutdown_rx = shutdown_tx.subscribe();
             let min_interval_ms = self.config.min_interval_ms;
@@ -751,7 +733,7 @@ impl Source for DataverseSource {
                         entity_set_name,
                         select,
                         client,
-                        dispatchers,
+                        base,
                         state_store,
                         shutdown_rx,
                         min_interval_ms,

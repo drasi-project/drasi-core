@@ -127,7 +127,7 @@ impl Source for CloudflareRadarSource {
         let source_id = self.base.id.clone();
         let config = self.config.clone();
         let client = self.client.clone();
-        let dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let state_store = self.state_store.read().await.clone();
 
         let task = tokio::spawn(async move {
@@ -135,7 +135,7 @@ impl Source for CloudflareRadarSource {
                 &source_id,
                 config,
                 client,
-                dispatchers,
+                base,
                 state_store,
                 shutdown_rx,
             )
@@ -416,11 +416,7 @@ async fn polling_loop(
     source_id: &str,
     config: CloudflareRadarConfig,
     client: Client,
-    dispatchers: Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
+    base: SourceBase,
     state_store: Option<Arc<dyn StateStoreProvider>>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<()> {
@@ -443,42 +439,42 @@ async fn polling_loop(
                 };
 
                 if config.categories.outages {
-                    if let Err(err) = poll_outages(source_id, &config, &client, &dispatchers, &mut state, emit_changes, min_timestamp).await {
+                    if let Err(err) = poll_outages(source_id, &config, &client, &base, &mut state, emit_changes, min_timestamp).await {
                         warn!("[{source_id}] Outages poll failed: {err}");
                     }
                 }
                 if config.categories.bgp_hijacks {
-                    if let Err(err) = poll_bgp_hijacks(source_id, &config, &client, &dispatchers, &mut state, emit_changes, min_timestamp).await {
+                    if let Err(err) = poll_bgp_hijacks(source_id, &config, &client, &base, &mut state, emit_changes, min_timestamp).await {
                         warn!("[{source_id}] BGP hijacks poll failed: {err}");
                     }
                 }
                 if config.categories.bgp_leaks {
-                    if let Err(err) = poll_bgp_leaks(source_id, &config, &client, &dispatchers, &mut state, emit_changes, min_timestamp).await {
+                    if let Err(err) = poll_bgp_leaks(source_id, &config, &client, &base, &mut state, emit_changes, min_timestamp).await {
                         warn!("[{source_id}] BGP leaks poll failed: {err}");
                     }
                 }
                 if config.categories.http_traffic {
-                    if let Err(err) = poll_http_summary(source_id, &config, &client, &dispatchers, &mut state, emit_changes).await {
+                    if let Err(err) = poll_http_summary(source_id, &config, &client, &base, &mut state, emit_changes).await {
                         warn!("[{source_id}] HTTP traffic poll failed: {err}");
                     }
                 }
                 if config.categories.attacks_l7 {
-                    if let Err(err) = poll_attack_l7_summary(source_id, &config, &client, &dispatchers, &mut state, emit_changes).await {
+                    if let Err(err) = poll_attack_l7_summary(source_id, &config, &client, &base, &mut state, emit_changes).await {
                         warn!("[{source_id}] L7 attacks poll failed: {err}");
                     }
                 }
                 if config.categories.attacks_l3 {
-                    if let Err(err) = poll_attack_l3_summary(source_id, &config, &client, &dispatchers, &mut state, emit_changes).await {
+                    if let Err(err) = poll_attack_l3_summary(source_id, &config, &client, &base, &mut state, emit_changes).await {
                         warn!("[{source_id}] L3 attacks poll failed: {err}");
                     }
                 }
                 if config.categories.domain_rankings {
-                    if let Err(err) = poll_domain_rankings(source_id, &config, &client, &dispatchers, &mut state, emit_changes).await {
+                    if let Err(err) = poll_domain_rankings(source_id, &config, &client, &base, &mut state, emit_changes).await {
                         warn!("[{source_id}] Domain rankings poll failed: {err}");
                     }
                 }
                 if config.categories.dns {
-                    if let Err(err) = poll_dns_top_locations(source_id, &config, &client, &dispatchers, &mut state, emit_changes).await {
+                    if let Err(err) = poll_dns_top_locations(source_id, &config, &client, &base, &mut state, emit_changes).await {
                         warn!("[{source_id}] DNS poll failed: {err}");
                     }
                 }
@@ -567,11 +563,7 @@ async fn poll_outages(
     source_id: &str,
     config: &CloudflareRadarConfig,
     client: &Client,
-    dispatchers: &Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
+    base: &SourceBase,
     state: &mut PollingState,
     emit_changes: bool,
     min_timestamp: Option<i64>,
@@ -605,22 +597,22 @@ async fn poll_outages(
             if should_emit {
                 let changes =
                     map_outage(source_id, &outage_id, &outage, ChangeAction::Insert, true);
-                dispatch_changes(source_id, dispatchers, changes).await?;
+                dispatch_changes(source_id, base, changes).await?;
             }
         } else if state.seen_outage_ids.get(&outage_id) != Some(&outage) && should_emit {
             let changes = map_outage(source_id, &outage_id, &outage, ChangeAction::Update, false);
-            dispatch_changes(source_id, dispatchers, changes).await?;
+            dispatch_changes(source_id, base, changes).await?;
 
             // Delete old relationships and insert new ones
             if let Some(old_outage) = state.seen_outage_ids.get(&outage_id) {
                 let old_rels = relation_element_ids_for_outage(&outage_id, old_outage);
                 let del_changes = delete_relations(source_id, &old_rels);
-                dispatch_changes(source_id, dispatchers, del_changes).await?;
+                dispatch_changes(source_id, base, del_changes).await?;
             }
             let new_rels = map_outage(source_id, &outage_id, &outage, ChangeAction::Insert, true);
             // Skip the first element (the node itself) and dispatch only relations/shared nodes
             if new_rels.len() > 1 {
-                dispatch_changes(source_id, dispatchers, new_rels[1..].to_vec()).await?;
+                dispatch_changes(source_id, base, new_rels[1..].to_vec()).await?;
             }
         }
     }
@@ -636,10 +628,10 @@ async fn poll_outages(
         for (id, outage) in removed {
             let rel_ids = relation_element_ids_for_outage(&id, &outage);
             let rel_changes = delete_relations(source_id, &rel_ids);
-            dispatch_changes(source_id, dispatchers, rel_changes).await?;
+            dispatch_changes(source_id, base, rel_changes).await?;
 
             let changes = map_outage(source_id, &id, &outage, ChangeAction::Delete, false);
-            dispatch_changes(source_id, dispatchers, changes).await?;
+            dispatch_changes(source_id, base, changes).await?;
         }
     }
 
@@ -651,11 +643,7 @@ async fn poll_bgp_hijacks(
     source_id: &str,
     config: &CloudflareRadarConfig,
     client: &Client,
-    dispatchers: &Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
+    base: &SourceBase,
     state: &mut PollingState,
     emit_changes: bool,
     min_timestamp: Option<i64>,
@@ -694,21 +682,21 @@ async fn poll_bgp_hijacks(
             if !state.seen_hijack_ids.contains_key(&event.id) {
                 if should_emit {
                     let changes = map_hijack(source_id, &event, ChangeAction::Insert, true);
-                    dispatch_changes(source_id, dispatchers, changes).await?;
+                    dispatch_changes(source_id, base, changes).await?;
                 }
             } else if state.seen_hijack_ids.get(&event.id) != Some(&event) && should_emit {
                 let changes = map_hijack(source_id, &event, ChangeAction::Update, false);
-                dispatch_changes(source_id, dispatchers, changes).await?;
+                dispatch_changes(source_id, base, changes).await?;
 
                 // Delete old relationships and insert new ones
                 if let Some(old_event) = state.seen_hijack_ids.get(&event.id) {
                     let old_rels = relation_element_ids_for_hijack(old_event);
                     let del_changes = delete_relations(source_id, &old_rels);
-                    dispatch_changes(source_id, dispatchers, del_changes).await?;
+                    dispatch_changes(source_id, base, del_changes).await?;
                 }
                 let new_rels = map_hijack(source_id, &event, ChangeAction::Insert, true);
                 if new_rels.len() > 1 {
-                    dispatch_changes(source_id, dispatchers, new_rels[1..].to_vec()).await?;
+                    dispatch_changes(source_id, base, new_rels[1..].to_vec()).await?;
                 }
             }
         }
@@ -726,10 +714,10 @@ async fn poll_bgp_hijacks(
             if let Some(old_event) = state.seen_hijack_ids.get(&id) {
                 let rel_ids = relation_element_ids_for_hijack(old_event);
                 let rel_changes = delete_relations(source_id, &rel_ids);
-                dispatch_changes(source_id, dispatchers, rel_changes).await?;
+                dispatch_changes(source_id, base, rel_changes).await?;
 
                 let changes = map_hijack(source_id, old_event, ChangeAction::Delete, false);
-                dispatch_changes(source_id, dispatchers, changes).await?;
+                dispatch_changes(source_id, base, changes).await?;
             }
         }
     }
@@ -742,11 +730,7 @@ async fn poll_bgp_leaks(
     source_id: &str,
     config: &CloudflareRadarConfig,
     client: &Client,
-    dispatchers: &Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
+    base: &SourceBase,
     state: &mut PollingState,
     emit_changes: bool,
     min_timestamp: Option<i64>,
@@ -782,21 +766,21 @@ async fn poll_bgp_leaks(
             if !state.seen_leak_ids.contains_key(&event.id) {
                 if should_emit {
                     let changes = map_leak(source_id, &event, ChangeAction::Insert, true);
-                    dispatch_changes(source_id, dispatchers, changes).await?;
+                    dispatch_changes(source_id, base, changes).await?;
                 }
             } else if state.seen_leak_ids.get(&event.id) != Some(&event) && should_emit {
                 let changes = map_leak(source_id, &event, ChangeAction::Update, false);
-                dispatch_changes(source_id, dispatchers, changes).await?;
+                dispatch_changes(source_id, base, changes).await?;
 
                 // Delete old relationships and insert new ones
                 if let Some(old_event) = state.seen_leak_ids.get(&event.id) {
                     let old_rels = relation_element_ids_for_leak(old_event);
                     let del_changes = delete_relations(source_id, &old_rels);
-                    dispatch_changes(source_id, dispatchers, del_changes).await?;
+                    dispatch_changes(source_id, base, del_changes).await?;
                 }
                 let new_rels = map_leak(source_id, &event, ChangeAction::Insert, true);
                 if new_rels.len() > 1 {
-                    dispatch_changes(source_id, dispatchers, new_rels[1..].to_vec()).await?;
+                    dispatch_changes(source_id, base, new_rels[1..].to_vec()).await?;
                 }
             }
         }
@@ -814,10 +798,10 @@ async fn poll_bgp_leaks(
             if let Some(old_event) = state.seen_leak_ids.get(&id) {
                 let rel_ids = relation_element_ids_for_leak(old_event);
                 let rel_changes = delete_relations(source_id, &rel_ids);
-                dispatch_changes(source_id, dispatchers, rel_changes).await?;
+                dispatch_changes(source_id, base, rel_changes).await?;
 
                 let changes = map_leak(source_id, old_event, ChangeAction::Delete, false);
-                dispatch_changes(source_id, dispatchers, changes).await?;
+                dispatch_changes(source_id, base, changes).await?;
             }
         }
     }
@@ -830,11 +814,7 @@ async fn poll_http_summary(
     source_id: &str,
     config: &CloudflareRadarConfig,
     client: &Client,
-    dispatchers: &Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
+    base: &SourceBase,
     state: &mut PollingState,
     emit_changes: bool,
 ) -> Result<()> {
@@ -865,7 +845,7 @@ async fn poll_http_summary(
             let node_id = format!("http-traffic-{}", normalize_id(series));
             let change =
                 map_http_summary(source_id, &node_id, series, summary, action, effective_from);
-            dispatch_changes(source_id, dispatchers, vec![change]).await?;
+            dispatch_changes(source_id, base, vec![change]).await?;
         }
     }
 
@@ -877,11 +857,7 @@ async fn poll_attack_l7_summary(
     source_id: &str,
     config: &CloudflareRadarConfig,
     client: &Client,
-    dispatchers: &Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
+    base: &SourceBase,
     state: &mut PollingState,
     emit_changes: bool,
 ) -> Result<()> {
@@ -912,7 +888,7 @@ async fn poll_attack_l7_summary(
             let node_id = format!("attack-l7-{}", normalize_id(series));
             let change =
                 map_attack_l7_summary(source_id, &node_id, series, summary, action, effective_from);
-            dispatch_changes(source_id, dispatchers, vec![change]).await?;
+            dispatch_changes(source_id, base, vec![change]).await?;
         }
     }
 
@@ -924,11 +900,7 @@ async fn poll_attack_l3_summary(
     source_id: &str,
     config: &CloudflareRadarConfig,
     client: &Client,
-    dispatchers: &Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
+    base: &SourceBase,
     state: &mut PollingState,
     emit_changes: bool,
 ) -> Result<()> {
@@ -959,7 +931,7 @@ async fn poll_attack_l3_summary(
             let node_id = format!("attack-l3-{}", normalize_id(series));
             let change =
                 map_attack_l3_summary(source_id, &node_id, series, summary, action, effective_from);
-            dispatch_changes(source_id, dispatchers, vec![change]).await?;
+            dispatch_changes(source_id, base, vec![change]).await?;
         }
     }
 
@@ -971,11 +943,7 @@ async fn poll_domain_rankings(
     source_id: &str,
     config: &CloudflareRadarConfig,
     client: &Client,
-    dispatchers: &Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
+    base: &SourceBase,
     state: &mut PollingState,
     emit_changes: bool,
 ) -> Result<()> {
@@ -1001,7 +969,7 @@ async fn poll_domain_rankings(
                     ChangeAction::Insert
                 };
                 let changes = map_domain_ranking(source_id, domain, action, effective_from);
-                dispatch_changes(source_id, dispatchers, changes).await?;
+                dispatch_changes(source_id, base, changes).await?;
             }
         }
     }
@@ -1020,7 +988,7 @@ async fn poll_domain_rankings(
         for removed in removed_domains {
             let changes =
                 map_domain_ranking(source_id, &removed, ChangeAction::Delete, effective_from);
-            dispatch_changes(source_id, dispatchers, changes).await?;
+            dispatch_changes(source_id, base, changes).await?;
         }
     }
 
@@ -1032,11 +1000,7 @@ async fn poll_dns_top_locations(
     source_id: &str,
     config: &CloudflareRadarConfig,
     client: &Client,
-    dispatchers: &Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
+    base: &SourceBase,
     state: &mut PollingState,
     emit_changes: bool,
 ) -> Result<()> {
@@ -1067,7 +1031,7 @@ async fn poll_dns_top_locations(
             };
             if let Some(locations) = result.top.values().next() {
                 let change = map_dns_summary(source_id, &domain, locations, action, effective_from);
-                dispatch_changes(source_id, dispatchers, vec![change]).await?;
+                dispatch_changes(source_id, base, vec![change]).await?;
             }
         }
 
@@ -1079,11 +1043,7 @@ async fn poll_dns_top_locations(
 
 async fn dispatch_changes(
     source_id: &str,
-    dispatchers: &Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
+    base: &SourceBase,
     changes: Vec<SourceChange>,
 ) -> Result<()> {
     for change in changes {
@@ -1092,12 +1052,7 @@ async fn dispatch_changes(
         profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
         let wrapper =
             SourceEventWrapper::with_profiling(source_id.to_string(), event, Utc::now(), profiling);
-        drasi_lib::sources::base::SourceBase::dispatch_from_task(
-            dispatchers.clone(),
-            wrapper,
-            source_id,
-        )
-        .await?;
+        base.dispatch_event(wrapper).await?;
     }
     Ok(())
 }
