@@ -246,13 +246,20 @@ pub trait Query: Send + Sync {
         None
     }
 
-    /// Whether this query's index and output (outbox/snapshot) are volatile.
+    /// Whether a durable reaction can safely resume from this query after a crash.
     ///
-    /// Volatile queries do not survive a process crash, so a durable reaction
-    /// (`Reaction::is_durable() == true`) must not subscribe to them.
+    /// Returns `true` when the query's outbox and snapshot do not survive process
+    /// restart. A durable reaction (`Reaction::is_durable() == true`) must not
+    /// subscribe to a volatile query: its checkpoint would be unrecoverable.
     ///
-    /// Default is `true` (fail-safe): implementations that do not override this
-    /// are treated as volatile.
+    /// `DrasiQuery` derives this from the query's storage backend (the same
+    /// backend persists the index, outbox, and snapshot). Custom `Query`
+    /// implementations that persist outbox/snapshot across restarts **must**
+    /// override this to return `false`.
+    ///
+    /// Default is `true` (fail-safe), matching other defaulted `Query` capability
+    /// methods: an undeclared implementation is treated as volatile rather than
+    /// silently pairing a durable reaction with a non-durable query.
     fn is_volatile(&self) -> bool {
         true
     }
@@ -1142,11 +1149,8 @@ impl Query for DrasiQuery {
         let session_control: Option<Arc<dyn drasi_core::interface::SessionControl>>;
 
         if let Some(backend_ref) = self
-            .base
-            .config
-            .storage_backend
-            .as_ref()
-            .or_else(|| self.index_factory.default_backend())
+            .index_factory
+            .effective_backend(self.base.config.storage_backend.as_ref())
         {
             debug!(
                 "Query '{}' using storage backend: {:?}",
@@ -3004,16 +3008,8 @@ impl Query for DrasiQuery {
     }
 
     fn is_volatile(&self) -> bool {
-        match self
-            .base
-            .config
-            .storage_backend
-            .as_ref()
-            .or_else(|| self.index_factory.default_backend())
-        {
-            Some(backend_ref) => self.index_factory.is_volatile(backend_ref),
-            None => true,
-        }
+        self.index_factory
+            .is_volatile_for_query(self.base.config.storage_backend.as_ref())
     }
 
     async fn release_persistent_handles(&self) {
@@ -3340,10 +3336,9 @@ impl QueryManager {
         // Resolve the effective backend the same way as start-up so that queries
         // relying on the instance-wide default backend are also cleaned up.
         if let Some(config) = query_config {
-            if let Some(backend_ref) = config
-                .storage_backend
-                .as_ref()
-                .or_else(|| self.index_factory.default_backend())
+            if let Some(backend_ref) = self
+                .index_factory
+                .effective_backend(config.storage_backend.as_ref())
             {
                 if !self.index_factory.is_volatile(backend_ref) {
                     info!("Query '{id}' removed — clearing persistent indexes and checkpoints");

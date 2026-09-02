@@ -298,7 +298,17 @@ impl ReactionManager {
                     )
                 })?;
                 for query_id in &query_ids {
-                    let query = query_provider.get_query_instance(query_id).await?;
+                    let query = query_provider
+                        .get_query_instance(query_id)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Reaction '{}' cannot start (is_durable=true): \
+                             subscribed query '{}' was not found or is unavailable: {e}",
+                                reaction.id(),
+                                query_id
+                            )
+                        })?;
                     if query.is_volatile() {
                         self.lifecycle_metrics.record_startup_rejection(
                             StartupRejectionReason::DurableOnVolatileQuery,
@@ -1812,6 +1822,15 @@ mod tests {
     // §3 Startup validation tests
     // ========================================================================
 
+    #[test]
+    fn query_is_volatile_defaults_to_true_when_not_overridden() {
+        let query = MockQuery::new(0, 0);
+        assert!(
+            crate::queries::Query::is_volatile(&query),
+            "Query trait default must treat undeclared implementations as volatile"
+        );
+    }
+
     #[tokio::test]
     async fn validation_rejects_durable_without_durable_store() {
         let core = build_core().await;
@@ -1830,6 +1849,32 @@ mod tests {
         assert!(
             msg.contains("durable"),
             "Error should mention 'durable': {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn validation_rejects_durable_store_before_volatile_query() {
+        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let core = build_core_with_store(store).await;
+        core.start().await.unwrap();
+
+        let reaction = MockReaction::new("r_both", vec!["q1".into()]).with_durable(true);
+        core.add_reaction(reaction).await.unwrap();
+
+        let result = core.start_reaction("r_both").await;
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("r_both"),
+            "Error should name the reaction id: {msg}"
+        );
+        assert!(
+            msg.contains("state store") && msg.contains("volatile"),
+            "Rule 1 (volatile store) must fire before Rule 2 (volatile query): {msg}"
+        );
+        assert!(
+            !msg.contains("subscribed query"),
+            "Rule 2 query check must not run when Rule 1 already rejected: {msg}"
         );
     }
 
