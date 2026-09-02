@@ -356,6 +356,15 @@ pub(crate) fn reconcile_durable_output(
     }
 
     let outbox_hwm = retained.last().copied();
+    if stored == 0 && (live_row_count > 0 || outbox_hwm.is_some()) {
+        return Err(
+            DurableOutputInconsistency::SequenceZeroAgainstDurableOutput {
+                live_rows: live_row_count,
+                outbox_hwm,
+            },
+        );
+    }
+
     if let Some(hwm) = outbox_hwm {
         if hwm > stored {
             return Err(DurableOutputInconsistency::OutboxAheadOfSequence {
@@ -363,15 +372,6 @@ pub(crate) fn reconcile_durable_output(
                 outbox_hwm: hwm,
             });
         }
-    }
-
-    if stored == 0 && live_row_count > 0 {
-        return Err(
-            DurableOutputInconsistency::SequenceZeroAgainstDurableOutput {
-                live_rows: live_row_count,
-                outbox_hwm,
-            },
-        );
     }
 
     // stored >= outbox_hwm (or outbox empty). Do not lower to the outbox HWM.
@@ -1025,6 +1025,18 @@ mod tests {
             DurableOutputInconsistency::SequenceZeroAgainstDurableOutput {
                 live_rows: 2,
                 outbox_hwm: None,
+            }
+        );
+    }
+
+    #[test]
+    fn reconcile_sequence_zero_against_outbox_is_inconsistent() {
+        let err = reconcile_durable_output(None, &[1, 2, 3], 0, true).unwrap_err();
+        assert_eq!(
+            err,
+            DurableOutputInconsistency::SequenceZeroAgainstDurableOutput {
+                live_rows: 0,
+                outbox_hwm: Some(3),
             }
         );
     }
