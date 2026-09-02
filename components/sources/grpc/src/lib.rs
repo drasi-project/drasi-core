@@ -363,7 +363,7 @@ impl Source for GrpcSource {
         let service = GrpcSourceService {
             source_id: self.base.id.clone(),
             instance_id: instance_id.clone(),
-            dispatchers: self.base.dispatchers.clone(),
+            base: self.base.clone_shared(),
             wal: wal_ref.clone(),
         };
 
@@ -529,12 +529,8 @@ struct GrpcSourceService {
     source_id: String,
     /// Instance ID for log routing isolation
     instance_id: String,
-    /// Shared dispatchers for sending events to subscribers
-    dispatchers: Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
+    /// Owned SourceBase for dispatching events (stamps sequences, tracks positions)
+    base: SourceBase,
     /// WAL provider for durable persistence (if durability is enabled)
     wal: Option<Arc<dyn WalProvider>>,
 }
@@ -597,14 +593,8 @@ impl SourceService for GrpcSourceService {
 
                     debug!("[{}] Processing gRPC event: {:?}", self.source_id, &wrapper);
 
-                    // Dispatch via helper
-                    if let Err(e) = SourceBase::dispatch_from_task(
-                        self.dispatchers.clone(),
-                        wrapper,
-                        &self.source_id,
-                    )
-                    .await
-                    {
+                    // Dispatch via owned base (stamps sequence when not WAL-set)
+                    if let Err(e) = self.base.dispatch_event(wrapper).await {
                         debug!(
                             "[{}] Failed to dispatch (no subscribers): {}",
                             self.source_id, e
@@ -649,7 +639,7 @@ impl SourceService for GrpcSourceService {
         let mut stream = request.into_inner();
         let source_id = self.source_id.clone();
         let instance_id = self.instance_id.clone();
-        let dispatchers = self.dispatchers.clone();
+        let base = self.base.clone_shared();
         let wal = self.wal.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
@@ -720,14 +710,8 @@ impl SourceService for GrpcSourceService {
                                     Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                             }
 
-                            // Dispatch via helper
-                            if let Err(e) = SourceBase::dispatch_from_task(
-                                dispatchers.clone(),
-                                wrapper.clone(),
-                                &source_id,
-                            )
-                            .await
-                            {
+                            // Dispatch via owned base (stamps sequence when not WAL-set)
+                            if let Err(e) = base.dispatch_event(wrapper).await {
                                 debug!("[{source_id}] Failed to dispatch (no subscribers): {e}");
                             }
 

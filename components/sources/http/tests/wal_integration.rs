@@ -399,3 +399,60 @@ async fn test_http_deprovision_removes_wal() {
     let count = wal.event_count("http-deprov").await;
     assert!(count.is_err(), "WAL should be deleted after deprovision");
 }
+
+/// With durability **disabled**, the HTTP source must still stamp a
+/// framework-assigned monotonic sequence on every emitted event (issue #828).
+/// Before the migration to `dispatch_event`, task-emitted events left
+/// `sequence = None` whenever the WAL was off.
+#[tokio::test]
+#[ignore]
+async fn test_http_sequence_stamped_without_durability() {
+    let port = 19307u16;
+    // No `.with_durability(...)` → durability is OFF, so no WAL sequence source.
+    let source = HttpSourceBuilder::new("http-noseq")
+        .with_host("127.0.0.1")
+        .with_port(port)
+        .build()
+        .unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    let wal = Arc::new(RedbWalProvider::new(tmp.path()));
+    init_source_with_wal(&source, wal.clone(), "http-noseq").await;
+
+    source.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Durability is off, so the source does not support replay / persist.
+    assert!(!source.supports_replay());
+
+    let mut rx = subscribe_fresh(&source, "http-noseq").await;
+
+    let client = Client::new();
+    let event_count = 5u64;
+    for i in 1..=event_count {
+        post_event(
+            &client,
+            port,
+            "http-noseq",
+            &format!("n{i}"),
+            &format!("Name{i}"),
+        )
+        .await;
+    }
+
+    // Every emitted event must carry a framework-stamped, strictly increasing
+    // sequence (1, 2, 3, ...), even though the WAL is disabled.
+    for expected_seq in 1..=event_count {
+        let event = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("timed out waiting for event")
+            .expect("event stream closed unexpectedly");
+        assert_eq!(
+            event.sequence,
+            Some(expected_seq),
+            "event {expected_seq} should carry a framework sequence with durability off"
+        );
+    }
+
+    source.stop().await.unwrap();
+}
