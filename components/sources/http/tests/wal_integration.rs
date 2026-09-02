@@ -33,6 +33,21 @@ use drasi_wal_redb::RedbWalProvider;
 use reqwest::Client;
 use tempfile::TempDir;
 
+/// Reserve an ephemeral TCP port to avoid collisions under parallel test
+/// execution (so the test can run in CI without a hard-coded port).
+///
+/// Binds `127.0.0.1:0`, reads the assigned port, and drops the listener so the
+/// source can bind it. There is a tiny TOCTOU window, but this is far more
+/// robust than a fixed port. Mirrors the dashboard reaction tests.
+fn reserve_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0") // DevSkim: ignore DS137138
+        .expect("failed to reserve an ephemeral port");
+    listener
+        .local_addr()
+        .expect("failed to read reserved port")
+        .port()
+}
+
 /// Helper: create a DurabilityConfig with the given policy
 fn durability_config(
     enabled: bool,
@@ -405,9 +420,9 @@ async fn test_http_deprovision_removes_wal() {
 /// Before the migration to `dispatch_event`, task-emitted events left
 /// `sequence = None` whenever the WAL was off.
 #[tokio::test]
-#[ignore]
 async fn test_http_sequence_stamped_without_durability() {
-    let port = 19307u16;
+    // Ephemeral port so this can run in CI without colliding with other tests.
+    let port = reserve_port();
     // No `.with_durability(...)` → durability is OFF, so no WAL sequence source.
     let source = HttpSourceBuilder::new("http-noseq")
         .with_host("127.0.0.1")

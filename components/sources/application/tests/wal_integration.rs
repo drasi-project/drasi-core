@@ -658,7 +658,6 @@ async fn test_resume_from_position_end_to_end() {
 /// Before the migration to `dispatch_event`, task-emitted events left
 /// `sequence = None` whenever the WAL was off.
 #[tokio::test]
-#[ignore]
 async fn test_sequence_stamped_without_durability() {
     // durability: None → WAL off, so no source-supplied sequence.
     let config = app_config(None);
