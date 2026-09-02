@@ -815,6 +815,102 @@ mod integration {
         base
     }
 
+    struct FailAlwaysStore {
+        inner: drasi_lib::MemoryStateStoreProvider,
+    }
+
+    impl FailAlwaysStore {
+        fn new() -> Self {
+            Self {
+                inner: drasi_lib::MemoryStateStoreProvider::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl drasi_lib::StateStoreProvider for FailAlwaysStore {
+        async fn get(
+            &self,
+            store_id: &str,
+            key: &str,
+        ) -> drasi_lib::StateStoreResult<Option<Vec<u8>>> {
+            self.inner.get(store_id, key).await
+        }
+        async fn set(
+            &self,
+            store_id: &str,
+            key: &str,
+            _value: Vec<u8>,
+        ) -> drasi_lib::StateStoreResult<()> {
+            let _ = (store_id, key);
+            Err(drasi_lib::StateStoreError::StorageError(
+                "injected write failure".into(),
+            ))
+        }
+        async fn delete(&self, store_id: &str, key: &str) -> drasi_lib::StateStoreResult<bool> {
+            self.inner.delete(store_id, key).await
+        }
+        async fn contains_key(
+            &self,
+            store_id: &str,
+            key: &str,
+        ) -> drasi_lib::StateStoreResult<bool> {
+            self.inner.contains_key(store_id, key).await
+        }
+        async fn get_many(
+            &self,
+            store_id: &str,
+            keys: &[&str],
+        ) -> drasi_lib::StateStoreResult<HashMap<String, Vec<u8>>> {
+            self.inner.get_many(store_id, keys).await
+        }
+        async fn set_many(
+            &self,
+            store_id: &str,
+            entries: &[(&str, &[u8])],
+        ) -> drasi_lib::StateStoreResult<()> {
+            let _ = (store_id, entries);
+            Err(drasi_lib::StateStoreError::StorageError(
+                "injected write failure".into(),
+            ))
+        }
+        async fn delete_many(
+            &self,
+            store_id: &str,
+            keys: &[&str],
+        ) -> drasi_lib::StateStoreResult<usize> {
+            self.inner.delete_many(store_id, keys).await
+        }
+        async fn clear_store(&self, store_id: &str) -> drasi_lib::StateStoreResult<usize> {
+            self.inner.clear_store(store_id).await
+        }
+        async fn list_keys(&self, store_id: &str) -> drasi_lib::StateStoreResult<Vec<String>> {
+            self.inner.list_keys(store_id).await
+        }
+        async fn store_exists(&self, store_id: &str) -> drasi_lib::StateStoreResult<bool> {
+            self.inner.store_exists(store_id).await
+        }
+        async fn key_count(&self, store_id: &str) -> drasi_lib::StateStoreResult<usize> {
+            self.inner.key_count(store_id).await
+        }
+    }
+
+    async fn running_base_with_failing_store() -> ReactionBase {
+        let base = running_base();
+        let store = std::sync::Arc::new(FailAlwaysStore::new());
+        let (graph, _rx) = drasi_lib::component_graph::ComponentGraph::new("test-instance");
+        let context = drasi_lib::context::ReactionRuntimeContext::new(
+            "test-instance",
+            "test-grpc",
+            Some(store),
+            graph.update_sender(),
+            None,
+        );
+        base.initialize(context).await;
+        set_running(&base).await;
+        base
+    }
+
     /// Build a `QueryResult` with an explicit per-query sequence and `count`
     /// Add diffs.
     fn query_result_seq(query_id: &str, count: usize, sequence: u64) -> QueryResult {
@@ -966,6 +1062,172 @@ mod integration {
             Some(7),
             "adaptive runner must persist the acked sequence"
         );
+
+        let _ = sd_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fixed_runner_fail_stops_on_checkpoint_write_failure_under_strict() {
+        let server = test_server::start().await;
+        let base = running_base_with_failing_store().await;
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        let config = config_for(
+            server.endpoint.clone(),
+            BatchingConfig::Fixed {
+                batch_size: 2,
+                batch_flush_timeout_ms: 10_000,
+            },
+        );
+        let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
+            reaction_name: "test-grpc".to_string(),
+            batch_size: 2,
+            batch_flush_timeout_ms: 10_000,
+            base: base.clone_shared(),
+            config,
+            shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
+        }));
+
+        base.enqueue_query_result(query_result_seq("q1", 2, 7))
+            .await
+            .unwrap();
+        let total = server
+            .recorder
+            .wait_for_items(2, Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            total, 2,
+            "side effect must complete before the checkpoint write"
+        );
+        assert!(
+            wait_for_status(&base, ComponentStatus::Error, Duration::from_secs(5)).await,
+            "Strict must fail-stop when write_checkpoint fails after ack"
+        );
+        assert!(
+            base.read_checkpoint("q1").await.unwrap().is_none(),
+            "failed checkpoint write must not advance the durable sequence"
+        );
+
+        let _ = sd_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fixed_runner_stays_running_on_checkpoint_write_failure_under_auto_skip_gap() {
+        let server = test_server::start().await;
+        let base = running_base_with_failing_store().await;
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        let config = config_for(
+            server.endpoint.clone(),
+            BatchingConfig::Fixed {
+                batch_size: 2,
+                batch_flush_timeout_ms: 10_000,
+            },
+        );
+        let handle = tokio::spawn(runner_fixed::run(FixedRunnerParams {
+            reaction_name: "test-grpc".to_string(),
+            batch_size: 2,
+            batch_flush_timeout_ms: 10_000,
+            base: base.clone_shared(),
+            config,
+            shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::AutoSkipGap,
+        }));
+
+        base.enqueue_query_result(query_result_seq("q1", 2, 7))
+            .await
+            .unwrap();
+        let total = server
+            .recorder
+            .wait_for_items(2, Duration::from_secs(5))
+            .await;
+        assert_eq!(total, 2);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            base.get_status().await,
+            ComponentStatus::Running,
+            "AutoSkipGap must not fail-stop on a checkpoint write failure"
+        );
+        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
+
+        let _ = sd_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adaptive_runner_fail_stops_on_checkpoint_write_failure_under_strict() {
+        let server = test_server::start().await;
+        let base = running_base_with_failing_store().await;
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        let config = config_for(
+            server.endpoint.clone(),
+            BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
+        );
+        let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
+            reaction_name: "test-grpc".to_string(),
+            adaptive: AdaptiveBatchConfig::default(),
+            base: base.clone_shared(),
+            config,
+            shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::Strict,
+        }));
+
+        base.enqueue_query_result(query_result_seq("q1", 2, 7))
+            .await
+            .unwrap();
+        let total = server
+            .recorder
+            .wait_for_items(2, Duration::from_secs(5))
+            .await;
+        assert_eq!(total, 2);
+        assert!(
+            wait_for_status(&base, ComponentStatus::Error, Duration::from_secs(5)).await,
+            "adaptive Strict must fail-stop when write_checkpoint fails after ack"
+        );
+        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
+
+        let _ = sd_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adaptive_runner_stays_running_on_checkpoint_write_failure_under_auto_skip_gap() {
+        let server = test_server::start().await;
+        let base = running_base_with_failing_store().await;
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        let config = config_for(
+            server.endpoint.clone(),
+            BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
+        );
+        let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
+            reaction_name: "test-grpc".to_string(),
+            adaptive: AdaptiveBatchConfig::default(),
+            base: base.clone_shared(),
+            config,
+            shutdown_rx: sd_rx,
+            checkpoints: CheckpointState::load(&base).await,
+            policy: drasi_lib::ReactionRecoveryPolicy::AutoSkipGap,
+        }));
+
+        base.enqueue_query_result(query_result_seq("q1", 2, 7))
+            .await
+            .unwrap();
+        let total = server
+            .recorder
+            .wait_for_items(2, Duration::from_secs(5))
+            .await;
+        assert_eq!(total, 2);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
+        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
 
         let _ = sd_tx.send(());
         let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
