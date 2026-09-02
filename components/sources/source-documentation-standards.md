@@ -249,7 +249,12 @@ Each source should have tests for:
    the sequence; a regression that drops back to an unstamped dispatch path would
    leave `sequence = None` and must be caught here. See
    `components/sources/{http,grpc,application}/tests/wal_integration.rs`
-   (`test_*_sequence_stamped_without_durability`) for the canonical pattern.
+   (`test_*_sequence_stamped_without_durability`) for durability-gated sources,
+   and `components/sources/mock/src/tests.rs`
+   (`test_generated_events_have_monotonic_sequence`) or
+   `components/sources/sqlite/tests/integration_test.rs`
+   (`sqlite_emitted_changes_have_monotonic_sequence`) for volatile / CDC-style
+   sources, as canonical patterns.
 
 ### Test Organization
 
