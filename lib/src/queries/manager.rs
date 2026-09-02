@@ -363,8 +363,10 @@ impl StagedOutputSequence {
 /// Stage result sequence, outbox, and live results into the active session.
 ///
 /// Must run after index writes (and source checkpoint, when present) and before
-/// `SessionControl::commit`. Volatile queries have no writers and skip this.
-/// Any failure aborts the outer transaction.
+/// `SessionControl::commit`. Volatile queries skip this: they have no outbox or
+/// live-results writers, and their checkpoint store (if present) is the
+/// in-memory fallback, which is not durable. Any failure aborts the outer
+/// transaction.
 #[allow(clippy::too_many_arguments)]
 async fn stage_durable_query_output(
     diffs: &[ResultDiff],
@@ -378,7 +380,13 @@ async fn stage_durable_query_output(
     if diffs.is_empty() {
         return Ok(None);
     }
-    if outbox_writer.is_none() && live_results_writer.is_none() && checkpoint_store.is_none() {
+    // `checkpoint_store` is always populated (in-memory fallback for volatile
+    // queries). Only persist when there is durable output I/O: outbox, live
+    // results, or a persistent checkpoint store.
+    let checkpoint_persistent = checkpoint_store
+        .as_ref()
+        .is_some_and(|store| store.is_persistent());
+    if outbox_writer.is_none() && live_results_writer.is_none() && !checkpoint_persistent {
         return Ok(None);
     }
 
