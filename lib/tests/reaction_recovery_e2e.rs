@@ -277,25 +277,24 @@ impl Reaction for RecordingReaction {
     async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
         let query_id = result.query_id.clone();
         let sequence = result.sequence;
-        let config_hash = self
-            .base
-            .read_checkpoint(&query_id)
-            .await?
-            .map(|checkpoint| checkpoint.config_hash)
-            .unwrap_or(0);
 
         self.tx
             .send(result)
             .map_err(|_| anyhow::anyhow!("Recording reaction receiver closed"))?;
-        self.base
-            .write_checkpoint(
-                &query_id,
-                &ReactionCheckpoint {
-                    sequence,
-                    config_hash,
-                },
-            )
-            .await?;
+
+        // Advance only after the host has seeded a checkpoint. Writing
+        // config_hash=0 here would clobber the real hash persisted at startup.
+        if let Some(previous) = self.base.read_checkpoint(&query_id).await? {
+            self.base
+                .write_checkpoint(
+                    &query_id,
+                    &ReactionCheckpoint {
+                        sequence,
+                        config_hash: previous.config_hash,
+                    },
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -346,13 +345,23 @@ async fn wait_for_query_result_count(
     expected: usize,
 ) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut last_count = None;
     loop {
         match core.get_query_results(query_id).await {
             Ok(results) if results.len() == expected => return Ok(()),
-            Ok(_) | Err(_) => {}
+            Ok(results) if results.len() > expected => {
+                anyhow::bail!(
+                    "Query {query_id} produced {} results, expected {expected}",
+                    results.len()
+                );
+            }
+            Ok(results) => last_count = Some(results.len()),
+            Err(_) => {}
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("Query {query_id} did not reach {expected} results within timeout");
+            anyhow::bail!(
+                "Query {query_id} did not reach {expected} results within timeout (last count: {last_count:?})"
+            );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -910,27 +919,29 @@ async fn test_fresh_trigger_does_not_replay_retained_history() -> Result<()> {
         false,
     );
     core.add_reaction(reaction).await?;
-
-    let historical = receiver.wait_for_count(1, Duration::from_millis(500)).await;
-    assert!(
-        historical.is_empty(),
-        "Fresh trigger replayed historical sequences: {:?}",
-        historical
-            .iter()
-            .map(|result| result.sequence)
-            .collect::<Vec<_>>()
-    );
+    for _ in 0..50 {
+        if core.get_reaction_status("rec").await? == ComponentStatus::Running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     insert_person(&handle, "p3", "Charlie", 35).await?;
-    let live = receiver.wait_for_count(1, Duration::from_secs(5)).await;
-    assert_eq!(live.len(), 1, "Fresh trigger should receive new results");
-    assert_eq!(live[0].sequence, 3);
+    let mut received = receiver.wait_for_count(1, Duration::from_secs(5)).await;
+    received.extend(receiver.wait_for_count(1, Duration::from_secs(1)).await);
+    let sequences: Vec<_> = received.iter().map(|result| result.sequence).collect();
+    assert_eq!(
+        sequences,
+        vec![3],
+        "Fresh trigger should receive only the live result, got {sequences:?}"
+    );
 
     core.stop().await?;
     Ok(())
 }
 
-/// A durable reaction cannot recover if its query output is volatile.
+/// A durable reaction cannot recover if its query output is volatile
+/// (the query does not retain results, so history cannot be replayed).
 #[tokio::test]
 async fn test_durable_reaction_rejects_volatile_query() -> Result<()> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
