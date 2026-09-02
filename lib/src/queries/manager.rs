@@ -1149,8 +1149,11 @@ impl Query for DrasiQuery {
         let session_control: Option<Arc<dyn drasi_core::interface::SessionControl>>;
 
         if let Some(backend_ref) = self
-            .index_factory
-            .effective_backend(self.base.config.storage_backend.as_ref())
+            .base
+            .config
+            .storage_backend
+            .as_ref()
+            .or_else(|| self.index_factory.default_backend())
         {
             debug!(
                 "Query '{}' using storage backend: {:?}",
@@ -3336,9 +3339,10 @@ impl QueryManager {
         // Resolve the effective backend the same way as start-up so that queries
         // relying on the instance-wide default backend are also cleaned up.
         if let Some(config) = query_config {
-            if let Some(backend_ref) = self
-                .index_factory
-                .effective_backend(config.storage_backend.as_ref())
+            if let Some(backend_ref) = config
+                .storage_backend
+                .as_ref()
+                .or_else(|| self.index_factory.default_backend())
             {
                 if !self.index_factory.is_volatile(backend_ref) {
                     info!("Query '{id}' removed — clearing persistent indexes and checkpoints");
