@@ -33,8 +33,8 @@ use drasi_lib::{
 };
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -155,14 +155,14 @@ struct RecordingReaction {
     durable: bool,
     snapshot_on_fresh: bool,
     bootstrap_count: Arc<AtomicUsize>,
-    bootstrap_as_of: Arc<Mutex<Option<u64>>>,
+    bootstrap_as_of: Arc<AtomicU64>,
 }
 
 /// Receiver side of the recording reaction.
 struct RecordingReceiver {
     rx: mpsc::UnboundedReceiver<QueryResult>,
     bootstrap_count: Arc<AtomicUsize>,
-    bootstrap_as_of: Arc<Mutex<Option<u64>>>,
+    bootstrap_as_of: Arc<AtomicU64>,
 }
 
 impl RecordingReceiver {
@@ -194,7 +194,10 @@ impl RecordingReceiver {
     }
 
     fn bootstrap_as_of(&self) -> Option<u64> {
-        *self.bootstrap_as_of.lock().expect("bootstrap_as_of lock")
+        match self.bootstrap_as_of.load(Ordering::SeqCst) {
+            u64::MAX => None,
+            sequence => Some(sequence),
+        }
     }
 }
 
@@ -222,7 +225,7 @@ fn recording_reaction_with_auto_start(
         .with_auto_start(auto_start);
     let base = ReactionBase::new(params);
     let bootstrap_count = Arc::new(AtomicUsize::new(0));
-    let bootstrap_as_of = Arc::new(Mutex::new(None));
+    let bootstrap_as_of = Arc::new(AtomicU64::new(u64::MAX));
     (
         RecordingReaction {
             base,
@@ -341,7 +344,8 @@ impl Reaction for RecordingReaction {
             .await
             .map_err(|error| anyhow::anyhow!("fetch reaction bootstrap snapshot: {error}"))?;
         self.bootstrap_count.fetch_add(1, Ordering::SeqCst);
-        *self.bootstrap_as_of.lock().expect("bootstrap_as_of lock") = Some(snapshot.as_of_sequence);
+        self.bootstrap_as_of
+            .store(snapshot.as_of_sequence, Ordering::SeqCst);
         Ok(())
     }
 }
