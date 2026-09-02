@@ -1254,6 +1254,72 @@ async fn save_state(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+    };
+    use std::sync::Arc;
+
+    fn insert_node(source_id: &str, id: &str) -> SourceChange {
+        SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new(source_id, id),
+                    labels: Arc::from([Arc::<str>::from("Outage")]),
+                    effective_from: 0,
+                },
+                properties: ElementPropertyMap::new(),
+            },
+        }
+    }
+
+    /// Every change routed through a poll cycle's dispatch path
+    /// (`dispatch_changes` → `SourceBase::dispatch_event`) must carry a
+    /// framework-assigned, strictly increasing `sequence` (issue #828).
+    /// Cloudflare Radar has no durability, so before migrating from the unstamped
+    /// `dispatch_from_task` helper these events had `sequence = None`. This drives
+    /// `dispatch_changes` directly with stubbed poll-cycle changes (no HTTP client
+    /// needed) and asserts the emitted sequences are monotonic.
+    #[tokio::test]
+    async fn dispatch_changes_stamps_monotonic_sequence() {
+        let source_id = "cloudflare-radar-seq-source";
+        let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+        let mut rx = base.test_subscribe().await;
+
+        let changes = vec![
+            insert_node(source_id, "outage-1"),
+            insert_node(source_id, "outage-2"),
+            insert_node(source_id, "outage-3"),
+        ];
+        let expected = changes.len() as u64;
+
+        dispatch_changes(source_id, &base, changes)
+            .await
+            .expect("dispatch_changes should succeed");
+
+        let mut sequences = Vec::new();
+        for _ in 0..expected {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+                .await
+                .expect("timed out waiting for event")
+                .expect("event stream closed unexpectedly");
+            sequences.push(
+                event
+                    .sequence
+                    .expect("dispatched change must carry a framework sequence"),
+            );
+        }
+
+        assert_eq!(
+            sequences,
+            vec![1, 2, 3],
+            "poll-cycle changes must carry unique, strictly increasing sequences"
+        );
+    }
+}
+
 /// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(

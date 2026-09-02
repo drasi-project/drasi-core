@@ -535,7 +535,7 @@ async fn process_apply_object(
     Ok(())
 }
 
-async fn dispatch_changes(
+pub(crate) async fn dispatch_changes(
     source_id: &str,
     base: &SourceBase,
     changes: Vec<drasi_core::models::SourceChange>,

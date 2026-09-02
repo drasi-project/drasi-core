@@ -101,7 +101,7 @@ use crate::types::{parse_delta_changes, DataverseChange};
 ///
 /// # Fields
 ///
-/// - `base`: Common source functionality (base, status, lifecycle)
+/// - `base`: Common source functionality (dispatchers, status, lifecycle)
 /// - `config`: Dataverse-specific configuration (connection, entities, polling)
 pub struct DataverseSource {
     /// Base source implementation providing common functionality.
@@ -441,9 +441,22 @@ impl DataverseSource {
         let change_count = all_changes.len();
 
         // Dispatch changes (matching platform's channel.Writer.WriteAsync pattern)
-        for change in &all_changes {
+        Self::dispatch_changes(source_id, entity_name, base, &all_changes).await;
+
+        Ok((final_delta_link, change_count))
+    }
+
+    /// Convert and dispatch a batch of Dataverse changes through the owned
+    /// `SourceBase` so the framework stamps a monotonic `sequence` on each event
+    /// (issue #828).
+    async fn dispatch_changes(
+        source_id: &str,
+        entity_name: &str,
+        base: &SourceBase,
+        changes: &[DataverseChange],
+    ) {
+        for change in changes {
             let source_change = Self::convert_to_source_change(source_id, change);
-            let timestamp = chrono::Utc::now();
 
             let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
             profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
@@ -451,7 +464,7 @@ impl DataverseSource {
             let wrapper = SourceEventWrapper::with_profiling(
                 source_id.to_string(),
                 SourceEvent::Change(source_change),
-                timestamp,
+                chrono::Utc::now(),
                 profiling,
             );
 
@@ -459,8 +472,6 @@ impl DataverseSource {
                 log::error!("[{source_id}] Failed to dispatch change for {entity_name}: {e}");
             }
         }
-
-        Ok((final_delta_link, change_count))
     }
 
     /// Convert a Dataverse change to a Drasi SourceChange.
@@ -1478,6 +1489,63 @@ mod tests {
                 }
                 _ => panic!("Expected List"),
             }
+        }
+
+        /// Every change routed through the entity-worker dispatch path
+        /// (`dispatch_changes` → `SourceBase::dispatch_event`) must carry a
+        /// framework-assigned, strictly increasing `sequence` (issue #828).
+        /// Dataverse has no durability, so before migrating from the unstamped
+        /// `dispatch_from_task` helper these events had `sequence = None`. This
+        /// drives `dispatch_changes` with fabricated delta changes (no live
+        /// Dataverse HTTP call needed) and asserts the emitted sequences are
+        /// monotonic.
+        #[tokio::test]
+        async fn dispatch_changes_stamps_monotonic_sequence() {
+            use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+
+            let source_id = "dataverse-seq-source";
+            let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+            let mut rx = base.test_subscribe().await;
+
+            // A realistic delta batch: two upserts and one delete.
+            let changes = vec![
+                DataverseChange::NewOrUpdated {
+                    id: "a-1".to_string(),
+                    entity_name: "account".to_string(),
+                    attributes: serde_json::Map::new(),
+                },
+                DataverseChange::NewOrUpdated {
+                    id: "a-2".to_string(),
+                    entity_name: "account".to_string(),
+                    attributes: serde_json::Map::new(),
+                },
+                DataverseChange::Deleted {
+                    id: "a-1".to_string(),
+                    entity_name: "account".to_string(),
+                },
+            ];
+            let expected = changes.len() as u64;
+
+            DataverseSource::dispatch_changes(source_id, "account", &base, &changes).await;
+
+            let mut sequences = Vec::new();
+            for _ in 0..expected {
+                let event = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+                    .await
+                    .expect("timed out waiting for event")
+                    .expect("event stream closed unexpectedly");
+                sequences.push(
+                    event
+                        .sequence
+                        .expect("dispatched change must carry a framework sequence"),
+                );
+            }
+
+            assert_eq!(
+                sequences,
+                vec![1, 2, 3],
+                "delta changes must carry unique, strictly increasing sequences"
+            );
         }
     }
 

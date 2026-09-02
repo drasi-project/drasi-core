@@ -756,6 +756,70 @@ mod tests {
         let latest = latest_event_timestamp(events.iter()).expect("latest timestamp");
         assert_eq!(latest, "2026-01-02T07:00:00Z");
     }
+
+    /// Every change routed through the poll-loop dispatch path
+    /// (`dispatch_change` → `SourceBase::dispatch_event`) must carry a
+    /// framework-assigned, strictly increasing `sequence` (issue #828). Open511
+    /// has no durability, so before migrating from the unstamped
+    /// `dispatch_from_task` helper these events had `sequence = None`. This drives
+    /// `dispatch_change` directly with stubbed poll-cycle changes and asserts the
+    /// emitted sequences are monotonic.
+    #[tokio::test]
+    async fn dispatch_change_stamps_monotonic_sequence() {
+        use drasi_core::models::{
+            Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+        };
+        use std::sync::Arc;
+
+        fn insert_node(source_id: &str, id: &str) -> SourceChange {
+            SourceChange::Insert {
+                element: Element::Node {
+                    metadata: ElementMetadata {
+                        reference: ElementReference::new(source_id, id),
+                        labels: Arc::from([Arc::<str>::from("Event")]),
+                        effective_from: 0,
+                    },
+                    properties: ElementPropertyMap::new(),
+                },
+            }
+        }
+
+        let source_id = "open511-seq-source";
+        let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+        let mut rx = base.test_subscribe().await;
+
+        // Simulate a poll cycle emitting several changes one at a time, as the
+        // real poll loop does.
+        let change_count = 4u64;
+        for i in 1..=change_count {
+            dispatch_change(
+                &base,
+                source_id,
+                insert_node(source_id, &format!("event-{i}")),
+            )
+            .await
+            .expect("dispatch_change should succeed");
+        }
+
+        let mut sequences = Vec::new();
+        for _ in 0..change_count {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+                .await
+                .expect("timed out waiting for event")
+                .expect("event stream closed unexpectedly");
+            sequences.push(
+                event
+                    .sequence
+                    .expect("dispatched change must carry a framework sequence"),
+            );
+        }
+
+        assert_eq!(
+            sequences,
+            vec![1, 2, 3, 4],
+            "poll-loop changes must carry unique, strictly increasing sequences"
+        );
+    }
 }
 
 /// Dynamic plugin entry point.

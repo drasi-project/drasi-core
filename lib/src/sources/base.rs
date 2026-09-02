@@ -174,7 +174,17 @@ pub struct SourceBase {
     /// This is a vector of dispatchers that send source events to all registered
     /// subscribers (queries). When a source produces a change event, it broadcasts
     /// it to all dispatchers in this vector.
-    pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    ///
+    /// Intentionally `pub(crate)`: source authors must **not** dispatch through
+    /// the raw dispatcher list, because that bypasses the framework's monotonic
+    /// sequence stamping and `source_position` validation. Dispatch via
+    /// [`dispatch_event`](Self::dispatch_event),
+    /// [`dispatch_events_batch`](Self::dispatch_events_batch), or
+    /// [`dispatch_source_change`](Self::dispatch_source_change) — and use
+    /// [`clone_shared`](Self::clone_shared) to move an owned `SourceBase` into a
+    /// background task.
+    pub(crate) dispatchers:
+        Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<SourceRuntimeContext>>>,
     /// State store provider (extracted from context for convenience)
