@@ -1323,3 +1323,66 @@ async fn test_durable_reaction_rejects_after_query_backend_becomes_volatile() ->
     core.stop().await?;
     Ok(())
 }
+
+/// Rule 1 (volatile store) fires before Rule 2 (volatile query) when both apply.
+#[tokio::test]
+async fn test_durable_reaction_rejects_volatile_store_before_volatile_query() -> Result<()> {
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+    let state_store = Arc::new(MemoryStateStoreProvider::new());
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("durable-both-volatile")
+            .with_source(mock_source)
+            .with_query(volatile_person_query("q1"))
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    let (reaction, _receiver) = recording_reaction_with_auto_start(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        true,
+        false,
+        false,
+    );
+    core.add_reaction(reaction).await?;
+
+    let result = core.start_reaction("rec").await;
+    assert!(
+        result.is_err(),
+        "Durable reaction unexpectedly started with volatile store and volatile query"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("rec"),
+        "Error should name the reaction id: {msg}"
+    );
+    assert!(
+        msg.contains("state store") && msg.contains("volatile"),
+        "Rule 1 (volatile store) must fire before Rule 2 (volatile query): {msg}"
+    );
+    assert!(
+        !msg.contains("subscribed query"),
+        "Rule 2 query check must not run when Rule 1 already rejected: {msg}"
+    );
+    assert_ne!(
+        core.get_reaction_status("rec").await?,
+        ComponentStatus::Running
+    );
+    let lifecycle = core.get_lifecycle_metrics().await?;
+    assert!(
+        lifecycle.startup_rejection_durable_on_volatile >= 1,
+        "Expected durable-on-volatile-store rejection, got {}",
+        lifecycle.startup_rejection_durable_on_volatile
+    );
+    assert_eq!(
+        lifecycle.startup_rejection_durable_on_volatile_query, 0,
+        "Query rejection must not be recorded when store check already failed"
+    );
+
+    core.stop().await?;
+    Ok(())
+}
