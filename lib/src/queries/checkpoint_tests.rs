@@ -2097,6 +2097,7 @@ mod tests {
         inner: PersistentInMemoryCheckpointStore,
         fail_read_config_hash: std::sync::atomic::AtomicBool,
         fail_clear_checkpoints: std::sync::atomic::AtomicBool,
+        fail_write_result_sequence: std::sync::atomic::AtomicBool,
     }
 
     impl FailableCheckpointStore {
@@ -2105,6 +2106,7 @@ mod tests {
                 inner: PersistentInMemoryCheckpointStore::new(),
                 fail_read_config_hash: std::sync::atomic::AtomicBool::new(false),
                 fail_clear_checkpoints: std::sync::atomic::AtomicBool::new(false),
+                fail_write_result_sequence: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -2115,6 +2117,11 @@ mod tests {
 
         fn set_fail_clear_checkpoints(&self, fail: bool) {
             self.fail_clear_checkpoints
+                .store(fail, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn set_fail_write_result_sequence(&self, fail: bool) {
+            self.fail_write_result_sequence
                 .store(fail, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -2198,6 +2205,25 @@ mod tests {
             sequence: u64,
         ) -> Result<(), drasi_core::interface::IndexError> {
             self.inner.stage_result_sequence(query_id, sequence).await
+        }
+
+        async fn write_result_sequence(
+            &self,
+            query_id: &str,
+            sequence: u64,
+        ) -> Result<(), drasi_core::interface::IndexError> {
+            if self
+                .fail_write_result_sequence
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(drasi_core::interface::IndexError::other(
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "injected write_result_sequence failure",
+                    ),
+                ));
+            }
+            self.inner.write_result_sequence(query_id, sequence).await
         }
     }
 
@@ -2421,6 +2447,54 @@ mod tests {
             stored_hash,
             Some(99999),
             "Old config hash should remain when clear_checkpoints fails on mismatch"
+        );
+    }
+
+    /// Test: when wiping output fails on config hash mismatch, start is aborted
+    /// rather than proceeding against leftover durable output.
+    #[tokio::test]
+    async fn test_reset_output_failure_on_hash_mismatch_aborts_start() {
+        let plugin = Arc::new(FailablePlugin::new());
+        let (query_manager, source_manager, graph) =
+            create_test_env_with_failable_backend(plugin.clone()).await;
+        let mut event_rx = graph.read().await.subscribe();
+
+        let source = CheckpointTestSource::new("wipe-fail-src").unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
+        source_manager
+            .start_source("wipe-fail-src".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "wipe-fail-src",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let store = plugin.get_store("wipe-fail-query").await;
+        store.write_config_hash(99999).await.unwrap();
+        store
+            .stage_checkpoint("wipe-fail-src", 10, None)
+            .await
+            .unwrap();
+        store.set_fail_write_result_sequence(true);
+
+        let config =
+            create_persistent_query_config("wipe-fail-query", vec!["wipe-fail-src".to_string()]);
+        add_query(&query_manager, &graph, config).await.unwrap();
+        let result = query_manager
+            .start_query("wipe-fail-query".to_string())
+            .await;
+        assert!(
+            result.is_err(),
+            "start_query should fail when reset_output fails on config hash mismatch"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("wipe durable output") || msg.contains("result sequence"),
+            "Error should mention the output wipe failure: {msg}"
         );
     }
 }
