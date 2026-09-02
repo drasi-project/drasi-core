@@ -41,7 +41,7 @@ use crate::component_graph::ComponentStatusHandle;
 use crate::context::ReactionRuntimeContext;
 use crate::identity::IdentityProvider;
 use crate::reactions::checkpoint::ReactionCheckpoint;
-use crate::reactions::common::checkpoint_state::{persist_with_recovery_policy, FailureAction};
+use crate::reactions::common::checkpoint_state::{CheckpointState, FailureAction};
 use crate::recovery::ReactionRecoveryPolicy;
 use crate::state_store::StateStoreProvider;
 
@@ -502,10 +502,10 @@ impl ReactionBase {
     ///    sequence. A crash between (3) and (4) replays the sequence on
     ///    restart (at-least-once). Writing the checkpoint first would
     ///    silently become at-most-once.
-    /// 5. Handler failure does **not** advance the durable checkpoint.
-    ///    `Strict` / `AutoReset` set the reaction to `Error` and stop so
-    ///    sequence `N` is retried on the next start. `AutoSkipGap` logs,
-    ///    advances past `N`, and continues.
+    /// 5. Handler failure does **not** advance the durable checkpoint under
+    ///    `Strict` / `AutoReset`, which set the reaction to `Error` and stop
+    ///    so sequence `N` is retried on the next start. `AutoSkipGap` instead
+    ///    logs, advances past `N`, and continues.
     /// 6. `write_checkpoint` failure follows [`ReactionRecoveryPolicy`]:
     ///    `Strict` errors out, `AutoReset` retries with bounded backoff
     ///    then errors, `AutoSkipGap` logs and continues.
@@ -518,7 +518,9 @@ impl ReactionBase {
     ///   query's `config_hash` when advancing the sequence.
     /// * `handler` — async function receiving a [`QueryResult`].  Return
     ///   `Ok(())` to advance the checkpoint. `Err` leaves the durable
-    ///   checkpoint unchanged (see recovery policy above).
+    ///   checkpoint unchanged under `Strict`/`AutoReset`; under `AutoSkipGap`
+    ///   the checkpoint is advanced past the failed sequence (see recovery
+    ///   policy above).
     pub async fn run_standard_loop<F, Fut>(
         &self,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -529,7 +531,8 @@ impl ReactionBase {
         F: Fn(Arc<crate::channels::QueryResult>) -> Fut + Send + Sync,
         Fut: std::future::Future<Output = Result<()>> + Send,
     {
-        let mut checkpoints = initial_checkpoints;
+        let mut checkpoints = CheckpointState::load(self).await;
+        checkpoints.seed(initial_checkpoints);
         let policy = self
             .recovery_policy
             .unwrap_or(ReactionRecoveryPolicy::Strict);
@@ -583,14 +586,14 @@ impl ReactionBase {
                                  advancing checkpoint per AutoSkipGap",
                                 self.id, query_id, seq
                             );
-                            self.persist_loop_checkpoint(query_id, seq, &mut checkpoints, policy)
+                            self.persist_after_side_effect(&mut checkpoints, query_id, seq, policy)
                                 .await?;
                             continue;
                         }
                     }
                 }
                 Ok(()) => {
-                    self.persist_loop_checkpoint(query_id, seq, &mut checkpoints, policy)
+                    self.persist_after_side_effect(&mut checkpoints, query_id, seq, policy)
                         .await?;
                 }
             }
@@ -599,43 +602,31 @@ impl ReactionBase {
         Ok(())
     }
 
-    /// Persist `sequence` for `query_id` after a successful (or AutoSkipGap-
-    /// skipped) side effect. Preserves `config_hash` from the store, falling
-    /// back to the in-memory map. Write failures follow `policy`.
-    async fn persist_loop_checkpoint(
+    /// Persist `sequence` for `query_id` through [`CheckpointState`] after a
+    /// successful (or AutoSkipGap-skipped) side effect. Write failures follow
+    /// `policy`; `Err` is always fatal because the policy has already been
+    /// applied inside `advance_with_policy`.
+    async fn persist_after_side_effect(
         &self,
+        checkpoints: &mut CheckpointState,
         query_id: &str,
         sequence: u64,
-        checkpoints: &mut std::collections::HashMap<String, ReactionCheckpoint>,
         policy: ReactionRecoveryPolicy,
     ) -> Result<()> {
-        let config_hash = match self.read_checkpoint(query_id).await {
-            Ok(Some(stored)) => stored.config_hash,
-            _ => checkpoints
-                .get(query_id)
-                .map(|cp| cp.config_hash)
-                .unwrap_or(0),
-        };
-        let cp = ReactionCheckpoint {
-            sequence,
-            config_hash,
-        };
-        if self.state_store().await.is_some() {
-            if let Err(e) =
-                persist_with_recovery_policy(policy, || self.write_checkpoint(query_id, &cp)).await
-            {
-                self.set_status(
-                    ComponentStatus::Error,
-                    Some(format!(
-                        "Checkpoint write failed for query '{query_id}' (seq {sequence}); \
-                         stopped per recovery policy"
-                    )),
-                )
-                .await;
-                return Err(e);
-            }
+        if let Err(e) = checkpoints
+            .advance_with_policy(self, query_id, sequence, policy)
+            .await
+        {
+            self.set_status(
+                ComponentStatus::Error,
+                Some(format!(
+                    "Checkpoint write failed for query '{query_id}' (seq {sequence}); \
+                     stopped per recovery policy"
+                )),
+            )
+            .await;
+            return Err(e);
         }
-        checkpoints.insert(query_id.to_string(), cp);
         Ok(())
     }
 }
@@ -643,9 +634,76 @@ impl ReactionBase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use crate::state_store::{
+        MemoryStateStoreProvider, StateStoreError, StateStoreProvider, StateStoreResult,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    struct FailNWritesStore {
+        inner: MemoryStateStoreProvider,
+        remaining: AtomicU32,
+    }
+
+    impl FailNWritesStore {
+        fn new(failures: u32) -> Self {
+            Self {
+                inner: MemoryStateStoreProvider::new(),
+                remaining: AtomicU32::new(failures),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StateStoreProvider for FailNWritesStore {
+        async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+            self.inner.get(store_id, key).await
+        }
+        async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+            let left = self.remaining.load(Ordering::SeqCst);
+            if left > 0 {
+                self.remaining.fetch_sub(1, Ordering::SeqCst);
+                return Err(StateStoreError::StorageError("injected".into()));
+            }
+            self.inner.set(store_id, key, value).await
+        }
+        async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+            self.inner.delete(store_id, key).await
+        }
+        async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+            self.inner.contains_key(store_id, key).await
+        }
+        async fn get_many(
+            &self,
+            store_id: &str,
+            keys: &[&str],
+        ) -> StateStoreResult<std::collections::HashMap<String, Vec<u8>>> {
+            self.inner.get_many(store_id, keys).await
+        }
+        async fn set_many(
+            &self,
+            store_id: &str,
+            entries: &[(&str, &[u8])],
+        ) -> StateStoreResult<()> {
+            self.inner.set_many(store_id, entries).await
+        }
+        async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
+            self.inner.delete_many(store_id, keys).await
+        }
+        async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
+            self.inner.clear_store(store_id).await
+        }
+        async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
+            self.inner.list_keys(store_id).await
+        }
+        async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
+            self.inner.store_exists(store_id).await
+        }
+        async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
+            self.inner.key_count(store_id).await
+        }
+    }
 
     #[tokio::test]
     async fn test_reaction_base_creation() {
@@ -1322,6 +1380,79 @@ mod tests {
             }
             if tokio::time::Instant::now() >= deadline {
                 panic!("AutoSkipGap did not advance past the failed side effect");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let _ = base.stop_common().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
+
+        let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
+        assert_eq!(cp.sequence, 6);
+        assert_eq!(cp.config_hash, 42);
+        assert_ne!(base.get_status().await, ComponentStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn test_run_standard_loop_autoreset_retries_then_advances_checkpoint() {
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
+
+        let params = ReactionBaseParams::new("loop-reset", vec!["q1".to_string()])
+            .with_recovery_policy(ReactionRecoveryPolicy::AutoReset);
+        let base = ReactionBase::new(params);
+
+        let store: Arc<dyn StateStoreProvider> = Arc::new(FailNWritesStore::new(2));
+        let context = crate::context::ReactionRuntimeContext::new(
+            "test-instance",
+            "loop-reset",
+            Some(store),
+            update_tx,
+            None,
+        );
+        base.initialize(context).await;
+
+        let mut initial_checkpoints = std::collections::HashMap::new();
+        initial_checkpoints.insert(
+            "q1".to_string(),
+            ReactionCheckpoint {
+                sequence: 5,
+                config_hash: 42,
+            },
+        );
+
+        let result = crate::channels::QueryResult {
+            query_id: "q1".to_string(),
+            sequence: 6,
+            timestamp: chrono::Utc::now(),
+            results: vec![],
+            metadata: Default::default(),
+            profiling: None,
+        };
+        base.enqueue_query_result(result).await.unwrap();
+
+        let shutdown_rx = base.create_shutdown_channel().await;
+        let base_clone = base.clone_shared();
+        let loop_handle = tokio::spawn(async move {
+            base_clone
+                .run_standard_loop(shutdown_rx, initial_checkpoints, |_event| async { Ok(()) })
+                .await
+                .unwrap();
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let seq = base
+                .read_checkpoint("q1")
+                .await
+                .unwrap()
+                .map(|cp| cp.sequence)
+                .unwrap_or(0);
+            if seq >= 6 {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("AutoReset did not persist the checkpoint after bounded retries");
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
