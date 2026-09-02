@@ -1165,13 +1165,7 @@ impl Source for HttpSource {
         );
         tokio::spawn(
             async move {
-                Self::run_adaptive_batcher(
-                    batch_rx,
-                    base,
-                    adaptive_config,
-                    source_id.clone(),
-                )
-                .await
+                Self::run_adaptive_batcher(batch_rx, base, adaptive_config, source_id.clone()).await
             }
             .instrument(span),
         );

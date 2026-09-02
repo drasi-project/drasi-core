@@ -678,7 +678,7 @@ async fn test_sequence_stamped_without_durability() {
     let event_count = 5u64;
     for i in 1..=event_count {
         let props = PropertyMapBuilder::new()
-            .with_string("name", &format!("Name{i}"))
+            .with_string("name", format!("Name{i}"))
             .build();
         handle
             .send_node_insert(format!("node-{i}"), vec!["Person"], props)

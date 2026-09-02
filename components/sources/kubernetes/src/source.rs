@@ -127,8 +127,7 @@ impl Source for KubernetesSource {
         let task = tokio::spawn(
             async move {
                 let run_result =
-                    run_source_stream(&source_id, config, base, state_store, shutdown_rx)
-                        .await;
+                    run_source_stream(&source_id, config, base, state_store, shutdown_rx).await;
 
                 if let Err(e) = run_result {
                     error!("Kubernetes source task failed for '{source_id}': {e}");

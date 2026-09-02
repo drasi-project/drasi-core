@@ -412,8 +412,7 @@ impl ReplicationStream {
         wrapper
             .set_source_position(self.position_bytes_with_timestamp(self.current_event_timestamp));
 
-        SourceBase::dispatch_from_task(self.base.dispatchers.clone(), wrapper, &self.source_id)
-            .await
+        self.base.dispatch_event(wrapper).await
     }
 
     async fn flush_transaction(&mut self, header: &BinlogEventHeader) -> Result<()> {
@@ -433,12 +432,7 @@ impl ReplicationStream {
                     chrono::Utc::now(),
                 );
                 wrapper.set_source_position(position_bytes.clone());
-                SourceBase::dispatch_from_task(
-                    self.base.dispatchers.clone(),
-                    wrapper,
-                    &self.source_id,
-                )
-                .await?;
+                self.base.dispatch_event(wrapper).await?;
             }
         }
 

@@ -341,7 +341,7 @@ impl Source for SqliteSource {
             .collect::<HashMap<_, _>>();
 
         let source_id = self.base.id.clone();
-        let dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let instance_id = self
             .base
             .context()
@@ -370,10 +370,7 @@ impl Source for SqliteSource {
                         chrono::Utc::now(),
                         profiling,
                     );
-                    if let Err(err) =
-                        SourceBase::dispatch_from_task(dispatchers.clone(), wrapper, &source_id)
-                            .await
-                    {
+                    if let Err(err) = base.dispatch_event(wrapper).await {
                         log::debug!("failed dispatching sqlite change for '{source_id}': {err}");
                     }
                 }

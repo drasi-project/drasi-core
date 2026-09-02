@@ -131,15 +131,8 @@ impl Source for CloudflareRadarSource {
         let state_store = self.state_store.read().await.clone();
 
         let task = tokio::spawn(async move {
-            if let Err(err) = polling_loop(
-                &source_id,
-                config,
-                client,
-                base,
-                state_store,
-                shutdown_rx,
-            )
-            .await
+            if let Err(err) =
+                polling_loop(&source_id, config, client, base, state_store, shutdown_rx).await
             {
                 error!("[{source_id}] Polling loop exited with error: {err}");
             }

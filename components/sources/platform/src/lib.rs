@@ -715,15 +715,7 @@ impl PlatformSource {
         source_id: String,
         instance_id: String,
         platform_config: PlatformConfig,
-        dispatchers: Arc<
-            RwLock<
-                Vec<
-                    Box<
-                        dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync,
-                    >,
-                >,
-            >,
-        >,
+        base: SourceBase,
         reporter: ComponentStatusHandle,
     ) -> JoinHandle<()> {
         let source_id_for_span = source_id.clone();
@@ -844,12 +836,7 @@ impl PlatformSource {
                                                                     );
 
                                                                     // Dispatch via helper
-                                                                    if let Err(e) = SourceBase::dispatch_from_task(
-                                                                        dispatchers.clone(),
-                                                                        wrapper,
-                                                                        &source_id,
-                                                                    )
-                                                                    .await
+                                                                    if let Err(e) = base.dispatch_event(wrapper).await
                                                                     {
                                                                         debug!("[{source_id}] Failed to dispatch control event (no subscribers): {e}");
                                                                     } else {
@@ -904,12 +891,7 @@ impl PlatformSource {
                                                                     );
 
                                                                     // Dispatch via helper
-                                                                    if let Err(e) = SourceBase::dispatch_from_task(
-                                                                        dispatchers.clone(),
-                                                                        wrapper,
-                                                                        &source_id,
-                                                                    )
-                                                                    .await
+                                                                    if let Err(e) = base.dispatch_event(wrapper).await
                                                                     {
                                                                         debug!("[{source_id}] Failed to dispatch change (no subscribers): {e}");
                                                                     } else {
@@ -1124,7 +1106,7 @@ impl Source for PlatformSource {
             self.base.id.clone(),
             instance_id,
             platform_config,
-            self.base.dispatchers.clone(),
+            self.base.clone_shared(),
             self.base.status_handle(),
         )
         .await;

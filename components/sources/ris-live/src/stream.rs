@@ -46,7 +46,7 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 pub async fn run_stream_loop(
     source_id: String,
     config: RisLiveSourceConfig,
-    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: SourceBase,
     state_store: Option<Arc<dyn StateStoreProvider>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -64,7 +64,7 @@ pub async fn run_stream_loop(
         match run_single_connection(
             &source_id,
             &config,
-            &dispatchers,
+            &base,
             &state_store,
             &mut mapper,
             &mut last_persisted,
@@ -99,7 +99,7 @@ pub async fn run_stream_loop(
 async fn run_single_connection(
     source_id: &str,
     config: &RisLiveSourceConfig,
-    dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: &SourceBase,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
     mapper: &mut GraphMapper,
     last_persisted: &mut Instant,
@@ -137,7 +137,7 @@ async fn run_single_connection(
             frame = socket.next() => {
                 match frame {
                     Some(Ok(Message::Text(text))) => {
-                        process_text_frame(source_id, config, dispatchers, state_store, mapper, last_persisted, &text).await?;
+                        process_text_frame(source_id, config, base, state_store, mapper, last_persisted, &text).await?;
                     }
                     Some(Ok(Message::Binary(_))) => {}
                     Some(Ok(Message::Ping(payload))) => {
@@ -169,7 +169,7 @@ async fn run_single_connection(
 async fn process_text_frame(
     source_id: &str,
     config: &RisLiveSourceConfig,
-    dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: &SourceBase,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
     mapper: &mut GraphMapper,
     last_persisted: &mut Instant,
@@ -222,7 +222,7 @@ async fn process_text_frame(
 
             if !changes.is_empty() {
                 for change in changes {
-                    dispatch_change(source_id, dispatchers, change).await?;
+                    dispatch_change(source_id, base, change).await?;
                 }
                 if last_persisted.elapsed() >= PERSIST_INTERVAL {
                     persist_state(source_id, state_store, mapper.state()).await?;
@@ -242,7 +242,7 @@ async fn process_text_frame(
 
 async fn dispatch_change(
     source_id: &str,
-    dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: &SourceBase,
     change: drasi_core::models::SourceChange,
 ) -> Result<()> {
     let mut profiling = ProfilingMetadata::new();
@@ -255,7 +255,7 @@ async fn dispatch_change(
         profiling,
     );
 
-    SourceBase::dispatch_from_task(dispatchers.clone(), wrapper, source_id).await
+    base.dispatch_event(wrapper).await
 }
 
 fn ensure_crypto_provider() {
