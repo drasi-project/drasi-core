@@ -566,11 +566,12 @@ impl ReactionManager {
             Ok(cp)
         } else {
             // Fresh start without snapshot bootstrap must not fire side effects
-            // for retained history. Still call `fetch_outbox(0)` to learn the
-            // current head sequence, but do not enqueue any returned entries.
-            // The live gate then delivers only later sequences.
+            // for retained history. Ask for entries after `u64::MAX` so
+            // `fetch_outbox` returns only `latest_sequence` without cloning
+            // retained outbox entries. The live gate then delivers later
+            // sequences.
             metrics.record_fetch_outbox();
-            let seq = match query.fetch_outbox(0).await {
+            let seq = match query.fetch_outbox(u64::MAX).await {
                 Ok(resp) => {
                     info!(
                         "[{reaction_id}] Fresh start for query '{query_id}' — \
