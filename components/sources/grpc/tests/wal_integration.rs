@@ -27,9 +27,40 @@ use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::context::SourceRuntimeContext;
 use drasi_lib::wal::{CapacityPolicy, WalProvider};
 use drasi_lib::Source;
+use drasi_source_grpc::proto::{
+    source_service_client::SourceServiceClient, ChangeType, Element, ElementMetadata,
+    ElementReference, Node, SourceChange as ProtoSourceChange, SubmitEventRequest,
+};
 use drasi_source_grpc::{GrpcSource, GrpcSourceConfig};
 use drasi_wal_redb::RedbWalProvider;
 use tempfile::TempDir;
+
+/// Helper: build a `SubmitEventRequest` for an insert of a single node.
+fn insert_node_request(source_id: &str, element_id: &str) -> SubmitEventRequest {
+    use drasi_source_grpc::proto::element::Element as ProtoElementType;
+    use drasi_source_grpc::proto::source_change::Change;
+
+    SubmitEventRequest {
+        event: Some(ProtoSourceChange {
+            r#type: ChangeType::Insert as i32,
+            change: Some(Change::Element(Element {
+                element: Some(ProtoElementType::Node(Node {
+                    metadata: Some(ElementMetadata {
+                        reference: Some(ElementReference {
+                            source_id: source_id.to_string(),
+                            element_id: element_id.to_string(),
+                        }),
+                        labels: vec!["Person".to_string()],
+                        effective_from: 0,
+                    }),
+                    properties: None,
+                })),
+            })),
+            timestamp: None,
+            source_id: source_id.to_string(),
+        }),
+    }
+}
 
 /// Helper: create a DurabilityConfig with the given policy
 fn durability_config(
@@ -234,4 +265,77 @@ async fn test_grpc_deprovision_removes_wal() {
 
     let count = wal.event_count("grpc-deprov").await;
     assert!(count.is_err(), "WAL should be deleted after deprovision");
+}
+
+/// With durability **disabled**, the gRPC source must still stamp a
+/// framework-assigned monotonic sequence on every emitted event (issue #828).
+/// Before the migration to `dispatch_event`, task-emitted events left
+/// `sequence = None` whenever the WAL was off.
+#[tokio::test]
+#[ignore]
+async fn test_grpc_sequence_stamped_without_durability() {
+    let port = 19405u16;
+    // durability: None → WAL off, so no source-supplied sequence.
+    let config = GrpcSourceConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        endpoint: None,
+        timeout_ms: 5000,
+        durability: None,
+    };
+    let source = GrpcSource::new("grpc-noseq", config).unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    let wal = Arc::new(RedbWalProvider::new(tmp.path()));
+    init_source_with_wal(&source, wal.clone(), "grpc-noseq").await;
+
+    source.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Durability is off, so the source neither persists nor supports replay.
+    assert!(!source.supports_replay());
+
+    // Subscribe before submitting so the events are dispatched to us.
+    let settings = SourceSubscriptionSettings {
+        source_id: "grpc-noseq".to_string(),
+        query_id: "q1".to_string(),
+        enable_bootstrap: false,
+        nodes: HashSet::new(),
+        relations: HashSet::new(),
+        resume_sequence: None,
+        request_position_handle: true,
+        resume_from: None,
+    };
+    let resp = source.subscribe(settings).await.unwrap();
+    let mut rx = resp.receiver;
+
+    // Connect a real gRPC client and submit events over the wire.
+    let mut client = SourceServiceClient::connect(format!("http://127.0.0.1:{port}"))
+        .await
+        .expect("failed to connect gRPC client");
+
+    let event_count = 5u64;
+    for i in 1..=event_count {
+        let response = client
+            .submit_event(insert_node_request("grpc-noseq", &format!("n{i}")))
+            .await
+            .expect("submit_event RPC failed");
+        assert!(response.into_inner().success);
+    }
+
+    // Every emitted event must carry a framework-stamped, strictly increasing
+    // sequence (1, 2, 3, ...), even though the WAL is disabled.
+    for expected_seq in 1..=event_count {
+        let event = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("timed out waiting for event")
+            .expect("event stream closed unexpectedly");
+        assert_eq!(
+            event.sequence,
+            Some(expected_seq),
+            "event {expected_seq} should carry a framework sequence with durability off"
+        );
+    }
+
+    source.stop().await.unwrap();
 }
