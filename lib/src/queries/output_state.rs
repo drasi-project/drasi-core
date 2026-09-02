@@ -236,12 +236,20 @@ impl QueryOutputState {
     /// `max(current, as_of_sequence)`. Outbox entries are sorted and trimmed to
     /// `outbox_capacity`, keeping the newest. Callers must validate durable
     /// consistency with [`reconcile_durable_output`] before invoking this.
+    ///
+    /// Hydrate is a startup-only operation from empty state. A non-zero
+    /// `as_of_sequence` is a programming error (double-hydrate); debug builds
+    /// assert, and release builds still refuse to lower the sequence.
     pub fn hydrate(
         &mut self,
         results: im::HashMap<u64, serde_json::Value>,
         mut outbox: Vec<Arc<QueryResult>>,
         as_of_sequence: u64,
     ) {
+        debug_assert_eq!(
+            self.as_of_sequence, 0,
+            "hydrate must run once from empty QueryOutputState"
+        );
         outbox.sort_by_key(|result| result.sequence);
         if outbox.len() > self.outbox_capacity {
             let skip = outbox.len() - self.outbox_capacity;
@@ -294,14 +302,30 @@ pub enum DurableOutputInconsistency {
     #[error("failed to deserialize durable live row {row_signature}: {message}")]
     CorruptLiveRow { row_signature: u64, message: String },
     /// A durable store could not be read at startup.
+    ///
+    /// This is a transient I/O failure, not structural corruption. Callers must
+    /// fail start (retryable) and must **not** AutoReset/wipe.
     #[error("failed to read durable query output: {message}")]
     ReadFailed { message: String },
+}
+
+impl DurableOutputInconsistency {
+    /// Transient storage read failures must not authorize a destructive wipe.
+    pub(crate) fn is_transient_read(&self) -> bool {
+        matches!(self, Self::ReadFailed { .. })
+    }
 }
 
 /// Reconcile durable output high-water marks without lowering either side.
 ///
 /// Returns the sequence to install into `QueryOutputState`. The next emitted
 /// result must be this value plus one.
+///
+/// # Errors
+/// Returns [`DurableOutputInconsistency`] if the stored sequence, outbox
+/// high-water mark, and live row count are not mutually consistent (e.g. a
+/// gapped or duplicate outbox, an outbox ahead of the stored sequence, missing
+/// live rows for a stored sequence, or non-empty durable output with sequence 0).
 pub(crate) fn reconcile_durable_output(
     stored_sequence: Option<u64>,
     outbox_sequences: &[u64],
@@ -976,6 +1000,15 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_duplicate_outbox_sequence_is_inconsistent() {
+        let err = reconcile_durable_output(Some(3), &[1, 2, 2, 3], 2, true).unwrap_err();
+        assert!(matches!(
+            err,
+            DurableOutputInconsistency::GappedOutbox { retained } if retained == vec![1, 2, 2, 3]
+        ));
+    }
+
+    #[test]
     fn reconcile_missing_live_rows_for_stored_sequence() {
         let err = reconcile_durable_output(Some(3), &[1, 2, 3], 0, false).unwrap_err();
         assert_eq!(
@@ -1036,14 +1069,11 @@ mod tests {
     }
 
     #[test]
-    fn hydrate_does_not_lower_existing_sequence() {
+    fn hydrate_from_empty_installs_sequence() {
         let mut state = QueryOutputState::new(10);
-        state.advance_sequence_and_push(make_query_result("q1", vec![]));
-        state.advance_sequence_and_push(make_query_result("q1", vec![]));
-        assert_eq!(state.as_of_sequence(), 2);
-
-        state.hydrate(im::HashMap::new(), Vec::new(), 1);
-        assert_eq!(state.as_of_sequence(), 2);
+        assert_eq!(state.as_of_sequence(), 0);
+        state.hydrate(im::HashMap::new(), Vec::new(), 4);
+        assert_eq!(state.as_of_sequence(), 4);
     }
 
     #[test]
