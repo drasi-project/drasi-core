@@ -1496,7 +1496,8 @@ async fn recover_trigger_fresh_phase(paths: &FixturePaths) -> Result<()> {
         "fresh trigger must checkpoint at the reconstructed query head, not replay 1..=N"
     );
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // History replay is synchronous in handle_fresh_start before start()
+    // returns, so an empty journal after the head checkpoint is sufficient.
     let historical = read_journal(&paths.journal)?;
     assert!(
         journal_sequences(&historical).is_empty(),

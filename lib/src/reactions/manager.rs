@@ -534,10 +534,10 @@ impl ReactionManager {
     ///
     /// If `needs_snapshot_on_fresh_start`, fetches a snapshot and sets the
     /// checkpoint to `as_of_sequence` so the reaction can bootstrap.
-    /// Otherwise this is a trigger / event reaction: skip retained outbox
-    /// history, persist `(current_sequence, config_hash)`, and deliver only
-    /// later live results (`sequence > current_sequence`). Subscribe-before-
-    /// bootstrap already captures true live events in the broadcast buffer.
+    /// Otherwise skip retained outbox history, persist
+    /// `(current_sequence, config_hash)`, and deliver only later live results
+    /// (`sequence > current_sequence`). Subscribe-before-bootstrap already
+    /// captures true live events in the broadcast buffer.
     async fn handle_fresh_start(
         &self,
         reaction_id: &str,
@@ -565,15 +565,16 @@ impl ReactionManager {
             bootstrap_queries.push((query_id.to_string(), query.clone()));
             Ok(cp)
         } else {
-            // Trigger / event reactions must not fire side effects for retained
-            // history. Record the query head and let the live gate deliver only
-            // later sequences. Do not replay `fetch_outbox(0)`.
+            // Fresh start without snapshot bootstrap must not fire side effects
+            // for retained history. Still call `fetch_outbox(0)` to learn the
+            // current head sequence, but do not enqueue any returned entries.
+            // The live gate then delivers only later sequences.
             metrics.record_fetch_outbox();
             let seq = match query.fetch_outbox(0).await {
                 Ok(resp) => {
                     info!(
                         "[{reaction_id}] Fresh start for query '{query_id}' — \
-                         trigger reaction skipping retained history, latest_seq={}",
+                         skipping retained history, latest_seq={}",
                         resp.latest_sequence
                     );
                     resp.latest_sequence
@@ -581,7 +582,7 @@ impl ReactionManager {
                 Err(FetchError::OutboxGap(gap)) => {
                     info!(
                         "[{reaction_id}] Fresh start for query '{query_id}' — \
-                         trigger reaction outbox gap, latest_seq={}",
+                         outbox gap on fresh start without snapshot, latest_seq={}",
                         gap.latest_sequence
                     );
                     gap.latest_sequence
