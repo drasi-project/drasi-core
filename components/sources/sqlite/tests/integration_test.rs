@@ -561,7 +561,9 @@ async fn sqlite_emitted_changes_have_monotonic_sequence() {
     let insert_count = 5u64;
     for i in 1..=insert_count {
         handle
-            .execute(&format!("INSERT INTO items(id, name) VALUES ({i}, 'item-{i}')"))
+            .execute(&format!(
+                "INSERT INTO items(id, name) VALUES ({i}, 'item-{i}')"
+            ))
             .await
             .unwrap();
     }

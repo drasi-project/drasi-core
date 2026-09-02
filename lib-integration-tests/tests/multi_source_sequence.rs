@@ -29,8 +29,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use drasi_lib::channels::ChangeReceiver;
 use drasi_lib::channels::events::SourceEventWrapper;
+use drasi_lib::channels::ChangeReceiver;
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::Source;
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
