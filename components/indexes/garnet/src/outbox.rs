@@ -50,6 +50,10 @@ impl GarnetOutboxWriter {
         }
     }
 
+    /// Attach shared session state so `append` stages into the active session
+    /// transaction instead of writing Redis directly. Use this when the outbox
+    /// write must commit atomically with other index writes; omit it for
+    /// standalone/direct writes (tests, wipe/trim).
     pub fn with_session_state(mut self, session_state: Arc<GarnetSessionState>) -> Self {
         self.session_state = Some(session_state);
         self
@@ -76,10 +80,17 @@ impl OutboxWriter for GarnetOutboxWriter {
         let seq_str = sequence.to_string();
 
         if let Some(session_state) = &self.session_state {
-            let mut guard = session_state.lock()?;
-            if let Some(buffer) = guard.as_mut() {
-                buffer.zset_add(outbox_key, seq_str.as_bytes().to_vec(), sequence as f64);
-                buffer.hash_set(data_key, &seq_str, data.to_vec());
+            if session_state
+                .with_active_buffer(|buffer| {
+                    buffer.zset_add(
+                        outbox_key.clone(),
+                        seq_str.as_bytes().to_vec(),
+                        sequence as f64,
+                    );
+                    buffer.hash_set(data_key.clone(), &seq_str, data.to_vec());
+                })?
+                .is_some()
+            {
                 return Ok(());
             }
         }

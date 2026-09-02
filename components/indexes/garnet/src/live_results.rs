@@ -46,6 +46,10 @@ impl GarnetLiveResultsWriter {
         }
     }
 
+    /// Attach shared session state so `apply_mutations` stages into the active
+    /// session transaction instead of writing Redis directly. Use this when
+    /// live-result writes must commit atomically with other index writes; omit
+    /// it for standalone/direct writes (tests, wipe).
     pub fn with_session_state(mut self, session_state: Arc<GarnetSessionState>) -> Self {
         self.session_state = Some(session_state);
         self
@@ -68,15 +72,18 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
         let live_key = self.live_key();
 
         if let Some(session_state) = &self.session_state {
-            let mut guard = session_state.lock()?;
-            if let Some(buffer) = guard.as_mut() {
-                for m in mutations {
-                    let field = m.row_signature.to_string();
-                    match m.data {
-                        Some(data) => buffer.hash_set(live_key.clone(), &field, data.to_vec()),
-                        None => buffer.hash_del(live_key.clone(), &field),
+            if session_state
+                .with_active_buffer(|buffer| {
+                    for m in mutations {
+                        let field = m.row_signature.to_string();
+                        match m.data {
+                            Some(data) => buffer.hash_set(live_key.clone(), &field, data.to_vec()),
+                            None => buffer.hash_del(live_key.clone(), &field),
+                        }
                     }
-                }
+                })?
+                .is_some()
+            {
                 return Ok(());
             }
         }
