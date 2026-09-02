@@ -12,6 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Full-process reaction recovery conformance.
+//!
+//! Unlike the in-process suite in `lib/tests/reaction_recovery_e2e.rs`, this
+//! test re-executes the current binary as a child (`DRASI_RECOVERY_CONFORMANCE_PHASE`
+//! = `seed` then `recover`) so RocksDB/redb state is reconstructed after a real
+//! process exit. `run_phase` / `seed_phase` / `recover_phase` implement that
+//! handshake.
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_index_rocksdb::RocksDbIndexProvider;
@@ -217,8 +225,8 @@ impl Reaction for DurableRecordingReaction {
             loop {
                 let result = tokio::select! {
                     biased;
-                    _ = &mut shutdown => break,
                     result = queue.dequeue() => result,
+                    _ = &mut shutdown => break,
                 };
 
                 let record = JournalRecord::Result {
@@ -498,7 +506,10 @@ async fn wait_for_journal_sequences(
             return Ok(records);
         }
         if tokio::time::Instant::now() >= deadline {
-            return Ok(records);
+            anyhow::bail!(
+                "timed out waiting for {expected_count} journal records, got {}",
+                journal_sequences(&records).len()
+            );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -510,13 +521,15 @@ async fn wait_for_checkpoint_sequence(
 ) -> Result<ReactionCheckpoint> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(checkpoint) = read_reaction_checkpoint(state_store).await {
-            if checkpoint.sequence >= expected {
-                return Ok(checkpoint);
-            }
+        match read_reaction_checkpoint(state_store).await {
+            Ok(checkpoint) if checkpoint.sequence >= expected => return Ok(checkpoint),
+            Ok(_) | Err(_) => {}
         }
         if tokio::time::Instant::now() >= deadline {
-            return read_reaction_checkpoint(state_store).await;
+            let observed = read_reaction_checkpoint(state_store).await.ok();
+            anyhow::bail!(
+                "timed out waiting for checkpoint sequence {expected}, last={observed:?}"
+            );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -939,6 +952,12 @@ fn read_seed_readiness(path: &Path) -> Result<SeedReadiness> {
         .with_context(|| format!("parse seed readiness {}", path.display()))
 }
 
+fn remove_test_root(root: &Path) {
+    if let Err(error) = std::fs::remove_dir_all(root) {
+        eprintln!("failed to clean up test root {}: {error}", root.display());
+    }
+}
+
 fn test_root() -> Result<PathBuf> {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -976,6 +995,7 @@ fn child_failure(phase: &str, output: &Output) -> String {
     )
 }
 
+/// Seed durable state in one child process, then recover it in a second child.
 #[tokio::test(flavor = "current_thread")]
 async fn rocksdb_redb_full_process_reconstruction() -> Result<()> {
     if std::env::var_os(PHASE_ENV).is_some() {
@@ -990,13 +1010,13 @@ async fn rocksdb_redb_full_process_reconstruction() -> Result<()> {
     let seed = run_phase("seed", &paths)?;
     if !seed.status.success() {
         let message = child_failure("seed", &seed);
-        let _ = std::fs::remove_dir_all(&root);
+        remove_test_root(&root);
         anyhow::bail!(message);
     }
     let readiness = match read_seed_readiness(&paths.ready) {
         Ok(readiness) => readiness,
         Err(error) => {
-            let _ = std::fs::remove_dir_all(&root);
+            remove_test_root(&root);
             return Err(error);
         }
     };
@@ -1007,7 +1027,7 @@ async fn rocksdb_redb_full_process_reconstruction() -> Result<()> {
         journal_sequences: vec![1, 2],
     };
     if readiness != expected_readiness {
-        let _ = std::fs::remove_dir_all(&root);
+        remove_test_root(&root);
         anyhow::bail!(
             "seed child durability observation did not match: expected {expected_readiness:?}, got {readiness:?}"
         );
@@ -1016,6 +1036,9 @@ async fn rocksdb_redb_full_process_reconstruction() -> Result<()> {
     let recover = run_phase("recover", &paths)?;
     let failure = (!recover.status.success()).then(|| child_failure("recover", &recover));
     let cleanup = std::fs::remove_dir_all(&root);
+    if let Err(error) = &cleanup {
+        eprintln!("failed to clean up test root {}: {error}", root.display());
+    }
     if let Some(message) = failure {
         anyhow::bail!(message);
     }
