@@ -1407,6 +1407,14 @@ mod tests {
         async fn read_config_hash(&self) -> Result<Option<u64>, drasi_core::interface::IndexError> {
             self.inner.read_config_hash().await
         }
+
+        async fn stage_result_sequence(
+            &self,
+            query_id: &str,
+            sequence: u64,
+        ) -> Result<(), drasi_core::interface::IndexError> {
+            self.inner.stage_result_sequence(query_id, sequence).await
+        }
     }
 
     /// Mock persistent plugin that gives each query its own
@@ -2183,6 +2191,14 @@ mod tests {
             }
             self.inner.read_config_hash().await
         }
+
+        async fn stage_result_sequence(
+            &self,
+            query_id: &str,
+            sequence: u64,
+        ) -> Result<(), drasi_core::interface::IndexError> {
+            self.inner.stage_result_sequence(query_id, sequence).await
+        }
     }
 
     /// Mock plugin that uses a pre-created FailableCheckpointStore.
@@ -2679,6 +2695,14 @@ mod orchestration_tests {
         }
         async fn clear_checkpoints(&self) -> Result<(), drasi_core::interface::IndexError> {
             self.inner.clear_checkpoints().await
+        }
+
+        async fn stage_result_sequence(
+            &self,
+            query_id: &str,
+            sequence: u64,
+        ) -> Result<(), drasi_core::interface::IndexError> {
+            self.inner.stage_result_sequence(query_id, sequence).await
         }
     }
 

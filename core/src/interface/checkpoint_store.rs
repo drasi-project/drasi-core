@@ -138,10 +138,11 @@ pub trait CheckpointStore: Send + Sync {
     /// For volatile backends, applies immediately (same as
     /// [`write_result_sequence`](Self::write_result_sequence)).
     ///
-    /// Default: delegates to [`write_result_sequence`](Self::write_result_sequence).
-    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
-        self.write_result_sequence(query_id, sequence).await
-    }
+    /// There is no default: every backend must choose staged-in-session vs
+    /// immediate apply. A default that called
+    /// [`write_result_sequence`](Self::write_result_sequence) would silently
+    /// commit outside the outer transaction.
+    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError>;
 
     /// Write the last persisted result sequence for a query.
     ///

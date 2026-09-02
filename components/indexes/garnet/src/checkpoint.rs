@@ -297,14 +297,14 @@ impl CheckpointStore for GarnetCheckpointStore {
         sequence: u64,
     ) -> Result<(), IndexError> {
         let key = self.result_sequence_key();
-        let mut guard = self.session_state.lock()?;
-        let buffer = guard.as_mut().ok_or_else(|| {
-            IndexError::other(std::io::Error::other(
+        match self.session_state.with_active_buffer(|buffer| {
+            buffer.string_set(key, sequence.to_string().into_bytes());
+        })? {
+            Some(()) => Ok(()),
+            None => Err(IndexError::other(std::io::Error::other(
                 "stage_result_sequence requires an active session",
-            ))
-        })?;
-        buffer.string_set(key, sequence.to_string().into_bytes());
-        Ok(())
+            ))),
+        }
     }
 
     async fn write_result_sequence(
