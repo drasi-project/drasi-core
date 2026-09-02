@@ -45,6 +45,9 @@ use crate::recovery::ReactionRecoveryPolicy;
 /// Total write attempts under [`ReactionRecoveryPolicy::AutoReset`] (initial try
 /// plus bounded retries).
 const AUTO_RESET_CHECKPOINT_ATTEMPTS: u32 = 4;
+/// Base delay between `AutoReset` retry attempts; doubled each attempt
+/// (`base * 2^attempt`). Kept in-tree rather than pulling a retry crate:
+/// the budget is four attempts and the backoff is intentionally small.
 const AUTO_RESET_CHECKPOINT_BASE_BACKOFF: Duration = Duration::from_millis(10);
 
 /// Tracks the last persisted `(sequence, config_hash)` per query so checkpoint
@@ -97,6 +100,20 @@ impl CheckpointState {
             }),
         );
         Ok(())
+    }
+
+    /// Seed in-memory checkpoints (for example from bootstrap). Existing
+    /// entries are left unchanged so a later lazy store read cannot clobber
+    /// a caller-provided seed.
+    pub fn seed(&mut self, initial: HashMap<String, ReactionCheckpoint>) {
+        for (query_id, checkpoint) in initial {
+            self.checkpoints.entry(query_id).or_insert(checkpoint);
+        }
+    }
+
+    /// Last known checkpoint for `query_id`, if seeded or previously advanced.
+    pub fn get(&self, query_id: &str) -> Option<&ReactionCheckpoint> {
+        self.checkpoints.get(query_id)
     }
 
     /// Advance `query_id`'s checkpoint to `sequence` when it moves forward,
@@ -164,13 +181,22 @@ impl CheckpointState {
     /// Checkpoint each fully-acked query to its max terminal sequence **after**
     /// the batch ack has succeeded. This is the HTTP/gRPC contract: a batch of
     /// `N..N+k` persists `N+k` only once the side effect (ack) has committed.
+    ///
+    /// Writes are per-query, not one atomic batch. Query IDs are processed in
+    /// sorted order so partial failure is deterministic: under `Strict` /
+    /// `AutoReset`, a write failure leaves already-persisted queries advanced
+    /// and remaining queries unchanged so they replay. Under `AutoSkipGap`
+    /// [`persist_with_recovery_policy`] never returns `Err`, so every query in
+    /// `completed` is attempted.
     pub async fn advance_completed_after_ack(
         &mut self,
         base: &ReactionBase,
         completed: &HashMap<String, u64>,
         policy: ReactionRecoveryPolicy,
     ) -> anyhow::Result<()> {
-        for (query_id, sequence) in completed {
+        let mut entries: Vec<_> = completed.iter().collect();
+        entries.sort_by(|left, right| left.0.cmp(right.0));
+        for (query_id, sequence) in entries {
             self.advance_with_policy(base, query_id, *sequence, policy)
                 .await?;
         }
@@ -283,11 +309,112 @@ impl FailureAction {
 mod tests {
     use super::*;
     use crate::reactions::common::base::ReactionBaseParams;
+    use crate::state_store::{
+        MemoryStateStoreProvider, StateStoreError, StateStoreProvider, StateStoreResult,
+    };
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
 
+    struct FailWritesStore {
+        inner: MemoryStateStoreProvider,
+        remaining_failures: AtomicU32,
+        fail_if_key_contains: Option<String>,
+    }
+
+    impl FailWritesStore {
+        fn always() -> Self {
+            Self {
+                inner: MemoryStateStoreProvider::new(),
+                remaining_failures: AtomicU32::new(u32::MAX),
+                fail_if_key_contains: None,
+            }
+        }
+
+        fn for_key_substring(needle: &str) -> Self {
+            Self {
+                inner: MemoryStateStoreProvider::new(),
+                remaining_failures: AtomicU32::new(u32::MAX),
+                fail_if_key_contains: Some(needle.to_string()),
+            }
+        }
+
+        fn fail_if_needed(&self, key: &str) -> StateStoreResult<()> {
+            if let Some(needle) = &self.fail_if_key_contains {
+                if !key.contains(needle.as_str()) {
+                    return Ok(());
+                }
+            }
+            let remaining = self.remaining_failures.load(Ordering::SeqCst);
+            if remaining == 0 {
+                return Ok(());
+            }
+            if remaining != u32::MAX {
+                self.remaining_failures.fetch_sub(1, Ordering::SeqCst);
+            }
+            Err(StateStoreError::StorageError(
+                "injected write failure".into(),
+            ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StateStoreProvider for FailWritesStore {
+        async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+            self.inner.get(store_id, key).await
+        }
+        async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+            self.fail_if_needed(key)?;
+            self.inner.set(store_id, key, value).await
+        }
+        async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+            self.inner.delete(store_id, key).await
+        }
+        async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+            self.inner.contains_key(store_id, key).await
+        }
+        async fn get_many(
+            &self,
+            store_id: &str,
+            keys: &[&str],
+        ) -> StateStoreResult<std::collections::HashMap<String, Vec<u8>>> {
+            self.inner.get_many(store_id, keys).await
+        }
+        async fn set_many(
+            &self,
+            store_id: &str,
+            entries: &[(&str, &[u8])],
+        ) -> StateStoreResult<()> {
+            for (key, _) in entries {
+                self.fail_if_needed(key)?;
+            }
+            self.inner.set_many(store_id, entries).await
+        }
+        async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
+            self.inner.delete_many(store_id, keys).await
+        }
+        async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
+            self.inner.clear_store(store_id).await
+        }
+        async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
+            self.inner.list_keys(store_id).await
+        }
+        async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
+            self.inner.store_exists(store_id).await
+        }
+        async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
+            self.inner.key_count(store_id).await
+        }
+    }
+
     async fn store_backed_base(id: &str) -> ReactionBase {
-        let base = ReactionBase::new(ReactionBaseParams::new(id, vec!["q1".to_string()]));
-        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        store_backed_base_with(id, Arc::new(MemoryStateStoreProvider::new())).await
+    }
+
+    async fn store_backed_base_with(id: &str, store: Arc<dyn StateStoreProvider>) -> ReactionBase {
+        let base = ReactionBase::new(ReactionBaseParams::new(
+            id,
+            vec!["q1".to_string(), "q2".to_string()],
+        ));
         let (graph, _rx) = crate::component_graph::ComponentGraph::new("inst");
         let ctx = crate::context::ReactionRuntimeContext::new(
             "inst",
@@ -511,5 +638,110 @@ mod tests {
                 .config_hash,
             7
         );
+    }
+
+    #[tokio::test]
+    async fn advance_with_policy_autoskip_does_not_return_err_on_write_failure() {
+        let store = Arc::new(FailWritesStore::always());
+        let base = store_backed_base_with("autoskip-write", store).await;
+        let mut state = CheckpointState::load(&base).await;
+        state.seed(HashMap::from([(
+            "q1".to_string(),
+            ReactionCheckpoint {
+                sequence: 1,
+                config_hash: 3,
+            },
+        )]));
+
+        state
+            .advance_with_policy(&base, "q1", 4, ReactionRecoveryPolicy::AutoSkipGap)
+            .await
+            .unwrap();
+        assert_eq!(state.get("q1").map(|cp| cp.sequence), Some(4));
+        assert!(
+            base.read_checkpoint("q1").await.unwrap().is_none(),
+            "AutoSkipGap must not persist a failed write"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_autoskip_attempts_every_query_when_writes_fail() {
+        let store = Arc::new(FailWritesStore::always());
+        let base = store_backed_base_with("batch-skip", store).await;
+        let mut state = CheckpointState::load(&base).await;
+        state.seed(HashMap::from([
+            (
+                "q1".to_string(),
+                ReactionCheckpoint {
+                    sequence: 1,
+                    config_hash: 1,
+                },
+            ),
+            (
+                "q2".to_string(),
+                ReactionCheckpoint {
+                    sequence: 1,
+                    config_hash: 1,
+                },
+            ),
+        ]));
+
+        let completed = HashMap::from([("q1".to_string(), 5), ("q2".to_string(), 6)]);
+        state
+            .advance_completed_after_ack(&base, &completed, ReactionRecoveryPolicy::AutoSkipGap)
+            .await
+            .unwrap();
+        assert_eq!(state.get("q1").map(|cp| cp.sequence), Some(5));
+        assert_eq!(state.get("q2").map(|cp| cp.sequence), Some(6));
+        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
+        assert!(base.read_checkpoint("q2").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn batch_strict_stops_after_first_failed_query_in_sorted_order() {
+        let store = Arc::new(FailWritesStore::for_key_substring("q2"));
+        let base = store_backed_base_with("batch-strict", store).await;
+        base.write_checkpoint(
+            "q1",
+            &ReactionCheckpoint {
+                sequence: 1,
+                config_hash: 9,
+            },
+        )
+        .await
+        .unwrap();
+        let mut state = CheckpointState::load(&base).await;
+        state.seed(HashMap::from([
+            (
+                "q1".to_string(),
+                ReactionCheckpoint {
+                    sequence: 1,
+                    config_hash: 9,
+                },
+            ),
+            (
+                "q2".to_string(),
+                ReactionCheckpoint {
+                    sequence: 1,
+                    config_hash: 9,
+                },
+            ),
+        ]));
+
+        let completed = HashMap::from([("q1".to_string(), 5), ("q2".to_string(), 6)]);
+        let result = state
+            .advance_completed_after_ack(&base, &completed, ReactionRecoveryPolicy::Strict)
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            base.read_checkpoint("q1").await.unwrap().unwrap().sequence,
+            5,
+            "q1 is persisted before the sorted q2 write fails"
+        );
+        assert!(
+            base.read_checkpoint("q2").await.unwrap().is_none(),
+            "failed query must not advance the durable checkpoint"
+        );
+        assert_eq!(state.get("q2").map(|cp| cp.sequence), Some(1));
     }
 }
