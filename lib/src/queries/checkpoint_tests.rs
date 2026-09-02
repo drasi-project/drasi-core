@@ -2497,6 +2497,80 @@ mod tests {
             "Error should mention the output wipe failure: {msg}"
         );
     }
+
+    /// Test: `teardown_query` fails when checkpoint clearing fails so delete-and-recreate
+    /// cannot silently leave source checkpoints/config hash behind.
+    #[tokio::test]
+    async fn test_teardown_fails_when_clear_checkpoints_fails() {
+        let plugin = Arc::new(FailablePlugin::new());
+        let (query_manager, source_manager, graph) =
+            create_test_env_with_failable_backend(plugin.clone()).await;
+        let mut event_rx = graph.read().await.subscribe();
+
+        let source = CheckpointTestSource::new("teardown-fail-src").unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
+        source_manager
+            .start_source("teardown-fail-src".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "teardown-fail-src",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let config = create_persistent_query_config(
+            "teardown-fail-query",
+            vec!["teardown-fail-src".to_string()],
+        );
+        add_query(&query_manager, &graph, config).await.unwrap();
+        query_manager
+            .start_query("teardown-fail-query".to_string())
+            .await
+            .unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "teardown-fail-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let store = plugin.get_store("teardown-fail-query").await;
+        store.write_config_hash(12345).await.unwrap();
+        store
+            .stage_checkpoint("teardown-fail-src", 7, None)
+            .await
+            .unwrap();
+        store.set_fail_clear_checkpoints(true);
+
+        let result = query_manager
+            .teardown_query("teardown-fail-query".to_string())
+            .await;
+        assert!(
+            result.is_err(),
+            "teardown_query should fail when clear_checkpoints fails"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("clear checkpoints"),
+            "Error should mention checkpoint cleanup: {msg}"
+        );
+
+        let stored_hash = store.read_config_hash().await.unwrap();
+        assert_eq!(
+            stored_hash,
+            Some(12345),
+            "Config hash must remain when checkpoint clear fails on removal"
+        );
+        let cp = store.read_checkpoint("teardown-fail-src").await.unwrap();
+        assert!(
+            cp.is_some(),
+            "Source checkpoint must remain when checkpoint clear fails on removal"
+        );
+    }
 }
 
 // ============================================================================

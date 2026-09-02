@@ -28,6 +28,7 @@ use drasi_core::{
     in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
     interface::{
         CheckpointStore, IndexError, LiveResultsWriter, OutboxWriter, RowMutation, SessionControl,
+        SessionGuard,
     },
     middleware::MiddlewareTypeRegistry,
     query::{ContinuousQuery, QueryBuilder},
@@ -3424,10 +3425,12 @@ impl QueryManager {
                         .with_context(|| {
                             format!("Query '{id}' failed to build indexes for cleanup on removal")
                         })?;
-                    created.set.session_control.begin().await.with_context(|| {
-                        format!("Query '{id}' failed to begin session for removal cleanup")
-                    })?;
-                    if let Err(e) = clear_persistent_indexes(
+                    let session = SessionGuard::begin(created.set.session_control.clone())
+                        .await
+                        .with_context(|| {
+                            format!("Query '{id}' failed to begin session for removal cleanup")
+                        })?;
+                    clear_persistent_indexes(
                         &id,
                         &Some(created.set.element_index),
                         &Some(created.set.archive_index),
@@ -3435,14 +3438,17 @@ impl QueryManager {
                         &Some(created.set.future_queue),
                     )
                     .await
-                    {
-                        warn!("Query '{id}' failed to clear persistent indexes on removal: {e}");
-                    }
+                    .with_context(|| {
+                        format!("Query '{id}' failed to clear persistent indexes on removal")
+                    })?;
 
                     if let Some(checkpoint_store) = created.checkpoint_store {
-                        if let Err(e) = checkpoint_store.clear_checkpoints().await {
-                            warn!("Query '{id}' failed to clear checkpoints on removal: {e}");
-                        }
+                        checkpoint_store
+                            .clear_checkpoints()
+                            .await
+                            .with_context(|| {
+                                format!("Query '{id}' failed to clear checkpoints on removal")
+                            })?;
                         let stores = DurableOutputStores {
                             checkpoint_store: checkpoint_store.clone(),
                             outbox_writer: created.outbox_writer.clone(),
@@ -3464,9 +3470,9 @@ impl QueryManager {
                         }
                     }
 
-                    if let Err(e) = created.set.session_control.commit().await {
-                        warn!("Query '{id}' failed to commit removal cleanup session: {e}");
-                    }
+                    session.commit().await.with_context(|| {
+                        format!("Query '{id}' failed to commit removal cleanup session")
+                    })?;
                 }
             }
         }
