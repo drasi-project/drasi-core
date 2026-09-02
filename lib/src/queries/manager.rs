@@ -599,21 +599,23 @@ async fn load_durable_output(
         (Vec::new(), Vec::new())
     };
 
-    let raw_live_rows = if let Some(writer) = &stores.live_results_writer {
-        writer.read_snapshot(query_id).await.map_err(|e| {
+    let (raw_live_rows, live_rows_readable) = if let Some(writer) = &stores.live_results_writer {
+        let rows = writer.read_snapshot(query_id).await.map_err(|e| {
             DurableOutputInconsistency::ReadFailed {
                 message: format!("failed to read persistent live results: {e}"),
             }
-        })?
+        })?;
+        (rows, true)
     } else {
-        Vec::new()
+        // Persistent hydrate with no live-results store cannot prove the snapshot.
+        (Vec::new(), false)
     };
 
     let as_of_sequence = reconcile_durable_output(
         stored_sequence,
         &outbox_sequences,
         raw_live_rows.len(),
-        true,
+        live_rows_readable,
     )?;
 
     let mut outbox_entries = Vec::with_capacity(raw_outbox.len());
