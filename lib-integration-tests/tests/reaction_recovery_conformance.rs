@@ -726,7 +726,7 @@ async fn wait_for_snapshot_row(
             return Ok(observation);
         }
         if tokio::time::Instant::now() >= deadline {
-            return Ok(observation);
+            anyhow::bail!("timed out waiting for snapshot row {expected:?}, last={observation:?}");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -775,7 +775,11 @@ async fn seed_phase(paths: &FixturePaths) -> Result<()> {
             break snapshot;
         }
         if tokio::time::Instant::now() >= deadline {
-            break snapshot;
+            anyhow::bail!(
+                "timed out waiting for seed snapshot sequence 3 with 3 rows, got sequence {} len {}",
+                snapshot.as_of_sequence,
+                snapshot.len()
+            );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
