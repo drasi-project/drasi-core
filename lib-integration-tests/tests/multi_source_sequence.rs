@@ -29,7 +29,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use drasi_lib::channels::events::SourceEventWrapper;
+use drasi_lib::channels::events::StampedSourceEvent;
 use drasi_lib::channels::ChangeReceiver;
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::Source;
@@ -50,14 +50,12 @@ fn streaming_settings(source_id: &str, query_id: &str) -> SourceSubscriptionSett
 }
 
 /// Receive the next event and return its framework-stamped sequence.
-async fn next_sequence(rx: &mut Box<dyn ChangeReceiver<SourceEventWrapper>>) -> u64 {
+async fn next_sequence(rx: &mut Box<dyn ChangeReceiver<StampedSourceEvent>>) -> u64 {
     let event = tokio::time::timeout(Duration::from_secs(3), rx.recv())
         .await
         .expect("timed out waiting for event")
         .expect("event stream closed unexpectedly");
-    event
-        .sequence
-        .expect("every dispatched event must carry a framework sequence")
+    event.sequence
 }
 
 #[tokio::test]

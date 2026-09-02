@@ -23,7 +23,7 @@ use crate::lsn::Lsn;
 use crate::types::extract_properties_from_cdc_row;
 use anyhow::{anyhow, Context, Result};
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::channels::SourceEventWrapper;
+use drasi_lib::channels::SourceEventDraft;
 use drasi_lib::sources::base::SourceBase;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
@@ -365,7 +365,7 @@ async fn poll_cdc_changes(
         max_lsn.to_hex()
     );
 
-    let mut batch: Vec<SourceEventWrapper> = Vec::new();
+    let mut batch: Vec<SourceEventDraft> = Vec::new();
 
     // Query each configured table's CDC changes
     for table in &config.tables {
@@ -440,7 +440,7 @@ async fn poll_cdc_changes(
             let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
             profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-            let mut wrapper = SourceEventWrapper::with_profiling(
+            let mut wrapper = SourceEventDraft::with_profiling(
                 source_id.to_string(),
                 drasi_lib::channels::SourceEvent::Change(change),
                 chrono::Utc::now(),

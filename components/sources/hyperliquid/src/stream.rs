@@ -22,7 +22,7 @@ use crate::mapping::{
 use crate::rest::HyperliquidRestClient;
 use crate::types::{FundingSnapshot, L2Book, Liquidation, Trade, WsMessage};
 use anyhow::{anyhow, Result};
-use drasi_lib::channels::{ChangeDispatcher, SourceEvent, SourceEventWrapper};
+use drasi_lib::channels::{ChangeDispatcher, SourceEvent, SourceEventDraft};
 use drasi_lib::profiling;
 use drasi_lib::sources::base::SourceBase;
 use drasi_lib::state_store::StateStoreProvider;
@@ -427,7 +427,7 @@ pub(crate) async fn dispatch_changes(
         let mut profiling = profiling::ProfilingMetadata::new();
         profiling.source_send_ns = Some(profiling::timestamp_ns());
 
-        let wrapper = SourceEventWrapper::with_profiling(
+        let wrapper = SourceEventDraft::with_profiling(
             source_id.to_string(),
             SourceEvent::Change(change),
             chrono::Utc::now(),

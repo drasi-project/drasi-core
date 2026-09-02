@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, tungstenite};
 use url::Url;
 
-use drasi_lib::channels::{ChangeDispatcher, SourceEvent, SourceEventWrapper};
+use drasi_lib::channels::{ChangeDispatcher, SourceEvent, SourceEventDraft};
 use drasi_lib::profiling::{timestamp_ns, ProfilingMetadata};
 use drasi_lib::sources::base::SourceBase;
 use drasi_lib::state_store::StateStoreProvider;
@@ -248,7 +248,7 @@ async fn dispatch_change(
     let mut profiling = ProfilingMetadata::new();
     profiling.source_send_ns = Some(timestamp_ns());
 
-    let wrapper = SourceEventWrapper::with_profiling(
+    let wrapper = SourceEventDraft::with_profiling(
         source_id.to_string(),
         SourceEvent::Change(change),
         chrono::Utc::now(),
@@ -410,11 +410,7 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await
         {
             if matches!(event.event, ChannelSourceEvent::Change(_)) {
-                sequences.push(
-                    event
-                        .sequence
-                        .expect("dispatched change must carry a framework sequence"),
-                );
+                sequences.push(event.sequence);
             }
         }
 

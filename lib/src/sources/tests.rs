@@ -39,7 +39,10 @@ pub struct TestMockSource {
     /// Status handle — always available, wired to graph during initialize().
     status_handle: crate::component_graph::ComponentStatusHandle,
     /// Dispatchers for sending events to subscribed queries
-    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
+    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<StampedSourceEvent>>>>>,
+    /// Monotonic sequence counter — this mock dispatches directly (bypassing
+    /// SourceBase), so it stamps its own increasing sequences.
+    next_sequence: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl TestMockSource {
@@ -50,6 +53,7 @@ impl TestMockSource {
             auto_start: true,
             status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
+            next_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -61,16 +65,23 @@ impl TestMockSource {
             auto_start,
             status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
+            next_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
     /// Inject an event into all subscribed queries.
     pub async fn inject_event(&self, change: SourceChange) -> Result<()> {
         let dispatchers = self.dispatchers.read().await;
-        let wrapper = SourceEventWrapper::new(
-            self.id.clone(),
-            SourceEvent::Change(change),
-            chrono::Utc::now(),
+        let seq = self
+            .next_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let wrapper = StampedSourceEvent::stamp(
+            SourceEventDraft::new(
+                self.id.clone(),
+                SourceEvent::Change(change),
+                chrono::Utc::now(),
+            ),
+            seq,
         );
         let arc_wrapper = Arc::new(wrapper);
         for dispatcher in dispatchers.iter() {
@@ -132,7 +143,7 @@ impl Source for TestMockSource {
         &self,
         settings: crate::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(100);
+        let dispatcher = ChannelChangeDispatcher::<StampedSourceEvent>::new(100);
         let receiver = dispatcher.create_receiver().await?;
 
         self.dispatchers.write().await.push(Box::new(dispatcher));
@@ -171,7 +182,7 @@ pub struct TestBootstrapMockSource {
     auto_start: bool,
     /// Status handle — always available, wired to graph during initialize().
     status_handle: crate::component_graph::ComponentStatusHandle,
-    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
+    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<StampedSourceEvent>>>>>,
     bootstrap_rx: Arc<tokio::sync::Mutex<Option<BootstrapEventReceiver>>>,
 }
 
@@ -240,7 +251,7 @@ impl Source for TestBootstrapMockSource {
         &self,
         settings: crate::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(100);
+        let dispatcher = ChannelChangeDispatcher::<StampedSourceEvent>::new(100);
         let receiver = dispatcher.create_receiver().await?;
 
         self.dispatchers.write().await.push(Box::new(dispatcher));

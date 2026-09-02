@@ -313,9 +313,7 @@ async fn concurrent_ws_and_funding_tasks_share_one_sequence_stream() {
             .await
             .expect("timed out waiting for event")
             .expect("event stream closed unexpectedly");
-        let seq = event
-            .sequence
-            .expect("dispatched change must carry a framework sequence");
+        let seq = event.sequence;
         assert!(
             sequences.insert(seq),
             "sequence {seq} was assigned twice — the two tasks are not sharing one counter"

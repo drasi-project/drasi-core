@@ -31,7 +31,7 @@ use bytes::Bytes;
 use serial_test::serial;
 use tokio::sync::{mpsc, RwLock};
 
-use crate::channels::events::SourceEventWrapper;
+use crate::channels::events::{SourceEventDraft, StampedSourceEvent};
 use crate::channels::{ChannelChangeReceiver, ComponentStatus, SubscriptionResponse};
 use crate::config::{QueryConfig, SourceSubscriptionSettings};
 use crate::context::SourceRuntimeContext;
@@ -59,7 +59,7 @@ struct E2eTestSource {
     /// Number of times remove_position_handle was called.
     position_handle_removed: Arc<AtomicU32>,
     /// Sender for injecting events. Recreated in subscribe() for each subscription.
-    event_tx: Arc<RwLock<Option<mpsc::Sender<Arc<SourceEventWrapper>>>>>,
+    event_tx: Arc<RwLock<Option<mpsc::Sender<Arc<StampedSourceEvent>>>>>,
 }
 
 impl E2eTestSource {
@@ -96,7 +96,7 @@ impl E2eTestSource {
         self.remaining_failures.clone()
     }
 
-    fn event_sender(&self) -> Arc<RwLock<Option<mpsc::Sender<Arc<SourceEventWrapper>>>>> {
+    fn event_sender(&self) -> Arc<RwLock<Option<mpsc::Sender<Arc<StampedSourceEvent>>>>> {
         self.event_tx.clone()
     }
 
@@ -268,7 +268,7 @@ fn make_volatile_query(id: &str, source_id: &str) -> QueryConfig {
 
 /// Send a source change event and wait briefly for processing.
 async fn send_event(
-    tx: &Arc<RwLock<Option<mpsc::Sender<Arc<SourceEventWrapper>>>>>,
+    tx: &Arc<RwLock<Option<mpsc::Sender<Arc<StampedSourceEvent>>>>>,
     source_id: &str,
     sequence: u64,
     position: &[u8],
@@ -299,13 +299,15 @@ async fn send_event(
 
     let change = SourceChange::Insert { element };
 
-    let mut event = SourceEventWrapper::new(
-        source_id.to_string(),
-        crate::channels::events::SourceEvent::Change(change),
-        chrono::Utc::now(),
+    let event = StampedSourceEvent::stamp(
+        SourceEventDraft::new(
+            source_id.to_string(),
+            crate::channels::events::SourceEvent::Change(change),
+            chrono::Utc::now(),
+        )
+        .with_source_position(Bytes::from(position.to_vec())),
+        sequence,
     );
-    event.sequence = Some(sequence);
-    event.source_position = Some(Bytes::from(position.to_vec()));
 
     if let Some(sender) = tx.read().await.as_ref() {
         sender.send(Arc::new(event)).await.unwrap();

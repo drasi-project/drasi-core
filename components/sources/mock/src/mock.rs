@@ -511,7 +511,7 @@ impl Source for MockSource {
                     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                    let wrapper = SourceEventWrapper::with_profiling(
+                    let wrapper = SourceEventDraft::with_profiling(
                         source_id.clone(),
                         SourceEvent::Change(source_change),
                         chrono::Utc::now(),
@@ -650,7 +650,7 @@ impl MockSource {
     ///
     /// # Returns
     ///
-    /// A boxed receiver that yields [`SourceEventWrapper`](drasi_lib::channels::SourceEventWrapper)
+    /// A boxed receiver that yields [`SourceEventDraft`](drasi_lib::channels::SourceEventDraft)
     /// for each event generated or injected.
     ///
     /// # Example
@@ -668,7 +668,7 @@ impl MockSource {
     /// ```
     pub async fn test_subscribe(
         &self,
-    ) -> Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::SourceEventWrapper>> {
+    ) -> Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::StampedSourceEvent>> {
         self.base.test_subscribe().await
     }
 }
@@ -978,7 +978,7 @@ fn connected_to_element(source_name: &str, edge: &MeshEdge, strength: f64) -> El
 async fn dispatch_generated_change(base: SourceBase, source_id: &str, source_change: SourceChange) {
     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-    let wrapper = SourceEventWrapper::with_profiling(
+    let wrapper = SourceEventDraft::with_profiling(
         source_id.to_string(),
         SourceEvent::Change(source_change),
         chrono::Utc::now(),
