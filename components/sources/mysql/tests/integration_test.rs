@@ -787,6 +787,101 @@ async fn test_conn(port: u16) -> Conn {
     Conn::new(opts).await.unwrap()
 }
 
+/// Verifies that `SslMode::IfAvailable` performs a real TLS handshake against a
+/// TLS-advertising MySQL server — not just the plaintext fallback. This
+/// exercises the rustls crypto provider end-to-end: if no provider is wired in,
+/// the handshake panics instead of connecting, so this test would fail. It also
+/// asserts the session is actually encrypted (non-empty `Ssl_cipher`) rather
+/// than a silent plaintext downgrade.
+///
+/// Run with:
+/// `cargo test -p drasi-source-mysql --test integration_test -- --ignored`
+#[tokio::test]
+#[ignore]
+#[allow(clippy::unwrap_used)]
+async fn test_if_available_negotiates_tls_against_real_server() {
+    use drasi_mysql_common::{connect_with_ssl_mode, SslMode};
+    use mysql_async::prelude::Query;
+
+    let (_container, port) = setup_mysql_container().await;
+    prepare_mysql_database(port).await;
+
+    let build_opts = || {
+        mysql_async::OptsBuilder::default()
+            .ip_or_hostname("127.0.0.1")
+            .tcp_port(port)
+            .user(Some("test"))
+            .pass(Some("test"))
+            .db_name(Some("test"))
+    };
+
+    // MySQL 8 advertises TLS with a self-signed cert; IfAvailable uses relaxed
+    // verification, so the handshake should succeed — and must not panic.
+    let mut conn = connect_with_ssl_mode(build_opts, SslMode::IfAvailable)
+        .await
+        .expect("IfAvailable should establish a TLS connection");
+
+    // Prove the session is actually encrypted rather than a plaintext fallback.
+    let row: Option<(String, String)> = "SHOW SESSION STATUS LIKE 'Ssl_cipher'"
+        .first(&mut conn)
+        .await
+        .unwrap();
+    let cipher = row.map(|(_, value)| value).unwrap_or_default();
+    assert!(
+        !cipher.is_empty(),
+        "expected an encrypted TLS session, but Ssl_cipher was empty (plaintext)"
+    );
+
+    conn.disconnect().await.unwrap();
+}
+
+/// Regression test for the `tls12` feature: `mysql_async`'s `rustls-tls` alone
+/// pulls rustls with its defaults off, leaving the client TLS 1.3-only, so
+/// `Require` fails with a `ProtocolVersion` alert against a server restricted to
+/// TLS 1.2 (MySQL 5.7 and hardened 8.x deployments).
+///
+/// Run with:
+/// `cargo test -p drasi-source-mysql --test integration_test -- --ignored`
+#[tokio::test]
+#[ignore]
+#[allow(clippy::unwrap_used)]
+async fn test_require_connects_to_tls12_only_server() {
+    use drasi_mysql_common::{connect_with_ssl_mode, SslMode};
+    use mysql_async::prelude::Query;
+
+    let mysql_image = Mysql::default()
+        .with_env_var("MYSQL_DATABASE", "test")
+        .with_env_var("MYSQL_USER", "test")
+        .with_env_var("MYSQL_PASSWORD", "test")
+        .with_env_var("MYSQL_ROOT_PASSWORD", "root")
+        .with_cmd(vec!["--tls-version=TLSv1.2"]);
+
+    let container = mysql_image.start().await.unwrap();
+    let port = container.get_host_port_ipv4(3306).await.unwrap();
+
+    let build_opts = || {
+        mysql_async::OptsBuilder::default()
+            .ip_or_hostname("127.0.0.1")
+            .tcp_port(port)
+            .user(Some("test"))
+            .pass(Some("test"))
+            .db_name(Some("test"))
+    };
+
+    let mut conn = connect_with_ssl_mode(build_opts, SslMode::Require)
+        .await
+        .expect("Require should negotiate TLS 1.2 against a TLS1.2-only server");
+
+    let row: Option<(String, String)> = "SHOW SESSION STATUS LIKE 'Ssl_version'"
+        .first(&mut conn)
+        .await
+        .unwrap();
+    let version = row.map(|(_, value)| value).unwrap_or_default();
+    assert_eq!(version, "TLSv1.2", "expected a negotiated TLS 1.2 session");
+
+    conn.disconnect().await.unwrap();
+}
+
 /// Helper: wait for a specific change to appear in the subscription.
 async fn wait_for_change<F>(
     sub: &mut drasi_reaction_application::subscription::Subscription,

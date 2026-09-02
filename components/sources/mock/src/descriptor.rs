@@ -31,6 +31,8 @@ pub enum DataTypeDto {
     SensorReading {
         #[serde(default = "default_sensor_count", rename = "sensorCount")]
         sensor_count: u32,
+        #[serde(default)]
+        mesh: bool,
     },
     #[default]
     Generic,
@@ -102,8 +104,9 @@ impl SourcePluginDescriptor for MockSourceDescriptor {
 
         let data_type = match &dto.data_type {
             DataTypeDto::Counter => DataType::Counter,
-            DataTypeDto::SensorReading { sensor_count } => DataType::SensorReading {
+            DataTypeDto::SensorReading { sensor_count, mesh } => DataType::SensorReading {
                 sensor_count: *sensor_count,
+                mesh: *mesh,
             },
             DataTypeDto::Generic => DataType::Generic,
         };

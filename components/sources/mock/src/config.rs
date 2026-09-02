@@ -47,6 +47,10 @@ pub enum DataType {
         /// Sensor IDs will be in range `[0, sensor_count)`.
         #[serde(default = "default_sensor_count")]
         sensor_count: u32,
+        /// When true, also emit a live `CONNECTED_TO` mesh between sensors.
+        /// Defaults to false so existing configs stay node-only.
+        #[serde(default)]
+        mesh: bool,
     },
 
     /// Generates generic data with random values (default).
@@ -73,7 +77,22 @@ impl DataType {
     /// assert_eq!(data_type.sensor_count(), Some(10));
     /// ```
     pub fn sensor_reading(sensor_count: u32) -> Self {
-        DataType::SensorReading { sensor_count }
+        DataType::SensorReading {
+            sensor_count,
+            mesh: false,
+        }
+    }
+
+    /// Creates a [`SensorReading`](DataType::SensorReading) data type with a live sensor mesh.
+    ///
+    /// In addition to sensor nodes, the source emits `CONNECTED_TO` relationships
+    /// (a ring plus a few chords). Edge `strength` updates over time and chords
+    /// are occasionally rewired.
+    pub fn sensor_reading_mesh(sensor_count: u32) -> Self {
+        DataType::SensorReading {
+            sensor_count,
+            mesh: true,
+        }
     }
 
     /// Returns the sensor count if this is a [`SensorReading`](DataType::SensorReading) variant.
@@ -84,9 +103,14 @@ impl DataType {
     /// - `None` for `Counter` and `Generic` variants
     pub fn sensor_count(&self) -> Option<u32> {
         match self {
-            DataType::SensorReading { sensor_count } => Some(*sensor_count),
+            DataType::SensorReading { sensor_count, .. } => Some(*sensor_count),
             _ => None,
         }
+    }
+
+    /// Returns whether mesh generation is enabled for a sensor reading data type.
+    pub fn mesh(&self) -> bool {
+        matches!(self, DataType::SensorReading { mesh: true, .. })
     }
 }
 
@@ -187,7 +211,7 @@ impl MockSourceConfig {
             ));
         }
 
-        if let DataType::SensorReading { sensor_count } = &self.data_type {
+        if let DataType::SensorReading { sensor_count, .. } = &self.data_type {
             if *sensor_count == 0 {
                 return Err(anyhow::anyhow!(
                     "Validation error: sensor_count cannot be 0. \

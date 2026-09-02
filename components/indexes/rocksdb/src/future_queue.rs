@@ -25,11 +25,11 @@ use drasi_core::{
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
 use prost::{bytes::Bytes, Message};
-use rocksdb::{AsColumnFamilyRef, Options, ReadOptions, SliceTransform, Transaction};
+use rocksdb::{AsColumnFamilyRef, Cache, Options, ReadOptions, SliceTransform, Transaction};
 use tokio::task;
 
 use crate::storage_models::{StoredElementReference, StoredFutureElementRef};
-use crate::RocksDbSessionState;
+use crate::{RocksDbSessionState, RocksIndexOptions};
 
 /// RocksDB future queue
 ///
@@ -39,6 +39,7 @@ use crate::RocksDbSessionState;
 pub struct RocksDbFutureQueue {
     db: Arc<IndexDb>,
     session_state: Arc<RocksDbSessionState>,
+    options: RocksIndexOptions,
 }
 
 const QUEUE_CF: &str = "fqueue";
@@ -49,8 +50,16 @@ impl RocksDbFutureQueue {
     ///
     /// The database must already have the required column families created.
     /// Use `open_unified_db()` to open a database with all required CFs.
-    pub fn new(db: Arc<IndexDb>, session_state: Arc<RocksDbSessionState>) -> Self {
-        Self { db, session_state }
+    pub fn new(
+        db: Arc<IndexDb>,
+        session_state: Arc<RocksDbSessionState>,
+        options: RocksIndexOptions,
+    ) -> Self {
+        Self {
+            db,
+            session_state,
+            options,
+        }
     }
 }
 
@@ -255,12 +264,17 @@ impl FutureQueue for RocksDbFutureQueue {
 
     async fn clear(&self) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let options = self.options.clone();
         let task = task::spawn_blocking(move || {
+            let block_cache = options.memory_budget().block_cache();
             if let Err(err) = db.drop_cf(QUEUE_CF) {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(QUEUE_CF, &get_fqueue_cf_options()) {
+            if let Err(err) = db.create_cf(
+                QUEUE_CF,
+                &crate::sizing::sized(QUEUE_CF, get_fqueue_cf_options(block_cache), &options),
+            ) {
                 return Err(IndexError::other(err));
             }
 
@@ -268,7 +282,10 @@ impl FutureQueue for RocksDbFutureQueue {
                 return Err(IndexError::other(err));
             }
 
-            if let Err(err) = db.create_cf(INDEX_CF, &get_findex_cf_options()) {
+            if let Err(err) = db.create_cf(
+                INDEX_CF,
+                &crate::sizing::sized(INDEX_CF, get_findex_cf_options(block_cache), &options),
+            ) {
                 return Err(IndexError::other(err));
             }
             Ok(())
@@ -341,24 +358,25 @@ fn encode_index_prefix(position_in_query: u32, group_signature: u64) -> [u8; 12]
     buf
 }
 
-pub(crate) fn get_fqueue_cf_options() -> Options {
-    let mut opts = Options::default();
-    crate::bound_write_buffer_history(&mut opts);
+pub(crate) fn get_fqueue_cf_options(block_cache: &Cache) -> Options {
+    let mut opts = crate::cf_options::base_cf_options(block_cache);
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
     opts
 }
 
-pub(crate) fn get_findex_cf_options() -> Options {
-    let mut opts = Options::default();
-    crate::bound_write_buffer_history(&mut opts);
+pub(crate) fn get_findex_cf_options(block_cache: &Cache) -> Options {
+    let mut opts = crate::cf_options::base_cf_options(block_cache);
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(12));
     opts
 }
 
 /// Collect all column family descriptors needed by the future queue.
-pub(crate) fn future_queue_cf_descriptors() -> Vec<rocksdb::ColumnFamilyDescriptor> {
+pub(crate) fn future_queue_cf_descriptors(
+    options: &crate::RocksIndexOptions,
+) -> Vec<rocksdb::ColumnFamilyDescriptor> {
+    let block_cache = options.memory_budget().block_cache();
     vec![
-        rocksdb::ColumnFamilyDescriptor::new(QUEUE_CF, get_fqueue_cf_options()),
-        rocksdb::ColumnFamilyDescriptor::new(INDEX_CF, get_findex_cf_options()),
+        crate::sizing::descriptor(QUEUE_CF, get_fqueue_cf_options(block_cache), options),
+        crate::sizing::descriptor(INDEX_CF, get_findex_cf_options(block_cache), options),
     ]
 }

@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-bootstrap-mysql"
-version = "0.2.9"
+version = "0.2.11"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "MySQL bootstrap provider for Drasi"
@@ -33,7 +33,7 @@ workspace = true
 drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
-drasi-mysql-common = { workspace = true }
+drasi-mysql-common = { workspace = true, features = ["api"] }
 utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
@@ -43,7 +43,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 ordered-float = "3.0"
-mysql_async = "0.37"
+mysql_async = { version = "0.37", features = ["rustls-tls", "ring", "tls12"] }
 mysql_common = "0.37"
 bytes = "1.0"
 

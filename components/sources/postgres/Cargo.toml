@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-postgres"
-version = "0.2.8"
+version = "0.2.10"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "PostgreSQL source plugin for Drasi"
@@ -32,6 +32,7 @@ workspace = true
 [dependencies]
 drasi-lib.workspace = true
 drasi-core.workspace = true
+drasi-postgres-common.workspace = true
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 anyhow = "1.0"

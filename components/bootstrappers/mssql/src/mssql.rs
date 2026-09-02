@@ -18,16 +18,16 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core::models::{
-    Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest, BootstrapResult};
 use drasi_lib::channels::{BootstrapEvent, SourceChangeEvent};
+use drasi_mssql_common::types::extract_column_value;
 use drasi_mssql_common::{
     validate_sql_identifier, Lsn, MsSqlConnection, MsSqlSourceConfig, PrimaryKeyCache,
 };
 use log::{debug, info, warn};
-use ordered_float::OrderedFloat;
 use std::sync::Arc;
 use tiberius::Row;
 
@@ -406,14 +406,10 @@ impl MsSqlBootstrapHandler {
     ) -> Result<SourceChange> {
         let mut properties = ElementPropertyMap::new();
 
-        // Process each column
+        // Process each column via the shared converter (same path as CDC).
         for (idx, column) in row.columns().iter().enumerate() {
             let column_name = column.name();
-
-            // Convert the value
-            let element_value = self.convert_column_value(row, idx, column)?;
-
-            // Add to properties
+            let element_value = extract_column_value(row, idx)?;
             properties.insert(column_name, element_value);
         }
 
@@ -431,99 +427,6 @@ impl MsSqlBootstrapHandler {
                 properties,
             },
         })
-    }
-
-    /// Convert a column value to ElementValue
-    fn convert_column_value(
-        &self,
-        row: &Row,
-        idx: usize,
-        column: &tiberius::Column,
-    ) -> Result<ElementValue> {
-        use tiberius::ColumnType;
-
-        match column.column_type() {
-            ColumnType::Bit | ColumnType::Bitn => {
-                if let Ok(Some(val)) = row.try_get::<bool, _>(idx) {
-                    Ok(ElementValue::Bool(val))
-                } else {
-                    Ok(ElementValue::Null)
-                }
-            }
-            ColumnType::Int1
-            | ColumnType::Int2
-            | ColumnType::Int4
-            | ColumnType::Int8
-            | ColumnType::Intn => {
-                // Try different integer sizes - order matters for SQL Server types
-                // INT (Int4) -> i32, BIGINT (Int8) -> i64, SMALLINT (Int2) -> i16, TINYINT (Int1) -> u8
-                if let Ok(Some(val)) = row.try_get::<i32, _>(idx) {
-                    Ok(ElementValue::Integer(val as i64))
-                } else if let Ok(Some(val)) = row.try_get::<i64, _>(idx) {
-                    Ok(ElementValue::Integer(val))
-                } else if let Ok(Some(val)) = row.try_get::<i16, _>(idx) {
-                    Ok(ElementValue::Integer(val as i64))
-                } else if let Ok(Some(val)) = row.try_get::<u8, _>(idx) {
-                    Ok(ElementValue::Integer(val as i64))
-                } else {
-                    Ok(ElementValue::Null)
-                }
-            }
-            ColumnType::Float4
-            | ColumnType::Float8
-            | ColumnType::Floatn
-            | ColumnType::Numericn
-            | ColumnType::Decimaln => {
-                // Try f32 first (Float4), then f64 (Float8)
-                // For Decimal/Numeric, tiberius can return them as f64
-                if let Ok(Some(val)) = row.try_get::<f32, _>(idx) {
-                    Ok(ElementValue::Float(OrderedFloat(val as f64)))
-                } else if let Ok(Some(val)) = row.try_get::<f64, _>(idx) {
-                    Ok(ElementValue::Float(OrderedFloat(val)))
-                } else {
-                    Ok(ElementValue::Null)
-                }
-            }
-            ColumnType::BigVarChar
-            | ColumnType::BigChar
-            | ColumnType::NVarchar
-            | ColumnType::NChar
-            | ColumnType::BigVarBin
-            | ColumnType::BigBinary
-            | ColumnType::Text
-            | ColumnType::NText => {
-                if let Ok(Some(val)) = row.try_get::<&str, _>(idx) {
-                    Ok(ElementValue::String(Arc::from(val)))
-                } else {
-                    Ok(ElementValue::Null)
-                }
-            }
-            ColumnType::Datetime
-            | ColumnType::Datetime2
-            | ColumnType::Datetime4
-            | ColumnType::Datetimen => {
-                if let Ok(Some(val)) = row.try_get::<chrono::NaiveDateTime, _>(idx) {
-                    Ok(ElementValue::String(Arc::from(val.to_string().as_str())))
-                } else if let Ok(Some(val)) = row.try_get::<chrono::DateTime<chrono::Utc>, _>(idx) {
-                    Ok(ElementValue::String(Arc::from(val.to_rfc3339().as_str())))
-                } else {
-                    Ok(ElementValue::Null)
-                }
-            }
-            _ => {
-                // For unsupported types, try to convert to string
-                if let Ok(Some(val)) = row.try_get::<&str, _>(idx) {
-                    Ok(ElementValue::String(Arc::from(val)))
-                } else {
-                    warn!(
-                        "Unsupported column type {:?} for column {}, treating as NULL",
-                        column.column_type(),
-                        column.name()
-                    );
-                    Ok(ElementValue::Null)
-                }
-            }
-        }
     }
 
     /// Send a batch of changes

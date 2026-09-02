@@ -8,9 +8,9 @@ on:
         type: string
 imports:
   - ../agents/source-planner.md
+model: claude-sonnet-4.5
 engine:
   id: copilot
-  model: claude-sonnet-4.5
 permissions:
   copilot-requests: write
   contents: read
@@ -23,7 +23,7 @@ tools:
 safe-outputs:
   create-pull-request:
     draft: true
-    expires: 14
+    expires: 14d
 ---
 
 # source-planner

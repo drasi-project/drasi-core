@@ -30,6 +30,8 @@ jobs:
   release-plz:
     name: Release-plz
     runs-on: ubuntu-latest-8-cores
+    # Allows the 120-minute retry window plus setup and publishing overhead.
+    timeout-minutes: 150
     environment: drasi-core-release
     outputs:
       # 'true' only when this run actually published crates (release commit or
@@ -41,6 +43,9 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+
+      - name: Test release retry wrapper
+        run: .github/scripts/release-with-retry.test.sh
 
       - name: Install release tools
         uses: ./.github/actions/install-release-tools
@@ -72,7 +77,7 @@ jobs:
 
       - name: Publish crates
         if: ${{ (steps.check_release.outputs.is_release == 'true' || inputs.force_publish == true) && inputs.dry_run != true }}
-        run: release-plz release --git-token "$GITHUB_TOKEN" --backend github
+        run: .github/scripts/release-with-retry.sh release-plz release --git-token "$GITHUB_TOKEN" --backend github
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
