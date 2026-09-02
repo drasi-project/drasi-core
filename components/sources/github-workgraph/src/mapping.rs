@@ -13,11 +13,17 @@ use crate::model::{
 };
 use crate::protocol::ProjectionInput;
 
-pub const NODE_LABELS: [&str; 19] = [
+/// Every node label the Source can advertise.
+///
+/// The list is dynamic observed state only: the static workflow shape
+/// (`WorkflowDefinition`/`TaskDefinition`) has no producer since the Reaction
+/// took ownership of the pinned definition. `WorkGraphTaskArtifact` remains
+/// because the Core lease ledger still projects lease-artifact detail nodes;
+/// the injected projector no longer emits any.
+pub const NODE_LABELS: [&str; 18] = [
     "GitHubIssue",
     "WorkGraphRootIssue",
-    "WorkflowDefinition",
-    "TaskDefinition",
+    "WorkGraphRootIssueComment",
     "WorkflowRun",
     "WorkGraphTask",
     "WorkGraphTaskAssign",
@@ -35,20 +41,23 @@ pub const NODE_LABELS: [&str; 19] = [
     "WorkGraphError",
 ];
 
-pub const RELATION_LABELS: [&str; 26] = [
-    "HAS_ROOT",
-    "HAS_TASK",
-    "DECLARES_CHILD",
-    "USES_DEFINITION",
-    "INSTANCE_OF",
+/// Every relation label the Source can advertise.
+///
+/// Only observed runtime relationships remain: the static definition edges
+/// (`HAS_ROOT`, `HAS_TASK`, `DECLARES_CHILD`, `USES_DEFINITION`,
+/// `INSTANCE_OF`, `FORK_CHILD_DEFINITION`), the wait/terminal edges
+/// (`ENTERS_WAIT`, `WAIT_IN_RUN`, `CONCLUDES`, `RESUMES`) no longer have a
+/// producer. `ARTIFACT_FOR` remains for the Core lease ledger's lease-artifact
+/// detail projection only.
+pub const RELATION_LABELS: [&str; 22] = [
     "IN_RUN",
     "TASK_FOR",
     "ROOT_TASK_FOR",
+    "PRECEDES",
     "RUN_FOR",
     "ACTION_FOR",
     "ASSIGNS",
     "FORK_CHILD",
-    "FORK_CHILD_DEFINITION",
     "JOINS_FORK",
     "JOIN_RESULT",
     "JOIN_EVALUATION",
@@ -57,6 +66,7 @@ pub const RELATION_LABELS: [&str; 26] = [
     "RESULT_FROM_LEASE",
     "EVALUATES",
     "ROUTES",
+    "ROUTE_FOR",
     "ERROR_FOR",
     "ARTIFACT_FOR",
     "HAS_SLOT",
@@ -539,7 +549,6 @@ mod label_tests {
         for label in [
             "ACTION_FOR",
             "FORK_CHILD",
-            "FORK_CHILD_DEFINITION",
             "JOINS_FORK",
             "JOIN_RESULT",
             "JOIN_EVALUATION",
@@ -549,6 +558,55 @@ mod label_tests {
                 "{label} must be an advertised relation label"
             );
         }
+    }
+
+    #[test]
+    fn dynamic_task_relations_are_allowlisted() {
+        for label in ["TASK_FOR", "ROOT_TASK_FOR", "PRECEDES", "IN_RUN", "RUN_FOR"] {
+            assert!(
+                RELATION_LABELS.contains(&label),
+                "{label} must be an advertised relation label"
+            );
+        }
+        assert!(
+            NODE_LABELS.contains(&"WorkGraphRootIssueComment"),
+            "trusted Root Issue comments must be an advertised node label"
+        );
+    }
+
+    #[test]
+    fn static_definition_labels_have_no_producer() {
+        for label in ["WorkflowDefinition", "TaskDefinition"] {
+            assert!(
+                !NODE_LABELS.contains(&label),
+                "{label} is definition-derived and must not be advertised"
+            );
+        }
+        for label in [
+            "HAS_ROOT",
+            "HAS_TASK",
+            "DECLARES_CHILD",
+            "USES_DEFINITION",
+            "INSTANCE_OF",
+            "FORK_CHILD_DEFINITION",
+            "ENTERS_WAIT",
+            "WAIT_IN_RUN",
+            "CONCLUDES",
+            "RESUMES",
+        ] {
+            assert!(
+                !RELATION_LABELS.contains(&label),
+                "{label} is definition-derived and must not be advertised"
+            );
+        }
+    }
+
+    #[test]
+    fn lease_artifact_labels_remain_for_the_lease_ledger() {
+        // The projector no longer emits query-helper artifacts, but the Core
+        // lease ledger still projects lease-artifact detail nodes.
+        assert!(NODE_LABELS.contains(&"WorkGraphTaskArtifact"));
+        assert!(RELATION_LABELS.contains(&"ARTIFACT_FOR"));
     }
 
     #[test]

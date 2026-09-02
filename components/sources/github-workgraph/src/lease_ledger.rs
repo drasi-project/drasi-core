@@ -11,9 +11,10 @@ use crate::protocol::{
     PreparedProjectionCommit, ProjectionInput, RootIssueCommentDocument, RootIssueDocument,
     TaskDocument, WorkGraphAllocatorProjection, WorkGraphAssignmentBinding,
     WorkGraphDispatchBinding, WorkGraphProjector, WorkGraphRouteBinding,
-    MAX_ROOT_ISSUE_COMMENT_BODY_BYTES, WORKGRAPH_ASSIGNMENT_MARKER, WORKGRAPH_DISPATCH_MARKER,
-    WORKGRAPH_EVALUATION_ACCEPTED, WORKGRAPH_EVALUATION_MARKER, WORKGRAPH_EVALUATION_REJECTED,
-    WORKGRAPH_RESULT_MARKER, WORKGRAPH_ROUTE_MARKER, WORKGRAPH_ROUTE_REWORK,
+    MAX_ROOT_ISSUE_COMMENT_BODY_BYTES, MAX_WORKGRAPH_ATTEMPTS, WORKGRAPH_ASSIGNMENT_MARKER,
+    WORKGRAPH_DISPATCH_MARKER, WORKGRAPH_EVALUATION_ACCEPTED, WORKGRAPH_EVALUATION_MARKER,
+    WORKGRAPH_EVALUATION_REJECTED, WORKGRAPH_RESULT_MARKER, WORKGRAPH_ROUTE_MARKER,
+    WORKGRAPH_ROUTE_REWORK,
 };
 use anyhow::{Context, Result as AnyResult};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -32,7 +33,6 @@ const DELIVERY_PREFIX: &str = "delivery:";
 const WORKGRAPH_ORIGIN_PREFIX: &str = "workgraph-origin:";
 const MAX_WORKGRAPH_ID_LENGTH: usize = 256;
 const MAX_WORKGRAPH_PERMITTED_EXECUTORS: usize = 64;
-pub(crate) const MAX_WORKGRAPH_ATTEMPTS: u64 = 64;
 
 fn workgraph_origin_key(origin_id: &str) -> String {
     let digest = Sha256::digest(origin_id.as_bytes());

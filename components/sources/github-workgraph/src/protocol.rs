@@ -60,6 +60,12 @@ pub const WORKGRAPH_EVALUATION_REJECTED: &str = "rejected";
 pub const WORKGRAPH_ROUTE_REWORK: &str = "rework";
 /// Maximum human Root Issue comment body forwarded to the projector.
 pub const MAX_ROOT_ISSUE_COMMENT_BODY_BYTES: usize = 64 * 1024;
+/// Hard upper bound on bounded worker attempts for one task Assignment.
+///
+/// Core owns this allocator bound. The injected projector supplies it as
+/// [`WorkGraphRouteBinding::max_attempts`] because definition-declared rework
+/// policy now lives in the Reaction.
+pub const MAX_WORKGRAPH_ATTEMPTS: u64 = 64;
 
 /// Namespace shared by every WorkGraph-owned canonical identifier.
 pub const WORKGRAPH_ID_NAMESPACE: &str = "urn:drasi:workgraph:id:v1";
@@ -141,17 +147,6 @@ pub enum LifecycleTrustRole {
 }
 
 // ── Normalized document types ─────────────────────────────────────────────
-
-/// A workflow definition document fetched from the configured repository file.
-///
-/// `source_key` is deterministic from the exact configured
-/// `repository/ref/path` (see [`definition_source_key`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DefinitionDocument {
-    pub source_key: String,
-    pub body: String,
-}
 
 /// A Root Issue admitted into WorkGraph by the exact `workgraph` label.
 ///
@@ -271,6 +266,10 @@ pub struct RootIssueCommentDocument {
 }
 
 /// A normalized input for the WorkGraph projection.
+///
+/// Every variant carries observed GitHub state. Core never fetches or projects
+/// a workflow definition: the pinned `WorkGraphWorkflowDefinition/v1` document
+/// is loaded by the Reaction, which owns every definition-dependent decision.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProjectionInput {
     RecordIssueRevision {
@@ -278,10 +277,6 @@ pub enum ProjectionInput {
         revision: i64,
         state_fingerprint: String,
         authorization_transition: bool,
-    },
-    UpsertDefinition(DefinitionDocument),
-    DeleteDefinition {
-        source_key: String,
     },
     UpsertRootIssue(RootIssueDocument),
     DeleteRootIssue {
@@ -404,6 +399,12 @@ pub struct WorkGraphEvaluateBinding {
 /// Identity-bearing Route representation. Core does not parse Route bodies;
 /// the injected projector supplies these canonical fields after selecting the
 /// authoritative Result/Evaluation chain.
+///
+/// `max_attempts` is the allocator's attempt bound, not a workflow policy: the
+/// projector no longer reads the workflow definition, so it supplies
+/// [`MAX_WORKGRAPH_ATTEMPTS`] — the same bound an Assignment starts with. The
+/// Reaction owns the definition-declared rework policy and simply stops
+/// writing rework Routes once it is exhausted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkGraphRouteBinding {
@@ -487,16 +488,6 @@ pub trait WorkGraphProjector: Send + Sync {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
-
-/// Build the deterministic `source_key` for a workflow definition from the
-/// exact configured repository, ref, and path.
-///
-/// Format: `github:definition:{repository}:{ref}:{path}`
-///
-/// This is documented as the canonical identity for the definition document.
-pub fn definition_source_key(repository: &str, git_ref: &str, path: &str) -> String {
-    format!("github:definition:{repository}:{git_ref}:{path}")
-}
 
 /// Diagnostic reason for untrusted WorkGraph lifecycle artifacts.
 #[derive(Debug, Clone, PartialEq, Eq)]

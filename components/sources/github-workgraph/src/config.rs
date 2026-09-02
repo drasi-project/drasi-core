@@ -313,27 +313,36 @@ impl AgentConfig {
     }
 }
 
-/// Default path for the WorkGraph workflow definition file.
+/// Default path of the pinned WorkGraph workflow definition file.
+///
+/// Retained for configuration compatibility only. The Source never reads this
+/// file; the Reaction loads the pinned definition it derives lifecycle from.
 pub const DEFAULT_WORKFLOW_DEFINITION_PATH: &str =
     ".github/workgraph/workflows/issue-lifecycle-v1.body";
 
-/// Configuration for fetching the bounded WorkGraph workflow definition from a
-/// GitHub repository file.
+/// The pinned WorkGraph workflow definition location and the read-only GitHub
+/// credential the Source uses for authoritative Issue-label reads.
 ///
-/// The fields mirror [`AgentConfig`] and use the same validation and
-/// transport ([`crate::agent_client::AgentFileClient`]).
+/// The Source neither fetches nor projects the definition file: definition
+/// ownership belongs to the Reaction, which loads and indexes the pinned
+/// `WorkGraphWorkflowDefinition/v1` body itself. `repository`, `ref`, and
+/// `path` are still validated and still pin the same immutable definition
+/// identity the Reaction is configured with, so a deployment cannot silently
+/// point the two at different workflows; they are otherwise ignored.
+///
+/// The fields mirror [`AgentConfig`] and use the same validation.
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkflowDefinitionConfig {
-    /// `owner/name` of the repository holding the definition file.
+    /// `owner/name` of the repository holding the pinned definition file.
     pub repository: String,
-    /// The exact git ref (normally a branch such as `main`).
+    /// The exact git ref (normally an immutable commit OID).
     pub r#ref: String,
-    /// Repository-relative path of the definition file.
+    /// Repository-relative path of the pinned definition file. Never fetched.
     #[serde(default = "default_workflow_definition_path")]
     pub path: String,
-    /// A read-only GitHub credential used to read the file and authoritative
-    /// Issue-label state during ambiguous webhook ordering transitions.
+    /// A read-only GitHub credential used to read authoritative Issue-label
+    /// state during ambiguous webhook ordering transitions.
     pub token: String,
     /// GraphQL API endpoint. Override for GitHub Enterprise Server.
     #[serde(default = "default_agent_api_base_url")]
@@ -357,8 +366,9 @@ impl Default for WorkflowDefinitionConfig {
 }
 
 impl WorkflowDefinitionConfig {
-    /// Build an [`AgentFileLocation`] for reuse with the generalized fetch
-    /// client.
+    /// Build an [`AgentFileLocation`] so the pinned definition location reuses
+    /// the same repository/ref/path validation as the agent file. The Source
+    /// never fetches this location.
     pub fn location(&self) -> AgentFileLocation {
         AgentFileLocation {
             repository: self.repository.clone(),
@@ -405,11 +415,12 @@ pub struct GitHubWorkGraphSourceConfig {
     pub webhook: WebhookConfig,
     #[serde(default, with = "DurabilityConfigDef")]
     pub durability: DurabilityConfig,
-    /// WorkGraph workflow definition file configuration.
+    /// Pinned WorkGraph workflow definition location plus the read-only
+    /// GitHub credential used for authoritative Issue-label reads.
     ///
-    /// When present, the source fetches and projects the definition at
-    /// startup and on matching push deliveries. Requires a
-    /// `WorkGraphProjector` to be injected via the builder.
+    /// The definition file itself is never fetched or projected: the Reaction
+    /// owns the pinned definition. When absent, ambiguous label-ordering
+    /// transitions cannot be resolved against GitHub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_definition: Option<WorkflowDefinitionConfig>,
 }

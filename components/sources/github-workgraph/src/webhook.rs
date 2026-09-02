@@ -16,9 +16,11 @@ use crate::agent_sync::{push_touches_agent_file, AgentSync, AgentSyncError};
 use crate::config::{ProtocolTrust, RepositoryFilter, TaskIssueType, WorkflowDefinitionConfig};
 use crate::lease_ledger::{
     root_comment_fingerprint, Allocator, LifecycleArtifactRevisionState,
-    RootIssueCommentRevisionState, WorkGraphActiveLease, MAX_WORKGRAPH_ATTEMPTS,
+    RootIssueCommentRevisionState, WorkGraphActiveLease,
 };
-use crate::protocol::{derive_workgraph_id, LifecycleArtifactDocument, WorkGraphProjector};
+use crate::protocol::{
+    derive_workgraph_id, LifecycleArtifactDocument, WorkGraphProjector, MAX_WORKGRAPH_ATTEMPTS,
+};
 use anyhow::{anyhow, Context, Result};
 use axum::body::Bytes;
 use axum::extract::State;
@@ -51,6 +53,9 @@ pub struct IngressParams {
     pub allocator: Arc<Allocator>,
     pub agent_sync: Option<Arc<AgentSync>>,
     pub projector: Option<Arc<dyn WorkGraphProjector>>,
+    /// Read-only GitHub credential used to resolve authoritative Issue-label
+    /// state during ambiguous webhook ordering. The configured definition file
+    /// is never fetched; the Reaction owns the pinned workflow definition.
     pub workflow_definition: Option<WorkflowDefinitionConfig>,
     pub notify: Arc<Notify>,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
@@ -67,7 +72,6 @@ struct IngressState {
     allocator: Arc<Allocator>,
     agent_sync: Option<Arc<AgentSync>>,
     projector: Option<Arc<dyn WorkGraphProjector>>,
-    workflow_definition: Option<WorkflowDefinitionConfig>,
     admission_client: Option<AdmissionClient>,
     projection_gate: Mutex<()>,
     notify: Arc<Notify>,
@@ -90,7 +94,6 @@ pub async fn serve(listener: TcpListener, params: IngressParams) -> Result<()> {
         allocator: params.allocator,
         agent_sync: params.agent_sync,
         projector: params.projector,
-        workflow_definition: params.workflow_definition,
         admission_client,
         projection_gate: Mutex::new(()),
         notify: params.notify,
@@ -346,22 +349,8 @@ async fn handle_push(
         }
     });
 
-    let touches_definition = state.workflow_definition.as_ref().is_some_and(|wf_config| {
-        let repo = payload
-            .pointer("/repository/full_name")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let pushed_ref = payload
-            .get("ref")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let location = wf_config.location();
-        location.matches_push(repo, pushed_ref)
-            && push_touches_definition_file(payload, &wf_config.path)
-    });
-
-    if touches_agent.is_none() && !touches_definition {
-        debug!("[{source_id}] push delivery {delivery_id} does not touch agent or definition file");
+    if touches_agent.is_none() {
+        debug!("[{source_id}] push delivery {delivery_id} does not touch the agent file");
         return Ok(None);
     }
 
@@ -380,7 +369,7 @@ async fn handle_push(
         }
     }
 
-    // Single delivery dedup for push touching agent AND/OR definition.
+    // Single delivery dedup for the agent convergence.
     if state
         .allocator
         .completed(delivery_id)
@@ -392,18 +381,6 @@ async fn handle_push(
     }
 
     let mut total_appended = 0usize;
-
-    // Converge the durable definition sub-projection first. If the subsequent
-    // agent convergence fails, redelivery skips this origin record and resumes
-    // the unfinished agent side without duplicating projector state or WAL.
-    if touches_definition {
-        let _projection_guard = state.projection_gate.lock().await;
-        match converge_definition_on_push(state, delivery_id, payload).await {
-            Ok(Some(n)) => total_appended += n,
-            Ok(None) => {}
-            Err(rejection) => return Err(rejection),
-        }
-    }
 
     // Converge agent file if touched.
     if let Some(agent_sync) = touches_agent {
@@ -429,7 +406,7 @@ async fn handle_push(
         );
     }
 
-    // Single delivery marker for both convergences.
+    // Single delivery marker for the convergence.
     state
         .allocator
         .mark_completed(delivery_id)
@@ -440,91 +417,6 @@ async fn handle_push(
         state.notify.notify_one();
     }
     Ok(Some(total_appended))
-}
-
-// ── WorkGraph push definition convergence ────────────────────────────────────
-
-/// Check whether the push payload modified the exact configured definition
-/// file path (not just the same repository/ref).
-pub fn push_touches_definition_file(payload: &serde_json::Value, path: &str) -> bool {
-    push_touches_agent_file(payload, path.trim_start_matches('/'))
-}
-
-/// If a push delivery touches the workflow definition file, converge the
-/// definition through the projector. Returns the number of changes
-/// appended, or `None` if the push didn't touch the definition file.
-async fn converge_definition_on_push(
-    state: &IngressState,
-    delivery_id: &str,
-    payload: &serde_json::Value,
-) -> Result<Option<usize>, Rejection> {
-    let source_id = &state.source_id;
-    let (Some(projector), Some(wf_config)) = (&state.projector, &state.workflow_definition) else {
-        return Ok(None);
-    };
-    let repository = payload
-        .pointer("/repository/full_name")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    let pushed_ref = payload
-        .get("ref")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    let location = wf_config.location();
-    if !location.matches_push(repository, pushed_ref) {
-        return Ok(None);
-    }
-    if !push_touches_definition_file(payload, &wf_config.path) {
-        return Ok(None);
-    }
-    debug!(
-        "[{source_id}] push delivery {delivery_id} touches workflow definition file '{}'",
-        wf_config.path
-    );
-
-    use crate::agent_client::AgentFileClient;
-    use crate::protocol::{definition_source_key, DefinitionDocument, ProjectionInput};
-
-    let client = AgentFileClient::new(&wf_config.token, &wf_config.api_base_url)
-        .map_err(|e| store_unavailable(source_id, e))?;
-    let content = match client.fetch(&location).await {
-        Ok(content) => content,
-        Err(error) => {
-            // Fetch failure is retryable — never project deletion/empty.
-            error!(
-                "[{source_id}] failed to fetch workflow definition on push: {error}; \
-                 requesting redeliver"
-            );
-            return reject(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("definition file unavailable; redeliver later: {error}"),
-            );
-        }
-    };
-    let source_key =
-        definition_source_key(&wf_config.repository, &wf_config.r#ref, &wf_config.path);
-    let effective_from = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    let origin_id = format!("push:{delivery_id}:definition:{source_key}");
-
-    let input = ProjectionInput::UpsertDefinition(DefinitionDocument {
-        source_key: source_key.clone(),
-        body: content.text,
-    });
-
-    let (appended, rejection) = state
-        .allocator
-        .ingest_workgraph(projector.as_ref(), vec![input], effective_from, &origin_id)
-        .await
-        .map_err(|e| store_unavailable(source_id, e))?;
-
-    if let Some(rejection) = &rejection {
-        warn!("[{source_id}] push definition projection rejected: {rejection}");
-    }
-    info!(
-        "[{source_id}] push delivery {delivery_id} converged definition '{source_key}' \
-         ({appended} change(s))"
-    );
-    Ok(Some(appended))
 }
 
 // ── WorkGraph event normalization ────────────────────────────────────────────
@@ -2622,7 +2514,6 @@ mod workgraph_tests {
                 allocator,
                 agent_sync: None,
                 projector: Some(projector.clone()),
-                workflow_definition: None,
                 admission_client: None,
                 projection_gate: Mutex::new(()),
                 notify: Arc::new(Notify::new()),
@@ -5994,35 +5885,12 @@ mod workgraph_tests {
     }
 
     #[tokio::test]
-    async fn matching_push_fetches_and_projects_configured_definition() {
-        let server = MockServer::start().await;
-        let body = "WorkGraphWorkflowDefinition/v1\n\n```json\n{}\n```\n";
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": {
-                    "repository": {
-                        "object": {
-                            "__typename": "Blob",
-                            "oid": "definition-oid",
-                            "text": body,
-                            "byteSize": body.len(),
-                            "isTruncated": false,
-                            "isBinary": false
-                        }
-                    }
-                }
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let (_temp, projector, mut state) = ingress_state(None).await;
-        state.workflow_definition = Some(WorkflowDefinitionConfig {
-            repository: "acme/widgets".to_string(),
-            r#ref: "main".to_string(),
-            path: ".github/workgraph/workflows/issue-lifecycle-v1.body".to_string(),
-            token: "token".to_string(),
-            api_base_url: server.uri(),
-        });
+    async fn matching_push_never_fetches_or_projects_a_definition() {
+        // The Reaction owns the pinned workflow definition. A push that
+        // touches the configured definition file is acknowledged with no
+        // content: the Source has no definition fetch or projection path, and
+        // no `IngressState` field that could reach GitHub for one.
+        let (_temp, projector, state) = ingress_state(None).await;
         let event = json!({
             "ref": "refs/heads/main",
             "organization": {"login": "acme"},
@@ -6036,18 +5904,15 @@ mod workgraph_tests {
         });
 
         assert_eq!(
-            converge_definition_on_push(&state, "push-1", &event)
+            handle_push(&state, "push-1", &event)
                 .await
-                .expect("definition convergence"),
-            Some(0)
+                .expect("push is acknowledged"),
+            None,
+            "a definition-only push must be acknowledged with no content"
         );
-        let committed = projector.committed.lock().await;
-        assert!(matches!(
-            &committed[0][0],
-            ProjectionInput::UpsertDefinition(document)
-                if document.body == body
-                    && document.source_key
-                        == "github:definition:acme/widgets:main:.github/workgraph/workflows/issue-lifecycle-v1.body"
-        ));
+        assert!(
+            projector.committed.lock().await.is_empty(),
+            "no definition may be projected"
+        );
     }
 }

@@ -188,9 +188,10 @@ impl Source for GitHubWorkGraphSource {
             .await?;
 
         // ── WorkGraph projector startup ──────────────────────────────────────
-        // If a projector was injected, restore it from durable records and
-        // then fetch+project the configured definition document before any
-        // delivery is accepted.
+        // If a projector was injected, restore it from durable records before
+        // any delivery is accepted. Core never loads a workflow definition:
+        // the pinned definition is the Reaction's, and the Source only
+        // projects observed GitHub state.
         if let Some(projector) = &self.projector {
             let checkpoint = allocator.workgraph_checkpoint().await?;
             if !checkpoint.is_empty() {
@@ -202,53 +203,6 @@ impl Source for GitHubWorkGraphSource {
                     "[{}] restored WorkGraph projector from a {}-byte durable checkpoint",
                     self.base.id,
                     checkpoint.len()
-                );
-            }
-
-            // Fetch the definition document and project it.
-            if let Some(wf_config) = &self.config.workflow_definition {
-                use crate::agent_client::AgentFileClient;
-                use crate::protocol::{definition_source_key, DefinitionDocument, ProjectionInput};
-
-                let client = AgentFileClient::new(&wf_config.token, &wf_config.api_base_url)
-                    .context("Failed to build workflow definition file client")?;
-                let location = wf_config.location();
-                let content = client.fetch(&location).await.map_err(|error| {
-                    anyhow!(
-                        "Failed to fetch workflow definition '{}' ref '{}' path '{}': {error}",
-                        wf_config.repository,
-                        wf_config.r#ref,
-                        wf_config.path
-                    )
-                })?;
-
-                let source_key =
-                    definition_source_key(&wf_config.repository, &wf_config.r#ref, &wf_config.path);
-                let effective_from = chrono::Utc::now().timestamp_millis().max(0) as u64;
-                let origin_id = format!("startup:definition:{source_key}:{}", content.oid);
-
-                let input = ProjectionInput::UpsertDefinition(DefinitionDocument {
-                    source_key: source_key.clone(),
-                    body: content.text,
-                });
-
-                let (appended, rejection) = allocator
-                    .ingest_workgraph(projector.as_ref(), vec![input], effective_from, &origin_id)
-                    .await
-                    .context("Failed to project startup workflow definition")?;
-
-                if let Some(rejection) = &rejection {
-                    warn!(
-                        "[{}] startup definition projection rejected: {rejection}",
-                        self.base.id
-                    );
-                }
-                if appended > 0 {
-                    self.notify.notify_one();
-                }
-                info!(
-                    "[{}] startup definition projected from '{source_key}' ({appended} change(s))",
-                    self.base.id
                 );
             }
         }

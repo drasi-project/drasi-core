@@ -66,10 +66,20 @@ Its sorted `workgraphLabels` namespace is case-sensitive. Only exact
 similarly spelled labels do not.
 
 Core normalizes authenticated GitHub documents, persists delivery deduplication,
-owns agent-slot leasing, and exposes an object-safe projector boundary. The
-definition and task body semantics are implemented by the injected v1 projector;
-the Dogfooding `github-workgraph-v1` wrapper supplies that projector and owns the
-`wg-` queries and runtime configuration.
+owns agent-slot leasing, and exposes an object-safe projector boundary. Task body
+semantics are implemented by the injected v1 projector; the Dogfooding
+`github-workgraph-v1` wrapper supplies that projector and owns the `wg-` queries
+and runtime configuration.
+
+The source never fetches or projects a workflow definition. The pinned
+`WorkGraphWorkflowDefinition/v1` body is loaded by the Reaction, which owns every
+definition-dependent decision (declared children, task metadata, transition
+reachability, route authorization, wait and terminal interpretation). The
+`workflowDefinition` block is retained only to pin the same immutable definition
+location the Reaction uses and to supply the read-only credential for
+authoritative Issue-label reads; a `push` touching that file is acknowledged with
+no content. The configured agent inventory is still loaded, because Core owns
+agent slots and leases.
 
 Human-authored comments on an admitted Root Issue are supplied to that projector
 as `UpsertRootIssueComment` evidence. The document carries the comment source
@@ -163,8 +173,10 @@ durability:
 ```
 
 `protocolTrust` requires `agentConfig`. Every trusted identity is matched by both
-its GitHub node ID and exact login. The agent/definition read token also performs
-authoritative Issue-label reads during ambiguous ordering transitions.
+its GitHub node ID and exact login. `workflowDefinition.repository`, `ref`, and
+`path` are validated and pin the Reaction's definition identity, but the file is
+never read; its token performs authoritative Issue-label reads during ambiguous
+ordering transitions.
 
 Sparse `sub_issue_removed` deliveries may identify the child only by numeric
 `sub_issue_id`. The source durably indexes that database ID when it first sees the
@@ -196,19 +208,26 @@ expiry makes the Lease historical and allocates a fresh retry attempt.
 
 The source advertises only the current v1 schema:
 
-- Nodes: `GitHubIssue`, `WorkGraphRootIssue`, `WorkflowDefinition`, `TaskDefinition`,
+- Nodes: `GitHubIssue`, `WorkGraphRootIssue`, `WorkGraphRootIssueComment`,
   `WorkflowRun`, `WorkGraphTask`, `WorkGraphTaskAssign`,
   `WorkGraphTaskFork`, `WorkGraphTaskJoin`,
   `WorkGraphTaskDispatch`, `WorkGraphTaskResult`,
-  `WorkGraphTaskEvaluate`, `WorkGraphTaskRoute`, `WorkGraphTaskArtifact`,
-  `WorkGraphTaskLease`, `WorkGraphAgent`, `WorkGraphAgentSlot`, and
-  `WorkGraphError`.
-- Relations: `HAS_ROOT`, `HAS_TASK`, `DECLARES_CHILD`, `USES_DEFINITION`,
-  `INSTANCE_OF`, `IN_RUN`, `TASK_FOR`, `ROOT_TASK_FOR`, `RUN_FOR`,
-  `ACTION_FOR`, `ASSIGNS`, `FORK_CHILD`, `FORK_CHILD_DEFINITION`, `JOINS_FORK`,
+  `WorkGraphTaskEvaluate`, `WorkGraphTaskRoute`, `WorkGraphTaskError`,
+  `WorkGraphTaskArtifact`, `WorkGraphTaskLease`, `WorkGraphAgent`,
+  `WorkGraphAgentSlot`, and `WorkGraphError`.
+- Relations: `IN_RUN`, `TASK_FOR`, `ROOT_TASK_FOR`, `PRECEDES`, `RUN_FOR`,
+  `ACTION_FOR`, `ASSIGNS`, `FORK_CHILD`, `JOINS_FORK`,
   `JOIN_RESULT`, `JOIN_EVALUATION`, `DISPATCHES`, `RESULT_FOR`,
-  `RESULT_FROM_LEASE`, `EVALUATES`, `ROUTES`,
+  `RESULT_FROM_LEASE`, `EVALUATES`, `ROUTES`, `ROUTE_FOR`, `ERROR_FOR`,
   `ARTIFACT_FOR`, `HAS_SLOT`, `LEASE_FOR`, and `LEASES_SLOT`.
+
+Every advertised label is observed runtime state. The retired static definition
+labels (`WorkflowDefinition`, `TaskDefinition`, `HAS_ROOT`, `HAS_TASK`,
+`DECLARES_CHILD`, `USES_DEFINITION`, `INSTANCE_OF`, `FORK_CHILD_DEFINITION`) and
+the wait/terminal labels (`WorkGraphWait`, `WorkGraphTerminal`, `ENTERS_WAIT`,
+`WAIT_IN_RUN`, `CONCLUDES`, `RESUMES`) have no producer. `WorkGraphTaskArtifact`
+and `ARTIFACT_FOR` remain only for the Core lease ledger's lease-artifact detail
+projection.
 
 State is durable and fail-closed. Unsupported persisted state must be cleared
 before starting this prototype revision; no protocol migration is provided.
