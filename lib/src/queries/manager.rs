@@ -28,6 +28,7 @@ use drasi_core::{
     in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
     interface::{
         CheckpointStore, IndexError, LiveResultsWriter, OutboxWriter, RowMutation, SessionControl,
+        SessionGuard,
     },
     middleware::MiddlewareTypeRegistry,
     query::{ContinuousQuery, QueryBuilder},
@@ -721,12 +722,16 @@ async fn load_durable_output(
 }
 
 /// Clear durable outbox and live-results storage and reset the persisted
-/// result sequence to 0. Called only under `RecoveryPolicy::AutoReset` when
-/// durable output is found inconsistent at startup.
+/// result sequence to 0.
 ///
 /// Sequence is reset first so a crash mid-wipe leaves `stored == 0` against
 /// leftover live rows, which `reconcile_durable_output` rejects instead of
 /// hydrating sequence 0 as a clean start.
+///
+/// Used by AutoReset, config-hash mismatch, first-run leftover wipe, and
+/// `delete_query` cleanup after the runtime is gone. Live instances should
+/// call [`DrasiQuery::reset_output`] so in-memory state is also reset.
+/// `stop_query` must not call this.
 async fn wipe_durable_output(query_id: &str, stores: &DurableOutputStores) -> anyhow::Result<()> {
     stores
         .checkpoint_store
@@ -929,6 +934,25 @@ impl DrasiQuery {
 
     pub async fn get_current_results(&self) -> Vec<serde_json::Value> {
         self.output_state.read().await.get_results_as_vec()
+    }
+
+    /// Wipe durable outbox / live results / result sequence and reset in-memory
+    /// `QueryOutputState` so the next emission is sequence 1 of the current config.
+    ///
+    /// Used on config-hash mismatch, first run against leftover storage, AutoReset
+    /// of inconsistent output, and hash-read failure. `stop_query` must not call this.
+    async fn reset_output(
+        &self,
+        checkpoint_store: &Arc<dyn CheckpointStore>,
+    ) -> anyhow::Result<()> {
+        let stores = DurableOutputStores {
+            checkpoint_store: checkpoint_store.clone(),
+            outbox_writer: self.outbox_writer.read().await.clone(),
+            live_results_writer: self.live_results_writer.read().await.clone(),
+        };
+        wipe_durable_output(&self.base.config.id, &stores).await?;
+        self.output_state.write().await.reset();
+        Ok(())
     }
 
     /// Wait until the query has finished bootstrapping (status is no longer `Starting`).
@@ -1385,6 +1409,18 @@ impl Query for DrasiQuery {
                     // resumed with the wrong config on the next restart.
                     match checkpoint_store.clear_checkpoints().await {
                         Ok(()) => {
+                            if let Err(e) = self.reset_output(&checkpoint_store).await {
+                                let msg = format!(
+                                    "Query '{}' failed to wipe durable output on config change: {e}. \
+                                     Cannot start with leftover outbox/live results from a different config.",
+                                    self.base.config.id
+                                );
+                                error!("{msg}");
+                                self.base
+                                    .set_status(ComponentStatus::Error, Some(msg.clone()))
+                                    .await;
+                                return Err(anyhow::anyhow!(msg));
+                            }
                             if let Err(e) = checkpoint_store.write_config_hash(current_hash).await {
                                 warn!(
                                     "Query '{}' failed to write new config hash: {e}",
@@ -1433,6 +1469,17 @@ impl Query for DrasiQuery {
                         "Query '{}' no stored config hash (first run), writing hash {current_hash}",
                         self.base.config.id
                     );
+                    if let Err(e) = self.reset_output(&checkpoint_store).await {
+                        let msg = format!(
+                            "Query '{}' failed to wipe leftover durable output on first run: {e}",
+                            self.base.config.id
+                        );
+                        error!("{msg}");
+                        self.base
+                            .set_status(ComponentStatus::Error, Some(msg.clone()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
+                    }
                     if let Err(e) = checkpoint_store.write_config_hash(current_hash).await {
                         warn!(
                             "Query '{}' failed to write config hash: {e}",
@@ -1451,6 +1498,17 @@ impl Query for DrasiQuery {
                     if let Err(ce) = checkpoint_store.clear_checkpoints().await {
                         let msg = format!(
                             "Query '{}' failed to clear checkpoints on hash read failure: {ce}",
+                            self.base.config.id
+                        );
+                        error!("{msg}");
+                        self.base
+                            .set_status(ComponentStatus::Error, Some(msg.clone()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                    if let Err(e) = self.reset_output(&checkpoint_store).await {
+                        let msg = format!(
+                            "Query '{}' failed to wipe durable output on hash read failure: {e}",
                             self.base.config.id
                         );
                         error!("{msg}");
@@ -1483,7 +1541,8 @@ impl Query for DrasiQuery {
             };
 
             // Only hydrate and resume checkpoints when the config hash matched.
-            // A mismatch (or first run) starts at sequence 0 against empty output.
+            // A mismatch (or first run) already wiped durable output, so the
+            // query starts fresh at sequence 0 under the current config.
             hydrate_output = config_matches;
 
             // Only read checkpoints if the config hash matched — otherwise we
@@ -1630,7 +1689,6 @@ impl Query for DrasiQuery {
                                     .await;
                                 return Err(anyhow::anyhow!(msg));
                             }
-
                             self.output_state.write().await.reset();
                             checkpoint_sequences_per_source.clear();
                             for settings in &mut subscription_settings {
@@ -3290,13 +3348,22 @@ impl QueryManager {
                 ));
             }
 
+            // `reconfigure_component` stops the old runtime first. After that
+            // stop, drop its persistent index handles (e.g. RocksDB) before
+            // `provision_query` re-opens the same path. `stop()` keeps those
+            // handles so in-process resume can hydrate; reconfigure must
+            // release them or the new start fails with a process-exclusive lock.
+            let old_query_for_release = old_query.clone();
             crate::managers::lifecycle_helpers::reconfigure_component::<Arc<dyn Query>, _, _, _>(
                 &self.graph,
                 &id,
                 "query",
                 &old_query,
                 || async {},
-                || self.provision_query(new_config),
+                || async {
+                    old_query_for_release.release_persistent_handles().await;
+                    self.provision_query(new_config).await
+                },
                 || self.start_query(id.clone()),
             )
             .await
@@ -3336,8 +3403,11 @@ impl QueryManager {
         )
         .await?;
 
-        // After teardown: clear persistent indexes + checkpoints so a future
-        // query with the same ID starts fresh. Only needed for persistent backends.
+        // After teardown: clear persistent indexes, checkpoints, outbox, live
+        // results, and result sequence so a future query with the same ID starts
+        // at sequence 0. Only needed for persistent backends. `stop_query` does
+        // not take this path because in-process resume/hydration must keep the
+        // prior output (sequences continue at N+1).
         // Resolve the effective backend the same way as start-up so that queries
         // relying on the instance-wide default backend are also cleaned up.
         if let Some(config) = query_config {
@@ -3347,50 +3417,64 @@ impl QueryManager {
                 .or_else(|| self.index_factory.default_backend())
             {
                 if !self.index_factory.is_volatile(backend_ref) {
-                    info!("Query '{id}' removed — clearing persistent indexes and checkpoints");
-                    match self.index_factory.build(backend_ref, &id).await {
-                        Ok(created) => {
-                            // Wrap clearing in a session for transactional backends
-                            if let Err(e) = created.set.session_control.begin().await {
-                                warn!(
-                                    "Query '{id}' failed to begin session for removal cleanup: {e}"
-                                );
-                            } else {
-                                if let Err(e) = clear_persistent_indexes(
-                                    &id,
-                                    &Some(created.set.element_index),
-                                    &Some(created.set.archive_index),
-                                    &Some(created.set.result_index),
-                                    &Some(created.set.future_queue),
-                                )
-                                .await
-                                {
-                                    warn!(
-                                        "Query '{id}' failed to clear persistent indexes on removal: {e}"
-                                    );
-                                }
+                    info!(
+                        "Query '{id}' removed — clearing persistent indexes, checkpoints, and output"
+                    );
+                    let created = self
+                        .index_factory
+                        .build(backend_ref, &id)
+                        .await
+                        .with_context(|| {
+                            format!("Query '{id}' failed to build indexes for cleanup on removal")
+                        })?;
+                    let session = SessionGuard::begin(created.set.session_control.clone())
+                        .await
+                        .with_context(|| {
+                            format!("Query '{id}' failed to begin session for removal cleanup")
+                        })?;
+                    clear_persistent_indexes(
+                        &id,
+                        &Some(created.set.element_index),
+                        &Some(created.set.archive_index),
+                        &Some(created.set.result_index),
+                        &Some(created.set.future_queue),
+                    )
+                    .await
+                    .with_context(|| {
+                        format!("Query '{id}' failed to clear persistent indexes on removal")
+                    })?;
 
-                                if let Some(checkpoint_store) = created.checkpoint_store {
-                                    if let Err(e) = checkpoint_store.clear_checkpoints().await {
-                                        warn!(
-                                            "Query '{id}' failed to clear checkpoints on removal: {e}"
-                                        );
-                                    }
-                                }
-
-                                if let Err(e) = created.set.session_control.commit().await {
-                                    warn!(
-                                        "Query '{id}' failed to commit removal cleanup session: {e}"
-                                    );
-                                }
-                            }
+                    if let Some(checkpoint_store) = created.checkpoint_store {
+                        checkpoint_store
+                            .clear_checkpoints()
+                            .await
+                            .with_context(|| {
+                                format!("Query '{id}' failed to clear checkpoints on removal")
+                            })?;
+                        let stores = DurableOutputStores {
+                            checkpoint_store: checkpoint_store.clone(),
+                            outbox_writer: created.outbox_writer.clone(),
+                            live_results_writer: created.live_results_writer.clone(),
+                        };
+                        wipe_durable_output(&id, &stores).await.with_context(|| {
+                            format!("Query '{id}' failed to wipe durable output on removal")
+                        })?;
+                    } else {
+                        if let Some(writer) = &created.outbox_writer {
+                            writer.clear(&id).await.with_context(|| {
+                                format!("Query '{id}' failed to clear outbox on removal")
+                            })?;
                         }
-                        Err(e) => {
-                            warn!(
-                                "Query '{id}' failed to build indexes for cleanup on removal: {e}"
-                            );
+                        if let Some(writer) = &created.live_results_writer {
+                            writer.clear(&id).await.with_context(|| {
+                                format!("Query '{id}' failed to clear live results on removal")
+                            })?;
                         }
                     }
+
+                    session.commit().await.with_context(|| {
+                        format!("Query '{id}' failed to commit removal cleanup session")
+                    })?;
                 }
             }
         }
