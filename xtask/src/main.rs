@@ -203,10 +203,7 @@ fn discover_dynamic_plugins(plugin_filter: Option<&str>) -> DiscoveryResult {
         }
     }
 
-    let plugin_names: BTreeSet<String> = plugins
-        .iter()
-        .map(|p| p.package.name.clone())
-        .collect();
+    let plugin_names: BTreeSet<String> = plugins.iter().map(|p| p.package.name.clone()).collect();
     let build_batches = plugin_build_batches(&metadata.packages, &plugin_names);
 
     DiscoveryResult {
@@ -968,10 +965,14 @@ fn publish_plugins(args: &[String]) {
     let mut plugins = discover_publishable_plugins(&plugins_dir);
     if let Some(filter) = parse_flag_value(args, "--plugin") {
         plugins.retain(|p| {
-            p.metadata.name == filter || format!("{}/{}", p.metadata.plugin_type, p.metadata.kind) == filter
+            p.metadata.name == filter
+                || format!("{}/{}", p.metadata.plugin_type, p.metadata.kind) == filter
         });
         if plugins.is_empty() {
-            eprintln!("Error: no plugin matched filter '{filter}' in {}", plugins_dir.display());
+            eprintln!(
+                "Error: no plugin matched filter '{filter}' in {}",
+                plugins_dir.display()
+            );
             std::process::exit(1);
         }
     }
