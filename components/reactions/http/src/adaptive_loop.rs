@@ -115,26 +115,22 @@ pub(crate) async fn run_adaptive_loop(
                     Ok(()) => {
                         // Advance each represented query to its max fully-acked
                         // (terminal) sequence after the side effect committed.
-                        for (query_id, seq) in &completed {
-                            if let Err(e) = checkpoints.advance(&base, query_id, *seq).await {
-                                error!(
-                                    "[{reaction_name}] Failed to write checkpoint for query \
-                                     '{query_id}' (seq {seq}): {e}"
-                                );
-                                if FailureAction::from_policy(policy) == FailureAction::Stop {
-                                    fail_stop(
-                                        &base,
-                                        &errored,
-                                        &reaction_name,
-                                        &format!(
-                                            "HTTP checkpoint write failed for query '{query_id}' \
-                                             (seq {seq}); stopped per recovery policy"
-                                        ),
-                                    )
-                                    .await;
-                                    return;
-                                }
-                            }
+                        if let Err(e) = checkpoints
+                            .advance_completed_after_ack(&base, &completed, policy)
+                            .await
+                        {
+                            error!(
+                                "[{reaction_name}] Failed to write batch checkpoint after ack: {e}"
+                            );
+                            fail_stop(
+                                &base,
+                                &errored,
+                                &reaction_name,
+                                "HTTP checkpoint write failed after batch ack; \
+                                 stopped per recovery policy",
+                            )
+                            .await;
+                            return;
                         }
                     }
                     Err(e) => match FailureAction::from_policy(policy) {
