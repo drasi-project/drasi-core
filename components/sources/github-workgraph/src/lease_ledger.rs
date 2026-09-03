@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const VERSION: u8 = 19;
+const VERSION: u8 = 20;
 const STATE_KEY: &str = "allocator:state";
 const DELIVERY_PREFIX: &str = "delivery:";
 const WORKGRAPH_ORIGIN_PREFIX: &str = "workgraph-origin:";
@@ -1322,6 +1322,72 @@ fn valid_typed_workgraph_id(value: &str, id_type: &str) -> bool {
     value.len() <= MAX_WORKGRAPH_ID_LENGTH && is_typed_workgraph_id(value, id_type)
 }
 
+/// A Root Issue's active mapping admission set must be ordered by mapping ID,
+/// unique by mapping ID *and* by selector label, carry a typed admission ID per
+/// activation, and never name a reserved exclusion modifier as its selector.
+fn valid_root_mapping_admissions(
+    mappings: &[crate::protocol::RootMappingAdmission],
+    admission_id: &str,
+) -> bool {
+    if mappings.is_empty() {
+        return false;
+    }
+    if mappings
+        .windows(2)
+        .any(|pair| pair[0].mapping_id >= pair[1].mapping_id)
+    {
+        return false;
+    }
+    let labels: BTreeSet<&str> = mappings
+        .iter()
+        .map(|mapping| mapping.label.as_str())
+        .collect();
+    if labels.len() != mappings.len() {
+        return false;
+    }
+    if crate::protocol::RootIssueDocument::legacy_admission_id(mappings) != Some(admission_id) {
+        return false;
+    }
+    mappings.iter().all(|mapping| {
+        valid_typed_workgraph_id(&mapping.admission_id, "admission")
+            && valid_workgraph_id(&mapping.mapping_id)
+            && valid_workgraph_id(&mapping.label)
+            && !matches!(
+                mapping.label.as_str(),
+                crate::protocol::WORKGRAPH_IGNORE_LABEL | crate::protocol::WORKGRAPH_ERROR_LABEL
+            )
+            && (mapping.label == crate::protocol::WORKGRAPH_ADMISSION_LABEL
+                || mapping
+                    .label
+                    .starts_with(crate::protocol::WORKGRAPH_LABEL_PREFIX))
+            && valid_workgraph_id(&mapping.definition_repository)
+            && mapping.definition_repository.split('/').count() == 2
+            && valid_workgraph_id(&mapping.definition_ref)
+            && valid_workgraph_id(&mapping.definition_path)
+    })
+}
+
+/// A Root Issue comment's admission set must be ordered, unique, typed, and
+/// must contain the compatibility `admission_id` it was stamped with.
+///
+/// An empty set is a legacy comment that predates admission sets: its single
+/// admission is the compatibility `admission_id`, which is validated
+/// separately.
+fn valid_root_comment_admission_ids(comment: &RootIssueCommentDocument) -> bool {
+    if comment.admission_ids.is_empty() {
+        return true;
+    }
+    comment
+        .admission_ids
+        .windows(2)
+        .all(|pair| pair[0] < pair[1])
+        && comment
+            .admission_ids
+            .iter()
+            .all(|admission_id| valid_typed_workgraph_id(admission_id, "admission"))
+        && comment.admission_ids.contains(&comment.admission_id)
+}
+
 fn valid_workgraph_inclusion(labels: &[String], included: bool) -> bool {
     labels.iter().all(|label| label.starts_with("workgraph:"))
         && labels.windows(2).all(|pair| pair[0] <= pair[1])
@@ -1697,6 +1763,7 @@ impl AllocationState {
             || self.workgraph_root_issues.values().any(|root| {
                 !valid_workgraph_inclusion(&root.workgraph_labels, root.workgraph_include)
                     || !valid_typed_workgraph_id(&root.admission_id, "admission")
+                    || !valid_root_mapping_admissions(&root.workflow_mappings, &root.admission_id)
             })
         {
             return Err("WorkGraph inclusion state is invalid".into());
@@ -1722,6 +1789,7 @@ impl AllocationState {
                         || comment.body.len() > MAX_ROOT_ISSUE_COMMENT_BODY_BYTES
                         || comment.issue_number == 0
                         || !valid_typed_workgraph_id(&comment.admission_id, "admission")
+                        || !valid_root_comment_admission_ids(comment)
                         || [
                             &comment.source_key,
                             &comment.root_issue_id,
@@ -3415,6 +3483,16 @@ mod tests {
             body: "Root body".to_string(),
             is_open: true,
             admission_id: test_id("admission", "generation"),
+            workflow_mappings: vec![crate::protocol::RootMappingAdmission {
+                mapping_id: crate::protocol::LEGACY_WORKFLOW_MAPPING_ID.to_string(),
+                label: crate::protocol::WORKGRAPH_ADMISSION_LABEL.to_string(),
+                admission_id: test_id("admission", "generation"),
+                title: "Root".to_string(),
+                body: "Root body".to_string(),
+                definition_repository: "acme/widgets".to_string(),
+                definition_ref: "main".to_string(),
+                definition_path: ".github/workgraph/workflows/issue-lifecycle-v1.body".to_string(),
+            }],
             workgraph_labels: (!workgraph_include)
                 .then(|| "workgraph:ignore".to_string())
                 .into_iter()
@@ -4499,12 +4577,81 @@ mod tests {
     #[test]
     fn prior_allocator_schema_is_rejected_explicitly() {
         let mut encoded = serde_json::to_value(AllocationState::default()).expect("encode state");
-        encoded["version"] = serde_json::json!(18);
+        encoded["version"] = serde_json::json!(VERSION - 1);
         let state: AllocationState = serde_json::from_value(encoded).expect("decode old state");
         assert!(state
             .validate()
-            .expect_err("schema 18 must be rejected")
-            .contains("version must equal 19"));
+            .expect_err("a prior schema must be rejected")
+            .contains(&format!("version must equal {VERSION}")));
+    }
+
+    fn comment_with_admissions(admission_ids: Vec<String>) -> RootIssueCommentDocument {
+        let admission_id = admission_ids
+            .first()
+            .cloned()
+            .unwrap_or_else(|| test_id("admission", "compat"));
+        RootIssueCommentDocument {
+            source_key: "IC_human".to_string(),
+            root_issue_id: "I_root".to_string(),
+            admission_id,
+            admission_ids,
+            repository_owner: "acme".to_string(),
+            repository_name: "widgets".to_string(),
+            repository_node_id: "R_widgets".to_string(),
+            issue_number: 6,
+            author_id: "U_human".to_string(),
+            author_type: "User".to_string(),
+            author_login: "octocat".to_string(),
+            body: "resume".to_string(),
+            created_at_revision: 1,
+            updated_at_revision: 1,
+        }
+    }
+
+    #[test]
+    fn root_comment_admission_sets_must_be_ordered_typed_and_self_consistent() {
+        let foo = test_id("admission", "foo");
+        let bar = test_id("admission", "bar");
+        let mut ordered = vec![foo.clone(), bar.clone()];
+        ordered.sort();
+
+        let valid = comment_with_admissions(ordered.clone());
+        assert!(valid_root_comment_admission_ids(&valid));
+
+        // Legacy documents carry no set at all.
+        assert!(valid_root_comment_admission_ids(&comment_with_admissions(
+            Vec::new()
+        )));
+
+        let mut unordered = valid.clone();
+        unordered.admission_ids = ordered.iter().rev().cloned().collect();
+        assert!(
+            !valid_root_comment_admission_ids(&unordered),
+            "an unordered set must be rejected"
+        );
+
+        let mut duplicated = valid.clone();
+        duplicated.admission_ids = vec![foo.clone(), foo.clone()];
+        duplicated.admission_id = foo.clone();
+        assert!(
+            !valid_root_comment_admission_ids(&duplicated),
+            "a repeated admission must be rejected"
+        );
+
+        let mut untyped = valid.clone();
+        untyped.admission_ids = vec!["not-a-workgraph-id".to_string()];
+        untyped.admission_id = "not-a-workgraph-id".to_string();
+        assert!(
+            !valid_root_comment_admission_ids(&untyped),
+            "every admission must be a typed WorkGraph ID"
+        );
+
+        let mut orphaned = valid.clone();
+        orphaned.admission_id = test_id("admission", "elsewhere");
+        assert!(
+            !valid_root_comment_admission_ids(&orphaned),
+            "the compatibility admission must be one of the set"
+        );
     }
 
     #[test]

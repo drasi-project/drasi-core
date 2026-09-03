@@ -13,13 +13,17 @@
 // limitations under the License.
 
 use crate::agent_sync::{push_touches_agent_file, AgentSync, AgentSyncError};
-use crate::config::{ProtocolTrust, RepositoryFilter, TaskIssueType, WorkflowDefinitionConfig};
+use crate::config::{
+    AdmissionReadCredential, ProtocolTrust, RepositoryFilter, TaskIssueType, WorkflowMappingSet,
+};
 use crate::lease_ledger::{
     root_comment_fingerprint, Allocator, LifecycleArtifactRevisionState,
     RootIssueCommentRevisionState, WorkGraphActiveLease,
 };
 use crate::protocol::{
-    derive_workgraph_id, LifecycleArtifactDocument, WorkGraphProjector, MAX_WORKGRAPH_ATTEMPTS,
+    derive_workgraph_id, LifecycleArtifactDocument, RootMappingAdmission, WorkGraphProjector,
+    LEGACY_WORKFLOW_MAPPING_ID, MAX_WORKGRAPH_ATTEMPTS, WORKGRAPH_ADMISSION_LABEL,
+    WORKGRAPH_ERROR_LABEL, WORKGRAPH_IGNORE_LABEL,
 };
 use anyhow::{anyhow, Context, Result};
 use axum::body::Bytes;
@@ -54,9 +58,15 @@ pub struct IngressParams {
     pub agent_sync: Option<Arc<AgentSync>>,
     pub projector: Option<Arc<dyn WorkGraphProjector>>,
     /// Read-only GitHub credential used to resolve authoritative Issue-label
-    /// state during ambiguous webhook ordering. The configured definition file
-    /// is never fetched; the Reaction owns the pinned workflow definition.
-    pub workflow_definition: Option<WorkflowDefinitionConfig>,
+    /// state during ambiguous webhook ordering. It is resolved from
+    /// configuration and is independent of how Root admission is configured, so
+    /// a mapping-only Source is exactly as authoritative as a legacy one. No
+    /// configured definition file is ever fetched; the Reaction owns the pinned
+    /// workflow definition.
+    pub admission_read: Option<AdmissionReadCredential>,
+    /// The complete ordered set of label→workflow mappings this Source
+    /// recognizes, including the implicit legacy `workgraph` mapping.
+    pub workflow_mappings: WorkflowMappingSet,
     pub notify: Arc<Notify>,
     pub shutdown: tokio::sync::watch::Receiver<bool>,
 }
@@ -73,13 +83,14 @@ struct IngressState {
     agent_sync: Option<Arc<AgentSync>>,
     projector: Option<Arc<dyn WorkGraphProjector>>,
     admission_client: Option<AdmissionClient>,
+    workflow_mappings: WorkflowMappingSet,
     projection_gate: Mutex<()>,
     notify: Arc<Notify>,
 }
 
 pub async fn serve(listener: TcpListener, params: IngressParams) -> Result<()> {
     let admission_client = params
-        .workflow_definition
+        .admission_read
         .as_ref()
         .map(AdmissionClient::new)
         .transpose()?;
@@ -95,6 +106,7 @@ pub async fn serve(listener: TcpListener, params: IngressParams) -> Result<()> {
         agent_sync: params.agent_sync,
         projector: params.projector,
         admission_client,
+        workflow_mappings: params.workflow_mappings,
         projection_gate: Mutex::new(()),
         notify: params.notify,
     });
@@ -466,11 +478,12 @@ impl IssueAuthorityState {
 }
 
 impl AdmissionClient {
-    fn new(config: &WorkflowDefinitionConfig) -> Result<Self> {
+    fn new(credential: impl Into<AdmissionReadCredential>) -> Result<Self> {
+        let credential = credential.into();
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::AUTHORIZATION,
-            reqwest::header::HeaderValue::from_str(&format!("bearer {}", config.token))
+            reqwest::header::HeaderValue::from_str(&format!("bearer {}", credential.token))
                 .context("invalid GitHub token header value")?,
         );
         headers.insert(
@@ -483,12 +496,13 @@ impl AdmissionClient {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .context("failed to build GitHub admission client")?,
-            api_url: config.api_base_url.clone(),
+            api_url: credential.api_base_url,
         })
     }
 
     async fn is_root_candidate(
         &self,
+        mappings: &WorkflowMappingSet,
         node_id: &str,
         task_issue_type: &crate::config::TaskIssueType,
     ) -> Result<bool> {
@@ -527,9 +541,8 @@ impl AdmissionClient {
             .and_then(Value::as_array)
             .context("authoritative Root Issue labels are missing")?
             .iter()
-            .any(|label| {
-                label.get("name").and_then(Value::as_str) == Some(WORKGRAPH_ADMISSION_LABEL)
-            });
+            .filter_map(|label| label.get("name").and_then(Value::as_str))
+            .any(|label| mappings.recognizes_label(label));
         if labels
             .pointer("/pageInfo/hasNextPage")
             .and_then(Value::as_bool)
@@ -601,6 +614,7 @@ impl AdmissionClient {
 
     async fn issue_authority_state(
         &self,
+        mappings: &WorkflowMappingSet,
         node_id: &str,
         task_issue_type: &crate::config::TaskIssueType,
     ) -> Result<IssueAuthorityState> {
@@ -693,7 +707,7 @@ impl AdmissionClient {
             .to_string();
         let admitted = label_names
             .iter()
-            .any(|label| label == WORKGRAPH_ADMISSION_LABEL);
+            .any(|label| mappings.recognizes_label(label));
         let classification =
             if task_typed && body.starts_with(crate::protocol::WORKGRAPH_TASK_MARKER) {
                 "task"
@@ -864,10 +878,6 @@ fn authorize_workgraph_repository(
     Ok(())
 }
 
-const WORKGRAPH_ADMISSION_LABEL: &str = "workgraph";
-const WORKGRAPH_IGNORE_LABEL: &str = "workgraph:ignore";
-const WORKGRAPH_ERROR_LABEL: &str = "workgraph:error";
-
 fn issue_workgraph_labels(issue: &serde_json::Value) -> (Vec<String>, bool) {
     let mut labels = issue
         .get("labels")
@@ -974,9 +984,15 @@ fn normalize_github_issue(
     })
 }
 
+/// An ordinary Issue is a Root candidate when it is neither a WorkGraphTask nor
+/// task-typed and it carries at least one exact configured selector label.
+///
+/// The reserved `workgraph:ignore` / `workgraph:error` modifiers never activate
+/// a mapping, and an unknown `workgraph:*` label is observed but starts nothing.
 fn issue_is_root_candidate(
     issue: &serde_json::Value,
     task_issue_type: &crate::config::TaskIssueType,
+    mappings: &WorkflowMappingSet,
 ) -> bool {
     !task_issue_type.matches(issue.get("type"))
         && !issue
@@ -987,11 +1003,22 @@ fn issue_is_root_candidate(
             .get("labels")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|labels| {
-                labels.iter().any(|label| {
-                    label.get("name").and_then(serde_json::Value::as_str)
-                        == Some(WORKGRAPH_ADMISSION_LABEL)
-                })
+                labels
+                    .iter()
+                    .filter_map(|label| label.get("name").and_then(serde_json::Value::as_str))
+                    .any(|label| mappings.recognizes_label(label))
             })
+}
+
+/// Every exact label on an Issue, in payload order.
+fn issue_label_names(issue: &serde_json::Value) -> Vec<&str> {
+    issue
+        .get("labels")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|label| label.get("name").and_then(serde_json::Value::as_str))
+        .collect()
 }
 
 fn issue_authority_state(
@@ -999,6 +1026,7 @@ fn issue_authority_state(
     repository: Option<&serde_json::Value>,
     parent_source_key: Option<String>,
     task_issue_type: &crate::config::TaskIssueType,
+    mappings: &WorkflowMappingSet,
     absent: bool,
 ) -> Result<IssueAuthorityState, WorkGraphNormError> {
     if absent {
@@ -1061,7 +1089,7 @@ fn issue_authority_state(
         && task_issue_type.matches(issue_type)
     {
         "task"
-    } else if issue_is_root_candidate(issue, task_issue_type) {
+    } else if issue_is_root_candidate(issue, task_issue_type, mappings) {
         "root"
     } else {
         "generic"
@@ -1158,8 +1186,86 @@ fn comment_updated_revision(comment: &serde_json::Value) -> Result<i64, WorkGrap
         })
 }
 
-fn admission_generation_id(root_issue_id: &str, delivery_id: &str) -> String {
-    derive_workgraph_id("admission", &[root_issue_id, delivery_id])
+/// Derives one mapping activation's admission generation ID.
+///
+/// The exact GitHub delivery that observed the activation supplies the
+/// generation entropy, and the mapping ID plus its exact selector label are
+/// framed inputs, so an Issue opened with several selector labels in one
+/// delivery still derives a distinct ID per mapping.
+fn admission_generation_id(
+    root_issue_id: &str,
+    delivery_id: &str,
+    mapping_id: &str,
+    label: &str,
+) -> String {
+    derive_workgraph_id(
+        "admission",
+        &[root_issue_id, delivery_id, mapping_id, label],
+    )
+}
+
+/// Resolves the ordered set of currently active mapping admissions.
+///
+/// A mapping already present in `previous` keeps its admission generation:
+/// adding another selector label must never regenerate an unrelated mapping.
+/// A mapping absent from `previous` starts a fresh generation, so removing and
+/// re-adding a selector label can never resume a retracted generation.
+///
+/// `relabeled` names the selector label of an explicit `labeled` delivery whose
+/// revision strictly advanced. A `labeled` event for a label the cached document
+/// already records can only mean an unobserved remove/re-add round trip, so that
+/// one mapping regenerates while every other active mapping is preserved.
+fn active_mapping_admissions(
+    mappings: &WorkflowMappingSet,
+    labels: &[&str],
+    previous: Option<&crate::protocol::RootIssueDocument>,
+    relabeled: Option<&str>,
+    root_issue_id: &str,
+    delivery_id: &str,
+    title: &str,
+    body: &str,
+) -> Vec<RootMappingAdmission> {
+    mappings
+        .active_for_labels(labels.iter().copied())
+        .into_iter()
+        .map(|mapping| {
+            let previous_activation = previous
+                .filter(|_| relabeled != Some(mapping.label.as_str()))
+                .and_then(|previous| previous.mapping_admission(&mapping.id))
+                .filter(|active| active.label == mapping.label);
+            let (admission_id, title, body) = previous_activation.map_or_else(
+                || {
+                    (
+                        admission_generation_id(
+                            root_issue_id,
+                            delivery_id,
+                            &mapping.id,
+                            &mapping.label,
+                        ),
+                        title.to_string(),
+                        body.to_string(),
+                    )
+                },
+                |active| {
+                    (
+                        active.admission_id.clone(),
+                        active.title.clone(),
+                        active.body.clone(),
+                    )
+                },
+            );
+            RootMappingAdmission {
+                mapping_id: mapping.id.clone(),
+                label: mapping.label.clone(),
+                admission_id,
+                title,
+                body,
+                definition_repository: mapping.definition_repository.clone(),
+                definition_ref: mapping.definition_ref.clone(),
+                definition_path: mapping.definition_path.clone(),
+            }
+        })
+        .collect()
 }
 
 /// Normalize either a labeled Root Issue or an authorized generated task.
@@ -1199,12 +1305,16 @@ async fn try_workgraph_issue(
     let authorization_transition = exclusion_label_event
         && ((action == "labeled" && !workgraph_include)
             || (action == "unlabeled" && workgraph_include));
-    let labeled_root_candidate = issue_is_root_candidate(issue, &state.task_issue_type);
-    let admission_added = action == "labeled"
-        && payload
-            .pointer("/label/name")
-            .and_then(serde_json::Value::as_str)
-            == Some(WORKGRAPH_ADMISSION_LABEL);
+    let labeled_root_candidate =
+        issue_is_root_candidate(issue, &state.task_issue_type, &state.workflow_mappings);
+    let relabeled_selector = (action == "labeled")
+        .then(|| {
+            payload
+                .pointer("/label/name")
+                .and_then(serde_json::Value::as_str)
+        })
+        .flatten()
+        .filter(|label| state.workflow_mappings.recognizes_label(label));
     authorize_workgraph_repository(state, payload, None)?;
     let previous_task = state
         .allocator
@@ -1253,6 +1363,7 @@ async fn try_workgraph_issue(
         payload.get("repository"),
         task_parent_source_key.clone(),
         &state.task_issue_type,
+        &state.workflow_mappings,
         matches!(action, "deleted" | "transferred"),
     )?;
     let incoming_state_fingerprint = incoming_state
@@ -1275,7 +1386,11 @@ async fn try_workgraph_issue(
                     )
                 })?;
                 let authoritative = client
-                    .issue_authority_state(node_id, &state.task_issue_type)
+                    .issue_authority_state(
+                        &state.workflow_mappings,
+                        node_id,
+                        &state.task_issue_type,
+                    )
                     .await
                     .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?;
                 let authoritative_fingerprint = authoritative
@@ -1339,52 +1454,55 @@ async fn try_workgraph_issue(
                     "admitted Root Issue repository is missing 'node_id'".to_string(),
                 )
             })?;
-        let begins_new_generation = previous_root.is_none()
-            || admission_added
-                && revision.is_some_and(|revision| {
-                    previous_revision.is_none_or(|previous| revision > previous)
-                });
-        let admission_id = if begins_new_generation {
-            admission_generation_id(node_id, delivery_id)
-        } else {
-            previous_root
-                .as_ref()
-                .expect("an existing generation supplies its admission ID")
-                .admission_id
-                .clone()
-        };
-        let admitted_title = if begins_new_generation {
-            issue
-                .get("title")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string()
-        } else {
-            previous_root
-                .as_ref()
-                .expect("an existing generation supplies its frozen title")
-                .title
-                .clone()
-        };
-        let admitted_body = if begins_new_generation {
-            body.to_string()
-        } else {
-            previous_root
-                .as_ref()
-                .expect("an existing generation supplies its frozen body")
-                .body
-                .clone()
-        };
+        // A mapping the previous document already admitted keeps its
+        // generation; every newly observed selector label starts its own. An
+        // explicit `labeled` delivery that advanced the revision regenerates
+        // only the mapping it names.
+        let relabeled_mapping = relabeled_selector.filter(|_| {
+            revision.is_some_and(|revision| {
+                previous_revision.is_none_or(|previous| revision > previous)
+            })
+        });
+        let current_title = issue
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let workflow_mappings = active_mapping_admissions(
+            &state.workflow_mappings,
+            &issue_label_names(issue),
+            previous_root.as_ref(),
+            relabeled_mapping,
+            node_id,
+            delivery_id,
+            current_title,
+            body,
+        );
+        if workflow_mappings.is_empty() {
+            return Err(WorkGraphNormError::InvalidPayload(
+                "admitted Root Issue carries no configured workflow mapping label".to_string(),
+            ));
+        }
+        let admission_id = RootIssueDocument::legacy_admission_id(&workflow_mappings)
+            .expect("a non-empty mapping set selects a legacy admission ID")
+            .to_string();
+        // Each activation owns immutable Root content. The document-level
+        // compatibility fields follow the mapping selected by `admissionId`;
+        // adding or re-adding a sibling mapping cannot mutate an existing run.
+        let compatibility_mapping = workflow_mappings
+            .iter()
+            .find(|mapping| mapping.admission_id == admission_id)
+            .expect("the compatibility admission selects an active mapping");
         inputs.push(ProjectionInput::UpsertRootIssue(RootIssueDocument {
             source_key: node_id.to_string(),
             repository_owner: locator.repository_owner,
             repository_name: locator.repository_name,
             repository_node_id: repository_node_id.to_string(),
             issue_number: locator.issue_number,
-            title: admitted_title,
-            body: admitted_body,
+            title: compatibility_mapping.title.clone(),
+            body: compatibility_mapping.body.clone(),
             is_open: item_is_open(issue),
             admission_id,
+            workflow_mappings,
             workgraph_labels,
             workgraph_include,
         }));
@@ -1666,10 +1784,16 @@ async fn try_workgraph_comment(
             "Root Issue comment body exceeds {MAX_ROOT_ISSUE_COMMENT_BODY_BYTES} bytes"
         )));
     }
+    // Every mapping admission active on the Root when the comment was
+    // observed, not just the ordering-dependent compatibility selection. The
+    // guard above proved the payload's Issue state matches this exact cached
+    // Root document, so the set is authoritative for this comment.
+    let admission_ids = root.active_admission_ids();
     let document = RootIssueCommentDocument {
         source_key: comment_id.to_string(),
         root_issue_id: root.source_key,
         admission_id: root.admission_id,
+        admission_ids,
         repository_owner: root.repository_owner,
         repository_name: root.repository_name,
         repository_node_id: root.repository_node_id,
@@ -1898,7 +2022,7 @@ async fn root_comment_issue_matches_cached_admission(
 ) -> Result<bool, WorkGraphNormError> {
     if !root.is_open
         || !root.workgraph_include
-        || !issue_is_root_candidate(issue, &state.task_issue_type)
+        || !issue_is_root_candidate(issue, &state.task_issue_type, &state.workflow_mappings)
         || !item_is_open(issue)
     {
         return Ok(false);
@@ -2024,7 +2148,7 @@ async fn try_workgraph_sub_issue(
         .ok_or_else(|| {
             WorkGraphNormError::InvalidPayload("sub_issue missing 'node_id'".to_string())
         })?;
-    if issue_is_root_candidate(sub_issue, &state.task_issue_type) {
+    if issue_is_root_candidate(sub_issue, &state.task_issue_type, &state.workflow_mappings) {
         return Ok(None);
     }
     let previous_root = state
@@ -2071,7 +2195,11 @@ async fn try_workgraph_sub_issue(
             )
         })?;
         if client
-            .is_root_candidate(child_node_id, &state.task_issue_type)
+            .is_root_candidate(
+                &state.workflow_mappings,
+                child_node_id,
+                &state.task_issue_type,
+            )
             .await
             .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?
         {
@@ -2156,6 +2284,7 @@ async fn try_workgraph_sub_issue(
         child_repository,
         task_doc.parent_source_key.clone(),
         &state.task_issue_type,
+        &state.workflow_mappings,
         false,
     )?;
     let incoming_state_fingerprint = incoming_state
@@ -2171,7 +2300,11 @@ async fn try_workgraph_sub_issue(
             )
         })?;
         let authoritative = client
-            .issue_authority_state(child_node_id, &state.task_issue_type)
+            .issue_authority_state(
+                &state.workflow_mappings,
+                child_node_id,
+                &state.task_issue_type,
+            )
             .await
             .map_err(|error| WorkGraphNormError::Unavailable(error.to_string()))?;
         let authoritative_fingerprint = authoritative
@@ -2265,7 +2398,7 @@ pub fn verify_signature(secret: &[u8], body: &[u8], signature_header: &str) -> R
 #[cfg(test)]
 mod workgraph_tests {
     use super::*;
-    use crate::config::{TaskIssueType, TrustedIdentity};
+    use crate::config::{TaskIssueType, TrustedIdentity, WorkflowDefinitionConfig};
     use crate::protocol::{
         derive_workgraph_id, GitHubIssueLocator, PreparedProjection, PreparedProjectionCommit,
         ProjectionInput, TaskDocument, WorkGraphAllocatorProjection, WorkGraphTaskBinding,
@@ -2292,10 +2425,25 @@ mod workgraph_tests {
     #[test]
     fn admission_generation_uses_canonical_cross_vector() {
         assert_eq!(
-            admission_generation_id("I_root", "delivery-123"),
-            "urn:drasi:workgraph:id:v1:admission:sha256:\
-             c9bf2ec95516dc3e0168f7e977291e590f2c5443230db669faf4496f5bf89b61"
+            admission_generation_id("I_root", "delivery-123", "workgraph", "workgraph"),
+            derive_workgraph_id(
+                "admission",
+                &["I_root", "delivery-123", "workgraph", "workgraph"]
+            )
         );
+    }
+
+    #[test]
+    fn admission_generation_is_distinct_per_mapping_in_one_delivery() {
+        let foo = admission_generation_id("I_root", "delivery-123", "foo", "workgraph:foo");
+        let bar = admission_generation_id("I_root", "delivery-123", "bar", "workgraph:bar");
+        let legacy = admission_generation_id("I_root", "delivery-123", "workgraph", "workgraph");
+        assert_ne!(foo, bar);
+        assert_ne!(foo, legacy);
+        assert_ne!(bar, legacy);
+        for id in [&foo, &bar, &legacy] {
+            assert!(id.starts_with("urn:drasi:workgraph:id:v1:admission:sha256:"));
+        }
     }
 
     #[derive(Default)]
@@ -2485,8 +2633,40 @@ mod workgraph_tests {
         }
     }
 
+    /// The implicit legacy mapping every pre-existing test relies on.
+    fn legacy_mapping() -> crate::config::ResolvedWorkflowMapping {
+        crate::config::ResolvedWorkflowMapping {
+            id: LEGACY_WORKFLOW_MAPPING_ID.to_string(),
+            label: WORKGRAPH_ADMISSION_LABEL.to_string(),
+            definition_repository: "acme/widgets".to_string(),
+            definition_ref: "main".to_string(),
+            definition_path: ".github/workgraph/workflows/issue-lifecycle-v1.body".to_string(),
+        }
+    }
+
+    fn named_mapping(id: &str, label: &str, path: &str) -> crate::config::ResolvedWorkflowMapping {
+        crate::config::ResolvedWorkflowMapping {
+            id: id.to_string(),
+            label: label.to_string(),
+            definition_repository: "acme/widgets".to_string(),
+            definition_ref: "main".to_string(),
+            definition_path: path.to_string(),
+        }
+    }
+
+    fn legacy_mapping_set() -> WorkflowMappingSet {
+        WorkflowMappingSet::new(vec![legacy_mapping()])
+    }
+
     async fn ingress_state(
         trust: Option<ProtocolTrust>,
+    ) -> (TempDir, Arc<RecordingProjector>, IngressState) {
+        ingress_state_with_mappings(trust, legacy_mapping_set()).await
+    }
+
+    async fn ingress_state_with_mappings(
+        trust: Option<ProtocolTrust>,
+        workflow_mappings: WorkflowMappingSet,
     ) -> (TempDir, Arc<RecordingProjector>, IngressState) {
         let temp = TempDir::new().expect("tempdir");
         let store = Arc::new(MemoryStateStoreProvider::new());
@@ -2515,6 +2695,7 @@ mod workgraph_tests {
                 agent_sync: None,
                 projector: Some(projector.clone()),
                 admission_client: None,
+                workflow_mappings,
                 projection_gate: Mutex::new(()),
                 notify: Arc::new(Notify::new()),
             },
@@ -2600,6 +2781,7 @@ mod workgraph_tests {
                 payload("opened", task_issue("I_task", body)).get("repository"),
                 Some("I_root".to_string()),
                 &state.task_issue_type,
+                &state.workflow_mappings,
                 false,
             )
             .expect("authoritative task state")
@@ -3259,6 +3441,898 @@ mod workgraph_tests {
             .any(|input| matches!(input, ProjectionInput::UpsertRootIssue(_))));
     }
 
+    // ── Multi-mapping Root admission ──────────────────────────────────
+
+    fn multi_mapping_set() -> WorkflowMappingSet {
+        WorkflowMappingSet::new(vec![
+            legacy_mapping(),
+            named_mapping(
+                "foo",
+                "workgraph:foo",
+                ".github/workgraph/workflows/foo-v1.body",
+            ),
+            named_mapping(
+                "bar",
+                "workgraph:bar",
+                ".github/workgraph/workflows/bar-v1.body",
+            ),
+        ])
+    }
+
+    fn upserted_root(inputs: &[ProjectionInput]) -> crate::protocol::RootIssueDocument {
+        inputs
+            .iter()
+            .find_map(|input| match input {
+                ProjectionInput::UpsertRootIssue(document) => Some(document.clone()),
+                _ => None,
+            })
+            .expect("an upserted Root Issue")
+    }
+
+    fn mapping_ids(document: &crate::protocol::RootIssueDocument) -> Vec<&str> {
+        document
+            .workflow_mappings
+            .iter()
+            .map(|mapping| mapping.mapping_id.as_str())
+            .collect()
+    }
+
+    fn admission_of<'a>(
+        document: &'a crate::protocol::RootIssueDocument,
+        mapping_id: &str,
+    ) -> &'a str {
+        document
+            .mapping_admission(mapping_id)
+            .unwrap_or_else(|| panic!("mapping '{mapping_id}' must be active"))
+            .admission_id
+            .as_str()
+    }
+
+    fn content_of<'a>(
+        document: &'a crate::protocol::RootIssueDocument,
+        mapping_id: &str,
+    ) -> (&'a str, &'a str) {
+        let mapping = document
+            .mapping_admission(mapping_id)
+            .unwrap_or_else(|| panic!("mapping '{mapping_id}' must be active"));
+        (&mapping.title, &mapping.body)
+    }
+
+    /// Runs one Issue delivery against the mapping-aware ingress and persists
+    /// it, so the next delivery observes the durable previous document.
+    async fn admit(
+        state: &IngressState,
+        projector: &RecordingProjector,
+        delivery: &str,
+        sequence: u64,
+        event: serde_json::Value,
+    ) -> Vec<ProjectionInput> {
+        let inputs = try_workgraph_issue(state, delivery, &event)
+            .await
+            .expect("normalize delivery")
+            .unwrap_or_default();
+        state
+            .allocator
+            .ingest_workgraph(projector, inputs.clone(), sequence, delivery)
+            .await
+            .expect("persist delivery");
+        inputs
+    }
+
+    fn labeled(labels: &[&str], selector: &str, updated_at: &str) -> serde_json::Value {
+        let mut issue = root_issue(labels);
+        issue["updated_at"] = json!(updated_at);
+        let mut event = payload("labeled", issue);
+        event["label"] = json!({ "name": selector });
+        event
+    }
+
+    fn unlabeled(labels: &[&str], selector: &str, updated_at: &str) -> serde_json::Value {
+        let mut issue = root_issue(labels);
+        issue["updated_at"] = json!(updated_at);
+        let mut event = payload("unlabeled", issue);
+        event["label"] = json!({ "name": selector });
+        event
+    }
+
+    #[tokio::test]
+    async fn issue_opened_with_two_selector_labels_admits_both_mappings_distinctly() {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        let mut issue = root_issue(&["workgraph:foo", "workgraph:bar"]);
+        issue["updated_at"] = json!("2026-08-01T00:00:00Z");
+        let inputs = admit(
+            &state,
+            projector.as_ref(),
+            "delivery-open",
+            1,
+            payload("opened", issue),
+        )
+        .await;
+        let document = upserted_root(&inputs);
+        assert_eq!(mapping_ids(&document), vec!["bar", "foo"]);
+        let foo = admission_of(&document, "foo");
+        let bar = admission_of(&document, "bar");
+        assert_ne!(foo, bar, "one delivery derives distinct per-mapping IDs");
+        // Definition locations are projected verbatim from configuration.
+        let foo_mapping = document.mapping_admission("foo").expect("foo");
+        assert_eq!(foo_mapping.label, "workgraph:foo");
+        assert_eq!(foo_mapping.definition_repository, "acme/widgets");
+        assert_eq!(foo_mapping.definition_ref, "main");
+        assert_eq!(
+            foo_mapping.definition_path,
+            ".github/workgraph/workflows/foo-v1.body"
+        );
+        // Without the legacy mapping active, the compatibility admission ID is
+        // the first ordered activation.
+        assert_eq!(document.admission_id, bar);
+    }
+
+    #[tokio::test]
+    async fn adding_a_second_selector_label_does_not_regenerate_the_first() {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        let first = admit(
+            &state,
+            projector.as_ref(),
+            "delivery-foo",
+            1,
+            labeled(&["workgraph:foo"], "workgraph:foo", "2026-08-01T00:00:00Z"),
+        )
+        .await;
+        let first = upserted_root(&first);
+        assert_eq!(mapping_ids(&first), vec!["foo"]);
+        let foo_admission = admission_of(&first, "foo").to_string();
+
+        let second = admit(
+            &state,
+            projector.as_ref(),
+            "delivery-bar",
+            2,
+            labeled(
+                &["workgraph:foo", "workgraph:bar"],
+                "workgraph:bar",
+                "2026-08-01T00:01:00Z",
+            ),
+        )
+        .await;
+        let second = upserted_root(&second);
+        assert_eq!(mapping_ids(&second), vec!["bar", "foo"]);
+        assert_eq!(
+            admission_of(&second, "foo"),
+            foo_admission,
+            "adding bar must not regenerate foo"
+        );
+        assert_ne!(admission_of(&second, "bar"), foo_admission);
+    }
+
+    #[tokio::test]
+    async fn removing_one_mapping_retracts_only_that_admission() {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        let opened = admit(
+            &state,
+            projector.as_ref(),
+            "delivery-open",
+            1,
+            labeled(
+                &["workgraph:foo", "workgraph:bar"],
+                "workgraph:foo",
+                "2026-08-01T00:00:00Z",
+            ),
+        )
+        .await;
+        let opened = upserted_root(&opened);
+        let bar_admission = admission_of(&opened, "bar").to_string();
+        let foo_admission = admission_of(&opened, "foo").to_string();
+
+        let removed = admit(
+            &state,
+            projector.as_ref(),
+            "delivery-remove-foo",
+            2,
+            unlabeled(&["workgraph:bar"], "workgraph:foo", "2026-08-01T00:02:00Z"),
+        )
+        .await;
+        assert!(
+            !removed
+                .iter()
+                .any(|input| matches!(input, ProjectionInput::DeleteRootIssue { .. })),
+            "one surviving mapping keeps the Root admitted"
+        );
+        let removed = upserted_root(&removed);
+        assert_eq!(mapping_ids(&removed), vec!["bar"]);
+        assert_eq!(admission_of(&removed, "bar"), bar_admission);
+        assert_eq!(removed.admission_id, bar_admission);
+
+        // Re-adding foo creates a fresh generation, never the retracted one.
+        let readded = admit(
+            &state,
+            projector.as_ref(),
+            "delivery-readd-foo",
+            3,
+            labeled(
+                &["workgraph:foo", "workgraph:bar"],
+                "workgraph:foo",
+                "2026-08-01T00:03:00Z",
+            ),
+        )
+        .await;
+        let readded = upserted_root(&readded);
+        assert_eq!(mapping_ids(&readded), vec!["bar", "foo"]);
+        assert_ne!(admission_of(&readded, "foo"), foo_admission);
+        assert_eq!(
+            admission_of(&readded, "bar"),
+            bar_admission,
+            "re-adding foo must not regenerate bar"
+        );
+    }
+
+    /// Adding a second selector label freezes current content for that new
+    /// activation without mutating the existing mapping's generation or
+    /// content.
+    #[tokio::test]
+    async fn adding_a_mapping_refreezes_content_and_keeps_the_active_generation() {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        let first = upserted_root(
+            &admit(
+                &state,
+                projector.as_ref(),
+                "delivery-foo",
+                1,
+                labeled(&["workgraph:foo"], "workgraph:foo", "2026-08-01T00:00:00Z"),
+            )
+            .await,
+        );
+        assert_eq!(first.title, "Root Issue");
+
+        // An ordinary edit between activations never restates frozen content.
+        let mut edited = root_issue(&["workgraph:foo"]);
+        edited["title"] = json!("Retitled while foo is active");
+        edited["updated_at"] = json!("2026-08-01T00:00:30Z");
+        let edited = upserted_root(
+            &admit(
+                &state,
+                projector.as_ref(),
+                "delivery-edit",
+                2,
+                payload("edited", edited),
+            )
+            .await,
+        );
+        assert_eq!(edited.title, "Root Issue", "an edit never refreezes");
+        assert_eq!(admission_of(&edited, "foo"), admission_of(&first, "foo"));
+
+        let mut issue = root_issue(&["workgraph:foo", "workgraph:bar"]);
+        issue["title"] = json!("Retitled while foo is active");
+        issue["updated_at"] = json!("2026-08-01T00:01:00Z");
+        let mut event = payload("labeled", issue);
+        event["label"] = json!({ "name": "workgraph:bar" });
+        let second =
+            upserted_root(&admit(&state, projector.as_ref(), "delivery-bar", 3, event).await);
+        assert_eq!(mapping_ids(&second), vec!["bar", "foo"]);
+        assert_eq!(
+            second.title, "Retitled while foo is active",
+            "the compatibility fields follow the first ordered mapping"
+        );
+        assert_eq!(
+            content_of(&second, "foo"),
+            ("Root Issue", "Coordinate this work."),
+            "adding bar must not mutate foo's frozen content"
+        );
+        assert_eq!(
+            content_of(&second, "bar"),
+            ("Retitled while foo is active", "Coordinate this work."),
+            "bar freezes content from its own activation"
+        );
+        assert_eq!(
+            admission_of(&second, "foo"),
+            admission_of(&first, "foo"),
+            "adding bar must not regenerate foo"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unobserved_readmission_regenerates_only_its_own_mapping() {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        let first = upserted_root(
+            &admit(
+                &state,
+                projector.as_ref(),
+                "delivery-open",
+                1,
+                labeled(
+                    &["workgraph:foo", "workgraph:bar"],
+                    "workgraph:foo",
+                    "2026-08-01T00:00:00Z",
+                ),
+            )
+            .await,
+        );
+        let bar_admission = admission_of(&first, "bar").to_string();
+
+        // A `labeled` delivery for a label the cached document already records
+        // can only be an unobserved remove/re-add round trip.
+        let mut issue = root_issue(&["workgraph:foo", "workgraph:bar"]);
+        issue["title"] = json!("Readmitted Root Issue");
+        issue["updated_at"] = json!("2026-08-01T00:02:00Z");
+        let mut event = payload("labeled", issue);
+        event["label"] = json!({ "name": "workgraph:foo" });
+        let second =
+            upserted_root(&admit(&state, projector.as_ref(), "delivery-refoo", 2, event).await);
+        assert_eq!(
+            second.title, "Root Issue",
+            "the compatibility fields continue to follow surviving bar"
+        );
+        assert_eq!(
+            content_of(&second, "foo"),
+            ("Readmitted Root Issue", "Coordinate this work.")
+        );
+        assert_eq!(
+            content_of(&second, "bar"),
+            ("Root Issue", "Coordinate this work.")
+        );
+        assert_ne!(admission_of(&second, "foo"), admission_of(&first, "foo"));
+        assert_eq!(
+            admission_of(&second, "bar"),
+            bar_admission,
+            "the unrelated mapping keeps its generation"
+        );
+    }
+
+    /// Replays one selector remove/re-add twice: once with the `unlabeled`
+    /// delivery observed, once with it lost. Both orders must converge on the
+    /// same frozen title, frozen body, and admission IDs.
+    async fn readmit_foo_with_surviving_bar(
+        observe_removal: bool,
+    ) -> crate::protocol::RootIssueDocument {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        let mut opened = root_issue(&["workgraph:foo", "workgraph:bar"]);
+        opened["title"] = json!("Original title");
+        opened["body"] = json!("Original body");
+        opened["updated_at"] = json!("2026-08-01T00:00:00Z");
+        let mut event = payload("labeled", opened);
+        event["label"] = json!({ "name": "workgraph:foo" });
+        admit(&state, projector.as_ref(), "delivery-open", 1, event).await;
+
+        if observe_removal {
+            let mut removed = root_issue(&["workgraph:bar"]);
+            removed["title"] = json!("Retitled while unlabeled");
+            removed["body"] = json!("Rewritten while unlabeled");
+            removed["updated_at"] = json!("2026-08-01T00:01:00Z");
+            let mut event = payload("unlabeled", removed);
+            event["label"] = json!({ "name": "workgraph:foo" });
+            let removed = upserted_root(
+                &admit(&state, projector.as_ref(), "delivery-remove", 2, event).await,
+            );
+            assert_eq!(mapping_ids(&removed), vec!["bar"]);
+            assert_eq!(
+                removed.title, "Original title",
+                "retracting one mapping never refreezes the survivor's content"
+            );
+        }
+
+        // The exact same re-add delivery in both orders.
+        let mut readded = root_issue(&["workgraph:foo", "workgraph:bar"]);
+        readded["title"] = json!("Readmitted title");
+        readded["body"] = json!("Readmitted body");
+        readded["updated_at"] = json!("2026-08-01T00:02:00Z");
+        let mut event = payload("labeled", readded);
+        event["label"] = json!({ "name": "workgraph:foo" });
+        upserted_root(&admit(&state, projector.as_ref(), "delivery-readd", 3, event).await)
+    }
+
+    #[tokio::test]
+    async fn observed_and_unobserved_readmission_converge_on_identical_content() {
+        let observed = readmit_foo_with_surviving_bar(true).await;
+        let unobserved = readmit_foo_with_surviving_bar(false).await;
+        assert_eq!(
+            observed, unobserved,
+            "webhook delivery order must not change the admitted Root document"
+        );
+        assert_eq!(observed.title, "Original title");
+        assert_eq!(observed.body, "Original body");
+        assert_eq!(
+            content_of(&observed, "foo"),
+            ("Readmitted title", "Readmitted body")
+        );
+        assert_eq!(
+            content_of(&observed, "bar"),
+            ("Original title", "Original body")
+        );
+        assert_eq!(mapping_ids(&observed), vec!["bar", "foo"]);
+        assert_eq!(
+            admission_of(&observed, "foo"),
+            admission_of(&unobserved, "foo")
+        );
+        assert_eq!(
+            admission_of(&observed, "bar"),
+            admission_of(&unobserved, "bar"),
+            "the surviving sibling keeps one generation in both orders"
+        );
+    }
+
+    /// The same convergence when the removal is a full retraction: the Root is
+    /// deleted and then readmitted from scratch.
+    #[tokio::test]
+    async fn observed_and_unobserved_sole_mapping_readmission_converge() {
+        async fn run(observe_removal: bool) -> crate::protocol::RootIssueDocument {
+            let (_temp, projector, state) =
+                ingress_state_with_mappings(None, multi_mapping_set()).await;
+            let mut opened = root_issue(&["workgraph:foo"]);
+            opened["title"] = json!("Original title");
+            opened["updated_at"] = json!("2026-08-01T00:00:00Z");
+            let mut event = payload("labeled", opened);
+            event["label"] = json!({ "name": "workgraph:foo" });
+            admit(&state, projector.as_ref(), "delivery-open", 1, event).await;
+            if observe_removal {
+                admit(
+                    &state,
+                    projector.as_ref(),
+                    "delivery-remove",
+                    2,
+                    unlabeled(&[], "workgraph:foo", "2026-08-01T00:01:00Z"),
+                )
+                .await;
+            }
+            let mut readded = root_issue(&["workgraph:foo"]);
+            readded["title"] = json!("Readmitted title");
+            readded["updated_at"] = json!("2026-08-01T00:02:00Z");
+            let mut event = payload("labeled", readded);
+            event["label"] = json!({ "name": "workgraph:foo" });
+            upserted_root(&admit(&state, projector.as_ref(), "delivery-readd", 3, event).await)
+        }
+        assert_eq!(run(true).await, run(false).await);
+        assert_eq!(run(true).await.title, "Readmitted title");
+    }
+
+    #[tokio::test]
+    async fn removing_the_last_mapping_retracts_the_whole_root() {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        admit(
+            &state,
+            projector.as_ref(),
+            "delivery-open",
+            1,
+            labeled(&["workgraph:foo"], "workgraph:foo", "2026-08-01T00:00:00Z"),
+        )
+        .await;
+        let removed = admit(
+            &state,
+            projector.as_ref(),
+            "delivery-remove",
+            2,
+            unlabeled(&[], "workgraph:foo", "2026-08-01T00:01:00Z"),
+        )
+        .await;
+        assert!(removed
+            .iter()
+            .any(|input| matches!(input, ProjectionInput::DeleteRootIssue { source_key } if source_key == "I_root")));
+        assert!(!removed
+            .iter()
+            .any(|input| matches!(input, ProjectionInput::UpsertRootIssue(_))));
+    }
+
+    #[tokio::test]
+    async fn unknown_and_reserved_labels_are_observed_but_start_nothing() {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        let inputs = admit(
+            &state,
+            projector.as_ref(),
+            "delivery-unknown",
+            1,
+            labeled(
+                &["workgraph:unknown", "workgraph:ignore"],
+                "workgraph:unknown",
+                "2026-08-01T00:00:00Z",
+            ),
+        )
+        .await;
+        assert!(
+            !inputs
+                .iter()
+                .any(|input| matches!(input, ProjectionInput::UpsertRootIssue(_))),
+            "an unknown workgraph:* label never admits a Root"
+        );
+        let generic = inputs
+            .iter()
+            .find_map(|input| match input {
+                ProjectionInput::UpsertGitHubIssue(document) => Some(document),
+                _ => None,
+            })
+            .expect("the Issue is still observed generically");
+        assert_eq!(
+            generic.workgraph_labels,
+            vec![
+                "workgraph:ignore".to_string(),
+                "workgraph:unknown".to_string()
+            ]
+        );
+        assert!(!generic.workgraph_include);
+    }
+
+    #[tokio::test]
+    async fn exclusion_modifiers_never_activate_a_mapping_but_still_exclude() {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        let inputs = admit(
+            &state,
+            projector.as_ref(),
+            "delivery-ignored",
+            1,
+            labeled(
+                &["workgraph:foo", "workgraph:ignore"],
+                "workgraph:foo",
+                "2026-08-01T00:00:00Z",
+            ),
+        )
+        .await;
+        let document = upserted_root(&inputs);
+        assert_eq!(
+            mapping_ids(&document),
+            vec!["foo"],
+            "workgraph:ignore never becomes a mapping activation"
+        );
+        assert!(!document.workgraph_include);
+        assert!(document
+            .workgraph_labels
+            .contains(&"workgraph:ignore".to_string()));
+    }
+
+    #[tokio::test]
+    async fn two_mappings_may_share_one_definition_location() {
+        let mappings = WorkflowMappingSet::new(vec![
+            named_mapping("foo", "workgraph:foo", "shared/definition.body"),
+            named_mapping("bar", "workgraph:bar", "shared/definition.body"),
+        ]);
+        let (_temp, projector, state) = ingress_state_with_mappings(None, mappings).await;
+        let inputs = admit(
+            &state,
+            projector.as_ref(),
+            "delivery-shared",
+            1,
+            labeled(
+                &["workgraph:foo", "workgraph:bar"],
+                "workgraph:foo",
+                "2026-08-01T00:00:00Z",
+            ),
+        )
+        .await;
+        let document = upserted_root(&inputs);
+        assert_eq!(mapping_ids(&document), vec!["bar", "foo"]);
+        assert_ne!(
+            admission_of(&document, "foo"),
+            admission_of(&document, "bar")
+        );
+        assert_eq!(
+            document.workflow_mappings[0].definition_path,
+            document.workflow_mappings[1].definition_path
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_exact_workgraph_label_keeps_admitting_and_selects_the_legacy_admission() {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        let inputs = admit(
+            &state,
+            projector.as_ref(),
+            "delivery-legacy",
+            1,
+            labeled(
+                &["workgraph", "workgraph:foo"],
+                "workgraph",
+                "2026-08-01T00:00:00Z",
+            ),
+        )
+        .await;
+        let document = upserted_root(&inputs);
+        assert_eq!(mapping_ids(&document), vec!["foo", "workgraph"]);
+        assert_eq!(
+            document.admission_id,
+            admission_of(&document, LEGACY_WORKFLOW_MAPPING_ID),
+            "the legacy activation is the deterministic compatibility admission"
+        );
+        // The exact `workgraph:` prefixed labels are still reported verbatim,
+        // and the bare legacy label is not one of them.
+        assert_eq!(document.workgraph_labels, vec!["workgraph:foo".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn source_never_reads_definition_contents_for_a_mapping() {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        // No admission client is configured, so any attempt to reach GitHub for
+        // definition content would fail the delivery instead of succeeding.
+        assert!(state.admission_client.is_none());
+        let inputs = admit(
+            &state,
+            projector.as_ref(),
+            "delivery-no-fetch",
+            1,
+            labeled(&["workgraph:foo"], "workgraph:foo", "2026-08-01T00:00:00Z"),
+        )
+        .await;
+        let document = upserted_root(&inputs);
+        let mapping = document.mapping_admission("foo").expect("foo");
+        assert_eq!(
+            mapping.definition_path,
+            ".github/workgraph/workflows/foo-v1.body"
+        );
+        // Only the location is carried; no definition body ever reaches Core.
+        assert!(!document.body.contains("WorkGraphWorkflowDefinition"));
+    }
+
+    #[tokio::test]
+    async fn a_replayed_delivery_reuses_every_mapping_generation() {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        let event = labeled(
+            &["workgraph:foo", "workgraph:bar"],
+            "workgraph:foo",
+            "2026-08-01T00:00:00Z",
+        );
+        let first =
+            upserted_root(&admit(&state, projector.as_ref(), "delivery-1", 1, event.clone()).await);
+        let replay = try_workgraph_issue(&state, "delivery-1", &event)
+            .await
+            .expect("normalize replay")
+            .unwrap_or_default();
+        let replay = upserted_root(&replay);
+        assert_eq!(replay, first, "an exact replay is byte-identical");
+    }
+
+    // ── Root comment admission sets ───────────────────────────────────────
+
+    /// A human comment on a Root Issue carrying `labels`.
+    fn multi_mapping_comment_event(comment_id: &str, labels: &[&str], body: &str) -> Value {
+        let mut event =
+            human_root_comment_event(comment_id, "created", body, "2026-08-01T00:05:00Z");
+        event["issue"] = root_issue(labels);
+        event["issue"]["updated_at"] = json!("2026-08-01T00:00:00Z");
+        event
+    }
+
+    async fn upserted_comment(
+        state: &IngressState,
+        event: &Value,
+    ) -> crate::protocol::RootIssueCommentDocument {
+        try_workgraph_comment(state, event)
+            .await
+            .expect("normalize Root Issue comment")
+            .expect("comment inputs")
+            .into_iter()
+            .find_map(|input| match input {
+                ProjectionInput::UpsertRootIssueComment(document) => Some(document),
+                _ => None,
+            })
+            .expect("an upserted Root Issue comment")
+    }
+
+    #[tokio::test]
+    async fn a_root_comment_carries_every_active_mapping_admission() {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        let root = upserted_root(
+            &admit(
+                &state,
+                projector.as_ref(),
+                "delivery-open",
+                1,
+                labeled(
+                    &["workgraph:foo", "workgraph:bar"],
+                    "workgraph:foo",
+                    "2026-08-01T00:00:00Z",
+                ),
+            )
+            .await,
+        );
+        let bar = admission_of(&root, "bar").to_string();
+        let foo = admission_of(&root, "foo").to_string();
+
+        let comment = upserted_comment(
+            &state,
+            &multi_mapping_comment_event(
+                "IC_human",
+                &["workgraph:foo", "workgraph:bar"],
+                "resume with option B",
+            ),
+        )
+        .await;
+        let mut expected = vec![bar.clone(), foo.clone()];
+        expected.sort();
+        assert_eq!(
+            comment.admission_ids, expected,
+            "the comment records every mapping admission active when it was written"
+        );
+        assert_eq!(
+            comment.effective_admission_ids(),
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            comment.admission_id, root.admission_id,
+            "the compatibility admission stays the Root's deterministic selection"
+        );
+        assert!(comment.admission_ids.contains(&comment.admission_id));
+    }
+
+    #[tokio::test]
+    async fn a_comment_written_under_two_mappings_survives_removing_one() {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        let root = upserted_root(
+            &admit(
+                &state,
+                projector.as_ref(),
+                "delivery-open",
+                1,
+                labeled(
+                    &["workgraph:foo", "workgraph:bar"],
+                    "workgraph:foo",
+                    "2026-08-01T00:00:00Z",
+                ),
+            )
+            .await,
+        );
+        let foo = admission_of(&root, "foo").to_string();
+        let comment = upserted_comment(
+            &state,
+            &multi_mapping_comment_event(
+                "IC_human",
+                &["workgraph:foo", "workgraph:bar"],
+                "resume with option B",
+            ),
+        )
+        .await;
+
+        let removed = upserted_root(
+            &admit(
+                &state,
+                projector.as_ref(),
+                "delivery-remove-bar",
+                2,
+                unlabeled(&["workgraph:foo"], "workgraph:bar", "2026-08-01T00:06:00Z"),
+            )
+            .await,
+        );
+        assert_eq!(mapping_ids(&removed), vec!["foo"]);
+        assert_ne!(
+            removed.admission_id, comment.admission_id,
+            "the compatibility admission moved to the surviving mapping"
+        );
+        assert!(
+            comment.effective_admission_ids().contains(&foo.as_str()),
+            "the comment is still evidence for the mapping that survived"
+        );
+        // The stale generation is gone, so it can never match a new run.
+        assert!(!removed
+            .active_admission_ids()
+            .contains(&comment.admission_id));
+    }
+
+    #[tokio::test]
+    async fn a_comment_cannot_follow_a_mapping_into_a_fresh_generation() {
+        let (_temp, projector, state) =
+            ingress_state_with_mappings(None, multi_mapping_set()).await;
+        let root = upserted_root(
+            &admit(
+                &state,
+                projector.as_ref(),
+                "delivery-open",
+                1,
+                labeled(
+                    &["workgraph:foo", "workgraph:bar"],
+                    "workgraph:foo",
+                    "2026-08-01T00:00:00Z",
+                ),
+            )
+            .await,
+        );
+        let comment = upserted_comment(
+            &state,
+            &multi_mapping_comment_event(
+                "IC_human",
+                &["workgraph:foo", "workgraph:bar"],
+                "resume with option B",
+            ),
+        )
+        .await;
+        let stale_foo = admission_of(&root, "foo").to_string();
+
+        // foo is removed and re-added while bar survives untouched.
+        admit(
+            &state,
+            projector.as_ref(),
+            "delivery-remove-foo",
+            2,
+            unlabeled(&["workgraph:bar"], "workgraph:foo", "2026-08-01T00:06:00Z"),
+        )
+        .await;
+        let readded = upserted_root(
+            &admit(
+                &state,
+                projector.as_ref(),
+                "delivery-readd-foo",
+                3,
+                labeled(
+                    &["workgraph:foo", "workgraph:bar"],
+                    "workgraph:foo",
+                    "2026-08-01T00:07:00Z",
+                ),
+            )
+            .await,
+        );
+        let fresh_foo = admission_of(&readded, "foo").to_string();
+        assert_ne!(fresh_foo, stale_foo);
+        assert!(
+            comment
+                .effective_admission_ids()
+                .contains(&stale_foo.as_str()),
+            "the comment still names the generation it was written under"
+        );
+        assert!(
+            !comment
+                .effective_admission_ids()
+                .contains(&fresh_foo.as_str()),
+            "an old comment must never name a generation created after it"
+        );
+        assert!(
+            comment
+                .effective_admission_ids()
+                .contains(&admission_of(&readded, "bar")),
+            "the surviving sibling keeps the comment projected"
+        );
+    }
+
+    #[test]
+    fn a_legacy_comment_document_reports_its_single_admission() {
+        let document = crate::protocol::RootIssueCommentDocument {
+            source_key: "IC_legacy".to_string(),
+            root_issue_id: "I_root".to_string(),
+            admission_id: derive_workgraph_id("admission", &["I_root", "legacy"]),
+            admission_ids: Vec::new(),
+            repository_owner: "acme".to_string(),
+            repository_name: "widgets".to_string(),
+            repository_node_id: "R_widgets".to_string(),
+            issue_number: 6,
+            author_id: "U_human".to_string(),
+            author_type: "User".to_string(),
+            author_login: "octocat".to_string(),
+            body: "resume".to_string(),
+            created_at_revision: 1,
+            updated_at_revision: 1,
+        };
+        assert_eq!(
+            document.effective_admission_ids(),
+            vec![document.admission_id.as_str()]
+        );
+        // A legacy row also round-trips through the wire schema unchanged.
+        let encoded = serde_json::to_value(&document).expect("encode");
+        assert_eq!(encoded["admissionIds"], json!([]));
+        let decoded: crate::protocol::RootIssueCommentDocument = serde_json::from_value(json!({
+            "sourceKey": "IC_legacy",
+            "rootIssueId": "I_root",
+            "admissionId": document.admission_id,
+            "repositoryOwner": "acme",
+            "repositoryName": "widgets",
+            "repositoryNodeId": "R_widgets",
+            "issueNumber": 6,
+            "authorId": "U_human",
+            "authorType": "User",
+            "authorLogin": "octocat",
+            "body": "resume",
+            "createdAtRevision": 1,
+            "updatedAtRevision": 1
+        }))
+        .expect("a document without admissionIds still decodes");
+        assert_eq!(decoded, document);
+    }
+
     #[tokio::test]
     async fn reordered_readmission_starts_a_fresh_generation_before_delayed_retraction() {
         let (_temp, projector, state) = ingress_state(None).await;
@@ -3600,6 +4674,7 @@ mod workgraph_tests {
                     reopen.get("repository"),
                     None,
                     &state.task_issue_type,
+                    &state.workflow_mappings,
                     false,
                 )
                 .expect("canonical reopened state")
@@ -5865,6 +6940,7 @@ mod workgraph_tests {
             event.get("sub_issue_repo"),
             Some("I_root".to_string()),
             &state.task_issue_type,
+            &state.workflow_mappings,
             false,
         )
         .expect("child repository state")
@@ -5875,6 +6951,7 @@ mod workgraph_tests {
             event.get("repository"),
             Some("I_root".to_string()),
             &state.task_issue_type,
+            &state.workflow_mappings,
             false,
         )
         .expect("parent repository state")

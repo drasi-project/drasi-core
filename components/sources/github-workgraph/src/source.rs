@@ -256,7 +256,8 @@ impl Source for GitHubWorkGraphSource {
             allocator: allocator.clone(),
             agent_sync,
             projector: self.projector.clone(),
-            workflow_definition: self.config.workflow_definition.clone(),
+            admission_read: self.config.admission_read_credential(),
+            workflow_mappings: self.config.workflow_mapping_set(),
             notify: self.notify.clone(),
             shutdown: shutdown_rx.clone(),
         };
@@ -618,11 +619,13 @@ impl GitHubWorkGraphSourceBuilder {
     }
     pub fn build(self) -> Result<GitHubWorkGraphSource> {
         let config = self.config.normalized()?;
-        // Fail clearly if workflow_definition is configured without a projector.
-        if config.workflow_definition.is_some() && self.projector.is_none() {
+        // Fail clearly if an admission mapping is configured without a projector.
+        if (config.workflow_definition.is_some() || !config.workflow_mappings.is_empty())
+            && self.projector.is_none()
+        {
             anyhow::bail!(
-                "workflowDefinition is configured but no WorkGraphProjector was injected; \
-                 use with_workgraph_projector() on the builder"
+                "workflowDefinition/workflowMappings are configured but no WorkGraphProjector \
+                 was injected; use with_workgraph_projector() on the builder"
             );
         }
         if let Some(projector) = &self.projector {
@@ -631,6 +634,14 @@ impl GitHubWorkGraphSourceBuilder {
                 "WorkGraphProjector source ID '{}' does not match source '{}'",
                 projector.source_id(),
                 self.id
+            );
+            // Root admission is definition-scoped: a projecting deployment must
+            // declare at least the legacy mapping or one explicit mapping, or it
+            // could never admit a Root Issue.
+            anyhow::ensure!(
+                !config.workflow_mapping_set().is_empty(),
+                "a WorkGraphProjector requires at least one of workflowDefinition or \
+                 workflowMappings so Root admission has a definition to project"
             );
         }
         let repository_filter = config.repository_filter()?;
@@ -662,7 +673,7 @@ impl GitHubWorkGraphSourceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{TaskIssueType, WebhookConfig};
+    use crate::config::{TaskIssueType, WebhookConfig, WorkflowMappingConfig};
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
     };
@@ -819,5 +830,130 @@ mod tests {
         };
         assert!(error.downcast_ref::<SourceError>().is_some());
         assert!(error.to_string().contains(FRESH_RESET_INSTRUCTION));
+    }
+
+    // ── Mapping-only startup ──────────────────────────────────────────────
+
+    struct NoopProjector {
+        source_id: String,
+    }
+
+    #[async_trait]
+    impl WorkGraphProjector for NoopProjector {
+        fn source_id(&self) -> &str {
+            &self.source_id
+        }
+
+        async fn prepare(
+            &self,
+            _inputs: Vec<crate::protocol::ProjectionInput>,
+            _effective_from: u64,
+        ) -> anyhow::Result<crate::protocol::PreparedProjection> {
+            unreachable!("startup wiring never projects")
+        }
+
+        async fn restore(&self, _checkpoint: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn mapping_source_config(mappings: Vec<WorkflowMappingConfig>) -> GitHubWorkGraphSourceConfig {
+        GitHubWorkGraphSourceConfig {
+            organization: "acme".to_string(),
+            repositories: vec!["widgets".to_string()],
+            task_issue_type: TaskIssueType {
+                id: "IT_test".to_string(),
+                name: "WorkGraphTask".to_string(),
+            },
+            webhook: WebhookConfig {
+                secret: "webhook-secret".to_string(),
+                lease_validation_token: "lease-secret".to_string(),
+                ..WebhookConfig::default()
+            },
+            durability: DurabilityConfig {
+                enabled: true,
+                ..DurabilityConfig::default()
+            },
+            workflow_mappings: mappings,
+            ..GitHubWorkGraphSourceConfig::default()
+        }
+    }
+
+    fn foo_mapping() -> WorkflowMappingConfig {
+        WorkflowMappingConfig {
+            id: "foo".to_string(),
+            label: "workgraph:foo".to_string(),
+            workflow_definition: crate::config::WorkflowDefinitionLocation {
+                repository: "acme/widgets".to_string(),
+                r#ref: "main".to_string(),
+                path: ".github/workgraph/workflows/foo-v1.body".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_mappings_only_source_starts_with_an_authoritative_read_credential() {
+        let mut config = mapping_source_config(vec![foo_mapping()]);
+        config.admission_read = Some(crate::config::AdmissionReadConfig {
+            token: "issue-read-token".to_string(),
+            ..crate::config::AdmissionReadConfig::default()
+        });
+        let source = GitHubWorkGraphSourceBuilder::new("mappings-only")
+            .with_config(config)
+            .with_workgraph_projector(Arc::new(NoopProjector {
+                source_id: "mappings-only".to_string(),
+            }))
+            .build()
+            .expect("a mappings-only Source starts");
+        assert!(source.config.workflow_definition.is_none());
+        let credential = source
+            .config
+            .admission_read_credential()
+            .expect("a mappings-only Source resolves an Issue-read credential");
+        assert_eq!(credential.token, "issue-read-token");
+        assert_eq!(source.config.workflow_mapping_set().len(), 1);
+    }
+
+    #[test]
+    fn a_mappings_only_source_may_reuse_a_repository_compatible_agent_credential() {
+        let mut config = mapping_source_config(vec![foo_mapping()]);
+        config.agent_config = Some(crate::config::AgentConfig {
+            repository: "acme/widgets".to_string(),
+            r#ref: "main".to_string(),
+            path: ".github/workgraph/agents.yaml".to_string(),
+            token: "agent-read-token".to_string(),
+            api_base_url: crate::config::DEFAULT_AGENT_API_BASE_URL.to_string(),
+        });
+        let source = GitHubWorkGraphSourceBuilder::new("agent-credential")
+            .with_config(config)
+            .with_workgraph_projector(Arc::new(NoopProjector {
+                source_id: "agent-credential".to_string(),
+            }))
+            .build()
+            .expect("a repository-compatible agent credential is reused");
+        assert_eq!(
+            source
+                .config
+                .admission_read_credential()
+                .expect("credential")
+                .token,
+            "agent-read-token"
+        );
+    }
+
+    #[test]
+    fn a_mappings_only_source_without_a_read_credential_fails_to_start() {
+        let config = mapping_source_config(vec![foo_mapping()]);
+        let error = match GitHubWorkGraphSourceBuilder::new("no-credential")
+            .with_config(config)
+            .with_workgraph_projector(Arc::new(NoopProjector {
+                source_id: "no-credential".to_string(),
+            }))
+            .build()
+        {
+            Ok(_) => panic!("startup must fail closed instead of degrading silently"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("authoritative Issue"));
     }
 }

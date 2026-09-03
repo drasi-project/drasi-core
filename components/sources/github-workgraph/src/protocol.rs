@@ -34,6 +34,7 @@ use async_trait::async_trait;
 use drasi_core::models::SourceChange;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -51,6 +52,24 @@ pub const WORKGRAPH_RESULT_MARKER: &str = "WorkGraphTaskResult/v1\n";
 pub const WORKGRAPH_EVALUATION_MARKER: &str = "WorkGraphTaskEvaluation/v1\n";
 pub const WORKGRAPH_ROUTE_MARKER: &str = "WorkGraphTaskRoute/v1\n";
 pub const WORKGRAPH_ERROR_MARKER: &str = "WorkGraphTaskError/v1\n";
+
+// ── Exact admission label vocabulary ──────────────────────────────────────
+
+/// The legacy admission label. It is the selector of the implicit mapping
+/// derived from the top-level `workflowDefinition` configuration block.
+pub const WORKGRAPH_ADMISSION_LABEL: &str = "workgraph";
+
+/// Reserved universal exclusion modifier. It never activates a mapping.
+pub const WORKGRAPH_IGNORE_LABEL: &str = "workgraph:ignore";
+
+/// Reserved universal exclusion modifier. It never activates a mapping.
+pub const WORKGRAPH_ERROR_LABEL: &str = "workgraph:error";
+
+/// Required prefix of every configured mapping selector label.
+pub const WORKGRAPH_LABEL_PREFIX: &str = "workgraph:";
+
+/// Reserved mapping ID of the implicit legacy `workflowDefinition` mapping.
+pub const LEGACY_WORKFLOW_MAPPING_ID: &str = "workgraph";
 
 /// Canonical accepted evaluator verdict.
 pub const WORKGRAPH_EVALUATION_ACCEPTED: &str = "accepted";
@@ -148,10 +167,52 @@ pub enum LifecycleTrustRole {
 
 // ── Normalized document types ─────────────────────────────────────────────
 
-/// A Root Issue admitted into WorkGraph by the exact `workgraph` label.
+/// One active admission of one configured Source label→workflow mapping on a
+/// Root Issue.
 ///
-/// `admission_id` identifies one continuous labeled generation. Ordinary edits
-/// preserve it; removing and later re-adding the label creates a new value.
+/// A mapping activation is created the first time its selector label is
+/// observed on the Issue and is retracted the moment the label is removed.
+/// Re-adding the same label later creates a *new* `admission_id`, so a
+/// retracted generation can never be resumed.
+///
+/// The three definition fields are projected verbatim from Source
+/// configuration. The Source never fetches, parses, or interprets the file
+/// they address: they only tell the Reaction *which* pinned definition this
+/// activation belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RootMappingAdmission {
+    /// Configured mapping ID. The implicit legacy mapping uses
+    /// [`LEGACY_WORKFLOW_MAPPING_ID`].
+    pub mapping_id: String,
+    /// The exact, case-sensitive selector label that activated the mapping.
+    pub label: String,
+    /// The admission generation ID of this mapping activation.
+    pub admission_id: String,
+    /// Root Issue title frozen when this mapping activation began.
+    pub title: String,
+    /// Root Issue body frozen when this mapping activation began.
+    pub body: String,
+    /// `owner/name` of the repository holding the pinned definition.
+    pub definition_repository: String,
+    /// The exact git ref pinning the definition.
+    pub definition_ref: String,
+    /// The exact repository-relative path of the definition file.
+    pub definition_path: String,
+}
+
+/// A Root Issue admitted into WorkGraph by at least one configured selector
+/// label.
+///
+/// `workflow_mappings` is the ordered (by `mapping_id`) set of *currently
+/// active* mapping admissions. One Issue may carry several simultaneously;
+/// each is an independent generation.
+///
+/// `admission_id` is retained for compatibility with Root Issue comment
+/// identity and existing persisted state. It is selected deterministically:
+/// the legacy [`LEGACY_WORKFLOW_MAPPING_ID`] activation when it is active,
+/// otherwise the first entry of `workflow_mappings`. New Reaction logic must
+/// read `workflow_mappings` instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RootIssueDocument {
@@ -164,10 +225,49 @@ pub struct RootIssueDocument {
     pub body: String,
     pub is_open: bool,
     pub admission_id: String,
+    /// Ordered active mapping admissions, unique by `mapping_id` and `label`.
+    #[serde(default)]
+    pub workflow_mappings: Vec<RootMappingAdmission>,
     /// Sorted, case-sensitive `workgraph:` labels from the source Issue.
     pub workgraph_labels: Vec<String>,
     /// False only for the exact `workgraph:ignore` or `workgraph:error` label.
     pub workgraph_include: bool,
+}
+
+impl RootIssueDocument {
+    /// The deterministic legacy admission ID for a set of active mapping
+    /// admissions: the legacy activation when present, otherwise the first
+    /// ordered activation.
+    pub fn legacy_admission_id(mappings: &[RootMappingAdmission]) -> Option<&str> {
+        mappings
+            .iter()
+            .find(|mapping| mapping.mapping_id == LEGACY_WORKFLOW_MAPPING_ID)
+            .or_else(|| mappings.first())
+            .map(|mapping| mapping.admission_id.as_str())
+    }
+
+    /// The active admission of one mapping ID, if that mapping is active.
+    pub fn mapping_admission(&self, mapping_id: &str) -> Option<&RootMappingAdmission> {
+        self.workflow_mappings
+            .iter()
+            .find(|mapping| mapping.mapping_id == mapping_id)
+    }
+
+    /// Every currently active admission generation, ordered and deduplicated.
+    ///
+    /// A legacy document persisted before mapping admissions existed carries
+    /// only [`Self::admission_id`], which is then the single active admission.
+    pub fn active_admission_ids(&self) -> Vec<String> {
+        if self.workflow_mappings.is_empty() {
+            return vec![self.admission_id.clone()];
+        }
+        self.workflow_mappings
+            .iter()
+            .map(|mapping| mapping.admission_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
 }
 
 /// An ordinary GitHub Issue normalized by Core for generic Source projection.
@@ -242,17 +342,33 @@ pub struct GitHubIssueLocator {
     pub issue_node_id: String,
 }
 
-/// A human-authored comment on the currently admitted Root Issue generation.
+/// A human-authored comment on an admitted Root Issue generation.
 ///
 /// Core authenticates and normalizes this bounded evidence but does not assign
 /// workflow meaning to it. The injected projector decides whether it qualifies
 /// as wait/resume evidence.
+///
+/// `admission_ids` is the ordered, deduplicated set of *every* mapping
+/// admission that was active on the Root Issue when the comment was observed.
+/// A Root Issue may carry several simultaneous mapping activations, so binding
+/// a comment to one of them would make its meaning depend on which activation
+/// happened to be selected as the compatibility [`Self::admission_id`]. The
+/// comment stays relevant while any of its admissions is still active, and a
+/// consumer matching it against a specific workflow run must require that
+/// run's *own* mapping admission to be in this set.
+///
+/// `admission_id` is retained for identity compatibility only. It is the same
+/// deterministic compatibility selection [`RootIssueDocument::admission_id`]
+/// carries, and new logic must read `admission_ids` instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RootIssueCommentDocument {
     pub source_key: String,
     pub root_issue_id: String,
     pub admission_id: String,
+    /// Ordered, deduplicated active mapping admissions at observation time.
+    #[serde(default)]
+    pub admission_ids: Vec<String>,
     pub repository_owner: String,
     pub repository_name: String,
     pub repository_node_id: String,
@@ -263,6 +379,22 @@ pub struct RootIssueCommentDocument {
     pub body: String,
     pub created_at_revision: i64,
     pub updated_at_revision: i64,
+}
+
+impl RootIssueCommentDocument {
+    /// Every admission this comment was created under.
+    ///
+    /// A legacy document persisted before comment admission sets existed
+    /// carries only [`Self::admission_id`], which is then its single admission.
+    pub fn effective_admission_ids(&self) -> Vec<&str> {
+        if self.admission_ids.is_empty() {
+            return vec![self.admission_id.as_str()];
+        }
+        self.admission_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    }
 }
 
 /// A normalized input for the WorkGraph projection.

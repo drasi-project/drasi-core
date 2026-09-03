@@ -179,11 +179,14 @@ impl SourcePluginDescriptor for GitHubWorkGraphSourceDescriptor {
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
-        if config_json.get("workflowDefinition").is_some() {
+        if config_json.get("workflowDefinition").is_some()
+            || config_json.get("workflowMappings").is_some()
+            || config_json.get("admissionRead").is_some()
+        {
             anyhow::bail!(
-                "workflowDefinition is not supported via dynamic plugin descriptor; \
-                 the WorkGraphProjector callback must be injected programmatically \
-                 via GitHubWorkGraphSourceBuilder::with_workgraph_projector()"
+                "workflowDefinition/workflowMappings/admissionRead are not supported via dynamic \
+                 plugin descriptor; the WorkGraphProjector callback must be injected \
+                 programmatically via GitHubWorkGraphSourceBuilder::with_workgraph_projector()"
             );
         }
         let dto: GitHubWorkGraphSourceConfigDto = serde_json::from_value(config_json.clone())
@@ -255,6 +258,8 @@ impl SourcePluginDescriptor for GitHubWorkGraphSourceDescriptor {
             agent_config,
             protocol_trust,
             workflow_definition: None,
+            admission_read: None,
+            workflow_mappings: Vec::new(),
             webhook: WebhookConfig {
                 host: mapper.resolve_string(&dto.webhook.host).await?,
                 port: mapper.resolve_typed(&dto.webhook.port).await?,

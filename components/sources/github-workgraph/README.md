@@ -27,14 +27,22 @@ as lifecycle artifacts and do not directly affect lease allocation. Core
 recognizes the exact marker prefixes and enforces the trust role, but never
 parses a WorkGraphTaskAction JSON body.
 
-An ordinary user-created Issue carrying the exact, case-sensitive `workgraph`
-label and not matching the configured task Issue Type is a **Root Issue**.
-Each continuous labeled period is one admission generation. Removing the label
-retracts the Root Issue and its run from the internal projection. Re-adding it
-starts a fresh generation. GitHub issue revisions are retained as admission
-tombstones so delayed deliveries cannot resurrect a removed generation. The title
-and body are frozen for the generation; changing either requires removing and
-re-adding the label. The source does not perform GitHub cleanup writes.
+An ordinary user-created Issue that does not match the configured task Issue
+Type and carries at least one exact, case-sensitive **selector label** is a
+**Root Issue**. A selector label is either the legacy `workgraph` label or one
+`workgraph:<name>` label declared by a configured mapping (see
+[Label→workflow mappings](#labelworkflow-mappings)). Each continuous labeled
+period *per mapping* is one admission generation. Removing a selector label
+retracts only that mapping's admission and run; removing the last one retracts
+the Root Issue entirely. Re-adding it starts a fresh generation. GitHub issue
+revisions are retained as admission tombstones so delayed deliveries cannot
+resurrect a removed generation. Each mapping activation freezes its own title
+and body from the delivery that created that generation. Adding or re-adding one
+selector captures current content for that new generation without mutating any
+sibling activation. An observed remove/re-add (`unlabeled` then `labeled`) and
+an unobserved one (`labeled` alone) converge on identical per-mapping content
+and admission IDs. An ordinary edit is not an activation and never restates
+frozen content. The source does not perform GitHub cleanup writes.
 
 Every WorkGraph-owned ID has the exact grammar
 `urn:drasi:workgraph:id:v1:<type>:sha256:<64 lowercase hex>`. The digest is
@@ -46,7 +54,10 @@ IDs from `(rootIssueId, deliveryId)` and lease IDs from
 At typed protocol boundaries Core requires the corresponding `task`,
 `assignment`, `lease`, `result`, `evaluation`, `route`, or `workflow-run`
 identifier. GitHub node IDs, configured agent/slot IDs, and human
-`workflowDefinitionId` values remain external and unchanged.
+`workflowDefinitionId` values remain external and unchanged. A mapping
+admission ID is derived from `(rootIssueId, deliveryId, mappingId, label)`, so
+an Issue opened with several selector labels in one delivery derives a distinct
+ID per mapping.
 
 The hierarchy is:
 
@@ -75,16 +86,104 @@ The source never fetches or projects a workflow definition. The pinned
 `WorkGraphWorkflowDefinition/v1` body is loaded by the Reaction, which owns every
 definition-dependent decision (declared children, task metadata, transition
 reachability, route authorization, wait and terminal interpretation). The
-`workflowDefinition` block is retained only to pin the same immutable definition
-location the Reaction uses and to supply the read-only credential for
-authoritative Issue-label reads; a `push` touching that file is acknowledged with
-no content. The configured agent inventory is still loaded, because Core owns
-agent slots and leases.
+`workflowDefinition` block and every `workflowMappings` entry are retained only
+to pin the same immutable definition locations the Reaction uses; a `push`
+touching such a file is acknowledged with no content. The read-only credential
+used for authoritative Issue reads is resolved separately (see
+[Authoritative Issue reads](#authoritative-issue-reads)). The configured agent
+inventory is still loaded, because Core owns agent slots and leases.
+
+### Label→workflow mappings
+
+`workflowMappings` binds exact selector labels to pinned definition locations:
+
+```yaml
+workflowMappings:
+- id: foo
+  label: workgraph:foo
+  workflowDefinition:
+    repository: example-org/example-repo
+    ref: main
+    path: .github/workgraph/workflows/foo-v1.body
+```
+
+The source validates configuration, recognizes labels, tracks per-mapping
+activation generations, and projects the definition *location* — never its
+contents. A mapping definition therefore has no token of its own.
+
+- The legacy top-level `workflowDefinition` block remains backwards compatible
+  as an implicit mapping with the reserved mapping ID `workgraph` selected by
+  the exact `workgraph` label. A source with an injected `WorkGraphProjector`
+  must configure the legacy block, `workflowMappings`, or both; configuring both
+  is unambiguous because the two label spaces are disjoint by construction.
+- Mapping IDs and selector labels are each unique, and the mapping ID
+  `workgraph` is reserved for the legacy mapping.
+- A selector label is exactly `workgraph:<bounded-name>`, case-sensitive, where
+  the name is 1–64 ASCII letters, digits, `.`, `-`, or `_`.
+- `workgraph:ignore` and `workgraph:error` stay universal exclusion modifiers:
+  they never activate a mapping and cannot be configured as selectors. An
+  unknown `workgraph:*` label is observed in `workgraphLabels` but starts
+  nothing.
+- Every mapping definition repository must belong to the configured
+  organization and remain inside the `repositories` allowlist.
+- Several mappings may address the same definition location and still produce
+  distinct mapping activations.
+
+`RootIssueDocument.workflowMappings` carries the ordered (by `mappingId`) set of
+active activations, each with `mappingId`, `label`, `admissionId`, frozen
+`title`/`body`, `definitionRepository`, `definitionRef`, and `definitionPath`. Adding a selector
+label adds only that activation; removing one removes only that activation;
+re-adding one creates a fresh generation. The top-level `admissionId` is kept
+for compatibility and is selected deterministically: the legacy `workgraph`
+activation when active, otherwise the first ordered activation. Consumers should
+read `workflowMappings`.
+
+### Authoritative Issue reads
+
+Ambiguous or reordered deliveries — an equal-revision Issue state transition, or
+a sparse sub-issue event whose child classification is unknown — are resolved by
+reading authoritative Issue state from GitHub. Without that read the source
+fails the delivery closed rather than guessing, so **every admitting deployment
+needs a read-only credential**, no matter how Root admission is configured.
+
+The credential is resolved deterministically:
+
+1. an explicit `admissionRead` block always wins;
+2. otherwise the legacy `workflowDefinition.token` / `apiBaseUrl`, so existing
+   deployments keep the exact credential they already used;
+3. otherwise `agentConfig.token` / `apiBaseUrl`, but only when `agentConfig`
+   is *repository-compatible*: its repository must belong to the configured
+   organization and be included by `repositories`, which is exactly the scope
+   authoritative Issue reads stay within. An agent file hosted anywhere else is
+   never reused.
+
+```yaml
+admissionRead:
+  token:
+    kind: Secret
+    name: github-workgraph-v1-read-token
+  # apiBaseUrl defaults to https://api.github.com/graphql
+```
+
+A configuration that recognizes at least one selector label but resolves no
+credential is rejected at startup. Mapping entries never carry credentials of
+their own, and this credential never reads a workflow definition or any other
+file.
 
 Human-authored comments on an admitted Root Issue are supplied to that projector
 as `UpsertRootIssueComment` evidence. The document carries the comment source
-key, direct `rootIssueId`, `admissionId`, repository locator, issue number,
-author ID/type/login, body, and immutable creation/current update revisions.
+key, direct `rootIssueId`, `admissionIds`, `admissionId`, repository locator,
+issue number, author ID/type/login, body, and immutable creation/current update
+revisions. `admissionIds` is the ordered, deduplicated set of *every* mapping
+admission that was active on the Root Issue when the comment was observed, so a
+comment written while two mappings were active is evidence for both and stays
+projected while either is still active. `admissionId` remains the same
+compatibility selection the Root Issue document uses and is retained for
+identity only; a consumer matching a comment against a specific workflow run
+must require that run's own mapping admission to appear in `admissionIds`, and
+must never rely on `admissionId`, which changes as mappings are added or
+removed. A comment written before mapping admission sets existed carries an
+empty `admissionIds` and is treated as naming exactly its `admissionId`.
 Edits replace the document and deletes emit `DeleteRootIssueComment` with
 `sourceKey`, `rootIssueId`, `admissionId`, `repositoryOwner`, `repositoryName`,
 `repositoryNodeId`, `issueNumber`, and `updatedAtRevision`. Core persists
@@ -157,6 +256,17 @@ workflowDefinition:
   token:
     kind: Secret
     name: github-workgraph-v1-read-token
+workflowMappings:
+- id: foo
+  label: workgraph:foo
+  workflowDefinition:
+    repository: example-org/example-repo
+    ref: main
+    path: .github/workgraph/workflows/foo-v1.body
+admissionRead:
+  token:
+    kind: Secret
+    name: github-workgraph-v1-read-token
 webhook:
   host: 0.0.0.0
   port: 9000
@@ -174,9 +284,16 @@ durability:
 
 `protocolTrust` requires `agentConfig`. Every trusted identity is matched by both
 its GitHub node ID and exact login. `workflowDefinition.repository`, `ref`, and
-`path` are validated and pin the Reaction's definition identity, but the file is
-never read; its token performs authoritative Issue-label reads during ambiguous
-ordering transitions.
+`path` — and the same three fields on every `workflowMappings` entry — are
+validated and pin the Reaction's definition identity, but the files are never
+read. Authoritative Issue reads use the credential resolved as described in
+[Authoritative Issue reads](#authoritative-issue-reads); a mapping-only
+deployment configures `admissionRead` (or relies on a repository-compatible
+`agentConfig`) instead of the legacy `workflowDefinition` token.
+
+`workflowDefinition`, `workflowMappings`, and `admissionRead` all require a
+programmatically injected `WorkGraphProjector` and are rejected through the
+dynamic plugin descriptor.
 
 Sparse `sub_issue_removed` deliveries may identify the child only by numeric
 `sub_issue_id`. The source durably indexes that database ID when it first sees the
