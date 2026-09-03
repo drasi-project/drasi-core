@@ -532,8 +532,12 @@ impl ReactionManager {
 
     /// Handle a fresh start for a query subscription (no existing checkpoint).
     ///
-    /// If `needs_snapshot_on_fresh_start`, fetches snapshot and sets checkpoint.
-    /// Otherwise, fetches outbox(0) to get the current sequence.
+    /// If `needs_snapshot_on_fresh_start`, fetches a snapshot and sets the
+    /// checkpoint to `as_of_sequence` so the reaction can bootstrap.
+    /// Otherwise skip retained outbox history, persist
+    /// `(current_sequence, config_hash)`, and deliver only later live results
+    /// (`sequence > current_sequence`). Subscribe-before-bootstrap already
+    /// captures true live events in the broadcast buffer.
     async fn handle_fresh_start(
         &self,
         reaction_id: &str,
@@ -561,52 +565,25 @@ impl ReactionManager {
             bootstrap_queries.push((query_id.to_string(), query.clone()));
             Ok(cp)
         } else {
-            // No snapshot needed — replay any outbox entries produced during this
-            // startup cycle (e.g., from source replay) and record the checkpoint.
-            // Without this replay, results produced before the reaction subscribes
-            // to the broadcast channel would be silently skipped.
+            // Fresh start without snapshot bootstrap must not fire side effects
+            // for retained history. Ask for entries after `u64::MAX` so
+            // `fetch_outbox` returns only `latest_sequence` without cloning
+            // retained outbox entries. The live gate then delivers later
+            // sequences.
             metrics.record_fetch_outbox();
-            let seq = match query.fetch_outbox(0).await {
+            let seq = match query.fetch_outbox(u64::MAX).await {
                 Ok(resp) => {
-                    if resp.results.is_empty() {
-                        info!(
-                            "[{reaction_id}] Fresh start for query '{query_id}' — fetch_outbox(0) returned latest_seq={}",
-                            resp.latest_sequence
-                        );
-                    } else {
-                        info!(
-                            "[{reaction_id}] Fresh start for query '{query_id}' — replaying {} outbox entries (latest_seq={})",
-                            resp.results.len(),
-                            resp.latest_sequence
-                        );
-                        let mut last_ok_seq = 0u64;
-                        for entry in &resp.results {
-                            let result = (*entry).as_ref().clone();
-                            match reaction.enqueue_query_result(result).await {
-                                Ok(()) => last_ok_seq = entry.sequence,
-                                Err(e) => {
-                                    warn!(
-                                        "[{reaction_id}] Failed to replay outbox entry for query \
-                                         '{query_id}' seq={}: {e}",
-                                        entry.sequence
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                        if last_ok_seq != resp.latest_sequence {
-                            info!(
-                                "[{reaction_id}] Partial outbox replay for query '{query_id}' — \
-                                 replayed up to seq={last_ok_seq}, latest_seq={}",
-                                resp.latest_sequence
-                            );
-                        }
-                    }
+                    info!(
+                        "[{reaction_id}] Fresh start for query '{query_id}' — \
+                         skipping retained history, latest_seq={}",
+                        resp.latest_sequence
+                    );
                     resp.latest_sequence
                 }
                 Err(FetchError::OutboxGap(gap)) => {
                     info!(
-                        "[{reaction_id}] Fresh start for query '{query_id}' — outbox gap, latest_seq={}",
+                        "[{reaction_id}] Fresh start for query '{query_id}' — \
+                         outbox gap on fresh start without snapshot, latest_seq={}",
                         gap.latest_sequence
                     );
                     gap.latest_sequence
@@ -1952,6 +1929,62 @@ mod tests {
         .await;
         let status = core.get_reaction_status("r5").await.unwrap();
         assert_eq!(status, ComponentStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn fresh_trigger_does_not_enqueue_retained_outbox() {
+        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let core = build_core_with_store(store.clone()).await;
+        core.start().await.unwrap();
+
+        let mut event_rx = core.subscribe_all_component_events();
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "q1",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+
+        inject_events(&core, 2).await;
+
+        let reaction = MockReaction::new("r_fresh_trigger", vec!["q1".into()])
+            .with_snapshot_on_fresh(false)
+            .with_policy(ReactionRecoveryPolicy::Strict);
+        let enqueued = reaction.enqueued.clone();
+        core.add_reaction(reaction).await.unwrap();
+        core.start_reaction("r_fresh_trigger").await.unwrap();
+
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "r_fresh_trigger",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        {
+            let results = enqueued.lock().await;
+            assert!(
+                results.is_empty(),
+                "fresh trigger must not enqueue retained outbox history, got {:?}",
+                results
+                    .iter()
+                    .map(|result| result.sequence)
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        inject_events(&core, 1).await;
+        let results = enqueued.lock().await;
+        assert_eq!(
+            results.len(),
+            1,
+            "fresh trigger should receive only the next live result, got {}",
+            results.len()
+        );
+        assert_eq!(results[0].sequence, 3);
     }
 
     // ========================================================================
