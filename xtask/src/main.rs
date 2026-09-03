@@ -209,7 +209,6 @@ fn discover_dynamic_plugins(plugin_filter: Option<&str>) -> DiscoveryResult {
         .collect();
     let build_batches = plugin_build_batches(&metadata.packages, &plugin_names);
 
-
     DiscoveryResult {
         plugins,
         build_batches,
