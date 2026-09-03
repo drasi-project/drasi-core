@@ -17,12 +17,14 @@
 //! Uses a dedicated `live_results` column family with keys formatted as:
 //! `{query_id}\x00{row_signature_u64_be}` (8-byte big-endian suffix).
 //!
-//! Writes are standalone (not part of the session transaction) since live results
-//! persistence happens after the index transaction commits.
+//! When a session is active, `apply_mutations` stages into that transaction so
+//! live rows commit atomically with index writes, source checkpoints, outbox
+//! entries, and the result sequence. Outside a session (tests, wipe) writes go
+//! directly to the DB.
 
 use std::sync::Arc;
 
-use crate::IndexDb;
+use crate::{IndexDb, RocksDbSessionState};
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, LiveResultsWriter, RowMutation};
 use rocksdb::{ColumnFamilyDescriptor, IteratorMode, WriteBatchWithTransaction};
@@ -69,14 +71,16 @@ fn make_prefix(query_id: &str) -> Vec<u8> {
 /// RocksDB-backed live results writer.
 ///
 /// Stores serialized row data keyed by `(query_id, row_signature)`.
-/// Uses WriteBatch for atomic multi-row mutations.
+/// Shares `RocksDbSessionState` with the rest of the query so mutations can
+/// join the outer transaction. Standalone writes use a WriteBatch.
 pub struct RocksDbLiveResultsWriter {
     db: Arc<IndexDb>,
+    session_state: Arc<RocksDbSessionState>,
 }
 
 impl RocksDbLiveResultsWriter {
-    pub fn new(db: Arc<IndexDb>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<IndexDb>, session_state: Arc<RocksDbSessionState>) -> Self {
+        Self { db, session_state }
     }
 }
 
@@ -88,6 +92,7 @@ impl LiveResultsWriter for RocksDbLiveResultsWriter {
         mutations: &[RowMutation<'_>],
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let session_state = self.session_state.clone();
         // Collect owned mutation data for the blocking task
         let owned_mutations: Vec<(Vec<u8>, Option<Vec<u8>>)> = mutations
             .iter()
@@ -103,14 +108,29 @@ impl LiveResultsWriter for RocksDbLiveResultsWriter {
                 .cf_handle(LIVE_RESULTS_CF)
                 .expect("live_results cf not found");
 
-            let mut batch = WriteBatchWithTransaction::<true>::default();
-            for (key, data) in &owned_mutations {
-                match data {
-                    Some(value) => batch.put_cf(&cf, key, value),
-                    None => batch.delete_cf(&cf, key),
-                }
-            }
-            db.write(batch).map_err(IndexError::other)
+            session_state.with_txn_or_db(
+                |txn| {
+                    for (key, data) in &owned_mutations {
+                        match data {
+                            Some(value) => {
+                                txn.put_cf(&cf, key, value).map_err(IndexError::other)?
+                            }
+                            None => txn.delete_cf(&cf, key).map_err(IndexError::other)?,
+                        }
+                    }
+                    Ok(())
+                },
+                |db| {
+                    let mut batch = WriteBatchWithTransaction::<true>::default();
+                    for (key, data) in &owned_mutations {
+                        match data {
+                            Some(value) => batch.put_cf(&cf, key, value),
+                            None => batch.delete_cf(&cf, key),
+                        }
+                    }
+                    db.write(batch).map_err(IndexError::other)
+                },
+            )
         })
         .await
         .map_err(IndexError::other)?

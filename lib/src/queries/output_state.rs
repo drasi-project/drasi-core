@@ -137,13 +137,41 @@ impl QueryOutputState {
         result.sequence = self.as_of_sequence;
 
         let arc_result = Arc::new(result);
+        self.push_outbox(arc_result.clone());
+        arc_result
+    }
 
+    /// Apply diffs and install a sequence that was already staged to durable storage.
+    ///
+    /// Unlike [`advance_sequence_and_push`], this does not independently increment
+    /// `as_of_sequence`. The caller must pass the sequence written inside the
+    /// session transaction so in-memory state cannot diverge from durable output.
+    /// In-memory sequence still only moves after that durable commit succeeds.
+    pub fn apply_committed_sequence(
+        &mut self,
+        sequence: u64,
+        diffs: &[ResultDiff],
+        mut result: QueryResult,
+    ) -> Arc<QueryResult> {
+        let expected = self.as_of_sequence.saturating_add(1);
+        if sequence != expected {
+            log::error!(
+                "committed output sequence {sequence} != next in-memory sequence {expected}"
+            );
+        }
+        self.apply_diffs(diffs);
+        self.as_of_sequence = sequence;
+        result.sequence = sequence;
+        let arc_result = Arc::new(result);
+        self.push_outbox(arc_result.clone());
+        arc_result
+    }
+
+    fn push_outbox(&mut self, arc_result: Arc<QueryResult>) {
         if self.outbox.len() >= self.outbox_capacity {
             self.outbox.pop_front();
         }
-        self.outbox.push_back(arc_result.clone());
-
-        arc_result
+        self.outbox.push_back(arc_result);
     }
 
     /// Return the live result set as a `Vec` for backward compatibility with `get_current_results`.
@@ -780,6 +808,21 @@ mod tests {
         let arc = state.advance_sequence_and_push(result);
         assert_eq!(arc.sequence, 2);
         assert_eq!(state.outbox.len(), 2);
+    }
+
+    #[test]
+    fn test_apply_committed_sequence_uses_durable_seq() {
+        let mut state = QueryOutputState::new(3);
+        let diffs = vec![ResultDiff::Add {
+            data: serde_json::json!({"name": "Alice"}),
+            row_signature: 1,
+        }];
+        let result = make_query_result("q1", diffs.clone());
+        let arc = state.apply_committed_sequence(1, &diffs, result);
+        assert_eq!(arc.sequence, 1);
+        assert_eq!(state.as_of_sequence(), 1);
+        assert_eq!(state.results_len(), 1);
+        assert_eq!(state.outbox_len(), 1);
     }
 
     #[test]

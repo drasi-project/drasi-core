@@ -129,14 +129,28 @@ pub trait CheckpointStore: Send + Sync {
     /// any session transaction begins.
     async fn read_config_hash(&self) -> Result<Option<u64>, IndexError>;
 
+    /// Stage the last persisted result sequence into the active session transaction.
+    ///
+    /// For persistent backends, must be called inside an open session (between
+    /// `SessionControl::begin` and `SessionControl::commit`) together with outbox
+    /// and live-results writes. The write is persisted by the outer commit.
+    ///
+    /// For volatile backends, applies immediately (same as
+    /// [`write_result_sequence`](Self::write_result_sequence)).
+    ///
+    /// There is no default: every backend must choose staged-in-session vs
+    /// immediate apply. A default that called
+    /// [`write_result_sequence`](Self::write_result_sequence) would silently
+    /// commit outside the outer transaction.
+    async fn stage_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError>;
+
     /// Write the last persisted result sequence for a query.
     ///
-    /// Called after outbox and live-results writes succeed, outside any session
-    /// transaction. Records the highest sequence that was durably persisted so
-    /// that recovery can detect outbox gaps (compare with the index's committed
-    /// sequence from `stage_checkpoint`).
-    ///
-    /// Standalone commit — does not require an active session.
+    /// Standalone commit — does not require an active session. Used by wipe/reset
+    /// paths. Event processing should call
+    /// [`stage_result_sequence`](Self::stage_result_sequence) inside the outer
+    /// session instead so the sequence commits atomically with outbox and live
+    /// results.
     ///
     /// Default: no-op (volatile backends that don't track result sequences).
     async fn write_result_sequence(

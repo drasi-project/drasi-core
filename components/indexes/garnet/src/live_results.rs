@@ -19,10 +19,14 @@
 //! - Field: `{row_signature}` (u64 as string)
 //! - Value: serialized row data (raw bytes)
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, LiveResultsWriter, RowMutation};
 use redis::aio::MultiplexedConnection;
 use redis::{cmd, AsyncCommands};
+
+use crate::session_state::GarnetSessionState;
 
 /// Garnet/Redis-backed live results writer.
 ///
@@ -30,6 +34,7 @@ use redis::{cmd, AsyncCommands};
 pub struct GarnetLiveResultsWriter {
     query_id: String,
     connection: MultiplexedConnection,
+    session_state: Option<Arc<GarnetSessionState>>,
 }
 
 impl GarnetLiveResultsWriter {
@@ -37,7 +42,17 @@ impl GarnetLiveResultsWriter {
         Self {
             query_id: query_id.to_string(),
             connection,
+            session_state: None,
         }
+    }
+
+    /// Attach shared session state so `apply_mutations` stages into the active
+    /// session transaction instead of writing Redis directly. Use this when
+    /// live-result writes must commit atomically with other index writes; omit
+    /// it for standalone/direct writes (tests, wipe).
+    pub fn with_session_state(mut self, session_state: Arc<GarnetSessionState>) -> Self {
+        self.session_state = Some(session_state);
+        self
     }
 
     /// Redis key for the live results hash (hash-tagged for cluster).
@@ -54,8 +69,26 @@ impl LiveResultsWriter for GarnetLiveResultsWriter {
         mutations: &[RowMutation<'_>],
     ) -> Result<(), IndexError> {
         let _ = query_id;
-        let mut con = self.connection.clone();
         let live_key = self.live_key();
+
+        if let Some(session_state) = &self.session_state {
+            if session_state
+                .with_active_buffer(|buffer| {
+                    for m in mutations {
+                        let field = m.row_signature.to_string();
+                        match m.data {
+                            Some(data) => buffer.hash_set(live_key.clone(), &field, data.to_vec()),
+                            None => buffer.hash_del(live_key.clone(), &field),
+                        }
+                    }
+                })?
+                .is_some()
+            {
+                return Ok(());
+            }
+        }
+
+        let mut con = self.connection.clone();
 
         // Use a pipeline for atomic batch operations
         let mut pipe = redis::pipe();

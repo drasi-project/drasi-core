@@ -291,6 +291,22 @@ impl CheckpointStore for GarnetCheckpointStore {
         }
     }
 
+    async fn stage_result_sequence(
+        &self,
+        _query_id: &str,
+        sequence: u64,
+    ) -> Result<(), IndexError> {
+        let key = self.result_sequence_key();
+        match self.session_state.with_active_buffer(|buffer| {
+            buffer.string_set(key, sequence.to_string().into_bytes());
+        })? {
+            Some(()) => Ok(()),
+            None => Err(IndexError::other(std::io::Error::other(
+                "stage_result_sequence requires an active session",
+            ))),
+        }
+    }
+
     async fn write_result_sequence(
         &self,
         _query_id: &str,
