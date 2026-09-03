@@ -132,6 +132,7 @@ mod schema_tests {
                 relations: vec![],
                 source_id: "source1".to_string(),
                 pipeline: vec![],
+                priority: None,
             }],
             auto_start: true,
             joins: None,
@@ -296,6 +297,7 @@ mod runtime_tests {
                 relations: vec![],
                 source_id: "source1".to_string(),
                 pipeline: vec![],
+                priority: None,
             }],
             auto_start: false,
             joins: None,
@@ -329,6 +331,7 @@ mod runtime_tests {
                 relations: vec![],
                 source_id: "source1".to_string(),
                 pipeline: vec![],
+                priority: None,
             }],
             auto_start: true,
             joins: Some(vec![QueryJoinConfig {
@@ -804,6 +807,47 @@ mod dispatch_mode_tests {
         assert_eq!(config.dispatch_mode, Some(DispatchMode::Channel));
     }
 
+    // Backward compatibility: a pre-existing config that omits `priority` on its
+    // source subscriptions must still deserialize, defaulting priority to None
+    // (i.e. implicit ranking by declared order). Guards against the added field
+    // silently becoming required for old configs.
+    #[test]
+    fn test_source_subscription_without_priority_defaults_to_none() {
+        let yaml = r#"
+            id: legacy_query
+            query: "MATCH (o:Order) RETURN o"
+            sources:
+              - source_id: orders
+                pipeline: []
+              - source_id: customers
+        "#;
+
+        let config: QueryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.sources.len(), 2);
+        assert_eq!(config.sources[0].source_id, "orders");
+        assert_eq!(config.sources[0].priority, None);
+        assert_eq!(config.sources[1].source_id, "customers");
+        assert_eq!(config.sources[1].priority, None);
+    }
+
+    // Explicit priority round-trips through YAML.
+    #[test]
+    fn test_source_subscription_with_explicit_priority() {
+        let yaml = r#"
+            id: prioritized_query
+            query: "MATCH (o:Order) RETURN o"
+            sources:
+              - source_id: customers
+                priority: 0
+              - source_id: orders
+                priority: 1
+        "#;
+
+        let config: QueryConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.sources[0].priority, Some(0));
+        assert_eq!(config.sources[1].priority, Some(1));
+    }
+
     #[test]
     fn test_full_config_with_mixed_query_dispatch_modes() {
         let mut config = DrasiLibConfig::default();
@@ -822,6 +866,7 @@ mod dispatch_mode_tests {
                 relations: vec![],
                 source_id: "source1".to_string(),
                 pipeline: vec![],
+                priority: None,
             }],
             auto_start: true,
             joins: None,
@@ -846,6 +891,7 @@ mod dispatch_mode_tests {
                 relations: vec![],
                 source_id: "source2".to_string(),
                 pipeline: vec![],
+                priority: None,
             }],
             auto_start: true,
             joins: None,
@@ -870,6 +916,7 @@ mod dispatch_mode_tests {
                 relations: vec![],
                 source_id: "source3".to_string(),
                 pipeline: vec![],
+                priority: None,
             }],
             auto_start: true,
             joins: None,

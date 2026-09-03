@@ -50,6 +50,7 @@ mod manager_tests {
                     relations: vec![],
                     source_id,
                     pipeline: vec![],
+                    priority: None,
                 })
                 .collect(),
             auto_start,
@@ -80,6 +81,7 @@ mod manager_tests {
                     relations: vec![],
                     source_id,
                     pipeline: vec![],
+                    priority: None,
                 })
                 .collect(),
             auto_start: true,
@@ -981,6 +983,7 @@ mod output_state_integration_tests {
                     relations: vec![],
                     source_id: s.clone(),
                     pipeline: vec![],
+                    priority: None,
                 })
                 .collect(),
             auto_start: true,
@@ -1264,6 +1267,7 @@ mod output_state_integration_tests {
                 relations: vec![],
                 source_id: "gap-src".to_string(),
                 pipeline: vec![],
+                priority: None,
             }],
             auto_start: true,
             joins: None,
@@ -1447,6 +1451,7 @@ mod output_state_integration_tests {
                 relations: vec![],
                 source_id: "noop-src".to_string(),
                 pipeline: vec![],
+                priority: None,
             }],
             auto_start: true,
             joins: None,

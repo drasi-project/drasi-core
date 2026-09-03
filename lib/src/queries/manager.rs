@@ -134,6 +134,37 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
     }
 }
 
+/// Compute per-source priority-queue ranks for same-timestamp tie-breaking.
+///
+/// `priorities` is one entry per source, in the query's declared `sources`
+/// order: `Some(p)` for an explicit `priority`, `None` to fall back to the
+/// source's list position. A source's effective priority is
+/// `priority.unwrap_or(list_index)`; sources are ordered by
+/// `(effective_priority, list_index)` and assigned distinct ranks `0..n` by
+/// that order.
+///
+/// This honors explicit priorities, falls back to declared order for
+/// unspecified sources, and always breaks remaining ties by list index — so
+/// every source gets a stable, distinct rank and cross-source ordering is
+/// deterministic. The returned vec is indexed by the source's list position:
+/// `ranks[i]` is the rank of the `i`-th declared source.
+fn compute_source_ranks(priorities: &[Option<i64>]) -> Vec<u32> {
+    let effective: Vec<i64> = priorities
+        .iter()
+        .enumerate()
+        .map(|(i, p)| p.unwrap_or(i as i64))
+        .collect();
+    let mut order: Vec<usize> = (0..effective.len()).collect();
+    // Stable sort by (effective_priority, list_index) — the index tiebreak
+    // guarantees a total order and therefore distinct ranks.
+    order.sort_by_key(|&i| (effective[i], i));
+    let mut ranks = vec![0u32; effective.len()];
+    for (rank, &orig) in order.iter().enumerate() {
+        ranks[orig] = rank as u32;
+    }
+    ranks
+}
+
 #[cfg(test)]
 mod tests {
     use super::convert_variable_value_to_json;
@@ -196,6 +227,50 @@ mod tests {
             duration_json,
             serde_json::Value::String(duration.to_string())
         );
+    }
+
+    use super::compute_source_ranks;
+
+    #[test]
+    fn ranks_fall_back_to_declared_order_when_unset() {
+        // No explicit priorities → rank equals list position.
+        assert_eq!(compute_source_ranks(&[None, None, None]), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn explicit_priority_reorders_ranks() {
+        // Third source declared with the lowest priority is ranked first.
+        // effective = [0->0, 1->1, 2->-5(explicit)] → order: s2, s0, s1
+        let ranks = compute_source_ranks(&[None, None, Some(-5)]);
+        assert_eq!(ranks, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn explicit_and_implicit_combine_with_index_tiebreak() {
+        // s0 explicit 10, s1 implicit (1), s2 explicit 1, s3 implicit (3).
+        // effective = [10, 1, 1, 3]; order by (value, index):
+        //   (1,1)=s1, (1,2)=s2, (3,3)=s3, (10,0)=s0
+        // ranks[orig]: s1->0, s2->1, s3->2, s0->3
+        let ranks = compute_source_ranks(&[Some(10), None, Some(1), None]);
+        assert_eq!(ranks, vec![3, 0, 1, 2]);
+    }
+
+    #[test]
+    fn ranks_are_always_distinct() {
+        // Even when explicit priorities collide, the index tiebreak keeps ranks
+        // distinct so cross-source ordering stays deterministic.
+        let ranks = compute_source_ranks(&[Some(5), Some(5), Some(5)]);
+        let mut sorted = ranks.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![0, 1, 2]);
+        // Ties resolved by declared order.
+        assert_eq!(ranks, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn single_source_is_rank_zero() {
+        assert_eq!(compute_source_ranks(&[None]), vec![0]);
+        assert_eq!(compute_source_ranks(&[Some(42)]), vec![0]);
     }
 }
 
@@ -1241,6 +1316,21 @@ impl Query for DrasiQuery {
             }
         }
 
+        // Compute per-source priority-queue ranks for same-timestamp
+        // tie-breaking. See [`compute_source_ranks`]. `sources_to_subscribe` is
+        // built in `config.sources` order, so index `i` here maps to
+        // `config.sources[i]` and thus to `source_ranks[i]`.
+        let source_ranks: Vec<u32> = {
+            let priorities: Vec<Option<i64>> = self
+                .base
+                .config
+                .sources
+                .iter()
+                .map(|s| s.priority)
+                .collect();
+            compute_source_ranks(&priorities)
+        };
+
         // Compatibility validation: persistent queries must not use volatile sources.
         // A volatile source (supports_replay() == false) cannot guarantee event replay
         // after a restart, so resuming from checkpoints could produce incorrect results
@@ -1303,15 +1393,14 @@ impl Query for DrasiQuery {
                 checkpoint_sequences_per_source.clear();
             }
 
-            for (source_rank, (source_id, source, settings)) in
+            for (source_index, (source_id, source, settings)) in
                 sources_to_subscribe.iter().enumerate()
             {
-                // The source's position in `config.sources` is its rank within
-                // this query. It breaks same-timestamp ties between events from
-                // different sources in the priority queue (inert for
-                // single-source queries). `sources_to_subscribe` is built in
-                // `config.sources` order, so the enumeration index is the rank.
-                let source_rank = source_rank as u32;
+                // Resolve this source's priority-queue rank (computed above from
+                // explicit `priority` with implicit list-order fallback). It
+                // breaks same-timestamp ties between events from different
+                // sources; inert for single-source queries.
+                let source_rank = source_ranks[source_index];
                 let subscription_response = match source.subscribe(settings.clone()).await {
                     Ok(response) => response,
                     Err(e) => {

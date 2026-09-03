@@ -169,6 +169,7 @@ async fn main() -> Result<()> {
             SourceSubscriptionConfig {
                 source_id: "stock-prices".to_string(),
                 pipeline: vec![],
+                priority: None,
             }
         ],
         auto_start: true,

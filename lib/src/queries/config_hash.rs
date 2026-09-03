@@ -161,6 +161,7 @@ mod tests {
                 nodes: vec!["A".into()],
                 relations: vec![],
                 pipeline: vec![],
+                priority: None,
             }],
             auto_start: true,
             joins: None,
@@ -356,12 +357,14 @@ mod tests {
                 nodes: vec!["A".into()],
                 relations: vec![],
                 pipeline: vec![],
+                priority: None,
             },
             SourceSubscriptionConfig {
                 source_id: "s2".into(),
                 nodes: vec!["B".into()],
                 relations: vec![],
                 pipeline: vec![],
+                priority: None,
             },
         ];
 
@@ -372,12 +375,14 @@ mod tests {
                 nodes: vec!["B".into()],
                 relations: vec![],
                 pipeline: vec![],
+                priority: None,
             },
             SourceSubscriptionConfig {
                 source_id: "s1".into(),
                 nodes: vec!["A".into()],
                 relations: vec![],
                 pipeline: vec![],
+                priority: None,
             },
         ];
 

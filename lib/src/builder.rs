@@ -882,6 +882,7 @@ impl Query {
             nodes: Vec::new(),
             relations: Vec::new(),
             pipeline: Vec::new(),
+            priority: None,
         });
         self
     }
@@ -900,6 +901,31 @@ impl Query {
             nodes: Vec::new(),
             relations: Vec::new(),
             pipeline,
+            priority: None,
+        });
+        self
+    }
+
+    /// Subscribe to a source with an explicit tie-break [`priority`].
+    ///
+    /// `priority` orders same-timestamp events between sources in the query's
+    /// priority queue: lower values are evaluated first. Sources added without a
+    /// priority fall back to their subscription order. See
+    /// [`priority`](SourceSubscriptionConfig::priority) for how explicit and
+    /// implicit ranks combine.
+    ///
+    /// [`priority`]: SourceSubscriptionConfig::priority
+    pub fn from_source_with_priority(
+        mut self,
+        source_id: impl Into<String>,
+        priority: i64,
+    ) -> Self {
+        self.sources.push(SourceSubscriptionConfig {
+            source_id: source_id.into(),
+            nodes: Vec::new(),
+            relations: Vec::new(),
+            pipeline: Vec::new(),
+            priority: Some(priority),
         });
         self
     }
@@ -1506,6 +1532,23 @@ mod tests {
         assert_eq!(q.sources[0].source_id, "src1");
         assert_eq!(q.sources[1].source_id, "src2");
         assert_eq!(q.sources[2].source_id, "src3");
+    }
+
+    #[test]
+    fn test_query_from_source_defaults_to_no_priority() {
+        let q = Query::cypher("q").from_source("src1");
+        assert_eq!(q.sources[0].priority, None);
+    }
+
+    #[test]
+    fn test_query_from_source_with_priority() {
+        let q = Query::cypher("q")
+            .from_source_with_priority("high", 0)
+            .from_source("low");
+        assert_eq!(q.sources[0].source_id, "high");
+        assert_eq!(q.sources[0].priority, Some(0));
+        assert_eq!(q.sources[1].source_id, "low");
+        assert_eq!(q.sources[1].priority, None);
     }
 
     #[test]
