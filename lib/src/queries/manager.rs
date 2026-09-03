@@ -26,7 +26,7 @@ use drasi_core::{
     evaluation::functions::FunctionRegistry,
     evaluation::variable_value::VariableValue,
     in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
-    interface::{CheckpointStore, LiveResultsWriter, OutboxWriter},
+    interface::{CheckpointStore, LiveResultsWriter, OutboxWriter, SessionControl},
     middleware::MiddlewareTypeRegistry,
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -47,7 +47,8 @@ use crate::managers::{
 use crate::metrics::QueryOutputMetrics;
 use crate::queries::label_extractor::{LabelExtractor, QueryLabels};
 use crate::queries::output_state::{
-    FetchError, OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse,
+    reconcile_durable_output, DurableOutputInconsistency, FetchError, OutboxGap, OutboxResponse,
+    QueryOutputState, SnapshotResponse,
 };
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
@@ -524,6 +525,255 @@ async fn dispatch_query_results(
     }
 }
 
+/// Durable stores used to hydrate and wipe query output.
+struct DurableOutputStores {
+    checkpoint_store: Arc<dyn CheckpointStore>,
+    outbox_writer: Option<Arc<dyn OutboxWriter>>,
+    live_results_writer: Option<Arc<dyn LiveResultsWriter>>,
+}
+
+/// Config-hash value written before an AutoReset wipe so a crash mid-wipe is
+/// visible on the next start (`stored_hash == !current_hash`).
+fn output_reset_in_progress_hash(current_hash: u64) -> u64 {
+    !current_hash
+}
+
+/// Reject oversized durable payloads before MessagePack decode.
+const MAX_HYDRATE_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+
+/// Load durable live rows, outbox entries, and result sequence into in-memory
+/// `QueryOutputState` before the query accepts subscriptions or processes events.
+///
+/// # Errors
+/// Returns [`DurableOutputInconsistency`] if the durable outbox, live rows, and
+/// stored result sequence are not mutually consistent (see
+/// [`reconcile_durable_output`]), a payload cannot be deserialized, or a store
+/// read fails. Callers must handle this per the query's recovery policy:
+/// `ReadFailed` always fails start (never wipe); other variants fail under
+/// Strict and wipe under AutoReset.
+async fn load_durable_output(
+    query_id: &str,
+    stores: &DurableOutputStores,
+    outbox_capacity: usize,
+) -> Result<
+    (
+        im::HashMap<u64, serde_json::Value>,
+        Vec<Arc<crate::channels::QueryResult>>,
+        u64,
+    ),
+    DurableOutputInconsistency,
+> {
+    let stored_sequence = stores
+        .checkpoint_store
+        .read_result_sequence(query_id)
+        .await
+        .map_err(|e| DurableOutputInconsistency::ReadFailed {
+            message: format!("failed to read persisted result sequence: {e}"),
+        })?;
+
+    let (raw_outbox, outbox_sequences) = if let Some(writer) = &stores.outbox_writer {
+        let latest = writer.read_latest_sequence(query_id).await.map_err(|e| {
+            DurableOutputInconsistency::ReadFailed {
+                message: format!("failed to read durable outbox high-water: {e}"),
+            }
+        })?;
+        let raw = if let Some(hwm) = latest {
+            let after = hwm.saturating_sub(outbox_capacity as u64);
+            writer.read_from(query_id, after).await.map_err(|e| {
+                DurableOutputInconsistency::ReadFailed {
+                    message: format!("failed to read durable outbox: {e}"),
+                }
+            })?
+        } else {
+            Vec::new()
+        };
+        // Reconcile against the durable HWM even if the ring only retains a tail.
+        let mut sequences: Vec<u64> = raw.iter().map(|(sequence, _)| *sequence).collect();
+        if let Some(hwm) = latest {
+            if sequences.last().copied() != Some(hwm) {
+                sequences.push(hwm);
+            }
+        }
+        (raw, sequences)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    let (raw_live_rows, live_rows_readable) = if let Some(writer) = &stores.live_results_writer {
+        let rows = writer.read_snapshot(query_id).await.map_err(|e| {
+            DurableOutputInconsistency::ReadFailed {
+                message: format!("failed to read persistent live results: {e}"),
+            }
+        })?;
+        (rows, true)
+    } else {
+        // Persistent hydrate with no live-results store cannot prove the snapshot.
+        (Vec::new(), false)
+    };
+
+    let as_of_sequence = reconcile_durable_output(
+        stored_sequence,
+        &outbox_sequences,
+        raw_live_rows.len(),
+        live_rows_readable,
+    )?;
+
+    let mut outbox_entries = Vec::with_capacity(raw_outbox.len());
+    for (sequence, data) in raw_outbox {
+        if data.len() > MAX_HYDRATE_PAYLOAD_BYTES {
+            return Err(DurableOutputInconsistency::CorruptOutbox {
+                sequence,
+                message: format!(
+                    "payload {} bytes exceeds hydrate limit {MAX_HYDRATE_PAYLOAD_BYTES}",
+                    data.len()
+                ),
+            });
+        }
+        let mut result =
+            rmp_serde::from_slice::<crate::channels::QueryResult>(&data).map_err(|e| {
+                DurableOutputInconsistency::CorruptOutbox {
+                    sequence,
+                    message: e.to_string(),
+                }
+            })?;
+        result.sequence = sequence;
+        outbox_entries.push(Arc::new(result));
+    }
+
+    let mut results = im::HashMap::new();
+    for (sig, data) in raw_live_rows {
+        if data.len() > MAX_HYDRATE_PAYLOAD_BYTES {
+            return Err(DurableOutputInconsistency::CorruptLiveRow {
+                row_signature: sig,
+                message: format!(
+                    "payload {} bytes exceeds hydrate limit {MAX_HYDRATE_PAYLOAD_BYTES}",
+                    data.len()
+                ),
+            });
+        }
+        let value = rmp_serde::from_slice::<serde_json::Value>(&data).map_err(|e| {
+            DurableOutputInconsistency::CorruptLiveRow {
+                row_signature: sig,
+                message: e.to_string(),
+            }
+        })?;
+        results.insert(sig, value);
+    }
+
+    Ok((results, outbox_entries, as_of_sequence))
+}
+
+/// Clear durable outbox and live-results storage and reset the persisted
+/// result sequence to 0. Called only under `RecoveryPolicy::AutoReset` when
+/// durable output is found inconsistent at startup.
+///
+/// Sequence is reset first so a crash mid-wipe leaves `stored == 0` against
+/// leftover live rows, which `reconcile_durable_output` rejects instead of
+/// hydrating sequence 0 as a clean start.
+async fn wipe_durable_output(query_id: &str, stores: &DurableOutputStores) -> anyhow::Result<()> {
+    stores
+        .checkpoint_store
+        .write_result_sequence(query_id, 0)
+        .await
+        .with_context(|| format!("Query '{query_id}' failed to reset result sequence"))?;
+    if let Some(writer) = &stores.outbox_writer {
+        writer
+            .clear(query_id)
+            .await
+            .with_context(|| format!("Query '{query_id}' failed to clear durable outbox"))?;
+    }
+    if let Some(writer) = &stores.live_results_writer {
+        writer
+            .clear(query_id)
+            .await
+            .with_context(|| format!("Query '{query_id}' failed to clear durable live results"))?;
+    }
+    Ok(())
+}
+
+/// Wipe graph indexes and source checkpoints, then persist `current_hash`.
+/// Used by config-hash mismatch and by AutoReset after output inconsistency.
+async fn wipe_indexes_and_checkpoints(
+    query_id: &str,
+    current_hash: u64,
+    checkpoint_store: &Arc<dyn CheckpointStore>,
+    session_control: &Option<Arc<dyn SessionControl>>,
+    element_index: &Option<Arc<dyn drasi_core::interface::ElementIndex>>,
+    archive_index: &Option<Arc<dyn drasi_core::interface::ElementArchiveIndex>>,
+    result_index: &Option<Arc<dyn drasi_core::interface::ResultIndex>>,
+    future_queue: &Option<Arc<dyn drasi_core::interface::FutureQueue>>,
+) -> anyhow::Result<()> {
+    if let Some(sc) = session_control {
+        sc.begin()
+            .await
+            .with_context(|| format!("Query '{query_id}' failed to begin session for rebuild"))?;
+    }
+    if let Err(ie) = clear_persistent_indexes(
+        query_id,
+        element_index,
+        archive_index,
+        result_index,
+        future_queue,
+    )
+    .await
+    {
+        if let Some(sc) = session_control {
+            let _ = sc.rollback();
+        }
+        return Err(ie).context(format!(
+            "Query '{query_id}' failed to clear persistent indexes"
+        ));
+    }
+    if let Some(sc) = session_control {
+        sc.commit()
+            .await
+            .with_context(|| format!("Query '{query_id}' failed to commit index wipe"))?;
+    }
+    checkpoint_store
+        .clear_checkpoints()
+        .await
+        .with_context(|| format!("Query '{query_id}' failed to clear checkpoints"))?;
+    checkpoint_store
+        .write_config_hash(current_hash)
+        .await
+        .with_context(|| format!("Query '{query_id}' failed to write config hash after rebuild"))?;
+    Ok(())
+}
+
+/// AutoReset after inconsistent durable output: mark reset-in-progress, wipe
+/// output, then wipe indexes/checkpoints so a crash cannot hydrate empty
+/// output against a stale graph.
+async fn autoreset_rebuild_after_output_inconsistency(
+    query_id: &str,
+    current_hash: u64,
+    stores: &DurableOutputStores,
+    session_control: &Option<Arc<dyn SessionControl>>,
+    element_index: &Option<Arc<dyn drasi_core::interface::ElementIndex>>,
+    archive_index: &Option<Arc<dyn drasi_core::interface::ElementArchiveIndex>>,
+    result_index: &Option<Arc<dyn drasi_core::interface::ResultIndex>>,
+    future_queue: &Option<Arc<dyn drasi_core::interface::FutureQueue>>,
+) -> anyhow::Result<()> {
+    stores
+        .checkpoint_store
+        .write_config_hash(output_reset_in_progress_hash(current_hash))
+        .await
+        .with_context(|| {
+            format!("Query '{query_id}' failed to persist AutoReset in-progress marker")
+        })?;
+    wipe_durable_output(query_id, stores).await?;
+    wipe_indexes_and_checkpoints(
+        query_id,
+        current_hash,
+        &stores.checkpoint_store,
+        session_control,
+        element_index,
+        archive_index,
+        result_index,
+        future_queue,
+    )
+    .await
+}
+
 pub struct DrasiQuery {
     // DrasiLib instance ID for log routing isolation
     instance_id: String,
@@ -977,6 +1227,7 @@ impl Query for DrasiQuery {
         // incorrect results.
         let mut subscription_settings = subscription_settings;
         let has_persistent_backend = checkpoint_store.is_persistent();
+        let mut hydrate_output = false;
         let mut checkpoint_sequences_per_source: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
         if has_persistent_backend {
@@ -1001,6 +1252,71 @@ impl Query for DrasiQuery {
                         self.base.config.id
                     );
                     true
+                }
+                Ok(Some(stored_hash))
+                    if stored_hash == output_reset_in_progress_hash(current_hash) =>
+                {
+                    info!(
+                        "Query '{}' found incomplete AutoReset marker, finishing output and index wipe",
+                        self.base.config.id
+                    );
+                    let stores = DurableOutputStores {
+                        checkpoint_store: checkpoint_store.clone(),
+                        outbox_writer: self.outbox_writer.read().await.clone(),
+                        live_results_writer: self.live_results_writer.read().await.clone(),
+                    };
+                    if let Err(e) = wipe_durable_output(&self.base.config.id, &stores).await {
+                        let msg = format!(
+                            "Query '{}' failed to finish AutoReset output wipe: {e}",
+                            self.base.config.id
+                        );
+                        error!("{msg}");
+                        self.base
+                            .set_status(ComponentStatus::Error, Some(msg.clone()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                    if let Err(e) = clear_persistent_indexes(
+                        &self.base.config.id,
+                        &element_index,
+                        &archive_index,
+                        &result_index,
+                        &future_queue,
+                    )
+                    .await
+                    {
+                        let msg = format!(
+                            "Query '{}' failed to clear persistent indexes while finishing AutoReset: {e}",
+                            self.base.config.id
+                        );
+                        error!("{msg}");
+                        self.base
+                            .set_status(ComponentStatus::Error, Some(msg.clone()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                    match checkpoint_store.clear_checkpoints().await {
+                        Ok(()) => {
+                            if let Err(e) = checkpoint_store.write_config_hash(current_hash).await {
+                                warn!(
+                                    "Query '{}' failed to write config hash after AutoReset resume: {e}",
+                                    self.base.config.id
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            let msg = format!(
+                                "Query '{}' failed to clear checkpoints while finishing AutoReset: {e}",
+                                self.base.config.id
+                            );
+                            error!("{msg}");
+                            self.base
+                                .set_status(ComponentStatus::Error, Some(msg.clone()))
+                                .await;
+                            return Err(anyhow::anyhow!(msg));
+                        }
+                    }
+                    false
                 }
                 Ok(Some(stored_hash)) => {
                     info!(
@@ -1109,6 +1425,10 @@ impl Query for DrasiQuery {
                 }
             };
 
+            // Only hydrate and resume checkpoints when the config hash matched.
+            // A mismatch (or first run) starts at sequence 0 against empty output.
+            hydrate_output = config_matches;
+
             // Only read checkpoints if the config hash matched — otherwise we
             // cleared them above and a full bootstrap will run.
             if config_matches {
@@ -1153,6 +1473,114 @@ impl Query for DrasiQuery {
                         "Query '{}' failed to commit startup session: {e}",
                         self.base.config.id
                     );
+                }
+            }
+        }
+
+        // Hydrate in-memory QueryOutputState from durable storage BEFORE
+        // subscriptions or reactions run. After this, fetch_snapshot/fetch_outbox
+        // are memory-served; disk is write-only except this startup path.
+        if hydrate_output {
+            let (already_populated_seq, outbox_capacity) = {
+                let state = self.output_state.read().await;
+                (state.as_of_sequence(), state.outbox_capacity())
+            };
+            if already_populated_seq > 0 {
+                // Same-process stop/start retains in-memory output; do not re-read
+                // disk or reset the live sequence. A process crash constructs a
+                // new DrasiQuery with sequence 0 and takes the hydrate path.
+                debug!(
+                    "Query '{}' skipping durable hydrate; in-memory output already at seq={already_populated_seq}",
+                    self.base.config.id
+                );
+            } else {
+                let stores = DurableOutputStores {
+                    checkpoint_store: checkpoint_store.clone(),
+                    outbox_writer: self.outbox_writer.read().await.clone(),
+                    live_results_writer: self.live_results_writer.read().await.clone(),
+                };
+                match load_durable_output(&self.base.config.id, &stores, outbox_capacity).await {
+                    Ok((results, outbox, as_of_sequence)) => {
+                        let mut state = self.output_state.write().await;
+                        state.hydrate(results, outbox, as_of_sequence);
+                        let earliest = state.outbox_earliest_seq().unwrap_or(0);
+                        self.output_metrics
+                            .record_live_results_count(state.results_len());
+                        self.output_metrics.update_outbox(
+                            state.outbox_len(),
+                            earliest,
+                            state.as_of_sequence(),
+                        );
+                        info!(
+                            "Query '{}' hydrated output state from durable storage: seq={}, live_rows={}, outbox={}",
+                            self.base.config.id,
+                            state.as_of_sequence(),
+                            state.results_len(),
+                            state.outbox_len()
+                        );
+                    }
+                    Err(inconsistency) if inconsistency.is_transient_read() => {
+                        let msg = format!(
+                            "Query '{}' failed to read durable output: {inconsistency}. \
+                             Refusing to start (transient read errors never wipe).",
+                            self.base.config.id
+                        );
+                        error!("{msg}");
+                        self.base
+                            .set_status(ComponentStatus::Error, Some(msg.clone()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                    Err(inconsistency) => match self.resolved_recovery_policy {
+                        crate::recovery::RecoveryPolicy::Strict => {
+                            let msg = format!(
+                                "Query '{}' durable output is inconsistent: {inconsistency}. \
+                                 Refusing to start under Strict recovery policy.",
+                                self.base.config.id
+                            );
+                            error!("{msg}");
+                            self.base
+                                .set_status(ComponentStatus::Error, Some(msg.clone()))
+                                .await;
+                            return Err(anyhow::anyhow!(msg));
+                        }
+                        crate::recovery::RecoveryPolicy::AutoReset => {
+                            warn!(
+                                "Query '{}' durable output is inconsistent: {inconsistency}. \
+                                 AutoReset: wiping query output, indexes, and checkpoints, then rebuilding.",
+                                self.base.config.id
+                            );
+                            let current_hash = super::compute_config_hash(&self.base.config);
+                            if let Err(e) = autoreset_rebuild_after_output_inconsistency(
+                                &self.base.config.id,
+                                current_hash,
+                                &stores,
+                                &session_control,
+                                &element_index,
+                                &archive_index,
+                                &result_index,
+                                &future_queue,
+                            )
+                            .await
+                            {
+                                let msg = format!(
+                                    "Query '{}' AutoReset failed to rebuild after inconsistent output: {e}",
+                                    self.base.config.id
+                                );
+                                error!("{msg}");
+                                self.base
+                                    .set_status(ComponentStatus::Error, Some(msg.clone()))
+                                    .await;
+                                return Err(anyhow::anyhow!(msg));
+                            }
+
+                            self.output_state.write().await.reset();
+                            checkpoint_sequences_per_source.clear();
+                            for settings in &mut subscription_settings {
+                                settings.resume_from = None;
+                            }
+                        }
+                    },
                 }
             }
         }
@@ -2453,73 +2881,10 @@ impl Query for DrasiQuery {
         // Track snapshot fetch invocations
         self.output_metrics.record_snapshot_fetch();
 
-        let (results_clone, as_of_sequence) = {
-            let state = self.output_state.read().await;
-            (state.clone_results(), state.as_of_sequence())
-        };
-
-        // If in-memory state has results, return them directly
-        if !results_clone.is_empty() || as_of_sequence > 0 {
-            return Ok(SnapshotResponse::new(
-                results_clone,
-                as_of_sequence,
-                self.config_hash,
-            ));
-        }
-
-        // In-memory state is empty at sequence 0 — try persistent live results
-        let query_id = &self.base.config.id;
-        let live_writer = self.live_results_writer.read().await;
-        if let Some(writer) = live_writer.as_ref() {
-            let cp_store = self.checkpoint_store.read().await;
-            let persisted_seq = if let Some(store) = cp_store.as_ref() {
-                match store.read_result_sequence(query_id).await {
-                    Ok(Some(seq)) => seq,
-                    Ok(None) => 0,
-                    Err(e) => {
-                        warn!("Query '{query_id}' failed to read persisted result sequence: {e}");
-                        0
-                    }
-                }
-            } else {
-                0
-            };
-
-            if persisted_seq > 0 {
-                match writer.read_snapshot(query_id).await {
-                    Ok(rows) => {
-                        let mut results = im::HashMap::new();
-                        for (sig, data) in &rows {
-                            match rmp_serde::from_slice::<serde_json::Value>(data) {
-                                Ok(value) => {
-                                    results.insert(*sig, value);
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "Query '{query_id}' failed to deserialize live results row (sig={sig}): {e}"
-                                    );
-                                }
-                            }
-                        }
-                        // Return with persisted_seq even if rows is empty
-                        // (all rows deleted is a valid state).
-                        return Ok(SnapshotResponse::new(
-                            results,
-                            persisted_seq,
-                            self.config_hash,
-                        ));
-                    }
-                    Err(e) => {
-                        warn!("Query '{query_id}' failed to read persistent live results: {e}");
-                    }
-                }
-            }
-        }
-
-        // Nothing in persistent storage either — return empty
+        let state = self.output_state.read().await;
         Ok(SnapshotResponse::new(
-            results_clone,
-            as_of_sequence,
+            state.clone_results(),
+            state.as_of_sequence(),
             self.config_hash,
         ))
     }

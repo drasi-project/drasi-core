@@ -26,9 +26,9 @@ use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
 use drasi_lib::reactions::BootstrapContext;
 use drasi_lib::{
-    CapacityPolicy, DrasiLib, DurabilityConfig, Reaction, ReactionBase, ReactionBaseParams,
-    ReactionCheckpoint, ReactionRecoveryPolicy, ReactionRuntimeContext, StateStoreProvider,
-    StorageBackendRef,
+    CapacityPolicy, DrasiLib, DurabilityConfig, IndexBackendPlugin, Reaction, ReactionBase,
+    ReactionBaseParams, ReactionCheckpoint, ReactionRecoveryPolicy, ReactionRuntimeContext,
+    RecoveryPolicy, StateStoreProvider, StorageBackendRef,
 };
 use drasi_source_application::{
     ApplicationSource, ApplicationSourceConfig, ApplicationSourceHandle, PropertyMapBuilder,
@@ -345,7 +345,25 @@ struct RecoveryFixture {
     state_store: Arc<RedbStateStoreProvider>,
 }
 
+struct FixtureOpts {
+    query_policy: RecoveryPolicy,
+    include_reaction: bool,
+}
+
+impl Default for FixtureOpts {
+    fn default() -> Self {
+        Self {
+            query_policy: RecoveryPolicy::Strict,
+            include_reaction: true,
+        }
+    }
+}
+
 async fn build_fixture(paths: &FixturePaths) -> Result<RecoveryFixture> {
+    build_fixture_opts(paths, FixtureOpts::default()).await
+}
+
+async fn build_fixture_opts(paths: &FixturePaths, opts: FixtureOpts) -> Result<RecoveryFixture> {
     std::fs::create_dir_all(&paths.rocks)
         .with_context(|| format!("create RocksDB directory {}", paths.rocks.display()))?;
     std::fs::create_dir_all(&paths.wal)
@@ -364,13 +382,11 @@ async fn build_fixture(paths: &FixturePaths) -> Result<RecoveryFixture> {
         }),
     };
     let (source, source_handle) = ApplicationSource::new(SOURCE_ID, source_config)?;
-    let reaction =
-        DurableRecordingReaction::new(paths.journal.clone(), ReactionRecoveryPolicy::Strict);
     let rocks = Arc::new(RocksDbIndexProvider::new(&paths.rocks, false, false));
     let state_store = Arc::new(RedbStateStoreProvider::new(&paths.state)?);
     let wal = Arc::new(RedbWalProvider::new(&paths.wal));
 
-    let core = DrasiLib::builder()
+    let mut builder = DrasiLib::builder()
         .with_id("reaction-recovery-conformance")
         .with_source(source)
         .with_query(
@@ -381,14 +397,21 @@ async fn build_fixture(paths: &FixturePaths) -> Result<RecoveryFixture> {
                 .enable_bootstrap(false)
                 .with_outbox_capacity(32)
                 .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
+                .with_recovery_policy(opts.query_policy)
                 .build(),
         )
-        .with_reaction(reaction)
         .with_index_provider("rocks", rocks)
         .with_state_store_provider(state_store.clone())
-        .with_wal_provider(wal)
-        .build()
-        .await?;
+        .with_wal_provider(wal);
+
+    if opts.include_reaction {
+        builder = builder.with_reaction(DurableRecordingReaction::new(
+            paths.journal.clone(),
+            ReactionRecoveryPolicy::Strict,
+        ));
+    }
+
+    let core = builder.build().await?;
 
     Ok(RecoveryFixture {
         core,
@@ -939,6 +962,227 @@ async fn recover_phase(paths: &FixturePaths) -> Result<()> {
     Ok(())
 }
 
+async fn seed_hwm_phase(paths: &FixturePaths) -> Result<()> {
+    let fixture = build_fixture(paths).await?;
+    fixture.core.start().await?;
+    wait_for_status(&fixture.core, SOURCE_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
+
+    insert_person(&fixture.source, "p1", "Alice", true).await?;
+    insert_person(&fixture.source, "p2", "Bob", false).await?;
+    insert_person(&fixture.source, "p3", "Carol", true).await?;
+    insert_person(&fixture.source, "p4", "Dave", false).await?;
+
+    let records = wait_for_journal_sequences(&paths.journal, 4).await?;
+    assert_eq!(
+        journal_emissions(&records)?,
+        vec![
+            add_emission(1, "p1", "Alice", true),
+            add_emission(2, "p2", "Bob", false),
+            add_emission(3, "p3", "Carol", true),
+            add_emission(4, "p4", "Dave", false),
+        ]
+    );
+    let checkpoint = wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 4).await?;
+    assert_eq!(checkpoint.sequence, 4);
+
+    let snapshot = wait_for_snapshot_row(&fixture.core, &person("p4", "Dave", false)).await?;
+    assert_eq!(snapshot.sequence, 4);
+    assert_eq!(
+        snapshot.people,
+        vec![
+            person("p1", "Alice", true),
+            person("p2", "Bob", false),
+            person("p3", "Carol", true),
+            person("p4", "Dave", false),
+        ]
+    );
+
+    let query = query_instance(&fixture.core).await?;
+    let outbox = query.fetch_outbox(0).await?;
+    assert_eq!(
+        outbox
+            .results
+            .iter()
+            .map(|r| r.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    assert_eq!(outbox.latest_sequence, 4);
+
+    let readiness = SeedReadiness {
+        query_sequence: 4,
+        reaction_checkpoint: 4,
+        outbox_sequences: vec![1, 2, 3, 4],
+        journal_sequences: journal_sequences(&records),
+    };
+    write_synced_file(&paths.ready, &serde_json::to_vec(&readiness)?)?;
+    std::process::exit(0);
+}
+
+async fn recover_hwm_phase(paths: &FixturePaths) -> Result<()> {
+    let fixture = build_fixture(paths).await?;
+    fixture.core.start().await?;
+    wait_for_status(&fixture.core, SOURCE_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
+
+    let restart_snapshot = observe_snapshot(&fixture.core).await?;
+    assert_eq!(
+        restart_snapshot,
+        SnapshotObservation {
+            sequence: 4,
+            people: vec![
+                person("p1", "Alice", true),
+                person("p2", "Bob", false),
+                person("p3", "Carol", true),
+                person("p4", "Dave", false),
+            ],
+        },
+        "snapshot after restart must match the pre-crash snapshot before any new event"
+    );
+
+    let query = query_instance(&fixture.core).await?;
+    let restart_outbox = query.fetch_outbox(0).await?;
+    let restart_sequences: Vec<u64> = restart_outbox
+        .results
+        .iter()
+        .map(|result| result.sequence)
+        .collect();
+    assert_eq!(restart_sequences, vec![1, 2, 3, 4]);
+    assert_eq!(restart_outbox.latest_sequence, 4);
+
+    update_person(&fixture.source, "p1", "Alicia", false).await?;
+    let final_snapshot =
+        wait_for_snapshot_row(&fixture.core, &person("p1", "Alicia", false)).await?;
+    assert_eq!(final_snapshot.sequence, 5);
+
+    let final_outbox = query.fetch_outbox(0).await?;
+    let final_sequences: Vec<u64> = final_outbox
+        .results
+        .iter()
+        .map(|result| result.sequence)
+        .collect();
+    assert_eq!(
+        final_sequences,
+        vec![1, 2, 3, 4, 5],
+        "outbox keys 1..=4 must be preserved; the new result is sequence 5"
+    );
+    assert_eq!(final_outbox.latest_sequence, 5);
+
+    fixture.core.shutdown().await?;
+    Ok(())
+}
+
+async fn recover_strict_fail_phase(paths: &FixturePaths) -> Result<()> {
+    let fixture = build_fixture(paths).await?;
+    // DrasiLib::start() still returns Ok when a query fails; the query is left in Error.
+    let _ = fixture.core.start().await;
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Error).await?;
+
+    let query_info = fixture.core.get_query_info(QUERY_ID).await?;
+    let message = query_info.error_message.clone().unwrap_or_default();
+    let _ = fixture.core.shutdown().await;
+    anyhow::ensure!(
+        message.contains("durable output is inconsistent")
+            || message.contains("outbox high-water")
+            || message.contains("failed to deserialize durable outbox"),
+        "query Error message did not describe durable output inconsistency: {message}"
+    );
+    Ok(())
+}
+
+async fn recover_autoreset_phase(paths: &FixturePaths) -> Result<()> {
+    let fixture = build_fixture_opts(
+        paths,
+        FixtureOpts {
+            query_policy: RecoveryPolicy::AutoReset,
+            include_reaction: false,
+        },
+    )
+    .await?;
+    fixture.core.start().await?;
+    wait_for_status(&fixture.core, SOURCE_ID, ComponentStatus::Running).await?;
+    wait_for_status(&fixture.core, QUERY_ID, ComponentStatus::Running).await?;
+
+    let wiped = observe_snapshot(&fixture.core).await?;
+    assert_eq!(
+        wiped.sequence, 0,
+        "AutoReset must wipe output so the snapshot sequence is 0"
+    );
+    assert!(
+        wiped.people.is_empty(),
+        "AutoReset must wipe live rows and graph indexes; leftover seed rows would mean output-only wipe left ResultIndex populated. got {:?}",
+        wiped.people
+    );
+
+    let query = query_instance(&fixture.core).await?;
+    let outbox = query.fetch_outbox(0).await?;
+    assert!(
+        outbox.results.is_empty(),
+        "AutoReset must wipe the outbox; got sequences {:?}",
+        outbox
+            .results
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(outbox.latest_sequence, 0);
+
+    insert_person(&fixture.source, "p5", "Eve", true).await?;
+    let after = wait_for_snapshot_row(&fixture.core, &person("p5", "Eve", true)).await?;
+    assert_eq!(
+        after.sequence, 1,
+        "the first result after AutoReset wipe must be sequence 1, not a reused durable key"
+    );
+
+    let final_outbox = query.fetch_outbox(0).await?;
+    assert_eq!(
+        final_outbox
+            .results
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+
+    fixture.core.shutdown().await?;
+    Ok(())
+}
+
+async fn append_outbox_ahead(paths: &FixturePaths) -> Result<()> {
+    let provider = RocksDbIndexProvider::new(&paths.rocks, false, false);
+    let created = provider.create_indexes(QUERY_ID).await?;
+    let writer = created
+        .outbox_writer
+        .as_ref()
+        .context("RocksDB outbox writer missing")?;
+    writer
+        .append(QUERY_ID, 99, b"corrupt-outbox-payload")
+        .await
+        .context("append outbox entry ahead of stored result sequence")?;
+    drop(created);
+    drop(provider);
+    Ok(())
+}
+
+async fn overwrite_outbox_with_garbage(paths: &FixturePaths, sequence: u64) -> Result<()> {
+    let provider = RocksDbIndexProvider::new(&paths.rocks, false, false);
+    let created = provider.create_indexes(QUERY_ID).await?;
+    let writer = created
+        .outbox_writer
+        .as_ref()
+        .context("RocksDB outbox writer missing")?;
+    writer
+        .append(QUERY_ID, sequence, b"corrupt-outbox-payload")
+        .await
+        .with_context(|| format!("overwrite outbox sequence {sequence} with garbage"))?;
+    drop(created);
+    drop(provider);
+    Ok(())
+}
+
 fn write_synced_file(path: &Path, contents: &[u8]) -> Result<()> {
     let mut file =
         File::create(path).with_context(|| format!("create synced file {}", path.display()))?;
@@ -1051,10 +1295,180 @@ async fn rocksdb_redb_full_process_reconstruction() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_sequence_hwm_and_snapshot_parity() -> Result<()> {
+    if std::env::var_os(PHASE_ENV).is_some() {
+        return Ok(());
+    }
+
+    let root = test_root()?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create test root {}", root.display()))?;
+    let paths = FixturePaths::under(&root);
+
+    let seed = run_phase("seed_hwm", &paths)?;
+    if !seed.status.success() {
+        let message = child_failure("seed_hwm", &seed);
+        let _ = std::fs::remove_dir_all(&root);
+        anyhow::bail!(message);
+    }
+
+    let recover = run_phase("recover_hwm", &paths)?;
+    let failure = (!recover.status.success()).then(|| child_failure("recover_hwm", &recover));
+    let cleanup = std::fs::remove_dir_all(&root);
+    if let Some(message) = failure {
+        anyhow::bail!(message);
+    }
+    cleanup.with_context(|| format!("remove test root {}", root.display()))?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_corrupt_output_strict_fails_start() -> Result<()> {
+    if std::env::var_os(PHASE_ENV).is_some() {
+        return Ok(());
+    }
+
+    let root = test_root()?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create test root {}", root.display()))?;
+    let paths = FixturePaths::under(&root);
+
+    let seed = run_phase("seed", &paths)?;
+    if !seed.status.success() {
+        let message = child_failure("seed", &seed);
+        let _ = std::fs::remove_dir_all(&root);
+        anyhow::bail!(message);
+    }
+
+    if let Err(error) = append_outbox_ahead(&paths).await {
+        let _ = std::fs::remove_dir_all(&root);
+        return Err(error);
+    }
+
+    let recover = run_phase("recover_strict_fail", &paths)?;
+    let failure =
+        (!recover.status.success()).then(|| child_failure("recover_strict_fail", &recover));
+    let cleanup = std::fs::remove_dir_all(&root);
+    if let Some(message) = failure {
+        anyhow::bail!(message);
+    }
+    cleanup.with_context(|| format!("remove test root {}", root.display()))?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_corrupt_output_autoreset_wipes() -> Result<()> {
+    if std::env::var_os(PHASE_ENV).is_some() {
+        return Ok(());
+    }
+
+    let root = test_root()?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create test root {}", root.display()))?;
+    let paths = FixturePaths::under(&root);
+
+    let seed = run_phase("seed", &paths)?;
+    if !seed.status.success() {
+        let message = child_failure("seed", &seed);
+        let _ = std::fs::remove_dir_all(&root);
+        anyhow::bail!(message);
+    }
+
+    if let Err(error) = append_outbox_ahead(&paths).await {
+        let _ = std::fs::remove_dir_all(&root);
+        return Err(error);
+    }
+
+    let recover = run_phase("recover_autoreset", &paths)?;
+    let failure = (!recover.status.success()).then(|| child_failure("recover_autoreset", &recover));
+    let cleanup = std::fs::remove_dir_all(&root);
+    if let Some(message) = failure {
+        anyhow::bail!(message);
+    }
+    cleanup.with_context(|| format!("remove test root {}", root.display()))?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_corrupt_outbox_payload_strict_fails_start() -> Result<()> {
+    if std::env::var_os(PHASE_ENV).is_some() {
+        return Ok(());
+    }
+
+    let root = test_root()?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create test root {}", root.display()))?;
+    let paths = FixturePaths::under(&root);
+
+    let seed = run_phase("seed", &paths)?;
+    if !seed.status.success() {
+        let message = child_failure("seed", &seed);
+        let _ = std::fs::remove_dir_all(&root);
+        anyhow::bail!(message);
+    }
+
+    if let Err(error) = overwrite_outbox_with_garbage(&paths, 3).await {
+        let _ = std::fs::remove_dir_all(&root);
+        return Err(error);
+    }
+
+    let recover = run_phase("recover_strict_fail", &paths)?;
+    let failure =
+        (!recover.status.success()).then(|| child_failure("recover_strict_fail", &recover));
+    let cleanup = std::fs::remove_dir_all(&root);
+    if let Some(message) = failure {
+        anyhow::bail!(message);
+    }
+    cleanup.with_context(|| format!("remove test root {}", root.display()))?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rocksdb_redb_corrupt_outbox_payload_autoreset_wipes() -> Result<()> {
+    if std::env::var_os(PHASE_ENV).is_some() {
+        return Ok(());
+    }
+
+    let root = test_root()?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create test root {}", root.display()))?;
+    let paths = FixturePaths::under(&root);
+
+    let seed = run_phase("seed", &paths)?;
+    if !seed.status.success() {
+        let message = child_failure("seed", &seed);
+        let _ = std::fs::remove_dir_all(&root);
+        anyhow::bail!(message);
+    }
+
+    if let Err(error) = overwrite_outbox_with_garbage(&paths, 3).await {
+        let _ = std::fs::remove_dir_all(&root);
+        return Err(error);
+    }
+
+    let recover = run_phase("recover_autoreset", &paths)?;
+    let failure = (!recover.status.success()).then(|| child_failure("recover_autoreset", &recover));
+    let cleanup = std::fs::remove_dir_all(&root);
+    if let Some(message) = failure {
+        anyhow::bail!(message);
+    }
+    cleanup.with_context(|| format!("remove test root {}", root.display()))?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn reaction_recovery_conformance_phase() -> Result<()> {
     match std::env::var(PHASE_ENV) {
         Ok(phase) if phase == "seed" => seed_phase(&FixturePaths::from_env()?).await,
         Ok(phase) if phase == "recover" => recover_phase(&FixturePaths::from_env()?).await,
+        Ok(phase) if phase == "seed_hwm" => seed_hwm_phase(&FixturePaths::from_env()?).await,
+        Ok(phase) if phase == "recover_hwm" => recover_hwm_phase(&FixturePaths::from_env()?).await,
+        Ok(phase) if phase == "recover_strict_fail" => {
+            recover_strict_fail_phase(&FixturePaths::from_env()?).await
+        }
+        Ok(phase) if phase == "recover_autoreset" => {
+            recover_autoreset_phase(&FixturePaths::from_env()?).await
+        }
         Ok(other) => anyhow::bail!("unknown conformance phase '{other}'"),
         Err(std::env::VarError::NotPresent) => Ok(()),
         Err(error) => Err(error).context("read conformance phase environment variable"),
