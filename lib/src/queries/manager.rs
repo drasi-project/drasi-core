@@ -1303,7 +1303,15 @@ impl Query for DrasiQuery {
                 checkpoint_sequences_per_source.clear();
             }
 
-            for (source_id, source, settings) in &sources_to_subscribe {
+            for (source_rank, (source_id, source, settings)) in
+                sources_to_subscribe.iter().enumerate()
+            {
+                // The source's position in `config.sources` is its rank within
+                // this query. It breaks same-timestamp ties between events from
+                // different sources in the priority queue (inert for
+                // single-source queries). `sources_to_subscribe` is built in
+                // `config.sources` order, so the enumeration index is the rank.
+                let source_rank = source_rank as u32;
                 let subscription_response = match source.subscribe(settings.clone()).await {
                     Ok(response) => response,
                     Err(e) => {
@@ -1585,6 +1593,10 @@ impl Query for DrasiQuery {
                 let query_id = self.base.config.id.clone();
                 let source_id_clone = source_id.clone();
                 let instance_id = self.instance_id.clone();
+                // Constant rank captured per forwarder; stamped onto each event
+                // at enqueue time so the priority queue can break cross-source
+                // ties deterministically.
+                let forwarder_source_rank = source_rank;
 
                 // Get source dispatch mode to determine enqueue strategy
                 let dispatch_mode = source.dispatch_mode();
@@ -1610,11 +1622,16 @@ impl Query for DrasiQuery {
                                     if use_blocking_enqueue {
                                         // Channel mode: Use blocking enqueue to prevent message loss
                                         // This creates backpressure when the priority queue is full
-                                        priority_queue.enqueue_wait(arc_event).await;
+                                        priority_queue
+                                            .enqueue_wait(arc_event, forwarder_source_rank)
+                                            .await;
                                     } else {
                                         // Broadcast mode: Use non-blocking enqueue to prevent deadlock
                                         // Messages may be dropped when priority queue is full
-                                        if !priority_queue.enqueue(arc_event).await {
+                                        if !priority_queue
+                                            .enqueue(arc_event, forwarder_source_rank)
+                                            .await
+                                        {
                                             warn!(
                                                 "Query '{query_id}' priority queue at capacity, dropping event from source '{source_id_clone}' (broadcast mode)"
                                             );
@@ -2061,7 +2078,12 @@ impl Query for DrasiQuery {
             let fq_forwarder = tokio::spawn(async move {
                 let mut receiver = fq_receiver;
                 while let Ok(event) = receiver.recv().await {
-                    fq_priority_queue.enqueue_wait(event).await;
+                    // The FutureQueueSource is a synthetic per-query source not
+                    // present in `config.sources`. Rank it after every real
+                    // source (u32::MAX) so that, on a timestamp tie, its
+                    // re-evaluation signals order deterministically last. Its
+                    // own monotonic sequence still breaks ties among its events.
+                    fq_priority_queue.enqueue_wait(event, u32::MAX).await;
                 }
             });
             self.subscription_tasks.write().await.push(fq_forwarder);

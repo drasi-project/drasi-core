@@ -327,7 +327,9 @@ impl ReactionBase {
     /// The host calls this to forward query results to the reaction's priority queue.
     /// Results are processed in timestamp order by the reaction's processing task.
     pub async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
-        self.priority_queue.enqueue_wait(Arc::new(result)).await;
+        // Reaction result queues carry a single logical stream per query, so the
+        // source rank is inert here; ties fall through to the per-query sequence.
+        self.priority_queue.enqueue_wait(Arc::new(result), 0).await;
         Ok(())
     }
 
@@ -638,7 +640,7 @@ mod tests {
         );
 
         // Enqueue result
-        let enqueued = base.priority_queue.enqueue(Arc::new(query_result)).await;
+        let enqueued = base.priority_queue.enqueue(Arc::new(query_result), 0).await;
         assert!(enqueued);
 
         // Drain queue

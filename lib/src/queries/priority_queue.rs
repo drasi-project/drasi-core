@@ -38,6 +38,14 @@ mod tests {
         source_id: &str,
         timestamp: chrono::DateTime<Utc>,
     ) -> Arc<StampedSourceEvent> {
+        create_test_event_seq(source_id, timestamp, 0)
+    }
+
+    fn create_test_event_seq(
+        source_id: &str,
+        timestamp: chrono::DateTime<Utc>,
+        sequence: u64,
+    ) -> Arc<StampedSourceEvent> {
         let change = SourceChange::Insert {
             element: Element::Node {
                 metadata: ElementMetadata {
@@ -55,8 +63,55 @@ mod tests {
                 SourceEvent::Change(change),
                 timestamp,
             ),
-            0,
+            sequence,
         ))
+    }
+
+    // Issue #814 Scenario 1/2: same-timestamp events from a single source must
+    // dequeue in ascending `sequence` order regardless of enqueue order, so the
+    // query evaluates them in emission order (and the sequence dedup high-water
+    // never moves backward).
+    #[tokio::test]
+    async fn test_same_timestamp_dequeues_in_sequence_order() {
+        let pq = PriorityQueue::new(100);
+        let now = Utc::now();
+
+        // Enqueue out of order; identical timestamp and source rank.
+        pq.enqueue(create_test_event_seq("s1", now, 3), 0).await;
+        pq.enqueue(create_test_event_seq("s1", now, 1), 0).await;
+        pq.enqueue(create_test_event_seq("s1", now, 2), 0).await;
+
+        assert_eq!(pq.try_dequeue().await.unwrap().sequence, 1);
+        assert_eq!(pq.try_dequeue().await.unwrap().sequence, 2);
+        assert_eq!(pq.try_dequeue().await.unwrap().sequence, 3);
+    }
+
+    // Issue #814 Scenario 3/4: two sources emit same-timestamp events. The lower
+    // source rank dequeues first; within a source, sequence orders the events.
+    #[tokio::test]
+    async fn test_same_timestamp_multi_source_ordered_by_rank_then_sequence() {
+        let pq = PriorityQueue::new(100);
+        let now = Utc::now();
+
+        // Interleave enqueue order across the two sources.
+        pq.enqueue(create_test_event_seq("sourceB", now, 11), 1)
+            .await;
+        pq.enqueue(create_test_event_seq("sourceA", now, 21), 0)
+            .await;
+        pq.enqueue(create_test_event_seq("sourceB", now, 10), 1)
+            .await;
+        pq.enqueue(create_test_event_seq("sourceA", now, 20), 0)
+            .await;
+
+        // rank 0 (sourceA) first, in sequence order, then rank 1 (sourceB).
+        let d1 = pq.try_dequeue().await.unwrap();
+        assert_eq!((d1.source_id.as_str(), d1.sequence), ("sourceA", 20));
+        let d2 = pq.try_dequeue().await.unwrap();
+        assert_eq!((d2.source_id.as_str(), d2.sequence), ("sourceA", 21));
+        let d3 = pq.try_dequeue().await.unwrap();
+        assert_eq!((d3.source_id.as_str(), d3.sequence), ("sourceB", 10));
+        let d4 = pq.try_dequeue().await.unwrap();
+        assert_eq!((d4.source_id.as_str(), d4.sequence), ("sourceB", 11));
     }
 
     #[tokio::test]
@@ -70,9 +125,9 @@ mod tests {
         let event3 = create_test_event("source3", now + chrono::Duration::seconds(5));
 
         // Enqueue in random order
-        pq.enqueue(event1).await;
-        pq.enqueue(event3).await;
-        pq.enqueue(event2).await;
+        pq.enqueue(event1, 0).await;
+        pq.enqueue(event3, 0).await;
+        pq.enqueue(event2, 0).await;
 
         // Dequeue should return oldest first
         let dequeued1 = pq.try_dequeue().await.unwrap();
@@ -95,11 +150,11 @@ mod tests {
         let event3 = create_test_event("source3", now);
 
         // Enqueue up to capacity
-        assert!(pq.enqueue(event1).await);
-        assert!(pq.enqueue(event2).await);
+        assert!(pq.enqueue(event1, 0).await);
+        assert!(pq.enqueue(event2, 0).await);
 
         // Should reject when at capacity
-        assert!(!pq.enqueue(event3).await);
+        assert!(!pq.enqueue(event3, 0).await);
 
         // Metrics should reflect the drop
         let metrics = pq.metrics().await;
@@ -112,8 +167,8 @@ mod tests {
         let pq = PriorityQueue::new(100);
 
         let now = Utc::now();
-        pq.enqueue(create_test_event("source1", now)).await;
-        pq.enqueue(create_test_event("source2", now)).await;
+        pq.enqueue(create_test_event("source1", now), 0).await;
+        pq.enqueue(create_test_event("source2", now), 0).await;
 
         let metrics = pq.metrics().await;
         assert_eq!(metrics.total_enqueued, 2);
@@ -136,7 +191,7 @@ mod tests {
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             let event = create_test_event("source1", Utc::now());
-            pq_clone.enqueue(event).await;
+            pq_clone.enqueue(event, 0).await;
         });
 
         // This should block until the event arrives
@@ -149,9 +204,9 @@ mod tests {
         let pq = PriorityQueue::new(100);
 
         let now = Utc::now();
-        pq.enqueue(create_test_event("source1", now)).await;
-        pq.enqueue(create_test_event("source2", now)).await;
-        pq.enqueue(create_test_event("source3", now)).await;
+        pq.enqueue(create_test_event("source1", now), 0).await;
+        pq.enqueue(create_test_event("source2", now), 0).await;
+        pq.enqueue(create_test_event("source3", now), 0).await;
 
         let drained = pq.drain().await;
         assert_eq!(drained.len(), 3);

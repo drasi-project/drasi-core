@@ -26,6 +26,16 @@ pub trait Timestamped {
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc>;
 }
 
+/// Trait for types carrying a monotonic per-source sequence number.
+///
+/// Used by the priority queue as the final tie-breaker when both the timestamp
+/// and the source rank are equal (i.e. two events from the *same* source that
+/// share a timestamp). Because a sequence is only meaningful within a single
+/// source, it is only ever compared between events of equal source rank.
+pub trait Sequenced {
+    fn sequence(&self) -> u64;
+}
+
 /// Type of Drasi component
 ///
 /// Used for identifying component types in events and monitoring.
@@ -425,6 +435,13 @@ impl Timestamped for StampedSourceEvent {
     }
 }
 
+// The framework-assigned sequence breaks same-timestamp ties within a source.
+impl Sequenced for StampedSourceEvent {
+    fn sequence(&self) -> u64 {
+        self.sequence
+    }
+}
+
 /// Arc-wrapped StampedSourceEvent for zero-copy distribution
 pub type ArcSourceEvent = Arc<StampedSourceEvent>;
 
@@ -577,6 +594,13 @@ impl QueryResult {
 impl Timestamped for QueryResult {
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
         self.timestamp
+    }
+}
+
+// The per-query sequence breaks same-timestamp ties for query results.
+impl Sequenced for QueryResult {
+    fn sequence(&self) -> u64 {
+        self.sequence
     }
 }
 
