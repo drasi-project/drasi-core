@@ -26,7 +26,7 @@ use super::types::{
 };
 
 // ============================================================================
-// Source events — carries SourceChange / SourceEventWrapper across FFI
+// Source events — carries SourceChange / StampedSourceEvent across FFI
 // ============================================================================
 
 /// Represents a source change event that crosses the FFI boundary.
@@ -34,7 +34,7 @@ use super::types::{
 /// The event is carried as a **serialized, self-describing payload**
 /// ([`crate::ffi::payload::SourceEventPayload`] encoded with `rmp-serde`), not as
 /// a `repr(Rust)` opaque pointer. The producing plugin owns `payload_ptr`; the
-/// host copies/deserializes it into a host-owned `SourceEventWrapper` and then
+/// host copies/deserializes it into a host-owned `StampedSourceEvent` and then
 /// frees the plugin's buffer via `payload_drop_fn`. Neither side ever reads or
 /// drops the other side's `repr(Rust)` memory (fixes #602).
 ///

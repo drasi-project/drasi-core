@@ -66,7 +66,7 @@ impl FutureQueueSource {
             task_handle: Arc::new(RwLock::new(None)),
             query_id,
             dispatcher: Arc::new(RwLock::new(None)),
-            next_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            next_sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
     }
 
