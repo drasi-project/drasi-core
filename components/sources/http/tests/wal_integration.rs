@@ -69,6 +69,7 @@ fn fresh_settings(source_id: &str) -> SourceSubscriptionSettings {
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
+        resume_sequence: None,
         request_position_handle: true,
         resume_from: None,
     }
@@ -82,6 +83,7 @@ fn resume_settings(source_id: &str, resume_seq: u64) -> SourceSubscriptionSettin
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
+        resume_sequence: None,
         request_position_handle: true,
         resume_from: Some(bytes::Bytes::from(resume_seq.to_be_bytes().to_vec())),
     }

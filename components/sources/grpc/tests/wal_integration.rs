@@ -180,6 +180,7 @@ async fn test_grpc_crash_recovery_resumes_sequence() {
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
+        resume_sequence: None,
         request_position_handle: true,
         resume_from: Some(bytes::Bytes::from(3u64.to_be_bytes().to_vec())),
     };
