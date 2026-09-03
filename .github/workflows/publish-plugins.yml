@@ -3,6 +3,11 @@ name: Publish Plugins
 on:
   workflow_dispatch:
     inputs:
+      plugin:
+        description: 'Publish a single plugin (crate name or type/kind, e.g. drasi-source-otel or source/otel). Leave empty for all.'
+        required: false
+        type: string
+        default: ''
       pre_release:
         description: 'Pre-release label (e.g., "dev.1", "rc.1"). Leave empty for stable release.'
         required: false
@@ -40,6 +45,11 @@ on:
         default: ''
   workflow_call:
     inputs:
+      plugin:
+        description: 'Publish a single plugin (crate name or type/kind, e.g. drasi-source-otel or source/otel). Leave empty for all.'
+        required: false
+        type: string
+        default: ''
       pre_release:
         description: 'Pre-release label (e.g., "dev.1", "rc.1"). Leave empty for stable release.'
         required: false
@@ -216,6 +226,8 @@ jobs:
 
       - name: Build plugins
         shell: bash
+        env:
+          INPUT_PLUGIN: ${{ inputs.plugin }}
         run: |
           # For -gnu targets, append the glibc-version suffix so cargo-zigbuild
           # pins the floor (e.g. x86_64-unknown-linux-gnu.2.28). xtask strips the
@@ -235,7 +247,15 @@ jobs:
             echo "${TOOLCHAIN_ENV}=${PWD}/ci/cmake/librdkafka-features.cmake" >> "$GITHUB_ENV"
             export "${TOOLCHAIN_ENV}=${PWD}/ci/cmake/librdkafka-features.cmake"
           fi
-          cargo run -p xtask -- build-plugins --release --target "$BUILD_TARGET"
+          if [ -n "$INPUT_PLUGIN" ] && ! [[ "$INPUT_PLUGIN" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid plugin format: $INPUT_PLUGIN" >&2; exit 1
+          fi
+          ARGS=(build-plugins --release --target "$BUILD_TARGET")
+          if [ -n "$INPUT_PLUGIN" ]; then
+            ARGS+=(--plugin "$INPUT_PLUGIN")
+          fi
+
+          cargo run -p xtask -- "${ARGS[@]}"
 
       - name: Verify glibc floor (-gnu plugins)
         if: matrix.zigbuild
@@ -293,6 +313,7 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_PRE_RELEASE: ${{ inputs.pre_release }}
           INPUT_SIGN: ${{ inputs.sign }}
+          INPUT_PLUGIN: ${{ inputs.plugin }}
           TARGET: ${{ matrix.target }}
           ARCH_SUFFIX: ${{ matrix.arch_suffix }}
         run: |
@@ -307,6 +328,9 @@ jobs:
           if ! [[ "$INPUT_REGISTRY" =~ ^[A-Za-z0-9._/:-]+$ ]]; then
             echo "Invalid registry format: $INPUT_REGISTRY" >&2; exit 1
           fi
+          if [ -n "$INPUT_PLUGIN" ] && ! [[ "$INPUT_PLUGIN" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid plugin format: $INPUT_PLUGIN" >&2; exit 1
+          fi
           # Build the args as an array so each element is passed verbatim (no
           # word-splitting or globbing).
           ARGS=(--release --target "$TARGET" --registry "$INPUT_REGISTRY" --arch-suffix "$ARCH_SUFFIX")
@@ -319,6 +343,9 @@ jobs:
           elif [ -n "$INPUT_PRE_RELEASE" ]; then
             ARGS+=(--pre-release "$INPUT_PRE_RELEASE")
           fi
+          if [ -n "$INPUT_PLUGIN" ]; then
+            ARGS+=(--plugin "$INPUT_PLUGIN")
+          fi
           cargo run -p xtask -- publish-plugins "${ARGS[@]}"
 
       - name: Publish plugins (dry run)
@@ -328,6 +355,7 @@ jobs:
           INPUT_REGISTRY: ${{ inputs.registry }}
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_PRE_RELEASE: ${{ inputs.pre_release }}
+          INPUT_PLUGIN: ${{ inputs.plugin }}
           TARGET: ${{ matrix.target }}
           ARCH_SUFFIX: ${{ matrix.arch_suffix }}
         run: |
@@ -340,11 +368,17 @@ jobs:
           if ! [[ "$INPUT_REGISTRY" =~ ^[A-Za-z0-9._/:-]+$ ]]; then
             echo "Invalid registry format: $INPUT_REGISTRY" >&2; exit 1
           fi
+          if [ -n "$INPUT_PLUGIN" ] && ! [[ "$INPUT_PLUGIN" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid plugin format: $INPUT_PLUGIN" >&2; exit 1
+          fi
           ARGS=(--release --target "$TARGET" --registry "$INPUT_REGISTRY" --arch-suffix "$ARCH_SUFFIX" --dry-run)
           if [ -n "$INPUT_TAG" ]; then
             ARGS+=(--tag "$INPUT_TAG")
           elif [ -n "$INPUT_PRE_RELEASE" ]; then
             ARGS+=(--pre-release "$INPUT_PRE_RELEASE")
+          fi
+          if [ -n "$INPUT_PLUGIN" ]; then
+            ARGS+=(--plugin "$INPUT_PLUGIN")
           fi
           cargo run -p xtask -- publish-plugins "${ARGS[@]}"
 
@@ -359,6 +393,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
+          # Use the same ref as the build jobs so list-plugins runs against the
+          # correct code on feature-branch preview builds.
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
 
       - name: Install system dependencies
@@ -384,11 +421,16 @@ jobs:
           # is required. Configure a PACKAGES_ADMIN_TOKEN secret; we fall back
           # to GITHUB_TOKEN only so the step doesn't fail to start.
           GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
+          INPUT_PLUGIN: ${{ inputs.plugin }}
         run: |
           set -euo pipefail
           ORG="drasi-project"
 
           FAILED=0
+
+          if [ -n "$INPUT_PLUGIN" ] && ! [[ "$INPUT_PLUGIN" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid plugin format: $INPUT_PLUGIN" >&2; exit 1
+          fi
 
           set_public() {
             local pkg="$1"
@@ -409,7 +451,11 @@ jobs:
           # Set each plugin package to public. list-plugins prints plugin lines
           # as "  <type>/<kind> v<version> (<path>)"; match only those so the
           # indented "SDK: ..." summary line is excluded.
-          PLUGINS=$(cargo run -p xtask -- list-plugins \
+          ARGS=(list-plugins)
+          if [ -n "$INPUT_PLUGIN" ]; then
+            ARGS+=(--plugin "$INPUT_PLUGIN")
+          fi
+          PLUGINS=$(cargo run -p xtask -- "${ARGS[@]}" \
             | { grep -E '^[[:space:]]+[a-z-]+/[^[:space:]]+ v[0-9]' || true; } \
             | awk '{print $1}')
           for PLUGIN in $PLUGINS; do
