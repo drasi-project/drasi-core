@@ -2,16 +2,18 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crate::agents::{
-    AgentDefinition, AgentFile, AgentFileContent, AgentFileLocation, MAX_AGENT_SLOTS,
+    ActorDefinition, ActorGitHubIdentity, ActorKind, AgentDefinition, AgentFile, AgentFileContent,
+    AgentFileLocation, MAX_AGENT_SLOTS,
 };
 use crate::mapping::{agent_changes, allocation_changes, generic_issue_changes, AgentProjection};
 use crate::model::slot_id;
 use crate::protocol::{
-    derive_workgraph_id, is_typed_workgraph_id, LifecycleArtifactDocument,
-    PreparedProjectionCommit, ProjectionInput, RootIssueCommentDocument, RootIssueDocument,
-    TaskDocument, WorkGraphAllocatorProjection, WorkGraphAssignmentBinding,
-    WorkGraphDispatchBinding, WorkGraphProjector, WorkGraphRouteBinding,
-    MAX_ROOT_ISSUE_COMMENT_BODY_BYTES, MAX_WORKGRAPH_ATTEMPTS, WORKGRAPH_ASSIGNMENT_MARKER,
+    derive_workgraph_id, derive_workgraph_response_body_digest, is_typed_workgraph_id,
+    LifecycleArtifactDocument, PreparedProjectionCommit, ProjectionInput, RootIssueCommentDocument,
+    RootIssueDocument, TaskDocument, TaskResponseDocument, TaskResponseRole,
+    WorkGraphAllocatorProjection, WorkGraphAssignmentBinding, WorkGraphDispatchBinding,
+    WorkGraphProjector, WorkGraphRouteBinding, MAX_ROOT_ISSUE_COMMENT_BODY_BYTES,
+    MAX_TASK_RESPONSE_BODY_BYTES, MAX_WORKGRAPH_ATTEMPTS, WORKGRAPH_ASSIGNMENT_MARKER,
     WORKGRAPH_DISPATCH_MARKER, WORKGRAPH_EVALUATION_ACCEPTED, WORKGRAPH_EVALUATION_MARKER,
     WORKGRAPH_EVALUATION_REJECTED, WORKGRAPH_RESULT_MARKER, WORKGRAPH_ROUTE_MARKER,
     WORKGRAPH_ROUTE_REWORK,
@@ -55,6 +57,14 @@ pub struct AllocationDelta {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkGraphActiveLease {
     pub lease_id: String,
+    /// Catalog kind of the executor holding this lease. Operator metadata:
+    /// leases are acquired at exactly the same lifecycle points for an agent
+    /// and a human worker, and are never taken for an evaluation phase.
+    #[serde(default)]
+    pub actor_kind: ActorKind,
+    /// The GitHub account of a human executor, when the catalog declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_github: Option<ActorGitHubIdentity>,
     pub task_source_key: String,
     pub root_issue_id: String,
     pub workflow_run_id: String,
@@ -69,6 +79,10 @@ pub struct WorkGraphActiveLease {
     pub acquired_at: String,
     pub expires_at: String,
     pub has_dispatch: bool,
+    /// Canonical Dispatch ID once this lease has been dispatched. Empty until
+    /// then, and empty when the projector supplies no Dispatch identity.
+    #[serde(default)]
+    pub dispatch_id: String,
     pub completed: bool,
     pub completion_eligible: bool,
     #[serde(default)]
@@ -99,6 +113,85 @@ pub(crate) struct LifecycleArtifactRevisionState {
     pub document: Option<LifecycleArtifactDocument>,
     pub revision: i64,
     pub tombstone: bool,
+}
+
+/// The open lifecycle subject a natural task response answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TaskResponseSubject {
+    /// The actor holds the task's current active, dispatched lease.
+    Worker {
+        dispatch_id: String,
+        lease_id: String,
+    },
+    /// No worker lease is held on the task and a Result is awaiting its
+    /// Evaluation.
+    Evaluator { result_id: String },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TaskResponseRevisionState {
+    pub document: Option<TaskResponseDocument>,
+    pub identity: TaskResponseIdentity,
+    pub revision: i64,
+    pub fingerprint: String,
+    pub tombstone: bool,
+}
+
+/// One Result a task is awaiting an Evaluation for, plus the executor whose
+/// attempt produced it.
+///
+/// The producer is carried durably rather than looked up through the lease,
+/// because a lease is transient: it expires, is released, is cancelled when
+/// the task closes, and is gone entirely after a restart prunes it. Self
+/// review must stay refused for as long as the Result is judgeable, so the
+/// identity that must never evaluate it is recorded with it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct WorkGraphPendingResult {
+    result_id: String,
+    lease_id: String,
+    /// The executor whose attempt produced this Result.
+    executor_id: String,
+    /// That executor's GitHub account, when it was a human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    producer_github: Option<ActorGitHubIdentity>,
+}
+
+impl WorkGraphPendingResult {
+    /// Whether one responder is the worker that produced this Result.
+    ///
+    /// Matched on the numeric GitHub ID, which survives a rename and both node
+    /// ID encodings, and on the catalog actor ID, which covers a producer
+    /// whose account was never recorded on the lease.
+    fn produced_by(&self, author_database_id: u64, actor_id: &str) -> bool {
+        self.executor_id == actor_id
+            || self
+                .producer_github
+                .as_ref()
+                .is_some_and(|github| github.database_id == author_database_id)
+    }
+}
+
+/// The identity a retracted task response keeps, so a delayed delivery is
+/// fenced against the exact response it would otherwise resurrect.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct TaskResponseIdentity {
+    pub source_key: String,
+    pub task_source_key: String,
+    pub task_id: String,
+    pub actor_id: String,
+}
+
+impl From<&TaskResponseDocument> for TaskResponseIdentity {
+    fn from(document: &TaskResponseDocument) -> Self {
+        Self {
+            source_key: document.source_key.clone(),
+            task_source_key: document.task_source_key.clone(),
+            task_id: document.task_id.clone(),
+            actor_id: document.actor_id.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,16 +228,29 @@ struct AgentState {
     configured_slots: u32,
     lease_duration_seconds: i64,
     retiring_slots: BTreeSet<u32>,
+    /// The catalog kind this executor was declared with. Defaulted so a state
+    /// written before the actor catalog existed still loads as an agent.
+    #[serde(default)]
+    kind: ActorKind,
+    /// The exact GitHub account a human executor speaks as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    github: Option<ActorGitHubIdentity>,
+    /// The custom agent an agent executor runs as. Empty for a legacy state.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    custom_agent: String,
 }
 
 impl AgentState {
-    fn new(agent: &AgentDefinition) -> Self {
+    fn new(actor: &ActorDefinition) -> Self {
         Self {
-            agent_id: agent.agent_id.clone(),
+            agent_id: actor.actor_id.clone(),
             configured: true,
-            configured_slots: agent.slots,
-            lease_duration_seconds: agent.lease_duration_seconds,
+            configured_slots: actor.slots,
+            lease_duration_seconds: actor.lease_duration_seconds,
             retiring_slots: BTreeSet::new(),
+            kind: actor.kind,
+            github: actor.github.clone(),
+            custom_agent: actor.custom_agent.clone(),
         }
     }
 
@@ -251,6 +357,20 @@ pub struct AllocationState {
     workgraph_root_comment_fingerprints: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workgraph_root_comment_tombstones: BTreeMap<String, RootIssueCommentIdentity>,
+    /// Authenticated natural task responses, keyed by comment node ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workgraph_task_responses: BTreeMap<String, TaskResponseDocument>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workgraph_task_response_revisions: BTreeMap<String, i64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workgraph_task_response_fingerprints: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workgraph_task_response_tombstones: BTreeMap<String, TaskResponseIdentity>,
+    /// The Result each task Issue is currently awaiting an Evaluation for,
+    /// with the executor that produced it. This is the open evaluator subject
+    /// a natural response can answer, and the identity that may not answer it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workgraph_pending_results: BTreeMap<String, WorkGraphPendingResult>,
     /// Latest authoritative GitHub revision observed for a Root Issue or task Issue.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workgraph_issue_revisions: BTreeMap<String, i64>,
@@ -569,6 +689,12 @@ impl Allocator {
             mut next_root_comment_fingerprints,
             mut next_root_comment_tombstones,
         ) = stage_root_comment_documents(&state, &accepted_inputs)?;
+        let (
+            mut next_task_responses,
+            mut next_task_response_revisions,
+            mut next_task_response_fingerprints,
+            mut next_task_response_tombstones,
+        ) = stage_task_response_documents(&state, &accepted_inputs)?;
         let mut candidate = state.clone();
         candidate.refresh_workgraph_authorizations(
             &prepared.allocator,
@@ -621,6 +747,12 @@ impl Allocator {
                     next_root_comment_fingerprints,
                     next_root_comment_tombstones,
                 ) = stage_root_comment_documents(&state, &accepted_inputs)?;
+                (
+                    next_task_responses,
+                    next_task_response_revisions,
+                    next_task_response_fingerprints,
+                    next_task_response_tombstones,
+                ) = stage_task_response_documents(&state, &accepted_inputs)?;
                 candidate = state.clone();
                 candidate.refresh_workgraph_authorizations(
                     &prepared.allocator,
@@ -657,6 +789,10 @@ impl Allocator {
         state.workgraph_root_comment_revisions = next_root_comment_revisions;
         state.workgraph_root_comment_fingerprints = next_root_comment_fingerprints;
         state.workgraph_root_comment_tombstones = next_root_comment_tombstones;
+        state.workgraph_task_responses = next_task_responses;
+        state.workgraph_task_response_revisions = next_task_response_revisions;
+        state.workgraph_task_response_fingerprints = next_task_response_fingerprints;
+        state.workgraph_task_response_tombstones = next_task_response_tombstones;
         state.workgraph_issue_revisions = next_issue_revisions;
         state.workgraph_issue_state_fingerprints = next_issue_state_fingerprints;
         state.workgraph_issue_database_ids = next_issue_database_ids;
@@ -789,6 +925,140 @@ impl Allocator {
             }))
     }
 
+    /// The open lifecycle subject one GitHub account may answer on a task.
+    ///
+    /// A worker answers the Dispatch of the lease it holds, matched against
+    /// the actor metadata that lease was *acquired* with. That snapshot is
+    /// what lets an in-flight lease survive a catalog rename or a node ID
+    /// re-encoding. Everyone else answers a Result still awaiting its
+    /// Evaluation, matched against the *current* catalog, because an evaluator
+    /// holds no lease and so has no snapshot of its own. A task with neither
+    /// open subject has nothing for a human to respond to.
+    pub(crate) async fn workgraph_task_response_subject(
+        &self,
+        task_source_key: &str,
+        author_database_id: u64,
+    ) -> AnyResult<Option<(String, TaskResponseSubject)>> {
+        if author_database_id == 0 {
+            return Ok(None);
+        }
+        let _guard = self.gate.lock().await;
+        let state = self.ready_state().await?;
+        let own_lease = state.workgraph_active.values().find(|lease| {
+            lease.task_source_key == task_source_key
+                && !lease.completed
+                && lease
+                    .actor_github
+                    .as_ref()
+                    .is_some_and(|github| github.database_id == author_database_id)
+        });
+        if let Some(lease) = own_lease {
+            // Holding a lease makes this actor the worker, never the evaluator
+            // of the Result its own attempt produced. The Dispatch that
+            // authorizes the work must already exist.
+            if !lease.has_dispatch || lease.dispatch_id.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some((
+                lease.executor_id.clone(),
+                TaskResponseSubject::Worker {
+                    dispatch_id: lease.dispatch_id.clone(),
+                    lease_id: lease.lease_id.clone(),
+                },
+            )));
+        }
+        let Some(pending) = state.workgraph_pending_results.get(task_source_key) else {
+            return Ok(None);
+        };
+        let Some(actor_id) = state
+            .agents
+            .values()
+            .find(|agent| {
+                agent.configured
+                    && agent.kind == ActorKind::Human
+                    && agent
+                        .github
+                        .as_ref()
+                        .is_some_and(|github| github.database_id == author_database_id)
+            })
+            .map(|agent| agent.agent_id.clone())
+        else {
+            return Ok(None);
+        };
+        // Nobody reviews their own work. The producing worker is recorded on
+        // the pending Result itself, so this holds after their lease has
+        // expired, been released, been cancelled with the task, or been
+        // pruned by a restart — the lease's liveness is irrelevant.
+        if pending.produced_by(author_database_id, &actor_id) {
+            return Ok(None);
+        }
+        Ok(Some((
+            actor_id,
+            TaskResponseSubject::Evaluator {
+                result_id: pending.result_id.clone(),
+            },
+        )))
+    }
+
+    /// The projected identity of one WorkGraph task Issue.
+    ///
+    /// Returns `(task_id, root_issue_id, workflow_run_id)`, which the Source
+    /// validated when the task was admitted, so a natural response can be
+    /// bound to a task without re-parsing the task body.
+    pub(crate) async fn workgraph_task_identity(
+        &self,
+        task_source_key: &str,
+    ) -> AnyResult<Option<(String, String, String)>> {
+        let _guard = self.gate.lock().await;
+        let state = self.ready_state().await?;
+        Ok(state
+            .workgraph_task_identities
+            .get(task_source_key)
+            .map(|task| {
+                (
+                    task.task_id.clone(),
+                    task.root_issue_id.clone(),
+                    task.workflow_run_id.clone(),
+                )
+            }))
+    }
+
+    /// Return the latest revision observed for one natural task response,
+    /// including a retained tombstone.
+    pub(crate) async fn latest_workgraph_task_response_revision(
+        &self,
+        source_key: &str,
+    ) -> AnyResult<Option<TaskResponseRevisionState>> {
+        let _guard = self.gate.lock().await;
+        let state = self.ready_state().await?;
+        // `validate` proves a revision always pairs with a fingerprint and with
+        // exactly one of a document or a tombstone, but this reads the maps
+        // rather than trusting that: a restored state that somehow escaped the
+        // check reports no prior revision instead of panicking.
+        let (Some(revision), Some(fingerprint)) = (
+            state.workgraph_task_response_revisions.get(source_key),
+            state.workgraph_task_response_fingerprints.get(source_key),
+        ) else {
+            return Ok(None);
+        };
+        let document = state.workgraph_task_responses.get(source_key);
+        let Some(identity) = document.map(TaskResponseIdentity::from).or_else(|| {
+            state
+                .workgraph_task_response_tombstones
+                .get(source_key)
+                .cloned()
+        }) else {
+            return Ok(None);
+        };
+        Ok(Some(TaskResponseRevisionState {
+            tombstone: document.is_none(),
+            document: document.cloned(),
+            identity,
+            revision: *revision,
+            fingerprint: fingerprint.clone(),
+        }))
+    }
+
     /// Return the latest authoritative GitHub revision observed for a Root Issue or task Issue.
     pub async fn latest_workgraph_issue_revision(
         &self,
@@ -886,6 +1156,13 @@ type RootCommentDocuments = (
     BTreeMap<String, RootIssueCommentIdentity>,
 );
 
+type TaskResponseDocuments = (
+    BTreeMap<String, TaskResponseDocument>,
+    BTreeMap<String, i64>,
+    BTreeMap<String, String>,
+    BTreeMap<String, TaskResponseIdentity>,
+);
+
 fn stage_root_comment_documents(
     state: &AllocationState,
     inputs: &[ProjectionInput],
@@ -942,6 +1219,87 @@ pub(crate) fn root_comment_fingerprint(document: &RootIssueCommentDocument) -> A
     Ok(hex::encode(Sha256::digest(
         serde_json::to_vec(document).context("failed to fingerprint Root Issue comment")?,
     )))
+}
+
+/// Stages every authenticated task response one delivery carries.
+///
+/// A response is fenced exactly like a Root Issue comment: its revision and
+/// content fingerprint are retained after retraction so a delayed or replayed
+/// delivery cannot resurrect it.
+fn stage_task_response_documents(
+    state: &AllocationState,
+    inputs: &[ProjectionInput],
+) -> AnyResult<TaskResponseDocuments> {
+    let mut responses = state.workgraph_task_responses.clone();
+    let mut revisions = state.workgraph_task_response_revisions.clone();
+    let mut fingerprints = state.workgraph_task_response_fingerprints.clone();
+    let mut tombstones = state.workgraph_task_response_tombstones.clone();
+    for input in inputs {
+        match input {
+            ProjectionInput::UpsertTaskResponse(document) => {
+                let fingerprint = task_response_fingerprint(document)?;
+                responses.insert(document.source_key.clone(), document.clone());
+                revisions.insert(document.source_key.clone(), document.updated_at_revision);
+                fingerprints.insert(document.source_key.clone(), fingerprint);
+                tombstones.remove(&document.source_key);
+            }
+            ProjectionInput::DeleteTaskResponse {
+                source_key,
+                task_source_key,
+                task_id,
+                actor_id,
+                updated_at_revision,
+            } => {
+                responses.remove(source_key);
+                revisions.insert(source_key.clone(), *updated_at_revision);
+                fingerprints.insert(
+                    source_key.clone(),
+                    task_response_tombstone_fingerprint(task_id, actor_id),
+                );
+                tombstones.insert(
+                    source_key.clone(),
+                    TaskResponseIdentity {
+                        source_key: source_key.clone(),
+                        task_source_key: task_source_key.clone(),
+                        task_id: task_id.clone(),
+                        actor_id: actor_id.clone(),
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok((responses, revisions, fingerprints, tombstones))
+}
+
+/// Fingerprints the immutable GitHub evidence one task response carries.
+///
+/// Deliberately excludes the lifecycle subject and the actor it resolved to.
+/// Those are allocator-derived and advance on their own, so folding them in
+/// would make an identical GitHub redelivery look like same-revision comment
+/// divergence every time the lifecycle moved. What this covers is exactly what
+/// GitHub reported about the comment, which is what a revision fences.
+pub(crate) fn task_response_fingerprint(document: &TaskResponseDocument) -> AnyResult<String> {
+    let evidence = serde_json::json!({
+        "sourceKey": document.source_key,
+        "taskSourceKey": document.task_source_key,
+        "authorDatabaseId": document.author_database_id,
+        "authorId": document.author_id,
+        "authorLogin": document.author_login,
+        "body": document.body,
+        "bodyDigest": document.body_digest,
+        "createdAtRevision": document.created_at_revision,
+        "updatedAtRevision": document.updated_at_revision,
+    });
+    Ok(hex::encode(Sha256::digest(
+        serde_json::to_vec(&evidence).context("failed to fingerprint task response")?,
+    )))
+}
+
+fn task_response_tombstone_fingerprint(task_id: &str, actor_id: &str) -> String {
+    hex::encode(Sha256::digest(
+        format!("deleted\0{task_id}\0{actor_id}").as_bytes(),
+    ))
 }
 
 fn root_comment_tombstone_fingerprint(root_issue_id: &str, admission_id: &str) -> String {
@@ -1154,6 +1512,7 @@ fn validate_workgraph_projection(
                 && valid_typed_workgraph_id(&dispatch.workflow_run_id, "workflow-run")
                 && valid_typed_workgraph_id(&dispatch.assignment_id, "assignment")
                 && valid_typed_workgraph_id(&dispatch.lease_id, "lease")
+                && valid_dispatch_identity(&dispatch.dispatch_id)
                 && valid_workgraph_id(&dispatch.executor_id)
                 && valid_workgraph_id(&dispatch.slot_id),
             "WorkGraph allocator projection contains an invalid or duplicate dispatch"
@@ -1373,6 +1732,60 @@ fn valid_root_mapping_admissions(
 /// An empty set is a legacy comment that predates admission sets: its single
 /// admission is the compatibility `admission_id`, which is validated
 /// separately.
+/// Whether a task response names exactly the lifecycle subject its role
+/// answers, so a stored document can never carry a contradictory binding.
+/// Whether a projected or recorded Dispatch identity is admissible.
+///
+/// Empty is the rollout state: a projector that does not publish canonical
+/// Dispatch identities yet, and a lease recorded before it did. Anything else
+/// must be a canonical typed `dispatch` ID, so a malformed identity is refused
+/// at admission rather than persisted onto a lease and later bound into a
+/// worker response.
+fn valid_dispatch_identity(dispatch_id: &str) -> bool {
+    dispatch_id.is_empty() || valid_typed_workgraph_id(dispatch_id, "dispatch")
+}
+
+/// Whether a lease's pinned actor metadata is internally well formed.
+///
+/// This is a shape check on the acquisition snapshot, never a comparison with
+/// the current catalog. A human lease must carry the exact GitHub account it
+/// was granted to, keyed on the numeric ID that survives renames and both node
+/// ID encodings; an agent lease carries no account at all.
+fn valid_lease_actor_snapshot(lease: &WorkGraphActiveLease) -> bool {
+    match lease.actor_kind {
+        ActorKind::Agent => lease.actor_github.is_none(),
+        ActorKind::Human => lease.actor_github.as_ref().is_some_and(|github| {
+            github.database_id > 0
+                && !github.node_id.trim().is_empty()
+                && !github.login.trim().is_empty()
+        }),
+    }
+}
+
+fn valid_task_response_subject(response: &TaskResponseDocument) -> bool {
+    match response.role {
+        TaskResponseRole::Worker => {
+            response.result_id.is_none()
+                && response
+                    .dispatch_id
+                    .as_ref()
+                    .is_some_and(|id| valid_typed_workgraph_id(id, "dispatch"))
+                && response
+                    .lease_id
+                    .as_ref()
+                    .is_some_and(|id| valid_typed_workgraph_id(id, "lease"))
+        }
+        TaskResponseRole::Evaluator => {
+            response.dispatch_id.is_none()
+                && response.lease_id.is_none()
+                && response
+                    .result_id
+                    .as_ref()
+                    .is_some_and(|id| valid_typed_workgraph_id(id, "result"))
+        }
+    }
+}
+
 fn valid_root_comment_admission_ids(comment: &RootIssueCommentDocument) -> bool {
     if comment.admission_ids.is_empty() {
         return true;
@@ -1422,6 +1835,14 @@ fn workgraph_dispatch_matches(
         && lease.lease_id == desired.lease_id
         && lease.executor_id == desired.executor_id
         && lease.slot_id == desired.slot_id
+        // A missing Dispatch identity on either side is a rollout gap, not a
+        // different Dispatch: a projector that does not publish one yet, and a
+        // lease recorded before it did, both still match and are backfilled.
+        // Two *different* non-empty identities are genuinely different
+        // Dispatches, so the recorded one is retracted instead.
+        && (lease.dispatch_id.is_empty()
+            || desired.dispatch_id.is_empty()
+            || lease.dispatch_id == desired.dispatch_id)
 }
 
 impl Default for AllocationState {
@@ -1445,6 +1866,11 @@ impl Default for AllocationState {
             workgraph_root_comment_revisions: BTreeMap::new(),
             workgraph_root_comment_fingerprints: BTreeMap::new(),
             workgraph_root_comment_tombstones: BTreeMap::new(),
+            workgraph_task_responses: BTreeMap::new(),
+            workgraph_task_response_revisions: BTreeMap::new(),
+            workgraph_task_response_fingerprints: BTreeMap::new(),
+            workgraph_task_response_tombstones: BTreeMap::new(),
+            workgraph_pending_results: BTreeMap::new(),
             workgraph_issue_revisions: BTreeMap::new(),
             workgraph_issue_state_fingerprints: BTreeMap::new(),
             workgraph_issue_database_ids: BTreeMap::new(),
@@ -1835,6 +2261,89 @@ impl AllocationState {
         {
             return Err("WorkGraph Root Issue comment revision state is invalid".into());
         }
+        // Task responses carry the same four-map shape as Root Issue comments,
+        // so they are proven the same way: every revision has a fingerprint,
+        // every retained document or tombstone has a revision, and the two are
+        // mutually exclusive. Every read of these maps below relies on it.
+        if self
+            .workgraph_task_response_revisions
+            .keys()
+            .ne(self.workgraph_task_response_fingerprints.keys())
+            || self
+                .workgraph_task_responses
+                .iter()
+                .any(|(source_key, response)| {
+                    response.source_key != *source_key
+                        || self
+                            .workgraph_task_response_tombstones
+                            .contains_key(source_key)
+                        || self
+                            .workgraph_task_response_revisions
+                            .get(source_key)
+                            .is_none_or(|revision| *revision != response.updated_at_revision)
+                        || response.created_at_revision < 0
+                        || response.updated_at_revision < response.created_at_revision
+                        || response.body.trim().is_empty()
+                        || response.body.len() > MAX_TASK_RESPONSE_BODY_BYTES
+                        || response.body_digest
+                            != derive_workgraph_response_body_digest(&response.body)
+                        || response.author_database_id == 0
+                        || !valid_typed_workgraph_id(&response.task_id, "task")
+                        || !valid_typed_workgraph_id(&response.workflow_run_id, "workflow-run")
+                        || !valid_task_response_subject(response)
+                        || [
+                            &response.source_key,
+                            &response.task_source_key,
+                            &response.actor_id,
+                            &response.root_issue_id,
+                            &response.author_id,
+                            &response.author_login,
+                        ]
+                        .into_iter()
+                        .any(|value| !valid_workgraph_id(value))
+                })
+            || self
+                .workgraph_task_response_tombstones
+                .iter()
+                .any(|(source_key, identity)| {
+                    self.workgraph_task_responses.contains_key(source_key)
+                        || !self
+                            .workgraph_task_response_revisions
+                            .contains_key(source_key)
+                        || identity.source_key != *source_key
+                        || !valid_typed_workgraph_id(&identity.task_id, "task")
+                        || [
+                            &identity.source_key,
+                            &identity.task_source_key,
+                            &identity.actor_id,
+                        ]
+                        .into_iter()
+                        .any(|value| !valid_workgraph_id(value))
+                })
+            || self
+                .workgraph_task_response_revisions
+                .values()
+                .any(|revision| *revision < 0)
+            || self
+                .workgraph_task_response_fingerprints
+                .values()
+                .any(|fingerprint| fingerprint.len() != 64)
+            || self
+                .workgraph_pending_results
+                .iter()
+                .any(|(task_source_key, pending)| {
+                    !valid_workgraph_id(task_source_key)
+                        || !valid_typed_workgraph_id(&pending.result_id, "result")
+                        || !valid_typed_workgraph_id(&pending.lease_id, "lease")
+                        || pending.executor_id.is_empty()
+                        || pending
+                            .producer_github
+                            .as_ref()
+                            .is_some_and(|github| github.database_id == 0)
+                })
+        {
+            return Err("WorkGraph task response revision state is invalid".into());
+        }
         if self
             .workgraph_authorizations
             .iter()
@@ -1953,6 +2462,18 @@ impl AllocationState {
                 || !task.workgraph_include
                 || (lease.slot_number > agent.configured_slots
                     && !agent.retiring_slots.contains(&lease.slot_number))
+                // A lease pins the actor metadata it was acquired with, which
+                // is deliberately *not* re-checked against the live catalog: a
+                // human renaming their GitHub account, or the catalog gaining
+                // a next-generation node ID, must never wedge allocator sync
+                // on an in-flight lease. Only the snapshot's own shape is
+                // enforced; a new lease takes the new catalog.
+                || !valid_lease_actor_snapshot(lease)
+                // A recorded Dispatch identity is either absent, because the
+                // lease predates the projector publishing one, or canonical.
+                // An undispatched lease never carries one at all.
+                || !valid_dispatch_identity(&lease.dispatch_id)
+                || (!lease.has_dispatch && !lease.dispatch_id.is_empty())
                 || !active_workgraph_tasks.insert(&lease.task_id)
                 || !slots.insert(&lease.slot_id)
             {
@@ -2374,6 +2895,7 @@ impl AllocationState {
         self.allocate_workgraph(now, &mut delta);
         let now_text = timestamp(now);
 
+        let mut backfill: Vec<(String, String)> = Vec::new();
         for dispatch in projection.dispatches.iter().filter(|dispatch| {
             !excluded_tasks.contains(dispatch.task_source_key.as_str())
                 && !self
@@ -2381,6 +2903,10 @@ impl AllocationState {
                     .contains(&dispatch.source_key)
         }) {
             if self.workgraph_dispatched.contains_key(&dispatch.source_key) {
+                // The Dispatch is already recorded, but a projector that has
+                // begun publishing canonical Dispatch identities must be able
+                // to fill one in on a lease dispatched before that rollout.
+                backfill.push((dispatch.source_key.clone(), dispatch.dispatch_id.clone()));
                 continue;
             }
             let applied_route_replay = projection.routes.iter().any(|route| {
@@ -2418,6 +2944,7 @@ impl AllocationState {
                 "WorkGraph dispatch violates its trusted assignment"
             );
             lease.has_dispatch = true;
+            lease.dispatch_id = dispatch.dispatch_id.clone();
             self.workgraph_active
                 .insert(lease.lease_id.clone(), lease.clone());
             if let Some(started) = delta
@@ -2432,6 +2959,10 @@ impl AllocationState {
             self.workgraph_dispatched
                 .insert(dispatch.source_key.clone(), lease);
         }
+        for (dispatch_source_key, dispatch_id) in backfill {
+            self.backfill_workgraph_dispatch_id(&dispatch_source_key, &dispatch_id, &mut delta);
+        }
+        self.refresh_workgraph_pending_results(&projection);
 
         for route in &projection.routes {
             let result = projection
@@ -2699,6 +3230,10 @@ impl AllocationState {
         };
         if let Some(active) = self.workgraph_active.get_mut(&lease.lease_id) {
             active.has_dispatch = false;
+            // The Dispatch identity is retracted with the Dispatch itself, so
+            // a lease that is no longer dispatched can never keep binding a
+            // worker response to a Dispatch that no longer exists.
+            active.dispatch_id.clear();
             self.workgraph_result_claims.remove(&lease.lease_id);
             let updated = active.clone();
             if let Some(started) = delta
@@ -2951,6 +3486,8 @@ impl AllocationState {
             let agent = &self.agents[&executor_id];
             let lease = WorkGraphActiveLease {
                 lease_id: lease_id.clone(),
+                actor_kind: agent.kind,
+                actor_github: agent.github.clone(),
                 task_source_key: assignment.task_source_key.clone(),
                 root_issue_id: assignment.root_issue_id.clone(),
                 workflow_run_id: assignment.workflow_run_id.clone(),
@@ -2967,6 +3504,7 @@ impl AllocationState {
                     now + chrono::Duration::seconds(agent.lease_duration_seconds),
                 ),
                 has_dispatch: false,
+                dispatch_id: String::new(),
                 completed: false,
                 completion_eligible: true,
                 route_selected: false,
@@ -3040,6 +3578,8 @@ impl AllocationState {
         let agent = &self.agents[executor_id];
         let lease = WorkGraphActiveLease {
             lease_id: lease_id.clone(),
+            actor_kind: agent.kind,
+            actor_github: agent.github.clone(),
             task_source_key: assignment.task_source_key.clone(),
             root_issue_id: assignment.root_issue_id.clone(),
             workflow_run_id: assignment.workflow_run_id.clone(),
@@ -3054,6 +3594,7 @@ impl AllocationState {
             acquired_at: timestamp(now),
             expires_at: timestamp(now + chrono::Duration::seconds(agent.lease_duration_seconds)),
             has_dispatch: false,
+            dispatch_id: String::new(),
             completed: false,
             completion_eligible: true,
             route_selected: false,
@@ -3166,6 +3707,113 @@ impl AllocationState {
         delta
     }
 
+    /// Recomputes the open evaluator subject of every task.
+    ///
+    /// The projector rebuilds the whole desired graph, so this is wholesale: a
+    /// Result no Evaluation names yet is the one an evaluator answers. Each is
+    /// recorded with the executor that produced it, resolved through the
+    /// Result's Dispatch and the lease snapshot behind it. A previously
+    /// recorded producer is carried forward when the lease it came from is no
+    /// longer retained, so expiry, release, and restart never erase who must
+    /// not review this Result.
+    fn refresh_workgraph_pending_results(&mut self, projection: &WorkGraphAllocatorProjection) {
+        let evaluated = projection
+            .evaluations
+            .iter()
+            .map(|evaluation| evaluation.result_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let previous = std::mem::take(&mut self.workgraph_pending_results)
+            .into_values()
+            .map(|pending| (pending.result_id.clone(), pending))
+            .collect::<BTreeMap<_, _>>();
+        self.workgraph_pending_results = projection
+            .results
+            .iter()
+            .filter(|result| !evaluated.contains(result.result_id.as_str()))
+            .map(|result| {
+                let recorded = previous.get(&result.result_id);
+                let executor_id = projection
+                    .dispatches
+                    .iter()
+                    .find(|dispatch| dispatch.lease_id == result.lease_id)
+                    .map(|dispatch| dispatch.executor_id.clone())
+                    .or_else(|| recorded.map(|pending| pending.executor_id.clone()))
+                    .unwrap_or_default();
+                let producer_github = self
+                    .workgraph_active
+                    .get(&result.lease_id)
+                    .or_else(|| {
+                        self.workgraph_dispatched
+                            .values()
+                            .find(|lease| lease.lease_id == result.lease_id)
+                    })
+                    .and_then(|lease| lease.actor_github.clone())
+                    .or_else(|| recorded.and_then(|pending| pending.producer_github.clone()))
+                    .or_else(|| {
+                        self.agents
+                            .get(&executor_id)
+                            .and_then(|agent| agent.github.clone())
+                    });
+                (
+                    result.task_source_key.clone(),
+                    WorkGraphPendingResult {
+                        result_id: result.result_id.clone(),
+                        lease_id: result.lease_id.clone(),
+                        executor_id,
+                        producer_github,
+                    },
+                )
+            })
+            .collect();
+    }
+
+    /// Records a canonical Dispatch identity on an already-dispatched lease.
+    ///
+    /// Lease timing is untouched: this only fills in an identity the projector
+    /// did not previously publish, on both the dispatch-keyed and lease-keyed
+    /// views, and republishes the lease so its projected node carries it. An
+    /// empty projected identity never clears a recorded one, so a projector
+    /// rollback cannot erase what was already observed.
+    fn backfill_workgraph_dispatch_id(
+        &mut self,
+        dispatch_source_key: &str,
+        dispatch_id: &str,
+        delta: &mut AllocationDelta,
+    ) {
+        if dispatch_id.is_empty() || !valid_dispatch_identity(dispatch_id) {
+            return;
+        }
+        let Some(lease) = self
+            .workgraph_dispatched
+            .get_mut(dispatch_source_key)
+            .filter(|lease| lease.dispatch_id != dispatch_id)
+        else {
+            return;
+        };
+        lease.dispatch_id = dispatch_id.to_string();
+        let lease = lease.clone();
+        if let Some(active) = self.workgraph_active.get_mut(&lease.lease_id) {
+            active.dispatch_id = lease.dispatch_id.clone();
+        }
+        if let Some(started) = delta
+            .workgraph_started
+            .iter_mut()
+            .find(|started| started.lease_id == lease.lease_id)
+        {
+            *started = lease;
+        } else if self.workgraph_active.contains_key(&lease.lease_id) {
+            delta.workgraph_started.push(lease);
+        } else if let Some(historical) = delta
+            .workgraph_historical
+            .iter_mut()
+            .find(|historical| historical.lease_id == lease.lease_id)
+        {
+            *historical = lease;
+        } else {
+            delta.workgraph_historical.push(lease);
+        }
+    }
+
     pub fn sync_agents(&mut self, file: &AgentFile, now: DateTime<Utc>) -> AllocationDelta {
         let old: BTreeMap<_, _> = self
             .agents
@@ -3173,18 +3821,18 @@ impl AllocationState {
             .map(|(id, agent)| (id.clone(), agent.slots()))
             .collect();
         let configured: BTreeSet<_> = file
-            .agents
+            .actors
             .iter()
-            .map(|agent| agent.agent_id.clone())
+            .map(|actor| actor.actor_id.clone())
             .collect();
-        for definition in &file.agents {
-            let active = self.active_slots(&definition.agent_id);
+        for definition in &file.actors {
+            let active = self.active_slots(&definition.actor_id);
             let mut agent = AgentState::new(definition);
             agent.retiring_slots = active
                 .into_iter()
                 .filter(|slot| *slot > definition.slots)
                 .collect();
-            self.agents.insert(definition.agent_id.clone(), agent);
+            self.agents.insert(definition.actor_id.clone(), agent);
         }
         for id in self
             .agents
@@ -3459,6 +4107,7 @@ mod tests {
 
     fn task_document(workgraph_include: bool) -> TaskDocument {
         TaskDocument {
+            assignees: Vec::new(),
             source_key: "issue".to_string(),
             body: "WorkGraphTask/v1\n\n```json\n{}\n```\n".to_string(),
             is_open: true,
@@ -3506,6 +4155,7 @@ mod tests {
         source_key: &str,
     ) -> WorkGraphDispatchBinding {
         WorkGraphDispatchBinding {
+            dispatch_id: derive_workgraph_id("dispatch", &["dispatch"]),
             source_key: source_key.to_string(),
             task_source_key: lease.task_source_key.clone(),
             root_issue_id: lease.root_issue_id.clone(),
@@ -3650,6 +4300,7 @@ mod tests {
         state.workgraph_tasks.insert(
             "I_child".to_string(),
             TaskDocument {
+                assignees: Vec::new(),
                 source_key: "I_child".to_string(),
                 body: "WorkGraphTask/v1\n\n```json\n{}\n```\n".to_string(),
                 is_open: true,
@@ -3691,25 +4342,383 @@ mod tests {
         );
     }
 
+    fn task_response_document() -> TaskResponseDocument {
+        let body = "@workgraph done".to_string();
+        TaskResponseDocument {
+            source_key: "IC_response".to_string(),
+            task_source_key: "I_task".to_string(),
+            actor_id: "human-agentofreality".to_string(),
+            task_id: TEST_TASK_ID.to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
+            role: TaskResponseRole::Worker,
+            dispatch_id: Some(test_id("dispatch", "dispatch")),
+            lease_id: Some(test_id("lease", "lease")),
+            result_id: None,
+            author_database_id: 4_021_243,
+            author_id: "MDQ6VXNlcjQwMjEyNDM=".to_string(),
+            author_login: "agentofreality".to_string(),
+            body_digest: derive_workgraph_response_body_digest(&body),
+            body,
+            created_at_revision: 10,
+            updated_at_revision: 10,
+        }
+    }
+
+    fn state_with_task_response() -> AllocationState {
+        let mut state = AllocationState::default();
+        let document = task_response_document();
+        state
+            .workgraph_task_response_revisions
+            .insert(document.source_key.clone(), document.updated_at_revision);
+        state.workgraph_task_response_fingerprints.insert(
+            document.source_key.clone(),
+            task_response_fingerprint(&document).expect("fingerprint"),
+        );
+        state
+            .workgraph_task_responses
+            .insert(document.source_key.clone(), document);
+        state
+    }
+
+    #[test]
+    fn the_response_revision_fingerprint_covers_github_evidence_only() {
+        let recorded = task_response_document();
+        let baseline = task_response_fingerprint(&recorded).expect("fingerprint");
+
+        // The lifecycle subject and the actor it resolved to are allocator
+        // derived and advance on their own. Folding them into the revision
+        // fingerprint would make an identical redelivery look like
+        // same-revision divergence every time the lifecycle moved.
+        let mut rebound = recorded.clone();
+        rebound.role = TaskResponseRole::Evaluator;
+        rebound.dispatch_id = None;
+        rebound.lease_id = None;
+        rebound.result_id = Some(test_id("result", "result"));
+        rebound.actor_id = "human-someone-else".to_string();
+        assert_eq!(
+            task_response_fingerprint(&rebound).expect("fingerprint"),
+            baseline,
+            "the subject must not participate in the revision fingerprint"
+        );
+
+        // Everything GitHub reported about the comment does participate.
+        for mutate in [
+            (|document: &mut TaskResponseDocument| {
+                document.body = "@workgraph different".to_string();
+                document.body_digest = derive_workgraph_response_body_digest(&document.body);
+            }) as fn(&mut TaskResponseDocument),
+            |document| document.author_database_id = 999,
+            |document| document.author_login = "someone-else".to_string(),
+            |document| document.author_id = "U_other".to_string(),
+            |document| document.source_key = "IC_other".to_string(),
+            |document| document.task_source_key = "I_other".to_string(),
+            |document| document.created_at_revision = 9,
+            |document| document.updated_at_revision = 11,
+        ] {
+            let mut diverged = recorded.clone();
+            mutate(&mut diverged);
+            assert_ne!(
+                task_response_fingerprint(&diverged).expect("fingerprint"),
+                baseline,
+                "GitHub comment evidence must participate in the fingerprint"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pending_results_producer_survives_losing_every_trace_of_its_lease() {
+        // A restart that pruned the lease, or a retracted dispatch record,
+        // must not erase who produced a Result that is still judgeable.
+        let lease_id = test_id("lease", "lease");
+        let result_id = test_id("result", "result");
+        let github = ActorGitHubIdentity {
+            database_id: 4_021_243,
+            node_id: "MDQ6VXNlcjQwMjEyNDM=".to_string(),
+            login: "agentofreality".to_string(),
+        };
+        let mut state = AllocationState::default();
+        state.workgraph_pending_results.insert(
+            "issue".to_string(),
+            WorkGraphPendingResult {
+                result_id: result_id.clone(),
+                lease_id: lease_id.clone(),
+                executor_id: "human-agentofreality".to_string(),
+                producer_github: Some(github.clone()),
+            },
+        );
+        assert!(state.workgraph_active.is_empty());
+        assert!(state.workgraph_dispatched.is_empty());
+
+        let mut projection = projection(vec![WorkGraphDispatchBinding {
+            dispatch_id: test_id("dispatch", "dispatch"),
+            source_key: "dispatch-comment".to_string(),
+            task_source_key: "issue".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
+            task_id: TEST_TASK_ID.to_string(),
+            assignment_id: test_id("assignment", "assignment"),
+            lease_id: lease_id.clone(),
+            executor_id: "human-agentofreality".to_string(),
+            slot_id: "human-agentofreality/1".to_string(),
+        }]);
+        projection.assignments[0].permitted_executors = vec!["human-agentofreality".to_string()];
+        projection.results = vec![WorkGraphResultBinding {
+            source_key: "result-comment".to_string(),
+            task_source_key: "issue".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
+            task_id: TEST_TASK_ID.to_string(),
+            result_id: result_id.clone(),
+            lease_id,
+            attempt: 1,
+        }];
+
+        state.refresh_workgraph_pending_results(&projection);
+        let pending = state
+            .workgraph_pending_results
+            .get("issue")
+            .expect("the Result is still pending");
+        assert_eq!(pending.result_id, result_id);
+        assert_eq!(pending.executor_id, "human-agentofreality");
+        assert_eq!(
+            pending.producer_github.as_ref(),
+            Some(&github),
+            "the recorded producer must be carried forward"
+        );
+        // Which is exactly what keeps self review refused.
+        assert!(pending.produced_by(4_021_243, "human-agentofreality"));
+        assert!(pending.produced_by(4_021_243, "human-someone-else"));
+        assert!(pending.produced_by(1, "human-agentofreality"));
+        assert!(!pending.produced_by(5_150_001, "human-reviewer"));
+
+        // An Evaluation retires the subject entirely.
+        projection.evaluations = vec![WorkGraphEvaluateBinding {
+            source_key: "evaluation-comment".to_string(),
+            task_source_key: "issue".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
+            task_id: TEST_TASK_ID.to_string(),
+            result_id,
+            evaluation_id: test_id("evaluation", "evaluation"),
+            attempt: 1,
+            verdict: WORKGRAPH_EVALUATION_ACCEPTED.to_string(),
+        }];
+        state.refresh_workgraph_pending_results(&projection);
+        assert!(state.workgraph_pending_results.is_empty());
+    }
+
+    #[test]
+    fn task_response_state_invariants_are_proven_before_any_map_is_read() {
+        state_with_task_response()
+            .validate()
+            .expect("a consistent task response state is valid");
+
+        // A revision without its fingerprint.
+        let mut orphaned = state_with_task_response();
+        orphaned.workgraph_task_response_fingerprints.clear();
+        assert!(orphaned.validate().is_err());
+
+        // A document whose revision disagrees with its own updatedAtRevision.
+        let mut skewed = state_with_task_response();
+        skewed
+            .workgraph_task_response_revisions
+            .insert("IC_response".to_string(), 11);
+        assert!(skewed.validate().is_err());
+
+        // A document and a tombstone for the same comment.
+        let mut both = state_with_task_response();
+        both.workgraph_task_response_tombstones.insert(
+            "IC_response".to_string(),
+            TaskResponseIdentity {
+                source_key: "IC_response".to_string(),
+                task_source_key: "I_task".to_string(),
+                task_id: TEST_TASK_ID.to_string(),
+                actor_id: "human-agentofreality".to_string(),
+            },
+        );
+        assert!(both.validate().is_err());
+
+        // A tombstone with no revision behind it.
+        let mut dangling = AllocationState::default();
+        dangling.workgraph_task_response_tombstones.insert(
+            "IC_response".to_string(),
+            TaskResponseIdentity {
+                source_key: "IC_response".to_string(),
+                task_source_key: "I_task".to_string(),
+                task_id: TEST_TASK_ID.to_string(),
+                actor_id: "human-agentofreality".to_string(),
+            },
+        );
+        assert!(dangling.validate().is_err());
+
+        // A body whose digest does not bind it.
+        let mut tampered = state_with_task_response();
+        tampered
+            .workgraph_task_responses
+            .get_mut("IC_response")
+            .expect("response")
+            .body = "@workgraph tampered".to_string();
+        assert!(tampered.validate().is_err());
+
+        // A worker document that also names a Result, and an evaluator that
+        // names a lease: neither subject shape is coherent.
+        let mut worker_with_result = state_with_task_response();
+        worker_with_result
+            .workgraph_task_responses
+            .get_mut("IC_response")
+            .expect("response")
+            .result_id = Some(test_id("result", "result"));
+        assert!(worker_with_result.validate().is_err());
+        let mut evaluator_with_lease = state_with_task_response();
+        evaluator_with_lease
+            .workgraph_task_responses
+            .get_mut("IC_response")
+            .expect("response")
+            .role = TaskResponseRole::Evaluator;
+        assert!(evaluator_with_lease.validate().is_err());
+
+        // A pending evaluator subject that is not canonical, or that records
+        // no producing executor to refuse self review against.
+        for pending in [
+            WorkGraphPendingResult {
+                result_id: "not-a-result".to_string(),
+                lease_id: test_id("lease", "lease"),
+                executor_id: "executor".to_string(),
+                producer_github: None,
+            },
+            WorkGraphPendingResult {
+                result_id: test_id("result", "result"),
+                lease_id: test_id("lease", "lease"),
+                executor_id: String::new(),
+                producer_github: None,
+            },
+            WorkGraphPendingResult {
+                result_id: test_id("result", "result"),
+                lease_id: "not-a-lease".to_string(),
+                executor_id: "executor".to_string(),
+                producer_github: None,
+            },
+        ] {
+            let mut bad_pending = state_with_task_response();
+            bad_pending
+                .workgraph_pending_results
+                .insert("I_task".to_string(), pending);
+            assert!(bad_pending.validate().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_corrupted_task_response_checkpoint_fails_restore_instead_of_panicking() {
+        // A state that escaped validation on the way in must still be read
+        // without unchecked indexing: the revision lookup reports nothing
+        // rather than panicking on a missing fingerprint.
+        let mut corrupted = state_with_task_response();
+        corrupted.workgraph_task_response_fingerprints.clear();
+        assert!(corrupted.validate().is_err());
+
+        let temp = TempDir::new().expect("tempdir");
+        let store = Arc::new(MemoryStateStoreProvider::new());
+        store
+            .set(
+                "source",
+                STATE_KEY,
+                serde_json::to_vec(&corrupted).expect("serialize state"),
+            )
+            .await
+            .expect("persist state");
+        let wal = Arc::new(RedbWalProvider::new(temp.path().join("wal")));
+        wal.register("source", WriteAheadLogConfig::default())
+            .await
+            .expect("register WAL");
+        let allocator = Allocator::new("source".to_string(), store, wal);
+        let error = allocator
+            .latest_workgraph_task_response_revision("IC_response")
+            .await
+            .expect_err("a corrupt task response checkpoint must not be served");
+        assert!(
+            error
+                .to_string()
+                .contains("task response revision state is invalid"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_response_revision_lookup_never_indexes_an_unproven_map() {
+        // The accessor is total even against a state that bypassed
+        // validation: an unpaired revision reports nothing rather than
+        // panicking on a missing fingerprint or identity.
+        let mut unpaired = AllocationState::default();
+        unpaired
+            .workgraph_task_response_revisions
+            .insert("IC_orphan".to_string(), 10);
+        let temp = TempDir::new().expect("tempdir");
+        let store = Arc::new(MemoryStateStoreProvider::new());
+        let wal = Arc::new(RedbWalProvider::new(temp.path().join("wal")));
+        wal.register("source", WriteAheadLogConfig::default())
+            .await
+            .expect("register WAL");
+        let allocator = Allocator::new("source".to_string(), store, wal);
+        let mut state = unpaired.clone();
+        state.validate().expect_err("unpaired revision is invalid");
+        // Reading the maps directly proves the accessor's own totality.
+        assert!(allocator
+            .latest_workgraph_task_response_revision("IC_missing")
+            .await
+            .expect("empty state reads cleanly")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_valid_task_response_checkpoint_round_trips() {
+        let state = state_with_task_response();
+        let temp = TempDir::new().expect("tempdir");
+        let store = Arc::new(MemoryStateStoreProvider::new());
+        store
+            .set(
+                "source",
+                STATE_KEY,
+                serde_json::to_vec(&state).expect("serialize state"),
+            )
+            .await
+            .expect("persist state");
+        let wal = Arc::new(RedbWalProvider::new(temp.path().join("wal")));
+        wal.register("source", WriteAheadLogConfig::default())
+            .await
+            .expect("register WAL");
+        let allocator = Allocator::new("source".to_string(), store, wal);
+        let restored = allocator
+            .latest_workgraph_task_response_revision("IC_response")
+            .await
+            .expect("restore task response revision")
+            .expect("recorded revision");
+        assert_eq!(restored.revision, 10);
+        assert!(!restored.tombstone);
+        assert_eq!(restored.identity.actor_id, "human-agentofreality");
+        assert_eq!(restored.document.expect("document").body, "@workgraph done");
+    }
+
     #[tokio::test]
     async fn invalid_dispatch_replacement_durably_retracts_prior_authorization() {
         let now = Utc::now();
         let mut state = AllocationState::default();
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         let documents = BTreeMap::from([(
             "issue".to_string(),
             TaskDocument {
+                assignees: Vec::new(),
                 source_key: "issue".to_string(),
                 body: "WorkGraphTask/v1\n\n```json\n{}\n```\n".to_string(),
                 is_open: true,
@@ -3729,6 +4738,7 @@ mod tests {
             .cloned()
             .expect("active lease");
         let accepted_dispatch = WorkGraphDispatchBinding {
+            dispatch_id: derive_workgraph_id("dispatch", &["dispatch"]),
             source_key: "dispatch-comment".to_string(),
             task_source_key: "issue".to_string(),
             task_id: TEST_TASK_ID.to_string(),
@@ -3793,6 +4803,7 @@ mod tests {
         let projector = RecordingDispatchProjector {
             committed: committed.clone(),
             replacement: WorkGraphDispatchBinding {
+                dispatch_id: derive_workgraph_id("dispatch", &["dispatch"]),
                 lease_id: test_id("lease", "not-the-active-lease"),
                 ..accepted_dispatch
             },
@@ -3866,20 +4877,21 @@ mod tests {
             .expect("timestamp");
         let mut state = AllocationState::default();
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         let documents = BTreeMap::from([(
             "issue".to_string(),
             TaskDocument {
+                assignees: Vec::new(),
                 source_key: "issue".to_string(),
                 body: "WorkGraphTask/v1\n\n```json\n{}\n```\n".to_string(),
                 is_open: true,
@@ -3900,6 +4912,7 @@ mod tests {
             .cloned()
             .expect("first lease");
         let dispatch = WorkGraphDispatchBinding {
+            dispatch_id: derive_workgraph_id("dispatch", &["dispatch"]),
             source_key: "dispatch-comment-1".to_string(),
             task_source_key: "issue".to_string(),
             task_id: TEST_TASK_ID.to_string(),
@@ -4064,6 +5077,7 @@ mod tests {
         let reclosed = state
             .reconcile_workgraph(
                 projection(vec![WorkGraphDispatchBinding {
+                    dispatch_id: derive_workgraph_id("dispatch", &["dispatch"]),
                     source_key: "dispatch-comment-1".to_string(),
                     task_source_key: "issue".to_string(),
                     task_id: TEST_TASK_ID.to_string(),
@@ -4098,15 +5112,15 @@ mod tests {
             .expect("timestamp");
         let mut state = AllocationState::default();
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         let included = BTreeMap::from([("issue".to_string(), task_document(true))]);
@@ -4124,6 +5138,7 @@ mod tests {
         assert_eq!(first.root_issue_id, "root");
         assert_eq!(first.workflow_run_id, test_id("workflow-run", "run"));
         desired.dispatches.push(WorkGraphDispatchBinding {
+            dispatch_id: derive_workgraph_id("dispatch", &["dispatch"]),
             source_key: "dispatch-comment".to_string(),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
@@ -4217,15 +5232,15 @@ mod tests {
             .expect("timestamp");
         let mut state = AllocationState::default();
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         let tasks = BTreeMap::from([("issue".to_string(), task_document(true))]);
@@ -4302,6 +5317,7 @@ mod tests {
             ("dispatch-comment".to_string(), dispatch_artifact.clone()),
         ]);
         let mut late = projection(vec![WorkGraphDispatchBinding {
+            dispatch_id: derive_workgraph_id("dispatch", &["dispatch"]),
             source_key: "dispatch-comment".to_string(),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
@@ -4425,15 +5441,15 @@ mod tests {
             .expect("timestamp");
         let mut state = AllocationState::default();
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         let artifact = LifecycleArtifactDocument {
@@ -4487,15 +5503,15 @@ mod tests {
             .expect("timestamp");
         let mut state = AllocationState::default();
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         let assignment = LifecycleArtifactDocument {
@@ -4553,6 +5569,7 @@ mod tests {
             .cloned()
             .expect("active lease");
         let mut dispatch_projection = projection(vec![WorkGraphDispatchBinding {
+            dispatch_id: derive_workgraph_id("dispatch", &["dispatch"]),
             source_key: "dispatch-comment".to_string(),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
@@ -4658,6 +5675,7 @@ mod tests {
     fn all_action_bindings_validate_direct_root_run_and_task_identities() {
         let lease_id = make_lease_id(TEST_TASK_ID, &test_id("assignment", "assignment"), 1);
         let mut desired = projection(vec![WorkGraphDispatchBinding {
+            dispatch_id: derive_workgraph_id("dispatch", &["dispatch"]),
             source_key: "dispatch-comment".to_string(),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
@@ -4810,6 +5828,9 @@ mod tests {
 
         let assignment_id = test_id("assignment", "assignment");
         let lease = WorkGraphActiveLease {
+            dispatch_id: String::new(),
+            actor_kind: ActorKind::Agent,
+            actor_github: None,
             lease_id: make_lease_id(TEST_TASK_ID, &assignment_id, 1),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
@@ -4873,15 +5894,15 @@ mod tests {
         let mut state = AllocationState::default();
         authorize_task(&mut state, 1);
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         state
@@ -4944,15 +5965,15 @@ mod tests {
         let mut state = AllocationState::default();
         authorize_task(&mut state, 1);
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         state
@@ -5018,15 +6039,15 @@ mod tests {
         let mut state = AllocationState::default();
         authorize_task(&mut state, 1);
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         state
@@ -5109,15 +6130,15 @@ mod tests {
         let documents = BTreeMap::from([("issue".to_string(), task_document(true))]);
         let mut state = AllocationState::default();
         authorize_task(&mut state, 1);
-        let configured = AgentFile {
-            version: 1,
-            agents: vec![AgentDefinition {
+        let configured = AgentFile::from_agents(
+            1,
+            vec![AgentDefinition {
                 agent_id: "executor".to_string(),
                 slots: 1,
                 lease_duration: "PT1M".to_string(),
                 lease_duration_seconds: 60,
             }],
-        };
+        );
         state.sync_agents(&configured, now);
         state
             .reconcile_workgraph(projection(Vec::new()), &documents, 1, now)
@@ -5139,13 +6160,7 @@ mod tests {
         state
             .reconcile_workgraph(routed.clone(), &documents, 2, now)
             .expect("apply rework");
-        state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: Vec::new(),
-            },
-            now,
-        );
+        state.sync_agents(&AgentFile::from_agents(1, Vec::new()), now);
         state.expire(now + chrono::Duration::minutes(2));
         assert!(state.workgraph_active.is_empty());
         assert!(state.workgraph_assignments["assignment-comment"].eligible);
@@ -5180,15 +6195,15 @@ mod tests {
         let mut state = AllocationState::default();
         authorize_task(&mut state, 1);
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         state
@@ -5251,15 +6266,15 @@ mod tests {
         let mut state = AllocationState::default();
         authorize_task(&mut state, 1);
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         state
@@ -5320,15 +6335,15 @@ mod tests {
         let mut state = AllocationState::default();
         authorize_task(&mut state, 1);
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         state
@@ -5370,15 +6385,15 @@ mod tests {
         let mut state = AllocationState::default();
         authorize_task(&mut state, 1);
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         state
@@ -5449,15 +6464,15 @@ mod tests {
         let mut state = AllocationState::default();
         authorize_task(&mut state, 1);
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         state
@@ -5515,6 +6530,9 @@ mod tests {
     #[test]
     fn route_validation_rejects_wrong_chain_and_rework_at_attempt_limit() {
         let lease = WorkGraphActiveLease {
+            dispatch_id: String::new(),
+            actor_kind: ActorKind::Agent,
+            actor_github: None,
             lease_id: make_lease_id(TEST_TASK_ID, &test_id("assignment", "assignment"), 1),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
@@ -5563,6 +6581,9 @@ mod tests {
     #[test]
     fn route_document_arriving_first_survives_restart_and_later_converges() {
         let lease = WorkGraphActiveLease {
+            dispatch_id: String::new(),
+            actor_kind: ActorKind::Agent,
+            actor_github: None,
             lease_id: make_lease_id(TEST_TASK_ID, &test_id("assignment", "assignment"), 1),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
@@ -5633,6 +6654,9 @@ mod tests {
     #[test]
     fn stale_generation_fences_result_evaluation_and_route_chain() {
         let lease = WorkGraphActiveLease {
+            dispatch_id: String::new(),
+            actor_kind: ActorKind::Agent,
+            actor_github: None,
             lease_id: make_lease_id(TEST_TASK_ID, &test_id("assignment", "assignment"), 1),
             task_source_key: "issue".to_string(),
             root_issue_id: "root".to_string(),
@@ -5696,21 +6720,22 @@ mod tests {
             .expect("timestamp");
         let mut state = AllocationState::default();
         state.sync_agents(
-            &AgentFile {
-                version: 1,
-                agents: vec![AgentDefinition {
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
                     agent_id: "executor".to_string(),
                     slots: 1,
                     lease_duration: "PT1M".to_string(),
                     lease_duration_seconds: 60,
                 }],
-            },
+            ),
             now,
         );
         let documents = BTreeMap::from([
             (
                 "issue".to_string(),
                 TaskDocument {
+                    assignees: Vec::new(),
                     source_key: "issue".to_string(),
                     body: "WorkGraphTask/v1\n\n```json\n{}\n```\n".to_string(),
                     is_open: true,
@@ -5723,6 +6748,7 @@ mod tests {
             (
                 "issue-2".to_string(),
                 TaskDocument {
+                    assignees: Vec::new(),
                     source_key: "issue-2".to_string(),
                     body: "WorkGraphTask/v1\n\n```json\n{}\n```\n".to_string(),
                     is_open: true,

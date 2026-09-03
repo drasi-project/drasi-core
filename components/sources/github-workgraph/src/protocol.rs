@@ -79,6 +79,72 @@ pub const WORKGRAPH_EVALUATION_REJECTED: &str = "rejected";
 pub const WORKGRAPH_ROUTE_REWORK: &str = "rework";
 /// Maximum human Root Issue comment body forwarded to the projector.
 pub const MAX_ROOT_ISSUE_COMMENT_BODY_BYTES: usize = 64 * 1024;
+/// The exact mention that opens a natural task response.
+///
+/// A human addresses the workflow by opening the first non-whitespace line of
+/// a task Issue comment with this mention. Core authenticates and binds that
+/// comment; it never interprets what the human wrote.
+pub const WORKGRAPH_RESPONSE_MENTION: &str = "@workgraph";
+/// Domain separator framed into every task response body digest.
+///
+/// This is the kernel's `derive_workgraph_response_body_digest` contract. The
+/// digest binds a normalized Response to the exact raw body it came from, so
+/// Core and the projector must derive it identically or the kernel refuses the
+/// Response it produces.
+pub const WORKGRAPH_RESPONSE_BODY_DIGEST_DOMAIN: &str = "workgraph-v1-task-response-body";
+/// Maximum natural task response body forwarded to the projector.
+///
+/// This matches the human reply bound the Reaction already defaults to
+/// (`DEFAULT_MAX_REPLY_BYTES`), so both human channels admit the same amount
+/// of text. The raw body is carried verbatim and encoded as utf-8-hex
+/// downstream, which still fits the 64 KiB WorkGraph body budget at this
+/// bound.
+pub const MAX_TASK_RESPONSE_BODY_BYTES: usize = 16 * 1024;
+// The body is carried raw and hex-encoded downstream, so the widest admitted
+// response must still fit the WorkGraph body budget.
+const _: () = assert!(MAX_TASK_RESPONSE_BODY_BYTES * 2 <= 64 * 1024);
+
+/// Derives the framed digest that binds a task response to its exact body.
+///
+/// Length-framed so no two `(domain, body)` pairs can collide by
+/// concatenation, and prefixed exactly as the kernel writes it. This is *not*
+/// a plain SHA-256 of the body.
+pub fn derive_workgraph_response_body_digest(body: &str) -> String {
+    let mut digest = Sha256::new();
+    for part in [WORKGRAPH_RESPONSE_BODY_DIGEST_DOMAIN, body] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
+/// Whether a comment's first non-whitespace line opens with the WorkGraph
+/// mention.
+///
+/// GitHub mentions are case-insensitive, so every ASCII case variant of
+/// `@workgraph` addresses the protocol. The mention must end there:
+/// `@workgraphs` and `@workgraph-bot` are different mentions and are not ours.
+pub fn body_opens_with_workgraph_mention(body: &str) -> bool {
+    let Some(first) = body
+        .lines()
+        .map(str::trim_start)
+        .find(|line| !line.is_empty())
+    else {
+        return false;
+    };
+    let mention = WORKGRAPH_RESPONSE_MENTION;
+    if first.len() < mention.len()
+        || !first
+            .get(..mention.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(mention))
+    {
+        return false;
+    }
+    first[mention.len()..]
+        .chars()
+        .next()
+        .is_none_or(|next| !next.is_alphanumeric() && next != '_' && next != '-')
+}
 /// Hard upper bound on bounded worker attempts for one task Assignment.
 ///
 /// Core owns this allocator bound. The injected projector supplies it as
@@ -293,6 +359,19 @@ pub struct GitHubIssueDocument {
     pub workgraph_include: bool,
 }
 
+/// One GitHub account currently assigned to a WorkGraph task Issue.
+///
+/// The numeric `database_id` is the stable identity across renames and across
+/// the legacy and next-generation node ID encodings; `node_id` and `login`
+/// are carried so the actor catalog can be matched without a second read.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskAssignee {
+    pub database_id: u64,
+    pub node_id: String,
+    pub login: String,
+}
+
 /// A WorkGraph task document derived from a GitHub issue whose body begins with
 /// `WorkGraphTask/v1\n`.
 ///
@@ -311,6 +390,10 @@ pub struct TaskDocument {
     pub workgraph_labels: Vec<String>,
     /// False only for the exact `workgraph:ignore` or `workgraph:error` label.
     pub workgraph_include: bool,
+    /// Assignees sorted by numeric ID and deduplicated. Defaulted so a
+    /// document persisted before assignee authority existed still loads.
+    #[serde(default)]
+    pub assignees: Vec<TaskAssignee>,
 }
 
 /// A WorkGraph lifecycle artifact from a GitHub issue comment whose body begins
@@ -397,6 +480,80 @@ impl RootIssueCommentDocument {
     }
 }
 
+/// The lifecycle role a natural task response speaks in.
+///
+/// A response always answers an open lifecycle subject: a human worker
+/// answers the Dispatch it holds a lease for, and a human evaluator answers a
+/// Result that is still awaiting its Evaluation. A comment with no open
+/// subject is not a response at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TaskResponseRole {
+    Worker,
+    Evaluator,
+}
+
+impl TaskResponseRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Evaluator => "evaluator",
+        }
+    }
+}
+
+/// A natural-language response a catalog human wrote on a WorkGraph task
+/// Issue.
+///
+/// The comment opens with [`WORKGRAPH_RESPONSE_MENTION`] on its first
+/// non-whitespace line. Core authenticates the author against the `version: 2`
+/// human actor catalog and the Issue's current WorkGraph-managed assignees,
+/// binds the comment to the exact task identity and open lifecycle subject it
+/// answers, and fences it by revision. Core never interprets the body: what
+/// the human meant is the Reaction's call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskResponseDocument {
+    /// The comment node ID.
+    pub source_key: String,
+    /// The task Issue node ID the comment was written on.
+    pub task_source_key: String,
+    /// The catalog actor ID the author was authenticated as.
+    pub actor_id: String,
+    pub task_id: String,
+    pub root_issue_id: String,
+    pub workflow_run_id: String,
+    /// Which open lifecycle subject this response answers.
+    pub role: TaskResponseRole,
+    /// The Dispatch a worker response answers. Present exactly when
+    /// [`Self::role`] is [`TaskResponseRole::Worker`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_id: Option<String>,
+    /// The lease a worker response holds. Present exactly when
+    /// [`Self::role`] is [`TaskResponseRole::Worker`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<String>,
+    /// The Result an evaluator response answers. Present exactly when
+    /// [`Self::role`] is [`TaskResponseRole::Evaluator`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_id: Option<String>,
+    pub author_database_id: u64,
+    pub author_id: String,
+    pub author_login: String,
+    /// The comment body, carried verbatim.
+    pub body: String,
+    /// The kernel's `derive_workgraph_response_body_digest` over
+    /// [`Self::body`]: a framed, domain-separated digest, not a plain
+    /// SHA-256. It binds this document to the exact body a Response will be
+    /// normalized from.
+    ///
+    /// This is distinct from Core's own document fingerprint, which fences
+    /// revisions in the ledger and covers every field of this document.
+    pub body_digest: String,
+    pub created_at_revision: i64,
+    pub updated_at_revision: i64,
+}
+
 /// A normalized input for the WorkGraph projection.
 ///
 /// Every variant carries observed GitHub state. Core never fetches or projects
@@ -440,6 +597,14 @@ pub enum ProjectionInput {
         repository_name: String,
         repository_node_id: String,
         issue_number: u64,
+        updated_at_revision: i64,
+    },
+    UpsertTaskResponse(TaskResponseDocument),
+    DeleteTaskResponse {
+        source_key: String,
+        task_source_key: String,
+        task_id: String,
+        actor_id: String,
         updated_at_revision: i64,
     },
 }
@@ -495,6 +660,13 @@ pub struct WorkGraphDispatchBinding {
     pub lease_id: String,
     pub executor_id: String,
     pub slot_id: String,
+    /// Canonical `dispatch` ID of the Dispatch this binding represents.
+    ///
+    /// Defaulted so a projector written before natural task responses existed
+    /// still binds; Core then has no Dispatch subject to bind a worker
+    /// response to and refuses one rather than inventing an identity.
+    #[serde(default)]
+    pub dispatch_id: String,
 }
 
 /// Identity-bearing Result representation used by Core to validate direct
@@ -739,5 +911,105 @@ mod marker_tests {
             Some(LifecycleTrustRole::Reporter)
         );
         assert_eq!(lifecycle_trust_role("not a marker"), None);
+    }
+
+    /// Fixed cross-component vectors for the task response body digest.
+    ///
+    /// The kernel derives this digest as
+    /// `sha256:framed_sha256(["workgraph-v1-task-response-body", body])` and
+    /// refuses a Response whose `bodyDigest` differs. These literals are the
+    /// shared contract: Core, the kernel, and the projector must all produce
+    /// them, so a change on any side fails here instead of drifting silently.
+    const RESPONSE_BODY_DIGEST_VECTORS: [(&str, &str); 3] = [
+        (
+            "",
+            "sha256:24b9c212b4ac4f20f1aa5736811c87160cb443ee40bd38e39e719c5e89621743",
+        ),
+        (
+            "@workgraph ready",
+            "sha256:26e307a3254e75d9de0f7d884d58fe199a6af7eeaec7cd00f00e21f10b8d63c3",
+        ),
+        (
+            "@workgraph looks good, shipping it",
+            "sha256:e85beef21c44c265825ca0b6fc461e6f580debac902577978ae005a9f1994467",
+        ),
+    ];
+
+    #[test]
+    fn task_response_body_digest_matches_the_shared_fixed_vectors() {
+        for (body, expected) in RESPONSE_BODY_DIGEST_VECTORS {
+            assert_eq!(
+                derive_workgraph_response_body_digest(body),
+                expected,
+                "digest drifted for {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_response_body_digest_is_domain_separated_not_a_plain_sha256() {
+        let body = "@workgraph ready";
+        let plain = format!("sha256:{:x}", Sha256::digest(body.as_bytes()));
+        assert_ne!(derive_workgraph_response_body_digest(body), plain);
+        // Framing is what stops a body from impersonating the domain prefix.
+        assert_ne!(
+            derive_workgraph_response_body_digest(body),
+            derive_workgraph_response_body_digest(&format!(
+                "{WORKGRAPH_RESPONSE_BODY_DIGEST_DOMAIN}{body}"
+            ))
+        );
+        assert_eq!(
+            WORKGRAPH_RESPONSE_BODY_DIGEST_DOMAIN,
+            "workgraph-v1-task-response-body"
+        );
+    }
+
+    #[test]
+    fn the_workgraph_mention_is_case_insensitive_with_an_exact_boundary() {
+        // GitHub mentions are case-insensitive, so every ASCII case variant
+        // addresses the protocol.
+        for body in [
+            "@workgraph ready",
+            "@WorkGraph ready",
+            "@WORKGRAPH ready",
+            "@wOrKgRaPh ready",
+            "   @workgraph indented",
+            "\n\n@workgraph after blank lines",
+            "@workgraph",
+            "@workgraph, with punctuation",
+            "@workgraph:done",
+            "@workgraph\nmore text",
+        ] {
+            assert!(
+                body_opens_with_workgraph_mention(body),
+                "{body:?} must open with the mention"
+            );
+        }
+
+        // A longer mention is a different account, and the mention must open
+        // the first non-whitespace line.
+        for body in [
+            "@workgraphs ready",
+            "@workgraph-bot ready",
+            "@workgraph_bot ready",
+            "@workgraphbot",
+            "@WORKGRAPHS ready",
+            "not a mention",
+            "context first\n@workgraph later",
+            "",
+            "   ",
+        ] {
+            assert!(
+                !body_opens_with_workgraph_mention(body),
+                "{body:?} must not open with the mention"
+            );
+        }
+    }
+
+    #[test]
+    fn the_task_response_body_bound_matches_the_human_reply_default() {
+        // The same bound the Reaction defaults to for a human reply, so the
+        // two human channels never disagree about how much a person may say.
+        assert_eq!(MAX_TASK_RESPONSE_BODY_BYTES, 16 * 1024);
     }
 }

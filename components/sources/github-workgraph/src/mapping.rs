@@ -120,10 +120,22 @@ pub fn agent_changes(
             for (agent_id, slots) in removed {
                 delete_agent(&mut changes, agent_id, slots);
             }
-            for agent in &file.agents {
-                let agent_element = agent_element_id(&agent.agent_id);
+            for agent in &file.actors {
+                let agent_element = agent_element_id(&agent.actor_id);
                 let mut properties = ElementPropertyMap::new();
-                properties.text("agentId", &agent.agent_id);
+                properties.text("agentId", &agent.actor_id);
+                // Operator metadata only. Which executor may hold a lease is
+                // decided by the catalog, not by these projected properties.
+                properties.text("actorKind", agent.kind.as_str());
+                properties.text("customAgent", &agent.custom_agent);
+                if let Some(github) = &agent.github {
+                    properties.insert(
+                        "githubDatabaseId",
+                        ElementValue::Integer(github.database_id as i64),
+                    );
+                    properties.text("githubNodeId", &github.node_id);
+                    properties.text("githubLogin", &github.login);
+                }
                 properties.insert(
                     "configuredSlotCount",
                     ElementValue::Integer(i64::from(agent.slots)),
@@ -150,15 +162,16 @@ pub fn agent_changes(
                 properties.text("configDigest", &sha256_digest(&content.text));
                 changes.node(Update, &agent_element, NODE_WORKGRAPH_AGENT, properties);
 
-                let retiring = retiring.get(&agent.agent_id).cloned().unwrap_or_default();
+                let retiring = retiring.get(&agent.actor_id).cloned().unwrap_or_default();
                 for slot_number in (1..=agent.slots).chain(retiring.iter().copied()) {
-                    let slot = slot_id(&agent.agent_id, slot_number);
+                    let slot = slot_id(&agent.actor_id, slot_number);
                     let slot_element = agent_slot_element_id(&slot);
                     let enabled = slot_number <= agent.slots;
                     let mut properties = ElementPropertyMap::new();
                     properties.text("slotId", &slot);
                     properties.insert("slotNumber", ElementValue::Integer(i64::from(slot_number)));
-                    properties.text("agentId", &agent.agent_id);
+                    properties.text("agentId", &agent.actor_id);
+                    properties.text("actorKind", agent.kind.as_str());
                     properties.insert("enabled", ElementValue::Bool(enabled));
                     properties.insert("retiring", ElementValue::Bool(!enabled));
                     properties.text("leaseDuration", &agent.lease_duration);
@@ -315,6 +328,15 @@ fn upsert_workgraph_lease(changes: &mut Changes<'_>, lease: &WorkGraphActiveLeas
     properties.text("taskId", &lease.task_id);
     properties.text("assignmentId", &lease.assignment_id);
     properties.text("executorId", &lease.executor_id);
+    properties.text("actorKind", lease.actor_kind.as_str());
+    if let Some(github) = &lease.actor_github {
+        properties.insert(
+            "actorGithubDatabaseId",
+            ElementValue::Integer(github.database_id as i64),
+        );
+        properties.text("actorGithubNodeId", &github.node_id);
+        properties.text("actorGithubLogin", &github.login);
+    }
     properties.text("slotId", &lease.slot_id);
     properties.insert("attempt", ElementValue::Integer(lease.attempt as i64));
     properties.text("acquiredAt", &lease.acquired_at);

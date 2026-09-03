@@ -17,8 +17,9 @@ use crate::config::{
     AdmissionReadCredential, ProtocolTrust, RepositoryFilter, TaskIssueType, WorkflowMappingSet,
 };
 use crate::lease_ledger::{
-    root_comment_fingerprint, Allocator, LifecycleArtifactRevisionState,
-    RootIssueCommentRevisionState, WorkGraphActiveLease,
+    root_comment_fingerprint, task_response_fingerprint, Allocator, LifecycleArtifactRevisionState,
+    RootIssueCommentRevisionState, TaskResponseRevisionState, TaskResponseSubject,
+    WorkGraphActiveLease,
 };
 use crate::protocol::{
     derive_workgraph_id, LifecycleArtifactDocument, RootMappingAdmission, WorkGraphProjector,
@@ -467,6 +468,9 @@ enum IssueAuthorityState {
         issue_type_name: String,
         parent_source_key: Option<String>,
         classification: String,
+        /// Assignees sorted by numeric ID and deduplicated, so an assignment
+        /// change is a real state transition the revision fence can see.
+        assignees: Vec<crate::protocol::TaskAssignee>,
     },
 }
 
@@ -622,7 +626,7 @@ impl AdmissionClient {
             .http
             .post(&self.api_url)
             .json(&json!({
-                "query": "query($id: ID!) { node(id: $id) { ... on Issue { id databaseId number title body state stateReason issueType { id name } parent { id } repository { id name owner { login } } labels(first: 100) { nodes { name } pageInfo { hasNextPage } } } } }",
+                "query": "query($id: ID!) { node(id: $id) { ... on Issue { id databaseId number title body state stateReason issueType { id name } parent { id } repository { id name owner { login } } labels(first: 100) { nodes { name } pageInfo { hasNextPage } } assignees(first: 100) { nodes { databaseId id login } pageInfo { hasNextPage } } } } }",
                 "variables": {"id": node_id}
             }))
             .send()
@@ -677,6 +681,29 @@ impl AdmissionClient {
             .map(str::to_string)
             .collect::<Vec<_>>();
         label_names.sort();
+        let assignee_page = issue
+            .get("assignees")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("authoritative task state lookup omitted assignees"))?;
+        if assignee_page
+            .get("pageInfo")
+            .and_then(Value::as_object)
+            .and_then(|page_info| page_info.get("hasNextPage"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            anyhow::bail!("authoritative task assignee set exceeds 100 entries");
+        }
+        let assignees = graphql_assignees(&Value::Object(issue.clone()));
+        if assignees.len()
+            != assignee_page
+                .get("nodes")
+                .and_then(Value::as_array)
+                .context("authoritative task state assignees are missing")?
+                .len()
+        {
+            anyhow::bail!("authoritative task state contains an invalid assignee");
+        }
         let parent_source_key = match issue.get("parent") {
             Some(Value::Null) => None,
             Some(parent) => Some(
@@ -775,6 +802,7 @@ impl AdmissionClient {
                 .to_string(),
             parent_source_key,
             classification: classification.to_string(),
+            assignees,
         })
     }
 
@@ -898,6 +926,69 @@ fn issue_workgraph_labels(issue: &serde_json::Value) -> (Vec<String>, bool) {
     (labels, included)
 }
 
+/// The Issue's current assignees, sorted by numeric ID and deduplicated.
+///
+/// GitHub carries the authoritative set in `issue.assignees` on every `issues`
+/// delivery, not only the assignment ones, so the set is read the same way
+/// whatever action produced the payload. An entry missing any of the three
+/// identity fields is dropped rather than half-recorded.
+fn issue_assignees(issue: &serde_json::Value) -> Vec<crate::protocol::TaskAssignee> {
+    let mut assignees = issue
+        .get("assignees")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|assignee| {
+            Some(crate::protocol::TaskAssignee {
+                database_id: assignee.get("id").and_then(serde_json::Value::as_u64)?,
+                node_id: assignee
+                    .get("node_id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())?
+                    .to_string(),
+                login: assignee
+                    .get("login")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())?
+                    .to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    assignees.sort();
+    assignees.dedup();
+    assignees
+}
+
+/// The same set read from the authoritative GraphQL assignee connection.
+fn graphql_assignees(issue: &serde_json::Value) -> Vec<crate::protocol::TaskAssignee> {
+    let mut assignees = issue
+        .pointer("/assignees/nodes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|assignee| {
+            Some(crate::protocol::TaskAssignee {
+                database_id: assignee
+                    .get("databaseId")
+                    .and_then(serde_json::Value::as_u64)?,
+                node_id: assignee
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())?
+                    .to_string(),
+                login: assignee
+                    .get("login")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())?
+                    .to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    assignees.sort();
+    assignees.dedup();
+    assignees
+}
+
 fn task_document(
     issue: &serde_json::Value,
     source_key: &str,
@@ -920,6 +1011,7 @@ fn task_document(
         parent_source_key,
         workgraph_labels,
         workgraph_include,
+        assignees: issue_assignees(issue),
     }
 }
 
@@ -1133,6 +1225,7 @@ fn issue_authority_state(
         issue_type_name,
         parent_source_key,
         classification: classification.to_string(),
+        assignees: issue_assignees(issue),
     })
 }
 
@@ -1563,10 +1656,61 @@ async fn try_workgraph_issue(
         };
         let creator = issue.get("user");
         let editor = payload.get("sender");
-        if !protocol_trust.is_task_creator(creator) || !protocol_trust.is_task_creator(editor) {
+        // Granting authority is restricted: an assignment is authored by the
+        // service actor that runs the workflow, never by the assignee, so
+        // being assigned never grants the authority to change the Issue.
+        //
+        // Revoking it is not. An `unassigned` delivery is signed GitHub state,
+        // and refusing it because the sender is untrusted would leave Core
+        // believing a human is still assigned after GitHub says they are not,
+        // keeping stale response authority alive. Such a delivery is accepted
+        // for its removals only: the recorded assignee set is intersected with
+        // what Core already knew, so an untrusted sender can shrink it and
+        // never grow it, and nothing else on the Issue moves.
+        let assignment_action = matches!(action, "assigned" | "unassigned");
+        let actor_is_trusted = protocol_trust.is_task_creator(editor)
+            || assignment_action && protocol_trust.is_assigner(editor);
+        if !protocol_trust.is_task_creator(creator) {
             return Err(WorkGraphNormError::Untrusted(format!(
-                "WorkGraph task {node_id}: creator or webhook actor is not a trusted task creator"
+                "WorkGraph task {node_id}: creator is not a trusted task creator"
             )));
+        }
+        if !actor_is_trusted {
+            let Some(previous) = previous_task.as_ref().filter(|_| action == "unassigned") else {
+                return Err(WorkGraphNormError::Untrusted(format!(
+                    "WorkGraph task {node_id}: webhook actor is not a trusted task creator"
+                )));
+            };
+            let observed = issue_assignees(issue);
+            let retained = previous
+                .assignees
+                .iter()
+                .filter(|assignee| {
+                    observed
+                        .iter()
+                        .any(|current| current.database_id == assignee.database_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if retained.len() == previous.assignees.len() {
+                return Ok(None);
+            }
+            // The revision watermark deliberately does not advance here.
+            //
+            // Only the assignee removal is applied; every other field stays
+            // the cached one, so the incoming payload's state fingerprint
+            // describes a state Core did not adopt. Recording it would also
+            // move the watermark to this delivery's `updated_at`, which is
+            // attacker-chosen: a tampered unassignment could then fence out a
+            // trusted change that GitHub emitted earlier but delivered later.
+            // Leaving the watermark alone keeps that delayed trusted delivery
+            // strictly newer, and replaying this removal is idempotent because
+            // the intersection above becomes a no-op.
+            inputs.retain(|input| !matches!(input, ProjectionInput::RecordIssueRevision { .. }));
+            let mut task_doc = previous.clone();
+            task_doc.assignees = retained;
+            inputs.push(ProjectionInput::UpsertTask(task_doc));
+            return Ok(Some(inputs));
         }
 
         inputs.push(ProjectionInput::DeleteGitHubIssue {
@@ -1663,6 +1807,25 @@ async fn try_workgraph_comment(
         {
             inputs.push(root_comment_deletion(&previous, updated_at_revision));
         }
+        // A deleted comment may also be a natural task response. Its tombstone
+        // is emitted here rather than in the response path, which this early
+        // return precedes, and is independent of the lifecycle and Root
+        // tombstones above: one deleted comment is only ever one of the three.
+        if let Some(previous) = state
+            .allocator
+            .latest_workgraph_task_response_revision(comment_id)
+            .await
+            .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?
+            .filter(|previous| !previous.tombstone && previous.revision <= updated_at_revision)
+        {
+            inputs.push(ProjectionInput::DeleteTaskResponse {
+                source_key: comment_id.to_string(),
+                task_source_key: previous.identity.task_source_key.clone(),
+                task_id: previous.identity.task_id.clone(),
+                actor_id: previous.identity.actor_id.clone(),
+                updated_at_revision,
+            });
+        }
         return Ok((!inputs.is_empty()).then_some(inputs));
     }
 
@@ -1744,6 +1907,29 @@ async fn try_workgraph_comment(
         return Ok((!inputs.is_empty()).then_some(inputs));
     }
 
+    // A natural task response is authenticated between lifecycle artifacts and
+    // Root Issue comments: it is neither a signed artifact nor a Root reply.
+    if let Some(task) = state
+        .allocator
+        .latest_workgraph_task(issue_node_id)
+        .await
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?
+    {
+        return try_workgraph_task_response(
+            state,
+            payload,
+            comment,
+            comment_id,
+            body,
+            action,
+            issue_node_id,
+            &task,
+            updated_at_revision,
+            inputs,
+        )
+        .await;
+    }
+
     let Some(root) = state
         .allocator
         .latest_workgraph_root_issue(issue_node_id)
@@ -1822,6 +2008,214 @@ async fn try_workgraph_comment(
         inputs.push(ProjectionInput::UpsertRootIssueComment(document));
     }
     Ok((!inputs.is_empty()).then_some(inputs))
+}
+
+/// Authenticate and bind one natural response a catalog human wrote on a
+/// WorkGraph task Issue.
+///
+/// A response is admitted only when every one of these holds:
+///
+/// * the first non-whitespace line opens with the exact `@workgraph` mention;
+/// * the author is a non-bot `User` whose exact GitHub triple is a declared
+///   `version: 2` human actor;
+/// * that same account is currently assigned to this task Issue;
+/// * the comment body is non-empty and bounded.
+///
+/// Core never interprets the body. Deciding what the human meant, and whether
+/// it answers anything, is the Reaction's call against the pinned definition.
+#[allow(clippy::too_many_arguments)]
+async fn try_workgraph_task_response(
+    state: &IngressState,
+    payload: &serde_json::Value,
+    comment: &serde_json::Value,
+    comment_id: &str,
+    body: &str,
+    action: &str,
+    issue_node_id: &str,
+    task: &crate::protocol::TaskDocument,
+    updated_at_revision: i64,
+    mut inputs: Vec<crate::protocol::ProjectionInput>,
+) -> Result<Option<Vec<crate::protocol::ProjectionInput>>, WorkGraphNormError> {
+    use crate::protocol::*;
+
+    let prior = state
+        .allocator
+        .latest_workgraph_task_response_revision(comment_id)
+        .await
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
+
+    // A response edited so it no longer addresses the workflow is retracted
+    // with the same fence that admitted it. Deletion is handled earlier, in
+    // the shared comment-deletion branch.
+    if !body_opens_with_workgraph_mention(body) {
+        if let Some(previous) = prior
+            .as_ref()
+            .filter(|previous| !previous.tombstone && previous.revision <= updated_at_revision)
+        {
+            authorize_workgraph_repository(state, payload, None)?;
+            inputs.push(ProjectionInput::DeleteTaskResponse {
+                source_key: comment_id.to_string(),
+                task_source_key: previous.identity.task_source_key.clone(),
+                task_id: previous.identity.task_id.clone(),
+                actor_id: previous.identity.actor_id.clone(),
+                updated_at_revision,
+            });
+        }
+        return Ok((!inputs.is_empty()).then_some(inputs));
+    }
+
+    authorize_workgraph_repository(state, payload, None)?;
+    let author = comment.get("user").ok_or_else(|| {
+        WorkGraphNormError::InvalidPayload("task response has no author".to_string())
+    })?;
+    if identity_is_bot_or_agent(author) {
+        return Ok((!inputs.is_empty()).then_some(inputs));
+    }
+    let author_type = required_string(author, "type", "task response author")?;
+    if author_type != "User" {
+        return Ok((!inputs.is_empty()).then_some(inputs));
+    }
+    let author_id = required_string(author, "node_id", "task response author")?.to_string();
+    let author_login = required_string(author, "login", "task response author")?.to_string();
+    let author_database_id = author
+        .get("id")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            WorkGraphNormError::InvalidPayload(
+                "task response author has no numeric GitHub ID".to_string(),
+            )
+        })?;
+    // An edit is authored by whoever performed it, so a third party editing a
+    // human's response can never keep it admitted under that human's identity.
+    let editor = comment
+        .get("editor")
+        .filter(|editor| !editor.is_null())
+        .or_else(|| payload.get("sender").filter(|sender| !sender.is_null()));
+    if action == "edited"
+        && editor.is_some_and(|editor| {
+            identity_is_bot_or_agent(editor)
+                || editor.get("node_id").and_then(Value::as_str) != Some(author_id.as_str())
+        })
+    {
+        return Ok((!inputs.is_empty()).then_some(inputs));
+    }
+    // A human speaks for a task only while GitHub reports them as a current
+    // WorkGraph-managed assignee, so authority is revoked the moment they are
+    // removed. The numeric ID is the identity: it survives a rename and both
+    // node ID encodings.
+    if !task
+        .assignees
+        .iter()
+        .any(|assignee| assignee.database_id == author_database_id)
+    {
+        return Ok((!inputs.is_empty()).then_some(inputs));
+    }
+    // A response always answers an open lifecycle subject, and the subject is
+    // what resolves the actor: a worker against the metadata its lease was
+    // acquired with, an evaluator against the current catalog. Without a
+    // subject there is nothing on this task for a human to respond to.
+    let Some((actor_id, subject)) = state
+        .allocator
+        .workgraph_task_response_subject(issue_node_id, author_database_id)
+        .await
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?
+    else {
+        return Ok((!inputs.is_empty()).then_some(inputs));
+    };
+    let (role, dispatch_id, lease_id, result_id) = match subject {
+        TaskResponseSubject::Worker {
+            dispatch_id,
+            lease_id,
+        } => (
+            TaskResponseRole::Worker,
+            Some(dispatch_id),
+            Some(lease_id),
+            None,
+        ),
+        TaskResponseSubject::Evaluator { result_id } => {
+            (TaskResponseRole::Evaluator, None, None, Some(result_id))
+        }
+    };
+    if body.trim().is_empty() {
+        return Ok((!inputs.is_empty()).then_some(inputs));
+    }
+    if body.len() > MAX_TASK_RESPONSE_BODY_BYTES {
+        return Err(WorkGraphNormError::InvalidPayload(format!(
+            "task response body exceeds {MAX_TASK_RESPONSE_BODY_BYTES} bytes"
+        )));
+    }
+    // The task identity was validated when the task was admitted, so the
+    // response binds to the projected identity rather than re-reading a body
+    // Core does not own the parser for.
+    let Some((task_id, root_issue_id, workflow_run_id)) = state
+        .allocator
+        .workgraph_task_identity(issue_node_id)
+        .await
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?
+    else {
+        return Ok((!inputs.is_empty()).then_some(inputs));
+    };
+    let document = TaskResponseDocument {
+        source_key: comment_id.to_string(),
+        task_source_key: issue_node_id.to_string(),
+        actor_id,
+        task_id,
+        root_issue_id,
+        workflow_run_id,
+        role,
+        dispatch_id,
+        lease_id,
+        result_id,
+        author_database_id,
+        author_id,
+        author_login,
+        body_digest: derive_workgraph_response_body_digest(body),
+        body: body.to_string(),
+        created_at_revision: lifecycle_created_revision(comment)?,
+        updated_at_revision,
+    };
+    if document.created_at_revision > document.updated_at_revision {
+        return Err(WorkGraphNormError::InvalidPayload(
+            "task response updated_at precedes created_at".to_string(),
+        ));
+    }
+    let fingerprint = task_response_fingerprint(&document)
+        .map_err(|error| WorkGraphNormError::InvalidPayload(error.to_string()))?;
+    if let Some(previous) = prior.as_ref() {
+        if !should_accept_task_response_upsert(previous, updated_at_revision, &fingerprint)? {
+            return Ok((!inputs.is_empty()).then_some(inputs));
+        }
+    }
+    inputs.push(ProjectionInput::UpsertTaskResponse(document));
+    Ok(Some(inputs))
+}
+
+/// Whether one observed task response supersedes what is already recorded.
+///
+/// Mirrors the Root Issue comment rule exactly. A newer revision wins. An
+/// equal revision carrying the same GitHub evidence is a redelivery and emits
+/// nothing, so an already-recorded response is never rebound to whatever
+/// lifecycle subject happens to be open now. Genuine same-revision divergence
+/// is ambiguous rather than invalid: GitHub is asked again.
+fn should_accept_task_response_upsert(
+    previous: &TaskResponseRevisionState,
+    revision: i64,
+    fingerprint: &str,
+) -> Result<bool, WorkGraphNormError> {
+    if previous.tombstone || revision < previous.revision {
+        return Ok(false);
+    }
+    if revision > previous.revision {
+        return Ok(true);
+    }
+    if fingerprint == previous.fingerprint {
+        return Ok(false);
+    }
+    Err(WorkGraphNormError::Unavailable(
+        "equal-revision task response content is ambiguous; redeliver after an authoritative \
+         comment read"
+            .to_string(),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2278,6 +2672,13 @@ async fn try_workgraph_sub_issue(
         parent_source_key,
         workgraph_labels,
         workgraph_include,
+        // A `sub_issues` payload carries the hierarchy transition, not the
+        // child's assignee set, so the cached authority is preserved and the
+        // next `issues` delivery remains the only writer of assignees.
+        assignees: previous
+            .as_ref()
+            .map(|document| document.assignees.clone())
+            .unwrap_or_else(|| issue_assignees(sub_issue)),
     };
     let incoming_state = issue_authority_state(
         sub_issue,
@@ -2401,7 +2802,8 @@ mod workgraph_tests {
     use crate::config::{TaskIssueType, TrustedIdentity, WorkflowDefinitionConfig};
     use crate::protocol::{
         derive_workgraph_id, GitHubIssueLocator, PreparedProjection, PreparedProjectionCommit,
-        ProjectionInput, TaskDocument, WorkGraphAllocatorProjection, WorkGraphTaskBinding,
+        ProjectionInput, TaskDocument, WorkGraphAllocatorProjection, WorkGraphAssignmentBinding,
+        WorkGraphDispatchBinding, WorkGraphResultBinding, WorkGraphTaskBinding,
     };
     use async_trait::async_trait;
     use drasi_core::models::{
@@ -2451,6 +2853,9 @@ mod workgraph_tests {
         committed: Arc<Mutex<Vec<Vec<ProjectionInput>>>>,
         restored: Arc<Mutex<Vec<Vec<u8>>>>,
         change_count: usize,
+        /// A complete allocator projection a test pins, standing in for the
+        /// whole-graph rebuild a real projector performs on every batch.
+        lifecycle: Arc<Mutex<Option<WorkGraphAllocatorProjection>>>,
     }
 
     struct RecordingCommit {
@@ -2463,6 +2868,9 @@ mod workgraph_tests {
         let task_id = test_task_id("task");
         let assignment_id = derive_workgraph_id("assignment", &["assignment"]);
         let active = WorkGraphActiveLease {
+            dispatch_id: String::new(),
+            actor_kind: crate::agents::ActorKind::Agent,
+            actor_github: None,
             lease_id: derive_workgraph_id("lease", &[&task_id, &assignment_id, "2"]),
             task_source_key: "task-source".to_string(),
             root_issue_id: "root".to_string(),
@@ -2556,12 +2964,16 @@ mod workgraph_tests {
                     },
                 })
                 .collect();
-            Ok(PreparedProjection {
-                changes,
-                allocator: WorkGraphAllocatorProjection {
+            let allocator = match self.lifecycle.lock().await.clone() {
+                Some(projection) => projection,
+                None => WorkGraphAllocatorProjection {
                     tasks,
                     ..WorkGraphAllocatorProjection::default()
                 },
+            };
+            Ok(PreparedProjection {
+                changes,
+                allocator,
                 rejection: None,
                 state_changed: true,
                 checkpoint,
@@ -2662,6 +3074,52 @@ mod workgraph_tests {
         trust: Option<ProtocolTrust>,
     ) -> (TempDir, Arc<RecordingProjector>, IngressState) {
         ingress_state_with_mappings(trust, legacy_mapping_set()).await
+    }
+
+    /// The same state, plus the durable store and WAL behind it, so a test can
+    /// rebuild the allocator exactly as a process restart does.
+    async fn restartable_ingress_state(
+        trust: Option<ProtocolTrust>,
+    ) -> (
+        TempDir,
+        Arc<RecordingProjector>,
+        IngressState,
+        Arc<MemoryStateStoreProvider>,
+        Arc<RedbWalProvider>,
+    ) {
+        let temp = TempDir::new().expect("tempdir");
+        let store = Arc::new(MemoryStateStoreProvider::new());
+        let wal = Arc::new(RedbWalProvider::new(temp.path().join("wal")));
+        wal.register("source", WriteAheadLogConfig::default())
+            .await
+            .expect("register WAL");
+        let allocator = Arc::new(Allocator::new(
+            "source".to_string(),
+            store.clone(),
+            wal.clone(),
+        ));
+        let projector = Arc::new(RecordingProjector::default());
+        let state = IngressState {
+            source_id: "source".to_string(),
+            organization: "acme".to_string(),
+            repository_filter: RepositoryFilter::new("acme", &["widgets".to_string()])
+                .expect("repository filter"),
+            task_issue_type: TaskIssueType {
+                id: "IT_task".to_string(),
+                name: "WorkGraphTask".to_string(),
+            },
+            protocol_trust: trust,
+            secret: b"secret".to_vec(),
+            lease_validation_token: b"validation".to_vec(),
+            allocator,
+            agent_sync: None,
+            projector: Some(projector.clone()),
+            admission_client: None,
+            workflow_mappings: legacy_mapping_set(),
+            projection_gate: Mutex::new(()),
+            notify: Arc::new(Notify::new()),
+        };
+        (temp, projector, state, store, wal)
     }
 
     async fn ingress_state_with_mappings(
@@ -2833,6 +3291,2115 @@ mod workgraph_tests {
             .ingest_workgraph(projector, inputs, 1, "seed-root")
             .await
             .expect("persist root");
+    }
+
+    // ── Human parity: assignees and natural task responses ────────────
+
+    /// The one deterministic human the WorkGraph mock simulates.
+    const HUMAN_ACTOR_ID: &str = "human-agentofreality";
+    const HUMAN_DATABASE_ID: u64 = 4_021_243;
+    const HUMAN_NODE_ID: &str = "MDQ6VXNlcjQwMjEyNDM=";
+    const HUMAN_LOGIN: &str = "agentofreality";
+    const HUMAN_ACTOR_FILE: &str = "version: 2\nactors:\n- actorId: executor\n  kind: agent\n  \
+                                    slots: 1\n  leaseDuration: PT15M\n- actorId: \
+                                    human-agentofreality\n  kind: human\n  slots: 1\n  \
+                                    leaseDuration: PT8H\n  github:\n    databaseId: 4021243\n    \
+                                    nodeId: MDQ6VXNlcjQwMjEyNDM=\n    login: agentofreality\n";
+
+    fn human_webhook_user() -> Value {
+        json!({
+            "id": HUMAN_DATABASE_ID,
+            "node_id": HUMAN_NODE_ID,
+            "login": HUMAN_LOGIN,
+            "type": "User"
+        })
+    }
+
+    /// A task Issue payload carrying the exact assignee shape GitHub sends.
+    fn assigned_task_issue(node_id: &str, assignees: &[Value], updated_at: &str) -> Value {
+        let mut issue = task_issue(node_id, "WorkGraphTask/v1\n\n```json\n{}\n```\n");
+        issue["updated_at"] = json!(updated_at);
+        issue["assignee"] = assignees.first().cloned().unwrap_or(Value::Null);
+        issue["assignees"] = json!(assignees);
+        issue
+    }
+
+    async fn seed_human_actor_catalog(state: &IngressState) {
+        let file = crate::agents::parse_agent_file(HUMAN_ACTOR_FILE).expect("actor catalog");
+        state
+            .allocator
+            .sync_agents(
+                &crate::agents::AgentFileLocation {
+                    repository: "acme/widgets".to_string(),
+                    r#ref: "main".to_string(),
+                    path: ".github/workgraph/agents.yaml".to_string(),
+                },
+                &file,
+                &crate::agents::AgentFileContent {
+                    text: HUMAN_ACTOR_FILE.to_string(),
+                    oid: "oid".to_string(),
+                },
+                1,
+            )
+            .await
+            .expect("sync actor catalog");
+    }
+
+    /// Seeds a task Issue assigned to the catalog human.
+    async fn seed_assigned_task(
+        state: &IngressState,
+        projector: &RecordingProjector,
+        assignees: &[Value],
+    ) {
+        seed_root_issue(state, projector).await;
+        let event = payload(
+            "opened",
+            assigned_task_issue("I_task", assignees, "2026-08-01T00:00:00Z"),
+        );
+        let inputs = try_workgraph_issue(state, "seed-task", &event)
+            .await
+            .expect("normalize task")
+            .expect("task inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector, inputs, 2, "seed-task")
+            .await
+            .expect("persist task");
+    }
+
+    const ASSIGNMENT_SOURCE: &str = "IC_assignment";
+    const DISPATCH_SOURCE: &str = "IC_dispatch";
+    const RESULT_SOURCE: &str = "IC_result";
+
+    fn lifecycle_artifact(source_key: &str, marker: &str) -> ProjectionInput {
+        lifecycle_artifact_at(source_key, marker, 1)
+    }
+
+    /// The same artifact at an explicit revision, so a test that watched one
+    /// be retracted can re-supply it past the retraction's revision fence.
+    fn lifecycle_artifact_at(source_key: &str, marker: &str, revision: i64) -> ProjectionInput {
+        ProjectionInput::UpsertLifecycleArtifact(LifecycleArtifactDocument {
+            source_key: source_key.to_string(),
+            task_source_key: "I_task".to_string(),
+            body: format!("{marker}\n\n```json\n{{}}\n```\n"),
+            created_at_revision: 1,
+            updated_at_revision: revision,
+        })
+    }
+
+    fn human_assignment_binding() -> WorkGraphAssignmentBinding {
+        WorkGraphAssignmentBinding {
+            source_key: ASSIGNMENT_SOURCE.to_string(),
+            task_source_key: "I_task".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: derive_workgraph_id("workflow-run", &["run"]),
+            task_id: test_task_id("I_task"),
+            assignment_id: derive_workgraph_id("assignment", &["assignment"]),
+            permitted_executors: vec![HUMAN_ACTOR_ID.to_string()],
+        }
+    }
+
+    fn human_task_projection() -> WorkGraphAllocatorProjection {
+        WorkGraphAllocatorProjection {
+            tasks: vec![WorkGraphTaskBinding {
+                source_key: "I_task".to_string(),
+                task_id: test_task_id("I_task"),
+                task_element_id: "task:I_task".to_string(),
+                root_issue_id: "root".to_string(),
+                workflow_run_id: derive_workgraph_id("workflow-run", &["run"]),
+            }],
+            assignments: vec![human_assignment_binding()],
+            ..WorkGraphAllocatorProjection::default()
+        }
+    }
+
+    fn human_dispatch_binding(lease_id: &str) -> WorkGraphDispatchBinding {
+        WorkGraphDispatchBinding {
+            source_key: DISPATCH_SOURCE.to_string(),
+            task_source_key: "I_task".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: derive_workgraph_id("workflow-run", &["run"]),
+            task_id: test_task_id("I_task"),
+            assignment_id: derive_workgraph_id("assignment", &["assignment"]),
+            lease_id: lease_id.to_string(),
+            executor_id: HUMAN_ACTOR_ID.to_string(),
+            slot_id: format!("{HUMAN_ACTOR_ID}/1"),
+            dispatch_id: derive_workgraph_id("dispatch", &["dispatch"]),
+        }
+    }
+
+    fn agent_task_projection() -> WorkGraphAllocatorProjection {
+        let mut projection = human_task_projection();
+        projection.assignments[0].permitted_executors = vec!["executor".to_string()];
+        projection
+    }
+
+    fn agent_dispatch_binding(lease_id: &str) -> WorkGraphDispatchBinding {
+        WorkGraphDispatchBinding {
+            executor_id: "executor".to_string(),
+            slot_id: "executor/1".to_string(),
+            ..human_dispatch_binding(lease_id)
+        }
+    }
+
+    /// Drives the task to an open worker subject held by the agent executor.
+    async fn seed_agent_worker_lease(
+        state: &IngressState,
+        projector: &RecordingProjector,
+    ) -> String {
+        *projector.lifecycle.lock().await = Some(agent_task_projection());
+        state
+            .allocator
+            .ingest_workgraph(
+                projector,
+                vec![lifecycle_artifact(
+                    ASSIGNMENT_SOURCE,
+                    "WorkGraphTaskAssignment/v1",
+                )],
+                3,
+                "seed-agent-assignment",
+            )
+            .await
+            .expect("persist agent assignment");
+        let lease_id = derive_workgraph_id(
+            "lease",
+            &[
+                &test_task_id("I_task"),
+                &derive_workgraph_id("assignment", &["assignment"]),
+                "1",
+            ],
+        );
+        let mut dispatched = agent_task_projection();
+        dispatched.dispatches = vec![agent_dispatch_binding(&lease_id)];
+        *projector.lifecycle.lock().await = Some(dispatched);
+        state
+            .allocator
+            .ingest_workgraph(
+                projector,
+                vec![lifecycle_artifact(
+                    DISPATCH_SOURCE,
+                    "WorkGraphTaskDispatch/v1",
+                )],
+                4,
+                "seed-agent-dispatch",
+            )
+            .await
+            .expect("persist agent dispatch");
+        lease_id
+    }
+
+    /// Drives the task to an open worker subject: the catalog human holds the
+    /// task's active lease and its Dispatch exists.
+    ///
+    /// A human takes a lease at exactly the same lifecycle point an agent
+    /// does, so this is the ordinary allocator path with a human executor.
+    async fn seed_worker_lease(state: &IngressState, projector: &RecordingProjector) -> String {
+        *projector.lifecycle.lock().await = Some(human_task_projection());
+        state
+            .allocator
+            .ingest_workgraph(
+                projector,
+                vec![lifecycle_artifact(
+                    ASSIGNMENT_SOURCE,
+                    "WorkGraphTaskAssignment/v1",
+                )],
+                3,
+                "seed-assignment",
+            )
+            .await
+            .expect("persist assignment");
+        let lease_id = derive_workgraph_id(
+            "lease",
+            &[
+                &test_task_id("I_task"),
+                &derive_workgraph_id("assignment", &["assignment"]),
+                "1",
+            ],
+        );
+        let mut dispatched = human_task_projection();
+        dispatched.dispatches = vec![human_dispatch_binding(&lease_id)];
+        *projector.lifecycle.lock().await = Some(dispatched);
+        state
+            .allocator
+            .ingest_workgraph(
+                projector,
+                vec![lifecycle_artifact(
+                    DISPATCH_SOURCE,
+                    "WorkGraphTaskDispatch/v1",
+                )],
+                4,
+                "seed-dispatch",
+            )
+            .await
+            .expect("persist dispatch");
+        lease_id
+    }
+
+    fn task_response_event(comment_id: &str, action: &str, body: &str, updated_at: &str) -> Value {
+        json!({
+            "action": action,
+            "organization": {"login": "acme"},
+            "repository": {
+                "name": "widgets",
+                "full_name": "acme/widgets",
+                "node_id": "R_widgets"
+            },
+            "sender": human_webhook_user(),
+            "issue": assigned_task_issue(
+                "I_task",
+                &[human_webhook_user()],
+                "2026-08-01T00:00:00Z"
+            ),
+            "comment": {
+                "id": 900,
+                "node_id": comment_id,
+                "body": body,
+                "user": human_webhook_user(),
+                "created_at": "2026-08-01T00:01:00Z",
+                "updated_at": updated_at
+            }
+        })
+    }
+
+    /// Persists one normalized batch, keeping the task binding present.
+    ///
+    /// `RecordingProjector` derives its allocator projection from the inputs
+    /// of the batch it is handed, while a real projector rebuilds the whole
+    /// desired graph, so the task upsert is replayed alongside the batch to
+    /// keep the double's task identity set complete.
+    async fn persist_with_task(
+        state: &IngressState,
+        projector: &RecordingProjector,
+        inputs: Vec<ProjectionInput>,
+        effective_from: u64,
+        origin: &str,
+    ) {
+        let task_event = payload(
+            "opened",
+            assigned_task_issue("I_task", &[human_webhook_user()], "2026-08-01T00:00:00Z"),
+        );
+        let mut batch = try_workgraph_issue(state, "replay-task", &task_event)
+            .await
+            .expect("normalize task")
+            .expect("task inputs");
+        batch.extend(inputs);
+        state
+            .allocator
+            .ingest_workgraph(projector, batch, effective_from, origin)
+            .await
+            .expect("persist batch");
+    }
+
+    fn upserted_task(inputs: &[ProjectionInput]) -> &TaskDocument {
+        inputs
+            .iter()
+            .find_map(|input| match input {
+                ProjectionInput::UpsertTask(document) => Some(document),
+                _ => None,
+            })
+            .expect("normalized task")
+    }
+
+    fn upserted_task_response(
+        inputs: &[ProjectionInput],
+    ) -> &crate::protocol::TaskResponseDocument {
+        inputs
+            .iter()
+            .find_map(|input| match input {
+                ProjectionInput::UpsertTaskResponse(document) => Some(document),
+                _ => None,
+            })
+            .expect("normalized task response")
+    }
+
+    /// The exact authoritative Issue query the WorkGraph mock recognizes.
+    ///
+    /// The mock matches the query string byte-for-byte, so this is a contract
+    /// assertion, not a formatting preference: if the Source and the mock ever
+    /// disagree the loopback read fails as an unknown operation.
+    const MOCK_SOURCE_ISSUE_AUTHORITY_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on Issue { id databaseId number title body state stateReason issueType { id name } parent { id } repository { id name owner { login } } labels(first: 100) { nodes { name } pageInfo { hasNextPage } } assignees(first: 100) { nodes { databaseId id login } pageInfo { hasNextPage } } } } }";
+
+    #[tokio::test]
+    async fn the_authoritative_issue_query_matches_the_mock_contract_exactly() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"node": null}})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = AdmissionClient::new(&WorkflowDefinitionConfig {
+            repository: "acme/widgets".to_string(),
+            r#ref: "main".to_string(),
+            path: ".github/workgraph/workflow.body".to_string(),
+            token: "token".to_string(),
+            api_base_url: server.uri(),
+        })
+        .expect("admission client");
+        client
+            .issue_authority_state(
+                &legacy_mapping_set(),
+                "I_task",
+                &TaskIssueType {
+                    id: "IT_task".to_string(),
+                    name: "WorkGraphTask".to_string(),
+                },
+            )
+            .await
+            .expect("authoritative read");
+        let requests = server.received_requests().await.expect("recorded requests");
+        let body: Value = serde_json::from_slice(&requests[0].body).expect("request body is JSON");
+        assert_eq!(
+            body["query"].as_str().expect("query string"),
+            MOCK_SOURCE_ISSUE_AUTHORITY_QUERY
+        );
+    }
+
+    #[tokio::test]
+    async fn assignee_transitions_are_accepted_only_from_the_trusted_service_actor() {
+        let (_temp, _projector, state) = ingress_state(Some(task_trust())).await;
+        let issue = assigned_task_issue("I_task", &[human_webhook_user()], "2026-08-01T00:05:00Z");
+
+        // The service actor that runs the workflow performs the assignment.
+        let inputs = try_workgraph_issue(&state, "assign-1", &payload("assigned", issue.clone()))
+            .await
+            .expect("trusted assignment")
+            .expect("assignment inputs");
+        assert_eq!(
+            upserted_task(&inputs).assignees,
+            vec![crate::protocol::TaskAssignee {
+                database_id: HUMAN_DATABASE_ID,
+                node_id: HUMAN_NODE_ID.to_string(),
+                login: HUMAN_LOGIN.to_string(),
+            }]
+        );
+
+        // An assigner is equally authoritative for an assignment transition.
+        let mut assigner_event = payload(
+            "unassigned",
+            assigned_task_issue("I_task", &[], "2026-08-01T00:06:00Z"),
+        );
+        assigner_event["sender"] = json!({"node_id": "U_dispatch", "login": "dispatcher"});
+        let inputs = try_workgraph_issue(&state, "assign-2", &assigner_event)
+            .await
+            .expect("assigner unassignment")
+            .expect("unassignment inputs");
+        assert!(upserted_task(&inputs).assignees.is_empty());
+
+        // The assignee is the subject of the assignment, never its author.
+        let mut human_event = payload("assigned", issue.clone());
+        human_event["sender"] = human_webhook_user();
+        assert!(matches!(
+            try_workgraph_issue(&state, "assign-3", &human_event).await,
+            Err(WorkGraphNormError::Untrusted(_))
+        ));
+
+        // Every other task action keeps the exact creator-only gate.
+        let mut assigner_edit = payload("edited", issue);
+        assigner_edit["sender"] = json!({"node_id": "U_dispatch", "login": "dispatcher"});
+        assert!(matches!(
+            try_workgraph_issue(&state, "assign-4", &assigner_edit).await,
+            Err(WorkGraphNormError::Untrusted(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn assignees_are_sorted_deduplicated_and_fence_the_issue_state() {
+        let (_temp, _projector, state) = ingress_state(Some(task_trust())).await;
+        let second = json!({
+            "id": 11,
+            "node_id": "U_second",
+            "login": "second",
+            "type": "User"
+        });
+        let issue = assigned_task_issue(
+            "I_task",
+            &[human_webhook_user(), second.clone(), human_webhook_user()],
+            "2026-08-01T00:05:00Z",
+        );
+        let inputs =
+            try_workgraph_issue(&state, "assign-order", &payload("assigned", issue.clone()))
+                .await
+                .expect("assignment")
+                .expect("assignment inputs");
+        let assignees = &upserted_task(&inputs).assignees;
+        assert_eq!(assignees.len(), 2);
+        assert_eq!(assignees[0].database_id, 11);
+        assert_eq!(assignees[1].database_id, HUMAN_DATABASE_ID);
+
+        // An assignment change is a real state transition, so the recorded
+        // fingerprint differs from the same Issue with no assignee.
+        let with_assignee = issue_authority_state(
+            &issue,
+            None,
+            None,
+            &state.task_issue_type,
+            &state.workflow_mappings,
+            false,
+        )
+        .expect("assigned state")
+        .fingerprint()
+        .expect("fingerprint");
+        let without_assignee = issue_authority_state(
+            &assigned_task_issue("I_task", &[], "2026-08-01T00:05:00Z"),
+            None,
+            None,
+            &state.task_issue_type,
+            &state.workflow_mappings,
+            false,
+        )
+        .expect("unassigned state")
+        .fingerprint()
+        .expect("fingerprint");
+        assert_ne!(with_assignee, without_assignee);
+    }
+
+    #[tokio::test]
+    async fn a_natural_task_response_from_the_assigned_human_is_bound_and_fenced() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        let lease_id = seed_worker_lease(&state, projector.as_ref()).await;
+
+        let inputs = try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_response",
+                "created",
+                "@workgraph looks good, shipping it",
+                "2026-08-01T00:01:00Z",
+            ),
+        )
+        .await
+        .expect("normalize response")
+        .expect("response inputs");
+        let document = upserted_task_response(&inputs);
+        assert_eq!(document.source_key, "IC_response");
+        assert_eq!(document.task_source_key, "I_task");
+        assert_eq!(document.actor_id, HUMAN_ACTOR_ID);
+        assert_eq!(document.task_id, test_task_id("I_task"));
+        assert_eq!(document.root_issue_id, "root");
+        assert_eq!(document.author_database_id, HUMAN_DATABASE_ID);
+        assert_eq!(document.author_id, HUMAN_NODE_ID);
+        assert_eq!(document.author_login, HUMAN_LOGIN);
+        // The human holds the task's active Dispatch and lease, so the
+        // response is bound to that worker subject.
+        assert_eq!(document.role, crate::protocol::TaskResponseRole::Worker);
+        assert_eq!(
+            document.dispatch_id.as_deref(),
+            Some(derive_workgraph_id("dispatch", &["dispatch"]).as_str())
+        );
+        assert_eq!(document.lease_id.as_deref(), Some(lease_id.as_str()));
+        assert_eq!(document.result_id, None);
+        // Core binds and authenticates; it never interprets the body.
+        assert_eq!(document.body, "@workgraph looks good, shipping it");
+        // The kernel's framed, domain-separated contract, pinned to the same
+        // fixed vector the protocol module asserts.
+        assert_eq!(
+            document.body_digest,
+            crate::protocol::derive_workgraph_response_body_digest(&document.body)
+        );
+        assert_eq!(
+            document.body_digest,
+            "sha256:e85beef21c44c265825ca0b6fc461e6f580debac902577978ae005a9f1994467"
+        );
+        assert_eq!(document.created_at_revision, document.updated_at_revision);
+
+        // A comment that does not address the workflow is simply ignored.
+        assert!(try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_chat",
+                "created",
+                "just chatting",
+                "2026-08-01T00:02:00Z"
+            ),
+        )
+        .await
+        .expect("normalize chatter")
+        .is_none());
+
+        // The mention must open the first non-whitespace line.
+        assert!(try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_late",
+                "created",
+                "context first\n@workgraph later",
+                "2026-08-01T00:02:00Z"
+            ),
+        )
+        .await
+        .expect("normalize trailing mention")
+        .is_none());
+
+        // Leading blank lines are still the first non-whitespace line.
+        let inputs = try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_indented",
+                "created",
+                "\n\n   @workgraph ready",
+                "2026-08-01T00:02:00Z",
+            ),
+        )
+        .await
+        .expect("normalize indented mention")
+        .expect("indented inputs");
+        assert_eq!(upserted_task_response(&inputs).source_key, "IC_indented");
+    }
+
+    #[tokio::test]
+    async fn a_task_response_is_refused_from_a_bot_impostor_or_unassigned_human() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        seed_worker_lease(&state, projector.as_ref()).await;
+
+        // A bot may never speak as a human responder.
+        let mut bot = task_response_event(
+            "IC_bot",
+            "created",
+            "@workgraph done",
+            "2026-08-01T00:02:00Z",
+        );
+        bot["comment"]["user"] = json!({
+            "id": 99,
+            "node_id": "U_bot",
+            "login": "workgraph[bot]",
+            "type": "Bot"
+        });
+        assert!(try_workgraph_comment(&state, &bot)
+            .await
+            .expect("normalize bot response")
+            .is_none());
+
+        // A GitHub account that is not in the human catalog has no authority.
+        let mut stranger = task_response_event(
+            "IC_stranger",
+            "created",
+            "@workgraph done",
+            "2026-08-01T00:02:00Z",
+        );
+        stranger["comment"]["user"] = json!({
+            "id": 12345,
+            "node_id": "U_stranger",
+            "login": "stranger",
+            "type": "User"
+        });
+        assert!(try_workgraph_comment(&state, &stranger)
+            .await
+            .expect("normalize stranger response")
+            .is_none());
+
+        // The numeric ID is the identity. A renamed login or a re-encoded node
+        // ID is the same GitHub account and must keep its authority, because
+        // GitHub itself signed the numeric ID in this payload.
+        for (index, (field, value)) in [
+            ("login", json!("agent-of-reality")),
+            ("node_id", json!("U_kgDOAD1Q2w")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let comment_id = format!("IC_renamed_{index}");
+            let mut renamed = task_response_event(
+                &comment_id,
+                "created",
+                "@workgraph done",
+                "2026-08-01T00:02:00Z",
+            );
+            renamed["comment"]["user"][field] = value;
+            renamed["issue"]["assignees"][0][field] = renamed["comment"]["user"][field].clone();
+            let inputs = try_workgraph_comment(&state, &renamed)
+                .await
+                .expect("normalize renamed response")
+                .unwrap_or_else(|| panic!("a changed {field} must not revoke authority"));
+            assert_eq!(upserted_task_response(&inputs).actor_id, HUMAN_ACTOR_ID);
+        }
+
+        // A different, or malformed, numeric ID is a different account.
+        for (index, id) in [json!(999_999), json!(0)].into_iter().enumerate() {
+            let comment_id = format!("IC_wrongid_{index}");
+            let mut foreign = task_response_event(
+                &comment_id,
+                "created",
+                "@workgraph done",
+                "2026-08-01T00:02:00Z",
+            );
+            foreign["comment"]["user"]["id"] = id.clone();
+            foreign["issue"]["assignees"][0]["id"] = id;
+            assert!(
+                try_workgraph_comment(&state, &foreign)
+                    .await
+                    .expect("normalize foreign numeric ID")
+                    .is_none(),
+                "a mismatched numeric ID must not authenticate"
+            );
+        }
+
+        // A third party editing the human's response cannot keep it admitted.
+        let mut hijacked = task_response_event(
+            "IC_hijack",
+            "edited",
+            "@workgraph approved",
+            "2026-08-01T00:03:00Z",
+        );
+        hijacked["sender"] =
+            json!({"node_id": "U_creator", "login": "task-creator", "type": "User"});
+        hijacked["changes"] = json!({"body": {"from": "@workgraph pending"}});
+        assert!(try_workgraph_comment(&state, &hijacked)
+            .await
+            .expect("normalize hijacked edit")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn an_evaluator_response_binds_the_result_awaiting_evaluation() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        // The agent worker holds the lease; the human is only an assignee, so
+        // the human never has a worker subject of its own here.
+        let lease_id = seed_agent_worker_lease(&state, projector.as_ref()).await;
+
+        // The attempt produces a Result that no Evaluation names yet.
+        let mut completed = agent_task_projection();
+        completed.dispatches = vec![agent_dispatch_binding(&lease_id)];
+        completed.results = vec![WorkGraphResultBinding {
+            source_key: RESULT_SOURCE.to_string(),
+            task_source_key: "I_task".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: derive_workgraph_id("workflow-run", &["run"]),
+            task_id: test_task_id("I_task"),
+            result_id: derive_workgraph_id("result", &["result"]),
+            lease_id: lease_id.clone(),
+            attempt: 1,
+        }];
+        *projector.lifecycle.lock().await = Some(completed);
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![lifecycle_artifact(RESULT_SOURCE, "WorkGraphTaskResult/v1")],
+                5,
+                "seed-result",
+            )
+            .await
+            .expect("persist result");
+
+        let inputs = try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_evaluation",
+                "created",
+                "@workgraph this meets the bar",
+                "2026-08-01T00:05:00Z",
+            ),
+        )
+        .await
+        .expect("normalize evaluator response")
+        .expect("evaluator inputs");
+        let document = upserted_task_response(&inputs);
+        // No worker lease is open, so the human answers the Result instead,
+        // and an evaluator never takes a lease of its own.
+        assert_eq!(document.role, crate::protocol::TaskResponseRole::Evaluator);
+        assert_eq!(
+            document.result_id.as_deref(),
+            Some(derive_workgraph_id("result", &["result"]).as_str())
+        );
+        assert_eq!(document.dispatch_id, None);
+        assert_eq!(document.lease_id, None);
+    }
+
+    #[tokio::test]
+    async fn a_lease_holding_worker_never_becomes_the_evaluator_of_its_own_result() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        let lease_id = seed_worker_lease(&state, projector.as_ref()).await;
+
+        // The human worker's own attempt produced the pending Result.
+        let mut completed = human_task_projection();
+        completed.dispatches = vec![human_dispatch_binding(&lease_id)];
+        completed.results = vec![WorkGraphResultBinding {
+            source_key: RESULT_SOURCE.to_string(),
+            task_source_key: "I_task".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: derive_workgraph_id("workflow-run", &["run"]),
+            task_id: test_task_id("I_task"),
+            result_id: derive_workgraph_id("result", &["result"]),
+            lease_id: lease_id.clone(),
+            attempt: 1,
+        }];
+        *projector.lifecycle.lock().await = Some(completed);
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![lifecycle_artifact(RESULT_SOURCE, "WorkGraphTaskResult/v1")],
+                5,
+                "own-result",
+            )
+            .await
+            .expect("persist result");
+
+        let inputs = try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_self",
+                "created",
+                "@workgraph I judge my own work good",
+                "2026-08-01T00:06:00Z",
+            ),
+        )
+        .await
+        .expect("normalize self response")
+        .expect("self inputs");
+        // Still the worker: holding the lease is what decides the role, so a
+        // worker can never evaluate the Result it produced.
+        let document = upserted_task_response(&inputs);
+        assert_eq!(document.role, crate::protocol::TaskResponseRole::Worker);
+        assert_eq!(document.lease_id.as_deref(), Some(lease_id.as_str()));
+        assert_eq!(document.result_id, None);
+    }
+
+    #[tokio::test]
+    async fn mention_case_variants_are_admitted_and_longer_mentions_are_not() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        seed_worker_lease(&state, projector.as_ref()).await;
+
+        // GitHub mentions are case-insensitive, so every ASCII case variant
+        // reaches the protocol.
+        for (index, body) in ["@WorkGraph ready", "@WORKGRAPH ready", "@wOrKgRaPh ready"]
+            .into_iter()
+            .enumerate()
+        {
+            let comment_id = format!("IC_case_{index}");
+            let inputs = try_workgraph_comment(
+                &state,
+                &task_response_event(&comment_id, "created", body, "2026-08-01T00:05:00Z"),
+            )
+            .await
+            .expect("normalize case variant")
+            .unwrap_or_else(|| panic!("{body:?} must be admitted"));
+            let document = upserted_task_response(&inputs);
+            // The body is carried exactly as written, case and all.
+            assert_eq!(document.body, body);
+            assert_eq!(
+                document.body_digest,
+                crate::protocol::derive_workgraph_response_body_digest(body)
+            );
+        }
+
+        // A longer mention is a different GitHub account, not ours.
+        for (index, body) in [
+            "@workgraphs ready",
+            "@WORKGRAPHS ready",
+            "@workgraph-bot ready",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let comment_id = format!("IC_other_{index}");
+            assert!(
+                try_workgraph_comment(
+                    &state,
+                    &task_response_event(&comment_id, "created", body, "2026-08-01T00:05:00Z"),
+                )
+                .await
+                .expect("normalize foreign mention")
+                .is_none(),
+                "{body:?} must not be admitted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_response_body_bound_admits_exactly_its_limit_and_no_more() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        seed_worker_lease(&state, projector.as_ref()).await;
+
+        // Exactly at the bound is admitted.
+        let mention = "@workgraph ";
+        let bound = crate::protocol::MAX_TASK_RESPONSE_BODY_BYTES;
+        let exact = format!("{mention}{}", "x".repeat(bound - mention.len()));
+        assert_eq!(exact.len(), bound);
+        let inputs = try_workgraph_comment(
+            &state,
+            &task_response_event("IC_exact", "created", &exact, "2026-08-01T00:05:00Z"),
+        )
+        .await
+        .expect("normalize bounded response")
+        .expect("bounded inputs");
+        assert_eq!(upserted_task_response(&inputs).body.len(), bound);
+
+        // One byte over is refused.
+        let oversized = format!("{exact}x");
+        assert_eq!(oversized.len(), bound + 1);
+        assert!(matches!(
+            try_workgraph_comment(
+                &state,
+                &task_response_event("IC_huge", "created", &oversized, "2026-08-01T00:06:00Z"),
+            )
+            .await,
+            Err(WorkGraphNormError::InvalidPayload(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_deleted_task_response_is_retracted_and_fenced() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        seed_worker_lease(&state, projector.as_ref()).await;
+
+        let created = task_response_event(
+            "IC_response",
+            "created",
+            "@workgraph first",
+            "2026-08-01T00:05:00Z",
+        );
+        let inputs = try_workgraph_comment(&state, &created)
+            .await
+            .expect("normalize create")
+            .expect("create inputs");
+        persist_with_task(&state, projector.as_ref(), inputs, 6, "response-create").await;
+
+        // The real GitHub `deleted` action retracts the response, which the
+        // shared comment-deletion branch must reach.
+        let inputs = try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_response",
+                "deleted",
+                "@workgraph first",
+                "2026-08-01T00:06:00Z",
+            ),
+        )
+        .await
+        .expect("normalize delete")
+        .expect("delete inputs");
+        assert!(matches!(
+            inputs.as_slice(),
+            [ProjectionInput::DeleteTaskResponse { source_key, task_id, actor_id, .. }]
+                if source_key == "IC_response"
+                    && task_id == &test_task_id("I_task")
+                    && actor_id == HUMAN_ACTOR_ID
+        ));
+        persist_with_task(&state, projector.as_ref(), inputs, 7, "response-delete").await;
+
+        // The tombstone fences a stale redelivery of the original comment.
+        assert!(try_workgraph_comment(&state, &created)
+            .await
+            .expect("normalize stale create")
+            .is_none());
+        // Deleting again emits nothing further.
+        assert!(try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_response",
+                "deleted",
+                "@workgraph first",
+                "2026-08-01T00:07:00Z"
+            ),
+        )
+        .await
+        .expect("normalize repeat delete")
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_lifecycle_or_root_comment_still_works_alongside_responses() {
+        // The shared deletion branch gained a task-response tombstone; the
+        // lifecycle and Root paths through it must be untouched.
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_root_issue(&state, projector.as_ref()).await;
+
+        let mut lifecycle = human_root_comment_event(
+            "IC_lifecycle",
+            "deleted",
+            "WorkGraphTaskResult/v1\n\n```json\n{}\n```\n",
+            "2026-08-01T00:02:00Z",
+        );
+        lifecycle["comment"]["user"] = json!({"node_id": "U_reporter", "login": "reporter"});
+        lifecycle["sender"] = json!({"node_id": "U_reporter", "login": "reporter"});
+        let inputs = try_workgraph_comment(&state, &lifecycle)
+            .await
+            .expect("normalize lifecycle delete")
+            .expect("lifecycle delete inputs");
+        assert!(inputs
+            .iter()
+            .any(|input| matches!(input, ProjectionInput::DeleteLifecycleArtifact { .. })));
+        assert!(inputs
+            .iter()
+            .all(|input| !matches!(input, ProjectionInput::DeleteTaskResponse { .. })));
+
+        let created =
+            human_root_comment_event("IC_root", "created", "resume now", "2026-08-01T00:03:00Z");
+        let inputs = try_workgraph_comment(&state, &created)
+            .await
+            .expect("normalize root comment")
+            .expect("root comment inputs");
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), inputs, 4, "root-comment")
+            .await
+            .expect("persist root comment");
+        let inputs = try_workgraph_comment(
+            &state,
+            &human_root_comment_event("IC_root", "deleted", "resume now", "2026-08-01T00:04:00Z"),
+        )
+        .await
+        .expect("normalize root delete")
+        .expect("root delete inputs");
+        assert!(inputs
+            .iter()
+            .any(|input| matches!(input, ProjectionInput::DeleteRootIssueComment { .. })));
+        assert!(inputs
+            .iter()
+            .all(|input| !matches!(input, ProjectionInput::DeleteTaskResponse { .. })));
+    }
+
+    #[tokio::test]
+    async fn a_malformed_projected_dispatch_identity_is_refused_before_any_response() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        *projector.lifecycle.lock().await = Some(human_task_projection());
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![lifecycle_artifact(
+                    ASSIGNMENT_SOURCE,
+                    "WorkGraphTaskAssignment/v1",
+                )],
+                3,
+                "malformed-assignment",
+            )
+            .await
+            .expect("persist assignment");
+        let lease_id = derive_workgraph_id(
+            "lease",
+            &[
+                &test_task_id("I_task"),
+                &derive_workgraph_id("assignment", &["assignment"]),
+                "1",
+            ],
+        );
+
+        // Anything that is not empty must be a canonical typed dispatch ID.
+        for (attempt, malformed) in [
+            "not-a-dispatch",
+            "urn:drasi:workgraph:id:v1:dispatch:sha256:short",
+            &derive_workgraph_id("lease", &["wrong-type"]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut projection = human_task_projection();
+            projection.dispatches = vec![WorkGraphDispatchBinding {
+                dispatch_id: malformed.to_string(),
+                ..human_dispatch_binding(&lease_id)
+            }];
+            *projector.lifecycle.lock().await = Some(projection);
+            let (_, rejection) = state
+                .allocator
+                .ingest_workgraph(
+                    projector.as_ref(),
+                    vec![lifecycle_artifact_at(
+                        DISPATCH_SOURCE,
+                        "WorkGraphTaskDispatch/v1",
+                        1 + attempt as i64,
+                    )],
+                    4 + attempt as u64,
+                    &format!("malformed-{malformed}"),
+                )
+                .await
+                .expect("the delivery is acknowledged with a fail-closed retraction");
+            // Admission refuses it and the Dispatch is retracted rather than
+            // persisted onto the lease.
+            assert!(
+                rejection
+                    .as_deref()
+                    .is_some_and(|message| message.contains("invalid or duplicate dispatch")),
+                "{rejection:?}"
+            );
+        }
+
+        // Nothing was recorded, so there is no worker subject and no response
+        // can bind to a Dispatch identity Core never admitted.
+        assert!(state
+            .allocator
+            .workgraph_task_response_subject("I_task", HUMAN_DATABASE_ID)
+            .await
+            .expect("subject lookup")
+            .is_none());
+        assert!(try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_malformed",
+                "created",
+                "@workgraph done",
+                "2026-08-01T00:07:00Z"
+            ),
+        )
+        .await
+        .expect("normalize response")
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn an_untrusted_removal_never_fences_out_a_delayed_trusted_change() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+
+        // A trusted change GitHub emitted at 00:05 has not been delivered yet.
+        let mut trusted = payload(
+            "edited",
+            assigned_task_issue("I_task", &[human_webhook_user()], "2026-08-01T00:05:00Z"),
+        );
+        trusted["issue"]["title"] = json!("Updated by the workflow");
+
+        // Meanwhile an untrusted unassignment arrives carrying a newer
+        // `updated_at`. It applies the removal only.
+        let mut tampered = payload(
+            "unassigned",
+            assigned_task_issue("I_task", &[], "2026-08-01T00:09:00Z"),
+        );
+        tampered["issue"]["title"] = json!("Tampered");
+        tampered["sender"] =
+            json!({"id": 77, "node_id": "U_stranger", "login": "stranger", "type": "User"});
+        let inputs = try_workgraph_issue(&state, "tampered", &tampered)
+            .await
+            .expect("untrusted revocation is accepted")
+            .expect("revocation inputs");
+        assert!(upserted_task(&inputs).assignees.is_empty());
+        assert!(!upserted_task(&inputs).body.contains("Tampered"));
+        // The revision watermark must not advance on state Core did not adopt.
+        assert!(
+            inputs
+                .iter()
+                .all(|input| !matches!(input, ProjectionInput::RecordIssueRevision { .. })),
+            "an untrusted removal must not record a revision it did not apply"
+        );
+        state
+            .allocator
+            .ingest_workgraph(projector.as_ref(), inputs, 5, "tampered")
+            .await
+            .expect("persist revocation");
+
+        // The delayed trusted change still lands: it was never fenced out by
+        // the attacker-chosen timestamp.
+        let inputs = try_workgraph_issue(&state, "delayed-trusted", &trusted)
+            .await
+            .expect("delayed trusted change is still accepted")
+            .expect("trusted inputs");
+        assert!(inputs
+            .iter()
+            .any(|input| matches!(input, ProjectionInput::RecordIssueRevision { .. })));
+        assert!(inputs
+            .iter()
+            .any(|input| matches!(input, ProjectionInput::UpsertTask(_))));
+
+        // Replaying the untrusted removal is a no-op.
+        assert!(try_workgraph_issue(&state, "tampered-replay", &tampered)
+            .await
+            .expect("replayed revocation")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_dispatch_identity_backfills_onto_a_lease_dispatched_before_the_rollout() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+
+        // A projector that does not publish Dispatch identities yet.
+        *projector.lifecycle.lock().await = Some(human_task_projection());
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![lifecycle_artifact(
+                    ASSIGNMENT_SOURCE,
+                    "WorkGraphTaskAssignment/v1",
+                )],
+                3,
+                "rollout-assignment",
+            )
+            .await
+            .expect("persist assignment");
+        let lease_id = derive_workgraph_id(
+            "lease",
+            &[
+                &test_task_id("I_task"),
+                &derive_workgraph_id("assignment", &["assignment"]),
+                "1",
+            ],
+        );
+        let mut legacy = human_task_projection();
+        legacy.dispatches = vec![WorkGraphDispatchBinding {
+            dispatch_id: String::new(),
+            ..human_dispatch_binding(&lease_id)
+        }];
+        *projector.lifecycle.lock().await = Some(legacy);
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![lifecycle_artifact(
+                    DISPATCH_SOURCE,
+                    "WorkGraphTaskDispatch/v1",
+                )],
+                4,
+                "rollout-dispatch",
+            )
+            .await
+            .expect("persist legacy dispatch");
+        // The lease is dispatched but carries no Dispatch identity, so there
+        // is no worker subject to bind a response to yet.
+        assert!(state
+            .allocator
+            .workgraph_task_response_subject("I_task", HUMAN_DATABASE_ID)
+            .await
+            .expect("subject lookup")
+            .is_none());
+
+        // The projector rolls out canonical Dispatch identities. The already
+        // dispatched lease must pick it up rather than stay empty forever.
+        let mut upgraded = human_task_projection();
+        upgraded.dispatches = vec![human_dispatch_binding(&lease_id)];
+        *projector.lifecycle.lock().await = Some(upgraded);
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![lifecycle_artifact(
+                    DISPATCH_SOURCE,
+                    "WorkGraphTaskDispatch/v1",
+                )],
+                5,
+                "rollout-dispatch-upgraded",
+            )
+            .await
+            .expect("persist upgraded dispatch");
+        assert_eq!(
+            state
+                .allocator
+                .workgraph_task_response_subject("I_task", HUMAN_DATABASE_ID)
+                .await
+                .expect("subject lookup"),
+            Some((
+                HUMAN_ACTOR_ID.to_string(),
+                crate::lease_ledger::TaskResponseSubject::Worker {
+                    dispatch_id: derive_workgraph_id("dispatch", &["dispatch"]),
+                    lease_id: lease_id.clone(),
+                }
+            ))
+        );
+
+        // A projector rollback never erases what was already observed, and
+        // the backfilled identity survives a replayed projection.
+        let mut rolled_back = human_task_projection();
+        rolled_back.dispatches = vec![WorkGraphDispatchBinding {
+            dispatch_id: String::new(),
+            ..human_dispatch_binding(&lease_id)
+        }];
+        *projector.lifecycle.lock().await = Some(rolled_back);
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![lifecycle_artifact(
+                    DISPATCH_SOURCE,
+                    "WorkGraphTaskDispatch/v1",
+                )],
+                6,
+                "rollout-dispatch-rollback",
+            )
+            .await
+            .expect("persist rolled back dispatch");
+        assert_eq!(
+            state
+                .allocator
+                .workgraph_task_response_subject("I_task", HUMAN_DATABASE_ID)
+                .await
+                .expect("subject lookup"),
+            Some((
+                HUMAN_ACTOR_ID.to_string(),
+                crate::lease_ledger::TaskResponseSubject::Worker {
+                    dispatch_id: derive_workgraph_id("dispatch", &["dispatch"]),
+                    lease_id,
+                }
+            ))
+        );
+
+        // And a response now binds to that backfilled subject.
+        let inputs = try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_backfilled",
+                "created",
+                "@workgraph done",
+                "2026-08-01T00:07:00Z",
+            ),
+        )
+        .await
+        .expect("normalize response")
+        .expect("response inputs");
+        assert_eq!(
+            upserted_task_response(&inputs).dispatch_id.as_deref(),
+            Some(derive_workgraph_id("dispatch", &["dispatch"]).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_multiline_crlf_and_code_fenced_response_keeps_its_exact_bytes() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        seed_worker_lease(&state, projector.as_ref()).await;
+
+        // Humans paste logs and diffs. CR and code fences are ordinary human
+        // text, not a canonicalization failure: Core carries the exact bounded
+        // bytes and lets the projector encode them.
+        let body = "@workgraph here is the failure\r\n\r\n```console\r\n$ cargo test\r\n                    error: boom\r\n```\r\n\r\nRetrying now.";
+        let inputs = try_workgraph_comment(
+            &state,
+            &task_response_event("IC_fenced", "created", body, "2026-08-01T00:05:00Z"),
+        )
+        .await
+        .expect("normalize fenced response")
+        .expect("fenced inputs");
+        let document = upserted_task_response(&inputs);
+        assert_eq!(document.body, body);
+        assert!(document.body.contains('\r'));
+        assert!(document.body.contains("```console"));
+        assert_eq!(
+            document.body_digest,
+            crate::protocol::derive_workgraph_response_body_digest(body)
+        );
+        // The digest is over the raw bytes, so it differs from the same text
+        // with CR stripped.
+        assert_ne!(
+            document.body_digest,
+            crate::protocol::derive_workgraph_response_body_digest(&body.replace('\r', ""))
+        );
+    }
+
+    const SECOND_HUMAN_ACTOR_ID: &str = "human-reviewer";
+    const SECOND_HUMAN_DATABASE_ID: u64 = 5_150_001;
+    const TWO_HUMAN_ACTOR_FILE: &str =
+        "version: 2\nactors:\n- actorId: executor\n  kind: agent\n  slots: 1\n  \
+         leaseDuration: PT15M\n- actorId: human-agentofreality\n  kind: human\n  slots: 1\n  \
+         leaseDuration: PT8H\n  github:\n    databaseId: 4021243\n    \
+         nodeId: MDQ6VXNlcjQwMjEyNDM=\n    login: agentofreality\n- actorId: human-reviewer\n  \
+         kind: human\n  slots: 1\n  leaseDuration: PT8H\n  github:\n    databaseId: 5150001\n    \
+         nodeId: MDQ6VXNlcjUxNTAwMDE=\n    login: reviewer\n";
+
+    fn second_human_webhook_user() -> Value {
+        json!({
+            "id": SECOND_HUMAN_DATABASE_ID,
+            "node_id": "MDQ6VXNlcjUxNTAwMDE=",
+            "login": "reviewer",
+            "type": "User"
+        })
+    }
+
+    async fn seed_two_human_catalog(state: &IngressState) {
+        let file = crate::agents::parse_agent_file(TWO_HUMAN_ACTOR_FILE).expect("actor catalog");
+        state
+            .allocator
+            .sync_agents(
+                &crate::agents::AgentFileLocation {
+                    repository: "acme/widgets".to_string(),
+                    r#ref: "main".to_string(),
+                    path: ".github/workgraph/agents.yaml".to_string(),
+                },
+                &file,
+                &crate::agents::AgentFileContent {
+                    text: TWO_HUMAN_ACTOR_FILE.to_string(),
+                    oid: "oid".to_string(),
+                },
+                1,
+            )
+            .await
+            .expect("sync actor catalog");
+    }
+
+    /// Drives a human worker all the way to a Result awaiting Evaluation.
+    async fn seed_human_result_awaiting_evaluation(
+        state: &IngressState,
+        projector: &RecordingProjector,
+    ) -> String {
+        let lease_id = seed_worker_lease(state, projector).await;
+        let mut completed = human_task_projection();
+        completed.dispatches = vec![human_dispatch_binding(&lease_id)];
+        completed.results = vec![WorkGraphResultBinding {
+            source_key: RESULT_SOURCE.to_string(),
+            task_source_key: "I_task".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: derive_workgraph_id("workflow-run", &["run"]),
+            task_id: test_task_id("I_task"),
+            result_id: derive_workgraph_id("result", &["result"]),
+            lease_id: lease_id.clone(),
+            attempt: 1,
+        }];
+        *projector.lifecycle.lock().await = Some(completed);
+        state
+            .allocator
+            .ingest_workgraph(
+                projector,
+                vec![lifecycle_artifact(RESULT_SOURCE, "WorkGraphTaskResult/v1")],
+                5,
+                "human-result",
+            )
+            .await
+            .expect("persist result");
+        lease_id
+    }
+
+    #[tokio::test]
+    async fn a_worker_never_reviews_its_own_result_whatever_became_of_its_lease() {
+        // Self review must stay refused for as long as the Result is
+        // judgeable, so it cannot depend on the lease still being live.
+        for (label, teardown) in [
+            ("active", None),
+            ("expired", Some("expire")),
+            ("released", Some("release")),
+            ("closed", Some("close")),
+            ("restarted", Some("restart")),
+        ] {
+            let (_temp, projector, mut state, store, wal) =
+                restartable_ingress_state(Some(task_trust())).await;
+            seed_two_human_catalog(&state).await;
+            seed_assigned_task(
+                &state,
+                projector.as_ref(),
+                &[human_webhook_user(), second_human_webhook_user()],
+            )
+            .await;
+            seed_human_result_awaiting_evaluation(&state, projector.as_ref()).await;
+
+            match teardown {
+                Some("expire") => {
+                    // Every lease is long past its expiry.
+                    state
+                        .allocator
+                        .expire(chrono::Utc::now() + chrono::Duration::days(3650), 6)
+                        .await
+                        .expect("expire leases");
+                }
+                Some("release") => {
+                    // The lease is released out of the active set, and the
+                    // pending Result is then recomputed from that released
+                    // state: the producer must be resolved from the retained
+                    // lease rather than from the active one.
+                    state
+                        .allocator
+                        .expire(chrono::Utc::now() + chrono::Duration::days(3650), 6)
+                        .await
+                        .expect("release lease");
+                    state
+                        .allocator
+                        .ingest_workgraph(
+                            projector.as_ref(),
+                            vec![lifecycle_artifact_at(
+                                RESULT_SOURCE,
+                                "WorkGraphTaskResult/v1",
+                                2,
+                            )],
+                            7,
+                            "recompute-after-release",
+                        )
+                        .await
+                        .expect("recompute pending results");
+                }
+                Some("close") => {
+                    let mut closed = payload(
+                        "closed",
+                        assigned_task_issue(
+                            "I_task",
+                            &[human_webhook_user(), second_human_webhook_user()],
+                            "2026-08-01T00:09:00Z",
+                        ),
+                    );
+                    closed["issue"]["state"] = json!("closed");
+                    closed["issue"]["state_reason"] = json!("completed");
+                    let inputs = try_workgraph_issue(&state, "close", &closed)
+                        .await
+                        .expect("normalize close")
+                        .expect("close inputs");
+                    state
+                        .allocator
+                        .ingest_workgraph(projector.as_ref(), inputs, 6, "close")
+                        .await
+                        .expect("persist close");
+                }
+                Some("restart") => {
+                    // A fresh allocator over the same durable store, exactly
+                    // as a process restart replays it.
+                    state.allocator = Arc::new(Allocator::new(
+                        "source".to_string(),
+                        store.clone(),
+                        wal.clone(),
+                    ));
+                }
+                _ => {}
+            }
+
+            // The worker that produced the Result is never classified as its
+            // evaluator, whatever became of the lease. While the lease is
+            // live they are still the worker; once it is gone they have no
+            // subject at all.
+            assert!(
+                !matches!(
+                    state
+                        .allocator
+                        .workgraph_task_response_subject("I_task", HUMAN_DATABASE_ID)
+                        .await
+                        .expect("subject lookup"),
+                    Some((
+                        _,
+                        crate::lease_ledger::TaskResponseSubject::Evaluator { .. }
+                    ))
+                ),
+                "{label}: the producing worker must never be classified evaluator"
+            );
+            let producer_subject = state
+                .allocator
+                .workgraph_task_response_subject("I_task", HUMAN_DATABASE_ID)
+                .await
+                .expect("subject lookup");
+            match label {
+                // A live lease, including one replayed across a restart,
+                // keeps its worker answering the Dispatch it holds.
+                "active" | "restarted" => assert!(
+                    matches!(
+                        producer_subject,
+                        Some((_, crate::lease_ledger::TaskResponseSubject::Worker { .. }))
+                    ),
+                    "{label}: a live lease keeps its worker subject"
+                ),
+                // Once the lease is gone the producer has no subject at all:
+                // not a worker any more, and never this Result's evaluator.
+                _ => assert!(
+                    producer_subject.is_none(),
+                    "{label}: a worker whose lease is gone has no subject left"
+                ),
+            }
+
+            // A distinct assigned catalog human still evaluates it.
+            assert_eq!(
+                state
+                    .allocator
+                    .workgraph_task_response_subject("I_task", SECOND_HUMAN_DATABASE_ID)
+                    .await
+                    .expect("subject lookup"),
+                Some((
+                    SECOND_HUMAN_ACTOR_ID.to_string(),
+                    crate::lease_ledger::TaskResponseSubject::Evaluator {
+                        result_id: derive_workgraph_id("result", &["result"]),
+                    }
+                )),
+                "{label}: a distinct human evaluator must still work"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_distinct_assigned_human_evaluates_a_human_workers_result() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_two_human_catalog(&state).await;
+        seed_assigned_task(
+            &state,
+            projector.as_ref(),
+            &[human_webhook_user(), second_human_webhook_user()],
+        )
+        .await;
+        seed_human_result_awaiting_evaluation(&state, projector.as_ref()).await;
+        state
+            .allocator
+            .expire(chrono::Utc::now() + chrono::Duration::days(3650), 6)
+            .await
+            .expect("expire leases");
+
+        let mut event = task_response_event(
+            "IC_review",
+            "created",
+            "@workgraph this meets the bar",
+            "2026-08-01T00:10:00Z",
+        );
+        event["comment"]["user"] = second_human_webhook_user();
+        event["sender"] = second_human_webhook_user();
+        event["issue"]["assignees"] = json!([human_webhook_user(), second_human_webhook_user()]);
+        let inputs = try_workgraph_comment(&state, &event)
+            .await
+            .expect("normalize evaluator response")
+            .expect("evaluator inputs");
+        let document = upserted_task_response(&inputs);
+        assert_eq!(document.role, crate::protocol::TaskResponseRole::Evaluator);
+        assert_eq!(document.actor_id, SECOND_HUMAN_ACTOR_ID);
+        assert_eq!(
+            document.result_id.as_deref(),
+            Some(derive_workgraph_id("result", &["result"]).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_response_without_an_open_lifecycle_subject_is_refused() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        // The human is a catalog actor and a current assignee, but the task
+        // has neither an open Dispatch nor a Result awaiting Evaluation.
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        assert!(try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_early",
+                "created",
+                "@workgraph anything to do?",
+                "2026-08-01T00:02:00Z"
+            ),
+        )
+        .await
+        .expect("normalize subjectless response")
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_worker_subject_belongs_only_to_the_executor_holding_the_lease() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        // The catalog gives the lease to an agent, and the human is only an
+        // assignee, so the open worker subject is not the human's to answer.
+        let catalog = "version: 2\nactors:\n- actorId: executor\n  kind: agent\n  slots: 1\n  \
+                       leaseDuration: PT15M\n- actorId: human-agentofreality\n  kind: human\n  \
+                       slots: 1\n  leaseDuration: PT8H\n  github:\n    databaseId: 4021243\n    \
+                       nodeId: MDQ6VXNlcjQwMjEyNDM=\n    login: agentofreality\n";
+        let file = crate::agents::parse_agent_file(catalog).expect("actor catalog");
+        state
+            .allocator
+            .sync_agents(
+                &crate::agents::AgentFileLocation {
+                    repository: "acme/widgets".to_string(),
+                    r#ref: "main".to_string(),
+                    path: ".github/workgraph/agents.yaml".to_string(),
+                },
+                &file,
+                &crate::agents::AgentFileContent {
+                    text: catalog.to_string(),
+                    oid: "oid".to_string(),
+                },
+                1,
+            )
+            .await
+            .expect("sync catalog");
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+
+        let mut agent_projection = human_task_projection();
+        agent_projection.assignments[0].permitted_executors = vec!["executor".to_string()];
+        *projector.lifecycle.lock().await = Some(agent_projection.clone());
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![lifecycle_artifact(
+                    ASSIGNMENT_SOURCE,
+                    "WorkGraphTaskAssignment/v1",
+                )],
+                3,
+                "agent-assignment",
+            )
+            .await
+            .expect("persist agent assignment");
+
+        assert!(try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_wrong-worker",
+                "created",
+                "@workgraph done",
+                "2026-08-01T00:02:00Z"
+            ),
+        )
+        .await
+        .expect("normalize foreign worker response")
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_marker_later_in_the_body_is_untrusted_text() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        seed_worker_lease(&state, projector.as_ref()).await;
+
+        // The first non-whitespace line decides the path. A lifecycle marker
+        // quoted further down is carried verbatim as untrusted human text and
+        // never reinterpreted as a signed artifact.
+        let body = "@workgraph here is what I saw\n\nWorkGraphTaskResult/v1\n\n```json\n{}\n```\n";
+        let inputs = try_workgraph_comment(
+            &state,
+            &task_response_event("IC_quoting", "created", body, "2026-08-01T00:05:00Z"),
+        )
+        .await
+        .expect("normalize quoting response")
+        .expect("quoting inputs");
+        let document = upserted_task_response(&inputs);
+        assert_eq!(document.body, body);
+        assert!(inputs
+            .iter()
+            .all(|input| !matches!(input, ProjectionInput::UpsertLifecycleArtifact(_))));
+    }
+
+    #[tokio::test]
+    async fn any_sender_may_revoke_an_assignee_but_only_trust_may_grant_one() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        seed_worker_lease(&state, projector.as_ref()).await;
+        // The human currently speaks for the task.
+        assert!(try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_before",
+                "created",
+                "@workgraph on it",
+                "2026-08-01T00:05:00Z"
+            ),
+        )
+        .await
+        .expect("normalize response")
+        .is_some());
+
+        // Revocation is signed GitHub state, so it lands whoever sent it: the
+        // human themselves, or an untrusted third party.
+        for (index, sender) in [
+            human_webhook_user(),
+            json!({"id": 77, "node_id": "U_stranger", "login": "stranger", "type": "User"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+            seed_human_actor_catalog(&state).await;
+            seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+            seed_worker_lease(&state, projector.as_ref()).await;
+            let mut event = payload(
+                "unassigned",
+                assigned_task_issue("I_task", &[], "2026-08-01T00:06:00Z"),
+            );
+            event["sender"] = sender;
+            let inputs = try_workgraph_issue(&state, &format!("revoke-{index}"), &event)
+                .await
+                .expect("untrusted revocation is accepted")
+                .expect("revocation inputs");
+            assert!(upserted_task(&inputs).assignees.is_empty());
+            // The revocation batch carries its own task upsert, so it is
+            // ingested as-is.
+            state
+                .allocator
+                .ingest_workgraph(projector.as_ref(), inputs, 6, "revoke")
+                .await
+                .expect("persist revocation");
+
+            // Authority is gone immediately.
+            assert!(try_workgraph_comment(
+                &state,
+                &task_response_event(
+                    "IC_after",
+                    "created",
+                    "@workgraph still here?",
+                    "2026-08-01T00:07:00Z"
+                ),
+            )
+            .await
+            .expect("normalize revoked response")
+            .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_untrusted_sender_can_only_shrink_the_assignee_set() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+
+        let stranger =
+            json!({"id": 77, "node_id": "U_stranger", "login": "stranger", "type": "User"});
+        // An untrusted `assigned` never grants, whoever it names.
+        let mut grant = payload(
+            "assigned",
+            assigned_task_issue(
+                "I_task",
+                &[human_webhook_user(), stranger.clone()],
+                "2026-08-01T00:06:00Z",
+            ),
+        );
+        grant["sender"] = stranger.clone();
+        assert!(matches!(
+            try_workgraph_issue(&state, "untrusted-grant", &grant).await,
+            Err(WorkGraphNormError::Untrusted(_))
+        ));
+
+        // An untrusted `unassigned` carrying a smuggled addition applies only
+        // the removals: the recorded set is intersected with what Core knew.
+        let mut smuggled = payload(
+            "unassigned",
+            assigned_task_issue(
+                "I_task",
+                std::slice::from_ref(&stranger),
+                "2026-08-01T00:07:00Z",
+            ),
+        );
+        smuggled["sender"] = stranger;
+        let inputs = try_workgraph_issue(&state, "smuggled", &smuggled)
+            .await
+            .expect("untrusted revocation is accepted")
+            .expect("revocation inputs");
+        assert!(upserted_task(&inputs).assignees.is_empty());
+
+        // And it moves nothing else on the Issue.
+        let mut retitled = payload(
+            "unassigned",
+            assigned_task_issue("I_task", &[], "2026-08-01T00:08:00Z"),
+        );
+        retitled["issue"]["body"] =
+            json!("WorkGraphTask/v1\n\n```json\n{\"tampered\":true}\n```\n");
+        retitled["sender"] =
+            json!({"id": 77, "node_id": "U_stranger", "login": "stranger", "type": "User"});
+        let inputs = try_workgraph_issue(&state, "retitled", &retitled)
+            .await
+            .expect("untrusted revocation is accepted")
+            .expect("revocation inputs");
+        assert!(!upserted_task(&inputs).body.contains("tampered"));
+        assert!(inputs
+            .iter()
+            .all(|input| !matches!(input, ProjectionInput::UpsertLocator(_))));
+    }
+
+    #[tokio::test]
+    async fn an_identical_redelivery_after_a_lifecycle_advance_is_a_no_op() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        let lease_id = seed_worker_lease(&state, projector.as_ref()).await;
+
+        let created = task_response_event(
+            "IC_response",
+            "created",
+            "@workgraph on it",
+            "2026-08-01T00:05:00Z",
+        );
+        let inputs = try_workgraph_comment(&state, &created)
+            .await
+            .expect("normalize create")
+            .expect("create inputs");
+        assert_eq!(
+            upserted_task_response(&inputs).role,
+            crate::protocol::TaskResponseRole::Worker
+        );
+        persist_with_task(&state, projector.as_ref(), inputs, 6, "response-create").await;
+
+        // The lifecycle advances underneath: the attempt produces a Result.
+        let mut completed = human_task_projection();
+        completed.dispatches = vec![human_dispatch_binding(&lease_id)];
+        completed.results = vec![WorkGraphResultBinding {
+            source_key: RESULT_SOURCE.to_string(),
+            task_source_key: "I_task".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: derive_workgraph_id("workflow-run", &["run"]),
+            task_id: test_task_id("I_task"),
+            result_id: derive_workgraph_id("result", &["result"]),
+            lease_id,
+            attempt: 1,
+        }];
+        *projector.lifecycle.lock().await = Some(completed);
+        state
+            .allocator
+            .ingest_workgraph(
+                projector.as_ref(),
+                vec![lifecycle_artifact(RESULT_SOURCE, "WorkGraphTaskResult/v1")],
+                7,
+                "advance",
+            )
+            .await
+            .expect("persist result");
+
+        // GitHub redelivers the identical comment. The subject has moved, but
+        // the comment evidence has not, so this is a replay: nothing is
+        // emitted and the recorded response keeps its original subject.
+        assert!(try_workgraph_comment(&state, &created)
+            .await
+            .expect("normalize redelivery")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_catalog_rename_never_wedges_an_active_lease_or_revokes_its_worker() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        let lease_id = seed_worker_lease(&state, projector.as_ref()).await;
+
+        // The human renames and GitHub re-encodes their node ID. The catalog
+        // is updated to match while their lease is still active.
+        let renamed = "version: 2\nactors:\n- actorId: executor\n  kind: agent\n  slots: 1\n  \
+                       leaseDuration: PT15M\n- actorId: human-agentofreality\n  kind: human\n  \
+                       slots: 1\n  leaseDuration: PT8H\n  github:\n    databaseId: 4021243\n    \
+                       nodeId: U_kgDOAD1Q2w\n    login: agent-of-reality\n";
+        let file = crate::agents::parse_agent_file(renamed).expect("renamed catalog");
+        state
+            .allocator
+            .sync_agents(
+                &crate::agents::AgentFileLocation {
+                    repository: "acme/widgets".to_string(),
+                    r#ref: "main".to_string(),
+                    path: ".github/workgraph/agents.yaml".to_string(),
+                },
+                &file,
+                &crate::agents::AgentFileContent {
+                    text: renamed.to_string(),
+                    oid: "renamed".to_string(),
+                },
+                6,
+            )
+            .await
+            .expect("catalog update must not wedge an active lease");
+
+        // The in-flight lease keeps the metadata it was acquired with, and the
+        // worker still speaks for it under the new login and node ID.
+        assert_eq!(
+            state
+                .allocator
+                .workgraph_task_response_subject("I_task", HUMAN_DATABASE_ID)
+                .await
+                .expect("subject lookup"),
+            Some((
+                HUMAN_ACTOR_ID.to_string(),
+                crate::lease_ledger::TaskResponseSubject::Worker {
+                    dispatch_id: derive_workgraph_id("dispatch", &["dispatch"]),
+                    lease_id,
+                }
+            ))
+        );
+        let mut event = task_response_event(
+            "IC_renamed",
+            "created",
+            "@workgraph still me",
+            "2026-08-01T00:07:00Z",
+        );
+        event["comment"]["user"]["login"] = json!("agent-of-reality");
+        event["comment"]["user"]["node_id"] = json!("U_kgDOAD1Q2w");
+        event["sender"] = event["comment"]["user"].clone();
+        let inputs = try_workgraph_comment(&state, &event)
+            .await
+            .expect("normalize renamed worker response")
+            .expect("renamed inputs");
+        assert_eq!(upserted_task_response(&inputs).actor_id, HUMAN_ACTOR_ID);
+
+        // A lease taken after the update carries the new catalog snapshot.
+        let next_lease_id = derive_workgraph_id(
+            "lease",
+            &[
+                &test_task_id("I_task"),
+                &derive_workgraph_id("assignment", &["assignment"]),
+                "2",
+            ],
+        );
+        assert_ne!(next_lease_id, derive_workgraph_id("lease", &["seed"]));
+    }
+
+    #[tokio::test]
+    async fn a_new_lease_after_a_catalog_update_uses_the_new_snapshot() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        // The catalog already carries the renamed identity when the lease is
+        // acquired, so the snapshot is the new one.
+        let renamed = "version: 2\nactors:\n- actorId: executor\n  kind: agent\n  slots: 1\n  \
+                       leaseDuration: PT15M\n- actorId: human-agentofreality\n  kind: human\n  \
+                       slots: 1\n  leaseDuration: PT8H\n  github:\n    databaseId: 4021243\n    \
+                       nodeId: U_kgDOAD1Q2w\n    login: agent-of-reality\n";
+        let file = crate::agents::parse_agent_file(renamed).expect("renamed catalog");
+        state
+            .allocator
+            .sync_agents(
+                &crate::agents::AgentFileLocation {
+                    repository: "acme/widgets".to_string(),
+                    r#ref: "main".to_string(),
+                    path: ".github/workgraph/agents.yaml".to_string(),
+                },
+                &file,
+                &crate::agents::AgentFileContent {
+                    text: renamed.to_string(),
+                    oid: "renamed".to_string(),
+                },
+                1,
+            )
+            .await
+            .expect("sync renamed catalog");
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        let lease_id = seed_worker_lease(&state, projector.as_ref()).await;
+
+        // The numeric ID is unchanged, so the same human still resolves.
+        assert_eq!(
+            state
+                .allocator
+                .workgraph_task_response_subject("I_task", HUMAN_DATABASE_ID)
+                .await
+                .expect("subject lookup"),
+            Some((
+                HUMAN_ACTOR_ID.to_string(),
+                crate::lease_ledger::TaskResponseSubject::Worker {
+                    dispatch_id: derive_workgraph_id("dispatch", &["dispatch"]),
+                    lease_id,
+                }
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unassigned_human_loses_task_response_authority() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        // The catalog human exists but GitHub reports no assignee.
+        seed_assigned_task(&state, projector.as_ref(), &[]).await;
+        assert!(try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_unassigned",
+                "created",
+                "@workgraph done",
+                "2026-08-01T00:02:00Z"
+            ),
+        )
+        .await
+        .expect("normalize unassigned response")
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_task_response_edit_delete_and_replay_are_revision_fenced() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        seed_worker_lease(&state, projector.as_ref()).await;
+
+        let created = task_response_event(
+            "IC_response",
+            "created",
+            "@workgraph first",
+            "2026-08-01T00:01:00Z",
+        );
+        let inputs = try_workgraph_comment(&state, &created)
+            .await
+            .expect("normalize create")
+            .expect("create inputs");
+        persist_with_task(&state, projector.as_ref(), inputs, 3, "response-create").await;
+
+        // Replaying the exact delivery emits nothing: the recorded response
+        // is never rebound to whatever subject is open now.
+        assert!(try_workgraph_comment(&state, &created)
+            .await
+            .expect("normalize replay")
+            .is_none());
+
+        // Genuine same-revision divergence is ambiguous, not invalid: GitHub
+        // is asked again rather than the delivery being refused outright.
+        let conflicting = task_response_event(
+            "IC_response",
+            "edited",
+            "@workgraph second",
+            "2026-08-01T00:01:00Z",
+        );
+        assert!(matches!(
+            try_workgraph_comment(&state, &conflicting).await,
+            Err(WorkGraphNormError::Unavailable(_))
+        ));
+
+        // A newer revision supersedes it.
+        let edited = task_response_event(
+            "IC_response",
+            "edited",
+            "@workgraph second",
+            "2026-08-01T00:02:00Z",
+        );
+        let inputs = try_workgraph_comment(&state, &edited)
+            .await
+            .expect("normalize edit")
+            .expect("edit inputs");
+        assert_eq!(upserted_task_response(&inputs).body, "@workgraph second");
+        persist_with_task(&state, projector.as_ref(), inputs, 4, "response-edit").await;
+
+        // Editing away the mention retracts the response.
+        let withdrawn = task_response_event(
+            "IC_response",
+            "edited",
+            "never mind",
+            "2026-08-01T00:03:00Z",
+        );
+        let inputs = try_workgraph_comment(&state, &withdrawn)
+            .await
+            .expect("normalize withdrawal")
+            .expect("withdrawal inputs");
+        assert!(matches!(
+            inputs.as_slice(),
+            [ProjectionInput::DeleteTaskResponse { source_key, task_id, actor_id, .. }]
+                if source_key == "IC_response"
+                    && task_id == &test_task_id("I_task")
+                    && actor_id == HUMAN_ACTOR_ID
+        ));
+        persist_with_task(&state, projector.as_ref(), inputs, 5, "response-withdraw").await;
+
+        // A stale delivery can never resurrect the retracted response.
+        assert!(try_workgraph_comment(
+            &state,
+            &task_response_event(
+                "IC_response",
+                "edited",
+                "@workgraph second",
+                "2026-08-01T00:02:00Z"
+            ),
+        )
+        .await
+        .expect("normalize stale delivery")
+        .is_none());
+
+        // Deleting an already-retracted response emits nothing further.
+        assert!(try_workgraph_comment(
+            &state,
+            &task_response_event("IC_response", "deleted", "", "2026-08-01T00:04:00Z"),
+        )
+        .await
+        .expect("normalize delete")
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_lifecycle_artifact_on_a_task_is_never_read_as_a_natural_response() {
+        let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
+        seed_human_actor_catalog(&state).await;
+        seed_assigned_task(&state, projector.as_ref(), &[human_webhook_user()]).await;
+        seed_worker_lease(&state, projector.as_ref()).await;
+        // A body opening with a lifecycle marker takes the artifact path, so
+        // trust is still decided by the reporter/assigner role, never by the
+        // human catalog.
+        let mut artifact = task_response_event(
+            "IC_artifact",
+            "created",
+            "WorkGraphTaskResult/v1\n\n```json\n{}\n```\n",
+            "2026-08-01T00:02:00Z",
+        );
+        artifact["comment"]["user"] = human_webhook_user();
+        assert!(matches!(
+            try_workgraph_comment(&state, &artifact).await,
+            Err(WorkGraphNormError::Untrusted(_)) | Ok(None)
+        ));
     }
 
     fn human_root_comment_event(
@@ -3047,6 +5614,7 @@ mod workgraph_tests {
                         authorization_transition: false,
                     },
                     ProjectionInput::UpsertTask(TaskDocument {
+                        assignees: Vec::new(),
                         source_key: "I_task".to_string(),
                         body: "WorkGraphTask/v1\n\n```json\n{}\n```\n".to_string(),
                         is_open: true,
@@ -3409,6 +5977,7 @@ mod workgraph_tests {
             .ingest_workgraph(
                 projector.as_ref(),
                 vec![ProjectionInput::UpsertTask(TaskDocument {
+                    assignees: Vec::new(),
                     source_key: "I_task".to_string(),
                     body: body.to_string(),
                     is_open: true,
@@ -4478,6 +7047,10 @@ mod workgraph_tests {
                             "labels": {
                                 "nodes": [],
                                 "pageInfo": {"hasNextPage": false}
+                            },
+                            "assignees": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": false}
                             }
                         }
                     }
@@ -4593,6 +7166,10 @@ mod workgraph_tests {
                                 },
                                 "labels": {
                                     "nodes": labels,
+                                    "pageInfo": {"hasNextPage": false}
+                                },
+                                "assignees": {
+                                    "nodes": [],
                                     "pageInfo": {"hasNextPage": false}
                                 }
                             }
@@ -4717,6 +7294,10 @@ mod workgraph_tests {
                                 "owner": {"login": "acme"}
                             },
                             "labels": {
+                                "nodes": [],
+                                "pageInfo": {"hasNextPage": false}
+                            },
+                            "assignees": {
                                 "nodes": [],
                                 "pageInfo": {"hasNextPage": false}
                             }
@@ -5053,6 +7634,7 @@ mod workgraph_tests {
             committed: Arc::default(),
             restored: Arc::default(),
             change_count: 2,
+            lifecycle: Arc::default(),
         };
         let input = ProjectionInput::DeleteTask {
             source_key: "I_task".to_string(),
@@ -5096,6 +7678,7 @@ mod workgraph_tests {
             .ingest_workgraph(
                 projector.as_ref(),
                 vec![ProjectionInput::UpsertTask(TaskDocument {
+                    assignees: Vec::new(),
                     source_key: "I_child".to_string(),
                     body: body.to_string(),
                     is_open: true,
@@ -5991,6 +8574,7 @@ mod workgraph_tests {
             .ingest_workgraph(
                 projector.as_ref(),
                 vec![ProjectionInput::UpsertTask(TaskDocument {
+                    assignees: Vec::new(),
                     source_key: "I_child".to_string(),
                     body: body.to_string(),
                     is_open: true,
@@ -6052,6 +8636,7 @@ mod workgraph_tests {
                 projector.as_ref(),
                 vec![
                     ProjectionInput::UpsertTask(TaskDocument {
+                        assignees: Vec::new(),
                         source_key: "I_child".to_string(),
                         body: body.to_string(),
                         is_open: true,
@@ -6098,6 +8683,7 @@ mod workgraph_tests {
         assert_eq!(
             inputs,
             vec![ProjectionInput::UpsertTask(TaskDocument {
+                assignees: Vec::new(),
                 source_key: "I_child".to_string(),
                 body: body.to_string(),
                 is_open: true,
@@ -6175,6 +8761,7 @@ mod workgraph_tests {
                 projector.as_ref(),
                 vec![
                     ProjectionInput::UpsertTask(TaskDocument {
+                        assignees: Vec::new(),
                         source_key: "I_child".to_string(),
                         body: "WorkGraphTask/v1\n\n```json\n{}\n```\n".to_string(),
                         is_open: true,
@@ -6246,6 +8833,7 @@ mod workgraph_tests {
             .ingest_workgraph(
                 projector.as_ref(),
                 vec![ProjectionInput::UpsertTask(TaskDocument {
+                    assignees: Vec::new(),
                     source_key: "I_child".to_string(),
                     body: body.to_string(),
                     is_open: true,
@@ -6313,6 +8901,7 @@ mod workgraph_tests {
                 projector.as_ref(),
                 vec![
                     ProjectionInput::UpsertTask(TaskDocument {
+                        assignees: Vec::new(),
                         source_key: "I_child".to_string(),
                         body: body.to_string(),
                         is_open: true,
@@ -6381,6 +8970,10 @@ mod workgraph_tests {
                         "labels": {
                             "nodes": [{"name": "workgraph"}],
                             "pageInfo": {"hasNextPage": false}
+                        },
+                        "assignees": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": false}
                         }
                     }
                 }
@@ -6445,6 +9038,10 @@ mod workgraph_tests {
                         "body": "ordinary issue",
                         "issueType": null,
                         "labels": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": false}
+                        },
+                        "assignees": {
                             "nodes": [],
                             "pageInfo": {"hasNextPage": false}
                         }
@@ -6562,6 +9159,10 @@ mod workgraph_tests {
                         "labels": {
                             "nodes": [{"name": "workgraph"}],
                             "pageInfo": {"hasNextPage": false}
+                        },
+                        "assignees": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": false}
                         }
                     }
                 }
@@ -6636,6 +9237,10 @@ mod workgraph_tests {
                         },
                         "labels": {
                             "nodes": [{"name": "workgraph"}],
+                            "pageInfo": {"hasNextPage": false}
+                        },
+                        "assignees": {
+                            "nodes": [],
                             "pageInfo": {"hasNextPage": false}
                         }
                     }
@@ -6735,6 +9340,7 @@ mod workgraph_tests {
             .ingest_workgraph(
                 projector.as_ref(),
                 vec![ProjectionInput::UpsertTask(TaskDocument {
+                    assignees: Vec::new(),
                     source_key: "I_task".to_string(),
                     body: body.to_string(),
                     is_open: true,
@@ -6791,6 +9397,7 @@ mod workgraph_tests {
     async fn delayed_sub_issue_delivery_cannot_overwrite_newer_exclusion_state() {
         let (_temp, projector, state) = ingress_state(Some(task_trust())).await;
         let excluded = TaskDocument {
+            assignees: Vec::new(),
             source_key: "I_child".to_string(),
             body: "WorkGraphTask/v1\n\n```json\n{}\n```\n".to_string(),
             is_open: true,
