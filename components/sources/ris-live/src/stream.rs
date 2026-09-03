@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, tungstenite};
 use url::Url;
 
-use drasi_lib::channels::{ChangeDispatcher, SourceEvent, SourceEventWrapper};
+use drasi_lib::channels::{ChangeDispatcher, SourceEvent, SourceEventDraft};
 use drasi_lib::profiling::{timestamp_ns, ProfilingMetadata};
 use drasi_lib::sources::base::SourceBase;
 use drasi_lib::state_store::StateStoreProvider;
@@ -46,7 +46,7 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 pub async fn run_stream_loop(
     source_id: String,
     config: RisLiveSourceConfig,
-    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: SourceBase,
     state_store: Option<Arc<dyn StateStoreProvider>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -64,7 +64,7 @@ pub async fn run_stream_loop(
         match run_single_connection(
             &source_id,
             &config,
-            &dispatchers,
+            &base,
             &state_store,
             &mut mapper,
             &mut last_persisted,
@@ -99,7 +99,7 @@ pub async fn run_stream_loop(
 async fn run_single_connection(
     source_id: &str,
     config: &RisLiveSourceConfig,
-    dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: &SourceBase,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
     mapper: &mut GraphMapper,
     last_persisted: &mut Instant,
@@ -137,7 +137,7 @@ async fn run_single_connection(
             frame = socket.next() => {
                 match frame {
                     Some(Ok(Message::Text(text))) => {
-                        process_text_frame(source_id, config, dispatchers, state_store, mapper, last_persisted, &text).await?;
+                        process_text_frame(source_id, config, base, state_store, mapper, last_persisted, &text).await?;
                     }
                     Some(Ok(Message::Binary(_))) => {}
                     Some(Ok(Message::Ping(payload))) => {
@@ -169,7 +169,7 @@ async fn run_single_connection(
 async fn process_text_frame(
     source_id: &str,
     config: &RisLiveSourceConfig,
-    dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: &SourceBase,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
     mapper: &mut GraphMapper,
     last_persisted: &mut Instant,
@@ -222,7 +222,7 @@ async fn process_text_frame(
 
             if !changes.is_empty() {
                 for change in changes {
-                    dispatch_change(source_id, dispatchers, change).await?;
+                    dispatch_change(source_id, base, change).await?;
                 }
                 if last_persisted.elapsed() >= PERSIST_INTERVAL {
                     persist_state(source_id, state_store, mapper.state()).await?;
@@ -242,20 +242,20 @@ async fn process_text_frame(
 
 async fn dispatch_change(
     source_id: &str,
-    dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: &SourceBase,
     change: drasi_core::models::SourceChange,
 ) -> Result<()> {
     let mut profiling = ProfilingMetadata::new();
     profiling.source_send_ns = Some(timestamp_ns());
 
-    let wrapper = SourceEventWrapper::with_profiling(
+    let wrapper = SourceEventDraft::with_profiling(
         source_id.to_string(),
         SourceEvent::Change(change),
         chrono::Utc::now(),
         profiling,
     );
 
-    SourceBase::dispatch_from_task(dispatchers.clone(), wrapper, source_id).await
+    base.dispatch_event(wrapper).await
 }
 
 fn ensure_crypto_provider() {
@@ -345,4 +345,85 @@ async fn persist_state(
         .await
         .with_context(|| format!("failed to persist state for source '{source_id}'"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_lib::channels::events::SourceEvent as ChannelSourceEvent;
+    use drasi_lib::sources::base::SourceBaseParams;
+    use serde_json::json;
+
+    /// Every change routed through the WS frame-processing loop
+    /// (`process_text_frame` → `dispatch_change` → `SourceBase::dispatch_event`)
+    /// must carry a framework-assigned, strictly increasing `sequence` (issue
+    /// #828). RIS-Live has no durability, so before migrating from the unstamped
+    /// `dispatch_from_task` helper these events had `sequence = None`. This feeds a
+    /// realistic `ris_message` UPDATE frame (which maps to a Peer, a Prefix, and a
+    /// ROUTES relation) and asserts the emitted sequences are monotonic.
+    #[tokio::test]
+    async fn process_text_frame_stamps_monotonic_sequence() {
+        let source_id = "ris-seq-source";
+        let config = RisLiveSourceConfig::default();
+        let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+        let mut mapper = GraphMapper::new(source_id.to_string(), StreamState::default());
+        let mut last_persisted = Instant::now();
+        let state_store: Option<Arc<dyn StateStoreProvider>> = None;
+
+        let mut rx = base.test_subscribe().await;
+
+        // A realistic RIS Live UPDATE frame with a single announcement. The mapper
+        // expands this into three changes: Peer node, Prefix node, ROUTES relation.
+        let frame = json!({
+            "type": "ris_message",
+            "data": {
+                "timestamp": 1_773_098_494.83,
+                "peer": "208.80.153.193",
+                "peer_asn": "14907",
+                "id": "msg-1",
+                "host": "rrc00.ripe.net",
+                "type": "UPDATE",
+                "origin": "IGP",
+                "announcements": [
+                    {"next_hop": "208.80.153.193", "prefixes": ["203.0.113.0/24"]}
+                ],
+                "withdrawals": []
+            }
+        })
+        .to_string();
+
+        process_text_frame(
+            source_id,
+            &config,
+            &base,
+            &state_store,
+            &mut mapper,
+            &mut last_persisted,
+            &frame,
+        )
+        .await
+        .expect("process_text_frame should succeed");
+
+        // Drain every dispatched change and assert strictly increasing sequences.
+        let mut sequences = Vec::new();
+        while let Ok(Ok(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await
+        {
+            if matches!(event.event, ChannelSourceEvent::Change(_)) {
+                sequences.push(event.sequence);
+            }
+        }
+
+        assert!(
+            sequences.len() >= 3,
+            "expected at least 3 changes from an UPDATE frame, got {sequences:?}"
+        );
+        for pair in sequences.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "sequences must be strictly increasing, got {sequences:?}"
+            );
+        }
+        assert_eq!(sequences[0], 1, "first framework sequence should be 1");
+    }
 }

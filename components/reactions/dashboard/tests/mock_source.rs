@@ -17,7 +17,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::{
-    ComponentStatus, DispatchMode, SourceEvent, SourceEventWrapper, SubscriptionResponse,
+    ComponentStatus, DispatchMode, SourceEvent, SourceEventDraft, SubscriptionResponse,
 };
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::context::SourceRuntimeContext;
@@ -138,7 +138,7 @@ impl MockSource {
             .ok_or_else(|| anyhow::anyhow!("mock source receiver already taken"))?;
 
         let source_name = self.base.id.clone();
-        let dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let status_handle = self.base.status_handle();
 
         let task_handle = tokio::spawn(async move {
@@ -150,15 +150,14 @@ impl MockSource {
                 let mut profiling = ProfilingMetadata::new();
                 profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                let event = SourceEventWrapper::with_profiling(
+                let event = SourceEventDraft::with_profiling(
                     source_name.clone(),
                     SourceEvent::Change(change),
                     chrono::Utc::now(),
                     profiling,
                 );
 
-                let _ =
-                    SourceBase::dispatch_from_task(dispatchers.clone(), event, &source_name).await;
+                let _ = base.dispatch_event(event).await;
             }
         });
 

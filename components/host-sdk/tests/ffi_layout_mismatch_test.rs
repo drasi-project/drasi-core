@@ -15,7 +15,7 @@
 //! T3 — cross-cdylib **layout-mismatch** regression for issue #602.
 //!
 //! Issue #602 was a heap corruption (`free(): invalid pointer`) caused by the
-//! host taking ownership of a plugin-allocated `repr(Rust)` `SourceEventWrapper`
+//! host taking ownership of a plugin-allocated `repr(Rust)` `StampedSourceEvent`
 //! (which embeds `bytes::Bytes` / `Arc<str>`) via `Box::from_raw`. That is
 //! unconditionally undefined behaviour, for two independent reasons: `repr(Rust)`
 //! has no stable layout across independently compiled cdylibs, *and* `bytes::Bytes`
@@ -28,7 +28,7 @@
 //! disagreement: the mock-source cdylib is built with one `-Zlayout-seed` and the
 //! test host with another, then run under glibc heap hardening (`MALLOC_CHECK_`).
 //!
-//! - **Before the fix:** the host reads `SourceEventWrapper`/`Element` fields at
+//! - **Before the fix:** the host reads `StampedSourceEvent`/`Element` fields at
 //!   the wrong offsets → frees a garbage interior pointer → SIGABRT/SIGSEGV.
 //! - **After the fix:** the serialized transfer is layout-independent → clean.
 //!
@@ -121,6 +121,7 @@ async fn mock_source_change_stream_survives_layout_mismatch() {
         nodes: HashSet::new(),
         relations: HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: false,
     };
     let sub = source.subscribe(settings).await.expect("Should subscribe");
@@ -218,6 +219,7 @@ async fn mock_source_bootstrap_stream_survives_layout_mismatch() {
         nodes: HashSet::new(),
         relations: HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: false,
     };
     let sub = source.subscribe(settings).await.expect("Should subscribe");

@@ -122,7 +122,7 @@ impl Source for Open511Source {
 
         let source_id = self.base.id.clone();
         let config = self.config.clone();
-        let dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let state_store = self.state_store.read().await.clone();
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -143,14 +143,8 @@ impl Source for Open511Source {
 
         let task = tokio::spawn(
             async move {
-                if let Err(e) = run_poll_loop(
-                    source_id.clone(),
-                    config,
-                    dispatchers,
-                    state_store,
-                    shutdown_rx,
-                )
-                .await
+                if let Err(e) =
+                    run_poll_loop(source_id.clone(), config, base, state_store, shutdown_rx).await
                 {
                     error!("Open511 source task failed for '{source_id}': {e}");
                 }
@@ -245,7 +239,7 @@ impl Source for Open511Source {
 async fn run_poll_loop(
     source_id: String,
     config: Open511SourceConfig,
-    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: SourceBase,
     state_store: Option<Arc<dyn StateStoreProvider>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -295,7 +289,7 @@ async fn run_poll_loop(
 
                 let mut dispatch_failures = 0usize;
                 for change in cycle.changes {
-                    if let Err(e) = dispatch_change(dispatchers.clone(), &source_id, change).await {
+                    if let Err(e) = dispatch_change(&base, &source_id, change).await {
                         dispatch_failures = dispatch_failures.saturating_add(1);
                         warn!("Open511 source '{source_id}' failed to dispatch change: {e}");
                     }
@@ -327,21 +321,21 @@ fn should_run_full_sweep(state: &PollState, full_sweep_interval: u32) -> bool {
 }
 
 async fn dispatch_change(
-    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: &SourceBase,
     source_id: &str,
     change: drasi_core::models::SourceChange,
 ) -> Result<()> {
     let mut profiling = ProfilingMetadata::new();
     profiling.source_send_ns = Some(timestamp_ns());
 
-    let wrapper = SourceEventWrapper::with_profiling(
+    let wrapper = SourceEventDraft::with_profiling(
         source_id.to_string(),
         SourceEvent::Change(change),
         Utc::now(),
         profiling,
     );
 
-    SourceBase::dispatch_from_task(dispatchers, wrapper, source_id).await
+    base.dispatch_event(wrapper).await
 }
 
 async fn initialize_poll_state(
@@ -761,6 +755,66 @@ mod tests {
 
         let latest = latest_event_timestamp(events.iter()).expect("latest timestamp");
         assert_eq!(latest, "2026-01-02T07:00:00Z");
+    }
+
+    /// Every change routed through the poll-loop dispatch path
+    /// (`dispatch_change` → `SourceBase::dispatch_event`) must carry a
+    /// framework-assigned, strictly increasing `sequence` (issue #828). Open511
+    /// has no durability, so before migrating from the unstamped
+    /// `dispatch_from_task` helper these events had `sequence = None`. This drives
+    /// `dispatch_change` directly with stubbed poll-cycle changes and asserts the
+    /// emitted sequences are monotonic.
+    #[tokio::test]
+    async fn dispatch_change_stamps_monotonic_sequence() {
+        use drasi_core::models::{
+            Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+        };
+        use std::sync::Arc;
+
+        fn insert_node(source_id: &str, id: &str) -> SourceChange {
+            SourceChange::Insert {
+                element: Element::Node {
+                    metadata: ElementMetadata {
+                        reference: ElementReference::new(source_id, id),
+                        labels: Arc::from([Arc::<str>::from("Event")]),
+                        effective_from: 0,
+                    },
+                    properties: ElementPropertyMap::new(),
+                },
+            }
+        }
+
+        let source_id = "open511-seq-source";
+        let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+        let mut rx = base.test_subscribe().await;
+
+        // Simulate a poll cycle emitting several changes one at a time, as the
+        // real poll loop does.
+        let change_count = 4u64;
+        for i in 1..=change_count {
+            dispatch_change(
+                &base,
+                source_id,
+                insert_node(source_id, &format!("event-{i}")),
+            )
+            .await
+            .expect("dispatch_change should succeed");
+        }
+
+        let mut sequences = Vec::new();
+        for _ in 0..change_count {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+                .await
+                .expect("timed out waiting for event")
+                .expect("event stream closed unexpectedly");
+            sequences.push(event.sequence);
+        }
+
+        assert_eq!(
+            sequences,
+            vec![1, 2, 3, 4],
+            "poll-loop changes must carry unique, strictly increasing sequences"
+        );
     }
 }
 

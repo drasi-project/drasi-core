@@ -407,6 +407,7 @@ async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
             nodes: HashSet::from(["Products".to_string()]),
             relations: HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: true,
         };
         let response = source
@@ -2133,7 +2134,7 @@ async fn subscribe_direct(
     query_id: &str,
 ) -> Result<(
     tokio::sync::mpsc::Receiver<drasi_lib::channels::BootstrapEvent>,
-    Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::SourceEventWrapper>>,
+    Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::StampedSourceEvent>>,
 )> {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(15) {
@@ -2154,6 +2155,7 @@ async fn subscribe_direct(
         nodes: HashSet::from(["Products".to_string()]),
         relations: HashSet::new(),
         resume_from: None,
+        resume_sequence: None,
         request_position_handle: true,
     };
     let response = source

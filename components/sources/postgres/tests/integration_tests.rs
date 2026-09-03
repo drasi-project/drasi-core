@@ -1440,6 +1440,7 @@ fn subscription_settings(
         nodes: HashSet::new(),
         relations: HashSet::new(),
         resume_from,
+        resume_sequence: None,
         request_position_handle,
     }
 }
@@ -1570,10 +1571,8 @@ async fn test_events_carry_source_position_bytes() -> Result<()> {
                 assert!(lsn > 0, "commit LSN should be non-zero");
 
                 // Verify the event has a sequence number stamped by dispatch_event
-                assert!(
-                    event.sequence.is_some(),
-                    "Event should have a sequence number"
-                );
+                // (mandatory on StampedSourceEvent).
+                let _ = event.sequence;
 
                 found_event = true;
                 break;

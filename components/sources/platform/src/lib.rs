@@ -175,8 +175,8 @@ use tokio::task::JoinHandle;
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::{
-    ComponentStatus, ControlOperation, DispatchMode, SourceControl, SourceEvent,
-    SourceEventWrapper, SubscriptionResponse,
+    ComponentStatus, ControlOperation, DispatchMode, SourceControl, SourceEvent, SourceEventDraft,
+    SubscriptionResponse,
 };
 use drasi_lib::component_graph::ComponentStatusHandle;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
@@ -715,15 +715,7 @@ impl PlatformSource {
         source_id: String,
         instance_id: String,
         platform_config: PlatformConfig,
-        dispatchers: Arc<
-            RwLock<
-                Vec<
-                    Box<
-                        dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync,
-                    >,
-                >,
-            >,
-        >,
+        base: SourceBase,
         reporter: ComponentStatusHandle,
     ) -> JoinHandle<()> {
         let source_id_for_span = source_id.clone();
@@ -836,7 +828,7 @@ impl PlatformSource {
                                                                     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                                                                     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                                                                    let wrapper = SourceEventWrapper::with_profiling(
+                                                                    let wrapper = SourceEventDraft::with_profiling(
                                                                         source_id.clone(),
                                                                         SourceEvent::Control(control_event),
                                                                         chrono::Utc::now(),
@@ -844,12 +836,7 @@ impl PlatformSource {
                                                                     );
 
                                                                     // Dispatch via helper
-                                                                    if let Err(e) = SourceBase::dispatch_from_task(
-                                                                        dispatchers.clone(),
-                                                                        wrapper,
-                                                                        &source_id,
-                                                                    )
-                                                                    .await
+                                                                    if let Err(e) = base.dispatch_event(wrapper).await
                                                                     {
                                                                         debug!("[{source_id}] Failed to dispatch control event (no subscribers): {e}");
                                                                     } else {
@@ -896,7 +883,7 @@ impl PlatformSource {
                                                                     profiling.reactivator_end_ns =
                                                                         item.reactivator_end_ns;
 
-                                                                    let wrapper = SourceEventWrapper::with_profiling(
+                                                                    let wrapper = SourceEventDraft::with_profiling(
                                                                         source_id.clone(),
                                                                         SourceEvent::Change(item.source_change),
                                                                         chrono::Utc::now(),
@@ -904,12 +891,7 @@ impl PlatformSource {
                                                                     );
 
                                                                     // Dispatch via helper
-                                                                    if let Err(e) = SourceBase::dispatch_from_task(
-                                                                        dispatchers.clone(),
-                                                                        wrapper,
-                                                                        &source_id,
-                                                                    )
-                                                                    .await
+                                                                    if let Err(e) = base.dispatch_event(wrapper).await
                                                                     {
                                                                         debug!("[{source_id}] Failed to dispatch change (no subscribers): {e}");
                                                                     } else {
@@ -1124,7 +1106,7 @@ impl Source for PlatformSource {
             self.base.id.clone(),
             instance_id,
             platform_config,
-            self.base.dispatchers.clone(),
+            self.base.clone_shared(),
             self.base.status_handle(),
         )
         .await;
@@ -1188,7 +1170,7 @@ impl PlatformSource {
     /// This method delegates to SourceBase and is provided for convenience in tests.
     pub async fn test_subscribe(
         &self,
-    ) -> Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::SourceEventWrapper>> {
+    ) -> Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::StampedSourceEvent>> {
         self.base.test_subscribe().await
     }
 }

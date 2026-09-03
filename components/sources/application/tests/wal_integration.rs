@@ -80,6 +80,7 @@ fn fresh_settings(source_id: &str, query_id: &str) -> SourceSubscriptionSettings
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
+        resume_sequence: None,
         request_position_handle: true,
         resume_from: None,
     }
@@ -93,6 +94,7 @@ fn resume_settings(source_id: &str, query_id: &str, resume_seq: u64) -> SourceSu
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
+        resume_sequence: None,
         request_position_handle: true,
         resume_from: Some(bytes::Bytes::from(resume_seq.to_be_bytes().to_vec())),
     }
@@ -102,7 +104,7 @@ fn resume_settings(source_id: &str, query_id: &str, resume_seq: u64) -> SourceSu
 async fn subscribe_fresh(
     source: &ApplicationSource,
     source_id: &str,
-) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::SourceEventWrapper>> {
+) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::StampedSourceEvent>> {
     let resp = source
         .subscribe(fresh_settings(source_id, "test-query"))
         .await
@@ -115,7 +117,7 @@ async fn subscribe_with_resume(
     source: &ApplicationSource,
     source_id: &str,
     resume_seq: u64,
-) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::SourceEventWrapper>> {
+) -> Box<dyn ChangeReceiver<drasi_lib::channels::events::StampedSourceEvent>> {
     let resp = source
         .subscribe(resume_settings(source_id, "test-query-resume", resume_seq))
         .await
@@ -182,8 +184,7 @@ async fn test_wal_enabled_events_persisted() {
         .await
         .unwrap()
         .unwrap();
-    assert!(event.sequence.is_some());
-    assert_eq!(event.sequence.unwrap(), 1);
+    assert_eq!(event.sequence, 1);
     assert!(event.source_position.is_some());
 
     // Verify WAL has the event
@@ -200,7 +201,7 @@ async fn test_wal_enabled_events_persisted() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event2.sequence.unwrap(), 2);
+    assert_eq!(event2.sequence, 2);
 
     let count = wal.event_count("persist-src").await.unwrap();
     assert_eq!(count, 2);
@@ -357,7 +358,7 @@ async fn test_crash_recovery_resumes_sequence() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(event.sequence.unwrap(), 6);
+        assert_eq!(event.sequence, 6);
 
         source.stop().await.unwrap();
     }
@@ -401,8 +402,7 @@ async fn test_replay_via_subscribe() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            event.sequence.unwrap(),
-            expected_seq,
+            event.sequence, expected_seq,
             "Expected replay seq {expected_seq}"
         );
     }
@@ -418,13 +418,13 @@ async fn test_replay_via_subscribe() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event1.sequence.unwrap(), 6);
+    assert_eq!(event1.sequence, 6);
 
     let event2 = tokio::time::timeout(Duration::from_secs(2), rx2.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(event2.sequence.unwrap(), 6);
+    assert_eq!(event2.sequence, 6);
 
     source.stop().await.unwrap();
 }
@@ -477,7 +477,7 @@ async fn test_concurrent_writes_monotonic_sequences() {
             .await
             .unwrap()
             .unwrap();
-        sequences.push(event.sequence.unwrap());
+        sequences.push(event.sequence);
     }
 
     // Verify all sequences are unique and cover 1..=total_events
@@ -528,6 +528,7 @@ async fn test_resume_from_position_end_to_end() {
         enable_bootstrap: false,
         nodes: HashSet::new(),
         relations: HashSet::new(),
+        resume_sequence: None,
         request_position_handle: true,
         resume_from: None,
     };
@@ -551,7 +552,7 @@ async fn test_resume_from_position_end_to_end() {
             .await
             .expect("timed out waiting for event")
             .unwrap();
-        let seq = event.sequence.expect("event should have WAL sequence");
+        let seq = event.sequence;
         // Simulate query confirming progress by advancing position handle
         position_handle.store(seq, std::sync::atomic::Ordering::Release);
         last_confirmed_seq = seq;
@@ -609,7 +610,7 @@ async fn test_resume_from_position_end_to_end() {
             .await
             .expect("timed out waiting for replay event")
             .unwrap();
-        replayed_seqs.push(event.sequence.expect("replay event should have sequence"));
+        replayed_seqs.push(event.sequence);
     }
     assert_eq!(
         replayed_seqs,
@@ -629,10 +630,7 @@ async fn test_resume_from_position_end_to_end() {
         .expect("timed out waiting for live event")
         .unwrap();
     assert_eq!(
-        live_event
-            .sequence
-            .expect("live event should have sequence"),
-        9,
+        live_event.sequence, 9,
         "Live event after restart should continue sequence"
     );
 
@@ -648,4 +646,52 @@ async fn test_resume_from_position_end_to_end() {
     );
 
     source2.stop().await.unwrap();
+}
+
+/// With durability **disabled**, the Application source must still stamp a
+/// framework-assigned monotonic sequence on every emitted event (issue #828).
+/// Before the migration to `dispatch_event`, task-emitted events left
+/// `sequence = None` whenever the WAL was off.
+#[tokio::test]
+async fn test_sequence_stamped_without_durability() {
+    // durability: None → WAL off, so no source-supplied sequence.
+    let config = app_config(None);
+    let (source, handle) = ApplicationSource::new("noseq-src", config).unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    let wal = Arc::new(RedbWalProvider::new(tmp.path()));
+    init_source_with_wal(&source, wal.clone(), "noseq-src").await;
+
+    source.start().await.unwrap();
+
+    // Durability is off, so the source neither persists nor supports replay.
+    assert!(!source.supports_replay());
+
+    let mut rx = subscribe_fresh(&source, "noseq-src").await;
+
+    let event_count = 5u64;
+    for i in 1..=event_count {
+        let props = PropertyMapBuilder::new()
+            .with_string("name", format!("Name{i}"))
+            .build();
+        handle
+            .send_node_insert(format!("node-{i}"), vec!["Person"], props)
+            .await
+            .unwrap();
+    }
+
+    // Every emitted event must carry a framework-stamped, strictly increasing
+    // sequence (1, 2, 3, ...), even though the WAL is disabled.
+    for expected_seq in 1..=event_count {
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for event")
+            .expect("event stream closed unexpectedly");
+        assert_eq!(
+            event.sequence, expected_seq,
+            "event {expected_seq} should carry a framework sequence with durability off"
+        );
+    }
+
+    source.stop().await.unwrap();
 }

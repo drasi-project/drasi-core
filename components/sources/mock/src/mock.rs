@@ -285,7 +285,7 @@ impl Source for MockSource {
             .await;
 
         // Get broadcast_tx for publishing
-        let base_dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let source_id = self.base.id.clone();
 
         // Get configuration
@@ -511,7 +511,7 @@ impl Source for MockSource {
                     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                    let wrapper = SourceEventWrapper::with_profiling(
+                    let wrapper = SourceEventDraft::with_profiling(
                         source_id.clone(),
                         SourceEvent::Change(source_change),
                         chrono::Utc::now(),
@@ -519,13 +519,7 @@ impl Source for MockSource {
                     );
 
                     // Dispatch to all subscribers via helper
-                    if let Err(e) = SourceBase::dispatch_from_task(
-                        base_dispatchers.clone(),
-                        wrapper,
-                        &source_id,
-                    )
-                    .await
-                    {
+                    if let Err(e) = base.dispatch_event(wrapper).await {
                         debug!("Failed to dispatch change: {e}");
                     }
 
@@ -541,7 +535,7 @@ impl Source for MockSource {
                             &source_name,
                             &source_id,
                             seq,
-                            base_dispatchers.clone(),
+                            base.clone_shared(),
                         )
                         .await;
                     }
@@ -656,7 +650,7 @@ impl MockSource {
     ///
     /// # Returns
     ///
-    /// A boxed receiver that yields [`SourceEventWrapper`](drasi_lib::channels::SourceEventWrapper)
+    /// A boxed receiver that yields [`SourceEventDraft`](drasi_lib::channels::SourceEventDraft)
     /// for each event generated or injected.
     ///
     /// # Example
@@ -674,7 +668,7 @@ impl MockSource {
     /// ```
     pub async fn test_subscribe(
         &self,
-    ) -> Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::SourceEventWrapper>> {
+    ) -> Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::StampedSourceEvent>> {
         self.base.test_subscribe().await
     }
 }
@@ -859,8 +853,6 @@ impl MockSource {
     }
 }
 
-type DispatcherList = Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>;
-
 #[derive(Debug, Clone)]
 struct MeshEdge {
     from: u32,
@@ -983,20 +975,16 @@ fn connected_to_element(source_name: &str, edge: &MeshEdge, strength: f64) -> El
     }
 }
 
-async fn dispatch_generated_change(
-    base_dispatchers: DispatcherList,
-    source_id: &str,
-    source_change: SourceChange,
-) {
+async fn dispatch_generated_change(base: SourceBase, source_id: &str, source_change: SourceChange) {
     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-    let wrapper = SourceEventWrapper::with_profiling(
+    let wrapper = SourceEventDraft::with_profiling(
         source_id.to_string(),
         SourceEvent::Change(source_change),
         chrono::Utc::now(),
         profiling,
     );
-    if let Err(e) = SourceBase::dispatch_from_task(base_dispatchers, wrapper, source_id).await {
+    if let Err(e) = base.dispatch_event(wrapper).await {
         debug!("Failed to dispatch mesh change: {e}");
     }
 }
@@ -1008,7 +996,7 @@ async fn emit_mesh_tick(
     source_name: &str,
     source_id: &str,
     seq: u64,
-    base_dispatchers: DispatcherList,
+    base: SourceBase,
 ) {
     let seen_count = seen_sensors.read().await.len() as u32;
     if seen_count < sensor_count || sensor_count < 2 {
@@ -1024,7 +1012,7 @@ async fn emit_mesh_tick(
         drop(state);
         for edge in edges {
             dispatch_generated_change(
-                base_dispatchers.clone(),
+                base.clone_shared(),
                 source_id,
                 SourceChange::Insert {
                     element: connected_to_element(source_name, &edge, random_strength()),
@@ -1056,7 +1044,7 @@ async fn emit_mesh_tick(
                 drop(state);
 
                 dispatch_generated_change(
-                    base_dispatchers.clone(),
+                    base.clone_shared(),
                     source_id,
                     SourceChange::Delete {
                         metadata: ElementMetadata {
@@ -1073,7 +1061,7 @@ async fn emit_mesh_tick(
                     state.edges.push(edge.clone());
                 }
                 dispatch_generated_change(
-                    base_dispatchers,
+                    base.clone_shared(),
                     source_id,
                     SourceChange::Insert {
                         element: connected_to_element(source_name, &edge, random_strength()),
@@ -1090,7 +1078,7 @@ async fn emit_mesh_tick(
         let edge = state.edges[idx].clone();
         drop(state);
         dispatch_generated_change(
-            base_dispatchers,
+            base.clone_shared(),
             source_id,
             SourceChange::Update {
                 element: connected_to_element(source_name, &edge, random_strength()),

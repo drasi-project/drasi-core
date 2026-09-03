@@ -910,6 +910,7 @@ mod tests {
             relations: Default::default(),
             enable_bootstrap: false,
             resume_from: Some(bytes::Bytes::from_static(&[1, 2, 3])),
+            resume_sequence: None,
             request_position_handle: false,
         };
         let err = match source.subscribe(settings).await {
@@ -939,6 +940,7 @@ mod tests {
             relations: Default::default(),
             enable_bootstrap: false,
             resume_from: Some(bytes::Bytes::copy_from_slice(&1u64.to_be_bytes())),
+            resume_sequence: None,
             request_position_handle: false,
         };
         let err = match source.subscribe(settings).await {

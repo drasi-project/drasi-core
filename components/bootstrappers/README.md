@@ -232,6 +232,9 @@ pub struct SourceSubscriptionSettings {
     pub relations: HashSet<String>,
     /// If set, the subscribing query requests events replayed from this sequence position.
     pub resume_from: Option<u64>,
+    /// If set, the last framework sequence the query checkpointed; SourceBase raises
+    /// its per-source sequence counter to this floor + 1 on resubscribe.
+    pub resume_sequence: Option<u64>,
     /// If true, the query requests a shared position handle for feedback.
     pub request_position_handle: bool,
 }

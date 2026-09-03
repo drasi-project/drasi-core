@@ -535,6 +535,43 @@ mod event_generation {
         assert_eq!(values[2], 3);
     }
 
+    /// Every event emitted by the mock source's background generator task must
+    /// carry a framework-assigned, strictly increasing `sequence` (issue #828).
+    /// The mock source has no durability, so before migrating from the unstamped
+    /// `dispatch_from_task` helper to `dispatch_event`, these events had
+    /// `sequence = None`. This guards the background-task dispatch path.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_generated_events_have_monotonic_sequence() {
+        let config = MockSourceConfig {
+            data_type: DataType::Counter,
+            interval_ms: 20,
+        };
+
+        let source = MockSource::new("test-counter-monotonic-seq", config).unwrap();
+        let mut rx = source.test_subscribe().await;
+
+        source.start().await.unwrap();
+
+        // Collect a handful of consecutively generated events.
+        let mut sequences = Vec::new();
+        for _ in 0..5 {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+                .await
+                .expect("Timeout")
+                .expect("No event");
+            sequences.push(event.sequence);
+        }
+
+        source.stop().await.unwrap();
+
+        // The framework stamps 1, 2, 3, ... on a fresh source.
+        assert_eq!(
+            sequences,
+            vec![1, 2, 3, 4, 5],
+            "generated events must have unique, strictly increasing sequences"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn test_counter_always_generates_insert_events() {
         let config = MockSourceConfig {
@@ -1624,6 +1661,7 @@ mod source_trait {
             nodes: HashSet::new(),
             relations: HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: false,
         };
 

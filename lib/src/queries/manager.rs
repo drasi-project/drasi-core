@@ -1119,6 +1119,7 @@ impl Query for DrasiQuery {
                                 checkpoint_sequences_per_source
                                     .insert(settings.source_id.clone(), cp.sequence);
                                 settings.request_position_handle = true;
+                                settings.resume_sequence = Some(cp.sequence);
                                 if let Some(pos) = &cp.source_position {
                                     settings.resume_from = Some(pos.clone());
                                 }
@@ -1291,6 +1292,7 @@ impl Query for DrasiQuery {
                 );
                 for (_, _, settings) in &mut sources_to_subscribe {
                     settings.resume_from = None;
+                    settings.resume_sequence = None;
                     settings.request_position_handle = has_persistent_backend;
                 }
                 // Reset per-loop accumulators
@@ -2183,7 +2185,7 @@ impl Query for DrasiQuery {
                         arc_event = priority_queue.dequeue() => {
                             // Try to extract without cloning if we have sole ownership (zero-copy path).
                             let parts =
-                                match SourceEventWrapper::try_unwrap_arc(arc_event) {
+                                match StampedSourceEvent::try_unwrap_arc(arc_event) {
                                     Ok(parts) => parts,
                                     Err(arc) => {
                                         crate::channels::events::SourceEventParts {
@@ -2208,7 +2210,7 @@ impl Query for DrasiQuery {
                             if dedup.should_skip(&source_id, sequence) {
                                 debug!(
                                     "Query '{query_id}' skipping duplicate event from '{source_id}' (seq={seq}, checkpoint={cp})",
-                                    seq = sequence.unwrap_or(0),
+                                    seq = sequence,
                                     cp = dedup.checkpoint_for(&source_id).unwrap_or(0)
                                 );
                                 continue;
@@ -2260,18 +2262,16 @@ impl Query for DrasiQuery {
                                     let cp_position = source_position.clone();
                                     let hook = move || {
                                         async move {
-                                            if let Some(seq) = sequence {
-                                                // Enforce position size limit at checkpoint time:
-                                                // oversized positions are skipped to preserve the
-                                                // last known good position in the store.
-                                                let pos_ref = match &cp_position {
-                                                    Some(p) if p.len() <= crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES => Some(p),
-                                                    _ => None,
-                                                };
-                                                cp_store
-                                                    .stage_checkpoint(&cp_source_id, seq, pos_ref)
-                                                    .await?;
-                                            }
+                                            // Enforce position size limit at checkpoint time:
+                                            // oversized positions are skipped to preserve the
+                                            // last known good position in the store.
+                                            let pos_ref = match &cp_position {
+                                                Some(p) if p.len() <= crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES => Some(p),
+                                                _ => None,
+                                            };
+                                            cp_store
+                                                .stage_checkpoint(&cp_source_id, sequence, pos_ref)
+                                                .await?;
                                             Ok(())
                                         }
                                     };
@@ -2284,12 +2284,10 @@ impl Query for DrasiQuery {
                                             profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
 
                                             // Advance dedup and notify source on successful commit
-                                            if let Some(seq) = sequence {
-                                                dedup.advance(&source_id, seq);
+                                            dedup.advance(&source_id, sequence);
 
-                                                if let Some(handle) = position_handles_for_processor.get(&source_id) {
-                                                    handle.store(seq, std::sync::atomic::Ordering::Release);
-                                                }
+                                            if let Some(handle) = position_handles_for_processor.get(&source_id) {
+                                                handle.store(sequence, std::sync::atomic::Ordering::Release);
                                             }
 
                                             if !results.is_empty() {

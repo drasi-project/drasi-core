@@ -79,15 +79,15 @@ mod tests {
             change: drasi_core::models::SourceChange,
             position: Option<Bytes>,
         ) -> anyhow::Result<()> {
-            let mut wrapper = SourceEventWrapper::new(
+            let mut draft = SourceEventDraft::new(
                 self.base.get_id().to_string(),
                 SourceEvent::Change(change),
                 chrono::Utc::now(),
             );
             if let Some(pos) = position {
-                wrapper.set_source_position(pos);
+                draft.set_source_position(pos);
             }
-            self.base.dispatch_event(wrapper).await
+            self.base.dispatch_event(draft).await
         }
 
         /// Get all resume_from values received during subscribe calls
@@ -328,6 +328,7 @@ mod tests {
             nodes: std::collections::HashSet::new(),
             relations: std::collections::HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: false,
         };
         let sub = source.subscribe(settings).await.unwrap();
@@ -361,7 +362,7 @@ mod tests {
         let mut sequences = Vec::new();
         for _ in 0..3 {
             let event = receiver.recv().await.unwrap();
-            sequences.push(event.sequence.unwrap());
+            sequences.push(event.sequence);
         }
 
         // Sequences should be 1, 2, 3 (monotonically increasing, starting at 1)
@@ -393,6 +394,7 @@ mod tests {
             nodes: std::collections::HashSet::new(),
             relations: std::collections::HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: false,
         };
         let sub = source.subscribe(settings).await.unwrap();
@@ -417,7 +419,6 @@ mod tests {
 
         let event = receiver.recv().await.unwrap();
         assert_eq!(event.source_position, Some(mssql_pos));
-        assert!(event.sequence.is_some());
     }
 
     /// Test the full end-to-end checkpoint persistence:
@@ -915,6 +916,7 @@ mod tests {
             nodes: std::collections::HashSet::new(),
             relations: std::collections::HashSet::new(),
             resume_from: None,
+            resume_sequence: None,
             request_position_handle: false,
         };
         let sub = source.subscribe(settings).await.unwrap();
@@ -997,7 +999,7 @@ mod tests {
         );
 
         // Verify sequences are still monotonic
-        assert_eq!(event3.sequence.unwrap(), 3);
+        assert_eq!(event3.sequence, 3);
     }
 
     // ========================================================================

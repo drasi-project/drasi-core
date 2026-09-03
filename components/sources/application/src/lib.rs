@@ -442,7 +442,7 @@ impl ApplicationSource {
             .ok_or_else(|| anyhow::anyhow!("Receiver already taken"))?;
 
         let source_name = self.base.id.clone();
-        let base_dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let reporter = self.base.status_handle();
         let source_id = self.base.id.clone();
 
@@ -480,7 +480,7 @@ impl ApplicationSource {
                     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                    let mut wrapper = SourceEventWrapper::with_profiling(
+                    let mut wrapper = SourceEventDraft::with_profiling(
                         source_name.clone(),
                         SourceEvent::Change(event.change),
                         chrono::Utc::now(),
@@ -489,18 +489,12 @@ impl ApplicationSource {
 
                     // Use pre-assigned WAL sequence from handle (WAL-before-ACK)
                     if let Some(seq) = event.wal_seq {
-                        wrapper.sequence = Some(seq);
+                        wrapper.supplied_sequence = Some(seq);
                         wrapper.source_position =
                             Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                     }
 
-                    if let Err(e) = SourceBase::dispatch_from_task(
-                        base_dispatchers.clone(),
-                        wrapper,
-                        &source_name,
-                    )
-                    .await
-                    {
+                    if let Err(e) = base.dispatch_event(wrapper).await {
                         debug!("Failed to dispatch change (no subscribers): {e}");
                     }
                 }
