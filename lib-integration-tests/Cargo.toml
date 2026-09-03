@@ -16,6 +16,8 @@ drasi-source-application.workspace = true
 drasi-reaction-application.workspace = true
 drasi-index-rocksdb = { workspace = true, features = ["plugin-descriptor"] }
 drasi-plugin-sdk.workspace = true
+drasi-state-store-redb.workspace = true
+drasi-wal-redb.workspace = true
 
 tokio = { version = "1.6", features = ["full"] }
 testcontainers = "0.27"
@@ -23,7 +25,9 @@ testcontainers-modules = { version = "0.15", features = ["postgres"] }
 tokio-postgres = "0.7"
 async-trait = "0.1"
 chrono = "0.4"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+bincode = "1.0"
 anyhow = "1.0"
 tracing = "0.1"
 serial_test = "3"
