@@ -170,7 +170,7 @@ impl Source for HyperliquidSource {
         *self.stream_state.funding_state.write().await = funding_state;
 
         let source_id = self.base.id.clone();
-        let dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let stream_state = self.stream_state.clone();
         let shutdown_rx = self.shutdown_rx.clone();
         let start_timestamp = config.initial_cursor.start_timestamp();
@@ -191,7 +191,7 @@ impl Source for HyperliquidSource {
                     ws_url,
                     config: config.clone(),
                     coins,
-                    dispatchers: dispatchers.clone(),
+                    base: base.clone_shared(),
                     state_store: state_store.clone(),
                     stream_state: stream_state.clone(),
                     shutdown_rx: shutdown_rx.clone(),
@@ -204,7 +204,7 @@ impl Source for HyperliquidSource {
                         source_id: source_id.clone(),
                         rest_client,
                         config: config.clone(),
-                        dispatchers: dispatchers.clone(),
+                        base: base.clone_shared(),
                         state_store: state_store.clone(),
                         stream_state: stream_state.clone(),
                         shutdown_rx: shutdown_rx.clone(),

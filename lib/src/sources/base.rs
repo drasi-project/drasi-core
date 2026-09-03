@@ -174,7 +174,17 @@ pub struct SourceBase {
     /// This is a vector of dispatchers that send source events to all registered
     /// subscribers (queries). When a source produces a change event, it broadcasts
     /// it to all dispatchers in this vector.
-    pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    ///
+    /// Intentionally `pub(crate)`: source authors must **not** dispatch through
+    /// the raw dispatcher list, because that bypasses the framework's monotonic
+    /// sequence stamping and `source_position` validation. Dispatch via
+    /// [`dispatch_event`](Self::dispatch_event),
+    /// [`dispatch_events_batch`](Self::dispatch_events_batch), or
+    /// [`dispatch_source_change`](Self::dispatch_source_change) — and use
+    /// [`clone_shared`](Self::clone_shared) to move an owned `SourceBase` into a
+    /// background task.
+    pub(crate) dispatchers:
+        Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<SourceRuntimeContext>>>,
     /// State store provider (extracted from context for convenience)
@@ -1577,57 +1587,6 @@ impl SourceBase {
         self.try_test_subscribe()
             .await
             .expect("Failed to create test subscription receiver")
-    }
-
-    /// Helper function to dispatch events from spawned tasks (unstamped).
-    ///
-    /// This is a static helper that can be used from spawned async tasks that don't
-    /// have access to `self`. It manually iterates through dispatchers and sends the event.
-    ///
-    /// **Important**: This method does NOT stamp a monotonic sequence number and
-    /// does NOT validate `source_position` size. Events dispatched through this
-    /// method will not be checkpoint-tracked. This is acceptable for sources that
-    /// do not support replay (`supports_replay() == false`).
-    ///
-    /// # For recoverable/checkpointed sources
-    ///
-    /// Use [`clone_shared()`](Self::clone_shared) to obtain a `SourceBase` that
-    /// can be moved into spawned tasks, then call [`dispatch_event()`](Self::dispatch_event)
-    /// which stamps sequences and validates positions:
-    ///
-    /// ```ignore
-    /// let base = self.base.clone_shared();
-    /// tokio::spawn(async move {
-    ///     base.dispatch_event(wrapper).await.ok();
-    /// });
-    /// ```
-    ///
-    /// # Arguments
-    /// * `dispatchers` - Arc to the dispatchers list (from `self.base.dispatchers.clone()`)
-    /// * `wrapper` - The event wrapper to dispatch
-    /// * `source_id` - Source ID for logging
-    pub async fn dispatch_from_task(
-        dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
-        wrapper: SourceEventWrapper,
-        source_id: &str,
-    ) -> Result<()> {
-        debug!(
-            "[{}] Dispatching event from task: {:?}",
-            source_id, &wrapper
-        );
-
-        // Arc-wrap for zero-copy sharing across dispatchers
-        let arc_wrapper = Arc::new(wrapper);
-
-        // Send to all dispatchers
-        let dispatchers_guard = dispatchers.read().await;
-        for dispatcher in dispatchers_guard.iter() {
-            if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
-                debug!("[{source_id}] Failed to dispatch event from task: {e}");
-            }
-        }
-
-        Ok(())
     }
 
     /// Handle common stop functionality

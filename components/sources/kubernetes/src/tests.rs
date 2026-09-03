@@ -360,3 +360,60 @@ fn test_crd_fallback_to_json_strings_for_unknown_kind() {
     assert!(matches!(props.get("spec"), Some(ElementValue::String(_))));
     assert!(matches!(props.get("status"), Some(ElementValue::String(_))));
 }
+
+/// Every change routed through the Kubernetes watch dispatch path
+/// (`dispatch_changes` → `SourceBase::dispatch_event`) must carry a
+/// framework-assigned, strictly increasing `sequence` (issue #828). The source
+/// has no durability, so before migrating from the unstamped `dispatch_from_task`
+/// helper these events had `sequence = None`. This drives the dispatch helper
+/// directly with fabricated apply (insert) and delete changes — no live K8s
+/// watch stream needed — and asserts the emitted sequences are monotonic.
+#[tokio::test]
+async fn test_dispatch_changes_stamps_monotonic_sequence() {
+    use drasi_lib::channels::SourceEvent;
+    use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+
+    let source_id = "k8s-seq-source";
+    let cfg = sample_config();
+    let base = SourceBase::new(SourceBaseParams::new(source_id.to_string())).unwrap();
+
+    // Subscribe before dispatching so we receive the emitted events.
+    let mut rx = base.test_subscribe().await;
+
+    // Build a realistic apply (insert) followed by a delete for the same object.
+    let pod = pod_obj();
+    let mut changes = build_insert_changes(source_id, "Pod", &pod, &cfg).unwrap();
+    changes.extend(build_delete_changes(source_id, "Pod", &pod, &cfg).unwrap());
+    let expected_count = changes.len();
+    assert!(
+        expected_count >= 2,
+        "expected at least an insert and a delete change"
+    );
+
+    crate::source::dispatch_changes(source_id, &base, changes)
+        .await
+        .unwrap();
+
+    // Collect every dispatched change event and assert monotonic sequences.
+    let mut sequences = Vec::new();
+    while sequences.len() < expected_count {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("timed out waiting for dispatched event")
+            .expect("event stream closed unexpectedly");
+        if matches!(event.event, SourceEvent::Change(_)) {
+            sequences.push(
+                event
+                    .sequence
+                    .expect("dispatched change must carry a framework sequence"),
+            );
+        }
+    }
+
+    for pair in sequences.windows(2) {
+        assert!(
+            pair[1] > pair[0],
+            "sequences must be strictly increasing, got {sequences:?}"
+        );
+    }
+}
