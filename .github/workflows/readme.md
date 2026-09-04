@@ -193,8 +193,8 @@ This runs automatically during the release process - no manual invocation needed
 - **Trigger**: Automatically triggered on pull requests to the `main`, `feature/*`, or `release/*` branches and pushes to the `main` branch.
   - Note: Performance tests are skipped for draft pull requests.
 
-### [test-docker.yml](test-docker.yml)
-- **Purpose**: Runs `#[ignore]`d integration and end-to-end tests that require Docker/testcontainers (Postgres, MySQL, MSSQL, Kafka, Neo4j, Kubernetes, Oracle, OTel, Cloudflare Radar, Loki, RabbitMQ, SQS, Azure Storage, Garnet). Live-network tests that need credentials are not included.
+### [test-integration.yml](test-integration.yml)
+- **Purpose**: Runs `#[ignore]`d plugin integration and end-to-end tests (Postgres, MySQL, MSSQL, Kafka, Neo4j, Kubernetes, Oracle, OTel, Cloudflare Radar, Loki, RabbitMQ, SQS, Azure Storage, Garnet). Live-network tests that need credentials are not included.
 - **Trigger**:
   - Pull requests to `main`, `feature/*`, `feature-lib`, or `release/*` (non-draft).
   - Manual `workflow_dispatch`.

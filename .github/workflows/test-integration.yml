@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Runs #[ignore]d integration/e2e tests that need Docker/testcontainers.
+# Runs #[ignore]d plugin integration/e2e tests that need external services.
 # Default `cargo test` (test.yml) skips these. Live-network / credential
 # ignored tests are not included.
 
-name: Docker Integration Tests
+name: Integration Tests
 
 on:
   workflow_dispatch:
@@ -37,7 +37,7 @@ permissions:
   contents: read
 
 jobs:
-  docker-integration:
+  integration:
     name: ${{ matrix.name }}
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
@@ -100,7 +100,7 @@ jobs:
             command: |
               cargo test -p drasi-source-cloudflare-radar --test integration_test -- --ignored --nocapture --test-threads=1
 
-          - name: Container reactions
+          - name: Reactions
             timeout: 60
             extra: none
             command: |
@@ -169,10 +169,10 @@ jobs:
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-docker-int-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-integration-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-docker-int-${{ matrix.name }}-
+            ${{ runner.os }}-cargo-integration-${{ matrix.name }}-
             ${{ runner.os }}-cargo-build-
 
-      - name: Run ignored Docker integration tests
+      - name: Run ignored integration tests
         run: ${{ matrix.command }}
