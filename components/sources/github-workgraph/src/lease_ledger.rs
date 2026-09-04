@@ -11,12 +11,12 @@ use crate::protocol::{
     derive_workgraph_id, derive_workgraph_response_body_digest, is_typed_workgraph_id,
     LifecycleArtifactDocument, PreparedProjectionCommit, ProjectionInput, RootIssueCommentDocument,
     RootIssueDocument, TaskDocument, TaskResponseDocument, TaskResponseRole,
-    WorkGraphAllocatorProjection, WorkGraphAssignmentBinding, WorkGraphDispatchBinding,
-    WorkGraphProjector, WorkGraphRouteBinding, MAX_ROOT_ISSUE_COMMENT_BODY_BYTES,
-    MAX_TASK_RESPONSE_BODY_BYTES, MAX_WORKGRAPH_ATTEMPTS, WORKGRAPH_ASSIGNMENT_MARKER,
-    WORKGRAPH_DISPATCH_MARKER, WORKGRAPH_EVALUATION_ACCEPTED, WORKGRAPH_EVALUATION_MARKER,
-    WORKGRAPH_EVALUATION_REJECTED, WORKGRAPH_RESULT_MARKER, WORKGRAPH_ROUTE_MARKER,
-    WORKGRAPH_ROUTE_REWORK,
+    WorkGraphAllocatorProjection, WorkGraphAssignmentBinding, WorkGraphAssignmentRequestBinding,
+    WorkGraphDispatchBinding, WorkGraphProjector, WorkGraphRouteBinding,
+    MAX_ROOT_ISSUE_COMMENT_BODY_BYTES, MAX_TASK_RESPONSE_BODY_BYTES, MAX_WORKGRAPH_ATTEMPTS,
+    WORKGRAPH_ASSIGNMENT_MARKER, WORKGRAPH_ASSIGNMENT_REQUEST_MARKER, WORKGRAPH_DISPATCH_MARKER,
+    WORKGRAPH_EVALUATION_ACCEPTED, WORKGRAPH_EVALUATION_MARKER, WORKGRAPH_EVALUATION_REJECTED,
+    WORKGRAPH_RESULT_MARKER, WORKGRAPH_ROUTE_MARKER, WORKGRAPH_ROUTE_REWORK,
 };
 use anyhow::{Context, Result as AnyResult};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -123,6 +123,8 @@ pub(crate) enum TaskResponseSubject {
         dispatch_id: String,
         lease_id: String,
     },
+    /// The actor is the exact assigner an unanswered AssignmentRequest named.
+    Assigner { request_id: String },
     /// No worker lease is held on the task and a Result is awaiting its
     /// Evaluation.
     Evaluator { result_id: String },
@@ -170,6 +172,24 @@ impl WorkGraphPendingResult {
                 .as_ref()
                 .is_some_and(|github| github.database_id == author_database_id)
     }
+}
+
+/// One unanswered AssignmentRequest a task is currently holding open.
+///
+/// This is the assigner subject a natural response may answer. It carries the
+/// named assigner and the candidate set verbatim so the response can be bound
+/// to the exact question that was asked, and it is retired the moment a
+/// decision-bound Assignment names its request.
+///
+/// A request allocates nothing. It has no lease, no slot, no attempt, and no
+/// queue entry: the assigner is asked to decide, never to execute.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct WorkGraphPendingRequest {
+    source_key: String,
+    request_id: String,
+    assigner_id: String,
+    candidates: Vec<String>,
 }
 
 /// The identity a retracted task response keeps, so a delayed delivery is
@@ -371,6 +391,14 @@ pub struct AllocationState {
     /// a natural response can answer, and the identity that may not answer it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workgraph_pending_results: BTreeMap<String, WorkGraphPendingResult>,
+    /// The AssignmentRequest each task Issue is currently awaiting a decision
+    /// for. This is the open assigner subject a natural response can answer.
+    ///
+    /// Defaulted and omitted when empty, so a checkpoint written before
+    /// first-class assigners existed restores unchanged and one written
+    /// without any pending request stays byte-identical to what it was.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workgraph_pending_requests: BTreeMap<String, WorkGraphPendingRequest>,
     /// Latest authoritative GitHub revision observed for a Root Issue or task Issue.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workgraph_issue_revisions: BTreeMap<String, i64>,
@@ -930,10 +958,17 @@ impl Allocator {
     /// A worker answers the Dispatch of the lease it holds, matched against
     /// the actor metadata that lease was *acquired* with. That snapshot is
     /// what lets an in-flight lease survive a catalog rename or a node ID
-    /// re-encoding. Everyone else answers a Result still awaiting its
-    /// Evaluation, matched against the *current* catalog, because an evaluator
-    /// holds no lease and so has no snapshot of its own. A task with neither
-    /// open subject has nothing for a human to respond to.
+    /// re-encoding. An assigner answers the AssignmentRequest that named it,
+    /// and only the one actor it named: the catalog must map that exact
+    /// `assignerId` to this GitHub account. Everyone else answers a Result
+    /// still awaiting its Evaluation, matched against the *current* catalog,
+    /// because an evaluator holds no lease and so has no snapshot of its own.
+    /// A task with no open subject has nothing for a human to respond to.
+    ///
+    /// The order is the order the questions were asked. A pending request is
+    /// retired by the Assignment that answers it, and a Result exists only
+    /// downstream of an Assignment, so an unanswered request is always the
+    /// later, still-open question when both are present.
     pub(crate) async fn workgraph_task_response_subject(
         &self,
         task_source_key: &str,
@@ -966,6 +1001,27 @@ impl Allocator {
                     lease_id: lease.lease_id.clone(),
                 },
             )));
+        }
+        if let Some(pending) = state.workgraph_pending_requests.get(task_source_key) {
+            // Exactly one actor was asked, so exactly one may answer. The
+            // catalog must currently map that `assignerId` to this GitHub
+            // account: a request never confers authority on anyone else, and
+            // a decision is not owed to a stale account either.
+            if state.agents.get(&pending.assigner_id).is_some_and(|agent| {
+                agent.configured
+                    && agent.kind == ActorKind::Human
+                    && agent
+                        .github
+                        .as_ref()
+                        .is_some_and(|github| github.database_id == author_database_id)
+            }) {
+                return Ok(Some((
+                    pending.assigner_id.clone(),
+                    TaskResponseSubject::Assigner {
+                        request_id: pending.request_id.clone(),
+                    },
+                )));
+            }
         }
         let Some(pending) = state.workgraph_pending_results.get(task_source_key) else {
             return Ok(None);
@@ -1452,6 +1508,52 @@ fn validate_workgraph_projection(
         assignments.len() == projection.assignments.len(),
         "WorkGraph allocator projection contains duplicate assignment source keys"
     );
+
+    // An AssignmentRequest is validated before the Assignments, because a
+    // decision-bound Assignment must name a request this same projection
+    // published. It is an action with no allocator authority: it is proven
+    // against its own signed artifact and its task binding, and nothing else
+    // in the allocator ever reads it.
+    let mut request_sources = BTreeSet::new();
+    let mut request_ids = BTreeSet::new();
+    let mut requested_tasks = BTreeSet::new();
+    for request in &projection.assignment_requests {
+        let document = artifacts
+            .get(&request.source_key)
+            .context("WorkGraph AssignmentRequest has no authenticated artifact")?;
+        let task = task_bindings
+            .get(request.task_source_key.as_str())
+            .context("WorkGraph AssignmentRequest has no accepted task binding")?;
+        anyhow::ensure!(
+            request_sources.insert(&request.source_key)
+                && request_ids.insert(&request.request_id)
+                // One task asks at most one open question at a time, so a
+                // second request on the same Issue is ambiguous rather than
+                // additive.
+                && requested_tasks.insert(&request.task_source_key)
+                && document.task_source_key == request.task_source_key
+                && document
+                    .body
+                    .starts_with(WORKGRAPH_ASSIGNMENT_REQUEST_MARKER)
+                && task.root_issue_id == request.root_issue_id
+                && task.workflow_run_id == request.workflow_run_id
+                && task.task_id == request.task_id
+                && valid_typed_workgraph_id(&request.request_id, "assignment-request")
+                && valid_workgraph_id(&request.assigner_id)
+                && !request.candidates.is_empty()
+                && request.candidates.len() <= MAX_WORKGRAPH_PERMITTED_EXECUTORS
+                && request
+                    .candidates
+                    .iter()
+                    .all(|candidate| valid_workgraph_id(candidate))
+                && request.candidates.windows(2).all(|pair| pair[0] < pair[1])
+                // Nobody hands work to themselves: the assigner decides among
+                // others or the request is not a decision at all.
+                && !request.candidates.contains(&request.assigner_id),
+            "WorkGraph allocator projection contains an invalid or duplicate AssignmentRequest"
+        );
+    }
+
     let mut assignment_ids = BTreeSet::new();
     for assignment in &projection.assignments {
         let document = artifacts
@@ -1481,6 +1583,10 @@ fn validate_workgraph_projection(
                     .len()
                     == assignment.permitted_executors.len(),
             "WorkGraph allocator projection contains an invalid or duplicate assignment"
+        );
+        anyhow::ensure!(
+            valid_assignment_decision(assignment, &projection.assignment_requests),
+            "WorkGraph allocator projection contains an incoherent assignment decision"
         );
     }
 
@@ -1766,6 +1872,7 @@ fn valid_task_response_subject(response: &TaskResponseDocument) -> bool {
     match response.role {
         TaskResponseRole::Worker => {
             response.result_id.is_none()
+                && response.request_id.is_none()
                 && response
                     .dispatch_id
                     .as_ref()
@@ -1775,15 +1882,66 @@ fn valid_task_response_subject(response: &TaskResponseDocument) -> bool {
                     .as_ref()
                     .is_some_and(|id| valid_typed_workgraph_id(id, "lease"))
         }
+        TaskResponseRole::Assigner => {
+            response.dispatch_id.is_none()
+                && response.lease_id.is_none()
+                && response.result_id.is_none()
+                && response
+                    .request_id
+                    .as_ref()
+                    .is_some_and(|id| valid_typed_workgraph_id(id, "assignment-request"))
+        }
         TaskResponseRole::Evaluator => {
             response.dispatch_id.is_none()
                 && response.lease_id.is_none()
+                && response.request_id.is_none()
                 && response
                     .result_id
                     .as_ref()
                     .is_some_and(|id| valid_typed_workgraph_id(id, "result"))
         }
     }
+}
+
+/// Whether an Assignment's optional decision provenance is coherent.
+///
+/// A legacy Assignment names no request, no response, and no assigner, and is
+/// admitted exactly as it always was. A decision-bound Assignment must name
+/// the request it answers *and* the assigner that answered it, that request
+/// must be one this projection published against the same task, the selected
+/// executor set must be the single candidate the request offered, and the
+/// assigner may never select itself. The human Response the decision was read
+/// from is optional: an agent assigner decides without a comment.
+fn valid_assignment_decision(
+    assignment: &WorkGraphAssignmentBinding,
+    requests: &[WorkGraphAssignmentRequestBinding],
+) -> bool {
+    let (Some(request_id), Some(assigner_id)) = (&assignment.request_id, &assignment.assigner_id)
+    else {
+        return assignment.request_id.is_none()
+            && assignment.assigner_id.is_none()
+            && assignment.response_id.is_none();
+    };
+    let Some(request) = requests
+        .iter()
+        .find(|request| request.request_id == *request_id)
+    else {
+        return false;
+    };
+    valid_typed_workgraph_id(request_id, "assignment-request")
+        && valid_workgraph_id(assigner_id)
+        && request.task_source_key == assignment.task_source_key
+        && request.task_id == assignment.task_id
+        && request.assigner_id == *assigner_id
+        && assignment.permitted_executors.len() == 1
+        && request
+            .candidates
+            .contains(&assignment.permitted_executors[0])
+        && assignment.permitted_executors[0] != *assigner_id
+        && assignment
+            .response_id
+            .as_ref()
+            .is_none_or(|response_id| valid_typed_workgraph_id(response_id, "response"))
 }
 
 fn valid_root_comment_admission_ids(comment: &RootIssueCommentDocument) -> bool {
@@ -1871,6 +2029,7 @@ impl Default for AllocationState {
             workgraph_task_response_fingerprints: BTreeMap::new(),
             workgraph_task_response_tombstones: BTreeMap::new(),
             workgraph_pending_results: BTreeMap::new(),
+            workgraph_pending_requests: BTreeMap::new(),
             workgraph_issue_revisions: BTreeMap::new(),
             workgraph_issue_state_fingerprints: BTreeMap::new(),
             workgraph_issue_database_ids: BTreeMap::new(),
@@ -2340,6 +2499,23 @@ impl AllocationState {
                             .producer_github
                             .as_ref()
                             .is_some_and(|github| github.database_id == 0)
+                })
+            || self
+                .workgraph_pending_requests
+                .iter()
+                .any(|(task_source_key, pending)| {
+                    !valid_workgraph_id(task_source_key)
+                        || !valid_workgraph_id(&pending.source_key)
+                        || !valid_typed_workgraph_id(&pending.request_id, "assignment-request")
+                        || !valid_workgraph_id(&pending.assigner_id)
+                        || pending.candidates.is_empty()
+                        || pending.candidates.len() > MAX_WORKGRAPH_PERMITTED_EXECUTORS
+                        || !pending
+                            .candidates
+                            .iter()
+                            .all(|candidate| valid_workgraph_id(candidate))
+                        || !pending.candidates.windows(2).all(|pair| pair[0] < pair[1])
+                        || pending.candidates.contains(&pending.assigner_id)
                 })
         {
             return Err("WorkGraph task response revision state is invalid".into());
@@ -2963,6 +3139,7 @@ impl AllocationState {
             self.backfill_workgraph_dispatch_id(&dispatch_source_key, &dispatch_id, &mut delta);
         }
         self.refresh_workgraph_pending_results(&projection);
+        self.refresh_workgraph_pending_requests(&projection);
 
         for route in &projection.routes {
             let result = projection
@@ -3716,6 +3893,37 @@ impl AllocationState {
     /// recorded producer is carried forward when the lease it came from is no
     /// longer retained, so expiry, release, and restart never erase who must
     /// not review this Result.
+    /// Recomputes the open assigner subject of every task.
+    ///
+    /// A request is open until the Assignment that answers it appears, so this
+    /// mirrors the pending-Result rule exactly: the projector republishes the
+    /// whole desired set on every batch, and a request a decision-bound
+    /// Assignment names is retired here. Nothing is allocated: the map only
+    /// records which question is still waiting on which task.
+    fn refresh_workgraph_pending_requests(&mut self, projection: &WorkGraphAllocatorProjection) {
+        let answered = projection
+            .assignments
+            .iter()
+            .filter_map(|assignment| assignment.request_id.as_deref())
+            .collect::<BTreeSet<_>>();
+        self.workgraph_pending_requests = projection
+            .assignment_requests
+            .iter()
+            .filter(|request| !answered.contains(request.request_id.as_str()))
+            .map(|request| {
+                (
+                    request.task_source_key.clone(),
+                    WorkGraphPendingRequest {
+                        source_key: request.source_key.clone(),
+                        request_id: request.request_id.clone(),
+                        assigner_id: request.assigner_id.clone(),
+                        candidates: request.candidates.clone(),
+                    },
+                )
+            })
+            .collect();
+    }
+
     fn refresh_workgraph_pending_results(&mut self, projection: &WorkGraphAllocatorProjection) {
         let evaluated = projection
             .evaluations
@@ -4089,6 +4297,7 @@ mod tests {
                 root_issue_id: "root".to_string(),
                 workflow_run_id: test_id("workflow-run", "run"),
             }],
+            assignment_requests: Vec::new(),
             assignments: vec![WorkGraphAssignmentBinding {
                 source_key: "assignment-comment".to_string(),
                 task_source_key: "issue".to_string(),
@@ -4097,6 +4306,9 @@ mod tests {
                 permitted_executors: vec!["executor".to_string()],
                 root_issue_id: "root".to_string(),
                 workflow_run_id: test_id("workflow-run", "run"),
+                request_id: None,
+                response_id: None,
+                assigner_id: None,
             }],
             dispatches,
             results: Vec::new(),
@@ -4221,15 +4433,22 @@ mod tests {
         projection: &WorkGraphAllocatorProjection,
     ) -> BTreeMap<String, LifecycleArtifactDocument> {
         projection
-            .assignments
+            .assignment_requests
             .iter()
             .map(|binding| {
                 (
                     &binding.source_key,
                     &binding.task_source_key,
-                    WORKGRAPH_ASSIGNMENT_MARKER,
+                    WORKGRAPH_ASSIGNMENT_REQUEST_MARKER,
                 )
             })
+            .chain(projection.assignments.iter().map(|binding| {
+                (
+                    &binding.source_key,
+                    &binding.task_source_key,
+                    WORKGRAPH_ASSIGNMENT_MARKER,
+                )
+            }))
             .chain(projection.dispatches.iter().map(|binding| {
                 (
                     &binding.source_key,
@@ -4279,6 +4498,432 @@ mod tests {
             .iter()
             .map(|(source_key, artifact)| (source_key.clone(), artifact.updated_at_revision))
             .collect();
+    }
+
+    // ── First-class assigner: the AssignmentRequest action ────────────────
+
+    const TEST_ASSIGNER_ID: &str = "triage-lead";
+
+    fn test_request_id(seed: &str) -> String {
+        test_id("assignment-request", seed)
+    }
+
+    /// A projection carrying one open AssignmentRequest and nothing else: the
+    /// task has been asked who should do the work, and no answer exists yet.
+    fn request_projection(candidates: Vec<String>) -> WorkGraphAllocatorProjection {
+        let mut desired = projection(Vec::new());
+        desired.assignments.clear();
+        desired.assignment_requests = vec![WorkGraphAssignmentRequestBinding {
+            source_key: "request-comment".to_string(),
+            task_source_key: "issue".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
+            task_id: TEST_TASK_ID.to_string(),
+            request_id: test_request_id("request"),
+            assigner_id: TEST_ASSIGNER_ID.to_string(),
+            candidates,
+        }];
+        desired
+    }
+
+    /// The Assignment that answers a request: it narrows the task to the one
+    /// executor the assigner chose and names the whole decision.
+    fn decision_assignment(selected: &str) -> WorkGraphAssignmentBinding {
+        WorkGraphAssignmentBinding {
+            source_key: "assignment-comment".to_string(),
+            task_source_key: "issue".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: test_id("workflow-run", "run"),
+            task_id: TEST_TASK_ID.to_string(),
+            assignment_id: test_id("assignment", "assignment"),
+            permitted_executors: vec![selected.to_string()],
+            request_id: Some(test_request_id("request")),
+            response_id: Some(test_id("response", "response")),
+            assigner_id: Some(TEST_ASSIGNER_ID.to_string()),
+        }
+    }
+
+    /// An open request is a question, never authority: it opens the assigner
+    /// subject and touches no queue, slot, lease, or attempt.
+    #[test]
+    fn an_assignment_request_opens_a_subject_and_allocates_nothing() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("timestamp");
+        let mut state = AllocationState::default();
+        state.sync_agents(
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
+                    agent_id: "executor".to_string(),
+                    slots: 1,
+                    lease_duration: "PT1M".to_string(),
+                    lease_duration_seconds: 60,
+                }],
+            ),
+            now,
+        );
+        let documents = BTreeMap::from([("issue".to_string(), task_document(true))]);
+
+        let delta = state
+            .reconcile_workgraph(
+                request_projection(vec!["executor".to_string()]),
+                &documents,
+                1,
+                now,
+            )
+            .expect("reconcile the request");
+
+        assert_eq!(
+            state
+                .workgraph_pending_requests
+                .get("issue")
+                .map(|pending| (pending.request_id.as_str(), pending.assigner_id.as_str())),
+            Some((test_request_id("request").as_str(), TEST_ASSIGNER_ID))
+        );
+        // A request is lease-free. Nothing is queued, dispatched, held, or
+        // counted against the executor's capacity.
+        assert!(state.workgraph_assignments.is_empty());
+        assert!(state.workgraph_assignment_attempts.is_empty());
+        assert!(state.workgraph_active.is_empty());
+        assert!(state.workgraph_dispatched.is_empty());
+        assert!(delta.workgraph_started.is_empty());
+        let runtime = state.agent_runtime();
+        let executor = runtime.get("executor").expect("executor runtime");
+        assert_eq!(executor.active_lease_count, 0);
+        assert_eq!(executor.queue_depth, 0);
+        assert_eq!(executor.available_slot_count, 1);
+        state.validate().expect("state stays valid");
+    }
+
+    /// The decision retires the question, and only then does the work queue.
+    #[test]
+    fn the_decision_that_answers_a_request_retires_it_and_starts_the_work() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("timestamp");
+        let mut state = AllocationState::default();
+        state.sync_agents(
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
+                    agent_id: "executor".to_string(),
+                    slots: 1,
+                    lease_duration: "PT1M".to_string(),
+                    lease_duration_seconds: 60,
+                }],
+            ),
+            now,
+        );
+        let documents = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let candidates = vec!["executor".to_string(), "other-agent".to_string()];
+        state
+            .reconcile_workgraph(request_projection(candidates.clone()), &documents, 1, now)
+            .expect("reconcile the request");
+        assert!(state.workgraph_pending_requests.contains_key("issue"));
+
+        let mut decided = request_projection(candidates);
+        decided.assignments = vec![decision_assignment("executor")];
+        state
+            .reconcile_workgraph(decided.clone(), &documents, 2, now)
+            .expect("reconcile the decision");
+
+        // The answered request no longer holds a subject open, even though the
+        // projector still republishes the request it answers.
+        assert!(state.workgraph_pending_requests.is_empty());
+        // Only now is the work queued, and only to the chosen executor.
+        assert_eq!(
+            state
+                .workgraph_assignments
+                .get("assignment-comment")
+                .map(|assignment| assignment.permitted_executors.clone()),
+            Some(vec!["executor".to_string()])
+        );
+        state.validate().expect("state stays valid");
+
+        // A projector that stops publishing the request drops the subject too,
+        // exactly as a retracted pending Result does.
+        state
+            .reconcile_workgraph(projection(Vec::new()), &documents, 3, now)
+            .expect("reconcile without the request");
+        assert!(state.workgraph_pending_requests.is_empty());
+    }
+
+    #[test]
+    fn an_assignment_request_binding_is_proven_against_its_signed_artifact() {
+        let valid = request_projection(vec!["executor".to_string(), "other-agent".to_string()]);
+        let documents = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let artifacts = lifecycle_artifacts_for_projection(&valid);
+        validate_workgraph_projection(&valid, &documents, &artifacts).expect("valid request");
+
+        // A request with no authenticated artifact is not evidence at all.
+        assert!(
+            validate_workgraph_projection(&valid, &documents, &BTreeMap::new()).is_err(),
+            "an unsigned request must be refused"
+        );
+
+        // An artifact carrying some *other* marker cannot stand in for one.
+        for marker in [
+            WORKGRAPH_ASSIGNMENT_MARKER,
+            WORKGRAPH_DISPATCH_MARKER,
+            WORKGRAPH_RESULT_MARKER,
+            "WorkGraphTaskAssignmentRequest/v2\n",
+        ] {
+            let mut spoofed = artifacts.clone();
+            spoofed
+                .get_mut("request-comment")
+                .expect("request artifact")
+                .body = marker.to_string();
+            assert!(
+                validate_workgraph_projection(&valid, &documents, &spoofed).is_err(),
+                "{marker} must not pass as an AssignmentRequest"
+            );
+        }
+
+        // Identity, shape, and separation of duties are all enforced.
+        let mutations: [(&str, fn(&mut WorkGraphAssignmentRequestBinding)); 8] = [
+            ("a non-canonical requestId", |request| {
+                request.request_id = test_id("assignment", "request");
+            }),
+            ("a mismatched taskId", |request| {
+                request.task_id = TEST_TASK_2_ID.to_string();
+            }),
+            ("a mismatched run", |request| {
+                request.workflow_run_id = test_id("workflow-run", "other-run");
+            }),
+            ("an empty candidate set", |request| {
+                request.candidates.clear();
+            }),
+            ("unsorted candidates", |request| {
+                request.candidates = vec!["other-agent".to_string(), "executor".to_string()];
+            }),
+            ("duplicate candidates", |request| {
+                request.candidates = vec!["executor".to_string(), "executor".to_string()];
+            }),
+            ("a self-dealing assigner", |request| {
+                request.assigner_id = "executor".to_string();
+            }),
+            ("a blank assigner", |request| {
+                request.assigner_id = String::new();
+            }),
+        ];
+        for (reason, mutate) in mutations {
+            let mut broken = valid.clone();
+            mutate(&mut broken.assignment_requests[0]);
+            assert!(
+                validate_workgraph_projection(&broken, &documents, &artifacts).is_err(),
+                "{reason} must be refused"
+            );
+        }
+
+        // One task asks one question at a time.
+        let mut twice = valid.clone();
+        let mut second = twice.assignment_requests[0].clone();
+        second.source_key = "request-comment-2".to_string();
+        second.request_id = test_request_id("request-2");
+        twice.assignment_requests.push(second);
+        let mut both = artifacts.clone();
+        both.insert(
+            "request-comment-2".to_string(),
+            LifecycleArtifactDocument {
+                source_key: "request-comment-2".to_string(),
+                task_source_key: "issue".to_string(),
+                body: WORKGRAPH_ASSIGNMENT_REQUEST_MARKER.to_string(),
+                created_at_revision: 1,
+                updated_at_revision: 1,
+            },
+        );
+        assert!(validate_workgraph_projection(&twice, &documents, &both).is_err());
+    }
+
+    #[test]
+    fn an_assignment_decision_must_answer_a_request_it_was_actually_asked() {
+        let documents = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let candidates = vec!["executor".to_string(), "other-agent".to_string()];
+        let mut valid = request_projection(candidates);
+        valid.assignments = vec![decision_assignment("executor")];
+        let artifacts = lifecycle_artifacts_for_projection(&valid);
+        validate_workgraph_projection(&valid, &documents, &artifacts).expect("valid decision");
+
+        // A legacy Assignment, which names nothing, is untouched.
+        let mut legacy = valid.clone();
+        legacy.assignment_requests.clear();
+        legacy.assignments[0].request_id = None;
+        legacy.assignments[0].response_id = None;
+        legacy.assignments[0].assigner_id = None;
+        legacy.assignments[0].permitted_executors =
+            vec!["executor".to_string(), "other-agent".to_string()];
+        let legacy_artifacts = lifecycle_artifacts_for_projection(&legacy);
+        validate_workgraph_projection(&legacy, &documents, &legacy_artifacts)
+            .expect("a legacy assignment still validates");
+
+        // An agent assigner decides without a comment; the provenance is the
+        // only optional part of a decision.
+        let mut agent_decided = valid.clone();
+        agent_decided.assignments[0].response_id = None;
+        validate_workgraph_projection(&agent_decided, &documents, &artifacts)
+            .expect("an agent assigner decides without a Response");
+
+        let mutations: [(&str, fn(&mut WorkGraphAllocatorProjection)); 8] = [
+            ("a decision naming no request", |desired| {
+                desired.assignments[0].request_id = None;
+            }),
+            ("a decision naming no assigner", |desired| {
+                desired.assignments[0].assigner_id = None;
+            }),
+            ("a dangling Response on a legacy body", |desired| {
+                desired.assignments[0].request_id = None;
+                desired.assignments[0].assigner_id = None;
+            }),
+            ("a request that was never asked", |desired| {
+                desired.assignments[0].request_id = Some(test_request_id("never-asked"));
+            }),
+            ("an assigner the request never named", |desired| {
+                desired.assignments[0].assigner_id = Some("release-lead".to_string());
+            }),
+            ("a decision that decided nothing", |desired| {
+                desired.assignments[0].permitted_executors =
+                    vec!["executor".to_string(), "other-agent".to_string()];
+            }),
+            ("an executor the request never offered", |desired| {
+                desired.assignments[0].permitted_executors = vec!["stranger".to_string()];
+            }),
+            ("a non-canonical responseId", |desired| {
+                desired.assignments[0].response_id = Some(test_id("result", "response"));
+            }),
+        ];
+        for (reason, mutate) in mutations {
+            let mut broken = valid.clone();
+            mutate(&mut broken);
+            assert!(
+                validate_workgraph_projection(&broken, &documents, &artifacts).is_err(),
+                "{reason} must be refused"
+            );
+        }
+
+        // An assigner may never select itself out of its own candidate set.
+        let mut self_dealing = valid.clone();
+        self_dealing.assignment_requests[0]
+            .candidates
+            .push(TEST_ASSIGNER_ID.to_string());
+        self_dealing.assignments[0].permitted_executors = vec![TEST_ASSIGNER_ID.to_string()];
+        assert!(validate_workgraph_projection(&self_dealing, &documents, &artifacts).is_err());
+    }
+
+    #[test]
+    fn assigner_response_state_invariants_are_proven_before_any_map_is_read() {
+        let mut state = state_with_task_response();
+        let source_key = "IC_response".to_string();
+        let response = state
+            .workgraph_task_responses
+            .get_mut(&source_key)
+            .expect("seeded response");
+        response.role = TaskResponseRole::Assigner;
+        response.dispatch_id = None;
+        response.lease_id = None;
+        response.request_id = Some(test_request_id("request"));
+        state.workgraph_task_response_fingerprints.insert(
+            source_key.clone(),
+            task_response_fingerprint(&state.workgraph_task_responses[&source_key])
+                .expect("fingerprint"),
+        );
+        state.validate().expect("an assigner response is coherent");
+
+        // An assigner response that names no request, or names something that
+        // is not a request, binds nothing.
+        for broken in [
+            None,
+            Some(test_id("assignment", "request")),
+            Some(test_id("response", "request")),
+            Some(String::new()),
+        ] {
+            let mut invalid = state.clone();
+            invalid
+                .workgraph_task_responses
+                .get_mut(&source_key)
+                .expect("response")
+                .request_id = broken;
+            invalid.workgraph_task_response_fingerprints.insert(
+                source_key.clone(),
+                task_response_fingerprint(&invalid.workgraph_task_responses[&source_key])
+                    .expect("fingerprint"),
+            );
+            assert!(invalid.validate().is_err());
+        }
+
+        // An assigner never reaches another role's subject, and no other role
+        // may carry a request.
+        for reach in [
+            (|response: &mut TaskResponseDocument| {
+                response.lease_id = Some(test_id("lease", "lease"));
+            }) as fn(&mut TaskResponseDocument),
+            |response| response.dispatch_id = Some(test_id("dispatch", "dispatch")),
+            |response| response.result_id = Some(test_id("result", "result")),
+            |response| response.role = TaskResponseRole::Evaluator,
+        ] {
+            let mut invalid = state.clone();
+            reach(
+                invalid
+                    .workgraph_task_responses
+                    .get_mut(&source_key)
+                    .expect("response"),
+            );
+            invalid.workgraph_task_response_fingerprints.insert(
+                source_key.clone(),
+                task_response_fingerprint(&invalid.workgraph_task_responses[&source_key])
+                    .expect("fingerprint"),
+            );
+            assert!(invalid.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn a_pending_assignment_request_is_proven_before_it_opens_a_subject() {
+        let mut state = AllocationState::default();
+        let coherent = WorkGraphPendingRequest {
+            source_key: "request-comment".to_string(),
+            request_id: test_request_id("request"),
+            assigner_id: TEST_ASSIGNER_ID.to_string(),
+            candidates: vec!["executor".to_string(), "other-agent".to_string()],
+        };
+        state
+            .workgraph_pending_requests
+            .insert("issue".to_string(), coherent.clone());
+        state.validate().expect("a coherent pending request");
+
+        for mutate in [
+            (|pending: &mut WorkGraphPendingRequest| {
+                pending.request_id = test_id("assignment", "request");
+            }) as fn(&mut WorkGraphPendingRequest),
+            |pending| pending.assigner_id = String::new(),
+            |pending| pending.source_key = String::new(),
+            |pending| pending.candidates.clear(),
+            |pending| pending.candidates = vec!["other-agent".to_string(), "executor".to_string()],
+            |pending| pending.candidates = vec!["executor".to_string(), "executor".to_string()],
+            |pending| pending.candidates.push(TEST_ASSIGNER_ID.to_string()),
+        ] {
+            let mut invalid = state.clone();
+            let mut broken = coherent.clone();
+            mutate(&mut broken);
+            invalid
+                .workgraph_pending_requests
+                .insert("issue".to_string(), broken);
+            assert!(invalid.validate().is_err());
+        }
+    }
+
+    /// A checkpoint with no pending request is byte-identical to one written
+    /// before first-class assigners existed, and both restore.
+    #[test]
+    fn an_assigner_free_checkpoint_round_trips_unchanged() {
+        let state = AllocationState::default();
+        let encoded = serde_json::to_string(&state).expect("encode state");
+        assert!(!encoded.contains("workgraphPendingRequests"));
+        let restored: AllocationState = serde_json::from_str(&encoded).expect("decode state");
+        assert!(restored.workgraph_pending_requests.is_empty());
+        restored.validate().expect("restored state is valid");
     }
 
     fn authorize_task(state: &mut AllocationState, generation: u64) {
@@ -4354,6 +4999,7 @@ mod tests {
             role: TaskResponseRole::Worker,
             dispatch_id: Some(test_id("dispatch", "dispatch")),
             lease_id: Some(test_id("lease", "lease")),
+            request_id: None,
             result_id: None,
             author_database_id: 4_021_243,
             author_id: "MDQ6VXNlcjQwMjEyNDM=".to_string(),
@@ -6779,6 +7425,9 @@ mod tests {
             permitted_executors: vec!["executor".to_string()],
             root_issue_id: "root".to_string(),
             workflow_run_id: test_id("workflow-run", "run"),
+            request_id: None,
+            response_id: None,
+            assigner_id: None,
         });
         let delta = state
             .reconcile_workgraph(queued, &documents, 2, now + chrono::Duration::seconds(1))

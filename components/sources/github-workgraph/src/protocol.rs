@@ -20,6 +20,7 @@
 //!
 //! * `WorkGraphTask/v1` — task body marker
 //! * `WorkGraphTaskAssignment/v1` — lifecycle artifact markers
+//! * `WorkGraphTaskAssignmentRequest/v1`
 //! * `WorkGraphTaskFork/v1`
 //! * `WorkGraphTaskJoin/v1`
 //! * `WorkGraphTaskDispatch/v1`
@@ -45,6 +46,12 @@ pub const WORKGRAPH_TASK_MARKER: &str = "WorkGraphTask/v1\n";
 
 /// Comment body prefixes for WorkGraph lifecycle artifacts.
 pub const WORKGRAPH_ASSIGNMENT_MARKER: &str = "WorkGraphTaskAssignment/v1\n";
+/// The action that puts a candidate set in front of one named assigner.
+///
+/// It is a distinct marker, not a longer spelling of the Assignment marker:
+/// `WorkGraphTaskAssignment/v1\n` and `WorkGraphTaskAssignmentRequest/v1\n`
+/// diverge before either terminates, so neither can ever prefix the other.
+pub const WORKGRAPH_ASSIGNMENT_REQUEST_MARKER: &str = "WorkGraphTaskAssignmentRequest/v1\n";
 pub const WORKGRAPH_FORK_MARKER: &str = "WorkGraphTaskFork/v1\n";
 pub const WORKGRAPH_JOIN_MARKER: &str = "WorkGraphTaskJoin/v1\n";
 pub const WORKGRAPH_DISPATCH_MARKER: &str = "WorkGraphTaskDispatch/v1\n";
@@ -191,6 +198,7 @@ pub fn is_typed_workgraph_id(value: &str, id_type: &str) -> bool {
 /// Returns true if `body` begins with any WorkGraph lifecycle artifact marker.
 pub fn is_workgraph_lifecycle_marker(body: &str) -> bool {
     body.starts_with(WORKGRAPH_ASSIGNMENT_MARKER)
+        || body.starts_with(WORKGRAPH_ASSIGNMENT_REQUEST_MARKER)
         || body.starts_with(WORKGRAPH_FORK_MARKER)
         || body.starts_with(WORKGRAPH_JOIN_MARKER)
         || body.starts_with(WORKGRAPH_DISPATCH_MARKER)
@@ -202,10 +210,14 @@ pub fn is_workgraph_lifecycle_marker(body: &str) -> bool {
 
 /// Returns the lifecycle marker kind for trust classification.
 ///
-/// `Assignment`, `Fork`, `Join`, and `Dispatch` use assigner trust; `Result`,
-/// `Evaluation`, `Route`, and `Error` use reporter trust.
+/// `Assignment`, `AssignmentRequest`, `Fork`, `Join`, and `Dispatch` use
+/// assigner trust; `Result`, `Evaluation`, `Route`, and `Error` use reporter
+/// trust. An AssignmentRequest routes work to an actor exactly as an
+/// Assignment does — it just asks the question instead of answering it — so it
+/// belongs to the same trusted writer role.
 pub fn lifecycle_trust_role(body: &str) -> Option<LifecycleTrustRole> {
     if body.starts_with(WORKGRAPH_ASSIGNMENT_MARKER)
+        || body.starts_with(WORKGRAPH_ASSIGNMENT_REQUEST_MARKER)
         || body.starts_with(WORKGRAPH_FORK_MARKER)
         || body.starts_with(WORKGRAPH_JOIN_MARKER)
         || body.starts_with(WORKGRAPH_DISPATCH_MARKER)
@@ -225,7 +237,8 @@ pub fn lifecycle_trust_role(body: &str) -> Option<LifecycleTrustRole> {
 /// Trust role for lifecycle artifact author/editor checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleTrustRole {
-    /// Assignment/Fork/Join/Dispatch — requires assigner trust.
+    /// Assignment/AssignmentRequest/Fork/Join/Dispatch — requires assigner
+    /// trust.
     Assigner,
     /// Result/Evaluation/Route/Error — requires reporter trust.
     Reporter,
@@ -483,13 +496,15 @@ impl RootIssueCommentDocument {
 /// The lifecycle role a natural task response speaks in.
 ///
 /// A response always answers an open lifecycle subject: a human worker
-/// answers the Dispatch it holds a lease for, and a human evaluator answers a
-/// Result that is still awaiting its Evaluation. A comment with no open
-/// subject is not a response at all.
+/// answers the Dispatch it holds a lease for, a human assigner answers the
+/// AssignmentRequest that named it, and a human evaluator answers a Result
+/// that is still awaiting its Evaluation. A comment with no open subject is
+/// not a response at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TaskResponseRole {
     Worker,
+    Assigner,
     Evaluator,
 }
 
@@ -497,6 +512,7 @@ impl TaskResponseRole {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Worker => "worker",
+            Self::Assigner => "assigner",
             Self::Evaluator => "evaluator",
         }
     }
@@ -511,6 +527,11 @@ impl TaskResponseRole {
 /// binds the comment to the exact task identity and open lifecycle subject it
 /// answers, and fences it by revision. Core never interprets the body: what
 /// the human meant is the Reaction's call.
+///
+/// The open subject also decides which identity may speak: a worker is matched
+/// against the metadata its lease was acquired with, an assigner against the
+/// exact actor its AssignmentRequest named, and an evaluator against the
+/// current catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskResponseDocument {
@@ -537,6 +558,13 @@ pub struct TaskResponseDocument {
     /// [`Self::role`] is [`TaskResponseRole::Evaluator`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_id: Option<String>,
+    /// The AssignmentRequest an assigner response answers. Present exactly
+    /// when [`Self::role`] is [`TaskResponseRole::Assigner`].
+    ///
+    /// Defaulted and omitted when absent so every response persisted before
+    /// assigner ingress existed still loads and still serializes byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     pub author_database_id: u64,
     pub author_id: String,
     pub author_login: String,
@@ -619,11 +647,42 @@ pub enum ProjectionInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkGraphAllocatorProjection {
     pub tasks: Vec<WorkGraphTaskBinding>,
+    /// Candidate sets currently in front of a named assigner.
+    ///
+    /// Defaulted so a projector written before first-class assigners existed
+    /// still produces an identical projection: no requests, no assigner
+    /// subject, and no change to any other binding.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignment_requests: Vec<WorkGraphAssignmentRequestBinding>,
     pub assignments: Vec<WorkGraphAssignmentBinding>,
     pub dispatches: Vec<WorkGraphDispatchBinding>,
     pub results: Vec<WorkGraphResultBinding>,
     pub evaluations: Vec<WorkGraphEvaluateBinding>,
     pub routes: Vec<WorkGraphRouteBinding>,
+}
+
+/// Identity-bearing `WorkGraphTaskAssignmentRequest/v1` representation: one
+/// task's candidate set put in front of exactly one named assigner.
+///
+/// A request is an *action*, not authority. It allocates nothing: no lease, no
+/// slot, no queue entry, no attempt. Its only allocator effect is to open the
+/// assigner subject a human may answer with a natural response, which the
+/// Assignment that follows retires. Core does not parse the request body; the
+/// trusted projector supplies these canonical fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkGraphAssignmentRequestBinding {
+    pub source_key: String,
+    pub task_source_key: String,
+    pub root_issue_id: String,
+    pub workflow_run_id: String,
+    pub task_id: String,
+    /// Canonical `assignment-request` typed ID.
+    pub request_id: String,
+    /// The single actor asked to decide. It is never one of the candidates.
+    pub assigner_id: String,
+    /// The executors the assigner may choose from, in canonical sorted order.
+    pub candidates: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -646,6 +705,23 @@ pub struct WorkGraphAssignmentBinding {
     pub task_id: String,
     pub assignment_id: String,
     pub permitted_executors: Vec<String>,
+    /// The AssignmentRequest this Assignment answers, when it is
+    /// decision-bound.
+    ///
+    /// A legacy Assignment names no request and is unchanged: absent here, and
+    /// omitted from the wire entirely. A decision-bound Assignment names the
+    /// request it closes, which is what retires that request's open assigner
+    /// subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// The normalized assigner Response the decision was read from, when the
+    /// assigner was a human. Absent for an agent assigner, which decides
+    /// without a comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
+    /// The actor that decided. Present exactly when [`Self::request_id`] is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigner_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -870,6 +946,7 @@ mod marker_tests {
     fn fork_and_join_are_recognized_lifecycle_markers() {
         for marker in [
             WORKGRAPH_ASSIGNMENT_MARKER,
+            WORKGRAPH_ASSIGNMENT_REQUEST_MARKER,
             WORKGRAPH_FORK_MARKER,
             WORKGRAPH_JOIN_MARKER,
             WORKGRAPH_DISPATCH_MARKER,
@@ -889,6 +966,95 @@ mod marker_tests {
         assert!(!is_workgraph_lifecycle_marker(
             "WorkGraphTaskJoins/v1\nbody"
         ));
+    }
+
+    /// The AssignmentRequest marker is its own exact spelling, and neither it
+    /// nor the Assignment marker can be read as the other.
+    #[test]
+    fn the_assignment_request_marker_is_exact_and_never_aliases_an_assignment() {
+        assert_eq!(
+            WORKGRAPH_ASSIGNMENT_REQUEST_MARKER,
+            "WorkGraphTaskAssignmentRequest/v1\n"
+        );
+        let request = format!("{WORKGRAPH_ASSIGNMENT_REQUEST_MARKER}\n```json\n{{}}\n```\n");
+        let assignment = format!("{WORKGRAPH_ASSIGNMENT_MARKER}\n```json\n{{}}\n```\n");
+        assert!(!request.starts_with(WORKGRAPH_ASSIGNMENT_MARKER));
+        assert!(!assignment.starts_with(WORKGRAPH_ASSIGNMENT_REQUEST_MARKER));
+        // Near-miss spellings a spoofed body would reach for are not markers.
+        for spoof in [
+            "WorkGraphTaskAssignmentRequest/v2\nbody",
+            "WorkGraphTaskAssignmentRequests/v1\nbody",
+            "WorkGraphTaskAssignmentRequest/v1 \nbody",
+            "WorkGraphTaskAssignmentRequest\nbody",
+            " WorkGraphTaskAssignmentRequest/v1\nbody",
+            "workgraphtaskassignmentrequest/v1\nbody",
+        ] {
+            assert!(!is_workgraph_lifecycle_marker(spoof), "{spoof}");
+            assert_eq!(lifecycle_trust_role(spoof), None, "{spoof}");
+        }
+    }
+
+    #[test]
+    fn an_assignment_request_requires_the_same_trusted_writer_as_an_assignment() {
+        assert_eq!(
+            lifecycle_trust_role(&format!("{WORKGRAPH_ASSIGNMENT_REQUEST_MARKER}body")),
+            Some(LifecycleTrustRole::Assigner)
+        );
+        assert_eq!(
+            lifecycle_trust_role(&format!("{WORKGRAPH_ASSIGNMENT_MARKER}body")),
+            lifecycle_trust_role(&format!("{WORKGRAPH_ASSIGNMENT_REQUEST_MARKER}body"))
+        );
+    }
+
+    /// A human assigner speaks in its own role, spelled exactly as the kernel
+    /// writes it on a normalized Response.
+    #[test]
+    fn the_assigner_response_role_has_the_kernels_exact_spelling() {
+        assert_eq!(TaskResponseRole::Assigner.as_str(), "assigner");
+        assert_eq!(
+            serde_json::to_value(TaskResponseRole::Assigner).expect("serialize role"),
+            serde_json::Value::String("assigner".to_string())
+        );
+        // The roles that existed before are untouched.
+        assert_eq!(TaskResponseRole::Worker.as_str(), "worker");
+        assert_eq!(TaskResponseRole::Evaluator.as_str(), "evaluator");
+    }
+
+    /// A projection and an Assignment written before first-class assigners
+    /// existed serialize exactly as they always did.
+    #[test]
+    fn assigner_fields_never_reach_a_projection_that_did_not_opt_into_them() {
+        let legacy = WorkGraphAssignmentBinding {
+            source_key: "IC_assignment".to_string(),
+            task_source_key: "I_task".to_string(),
+            root_issue_id: "root".to_string(),
+            workflow_run_id: derive_workgraph_id("workflow-run", &["run"]),
+            task_id: derive_workgraph_id("task", &["task"]),
+            assignment_id: derive_workgraph_id("assignment", &["assignment"]),
+            permitted_executors: vec!["build-agent".to_string()],
+            request_id: None,
+            response_id: None,
+            assigner_id: None,
+        };
+        let projection = WorkGraphAllocatorProjection {
+            assignments: vec![legacy.clone()],
+            ..WorkGraphAllocatorProjection::default()
+        };
+        let body = serde_json::to_string(&projection).expect("serialize projection");
+        for absent in [
+            "assignmentRequests",
+            "requestId",
+            "responseId",
+            "assignerId",
+        ] {
+            assert!(!body.contains(absent), "{absent} must not appear: {body}");
+        }
+        // ...and a projector that never learned the new fields still parses.
+        let restored: WorkGraphAllocatorProjection =
+            serde_json::from_str(&body).expect("parse legacy projection");
+        assert_eq!(restored, projection);
+        assert!(restored.assignment_requests.is_empty());
+        assert_eq!(restored.assignments[0], legacy);
     }
 
     #[test]
