@@ -2232,17 +2232,20 @@ impl AllocationState {
     }
 
     fn fence_stale_workgraph_authorizations(&self, projection: &mut WorkGraphAllocatorProjection) {
+        projection.assignment_requests.retain(|request| {
+            self.artifact_is_current(&request.task_source_key, &request.source_key)
+        });
+        let request_ids = projection
+            .assignment_requests
+            .iter()
+            .map(|request| request.request_id.as_str())
+            .collect::<BTreeSet<_>>();
         projection.assignments.retain(|assignment| {
-            self.workgraph_authorizations
-                .get(&assignment.task_source_key)
-                .filter(|authorization| authorization.included)
-                .zip(
-                    self.workgraph_artifact_generations
-                        .get(&assignment.source_key),
-                )
-                .is_some_and(|(authorization, artifact_generation)| {
-                    authorization.generation == *artifact_generation
-                })
+            assignment
+                .request_id
+                .as_deref()
+                .is_none_or(|request_id| request_ids.contains(request_id))
+                && self.artifact_is_current(&assignment.task_source_key, &assignment.source_key)
         });
         let assignment_ids = projection
             .assignments
@@ -4924,6 +4927,137 @@ mod tests {
         let restored: AllocationState = serde_json::from_str(&encoded).expect("decode state");
         assert!(restored.workgraph_pending_requests.is_empty());
         restored.validate().expect("restored state is valid");
+    }
+
+    /// Excluding a task closes every question it had open. A request that
+    /// outlived exclusion would keep the assigner subject open on work the
+    /// graph no longer admits, so the fence retracts it with everything else.
+    #[test]
+    fn an_excluded_task_fences_its_open_assignment_request() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("timestamp");
+        let mut state = AllocationState::default();
+        state.sync_agents(
+            &AgentFile::from_agents(
+                1,
+                vec![AgentDefinition {
+                    agent_id: "executor".to_string(),
+                    slots: 1,
+                    lease_duration: "PT1M".to_string(),
+                    lease_duration_seconds: 60,
+                }],
+            ),
+            now,
+        );
+        let documents = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let desired = request_projection(vec!["executor".to_string(), "other-agent".to_string()]);
+        authorize_task(&mut state, 1);
+        state.workgraph_artifacts = lifecycle_artifacts_for_projection(&desired);
+        refresh_artifact_revisions(&mut state);
+        state.workgraph_artifact_generations = state
+            .workgraph_artifacts
+            .keys()
+            .map(|source_key| (source_key.clone(), 1))
+            .collect();
+
+        // While the task is included the request is current, and the subject
+        // it opens is real.
+        let mut included = desired.clone();
+        state.fence_stale_workgraph_authorizations(&mut included);
+        assert_eq!(included.assignment_requests.len(), 1);
+        state
+            .reconcile_workgraph(included, &documents, 1, now)
+            .expect("reconcile the included request");
+        assert!(state.workgraph_pending_requests.contains_key("issue"));
+
+        // Excluding the task retracts the question along with it.
+        state
+            .workgraph_authorizations
+            .get_mut("issue")
+            .expect("authorization")
+            .included = false;
+        let mut excluded = desired;
+        state.fence_stale_workgraph_authorizations(&mut excluded);
+        assert!(
+            excluded.assignment_requests.is_empty(),
+            "an excluded task keeps no open assignment request"
+        );
+        state
+            .reconcile_workgraph(excluded, &documents, 2, now)
+            .expect("reconcile the exclusion");
+        assert!(
+            state.workgraph_pending_requests.is_empty(),
+            "an excluded task opens no assigner subject"
+        );
+        state.validate().expect("state stays valid");
+    }
+
+    /// A request written before an exclusion is not authority after the task is
+    /// re-included: the new generation fences it. The decision that claimed to
+    /// answer it falls with it, so no Assignment is ever left naming a request
+    /// the projection no longer carries.
+    #[test]
+    fn a_stale_generation_request_fences_the_decision_that_answered_it() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("timestamp");
+        let documents = BTreeMap::from([("issue".to_string(), task_document(true))]);
+        let mut desired =
+            request_projection(vec!["executor".to_string(), "other-agent".to_string()]);
+        desired.assignments = vec![decision_assignment("executor")];
+        let artifacts = lifecycle_artifacts_for_projection(&desired);
+        validate_workgraph_projection(&desired, &documents, &artifacts)
+            .expect("the pre-exclusion chain is coherent");
+
+        let mut state = AllocationState::default();
+        // The task was excluded and re-included, so the current generation is 2.
+        // Only the request predates the exclusion; the decision is current.
+        authorize_task(&mut state, 2);
+        state.workgraph_artifacts = artifacts;
+        refresh_artifact_revisions(&mut state);
+        state.workgraph_artifact_generations = BTreeMap::from([
+            ("request-comment".to_string(), 1),
+            ("assignment-comment".to_string(), 2),
+        ]);
+
+        state.fence_stale_workgraph_authorizations(&mut desired);
+        assert!(
+            desired.assignment_requests.is_empty(),
+            "a pre-exclusion request must not survive re-inclusion"
+        );
+        assert!(
+            desired.assignments.is_empty(),
+            "a decision never outlives the request it answered"
+        );
+        validate_workgraph_projection(
+            &desired,
+            &documents,
+            &lifecycle_artifacts_for_projection(&desired),
+        )
+        .expect("the fenced projection is still coherent");
+
+        state
+            .reconcile_workgraph(desired, &documents, 1, now)
+            .expect("reconcile the fenced projection");
+        assert!(
+            state.workgraph_pending_requests.is_empty(),
+            "a stale request opens no assigner subject"
+        );
+        assert!(state.workgraph_assignments.is_empty());
+        state.validate().expect("state stays valid");
+
+        // Fencing a request never reaches an Assignment that answered no
+        // request: legacy decisions survive on their own generation alone.
+        let mut legacy = projection(Vec::new());
+        state.workgraph_artifacts = lifecycle_artifacts_for_projection(&legacy);
+        refresh_artifact_revisions(&mut state);
+        state.workgraph_artifact_generations =
+            BTreeMap::from([("assignment-comment".to_string(), 2)]);
+        state.fence_stale_workgraph_authorizations(&mut legacy);
+        assert_eq!(legacy.assignments.len(), 1);
     }
 
     fn authorize_task(state: &mut AllocationState, generation: u64) {
