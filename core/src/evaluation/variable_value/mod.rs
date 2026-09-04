@@ -370,6 +370,15 @@ impl VariableValue {
             _ => self.hash(state),
         }
     }
+
+    pub fn eq_for_groupby(&self, other: &Self) -> bool {
+        match (self, other) {
+            (VariableValue::Element(left), VariableValue::Element(right)) => {
+                left.get_reference() == right.get_reference()
+            }
+            _ => self == other,
+        }
+    }
 }
 
 fn parse_index(s: &str) -> Option<usize> {
