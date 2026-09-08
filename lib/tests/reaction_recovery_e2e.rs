@@ -242,6 +242,175 @@ struct SnapshotRecordingReaction {
     snapshot_tx: Mutex<Option<oneshot::Sender<(u64, Vec<serde_json::Value>)>>>,
 }
 
+#[derive(Default)]
+struct ReplayControl {
+    fail_sequence: std::sync::atomic::AtomicU64,
+    block_sequence: std::sync::atomic::AtomicU64,
+    block_entered: Mutex<Option<oneshot::Sender<()>>>,
+    block_release: Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+impl ReplayControl {
+    fn fail_once(&self, sequence: u64) {
+        self.fail_sequence
+            .store(sequence, std::sync::atomic::Ordering::Release);
+    }
+
+    async fn block_once(&self, sequence: u64) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *self.block_entered.lock().await = Some(entered_tx);
+        *self.block_release.lock().await = Some(release_rx);
+        self.block_sequence
+            .store(sequence, std::sync::atomic::Ordering::Release);
+        (entered_rx, release_tx)
+    }
+}
+
+struct ControlledRecordingReaction {
+    base: ReactionBase,
+    tx: mpsc::UnboundedSender<QueryResult>,
+    control: Arc<ReplayControl>,
+    config_hash: Arc<std::sync::atomic::AtomicU64>,
+}
+
+fn controlled_recording_reaction(
+    id: &str,
+    query_id: &str,
+) -> (
+    ControlledRecordingReaction,
+    RecordingReceiver,
+    Arc<ReplayControl>,
+    Arc<std::sync::atomic::AtomicU64>,
+) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let control = Arc::new(ReplayControl::default());
+    let config_hash = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    (
+        ControlledRecordingReaction {
+            base: ReactionBase::new(
+                ReactionBaseParams::new(id, vec![query_id.to_string()])
+                    .with_recovery_policy(ReactionRecoveryPolicy::AutoSkipGap),
+            ),
+            tx,
+            control: control.clone(),
+            config_hash: config_hash.clone(),
+        },
+        RecordingReceiver { rx },
+        control,
+        config_hash,
+    )
+}
+
+#[async_trait]
+impl Reaction for ControlledRecordingReaction {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "controlled-recording"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        HashMap::new()
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.queries.clone()
+    }
+
+    async fn initialize(&self, context: ReactionRuntimeContext) {
+        self.base.initialize(context).await;
+    }
+
+    async fn start(&self) -> Result<()> {
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("Controlled reaction started".into()),
+            )
+            .await;
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.base
+            .set_status(
+                ComponentStatus::Stopped,
+                Some("Controlled reaction stopped".into()),
+            )
+            .await;
+        Ok(())
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+        let sequence = result.sequence;
+        if self
+            .control
+            .block_sequence
+            .compare_exchange(
+                sequence,
+                0,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            if let Some(entered) = self.control.block_entered.lock().await.take() {
+                let _ = entered.send(());
+            }
+            self.control
+                .block_release
+                .lock()
+                .await
+                .take()
+                .expect("configured replay release receiver")
+                .await
+                .map_err(|_| anyhow::anyhow!("replay release sender dropped"))?;
+        }
+        if self
+            .control
+            .fail_sequence
+            .compare_exchange(
+                sequence,
+                0,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            anyhow::bail!("injected retained replay failure at sequence {sequence}");
+        }
+
+        self.tx
+            .send(result)
+            .map_err(|_| anyhow::anyhow!("controlled recording receiver dropped"))?;
+        if sequence > 0 {
+            let checkpoint = ReactionCheckpoint {
+                sequence,
+                config_hash: self.config_hash.load(std::sync::atomic::Ordering::Acquire),
+            };
+            self.base
+                .write_checkpoint(&self.base.queries[0], &checkpoint)
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn is_durable(&self) -> bool {
+        true
+    }
+
+    fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
+        ReactionRecoveryPolicy::AutoSkipGap
+    }
+}
+
 impl SnapshotRecordingReaction {
     fn new(id: &str, query_id: &str) -> (Self, oneshot::Receiver<(u64, Vec<serde_json::Value>)>) {
         let (snapshot_tx, snapshot_rx) = oneshot::channel();
@@ -518,6 +687,18 @@ async fn persist_reaction_checkpoint(
     Ok(())
 }
 
+async fn read_reaction_checkpoint(
+    store: &dyn StateStoreProvider,
+    reaction_id: &str,
+    query_id: &str,
+) -> Result<Option<ReactionCheckpoint>> {
+    store
+        .get(reaction_id, &format!("checkpoint:{query_id}"))
+        .await?
+        .map(|bytes| bincode::deserialize(&bytes).map_err(anyhow::Error::from))
+        .transpose()
+}
+
 /// Wait for the reaction to finish stopping before trying to restart.
 async fn stop_reaction_and_wait(core: &DrasiLib, id: &str) -> Result<()> {
     core.stop_reaction(id).await?;
@@ -546,6 +727,26 @@ async fn wait_for_query_status(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     anyhow::bail!("Query {query_id} did not reach {expected:?} within timeout");
+}
+
+async fn wait_for_query_rows(core: &DrasiLib, query_id: &str, expected: usize) -> Result<()> {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if core
+                .get_query_results(query_id)
+                .await
+                .map_err(anyhow::Error::from)?
+                .len()
+                >= expected
+            {
+                return Ok::<(), anyhow::Error>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Query {query_id} did not reach {expected} rows"))??;
+    Ok(())
 }
 
 // ============================================================================
@@ -1073,7 +1274,8 @@ async fn test_reaction_restart_no_missed_events() -> Result<()> {
 
 /// Test 3: Outbox gap with AutoSkipGap — skips missed events, resumes live.
 #[tokio::test]
-async fn test_reaction_outbox_gap_auto_skip() -> Result<()> {
+async fn test_reaction_outbox_gap_auto_skip_replays_retained_suffix_and_orders_live() -> Result<()>
+{
     let (mock_source, handle) = MockSource::new("test-source")?;
 
     // Small outbox capacity so it overflows
@@ -1086,13 +1288,7 @@ async fn test_reaction_outbox_gap_auto_skip() -> Result<()> {
 
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
 
-    let (reaction, mut receiver) = recording_reaction(
-        "rec",
-        vec!["q1".into()],
-        ReactionRecoveryPolicy::AutoSkipGap,
-        true,
-        false,
-    );
+    let (reaction, mut receiver, control, config_hash) = controlled_recording_reaction("rec", "q1");
 
     let core = Arc::new(
         DrasiLib::builder()
@@ -1100,17 +1296,21 @@ async fn test_reaction_outbox_gap_auto_skip() -> Result<()> {
             .with_source(mock_source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_state_store_provider(state_store)
+            .with_state_store_provider(state_store.clone())
             .build()
             .await?,
     );
 
     core.start().await?;
+    config_hash.store(
+        drasi_lib::queries::compute_config_hash(&core.get_query_config("q1").await?),
+        std::sync::atomic::Ordering::Release,
+    );
 
     // Insert 1 row to establish checkpoint
     insert_person(&handle, "p1", "Alice", 30).await?;
-    let initial = receiver.wait_for_count(1, Duration::from_secs(5)).await;
-    assert_eq!(initial.len(), 1);
+    let (_, initial) = receiver.wait_for_live(Duration::from_secs(5)).await;
+    assert_eq!(initial.expect("initial controlled result").sequence, 1);
 
     // Stop reaction
     stop_reaction_and_wait(&core, "rec").await?;
@@ -1125,23 +1325,143 @@ async fn test_reaction_outbox_gap_auto_skip() -> Result<()> {
         )
         .await?;
     }
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_query_rows(&core, "q1", 6).await?;
 
-    // Restart — AutoSkipGap should jump to current sequence
-    core.start_reaction("rec").await?;
+    // Block the first retained replay (seq 5). A live seq 7 arrives while the
+    // reaction gate is still closed and must follow retained seqs 5 and 6.
+    let (replay_entered, replay_release) = control.block_once(5).await;
+    let start_core = core.clone();
+    let start = tokio::spawn(async move { start_core.start_reaction("rec").await });
+    replay_entered
+        .await
+        .expect("retained replay should reach sequence 5");
+    insert_person(&handle, "p-live", "LivePerson", 99).await?;
+    wait_for_query_rows(&core, "q1", 7).await?;
+    replay_release
+        .send(())
+        .expect("release retained replay sequence 5");
+    start
+        .await
+        .expect("reaction start task should join")
+        .expect("reaction catch-up should succeed");
 
-    // Drain any replayed events (should be minimal — gap was skipped)
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let after_restart = receiver.drain_available();
-    eprintln!(
-        "Events after AutoSkipGap restart: {} (gap events were skipped)",
-        after_restart.len()
+    let delivered = receiver.wait_for_count(3, Duration::from_secs(5)).await;
+    assert_eq!(
+        delivered
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        vec![5, 6, 7],
+        "missing prefix 2..=4 should be skipped while retained/live results stay ordered"
+    );
+    assert_eq!(
+        delivered
+            .iter()
+            .flat_map(|result| result.results.iter())
+            .filter_map(|diff| match diff {
+                ResultDiff::Add { data, .. } => data["name"].as_str(),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["Person-3", "Person-4", "LivePerson"]
+    );
+    assert!(receiver.drain_available().is_empty());
+    let final_checkpoint = read_reaction_checkpoint(state_store.as_ref(), "rec", "q1")
+        .await?
+        .expect("controlled reaction checkpoint");
+    assert_eq!(final_checkpoint.sequence, 7);
+
+    core.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_reaction_outbox_gap_auto_skip_resumes_first_failed_retained_entry() -> Result<()> {
+    let (mock_source, handle) = MockSource::new("test-source")?;
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .with_outbox_capacity(2)
+        .auto_start(true)
+        .build();
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let (reaction, mut receiver, control, config_hash) = controlled_recording_reaction("rec", "q1");
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("skip-gap-failure-test")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_state_store_provider(state_store.clone())
+            .build()
+            .await?,
+    );
+    core.start().await?;
+    config_hash.store(
+        drasi_lib::queries::compute_config_hash(&core.get_query_config("q1").await?),
+        std::sync::atomic::Ordering::Release,
+    );
+    insert_person(&handle, "p1", "Alice", 30).await?;
+    let (_, initial) = receiver.wait_for_live(Duration::from_secs(5)).await;
+    assert_eq!(initial.expect("initial controlled result").sequence, 1);
+    stop_reaction_and_wait(&core, "rec").await?;
+
+    for i in 0..5 {
+        insert_person(
+            &handle,
+            &format!("p{}", i + 10),
+            &format!("Person-{i}"),
+            20 + i,
+        )
+        .await?;
+    }
+    wait_for_query_rows(&core, "q1", 6).await?;
+    control.fail_once(5);
+    let error = core
+        .start_reaction("rec")
+        .await
+        .expect_err("first retained replay should fail");
+    assert!(error.to_string().contains("sequence 5"));
+    assert!(receiver.drain_available().is_empty());
+    assert_eq!(
+        read_reaction_checkpoint(state_store.as_ref(), "rec", "q1")
+            .await?
+            .expect("skipped-floor checkpoint")
+            .sequence,
+        4,
+        "failure at sequence 5 must leave the checkpoint at 4"
     );
 
-    // Verify live delivery works after skip
-    insert_person(&handle, "p-live", "LivePerson", 99).await?;
+    stop_reaction_and_wait(&core, "rec").await?;
+    core.start_reaction("rec").await?;
+    let replayed = receiver.wait_for_count(2, Duration::from_secs(5)).await;
+    assert_eq!(
+        replayed
+            .iter()
+            .map(|result| result.sequence)
+            .collect::<Vec<_>>(),
+        vec![5, 6]
+    );
+    assert!(receiver.drain_available().is_empty());
+    assert_eq!(
+        read_reaction_checkpoint(state_store.as_ref(), "rec", "q1")
+            .await?
+            .expect("retained replay checkpoint")
+            .sequence,
+        6
+    );
+
+    insert_person(&handle, "p-live", "LiveAfterRetry", 99).await?;
     let live = receiver.wait_for_count(1, Duration::from_secs(5)).await;
-    assert_eq!(live.len(), 1, "Should receive live event after gap skip");
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].sequence, 7);
+    assert_eq!(
+        read_reaction_checkpoint(state_store.as_ref(), "rec", "q1")
+            .await?
+            .expect("final live checkpoint")
+            .sequence,
+        7
+    );
 
     core.stop().await?;
     Ok(())

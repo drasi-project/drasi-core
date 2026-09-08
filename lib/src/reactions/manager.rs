@@ -655,21 +655,38 @@ impl ReactionManager {
 
                 Ok(cp)
             }
-            Err(FetchError::OutboxGap(_gap)) => {
+            Err(FetchError::OutboxGap(gap)) => {
                 info!(
                     "[{reaction_id}] Outbox gap for query '{query_id}' — applying recovery policy"
                 );
-                self.apply_recovery_policy(
-                    reaction_id,
-                    query_id,
-                    reaction,
-                    query,
-                    policy,
-                    state_store,
-                    bootstrap_queries,
-                    metrics,
-                )
-                .await
+                match policy {
+                    ReactionRecoveryPolicy::AutoSkipGap => {
+                        Self::replay_retained_outbox_after_gap(
+                            reaction_id,
+                            query_id,
+                            checkpoint,
+                            reaction,
+                            query,
+                            state_store,
+                            metrics,
+                            &gap,
+                        )
+                        .await
+                    }
+                    ReactionRecoveryPolicy::Strict | ReactionRecoveryPolicy::AutoReset => {
+                        self.apply_recovery_policy(
+                            reaction_id,
+                            query_id,
+                            reaction,
+                            query,
+                            policy,
+                            state_store,
+                            bootstrap_queries,
+                            metrics,
+                        )
+                        .await
+                    }
+                }
             }
             Err(FetchError::NotRunning { .. } | FetchError::TimedOut) => {
                 // Query not running — keep the existing checkpoint as-is.
@@ -682,6 +699,126 @@ impl ReactionManager {
                 Ok(checkpoint.clone())
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn replay_retained_outbox_after_gap(
+        reaction_id: &str,
+        query_id: &str,
+        checkpoint: &ReactionCheckpoint,
+        reaction: &Arc<dyn Reaction>,
+        query: &Arc<dyn Query>,
+        state_store: &Option<Arc<dyn StateStoreProvider>>,
+        metrics: &Arc<ReactionMetrics>,
+        gap: &crate::queries::OutboxGap,
+    ) -> Result<ReactionCheckpoint> {
+        let mut skipped_floor = gap
+            .earliest_available
+            .saturating_sub(1)
+            .max(checkpoint.sequence);
+        let mut current = ReactionCheckpoint {
+            sequence: skipped_floor,
+            config_hash: checkpoint.config_hash,
+        };
+        let mut previous_sequence = checkpoint.sequence;
+
+        let retained = loop {
+            Self::persist_reaction_checkpoint(
+                state_store,
+                reaction_id,
+                query_id,
+                previous_sequence,
+                &current,
+            )
+            .await?;
+            previous_sequence = current.sequence;
+
+            metrics.record_fetch_outbox();
+            match query.fetch_outbox(skipped_floor).await {
+                Ok(retained) => break retained,
+                Err(FetchError::OutboxGap(next_gap)) => {
+                    let next_floor = next_gap
+                        .earliest_available
+                        .saturating_sub(1)
+                        .max(current.sequence);
+                    anyhow::ensure!(
+                        next_floor > skipped_floor,
+                        "[{reaction_id}] query '{query_id}' returned a non-advancing \
+                             outbox gap at floor {skipped_floor}"
+                    );
+                    skipped_floor = next_floor;
+                    current.sequence = next_floor;
+                }
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "[{reaction_id}] failed to fetch retained outbox suffix for query \
+                             '{query_id}' after skipped floor {skipped_floor}: {error}"
+                    ));
+                }
+            }
+        };
+
+        let mut expected = skipped_floor.saturating_add(1);
+        for entry in retained.results {
+            anyhow::ensure!(
+                entry.sequence == expected,
+                "[{reaction_id}] retained outbox suffix for query '{query_id}' is not \
+                     contiguous: expected {expected}, got {}",
+                entry.sequence
+            );
+            reaction
+                .enqueue_query_result(entry.as_ref().clone())
+                .await
+                .with_context(|| {
+                    format!(
+                        "[{reaction_id}] failed to replay retained outbox entry for query \
+                             '{query_id}' at sequence {}",
+                        entry.sequence
+                    )
+                })?;
+            current.sequence = entry.sequence;
+            Self::persist_reaction_checkpoint(
+                state_store,
+                reaction_id,
+                query_id,
+                previous_sequence,
+                &current,
+            )
+            .await?;
+            previous_sequence = current.sequence;
+            expected = entry.sequence.saturating_add(1);
+        }
+        anyhow::ensure!(
+            current.sequence == retained.latest_sequence,
+            "[{reaction_id}] retained outbox replay for query '{query_id}' ended at {}, \
+                 expected latest {}",
+            current.sequence,
+            retained.latest_sequence
+        );
+
+        Ok(current)
+    }
+
+    async fn persist_reaction_checkpoint(
+        state_store: &Option<Arc<dyn StateStoreProvider>>,
+        reaction_id: &str,
+        query_id: &str,
+        previous_sequence: u64,
+        checkpoint: &ReactionCheckpoint,
+    ) -> Result<()> {
+        if checkpoint.sequence == previous_sequence {
+            return Ok(());
+        }
+        if let Some(store) = state_store.as_ref() {
+            crate::reactions::checkpoint::write_checkpoint(
+                store.as_ref(),
+                reaction_id,
+                query_id,
+                checkpoint,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Apply the recovery policy when a gap or hash mismatch is detected.
@@ -2237,6 +2374,71 @@ mod tests {
             0,
             "bootstrap() should not be called for AutoSkipGap"
         );
+    }
+
+    #[tokio::test]
+    async fn startup_auto_skip_gap_handles_empty_and_saturated_bounds() {
+        let empty_query = Arc::new(MockQuery::new(42, 0));
+        let empty_query_trait: Arc<dyn crate::queries::Query> = empty_query.clone();
+        let reaction: Arc<dyn Reaction> = Arc::new(MockReaction::new("r1", vec!["q1".into()]));
+        let checkpoint = ReactionCheckpoint {
+            sequence: 0,
+            config_hash: 42,
+        };
+        let metrics = Arc::new(ReactionMetrics::new());
+        let empty = ReactionManager::replay_retained_outbox_after_gap(
+            "r1",
+            "q1",
+            &checkpoint,
+            &reaction,
+            &empty_query_trait,
+            &None,
+            &metrics,
+            &crate::queries::OutboxGap {
+                requested: 0,
+                earliest_available: 0,
+                latest_sequence: 0,
+                config_hash: 42,
+            },
+        )
+        .await
+        .expect("empty outbox bounds should not underflow");
+        assert_eq!(empty.sequence, 0);
+
+        let saturated_query = Arc::new(MockQuery::new(42, u64::MAX));
+        *saturated_query.outbox_response.write().await = Ok(OutboxResponse {
+            results: vec![Arc::new(QueryResult::new(
+                "q1".to_string(),
+                u64::MAX,
+                chrono::Utc::now(),
+                Vec::new(),
+                HashMap::new(),
+            ))],
+            latest_sequence: u64::MAX,
+            config_hash: 42,
+        });
+        let saturated_query_trait: Arc<dyn crate::queries::Query> = saturated_query;
+        let saturated = ReactionManager::replay_retained_outbox_after_gap(
+            "r1",
+            "q1",
+            &ReactionCheckpoint {
+                sequence: u64::MAX - 2,
+                config_hash: 42,
+            },
+            &reaction,
+            &saturated_query_trait,
+            &None,
+            &metrics,
+            &crate::queries::OutboxGap {
+                requested: u64::MAX - 2,
+                earliest_available: u64::MAX,
+                latest_sequence: u64::MAX,
+                config_hash: 42,
+            },
+        )
+        .await
+        .expect("saturated outbox bounds should not overflow");
+        assert_eq!(saturated.sequence, u64::MAX);
     }
 
     #[tokio::test]
