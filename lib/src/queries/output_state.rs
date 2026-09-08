@@ -177,8 +177,14 @@ impl QueryOutputState {
 
     /// Reset all process-local output state after persistent state is cleared.
     pub(crate) fn reset(&mut self) {
+        self.reset_to_sequence(0);
+    }
+
+    /// Clear the result projection and outbox while preserving a monotonic
+    /// public output high-water across a destructive reset.
+    pub(crate) fn reset_to_sequence(&mut self, as_of_sequence: u64) {
         self.results.clear();
-        self.as_of_sequence = 0;
+        self.as_of_sequence = as_of_sequence;
         self.outbox.clear();
     }
 

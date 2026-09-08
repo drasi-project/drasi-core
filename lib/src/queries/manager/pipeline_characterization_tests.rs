@@ -15,9 +15,8 @@
 //! Characterization tests for the fixed Source -> Continuous Query -> Reaction pipeline.
 //!
 //! These tests intentionally pin the legacy transaction and output boundaries. Their
-//! non-domain backend remains in legacy mode and documents the weaker durability gap
-//! where source progress commits before query output is persisted. Fully capable
-//! bundles use the atomic `QueryCompositeHost` path instead.
+//! output writers remain outside the core transaction, while the checkpoint store
+//! shares the core domain so the Legacy pending-publication marker is load-bearing.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -40,6 +39,7 @@ use drasi_core::{
     interface::{
         CheckpointStore, CreatedIndexes, ElementIndex, FutureQueue, IndexBackendPlugin, IndexError,
         IndexSet, LiveResultsWriter, OutboxWriter, RowMutation, SessionControl, SourceCheckpoint,
+        TransactionDomain,
     },
     middleware::MiddlewareTypeRegistry,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
@@ -123,10 +123,15 @@ struct TransactionState {
 struct RecordingSessionControl {
     state: Arc<Mutex<TransactionState>>,
     trace: EventTrace,
+    transaction_domain: TransactionDomain,
 }
 
 #[async_trait]
 impl SessionControl for RecordingSessionControl {
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        Some(self.transaction_domain.clone())
+    }
+
     async fn begin(&self) -> Result<(), IndexError> {
         let mut state = self.state.lock().unwrap();
         if state.active {
@@ -165,10 +170,15 @@ impl SessionControl for RecordingSessionControl {
 struct TransactionalCheckpointStore {
     state: Arc<Mutex<TransactionState>>,
     trace: EventTrace,
+    transaction_domain: TransactionDomain,
 }
 
 #[async_trait]
 impl CheckpointStore for TransactionalCheckpointStore {
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        Some(self.transaction_domain.clone())
+    }
+
     fn is_persistent(&self) -> bool {
         true
     }
@@ -440,6 +450,7 @@ impl CharacterizationBackend {
     fn new(fail_output_writes: bool) -> Self {
         let trace = EventTrace::default();
         let state = Arc::new(Mutex::new(TransactionState::default()));
+        let transaction_domain = TransactionDomain::new();
         Self {
             trace: trace.clone(),
             element_index: Arc::new(InMemoryElementIndex::new()),
@@ -448,10 +459,12 @@ impl CharacterizationBackend {
             session_control: Arc::new(RecordingSessionControl {
                 state: state.clone(),
                 trace: trace.clone(),
+                transaction_domain: transaction_domain.clone(),
             }),
             checkpoint_store: Arc::new(TransactionalCheckpointStore {
                 state,
                 trace: trace.clone(),
+                transaction_domain,
             }),
             output_store: Arc::new(RecordingOutputStore::new(fail_output_writes, trace)),
         }
@@ -836,6 +849,7 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
     let checkpoint_store = Arc::new(TransactionalCheckpointStore {
         state: checkpoint_state,
         trace: trace.clone(),
+        transaction_domain: TransactionDomain::new(),
     });
     let output_state = RwLock::new(QueryOutputState::new(16));
     let output_metrics = Arc::new(QueryOutputMetrics::new());
@@ -1108,6 +1122,11 @@ async fn live_source_change_envelope_path_preserves_legacy_result_metadata() {
         vec![
             TraceEvent::SessionBegin,
             TraceEvent::CheckpointStaged {
+                source_id: LEGACY_OUTPUT_PENDING_MARKER_V1.to_string(),
+                sequence: 1,
+                source_position: Some(Bytes::from_static(b"\x91\x01")),
+            },
+            TraceEvent::CheckpointStaged {
                 source_id: SOURCE_ID.to_string(),
                 sequence: 7,
                 source_position: Some(source_position),
@@ -1126,6 +1145,13 @@ async fn live_source_change_envelope_path_preserves_legacy_result_metadata() {
                 sequence: 1,
             },
             TraceEvent::ReactionDispatch { sequence: 1 },
+            TraceEvent::SessionBegin,
+            TraceEvent::CheckpointStaged {
+                source_id: LEGACY_OUTPUT_PENDING_MARKER_V1.to_string(),
+                sequence: 0,
+                source_position: None,
+            },
+            TraceEvent::SessionCommit,
         ]
     );
     assert_eq!(
@@ -1180,6 +1206,11 @@ async fn persistent_legacy_output_failure_fences_before_delivery() {
         vec![
             TraceEvent::SessionBegin,
             TraceEvent::CheckpointStaged {
+                source_id: LEGACY_OUTPUT_PENDING_MARKER_V1.to_string(),
+                sequence: 1,
+                source_position: Some(Bytes::from_static(b"\x91\x01")),
+            },
+            TraceEvent::CheckpointStaged {
                 source_id: SOURCE_ID.to_string(),
                 sequence: 1,
                 source_position: Some(first_position.clone()),
@@ -1189,13 +1220,9 @@ async fn persistent_legacy_output_failure_fences_before_delivery() {
                 query_id: QUERY_ID.to_string(),
                 sequence: 1,
             },
-            TraceEvent::ResultSequenceWritten {
-                query_id: QUERY_ID.to_string(),
-                sequence: 1,
-            },
         ],
-        "the Legacy checkpoint commit remains visible, but persistent output failure \
-         is marked and fenced before later persistence or dispatch"
+        "the pending marker and source checkpoint commit together before persistent \
+         output failure fences later persistence and dispatch"
     );
 
     assert!(
@@ -1240,8 +1267,8 @@ async fn persistent_legacy_output_failure_fences_before_delivery() {
             .read_result_sequence(QUERY_ID)
             .await
             .unwrap(),
-        Some(1),
-        "the attempted result sequence must expose the partial durable bundle on restart"
+        None,
+        "result sequence remains the committed output high-water, not an error marker"
     );
     assert!(query.publication_recovery_required());
     query.stop().await.unwrap();
@@ -1257,13 +1284,16 @@ async fn persistent_legacy_output_failure_fences_before_delivery() {
 async fn due_future_output_is_dispatched_after_core_commit() {
     let trace = EventTrace::default();
     let state = Arc::new(Mutex::new(TransactionState::default()));
+    let transaction_domain = TransactionDomain::new();
     let session_control = Arc::new(RecordingSessionControl {
         state: state.clone(),
         trace: trace.clone(),
+        transaction_domain: transaction_domain.clone(),
     });
     let checkpoint_store = Arc::new(TransactionalCheckpointStore {
         state,
         trace: trace.clone(),
+        transaction_domain,
     });
     let output_store = Arc::new(RecordingOutputStore::new(false, trace.clone()));
     let element_index = Arc::new(InMemoryElementIndex::new());

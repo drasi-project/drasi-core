@@ -38,11 +38,14 @@ use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 
 use super::{
     manager::{DrasiQuery, Query, QueryManager},
-    query_composite_host::{QueryIngressFence, QueryProcessingObserver, QUERY_BOOTSTRAP_MARKER_V1},
+    query_composite_host::{
+        read_legacy_pending_state, LegacyPendingState, QueryIngressFence, QueryProcessingObserver,
+        LEGACY_OUTPUT_PENDING_MARKER_V1, QUERY_BOOTSTRAP_MARKER_V1,
+    },
 };
 use crate::{
     channels::{
-        ChangeReceiver, ComponentStatus, DispatchMode, QueryResult, SourceEvent,
+        ChangeReceiver, ComponentStatus, DispatchMode, QueryResult, ResultDiff, SourceEvent,
         SourceEventWrapper, SubscriptionResponse,
     },
     component_graph::ComponentGraph,
@@ -297,6 +300,8 @@ enum LegacyFailureStage {
     Outbox,
     LiveResults,
     ResultSequence,
+    MarkerStage,
+    MarkerClear,
 }
 
 struct LegacyFailureProvider {
@@ -445,6 +450,24 @@ impl CheckpointStore for LegacyFailureCheckpointStore {
         sequence: u64,
         source_position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
+        if self.stage == LegacyFailureStage::MarkerStage
+            && source_id == LEGACY_OUTPUT_PENDING_MARKER_V1
+            && sequence == 1
+            && !self.failed.swap(true, Ordering::AcqRel)
+        {
+            return Err(IndexError::other(std::io::Error::other(
+                "injected Legacy pending-marker stage failure",
+            )));
+        }
+        if self.stage == LegacyFailureStage::MarkerClear
+            && source_id == LEGACY_OUTPUT_PENDING_MARKER_V1
+            && sequence == 0
+            && !self.failed.swap(true, Ordering::AcqRel)
+        {
+            return Err(IndexError::other(std::io::Error::other(
+                "injected Legacy pending-marker clear failure",
+            )));
+        }
         self.inner
             .stage_checkpoint(source_id, sequence, source_position)
             .await
@@ -1050,14 +1073,14 @@ async fn auto_reset_clears_inconsistent_durable_output_before_live_processing() 
         ComponentStatus::Running,
     )
     .await;
-    assert_eq!(concrete_query(&query).output_sequence_for_test().await, 0);
+    assert_eq!(concrete_query(&query).output_sequence_for_test().await, 1);
 
     harness
         .source
         .inject(2, "after-reset")
         .await
         .expect("inject after reset");
-    assert_eq!(receive_result(&mut results).await.sequence, 1);
+    assert_eq!(receive_result(&mut results).await.sequence, 2);
 
     harness
         .manager
@@ -1138,7 +1161,7 @@ async fn persistent_legacy_write_failures_make_strict_restart_fail_closed() {
             .await
             .expect_err("Strict restart must reject partial Legacy output");
         assert!(
-            format!("{error:#}").contains("durable output reconciliation failed"),
+            format!("{error:#}").contains("unfinished persistent Legacy publication"),
             "{stage:?}: unexpected Strict restart error: {error:#}"
         );
         assert!(concrete.publication_recovery_required());
@@ -1205,7 +1228,7 @@ async fn persistent_legacy_write_failures_auto_reset_and_resume() {
             .expect("AutoReset restart should clear partial Legacy output");
         wait_for_status(&harness.manager, &query_id, ComponentStatus::Running).await;
         assert!(!concrete.publication_recovery_required());
-        assert_eq!(concrete.output_sequence_for_test().await, 0);
+        assert_eq!(concrete.output_sequence_for_test().await, 1);
         let checkpoint_store = concrete
             .get_checkpoint_store()
             .await
@@ -1222,7 +1245,7 @@ async fn persistent_legacy_write_failures_auto_reset_and_resume() {
             .await
             .expect("inject after Legacy AutoReset");
         let delivered = receive_result(&mut results).await;
-        assert_eq!(delivered.sequence, 1);
+        assert_eq!(delivered.sequence, 2);
         assert_eq!(
             checkpoint_store
                 .read_checkpoint(SOURCE_ID)
@@ -1244,7 +1267,7 @@ async fn persistent_legacy_write_failures_auto_reset_and_resume() {
                 .iter()
                 .map(|(sequence, _)| *sequence)
                 .collect::<Vec<_>>(),
-            vec![1],
+            vec![2],
             "{stage:?}: stale or reused outbox entries survived AutoReset"
         );
 
@@ -1259,6 +1282,329 @@ async fn persistent_legacy_write_failures_auto_reset_and_resume() {
             .await
             .expect("stop lifecycle source");
     }
+}
+
+#[tokio::test]
+async fn fresh_process_auto_reset_recovers_legacy_pending_marker_high_water() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let failed = Arc::new(AtomicBool::new(false));
+    let provider1: Arc<dyn IndexBackendPlugin> = Arc::new(LegacyFailureProvider {
+        inner: RocksDbIndexProvider::new(temp_dir.path(), true, false),
+        stage: LegacyFailureStage::Outbox,
+        failed: failed.clone(),
+    });
+    let harness1 = LifecycleHarness::new_with_provider(provider1).await;
+    let query_id = "legacy-fresh-process";
+    let query1 = harness1
+        .add_query_config(query_config_with_policy(
+            query_id,
+            crate::recovery::RecoveryPolicy::AutoReset,
+        ))
+        .await;
+    harness1.start_query(query_id).await;
+    harness1
+        .source
+        .inject(1, "lost-before-process-restart")
+        .await
+        .expect("inject Legacy failure");
+    wait_for_status(&harness1.manager, query_id, ComponentStatus::Error).await;
+    assert_eq!(
+        read_legacy_pending_state(
+            concrete_query(&query1)
+                .get_checkpoint_store()
+                .await
+                .expect("first-process checkpoint store")
+                .as_ref()
+        )
+        .await
+        .expect("read first-process pending marker"),
+        LegacyPendingState::Pending {
+            output_sequence: Some(1)
+        }
+    );
+    harness1
+        .manager
+        .stop_query(query_id.to_string())
+        .await
+        .expect("stop first-process query");
+    wait_for_status(&harness1.manager, query_id, ComponentStatus::Stopped).await;
+    query1.release_persistent_handles().await;
+    harness1
+        .source_manager
+        .stop_source(SOURCE_ID.to_string())
+        .await
+        .expect("stop first-process source");
+    drop(query1);
+    drop(harness1);
+
+    let provider2: Arc<dyn IndexBackendPlugin> = Arc::new(LegacyFailureProvider {
+        inner: RocksDbIndexProvider::new(temp_dir.path(), true, false),
+        stage: LegacyFailureStage::Outbox,
+        failed,
+    });
+    let harness2 = LifecycleHarness::new_with_provider(provider2).await;
+    let query2 = harness2
+        .add_query_config(query_config_with_policy(
+            query_id,
+            crate::recovery::RecoveryPolicy::AutoReset,
+        ))
+        .await;
+    let mut results = query2
+        .subscribe("fresh-process-results".to_string())
+        .await
+        .expect("subscribe fresh-process output")
+        .receiver;
+    harness2.start_query(query_id).await;
+    assert_eq!(
+        concrete_query(&query2).output_sequence_for_test().await,
+        1,
+        "fresh process did not preserve the pending output high-water"
+    );
+    harness2
+        .source
+        .inject(2, "after-process-reset")
+        .await
+        .expect("inject after fresh-process AutoReset");
+    assert_eq!(receive_result(&mut results).await.sequence, 2);
+
+    harness2
+        .manager
+        .stop_query(query_id.to_string())
+        .await
+        .expect("stop recovered fresh-process query");
+    harness2
+        .source_manager
+        .stop_source(SOURCE_ID.to_string())
+        .await
+        .expect("stop second-process source");
+}
+
+#[tokio::test]
+async fn legacy_pending_marker_stage_failure_rolls_back_source_progress() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let provider: Arc<dyn IndexBackendPlugin> = Arc::new(LegacyFailureProvider {
+        inner: RocksDbIndexProvider::new(temp_dir.path(), true, false),
+        stage: LegacyFailureStage::MarkerStage,
+        failed: Arc::new(AtomicBool::new(false)),
+    });
+    let harness = LifecycleHarness::new_with_provider(provider).await;
+    let query_id = "legacy-marker-stage";
+    let query = harness.add_query(query_id).await;
+    let mut results = query
+        .subscribe("legacy-marker-stage-results".to_string())
+        .await
+        .expect("subscribe marker-stage output")
+        .receiver;
+    harness.start_query(query_id).await;
+
+    harness
+        .source
+        .inject(1, "first")
+        .await
+        .expect("inject marker-stage failure");
+    wait_for_status(&harness.manager, query_id, ComponentStatus::Error).await;
+    let concrete = concrete_query(&query);
+    let checkpoint_store = concrete
+        .get_checkpoint_store()
+        .await
+        .expect("marker-stage checkpoint store");
+    assert!(checkpoint_store
+        .read_checkpoint(SOURCE_ID)
+        .await
+        .expect("read rolled-back source checkpoint")
+        .is_none());
+    assert!(checkpoint_store
+        .read_checkpoint(LEGACY_OUTPUT_PENDING_MARKER_V1)
+        .await
+        .expect("read failed marker")
+        .is_none());
+    assert_eq!(concrete.output_sequence_for_test().await, 0);
+    assert!(!concrete.publication_recovery_required());
+    assert_eq!(harness.source.base.compute_confirmed_position().await, None);
+    drop(checkpoint_store);
+
+    harness
+        .manager
+        .stop_query(query_id.to_string())
+        .await
+        .expect("stop marker-stage query");
+    wait_for_status(&harness.manager, query_id, ComponentStatus::Stopped).await;
+    harness
+        .manager
+        .start_query(query_id.to_string())
+        .await
+        .expect("restart after marker-stage rollback");
+    wait_for_status(&harness.manager, query_id, ComponentStatus::Running).await;
+    harness
+        .source
+        .inject(1, "retry")
+        .await
+        .expect("retry rolled-back input");
+    let retried = receive_result(&mut results).await;
+    assert_eq!(retried.sequence, 1);
+    assert!(matches!(retried.results[0], ResultDiff::Add { .. }));
+
+    harness
+        .manager
+        .stop_query(query_id.to_string())
+        .await
+        .expect("stop recovered marker-stage query");
+    harness
+        .source_manager
+        .stop_source(SOURCE_ID.to_string())
+        .await
+        .expect("stop lifecycle source");
+}
+
+#[tokio::test]
+async fn legacy_marker_clear_failure_stays_detectable_after_output_success() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let provider: Arc<dyn IndexBackendPlugin> = Arc::new(LegacyFailureProvider {
+        inner: RocksDbIndexProvider::new(temp_dir.path(), true, false),
+        stage: LegacyFailureStage::MarkerClear,
+        failed: Arc::new(AtomicBool::new(false)),
+    });
+    let harness = LifecycleHarness::new_with_provider(provider).await;
+    let query_id = "legacy-marker-clear";
+    let query = harness.add_query(query_id).await;
+    let mut results = query
+        .subscribe("legacy-marker-clear-results".to_string())
+        .await
+        .expect("subscribe marker-clear output")
+        .receiver;
+    harness.start_query(query_id).await;
+    harness
+        .source
+        .inject(1, "committed")
+        .await
+        .expect("inject marker-clear failure");
+    let delivered = receive_result(&mut results).await;
+    assert_eq!(delivered.sequence, 1);
+    wait_for_status(&harness.manager, query_id, ComponentStatus::Error).await;
+
+    let concrete = concrete_query(&query);
+    let checkpoint_store = concrete
+        .get_checkpoint_store()
+        .await
+        .expect("marker-clear checkpoint store");
+    assert_eq!(
+        checkpoint_store
+            .read_checkpoint(LEGACY_OUTPUT_PENDING_MARKER_V1)
+            .await
+            .expect("read retained marker")
+            .expect("pending marker retained")
+            .sequence,
+        1
+    );
+    assert_eq!(
+        checkpoint_store
+            .read_result_sequence(query_id)
+            .await
+            .expect("read committed output sequence"),
+        Some(1)
+    );
+    assert_eq!(
+        harness.source.base.compute_confirmed_position().await,
+        None,
+        "marker-clear failure must prevent source acknowledgement"
+    );
+    drop(checkpoint_store);
+
+    harness
+        .manager
+        .stop_query(query_id.to_string())
+        .await
+        .expect("stop marker-clear query");
+    wait_for_status(&harness.manager, query_id, ComponentStatus::Stopped).await;
+    let error = harness
+        .manager
+        .start_query(query_id.to_string())
+        .await
+        .expect_err("Strict restart must detect retained pending marker");
+    assert!(format!("{error:#}").contains("unfinished persistent Legacy publication"));
+
+    harness
+        .manager
+        .stop_query(query_id.to_string())
+        .await
+        .expect("stop marker-clear query from Error");
+    harness
+        .source_manager
+        .stop_source(SOURCE_ID.to_string())
+        .await
+        .expect("stop lifecycle source");
+}
+
+#[tokio::test]
+async fn persistent_legacy_noop_clears_marker_without_allocating_sequence() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let provider: Arc<dyn IndexBackendPlugin> = Arc::new(LegacyFailureProvider {
+        inner: RocksDbIndexProvider::new(temp_dir.path(), true, false),
+        stage: LegacyFailureStage::ResultSequence,
+        failed: Arc::new(AtomicBool::new(false)),
+    });
+    let harness = LifecycleHarness::new_with_provider(provider).await;
+    let query_id = "legacy-noop";
+    let mut config = query_config(query_id);
+    config.query = "MATCH (n:Person) WHERE n.name = 'visible' RETURN n.name AS name".to_string();
+    let query = harness.add_query_config(config).await;
+    harness.start_query(query_id).await;
+    harness
+        .source
+        .inject(1, "hidden")
+        .await
+        .expect("inject no-output input");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if harness.source.base.compute_confirmed_position().await == Some(1) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Noop input should be acknowledged after marker clear");
+
+    let concrete = concrete_query(&query);
+    let checkpoint_store = concrete
+        .get_checkpoint_store()
+        .await
+        .expect("Noop checkpoint store");
+    assert_eq!(
+        checkpoint_store
+            .read_checkpoint(LEGACY_OUTPUT_PENDING_MARKER_V1)
+            .await
+            .expect("read cleared Noop marker")
+            .expect("logical clear marker")
+            .sequence,
+        0
+    );
+    assert_eq!(
+        read_legacy_pending_state(checkpoint_store.as_ref())
+            .await
+            .expect("read logical Noop marker state"),
+        LegacyPendingState::Absent
+    );
+    assert_eq!(concrete.output_sequence_for_test().await, 0);
+    assert_eq!(
+        checkpoint_store
+            .read_result_sequence(query_id)
+            .await
+            .expect("read Noop result sequence"),
+        None
+    );
+    assert_eq!(query.status().await, ComponentStatus::Running);
+
+    harness
+        .manager
+        .stop_query(query_id.to_string())
+        .await
+        .expect("stop Noop query");
+    harness
+        .source_manager
+        .stop_source(SOURCE_ID.to_string())
+        .await
+        .expect("stop lifecycle source");
 }
 
 #[tokio::test]

@@ -51,10 +51,11 @@ use crate::queries::output_state::{
 #[cfg(test)]
 use crate::queries::query_composite_host::dispatch_query_results;
 use crate::queries::query_composite_host::{
-    AtomicPublicationRecovery, QueryBootstrapInput, QueryBootstrapRecoveryState,
-    QueryBootstrapScope, QueryCompositeHost, QueryHostRuntime, QueryIngressFence,
-    QueryLiveDependencies, QueryOutputDependencies, QueryProcessingMode, QueryProcessingObserver,
-    QUERY_BOOTSTRAP_MARKER_V1,
+    read_legacy_pending_state, read_output_reset_high_water, AtomicPublicationRecovery,
+    LegacyPendingState, QueryBootstrapInput, QueryBootstrapRecoveryState, QueryBootstrapScope,
+    QueryCompositeHost, QueryHostRuntime, QueryIngressFence, QueryLiveDependencies,
+    QueryOutputDependencies, QueryProcessingMode, QueryProcessingObserver,
+    LEGACY_OUTPUT_PENDING_MARKER_V1, QUERY_BOOTSTRAP_MARKER_V1, QUERY_OUTPUT_RESET_MARKER_V1,
 };
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
@@ -489,6 +490,7 @@ struct PersistentQueryState {
     result_index: Option<Arc<dyn drasi_core::interface::ResultIndex>>,
     future_queue: Option<Arc<dyn drasi_core::interface::FutureQueue>>,
     checkpoint_store: Arc<dyn CheckpointStore>,
+    session_control: Arc<dyn drasi_core::interface::SessionControl>,
     outbox_writer: Option<Arc<dyn OutboxWriter>>,
     live_results_writer: Option<Arc<dyn LiveResultsWriter>>,
 }
@@ -500,6 +502,7 @@ enum QueryRecoveryResetReason {
     IncompleteBootstrap,
     CheckpointReadFailed,
     InvalidBootstrapMarker,
+    LegacyPublicationPending,
     OutputReconciliationFailed,
     PositionUnavailable,
     Deprovision,
@@ -517,13 +520,66 @@ impl PersistentQueryState {
             "Query '{}' clearing persistent and process-local recovery state ({reason:?})",
             self.query_id
         );
-        self.clear_persistent(config_hash).await?;
-        output_state.write().await.reset();
+        let preserved_sequence = if reason == QueryRecoveryResetReason::Deprovision {
+            None
+        } else {
+            Some(
+                self.safe_output_high_water(output_state, publication_recovery)
+                    .await?,
+            )
+        };
+        self.clear_persistent(config_hash, preserved_sequence)
+            .await?;
+        output_state
+            .write()
+            .await
+            .reset_to_sequence(preserved_sequence.unwrap_or(0));
         publication_recovery.reconcile_in_memory();
         Ok(())
     }
 
-    async fn clear_persistent(&self, config_hash: Option<u64>) -> anyhow::Result<()> {
+    async fn safe_output_high_water(
+        &self,
+        output_state: &RwLock<QueryOutputState>,
+        publication_recovery: &AtomicPublicationRecovery,
+    ) -> anyhow::Result<u64> {
+        let in_memory = output_state.read().await.as_of_sequence();
+        let durable = self
+            .checkpoint_store
+            .read_result_sequence(&self.query_id)
+            .await
+            .context("failed to read durable result sequence before reset")?
+            .unwrap_or(0);
+        let outbox = match &self.outbox_writer {
+            Some(writer) => writer
+                .read_latest_sequence(&self.query_id)
+                .await
+                .context("failed to read durable outbox high-water before reset")?
+                .unwrap_or(0),
+            None => 0,
+        };
+        let atomic_pending = publication_recovery.pending_sequence().unwrap_or(0);
+        let legacy_pending = match read_legacy_pending_state(self.checkpoint_store.as_ref()).await?
+        {
+            LegacyPendingState::Absent => 0,
+            LegacyPendingState::Pending { output_sequence } => output_sequence.unwrap_or(0),
+        };
+        let reset_baseline = read_output_reset_high_water(self.checkpoint_store.as_ref())
+            .await?
+            .unwrap_or(0);
+        Ok(in_memory
+            .max(durable)
+            .max(outbox)
+            .max(atomic_pending)
+            .max(legacy_pending)
+            .max(reset_baseline))
+    }
+
+    async fn clear_persistent(
+        &self,
+        config_hash: Option<u64>,
+        preserved_sequence: Option<u64>,
+    ) -> anyhow::Result<()> {
         clear_persistent_indexes(
             &self.query_id,
             &self.element_index,
@@ -549,10 +605,28 @@ impl PersistentQueryState {
             .clear_checkpoints()
             .await
             .context("failed to clear query checkpoints")?;
-        self.checkpoint_store
-            .write_result_sequence(&self.query_id, 0)
-            .await
-            .context("failed to reset the durable result sequence")?;
+        if let Some(preserved_sequence) = preserved_sequence {
+            let session = drasi_core::interface::SessionGuard::begin(self.session_control.clone())
+                .await
+                .context("failed to begin output reset-baseline transaction")?;
+            self.checkpoint_store
+                .stage_checkpoint(QUERY_OUTPUT_RESET_MARKER_V1, preserved_sequence, None)
+                .await
+                .context("failed to stage output reset baseline")?;
+            self.checkpoint_store
+                .write_result_sequence(&self.query_id, preserved_sequence)
+                .await
+                .context("failed to preserve durable result sequence")?;
+            session
+                .commit()
+                .await
+                .context("failed to commit output reset baseline")?;
+        } else {
+            self.checkpoint_store
+                .write_result_sequence(&self.query_id, 0)
+                .await
+                .context("failed to clear durable result sequence")?;
+        }
         if let Some(config_hash) = config_hash {
             self.checkpoint_store
                 .write_config_hash(config_hash)
@@ -636,6 +710,7 @@ mod recovery_reset_tests {
             QueryRecoveryResetReason::IncompleteBootstrap,
             QueryRecoveryResetReason::CheckpointReadFailed,
             QueryRecoveryResetReason::InvalidBootstrapMarker,
+            QueryRecoveryResetReason::LegacyPublicationPending,
             QueryRecoveryResetReason::OutputReconciliationFailed,
             QueryRecoveryResetReason::PositionUnavailable,
             QueryRecoveryResetReason::Deprovision,
@@ -730,6 +805,7 @@ mod recovery_reset_tests {
                 result_index: Some(created.set.result_index.clone()),
                 future_queue: Some(created.set.future_queue.clone()),
                 checkpoint_store: checkpoint_store.clone(),
+                session_control: created.set.session_control.clone(),
                 outbox_writer: Some(outbox_writer.clone()),
                 live_results_writer: Some(live_results_writer.clone()),
             };
@@ -740,8 +816,13 @@ mod recovery_reset_tests {
                 .await
                 .expect("clear recovery state");
 
+            let preserved_sequence = (reason != QueryRecoveryResetReason::Deprovision).then_some(1);
             let output = output_state.read().await;
-            assert_eq!(output.as_of_sequence(), 0, "{reason:?}");
+            assert_eq!(
+                output.as_of_sequence(),
+                preserved_sequence.unwrap_or(0),
+                "{reason:?}"
+            );
             assert_eq!(output.results_len(), 0, "{reason:?}");
             assert_eq!(output.outbox_len(), 0, "{reason:?}");
             drop(output);
@@ -767,7 +848,16 @@ mod recovery_reset_tests {
                     .read_result_sequence(&query_id)
                     .await
                     .expect("read reset sequence"),
-                Some(0),
+                preserved_sequence.or(Some(0)),
+                "{reason:?}"
+            );
+            assert_eq!(
+                checkpoint_store
+                    .read_checkpoint(QUERY_OUTPUT_RESET_MARKER_V1)
+                    .await
+                    .expect("read output reset marker")
+                    .map(|marker| marker.sequence),
+                preserved_sequence,
                 "{reason:?}"
             );
             assert!(
@@ -978,9 +1068,22 @@ impl DrasiQuery {
             result_index: result_index.clone(),
             future_queue: future_queue.clone(),
             checkpoint_store: checkpoint_store.clone(),
+            session_control: session_control
+                .clone()
+                .unwrap_or_else(|| Arc::new(drasi_core::interface::NoOpSessionControl)),
             outbox_writer: outbox_writer.clone(),
             live_results_writer: live_results_writer.clone(),
         };
+        if let Err(error) = processing_mode.validate_legacy_pending_capability() {
+            let message = format!(
+                "Query '{}' cannot start persistent Legacy processing safely: {error:#}",
+                self.base.config.id
+            );
+            self.base
+                .set_status(ComponentStatus::Error, Some(message.clone()))
+                .await;
+            return Err(anyhow::anyhow!(message));
+        }
 
         let continuous_query = match builder.try_build().await {
             Ok(query) => query,
@@ -1037,13 +1140,14 @@ impl DrasiQuery {
                     ));
                 }
             };
-        if self
-            .base
-            .config
-            .sources
-            .iter()
-            .any(|source| source.source_id == QUERY_BOOTSTRAP_MARKER_V1)
-        {
+        if self.base.config.sources.iter().any(|source| {
+            matches!(
+                source.source_id.as_str(),
+                QUERY_BOOTSTRAP_MARKER_V1
+                    | QUERY_OUTPUT_RESET_MARKER_V1
+                    | LEGACY_OUTPUT_PENDING_MARKER_V1
+            )
+        }) {
             let message = format!(
                 "Query '{}' uses a source id reserved for bootstrap recovery",
                 self.base.config.id
@@ -1238,6 +1342,40 @@ impl DrasiQuery {
 
             for settings in &mut subscription_settings {
                 settings.request_position_handle = true;
+            }
+        }
+
+        if let LegacyPendingState::Pending { output_sequence } =
+            processing_mode.read_legacy_pending_state().await?
+        {
+            let detail = format!(
+                "Query '{}' has an unfinished persistent Legacy publication \
+                 (output sequence {output_sequence:?})",
+                self.base.config.id
+            );
+            match self.resolved_recovery_policy {
+                crate::recovery::RecoveryPolicy::Strict => {
+                    self.base
+                        .set_status(ComponentStatus::Error, Some(detail.clone()))
+                        .await;
+                    return Err(anyhow::anyhow!(detail));
+                }
+                crate::recovery::RecoveryPolicy::AutoReset => {
+                    warn!("{detail}; AutoReset is clearing persistent state");
+                    persistent_state
+                        .clear_recovery_state(
+                            &self.output_state,
+                            &self.publication_recovery,
+                            Some(super::compute_config_hash(&self.base.config)),
+                            QueryRecoveryResetReason::OutputReconciliationFailed,
+                        )
+                        .await?;
+                    checkpoint_sequences_per_source.clear();
+                    for settings in &mut subscription_settings {
+                        settings.resume_from = None;
+                        settings.resume_sequence = None;
+                    }
+                }
             }
         }
 
@@ -2324,6 +2462,7 @@ impl QueryManager {
                                     result_index: Some(created.set.result_index.clone()),
                                     future_queue: Some(created.set.future_queue.clone()),
                                     checkpoint_store,
+                                    session_control: created.set.session_control.clone(),
                                     outbox_writer: created.outbox_writer.clone(),
                                     live_results_writer: created.live_results_writer.clone(),
                                 };
@@ -2341,7 +2480,7 @@ impl QueryManager {
                                             )
                                             .await
                                     }
-                                    None => state.clear_persistent(None).await,
+                                    None => state.clear_persistent(None, None).await,
                                 };
                                 if let Err(error) = reset_result {
                                     warn!(

@@ -63,12 +63,28 @@ use crate::{
 /// A NUL-prefixed identifier is rejected as a configured source id by
 /// `DrasiQuery`, so it cannot collide with a real source checkpoint.
 pub(super) const QUERY_BOOTSTRAP_MARKER_V1: &str = "\0drasi:query-bootstrap:v1";
+pub(super) const QUERY_OUTPUT_RESET_MARKER_V1: &str = "\0drasi:query-output-reset:v1";
+pub(super) const LEGACY_OUTPUT_PENDING_MARKER_V1: &str = "\0drasi:legacy-output-pending:v1";
+
+const LEGACY_OUTPUT_PENDING_VERSION: u64 = 1;
+const LEGACY_OUTPUT_PENDING_CLEARED: u64 = 0;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct LegacyOutputPendingRecord {
+    output_sequence: Option<u64>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum QueryBootstrapRecoveryState {
     Absent,
     InProgress,
     Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LegacyPendingState {
+    Absent,
+    Pending { output_sequence: Option<u64> },
 }
 
 pub(super) struct QueryBootstrapInput {
@@ -214,6 +230,10 @@ impl AtomicPublicationRecovery {
             .clone()
     }
 
+    pub(super) fn pending_sequence(&self) -> Option<u64> {
+        self.pending_result().map(|result| result.sequence)
+    }
+
     pub(super) fn reconcile_in_memory(&self) {
         self.pending
             .lock()
@@ -312,7 +332,7 @@ impl QueryLiveDependencies {
 #[derive(Clone)]
 pub(super) enum QueryProcessingMode {
     Atomic(AtomicQueryResources),
-    Legacy,
+    Legacy(LegacyQueryResources),
 }
 
 #[derive(Clone)]
@@ -324,15 +344,34 @@ pub(super) struct AtomicQueryResources {
     live_results_writer: Arc<dyn LiveResultsWriter>,
 }
 
+#[derive(Clone)]
+pub(super) struct LegacyQueryResources {
+    pending_publication: LegacyPendingPublication,
+}
+
+#[derive(Clone)]
+enum LegacyPendingPublication {
+    Volatile,
+    Persistent {
+        session_control: Arc<dyn SessionControl>,
+        checkpoint_store: Arc<dyn CheckpointStore>,
+    },
+    Unsupported {
+        reason: Arc<str>,
+    },
+}
+
 impl QueryProcessingMode {
-    pub(super) const fn legacy() -> Self {
-        Self::Legacy
+    pub(super) fn legacy() -> Self {
+        Self::Legacy(LegacyQueryResources {
+            pending_publication: LegacyPendingPublication::Volatile,
+        })
     }
 
     /// Capture the bundle-level capability before `CreatedIndexes` is distributed.
     pub(super) fn from_created_indexes(created: &CreatedIndexes) -> Self {
         let Some(transaction) = created.atomic_result_transaction() else {
-            return Self::Legacy;
+            return Self::legacy_from_created_indexes(created);
         };
 
         let (Some(checkpoint_store), Some(outbox_writer), Some(live_results_writer)) = (
@@ -344,7 +383,7 @@ impl QueryProcessingMode {
                 "Atomic result capability was issued without every persistent output writer; \
                  falling back to legacy processing"
             );
-            return Self::Legacy;
+            return Self::legacy_from_created_indexes(created);
         };
 
         Self::Atomic(AtomicQueryResources {
@@ -359,9 +398,158 @@ impl QueryProcessingMode {
     pub(super) const fn diagnostic_name(&self) -> &'static str {
         match self {
             Self::Atomic(_) => "atomic",
-            Self::Legacy => "legacy",
+            Self::Legacy(_) => "legacy",
         }
     }
+
+    fn legacy_from_created_indexes(created: &CreatedIndexes) -> Self {
+        let pending_publication = match created.checkpoint_store.as_ref() {
+            Some(checkpoint_store) if checkpoint_store.is_persistent() => {
+                match (
+                    created.set.session_control.transaction_domain(),
+                    checkpoint_store.transaction_domain(),
+                ) {
+                    (Some(session_domain), Some(checkpoint_domain))
+                        if session_domain == checkpoint_domain =>
+                    {
+                        LegacyPendingPublication::Persistent {
+                            session_control: created.set.session_control.clone(),
+                            checkpoint_store: checkpoint_store.clone(),
+                        }
+                    }
+                    _ => LegacyPendingPublication::Unsupported {
+                        reason: Arc::from(
+                            "persistent Legacy source progress cannot atomically stage the \
+                             pending-publication marker in the core transaction",
+                        ),
+                    },
+                }
+            }
+            _ => LegacyPendingPublication::Volatile,
+        };
+        Self::Legacy(LegacyQueryResources {
+            pending_publication,
+        })
+    }
+
+    pub(super) fn validate_legacy_pending_capability(&self) -> Result<()> {
+        if let Self::Legacy(LegacyQueryResources {
+            pending_publication: LegacyPendingPublication::Unsupported { reason },
+        }) = self
+        {
+            anyhow::bail!("{reason}");
+        }
+        Ok(())
+    }
+
+    pub(super) async fn read_legacy_pending_state(&self) -> Result<LegacyPendingState> {
+        match self {
+            Self::Legacy(LegacyQueryResources {
+                pending_publication:
+                    LegacyPendingPublication::Persistent {
+                        checkpoint_store, ..
+                    },
+            }) => read_legacy_pending_state(checkpoint_store.as_ref()).await,
+            _ => Ok(LegacyPendingState::Absent),
+        }
+    }
+}
+
+impl LegacyQueryResources {
+    fn persistent(&self) -> Result<Option<(&Arc<dyn SessionControl>, &Arc<dyn CheckpointStore>)>> {
+        match &self.pending_publication {
+            LegacyPendingPublication::Volatile => Ok(None),
+            LegacyPendingPublication::Persistent {
+                session_control,
+                checkpoint_store,
+            } => Ok(Some((session_control, checkpoint_store))),
+            LegacyPendingPublication::Unsupported { reason } => anyhow::bail!("{reason}"),
+        }
+    }
+
+    async fn stage_pending_in_active_session(
+        &self,
+        output_sequence: Option<u64>,
+    ) -> std::result::Result<(), IndexError> {
+        let Some((_, checkpoint_store)) = self.persistent().map_err(index_error)? else {
+            return Ok(());
+        };
+        let record = LegacyOutputPendingRecord { output_sequence };
+        let data = rmp_serde::to_vec(&record).map_err(|error| {
+            IndexError::other(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("failed to serialize Legacy pending-publication marker: {error}"),
+            ))
+        })?;
+        checkpoint_store
+            .stage_checkpoint(
+                LEGACY_OUTPUT_PENDING_MARKER_V1,
+                LEGACY_OUTPUT_PENDING_VERSION,
+                Some(&Bytes::from(data)),
+            )
+            .await
+    }
+
+    async fn clear_pending(&self) -> Result<()> {
+        let Some((session_control, checkpoint_store)) = self.persistent()? else {
+            return Ok(());
+        };
+        let session = SessionGuard::begin(session_control.clone())
+            .await
+            .context("failed to begin Legacy pending-marker clear transaction")?;
+        checkpoint_store
+            .stage_checkpoint(
+                LEGACY_OUTPUT_PENDING_MARKER_V1,
+                LEGACY_OUTPUT_PENDING_CLEARED,
+                None,
+            )
+            .await
+            .context("failed to clear Legacy pending-publication marker")?;
+        session
+            .commit()
+            .await
+            .context("failed to commit Legacy pending-marker clear")
+    }
+}
+
+pub(super) async fn read_legacy_pending_state(
+    checkpoint_store: &dyn CheckpointStore,
+) -> Result<LegacyPendingState> {
+    let marker = checkpoint_store
+        .read_checkpoint(LEGACY_OUTPUT_PENDING_MARKER_V1)
+        .await
+        .context("failed to read Legacy pending-publication marker")?;
+    match marker {
+        None
+        | Some(drasi_core::interface::SourceCheckpoint {
+            sequence: LEGACY_OUTPUT_PENDING_CLEARED,
+            ..
+        }) => Ok(LegacyPendingState::Absent),
+        Some(marker) if marker.sequence == LEGACY_OUTPUT_PENDING_VERSION => {
+            let data = marker
+                .source_position
+                .context("Legacy pending-publication marker is missing its versioned payload")?;
+            let record: LegacyOutputPendingRecord = rmp_serde::from_slice(&data)
+                .context("failed to deserialize Legacy pending-publication marker")?;
+            Ok(LegacyPendingState::Pending {
+                output_sequence: record.output_sequence,
+            })
+        }
+        Some(marker) => anyhow::bail!(
+            "invalid Legacy pending-publication marker version {}",
+            marker.sequence
+        ),
+    }
+}
+
+pub(super) async fn read_output_reset_high_water(
+    checkpoint_store: &dyn CheckpointStore,
+) -> Result<Option<u64>> {
+    checkpoint_store
+        .read_checkpoint(QUERY_OUTPUT_RESET_MARKER_V1)
+        .await
+        .context("failed to read query output reset marker")
+        .map(|marker| marker.map(|marker| marker.sequence))
 }
 
 /// Deterministic crate-private seam for transaction-boundary tests.
@@ -693,7 +881,7 @@ async fn process_bootstrap_change(
             )
             .await
             .context("atomic bootstrap envelope transaction failed")?,
-        QueryProcessingMode::Legacy => {
+        QueryProcessingMode::Legacy(_) => {
             let results: Arc<[QueryPartEvaluationContext]> = continuous_query
                 .process_source_change(change)
                 .await
@@ -787,27 +975,55 @@ impl QueryCompositeHost {
         mode: &QueryProcessingMode,
         dependencies: &QueryOutputDependencies,
     ) -> Result<()> {
+        if let LegacyPendingState::Pending { output_sequence } =
+            mode.read_legacy_pending_state().await?
+        {
+            anyhow::bail!(
+                "persistent Legacy publication is pending for output sequence {output_sequence:?}"
+            );
+        }
         let (checkpoint_store, outbox_writer, live_results_writer) = match mode {
             QueryProcessingMode::Atomic(resources) => (
                 resources.checkpoint_store.clone(),
                 resources.outbox_writer.clone(),
                 resources.live_results_writer.clone(),
             ),
-            QueryProcessingMode::Legacy => {
-                let (Some(checkpoint_store), Some(outbox_writer), Some(live_results_writer)) = (
-                    dependencies.checkpoint_store.clone(),
-                    dependencies.outbox_writer.clone(),
-                    dependencies.live_results_writer.clone(),
-                ) else {
+            QueryProcessingMode::Legacy(_) => {
+                let Some(checkpoint_store) = dependencies.checkpoint_store.clone() else {
                     anyhow::ensure!(
                         !dependencies.publication_recovery.is_required(),
-                        "atomic publication recovery requires a complete durable output bundle"
+                        "publication recovery requires a durable checkpoint store"
                     );
                     return Ok(());
                 };
                 if !checkpoint_store.is_persistent() {
                     return Ok(());
                 }
+                let (Some(outbox_writer), Some(live_results_writer)) = (
+                    dependencies.outbox_writer.clone(),
+                    dependencies.live_results_writer.clone(),
+                ) else {
+                    anyhow::ensure!(
+                        !dependencies.publication_recovery.is_required(),
+                        "publication recovery requires a complete durable output bundle"
+                    );
+                    let sequence = checkpoint_store
+                        .read_result_sequence(&dependencies.query_id)
+                        .await
+                        .context("failed to read Legacy result sequence")?
+                        .unwrap_or(0);
+                    let reset_high_water =
+                        read_output_reset_high_water(checkpoint_store.as_ref()).await?;
+                    anyhow::ensure!(
+                        reset_high_water.map_or(true, |baseline| baseline <= sequence),
+                        "query output reset baseline {reset_high_water:?} is ahead of Legacy sequence {sequence}"
+                    );
+                    let mut state = dependencies.output_state.write().await;
+                    state.hydrate(im::HashMap::new(), sequence, Vec::new());
+                    dependencies.output_metrics.record_live_results_count(0);
+                    dependencies.output_metrics.update_outbox(0, 0, sequence);
+                    return Ok(());
+                };
                 (checkpoint_store, outbox_writer, live_results_writer)
             }
         };
@@ -823,6 +1039,7 @@ impl QueryCompositeHost {
             live_results_writer.read_snapshot(query_id),
         )
         .context("failed to read the durable query output bundle")?;
+        let reset_high_water = read_output_reset_high_water(checkpoint_store.as_ref()).await?;
         let durable_sequence = result_sequence.unwrap_or(0);
         anyhow::ensure!(
             durable_sequence < u64::MAX,
@@ -835,15 +1052,23 @@ impl QueryCompositeHost {
                 "durable output is inconsistent: result sequence is 0 but the outbox is not empty"
             );
         } else {
+            match outbox_latest {
+                Some(outbox_latest) => anyhow::ensure!(
+                    outbox_latest == durable_sequence,
+                    "durable output is inconsistent: result sequence is {durable_sequence}, \
+                     outbox latest is {outbox_latest}"
+                ),
+                None => anyhow::ensure!(
+                    reset_high_water == Some(durable_sequence),
+                    "durable output is inconsistent: result sequence is {durable_sequence}, \
+                     but the outbox has no retained entry or matching reset baseline"
+                ),
+            }
+        }
+        if let Some(reset_high_water) = reset_high_water {
             anyhow::ensure!(
-                outbox_latest == Some(durable_sequence),
-                "durable output is inconsistent: result sequence is {durable_sequence}, \
-                 outbox latest is {outbox_latest:?}"
-            );
-            anyhow::ensure!(
-                !durable_outbox.is_empty(),
-                "durable output is inconsistent: result sequence is {durable_sequence}, \
-                 but the outbox has no retained entry"
+                reset_high_water <= durable_sequence,
+                "query output reset baseline {reset_high_water} is ahead of durable sequence {durable_sequence}"
             );
         }
 
@@ -1129,7 +1354,7 @@ impl QueryCompositeHost {
                             )
                         } else {
                             format!(
-                                "Atomic query processing failed before publication; \
+                                "Query processing failed before publication; \
                                  ingress is fenced and a clean stop/start can replay it: {detail}"
                             )
                         };
@@ -1324,7 +1549,9 @@ impl LiveInputStage {
             QueryProcessingMode::Atomic(resources) => {
                 self.process_atomic(input, acknowledgement, resources).await
             }
-            QueryProcessingMode::Legacy => self.process_legacy(input, acknowledgement).await,
+            QueryProcessingMode::Legacy(resources) => {
+                self.process_legacy(input, acknowledgement, resources).await
+            }
         }
     }
 
@@ -1332,6 +1559,7 @@ impl LiveInputStage {
         &self,
         input: LiveChangeContext,
         acknowledgement: &mut SourceAcknowledgement,
+        resources: &LegacyQueryResources,
     ) -> Result<()> {
         let mut profiling = match input.profiling {
             Some(profiling) => profiling,
@@ -1340,13 +1568,19 @@ impl LiveInputStage {
         profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
         profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
 
-        // Legacy mode intentionally retains the A1 ordering. Atomic mode stages
-        // checkpoint and output together in its result-aware hook.
+        let persistent = resources.persistent()?.is_some();
+        let output_sequence = self.output.output_state.read().await.next_sequence();
         let checkpoint_store = self.checkpoint_store.clone();
         let checkpoint_source_id = input.source_id.clone();
         let checkpoint_position = input.source_position.clone();
         let sequence = input.sequence;
-        let hook = move || async move {
+        let pending_resources = resources.clone();
+        let hook = move |results: Arc<[QueryPartEvaluationContext]>| async move {
+            pending_resources
+                .stage_pending_in_active_session(
+                    has_query_output(&results).then_some(output_sequence),
+                )
+                .await?;
             if let Some(sequence) = sequence {
                 let position = match &checkpoint_position {
                     Some(position)
@@ -1366,7 +1600,7 @@ impl LiveInputStage {
 
         match self
             .continuous_query
-            .process_source_change_with_hook(input.source_change, hook)
+            .process_source_change_with_legacy_result_hook(input.source_change, hook)
             .await
         {
             Ok(results) => {
@@ -1379,9 +1613,18 @@ impl LiveInputStage {
                         .await
                         .context("Legacy query output publication failed")?;
                 }
+                resources
+                    .clear_pending()
+                    .await
+                    .context("Legacy source output completed but pending-marker clear failed")?;
                 acknowledgement.advance(input.source_id.as_ref(), input.sequence);
             }
             Err(e) => {
+                if persistent {
+                    return Err(e).context(
+                        "persistent Legacy source transaction or pending-marker stage failed",
+                    );
+                }
                 error!(
                     "Query '{}' failed to process source change: {e}",
                     self.output.query_id
@@ -1574,13 +1817,26 @@ impl FutureProcessingStage {
     async fn drain_due(&self) -> Result<()> {
         match &self.mode {
             QueryProcessingMode::Atomic(resources) => self.drain_due_atomic(resources).await,
-            QueryProcessingMode::Legacy => self.drain_due_legacy().await,
+            QueryProcessingMode::Legacy(resources) => self.drain_due_legacy(resources).await,
         }
     }
 
-    async fn drain_due_legacy(&self) -> Result<()> {
+    async fn drain_due_legacy(&self, resources: &LegacyQueryResources) -> Result<()> {
+        let persistent = resources.persistent()?.is_some();
         loop {
-            match self.continuous_query.process_due_futures().await {
+            let output_sequence = self.output.output_state.read().await.next_sequence();
+            let pending_resources = resources.clone();
+            match self
+                .continuous_query
+                .process_due_futures_with_legacy_result_hook(move |due_result| async move {
+                    pending_resources
+                        .stage_pending_in_active_session(
+                            has_query_output(&due_result.results).then_some(output_sequence),
+                        )
+                        .await
+                })
+                .await
+            {
                 Ok(Some(due_result)) => {
                     if !due_result.results.is_empty() {
                         let profiling = ProfilingMetadata::new();
@@ -1589,9 +1845,18 @@ impl FutureProcessingStage {
                             .await
                             .context("Legacy due-future output publication failed")?;
                     }
+                    resources
+                        .clear_pending()
+                        .await
+                        .context("Legacy due future completed but pending-marker clear failed")?;
                 }
                 Ok(None) => break,
                 Err(e) => {
+                    if persistent {
+                        return Err(e).context(
+                            "persistent Legacy due-future transaction or pending-marker stage failed",
+                        );
+                    }
                     error!(
                         "Query '{}' failed to process due futures: {e}",
                         self.output.query_id
@@ -2366,9 +2631,7 @@ async fn persist_required_legacy_output(
                     result.sequence,
                     "outbox serialization",
                     error.into(),
-                    checkpoint_store,
                 )
-                .await
                 .into());
             }
         };
@@ -2378,9 +2641,7 @@ async fn persist_required_legacy_output(
                 result.sequence,
                 "outbox append",
                 error.into(),
-                checkpoint_store,
             )
-            .await
             .into());
         }
         if let Err(error) = writer.trim_to_capacity(query_id, outbox_capacity).await {
@@ -2389,9 +2650,7 @@ async fn persist_required_legacy_output(
                 result.sequence,
                 "outbox trim",
                 error.into(),
-                checkpoint_store,
             )
-            .await
             .into());
         }
     }
@@ -2405,9 +2664,7 @@ async fn persist_required_legacy_output(
                     result.sequence,
                     "live-result serialization",
                     error,
-                    checkpoint_store,
                 )
-                .await
                 .into());
             }
         };
@@ -2417,9 +2674,7 @@ async fn persist_required_legacy_output(
                 result.sequence,
                 "live-result mutation",
                 error.into(),
-                checkpoint_store,
             )
-            .await
             .into());
         }
     }
@@ -2436,22 +2691,12 @@ async fn persist_required_legacy_output(
     Ok(())
 }
 
-async fn legacy_output_failure(
+fn legacy_output_failure(
     query_id: &str,
     sequence: u64,
     stage: &'static str,
     source: anyhow::Error,
-    checkpoint_store: &Arc<dyn CheckpointStore>,
 ) -> LegacyOutputPersistenceError {
-    if let Err(marker_error) = checkpoint_store
-        .write_result_sequence(query_id, sequence)
-        .await
-    {
-        error!(
-            "Query '{query_id}' could not persist failed Legacy output sequence {sequence} \
-             after {stage} failed: {marker_error}"
-        );
-    }
     LegacyOutputPersistenceError {
         query_id: query_id.to_string(),
         sequence,

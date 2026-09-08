@@ -16,7 +16,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::Path,
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -75,6 +75,8 @@ enum BackendFault {
     OutboxStage,
     LiveResultsStage,
     ResultSequenceWrite,
+    LegacyMarkerStage,
+    LegacyMarkerClear,
 }
 
 struct FailingCommitSessionControl {
@@ -167,6 +169,12 @@ struct FailingSecondCheckpointStore {
 
 struct FailingResultSequenceCheckpointStore {
     inner: Arc<dyn CheckpointStore>,
+}
+
+struct FailingLegacyMarkerCheckpointStore {
+    inner: Arc<dyn CheckpointStore>,
+    fail_clear: bool,
+    failed: AtomicBool,
 }
 
 #[async_trait]
@@ -288,6 +296,77 @@ impl CheckpointStore for FailingResultSequenceCheckpointStore {
         Err(IndexError::other(std::io::Error::other(
             "injected Legacy result-sequence write failure",
         )))
+    }
+
+    async fn read_result_sequence(
+        &self,
+        query_id: &str,
+    ) -> std::result::Result<Option<u64>, IndexError> {
+        self.inner.read_result_sequence(query_id).await
+    }
+}
+
+#[async_trait]
+impl CheckpointStore for FailingLegacyMarkerCheckpointStore {
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        self.inner.transaction_domain()
+    }
+
+    fn is_persistent(&self) -> bool {
+        self.inner.is_persistent()
+    }
+
+    async fn stage_checkpoint(
+        &self,
+        source_id: &str,
+        sequence: u64,
+        source_position: Option<&Bytes>,
+    ) -> std::result::Result<(), IndexError> {
+        let target_sequence = if self.fail_clear { 0 } else { 1 };
+        if source_id == LEGACY_OUTPUT_PENDING_MARKER_V1
+            && sequence == target_sequence
+            && !self.failed.swap(true, Ordering::AcqRel)
+        {
+            return Err(IndexError::other(std::io::Error::other(
+                "injected Legacy marker failure",
+            )));
+        }
+        self.inner
+            .stage_checkpoint(source_id, sequence, source_position)
+            .await
+    }
+
+    async fn read_checkpoint(
+        &self,
+        source_id: &str,
+    ) -> std::result::Result<Option<SourceCheckpoint>, IndexError> {
+        self.inner.read_checkpoint(source_id).await
+    }
+
+    async fn read_all_checkpoints(
+        &self,
+    ) -> std::result::Result<HashMap<String, SourceCheckpoint>, IndexError> {
+        self.inner.read_all_checkpoints().await
+    }
+
+    async fn clear_checkpoints(&self) -> std::result::Result<(), IndexError> {
+        self.inner.clear_checkpoints().await
+    }
+
+    async fn write_config_hash(&self, hash: u64) -> std::result::Result<(), IndexError> {
+        self.inner.write_config_hash(hash).await
+    }
+
+    async fn read_config_hash(&self) -> std::result::Result<Option<u64>, IndexError> {
+        self.inner.read_config_hash().await
+    }
+
+    async fn write_result_sequence(
+        &self,
+        query_id: &str,
+        sequence: u64,
+    ) -> std::result::Result<(), IndexError> {
+        self.inner.write_result_sequence(query_id, sequence).await
     }
 
     async fn read_result_sequence(
@@ -499,10 +578,34 @@ async fn build_host_with_bootstrap(
             created.checkpoint_store =
                 Some(Arc::new(FailingResultSequenceCheckpointStore { inner }));
         }
+        BackendFault::LegacyMarkerStage => {
+            let inner = created
+                .checkpoint_store
+                .as_ref()
+                .expect("RocksDB checkpoint store")
+                .clone();
+            created.checkpoint_store = Some(Arc::new(FailingLegacyMarkerCheckpointStore {
+                inner,
+                fail_clear: false,
+                failed: AtomicBool::new(false),
+            }));
+        }
+        BackendFault::LegacyMarkerClear => {
+            let inner = created
+                .checkpoint_store
+                .as_ref()
+                .expect("RocksDB checkpoint store")
+                .clone();
+            created.checkpoint_store = Some(Arc::new(FailingLegacyMarkerCheckpointStore {
+                inner,
+                fail_clear: true,
+                failed: AtomicBool::new(false),
+            }));
+        }
     }
 
     let mode = if force_legacy {
-        QueryProcessingMode::legacy()
+        QueryProcessingMode::legacy_from_created_indexes(&created)
     } else {
         QueryProcessingMode::from_created_indexes(&created)
     };
@@ -1985,6 +2088,102 @@ async fn due_future_stage_failure_retains_future_and_publishes_nothing() {
 }
 
 #[tokio::test]
+async fn legacy_due_future_marker_stage_failure_rolls_back_pop() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let (host, fixture) = build_host(
+        temp_dir.path(),
+        "MATCH (n:Person) WHERE drasi.trueLater(true, 2000) RETURN n.name AS name",
+        BackendFault::LegacyMarkerStage,
+        true,
+        None,
+    )
+    .await;
+    seed_due_future(&fixture).await;
+    start_host(host, &fixture).await;
+    enqueue_futures_due(&fixture).await;
+    wait_for_status(&fixture.base, ComponentStatus::Error).await;
+
+    assert_eq!(
+        fixture
+            .future_queue
+            .peek_due_time()
+            .await
+            .expect("peek future after marker failure"),
+        Some(2_000),
+        "marker stage failure must roll back the due-future pop"
+    );
+    assert!(fixture
+        .checkpoint_store
+        .read_checkpoint(LEGACY_OUTPUT_PENDING_MARKER_V1)
+        .await
+        .expect("read failed due marker")
+        .is_none());
+    assert_eq!(fixture.output_state.read().await.as_of_sequence(), 0);
+    assert_eq!(fixture.dispatch_count.load(Ordering::Acquire), 0);
+
+    stop_host(&fixture).await;
+}
+
+#[tokio::test]
+async fn legacy_due_future_success_clears_pending_marker_after_output() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let (host, mut fixture) = build_host(
+        temp_dir.path(),
+        "MATCH (n:Person) WHERE drasi.trueLater(true, 2000) RETURN n.name AS name",
+        BackendFault::None,
+        true,
+        None,
+    )
+    .await;
+    seed_due_future(&fixture).await;
+    start_host(host, &fixture).await;
+    enqueue_futures_due(&fixture).await;
+    let result = receive_result(&mut fixture.output_rx).await;
+
+    assert_eq!(result.sequence, 1);
+    assert_eq!(
+        fixture
+            .future_queue
+            .peek_due_time()
+            .await
+            .expect("peek committed Legacy future"),
+        None
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fixture
+                .checkpoint_store
+                .read_checkpoint(LEGACY_OUTPUT_PENDING_MARKER_V1)
+                .await
+                .expect("read cleared Legacy due marker")
+                .is_some_and(|marker| marker.sequence == 0)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Legacy due marker should clear");
+    assert_eq!(
+        read_legacy_pending_state(fixture.checkpoint_store.as_ref())
+            .await
+            .expect("read logical Legacy due marker"),
+        LegacyPendingState::Absent
+    );
+    assert_eq!(
+        fixture
+            .checkpoint_store
+            .read_result_sequence(QUERY_ID)
+            .await
+            .expect("read Legacy due sequence"),
+        Some(1)
+    );
+
+    stop_host(&fixture).await;
+}
+
+#[tokio::test]
 async fn due_future_post_commit_failure_requires_output_reconciliation() {
     let temp_dir = tempfile::TempDir::new().expect("create temp directory");
     let (host, fixture) = build_host(
@@ -2059,7 +2258,13 @@ async fn explicit_legacy_mode_preserves_a1_ordering_and_skips_atomic_observers()
 
     assert_eq!(dispatched.sequence, 1);
     assert_eq!(fixture.base.get_status().await, ComponentStatus::Running);
-    assert_eq!(fixture.position_handle.load(Ordering::Acquire), 19);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.position_handle.load(Ordering::Acquire) != 19 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Legacy source acknowledgement should follow marker clear");
     assert!(element_exists(&fixture, "person-legacy").await);
     assert_eq!(
         fixture
@@ -2176,14 +2381,12 @@ async fn persistent_legacy_output_failures_fence_immediately_and_strict_restart_
             16,
             Arc::new(QueryOutputMetrics::new()),
         );
-        let error = QueryCompositeHost::reconcile_output_state(
-            &QueryProcessingMode::legacy(),
-            &dependencies,
-        )
-        .await
-        .expect_err("Strict restart must reject partial Legacy output");
+        let error = QueryCompositeHost::reconcile_output_state(&fixture.mode, &dependencies)
+            .await
+            .expect_err("Strict restart must reject partial Legacy output");
         assert!(
-            format!("{error:#}").contains(expected_stage)
+            format!("{error:#}").contains("pending")
+                || format!("{error:#}").contains(expected_stage)
                 || format!("{error:#}").contains("durable output is inconsistent"),
             "{name}: unexpected reconciliation error: {error:#}"
         );

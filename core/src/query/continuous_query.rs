@@ -152,6 +152,34 @@ impl ContinuousQuery {
         Ok(result)
     }
 
+    /// Process a source change with a result-aware hook in the active legacy session.
+    ///
+    /// Unlike [`Self::process_source_change_with_result_hook`], this method does not
+    /// claim that every query output writer participates in the transaction. It is
+    /// used by orchestration that must atomically stage metadata with core/source
+    /// progress before the legacy session commits.
+    #[tracing::instrument(skip_all, err, level = "debug")]
+    pub async fn process_source_change_with_legacy_result_hook<F, Fut>(
+        &self,
+        change: SourceChange,
+        pre_commit_hook: F,
+    ) -> Result<Arc<[QueryPartEvaluationContext]>, EvaluationError>
+    where
+        F: FnOnce(Arc<[QueryPartEvaluationContext]>) -> Fut + Send,
+        Fut: Future<Output = Result<(), IndexError>> + Send,
+    {
+        let _lock = self.change_lock.lock().await;
+        let guard = SessionGuard::begin(self.session_control.clone()).await?;
+
+        let changes = self.execute_source_middleware(change).await?;
+        let result: Arc<[QueryPartEvaluationContext]> =
+            self.process_changes_inner(changes).await?.into();
+
+        pre_commit_hook(result.clone()).await?;
+        guard.commit().await?;
+        Ok(result)
+    }
+
     /// Process a source change with a result-aware pre-commit hook.
     ///
     /// The hook receives an immutable [`Arc`] containing the exact typed result
@@ -219,6 +247,44 @@ impl ContinuousQuery {
         let results = self.process_changes_inner(changes).await?;
         guard.commit().await?;
         Ok(Some(DueFutureResult { results, source_id }))
+    }
+
+    /// Pop and process one due future with a result-aware hook in the active
+    /// legacy session.
+    ///
+    /// The hook runs after evaluation but before commit. Hook failure rolls back
+    /// the future pop and all core mutations on transaction-capable backends.
+    #[tracing::instrument(skip_all, err, level = "debug")]
+    pub async fn process_due_futures_with_legacy_result_hook<F, Fut>(
+        &self,
+        pre_commit_hook: F,
+    ) -> Result<Option<Arc<DueFutureResult>>, EvaluationError>
+    where
+        F: FnOnce(Arc<DueFutureResult>) -> Fut + Send,
+        Fut: Future<Output = Result<(), IndexError>> + Send,
+    {
+        let _lock = self.change_lock.lock().await;
+        let guard = SessionGuard::begin(self.session_control.clone()).await?;
+
+        let future_ref = match self.future_queue.pop().await {
+            Ok(Some(future_ref)) => future_ref,
+            Ok(None) => {
+                guard.commit().await?;
+                return Ok(None);
+            }
+            Err(error) => return Err(EvaluationError::from(error)),
+        };
+
+        let source_id = future_ref.element_ref.source_id.clone();
+        let change = SourceChange::Future { future_ref };
+        let changes = self.execute_source_middleware(change).await?;
+        let result = Arc::new(DueFutureResult {
+            results: self.process_changes_inner(changes).await?,
+            source_id,
+        });
+        pre_commit_hook(result.clone()).await?;
+        guard.commit().await?;
+        Ok(Some(result))
     }
 
     /// Atomically process a due future with a result-aware pre-commit hook.

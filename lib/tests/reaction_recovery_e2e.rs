@@ -22,9 +22,13 @@ mod mock_source;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use drasi_core::interface::{
+    CheckpointStore, CreatedIndexes, IndexBackendPlugin, IndexError, OutboxWriter, SessionControl,
+};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
+use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_lib::bootstrap::{
     BootstrapContext as SourceBootstrapContext, BootstrapProvider, BootstrapRequest,
     BootstrapResult,
@@ -36,7 +40,10 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::reactions::{BootstrapContext as ReactionBootstrapContext, ReactionCheckpoint};
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::state_store::StateStoreProvider;
-use drasi_lib::{DispatchMode, DrasiLib, MemoryStateStoreProvider, Query, Reaction, Source};
+use drasi_lib::{
+    DispatchMode, DrasiLib, MemoryStateStoreProvider, Query, Reaction, RecoveryPolicy, Source,
+    StorageBackendRef,
+};
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -162,6 +169,28 @@ struct RecordingReaction {
 
 struct StableSnapshotBootstrapProvider {
     attempts: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct CapturingRocksProvider {
+    inner: RocksDbIndexProvider,
+    outbox: Arc<tokio::sync::RwLock<Option<Arc<dyn OutboxWriter>>>>,
+    checkpoint_store: Arc<tokio::sync::RwLock<Option<Arc<dyn CheckpointStore>>>>,
+    session_control: Arc<tokio::sync::RwLock<Option<Arc<dyn SessionControl>>>>,
+}
+
+#[async_trait]
+impl IndexBackendPlugin for CapturingRocksProvider {
+    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
+        let created = self.inner.create_indexes(query_id).await?;
+        *self.outbox.write().await = created.outbox_writer.clone();
+        *self.checkpoint_store.write().await = created.checkpoint_store.clone();
+        *self.session_control.write().await = Some(created.set.session_control.clone());
+        Ok(created)
+    }
+
+    fn is_volatile(&self) -> bool {
+        false
+    }
 }
 
 #[async_trait]
@@ -315,6 +344,19 @@ impl RecordingReceiver {
             results.push(r);
         }
         results
+    }
+
+    async fn wait_for_live(&mut self, dur: Duration) -> (Vec<QueryResult>, Option<QueryResult>) {
+        let deadline = tokio::time::Instant::now() + dur;
+        let mut controls = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match timeout(remaining, self.rx.recv()).await {
+                Ok(Some(result)) if result.sequence == 0 => controls.push(result),
+                Ok(Some(result)) => return (controls, Some(result)),
+                Ok(None) | Err(_) => return (controls, None),
+            }
+        }
     }
 }
 
@@ -522,9 +564,8 @@ async fn volatile_query_rebootstrap_preserves_reaction_sequence_and_current_snap
     wait_for_query_status(&core, "volatile-query", ComponentStatus::Running).await?;
 
     insert_person(&handle, "live-before-restart", "Before", 30).await?;
-    let first = receiver.wait_for_count(1, Duration::from_secs(5)).await;
-    assert_eq!(first.len(), 1);
-    assert_eq!(first[0].sequence, 1);
+    let (_, first) = receiver.wait_for_live(Duration::from_secs(5)).await;
+    assert_eq!(first.expect("first live result").sequence, 1);
     let config_hash =
         drasi_lib::queries::compute_config_hash(&core.get_query_config("volatile-query").await?);
     persist_reaction_checkpoint(
@@ -546,13 +587,21 @@ async fn volatile_query_rebootstrap_preserves_reaction_sequence_and_current_snap
     );
 
     insert_person(&handle, "live-after-restart", "After", 31).await?;
-    let after_restart = receiver.wait_for_count(1, Duration::from_secs(5)).await;
+    let (controls, live) = receiver.wait_for_live(Duration::from_secs(5)).await;
+    let controls: Vec<_> = controls
+        .iter()
+        .filter_map(|result| {
+            (result.sequence == 0)
+                .then(|| result.metadata["control_signal"].as_str())
+                .flatten()
+        })
+        .collect();
+    assert_eq!(controls, vec!["bootstrapStarted", "bootstrapCompleted"]);
     assert_eq!(
-        after_restart.len(),
-        1,
-        "surviving reaction silently dropped the first post-rebootstrap result"
+        live.expect("surviving reaction dropped post-rebootstrap output")
+            .sequence,
+        2
     );
-    assert_eq!(after_restart[0].sequence, 2);
 
     let (snapshot_reaction, snapshot_rx) =
         SnapshotRecordingReaction::new("new-snapshot-reaction", "volatile-query");
@@ -572,6 +621,284 @@ async fn volatile_query_rebootstrap_preserves_reaction_sequence_and_current_snap
     assert!(!names.contains(&"Before"));
 
     core.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn persistent_auto_reset_preserves_reaction_high_water_across_process_restart() -> Result<()>
+{
+    let data_dir = tempfile::TempDir::new()?;
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let captured_outbox: Arc<tokio::sync::RwLock<Option<Arc<dyn OutboxWriter>>>> =
+        Arc::new(tokio::sync::RwLock::new(None));
+    let captured_checkpoints: Arc<tokio::sync::RwLock<Option<Arc<dyn CheckpointStore>>>> =
+        Arc::new(tokio::sync::RwLock::new(None));
+    let captured_session: Arc<tokio::sync::RwLock<Option<Arc<dyn SessionControl>>>> =
+        Arc::new(tokio::sync::RwLock::new(None));
+    let provider1: Arc<dyn IndexBackendPlugin> = Arc::new(CapturingRocksProvider {
+        inner: RocksDbIndexProvider::new(data_dir.path(), true, false),
+        outbox: captured_outbox.clone(),
+        checkpoint_store: captured_checkpoints.clone(),
+        session_control: captured_session.clone(),
+    });
+    let (source1, handle1) = MockSource::new("persistent-reset-source")?;
+    let query_config = || {
+        Query::cypher("persistent-reset-query")
+            .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+            .from_source("persistent-reset-source")
+            .enable_bootstrap(false)
+            .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
+            .with_recovery_policy(RecoveryPolicy::AutoReset)
+            .with_outbox_capacity(16)
+            .auto_start(true)
+            .build()
+    };
+    let (reaction1, mut receiver1) = recording_reaction(
+        "persistent-reset-reaction",
+        vec!["persistent-reset-query".into()],
+        ReactionRecoveryPolicy::Strict,
+        true,
+        false,
+    );
+    let core1 = Arc::new(
+        DrasiLib::builder()
+            .with_id("persistent-reset-1")
+            .with_index_provider("rocks", provider1)
+            .with_source(source1)
+            .with_query(query_config())
+            .with_reaction(reaction1)
+            .with_state_store_provider(state_store.clone())
+            .build()
+            .await?,
+    );
+    core1.start().await?;
+    wait_for_query_status(&core1, "persistent-reset-query", ComponentStatus::Running).await?;
+    insert_person(&handle1, "p1", "BeforeReset", 30).await?;
+    let first = receiver1.wait_for_count(1, Duration::from_secs(5)).await;
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].sequence, 1);
+    let config_hash = drasi_lib::queries::compute_config_hash(
+        &core1.get_query_config("persistent-reset-query").await?,
+    );
+    persist_reaction_checkpoint(
+        state_store.as_ref(),
+        "persistent-reset-reaction",
+        "persistent-reset-query",
+        1,
+        config_hash,
+    )
+    .await?;
+
+    core1.stop_query("persistent-reset-query").await?;
+    wait_for_query_status(&core1, "persistent-reset-query", ComponentStatus::Stopped).await?;
+    captured_outbox
+        .read()
+        .await
+        .as_ref()
+        .expect("captured RocksDB outbox")
+        .clear("persistent-reset-query")
+        .await?;
+    *captured_outbox.write().await = None;
+    *captured_checkpoints.write().await = None;
+    *captured_session.write().await = None;
+    core1.start_query("persistent-reset-query").await?;
+    wait_for_query_status(&core1, "persistent-reset-query", ComponentStatus::Running).await?;
+
+    insert_person(&handle1, "p2", "AfterReset", 31).await?;
+    let after_reset = receiver1.wait_for_count(1, Duration::from_secs(5)).await;
+    assert_eq!(after_reset.len(), 1);
+    assert_eq!(
+        after_reset[0].sequence, 2,
+        "AutoReset rewound the public output sequence"
+    );
+    persist_reaction_checkpoint(
+        state_store.as_ref(),
+        "persistent-reset-reaction",
+        "persistent-reset-query",
+        2,
+        config_hash,
+    )
+    .await?;
+
+    core1.stop_query("persistent-reset-query").await?;
+    wait_for_query_status(&core1, "persistent-reset-query", ComponentStatus::Stopped).await?;
+    let checkpoint_store = captured_checkpoints
+        .read()
+        .await
+        .as_ref()
+        .expect("captured RocksDB checkpoint store")
+        .clone();
+    let session_control = captured_session
+        .read()
+        .await
+        .as_ref()
+        .expect("captured RocksDB session control")
+        .clone();
+    session_control.begin().await?;
+    checkpoint_store
+        .stage_checkpoint("\0drasi:query-bootstrap:v1", 0, None)
+        .await?;
+    session_control.commit().await?;
+    drop(checkpoint_store);
+    drop(session_control);
+    *captured_outbox.write().await = None;
+    *captured_checkpoints.write().await = None;
+    *captured_session.write().await = None;
+    core1.start_query("persistent-reset-query").await?;
+    wait_for_query_status(&core1, "persistent-reset-query", ComponentStatus::Running).await?;
+    insert_person(&handle1, "p3", "AfterIncompleteBootstrap", 32).await?;
+    let after_incomplete = receiver1.wait_for_count(1, Duration::from_secs(5)).await;
+    assert_eq!(after_incomplete.len(), 1);
+    assert_eq!(
+        after_incomplete[0].sequence, 3,
+        "incomplete-bootstrap reset rewound the public sequence"
+    );
+    persist_reaction_checkpoint(
+        state_store.as_ref(),
+        "persistent-reset-reaction",
+        "persistent-reset-query",
+        3,
+        config_hash,
+    )
+    .await?;
+
+    let (snapshot_reaction, snapshot_rx) =
+        SnapshotRecordingReaction::new("persistent-reset-snapshot", "persistent-reset-query");
+    core1.add_reaction(snapshot_reaction).await?;
+    let (snapshot_sequence, snapshot_rows) = timeout(Duration::from_secs(5), snapshot_rx)
+        .await
+        .expect("persistent reset snapshot timed out")
+        .expect("persistent reset snapshot channel closed");
+    assert_eq!(snapshot_sequence, 3);
+    assert_eq!(snapshot_rows.len(), 1);
+    assert_eq!(snapshot_rows[0]["name"], "AfterIncompleteBootstrap");
+
+    core1.shutdown().await?;
+    *captured_outbox.write().await = None;
+    *captured_checkpoints.write().await = None;
+    *captured_session.write().await = None;
+    drop(core1);
+
+    let provider2: Arc<dyn IndexBackendPlugin> =
+        Arc::new(RocksDbIndexProvider::new(data_dir.path(), true, false));
+    let (source2, handle2) = MockSource::new("persistent-reset-source")?;
+    let (reaction2, mut receiver2) = recording_reaction(
+        "persistent-reset-reaction",
+        vec!["persistent-reset-query".into()],
+        ReactionRecoveryPolicy::Strict,
+        true,
+        false,
+    );
+    let core2 = Arc::new(
+        DrasiLib::builder()
+            .with_id("persistent-reset-2")
+            .with_index_provider("rocks", provider2)
+            .with_source(source2)
+            .with_query(query_config())
+            .with_reaction(reaction2)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+    core2.start().await?;
+    wait_for_query_status(&core2, "persistent-reset-query", ComponentStatus::Running).await?;
+    assert!(
+        receiver2.drain_available().is_empty(),
+        "checkpointed reaction replayed reset history on process restart"
+    );
+    insert_person(&handle2, "p3", "AfterProcessRestart", 32).await?;
+    let after_process_restart = receiver2.wait_for_count(1, Duration::from_secs(5)).await;
+    assert_eq!(after_process_restart.len(), 1);
+    assert_eq!(after_process_restart[0].sequence, 4);
+
+    core2.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn config_reset_preserves_reaction_high_water() -> Result<()> {
+    let data_dir = tempfile::TempDir::new()?;
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let provider: Arc<dyn IndexBackendPlugin> =
+        Arc::new(RocksDbIndexProvider::new(data_dir.path(), true, false));
+    let (source, handle) = MockSource::new("config-reset-source")?;
+    let query = Query::cypher("config-reset-query")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("config-reset-source")
+        .enable_bootstrap(false)
+        .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
+        .with_recovery_policy(RecoveryPolicy::AutoReset)
+        .auto_start(true)
+        .build();
+    let (reaction, mut receiver) = recording_reaction(
+        "config-reset-reaction",
+        vec!["config-reset-query".into()],
+        ReactionRecoveryPolicy::AutoReset,
+        true,
+        true,
+    );
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("config-reset-test")
+            .with_index_provider("rocks", provider)
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_state_store_provider(state_store.clone())
+            .build()
+            .await?,
+    );
+    core.start().await?;
+    insert_person(&handle, "p1", "BeforeConfigReset", 30).await?;
+    let (_, first) = receiver.wait_for_live(Duration::from_secs(5)).await;
+    assert_eq!(first.expect("first config-reset output").sequence, 1);
+    let old_hash = drasi_lib::queries::compute_config_hash(
+        &core.get_query_config("config-reset-query").await?,
+    );
+    persist_reaction_checkpoint(
+        state_store.as_ref(),
+        "config-reset-reaction",
+        "config-reset-query",
+        1,
+        old_hash,
+    )
+    .await?;
+    stop_reaction_and_wait(&core, "config-reset-reaction").await?;
+
+    let changed_query = Query::cypher("config-reset-query")
+        .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+        .from_source("config-reset-source")
+        .enable_bootstrap(false)
+        .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
+        .with_recovery_policy(RecoveryPolicy::AutoReset)
+        .auto_start(true)
+        .build();
+    core.update_query("config-reset-query", changed_query)
+        .await?;
+    wait_for_query_status(&core, "config-reset-query", ComponentStatus::Running).await?;
+    core.start_reaction("config-reset-reaction").await?;
+
+    insert_person(&handle, "p2", "AfterConfigReset", 31).await?;
+    let (_, after_reset) = receiver.wait_for_live(Duration::from_secs(5)).await;
+    assert_eq!(
+        after_reset
+            .expect("post-config-reset output was silently dropped")
+            .sequence,
+        2
+    );
+
+    let (snapshot_reaction, snapshot_rx) =
+        SnapshotRecordingReaction::new("config-reset-snapshot", "config-reset-query");
+    core.add_reaction(snapshot_reaction).await?;
+    let (snapshot_sequence, snapshot_rows) = timeout(Duration::from_secs(5), snapshot_rx)
+        .await
+        .expect("config reset snapshot timed out")
+        .expect("config reset snapshot channel closed");
+    assert_eq!(snapshot_sequence, 2);
+    assert_eq!(snapshot_rows.len(), 1);
+    assert_eq!(snapshot_rows[0]["name"], "AfterConfigReset");
+
+    core.shutdown().await?;
     Ok(())
 }
 

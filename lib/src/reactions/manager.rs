@@ -1143,6 +1143,32 @@ impl ReactionManager {
                     loop {
                         match receiver.recv().await {
                             Ok(query_result) => {
+                                if query_result.sequence == 0
+                                    && query_result
+                                        .metadata
+                                        .get("control_signal")
+                                        .and_then(serde_json::Value::as_str)
+                                        .is_some_and(|signal| {
+                                            matches!(
+                                                signal,
+                                                "bootstrapStarted" | "bootstrapCompleted"
+                                            )
+                                        })
+                                {
+                                    let result = Arc::try_unwrap(query_result)
+                                        .unwrap_or_else(|arc| (*arc).clone());
+                                    if let Err(error) =
+                                        reaction.enqueue_query_result(result).await
+                                    {
+                                        log::error!(
+                                            "[{reaction_id_owned}] Failed to enqueue bootstrap control \
+                                             from query '{query_id_clone}': {error}"
+                                        );
+                                        break;
+                                    }
+                                    continue;
+                                }
+
                                 // Skip events already covered by the bootstrap snapshot/outbox catchup.
                                 if query_result.sequence <= last_forwarded_seq {
                                     forwarder_metrics.record_dedup_skip();
