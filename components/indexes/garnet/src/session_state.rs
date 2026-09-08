@@ -18,7 +18,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use drasi_core::interface::{IndexError, SessionControl};
+use drasi_core::interface::{IndexError, SessionControl, TransactionDomain};
 use redis::{aio::MultiplexedConnection, Pipeline, ToRedisArgs};
 
 /// Result of checking the write buffer for a key/field.
@@ -476,6 +476,7 @@ impl SessionInner {
 pub struct GarnetSessionState {
     connection: MultiplexedConnection,
     inner: Mutex<SessionInner>,
+    transaction_domain: TransactionDomain,
 }
 
 impl GarnetSessionState {
@@ -486,7 +487,12 @@ impl GarnetSessionState {
                 buffer: None,
                 depth: 0,
             }),
+            transaction_domain: TransactionDomain::new(),
         }
+    }
+
+    pub(crate) fn transaction_domain(&self) -> TransactionDomain {
+        self.transaction_domain.clone()
     }
 
     /// Begin a new session-scoped transaction, or nest into an existing one.
@@ -645,8 +651,8 @@ impl GarnetSessionControl {
 
 #[async_trait]
 impl SessionControl for GarnetSessionControl {
-    fn supports_atomic_sessions(&self) -> bool {
-        true
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        Some(self.state.transaction_domain())
     }
 
     async fn begin(&self) -> Result<(), IndexError> {

@@ -41,6 +41,7 @@ async fn test_outbox_append_and_read() {
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
     let writer = RocksDbOutboxWriter::new(db);
+    assert!(writer.transaction_domain().is_none());
 
     writer.append("q1", 1, b"hello").await.unwrap();
     writer.append("q1", 2, b"world").await.unwrap();
@@ -172,6 +173,7 @@ async fn test_live_results_apply_upserts() {
     let tmp = TempDir::new().unwrap();
     let db = open_db(tmp.path().to_str().unwrap(), "q1");
     let writer = RocksDbLiveResultsWriter::new(db);
+    assert!(writer.transaction_domain().is_none());
 
     let mutations = vec![
         RowMutation {

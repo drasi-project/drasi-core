@@ -17,14 +17,15 @@
 //! Uses a dedicated `live_results` column family with keys formatted as:
 //! `{query_id}\x00{row_signature_u64_be}` (8-byte big-endian suffix).
 //!
-//! Writes are standalone (not part of the session transaction) since live results
-//! persistence happens after the index transaction commits.
+//! Provider-created writers share session state with the core indexes, so live
+//! mutations join an active transaction. Writers created directly retain
+//! standalone behavior.
 
 use std::sync::Arc;
 
-use crate::IndexDb;
+use crate::{IndexDb, RocksDbSessionState};
 use async_trait::async_trait;
-use drasi_core::interface::{IndexError, LiveResultsWriter, RowMutation};
+use drasi_core::interface::{IndexError, LiveResultsWriter, RowMutation, TransactionDomain};
 use rocksdb::{ColumnFamilyDescriptor, IteratorMode, WriteBatchWithTransaction};
 use tokio::task;
 
@@ -72,22 +73,48 @@ fn make_prefix(query_id: &str) -> Vec<u8> {
 /// Uses WriteBatch for atomic multi-row mutations.
 pub struct RocksDbLiveResultsWriter {
     db: Arc<IndexDb>,
+    session_state: Option<Arc<RocksDbSessionState>>,
 }
 
 impl RocksDbLiveResultsWriter {
+    /// Create a standalone writer whose mutations commit immediately.
     pub fn new(db: Arc<IndexDb>) -> Self {
-        Self { db }
+        Self {
+            db,
+            session_state: None,
+        }
+    }
+
+    /// Create a writer that joins active transactions in `session_state`.
+    pub fn new_with_session_state(
+        db: Arc<IndexDb>,
+        session_state: Arc<RocksDbSessionState>,
+    ) -> Self {
+        Self {
+            db,
+            session_state: Some(session_state),
+        }
     }
 }
 
 #[async_trait]
 impl LiveResultsWriter for RocksDbLiveResultsWriter {
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        self.session_state
+            .as_ref()
+            .map(|state| state.transaction_domain())
+    }
+
     async fn apply_mutations(
         &self,
         query_id: &str,
         mutations: &[RowMutation<'_>],
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let active_session_state = match &self.session_state {
+            Some(state) if state.is_active()? => Some(state.clone()),
+            _ => None,
+        };
         // Collect owned mutation data for the blocking task
         let owned_mutations: Vec<(Vec<u8>, Option<Vec<u8>>)> = mutations
             .iter()
@@ -103,14 +130,29 @@ impl LiveResultsWriter for RocksDbLiveResultsWriter {
                 .cf_handle(LIVE_RESULTS_CF)
                 .expect("live_results cf not found");
 
-            let mut batch = WriteBatchWithTransaction::<true>::default();
-            for (key, data) in &owned_mutations {
-                match data {
-                    Some(value) => batch.put_cf(&cf, key, value),
-                    None => batch.delete_cf(&cf, key),
+            match active_session_state {
+                Some(state) => state.with_txn(|txn| {
+                    for (key, data) in &owned_mutations {
+                        match data {
+                            Some(value) => {
+                                txn.put_cf(&cf, key, value).map_err(IndexError::other)?
+                            }
+                            None => txn.delete_cf(&cf, key).map_err(IndexError::other)?,
+                        }
+                    }
+                    Ok(())
+                }),
+                None => {
+                    let mut batch = WriteBatchWithTransaction::<true>::default();
+                    for (key, data) in &owned_mutations {
+                        match data {
+                            Some(value) => batch.put_cf(&cf, key, value),
+                            None => batch.delete_cf(&cf, key),
+                        }
+                    }
+                    db.write(batch).map_err(IndexError::other)
                 }
             }
-            db.write(batch).map_err(IndexError::other)
         })
         .await
         .map_err(IndexError::other)?

@@ -22,6 +22,7 @@ mod query_clock;
 mod result_index;
 mod session_control;
 mod source_middleware;
+mod transaction_domain;
 
 use std::error::Error;
 use std::fmt::Display;
@@ -59,6 +60,7 @@ pub use source_middleware::MiddlewareSetupError;
 pub use source_middleware::SourceMiddleware;
 pub use source_middleware::SourceMiddlewareFactory;
 use thiserror::Error;
+pub use transaction_domain::{AtomicResultTransaction, TransactionDomain};
 
 use crate::evaluation::EvaluationError;
 
@@ -68,6 +70,8 @@ pub enum IndexError {
     NotSupported,
     /// A result-aware hook requires a session that can atomically roll back index writes.
     AtomicSessionNotSupported,
+    /// A result-aware hook was prepared for a different transaction domain.
+    TransactionDomainMismatch,
     /// A temporal read was attempted on an index whose archive is not enabled.
     ArchiveNotEnabled,
     CorruptedData,
@@ -82,6 +86,7 @@ impl PartialEq for IndexError {
             (IndexError::IOError, IndexError::IOError) => true,
             (IndexError::NotSupported, IndexError::NotSupported) => true,
             (IndexError::AtomicSessionNotSupported, IndexError::AtomicSessionNotSupported) => true,
+            (IndexError::TransactionDomainMismatch, IndexError::TransactionDomainMismatch) => true,
             (IndexError::ArchiveNotEnabled, IndexError::ArchiveNotEnabled) => true,
             (IndexError::CorruptedData, IndexError::CorruptedData) => true,
             (IndexError::ConnectionFailed(a), IndexError::ConnectionFailed(b)) => {
@@ -104,6 +109,12 @@ impl Display for IndexError {
         match self {
             IndexError::AtomicSessionNotSupported => {
                 write!(f, "result-aware hooks require atomic session support")
+            }
+            IndexError::TransactionDomainMismatch => {
+                write!(
+                    f,
+                    "result-aware hook transaction domain does not match the query"
+                )
             }
             IndexError::ArchiveNotEnabled => write!(
                 f,

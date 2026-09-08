@@ -28,7 +28,7 @@
 
 use async_trait::async_trait;
 
-use super::IndexError;
+use super::{IndexError, TransactionDomain};
 
 /// A single row mutation: upsert if data is `Some`, delete if `None`.
 #[derive(Debug, Clone)]
@@ -45,13 +45,22 @@ pub struct RowMutation<'a> {
 /// The `lib` layer handles serialization/deserialization of row data.
 #[async_trait]
 pub trait LiveResultsWriter: Send + Sync {
+    /// Transaction domain used by live-result mutations.
+    ///
+    /// Returns `None` when mutations cannot join a query's active session.
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        None
+    }
+
     /// Apply a batch of row mutations atomically.
     ///
     /// - `data = Some(bytes)`: Upsert the row (insert or replace).
     /// - `data = None`: Delete the row if it exists.
     ///
     /// Implementations should apply all mutations in a single batch/transaction
-    /// when possible for efficiency.
+    /// when possible for efficiency. Domain-aware implementations stage the
+    /// batch in an active matching session and retain standalone behavior
+    /// outside a session.
     async fn apply_mutations(
         &self,
         query_id: &str,

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::IndexDb;
 use async_trait::async_trait;
-use drasi_core::interface::{IndexError, SessionControl};
+use drasi_core::interface::{IndexError, SessionControl, TransactionDomain};
 use rocksdb::Transaction;
 
 /// Groups the active transaction and nesting depth under a single mutex.
@@ -60,11 +60,13 @@ struct SessionInner {
 ///    any clone of the Arc exists.
 /// 2. The `Drop` impl on `RocksDbSessionState` clears the transaction before struct fields
 ///    are dropped, ensuring the transaction is released before the Arc can be decremented.
-/// 3. All holders of `Arc<RocksDbSessionState>` (the three index structs + `RocksDbSessionControl`)
-///    are grouped in `IndexSet` and dropped together.
+/// 3. Indexes, checkpoint/output writers, and `RocksDbSessionControl` hold the
+///    state through `Arc`; whichever clone is dropped last runs the same ordered
+///    cleanup before releasing the database.
 pub struct RocksDbSessionState {
     db: Arc<IndexDb>,
     inner: Mutex<SessionInner>,
+    transaction_domain: TransactionDomain,
 }
 
 impl RocksDbSessionState {
@@ -75,7 +77,16 @@ impl RocksDbSessionState {
                 txn: None,
                 depth: 0,
             }),
+            transaction_domain: TransactionDomain::new(),
         }
+    }
+
+    pub(crate) fn transaction_domain(&self) -> TransactionDomain {
+        self.transaction_domain.clone()
+    }
+
+    pub(crate) fn is_active(&self) -> Result<bool, IndexError> {
+        Ok(self.lock()?.depth > 0)
     }
 
     /// Begin a new session-scoped transaction, or nest into an existing one.
@@ -260,8 +271,8 @@ impl RocksDbSessionControl {
 
 #[async_trait]
 impl SessionControl for RocksDbSessionControl {
-    fn supports_atomic_sessions(&self) -> bool {
-        true
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        Some(self.state.transaction_domain())
     }
 
     async fn begin(&self) -> Result<(), IndexError> {

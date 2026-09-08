@@ -36,8 +36,8 @@ use crate::{
         QueryPartEvaluator,
     },
     interface::{
-        ElementIndex, FutureQueue, FutureQueueConsumer, IndexError, MiddlewareError, QueryClock,
-        SessionControl, SessionGuard,
+        AtomicResultTransaction, ElementIndex, FutureQueue, FutureQueueConsumer, IndexError,
+        MiddlewareError, QueryClock, SessionControl, SessionGuard, TransactionDomain,
     },
     middleware::SourceMiddlewarePipelineCollection,
     models::{Element, SourceChange},
@@ -101,12 +101,9 @@ impl ContinuousQuery {
         }
     }
 
-    /// Whether the configured session can safely run result-aware hooks.
-    ///
-    /// A hook-staged write is atomic with core index mutations only when it uses
-    /// a backend resource that shares this query's session state.
-    pub fn supports_atomic_result_hooks(&self) -> bool {
-        self.session_control.supports_atomic_sessions()
+    /// Transaction domain used by this query's core index session.
+    pub(crate) fn transaction_domain(&self) -> Option<TransactionDomain> {
+        self.session_control.transaction_domain()
     }
 
     #[tracing::instrument(skip_all, err, level = "debug")]
@@ -161,22 +158,27 @@ impl ContinuousQuery {
     /// produced by middleware and evaluation. Cloning the `Arc` does not clone
     /// its result values, and an ordinary async closure may borrow caller state.
     ///
-    /// This method requires an atomic session and rejects unsupported backends
-    /// before middleware or evaluation begins. The hook runs after index updates
-    /// but before commit, while the change lock remains held. If it fails, its
-    /// [`IndexError`] is returned as an [`EvaluationError`] and the transaction
-    /// rolls back.
+    /// This method requires a validated atomic transaction and rejects an
+    /// unsupported backend or mismatched capability before middleware/evaluation
+    /// begins. The hook runs after index updates but before commit, while the
+    /// change lock remains held. If it fails, its [`IndexError`] is returned as
+    /// an [`EvaluationError`] and the transaction rolls back.
+    ///
+    /// Callers staging all persistent query output should use
+    /// [`CreatedIndexes::atomic_result_transaction`](crate::interface::CreatedIndexes::atomic_result_transaction)
+    /// so every participant is validated before this method is called.
     #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_source_change_with_result_hook<F, Fut>(
         &self,
         change: SourceChange,
+        transaction: &AtomicResultTransaction,
         pre_commit_hook: F,
     ) -> Result<Arc<[QueryPartEvaluationContext]>, EvaluationError>
     where
         F: FnOnce(Arc<[QueryPartEvaluationContext]>) -> Fut + Send,
         Fut: Future<Output = Result<(), IndexError>> + Send,
     {
-        self.require_atomic_result_hooks()?;
+        self.require_atomic_result_transaction(transaction)?;
         let _lock = self.change_lock.lock().await;
         let guard = SessionGuard::begin(self.session_control.clone()).await?;
 
@@ -224,21 +226,26 @@ impl ContinuousQuery {
     /// The hook receives an immutable [`Arc`] containing the exact
     /// [`DueFutureResult`] and may borrow caller state in its async operation.
     ///
-    /// This method requires an atomic session and rejects unsupported backends
-    /// before popping the queue. The hook runs before commit and is called only
-    /// when a future was popped; an empty queue commits the session and returns
-    /// `Ok(None)` without calling it. Hook failure rolls back the future pop and
-    /// all evaluation writes.
+    /// This method requires a validated atomic transaction and rejects an
+    /// unsupported backend or mismatched capability before popping the queue. The hook runs
+    /// before commit and is called only when a future was popped; an empty queue
+    /// commits the session and returns `Ok(None)` without calling it. Hook
+    /// failure rolls back the future pop and all evaluation writes.
+    ///
+    /// Callers staging all persistent query output should use
+    /// [`CreatedIndexes::atomic_result_transaction`](crate::interface::CreatedIndexes::atomic_result_transaction)
+    /// to obtain the required domain.
     #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_due_futures_with_result_hook<F, Fut>(
         &self,
+        transaction: &AtomicResultTransaction,
         pre_commit_hook: F,
     ) -> Result<Option<Arc<DueFutureResult>>, EvaluationError>
     where
         F: FnOnce(Arc<DueFutureResult>) -> Fut + Send,
         Fut: Future<Output = Result<(), IndexError>> + Send,
     {
-        self.require_atomic_result_hooks()?;
+        self.require_atomic_result_transaction(transaction)?;
         let _lock = self.change_lock.lock().await;
         let guard = SessionGuard::begin(self.session_control.clone()).await?;
 
@@ -262,11 +269,14 @@ impl ContinuousQuery {
         Ok(Some(result))
     }
 
-    fn require_atomic_result_hooks(&self) -> Result<(), EvaluationError> {
-        if self.supports_atomic_result_hooks() {
-            Ok(())
-        } else {
-            Err(IndexError::AtomicSessionNotSupported.into())
+    fn require_atomic_result_transaction(
+        &self,
+        transaction: &AtomicResultTransaction,
+    ) -> Result<(), EvaluationError> {
+        match self.transaction_domain() {
+            Some(actual_domain) if transaction.matches(&actual_domain) => Ok(()),
+            Some(_) => Err(IndexError::TransactionDomainMismatch.into()),
+            None => Err(IndexError::AtomicSessionNotSupported.into()),
         }
     }
 

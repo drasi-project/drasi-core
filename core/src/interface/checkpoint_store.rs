@@ -18,11 +18,11 @@
 //! position bytes (for native stream resumption), and config hashing.
 //!
 //! Implementations are paired with an [`IndexBackendPlugin`](super::IndexBackendPlugin)
-//! and share the same session state. [`CheckpointStore::stage_checkpoint`] writes
-//! into the currently-active session transaction (opened by
-//! [`SessionControl::begin`](super::SessionControl)) and is committed by the
-//! session's outer commit alongside the index updates. All other methods operate
-//! outside a session transaction and commit independently.
+//! and may share the same session state. [`CheckpointStore::stage_checkpoint`]
+//! and [`CheckpointStore::write_result_sequence`] participate in that active
+//! transaction when [`CheckpointStore::transaction_domain`] matches the
+//! [`SessionControl`](super::SessionControl). Other methods operate outside a
+//! session transaction and commit independently.
 //!
 //! This trait lives in core (not lib) so that index plugins can implement it
 //! without taking a reverse dependency on `drasi-lib`.
@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use super::IndexError;
+use super::{IndexError, TransactionDomain};
 
 /// Per-source checkpoint data.
 ///
@@ -64,8 +64,9 @@ impl SourceCheckpoint {
 ///   `SessionControl::begin` and `SessionControl::commit` for persistent backends.
 ///   The write is staged into the active session transaction and persisted by the
 ///   outer commit. For volatile (in-memory) backends, it applies immediately.
-/// - All other methods operate independently of the session transaction and
-///   commit on their own.
+/// - [`write_result_sequence`](Self::write_result_sequence) joins an active
+///   matching transaction when supported and otherwise commits on its own.
+/// - Other methods operate independently of the session transaction.
 ///
 /// # Source positions
 ///
@@ -74,6 +75,13 @@ impl SourceCheckpoint {
 /// query reads each source's position and passes it via `resume_from`.
 #[async_trait]
 pub trait CheckpointStore: Send + Sync {
+    /// Transaction domain used by staged checkpoints and result sequences.
+    ///
+    /// Returns `None` when these writes cannot join a query's active session.
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        None
+    }
+
     /// Whether this store persists checkpoints across process restarts.
     ///
     /// The orchestration layer uses this to decide whether to propagate
@@ -131,12 +139,12 @@ pub trait CheckpointStore: Send + Sync {
 
     /// Write the last persisted result sequence for a query.
     ///
-    /// Called after outbox and live-results writes succeed, outside any session
-    /// transaction. Records the highest sequence that was durably persisted so
-    /// that recovery can detect outbox gaps (compare with the index's committed
-    /// sequence from `stage_checkpoint`).
+    /// Records the highest sequence that was durably persisted so recovery can
+    /// detect outbox gaps (compare with the index's committed sequence from
+    /// `stage_checkpoint`).
     ///
-    /// Standalone commit — does not require an active session.
+    /// Transaction-domain implementations stage this write when a matching
+    /// session is active and preserve standalone behavior otherwise.
     ///
     /// Default: no-op (volatile backends that don't track result sequences).
     async fn write_result_sequence(

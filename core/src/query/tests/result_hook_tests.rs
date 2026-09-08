@@ -38,8 +38,9 @@ use crate::{
         in_memory_element_index::InMemoryElementIndex, in_memory_future_queue::InMemoryFutureQueue,
     },
     interface::{
-        ElementIndex, FutureQueue, IndexError, MiddlewareError, MiddlewareSetupError,
-        SessionControl, SourceMiddleware, SourceMiddlewareFactory,
+        AtomicResultTransaction, ElementIndex, FutureQueue, IndexError, MiddlewareError,
+        MiddlewareSetupError, SessionControl, SourceMiddleware, SourceMiddlewareFactory,
+        TransactionDomain,
     },
     middleware::MiddlewareTypeRegistry,
     models::{
@@ -49,12 +50,15 @@ use crate::{
     query::{ContinuousQuery, QueryBuilder},
 };
 
-struct AtomicTestSessionControl;
+#[derive(Default)]
+struct AtomicTestSessionControl {
+    transaction_domain: TransactionDomain,
+}
 
 #[async_trait]
 impl SessionControl for AtomicTestSessionControl {
-    fn supports_atomic_sessions(&self) -> bool {
-        true
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        Some(self.transaction_domain.clone())
     }
 
     async fn begin(&self) -> Result<(), IndexError> {
@@ -74,7 +78,7 @@ async fn build_query(query: &str, functions: Arc<FunctionRegistry>) -> Continuou
     let parser = Arc::new(CypherParser::new(functions.clone()));
     QueryBuilder::new(query, parser)
         .with_function_registry(functions)
-        .with_session_control(Arc::new(AtomicTestSessionControl))
+        .with_session_control(Arc::new(AtomicTestSessionControl::default()))
         .build()
         .await
 }
@@ -112,12 +116,15 @@ async fn result_hook_shares_exact_add_update_delete_and_aggregation_results() {
         Arc::new(FunctionRegistry::new()),
     )
     .await;
+    let transaction =
+        AtomicResultTransaction::new(query.transaction_domain().expect("atomic test domain"));
 
     let observed_pointer = Arc::new(AtomicUsize::new(0));
     let hook_pointer = observed_pointer.clone();
     let added = query
         .process_source_change_with_result_hook(
             person_change("person-1", "Alice", 1_000, false),
+            &transaction,
             move |results| async move {
                 tokio::task::yield_now().await;
                 hook_pointer.store(results.as_ptr() as usize, Ordering::Relaxed);
@@ -139,6 +146,7 @@ async fn result_hook_shares_exact_add_update_delete_and_aggregation_results() {
     let updated = query
         .process_source_change_with_result_hook(
             person_change("person-1", "Alicia", 2_000, true),
+            &transaction,
             |results| async move {
                 tokio::task::yield_now().await;
                 let [QueryPartEvaluationContext::Updating { before, after, .. }] = results.as_ref()
@@ -166,6 +174,7 @@ async fn result_hook_shares_exact_add_update_delete_and_aggregation_results() {
                     effective_from: 3_000,
                 },
             },
+            &transaction,
             |results| async move {
                 tokio::task::yield_now().await;
                 let [QueryPartEvaluationContext::Removing { before, .. }] = results.as_ref() else {
@@ -185,9 +194,15 @@ async fn result_hook_shares_exact_add_update_delete_and_aggregation_results() {
     let functions = Arc::new(FunctionRegistry::new());
     functions.register_aggregation_functions();
     let aggregate_query = build_query("MATCH (n:Person) RETURN count(n) AS total", functions).await;
+    let aggregate_transaction = AtomicResultTransaction::new(
+        aggregate_query
+            .transaction_domain()
+            .expect("atomic aggregate test domain"),
+    );
     let aggregated = aggregate_query
         .process_source_change_with_result_hook(
             person_change("person-2", "Grace", 4_000, false),
+            &aggregate_transaction,
             |results| async move {
                 tokio::task::yield_now().await;
                 let [QueryPartEvaluationContext::Aggregation {
@@ -223,6 +238,7 @@ async fn result_hook_shares_exact_add_update_delete_and_aggregation_results() {
 #[derive(Default)]
 struct RecordingSessionControl {
     calls: Mutex<Vec<&'static str>>,
+    transaction_domain: TransactionDomain,
 }
 
 impl RecordingSessionControl {
@@ -233,8 +249,8 @@ impl RecordingSessionControl {
 
 #[async_trait]
 impl SessionControl for RecordingSessionControl {
-    fn supports_atomic_sessions(&self) -> bool {
-        true
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        Some(self.transaction_domain.clone())
     }
 
     async fn begin(&self) -> Result<(), IndexError> {
@@ -290,12 +306,15 @@ async fn result_hook_is_not_called_when_evaluation_fails() {
         .with_session_control(session_control.clone())
         .build()
         .await;
+    let transaction =
+        AtomicResultTransaction::new(query.transaction_domain().expect("recording test domain"));
     let hook_called = Arc::new(AtomicBool::new(false));
     let hook_called_inside = hook_called.clone();
 
     let result = query
         .process_source_change_with_result_hook(
             person_change("person-1", "Alice", 1_000, false),
+            &transaction,
             move |_| async move {
                 hook_called_inside.store(true, Ordering::Relaxed);
                 Ok(())
@@ -357,11 +376,17 @@ async fn result_hook_preserves_empty_and_middleware_fan_out_results() {
         Arc::new(FunctionRegistry::new()),
     )
     .await;
+    let no_result_transaction = AtomicResultTransaction::new(
+        no_result_query
+            .transaction_domain()
+            .expect("atomic no-result test domain"),
+    );
     let empty_hook_called = Arc::new(AtomicBool::new(false));
     let empty_hook_called_inside = empty_hook_called.clone();
     let empty = no_result_query
         .process_source_change_with_result_hook(
             person_change("person-1", "Alice", 1_000, false),
+            &no_result_transaction,
             move |results| async move {
                 tokio::task::yield_now().await;
                 assert!(results.is_empty());
@@ -387,13 +412,19 @@ async fn result_hook_preserves_empty_and_middleware_fan_out_results() {
             serde_json::Map::new(),
         )))
         .with_source_pipeline("people", &["fan-out".to_string()])
-        .with_session_control(Arc::new(AtomicTestSessionControl))
+        .with_session_control(Arc::new(AtomicTestSessionControl::default()))
         .build()
         .await;
+    let transaction = AtomicResultTransaction::new(
+        query
+            .transaction_domain()
+            .expect("atomic fan-out test domain"),
+    );
 
     let results = query
         .process_source_change_with_result_hook(
             person_change("ignored", "ignored", 2_000, false),
+            &transaction,
             |results| async move {
                 tokio::task::yield_now().await;
                 let names = results
@@ -426,10 +457,11 @@ impl BorrowingHost {
     async fn run(
         &self,
         query: &ContinuousQuery,
+        transaction: &AtomicResultTransaction,
         change: SourceChange,
     ) -> Result<Arc<[QueryPartEvaluationContext]>, EvaluationError> {
         query
-            .process_source_change_with_result_hook(change, |results| async move {
+            .process_source_change_with_result_hook(change, transaction, |results| async move {
                 tokio::task::yield_now().await;
                 let [QueryPartEvaluationContext::Adding { after, .. }] = results.as_ref() else {
                     panic!("expected one adding result, got {results:?}");
@@ -456,9 +488,18 @@ async fn result_hook_can_borrow_host_state_across_await() {
         expected_name: "Ada".to_string(),
         hook_called: AtomicBool::new(false),
     };
+    let transaction = AtomicResultTransaction::new(
+        query
+            .transaction_domain()
+            .expect("borrowing host requires an atomic domain"),
+    );
 
     let results = host
-        .run(&query, person_change("person-1", "Ada", 1_000, false))
+        .run(
+            &query,
+            &transaction,
+            person_change("person-1", "Ada", 1_000, false),
+        )
         .await
         .expect("borrowed host hook should compile and run");
 
@@ -477,13 +518,14 @@ async fn result_hooks_reject_non_atomic_sessions_before_mutation_or_pop() {
         .with_archive_index(element_index.clone())
         .build()
         .await;
-    assert!(!query.supports_atomic_result_hooks());
+    assert!(query.transaction_domain().is_none());
 
     let source_hook_called = Arc::new(AtomicBool::new(false));
     let called = source_hook_called.clone();
     let source_result = query
         .process_source_change_with_result_hook(
             person_change("person-1", "Alice", 1_000, false),
+            &AtomicResultTransaction::new(TransactionDomain::new()),
             move |_| async move {
                 called.store(true, Ordering::Relaxed);
                 Ok(())
@@ -533,10 +575,13 @@ async fn result_hooks_reject_non_atomic_sessions_before_mutation_or_pop() {
     let future_hook_called = Arc::new(AtomicBool::new(false));
     let called = future_hook_called.clone();
     let due_result = future_query
-        .process_due_futures_with_result_hook(move |_| async move {
-            called.store(true, Ordering::Relaxed);
-            Ok(())
-        })
+        .process_due_futures_with_result_hook(
+            &AtomicResultTransaction::new(TransactionDomain::new()),
+            move |_| async move {
+                called.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+        )
         .await;
     assert!(matches!(
         due_result,

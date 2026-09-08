@@ -22,9 +22,9 @@
 //! - `source_position:{source_id}` → raw opaque bytes
 //! - `config_hash` → 8-byte big-endian `u64`
 //!
-//! `stage_checkpoint` writes into the active session transaction so it commits
-//! atomically with index updates. All other methods (reads, config hash,
-//! clear) operate directly on the DB without requiring an active session.
+//! `stage_checkpoint` and `write_result_sequence` write into an active session
+//! transaction so they commit atomically with index updates. Outside a session,
+//! result-sequence writes retain their standalone behavior.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,7 +32,7 @@ use std::sync::Arc;
 use crate::IndexDb;
 use async_trait::async_trait;
 use bytes::Bytes;
-use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint};
+use drasi_core::interface::{CheckpointStore, IndexError, SourceCheckpoint, TransactionDomain};
 use rocksdb::ColumnFamilyDescriptor;
 use tokio::task;
 
@@ -139,6 +139,10 @@ fn read_all_checkpoints_impl(
 
 #[async_trait]
 impl CheckpointStore for RocksDbCheckpointStore {
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        Some(self.session_state.transaction_domain())
+    }
+
     fn is_persistent(&self) -> bool {
         true
     }
@@ -355,14 +359,23 @@ impl CheckpointStore for RocksDbCheckpointStore {
 
     async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let session_state = self.session_state.clone();
+        let active_session_state = session_state.is_active()?;
         let key = format!("{RESULT_SEQUENCE_PREFIX}{query_id}");
 
         let task = task::spawn_blocking(move || {
             let cf = db
                 .cf_handle(STREAM_STATE_CF)
                 .expect("stream_state cf not found");
-            db.put_cf(&cf, &key, sequence.to_be_bytes())
-                .map_err(IndexError::other)
+            if active_session_state {
+                session_state.with_txn(|txn| {
+                    txn.put_cf(&cf, &key, sequence.to_be_bytes())
+                        .map_err(IndexError::other)
+                })
+            } else {
+                db.put_cf(&cf, &key, sequence.to_be_bytes())
+                    .map_err(IndexError::other)
+            }
         });
 
         match task.await {
@@ -373,13 +386,17 @@ impl CheckpointStore for RocksDbCheckpointStore {
 
     async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
         let db = self.db.clone();
+        let session_state = self.session_state.clone();
         let key = format!("{RESULT_SEQUENCE_PREFIX}{query_id}");
 
         let task = task::spawn_blocking(move || {
             let cf = db
                 .cf_handle(STREAM_STATE_CF)
                 .expect("stream_state cf not found");
-            let data = db.get_cf(&cf, &key).map_err(IndexError::other)?;
+            let data = session_state.with_txn_or_db(
+                |txn| txn.get_cf(&cf, &key).map_err(IndexError::other),
+                |db| db.get_cf(&cf, &key).map_err(IndexError::other),
+            )?;
             match data {
                 Some(v) => {
                     let bytes: [u8; 8] = v

@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::IndexError;
+use super::{IndexError, TransactionDomain};
 
 /// Backend-implemented lifecycle control for session-scoped transactions.
 ///
@@ -25,14 +25,13 @@ use super::IndexError;
 /// Session state lives inside backend implementations, shared via `Arc`.
 #[async_trait]
 pub trait SessionControl: Send + Sync {
-    /// Whether this control provides an atomic transaction for result-aware hooks.
+    /// Identity of the atomic transaction domain managed by this control.
     ///
-    /// Implementations should return `true` only when rollback discards every
-    /// core index mutation made between `begin` and `commit`. Writes staged by a
-    /// hook are part of that transaction only when they use a backend resource
-    /// created with the same shared session state.
-    fn supports_atomic_sessions(&self) -> bool {
-        false
+    /// Implementations return `Some` only when rollback discards every core
+    /// index mutation made between `begin` and `commit`. Stageable writers join
+    /// the transaction by returning the same domain identity.
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        None
     }
 
     /// Begin a new session-scoped transaction.
