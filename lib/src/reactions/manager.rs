@@ -1892,6 +1892,64 @@ mod tests {
         }
     }
 
+    struct QueueBackedReaction {
+        base: crate::reactions::common::base::ReactionBase,
+    }
+
+    impl QueueBackedReaction {
+        fn new(id: &str, queries: Vec<String>) -> Self {
+            Self {
+                base: crate::reactions::common::base::ReactionBase::new(
+                    crate::reactions::common::base::ReactionBaseParams::new(id, queries),
+                ),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Reaction for QueueBackedReaction {
+        fn id(&self) -> &str {
+            self.base.get_id()
+        }
+
+        fn type_name(&self) -> &str {
+            "queue-backed-test"
+        }
+
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+
+        fn query_ids(&self) -> Vec<String> {
+            self.base.get_queries().to_vec()
+        }
+
+        fn auto_start(&self) -> bool {
+            false
+        }
+
+        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+            self.base.initialize(context).await;
+        }
+
+        async fn start(&self) -> Result<()> {
+            self.base.set_status(ComponentStatus::Running, None).await;
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<()> {
+            self.base.stop_common().await
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            self.base.get_status().await
+        }
+
+        async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+            self.base.enqueue_query_result(result).await
+        }
+    }
+
     // ========================================================================
     // Test helpers
     // ========================================================================
@@ -2439,6 +2497,82 @@ mod tests {
         .await
         .expect("saturated outbox bounds should not overflow");
         assert_eq!(saturated.sequence, u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn retained_outbox_then_live_is_ordered_by_reaction_base() {
+        let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let query = Arc::new(MockQuery::new(42, 6));
+        *query.outbox_response.write().await = Ok(OutboxResponse {
+            results: vec![
+                Arc::new(QueryResult::new(
+                    "q1".to_string(),
+                    5,
+                    timestamp + chrono::Duration::seconds(10),
+                    Vec::new(),
+                    HashMap::new(),
+                )),
+                Arc::new(QueryResult::new(
+                    "q1".to_string(),
+                    6,
+                    timestamp,
+                    Vec::new(),
+                    HashMap::new(),
+                )),
+            ],
+            latest_sequence: 6,
+            config_hash: 42,
+        });
+        let query_trait: Arc<dyn crate::queries::Query> = query;
+        let reaction = Arc::new(QueueBackedReaction::new("r1", vec!["q1".to_string()]));
+        let reaction_trait: Arc<dyn Reaction> = reaction.clone();
+        let metrics = Arc::new(ReactionMetrics::new());
+
+        let recovered = ReactionManager::replay_retained_outbox_after_gap(
+            "r1",
+            "q1",
+            &ReactionCheckpoint {
+                sequence: 4,
+                config_hash: 42,
+            },
+            &reaction_trait,
+            &query_trait,
+            &None,
+            &metrics,
+            &crate::queries::OutboxGap {
+                requested: 4,
+                earliest_available: 5,
+                latest_sequence: 6,
+                config_hash: 42,
+            },
+        )
+        .await
+        .expect("retained outbox replay should enqueue sequences 5 and 6");
+        assert_eq!(recovered.sequence, 6);
+
+        let checkpoints = Arc::new(RwLock::new(HashMap::from([("q1".to_string(), recovered)])));
+        ReactionManager::enqueue_forwarded_result(
+            &reaction_trait,
+            &query_trait,
+            "q1",
+            &checkpoints,
+            &metrics,
+            Arc::new(QueryResult::new(
+                "q1".to_string(),
+                7,
+                timestamp - chrono::Duration::seconds(10),
+                Vec::new(),
+                HashMap::new(),
+            )),
+        )
+        .await
+        .expect("buffered live result should enqueue after retained replay");
+
+        let mut sequences = Vec::new();
+        for _ in 0..3 {
+            sequences.push(reaction.base.priority_queue.dequeue().await.sequence);
+        }
+        assert_eq!(sequences, vec![5, 6, 7]);
     }
 
     #[tokio::test]

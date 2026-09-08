@@ -21,21 +21,27 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 
-/// Wrapper for priority queue events with timestamp-based ordering
+/// Wrapper for priority queue events with stable timestamp-based ordering.
 #[derive(Clone)]
 struct PriorityQueueEvent<T>
 where
     T: Timestamped + Clone + Send + Sync + 'static,
 {
     event: Arc<T>,
+    ordering_timestamp: chrono::DateTime<chrono::Utc>,
+    ordinal: u64,
 }
 
 impl<T> PriorityQueueEvent<T>
 where
     T: Timestamped + Clone + Send + Sync + 'static,
 {
-    fn new(event: Arc<T>) -> Self {
-        Self { event }
+    fn new(event: Arc<T>, ordering_timestamp: chrono::DateTime<chrono::Utc>, ordinal: u64) -> Self {
+        Self {
+            event,
+            ordering_timestamp,
+            ordinal,
+        }
     }
 }
 
@@ -45,7 +51,7 @@ where
     T: Timestamped + Clone + Send + Sync + 'static,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.event.timestamp() == other.event.timestamp()
+        self.ordering_timestamp == other.ordering_timestamp && self.ordinal == other.ordinal
     }
 }
 
@@ -65,8 +71,12 @@ where
     T: Timestamped + Clone + Send + Sync + 'static,
 {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap behavior (oldest first)
-        other.event.timestamp().cmp(&self.event.timestamp())
+        // Reverse the lexicographic key for min-heap behavior. The ordinal
+        // keeps equal timestamps stable and makes this a total order.
+        other
+            .ordering_timestamp
+            .cmp(&self.ordering_timestamp)
+            .then_with(|| other.ordinal.cmp(&self.ordinal))
     }
 }
 
@@ -162,6 +172,8 @@ where
     notify: Arc<Notify>,
     /// Maximum queue capacity (for backpressure)
     max_capacity: usize,
+    /// Stable insertion order for events with the same ordering timestamp.
+    next_ordinal: Arc<AtomicU64>,
     /// Metrics (using atomic operations for lock-free updates)
     metrics: Arc<PriorityQueueMetrics>,
 }
@@ -176,6 +188,7 @@ where
             heap: Arc::new(Mutex::new(BinaryHeap::new())),
             notify: Arc::new(Notify::new()),
             max_capacity,
+            next_ordinal: Arc::new(AtomicU64::new(0)),
             metrics: Arc::new(PriorityQueueMetrics::default()),
         }
     }
@@ -183,6 +196,17 @@ where
     /// Enqueue an event into the priority queue
     /// Returns true if enqueued, false if queue is at capacity
     pub async fn enqueue(&self, event: Arc<T>) -> bool {
+        let ordering_timestamp = event.timestamp();
+        self.enqueue_with_ordering_timestamp(event, ordering_timestamp)
+            .await
+    }
+
+    /// Enqueue using an internal ordering timestamp without changing the event.
+    pub(crate) async fn enqueue_with_ordering_timestamp(
+        &self,
+        event: Arc<T>,
+        ordering_timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
         let mut heap = self.heap.lock().await;
 
         // Check capacity
@@ -210,7 +234,8 @@ where
         }
 
         // Enqueue event
-        heap.push(PriorityQueueEvent::new(event));
+        let ordinal = self.next_ordinal.fetch_add(1, AtomicOrdering::Relaxed);
+        heap.push(PriorityQueueEvent::new(event, ordering_timestamp, ordinal));
 
         // Update metrics using atomic operations (lock-free)
         self.metrics
@@ -251,6 +276,17 @@ where
     /// WARNING: Do NOT use with Broadcast dispatch mode - will cause deadlock!
     /// In broadcast mode, use the non-blocking `enqueue()` method instead.
     pub async fn enqueue_wait(&self, event: Arc<T>) {
+        let ordering_timestamp = event.timestamp();
+        self.enqueue_wait_with_ordering_timestamp(event, ordering_timestamp)
+            .await;
+    }
+
+    /// Enqueue with backpressure using an internal ordering timestamp.
+    pub(crate) async fn enqueue_wait_with_ordering_timestamp(
+        &self,
+        event: Arc<T>,
+        ordering_timestamp: chrono::DateTime<chrono::Utc>,
+    ) {
         loop {
             // Register notified future BEFORE acquiring lock to avoid race
             let notified = self.notify.notified();
@@ -261,7 +297,8 @@ where
             // Check if there's capacity
             if heap.len() < self.max_capacity {
                 // Space available - enqueue the event
-                heap.push(PriorityQueueEvent::new(event));
+                let ordinal = self.next_ordinal.fetch_add(1, AtomicOrdering::Relaxed);
+                heap.push(PriorityQueueEvent::new(event, ordering_timestamp, ordinal));
 
                 // Update metrics using atomic operations (lock-free)
                 self.metrics
@@ -433,6 +470,7 @@ where
             heap: Arc::clone(&self.heap),
             notify: Arc::clone(&self.notify),
             max_capacity: self.max_capacity,
+            next_ordinal: Arc::clone(&self.next_ordinal),
             metrics: Arc::clone(&self.metrics),
         }
     }
@@ -486,6 +524,20 @@ mod tests {
 
         let dequeued3 = pq.try_dequeue().await.unwrap();
         assert_eq!(dequeued3.id, "event3"); // Newest
+    }
+
+    #[tokio::test]
+    async fn test_equal_timestamps_preserve_enqueue_order() {
+        let pq = PriorityQueue::new(100);
+        let timestamp = Utc::now();
+
+        for id in ["event1", "event2", "event3"] {
+            assert!(pq.enqueue(create_test_event(id, timestamp)).await);
+        }
+
+        for expected in ["event1", "event2", "event3"] {
+            assert_eq!(pq.try_dequeue().await.unwrap().id, expected);
+        }
     }
 
     #[tokio::test]
