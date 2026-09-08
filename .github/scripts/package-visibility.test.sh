@@ -125,11 +125,20 @@ assert_contains "$output" "remained 'private'"
 
 calls="$test_dir/invalid-calls"
 set +e
-output="$(run_mock public "$calls" set-public 'source/../invalid' 2>&1)"
+output="$(run_mock public "$calls" set-public source/http 'source/../invalid' 2>&1)"
 status="$?"
 set -e
 [[ "$status" -ne 0 ]] || fail "an invalid package name should fail"
 assert_contains "$output" "Invalid package name"
-[[ ! -e "$calls" ]] || fail "an invalid package name should not call GitHub"
+[[ ! -e "$calls" ]] || fail "all package names should be validated before calling GitHub"
+
+calls="$test_dir/namespace-calls"
+set +e
+output="$(run_mock public "$calls" set-public internal/private 2>&1)"
+status="$?"
+set -e
+[[ "$status" -ne 0 ]] || fail "a package outside the plugin namespaces should fail"
+assert_contains "$output" "outside the Drasi plugin namespaces"
+[[ ! -e "$calls" ]] || fail "a package outside the plugin namespaces should not call GitHub"
 
 echo "package-visibility tests passed"
