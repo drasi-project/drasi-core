@@ -62,9 +62,6 @@ pub mod recovery;
 // Internal Modules (crate-private, but visible to integration tests)
 // ============================================================================
 
-// Introduced ahead of pipeline wiring so the compatibility adapters can be reviewed
-// independently from the runtime behavior change.
-#[allow(dead_code)]
 pub(crate) mod change;
 
 // These modules are internal but need to be accessible to integration tests

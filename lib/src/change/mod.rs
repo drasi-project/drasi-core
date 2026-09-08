@@ -14,15 +14,16 @@
 
 //! Internal immutable change contracts.
 //!
-//! These types intentionally remain crate-private. The compatibility adapters are
-//! not connected to the live pipeline until the next migration layer.
+//! These types intentionally remain crate-private. The fixed query pipeline uses
+//! compatibility adapters at its ingress and egress boundaries.
 
 mod adapters;
 mod canonical;
 
 pub(crate) use adapters::{
-    query_evaluation_to_envelope, query_result_from_envelope, source_event_from_envelope,
-    source_event_to_envelope, ChangeAdapterError, QueryEnvelopeMetadata,
+    query_evaluation_to_envelope, query_result_from_envelope, source_change_from_envelope,
+    source_event_from_envelope, source_event_to_envelope, ChangeAdapterError,
+    QueryEnvelopeMetadata,
 };
 #[cfg(test)]
 pub(crate) use canonical::{encode_query_variables, encode_source_change};

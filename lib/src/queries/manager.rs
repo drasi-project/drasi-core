@@ -268,8 +268,8 @@ enum BootstrapPhase {
 /// Dispatch query evaluation results to the current result set and all subscribed reactions.
 ///
 /// Shared between the regular event processing path and the future queue drain path.
-/// Uses `QueryOutputState` for O(1) result-set updates keyed by `row_signature`,
-/// increments the sequence counter, and pushes to the outbox ring buffer.
+/// Converts the core evaluation into a typed change envelope before exposing the
+/// legacy `QueryResult`, then updates `QueryOutputState` and the outbox.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_query_results(
     results: &[QueryPartEvaluationContext],
@@ -283,96 +283,49 @@ async fn dispatch_query_results(
     outbox_capacity: usize,
     profiling: crate::profiling::ProfilingMetadata,
     output_metrics: &Arc<QueryOutputMetrics>,
-) {
-    // Convert Drasi results to our QueryResult format, filtering out Noops
-    let converted_results: Vec<ResultDiff> = results
+) -> Result<()> {
+    let result_count = results
         .iter()
-        .filter_map(|ctx| match ctx {
-            QueryPartEvaluationContext::Adding {
-                after,
-                row_signature,
-            } => Some(ResultDiff::Add {
-                data: convert_query_variables_to_json(after),
-                row_signature: *row_signature,
-            }),
-            QueryPartEvaluationContext::Removing {
-                before,
-                row_signature,
-            } => Some(ResultDiff::Delete {
-                data: convert_query_variables_to_json(before),
-                row_signature: *row_signature,
-            }),
-            QueryPartEvaluationContext::Updating {
-                before,
-                after,
-                row_signature,
-            } => {
-                let after_json = convert_query_variables_to_json(after);
-                Some(ResultDiff::Update {
-                    data: after_json.clone(),
-                    before: convert_query_variables_to_json(before),
-                    after: after_json,
-                    grouping_keys: None,
-                    row_signature: *row_signature,
-                })
-            }
-            // NOTE: When a group empties (last contributor removed), core emits
-            // Aggregation { default_after: true, .. } with identity values (count:0,
-            // sum:0, etc.) rather than Removing. Proper empty-group → Delete detection
-            // requires core-level `is_at_identity()` on each accumulator (see PR #409).
-            // Without that infrastructure, this conversion preserves current behavior:
-            // the row stays in the result set with zeroed-out values.
-            QueryPartEvaluationContext::Aggregation {
-                before,
-                after,
-                row_signature,
-                ..
-            } => Some(ResultDiff::Aggregation {
-                before: before.as_ref().map(convert_query_variables_to_json),
-                after: convert_query_variables_to_json(after),
-                row_signature: *row_signature,
-            }),
-            QueryPartEvaluationContext::Noop => None,
-        })
-        .collect();
+        .filter(|result| !matches!(result, QueryPartEvaluationContext::Noop))
+        .count();
 
-    // If all results were Noops, skip outbox/sequence advancement and dispatch
-    if converted_results.is_empty() {
-        return;
-    }
-
-    // Apply diffs to the output state, build QueryResult, increment sequence,
-    // push to outbox, and get back the Arc for zero-copy dispatch — all in one
-    // write-lock acquisition.
+    // Build the typed envelope and adapt it to the legacy output while holding the
+    // state lock so the envelope carries the exact sequence assigned to this result.
     let arc_result = {
         let tx_start = std::time::Instant::now();
         let mut state = output_state.write().await;
-        state.apply_diffs(&converted_results);
-
-        let result_count = converted_results.len();
-        let query_result = QueryResult::with_profiling(
-            query_id.to_string(),
-            0, // sequence assigned by advance_sequence_and_push
-            chrono::Utc::now(),
-            converted_results,
-            {
-                let mut meta = HashMap::new();
-                meta.insert(
-                    "source_id".to_string(),
-                    serde_json::Value::String(source_id.to_string()),
-                );
-                meta.insert(
-                    "processed_by".to_string(),
-                    serde_json::Value::String("drasi-core".to_string()),
-                );
-                meta.insert(
-                    "result_count".to_string(),
-                    serde_json::Value::Number(result_count.into()),
-                );
-                meta
-            },
-            profiling,
+        let next_sequence = state.as_of_sequence().saturating_add(1);
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "source_id".to_string(),
+            serde_json::Value::String(source_id.to_string()),
         );
+        metadata.insert(
+            "processed_by".to_string(),
+            serde_json::Value::String("drasi-core".to_string()),
+        );
+        metadata.insert(
+            "result_count".to_string(),
+            serde_json::Value::Number(result_count.into()),
+        );
+
+        let Some(envelope) = crate::change::query_evaluation_to_envelope(
+            results,
+            crate::change::QueryEnvelopeMetadata::new(
+                query_id,
+                Some(Arc::from(source_id)),
+                next_sequence,
+                chrono::Utc::now(),
+                metadata,
+                Some(profiling),
+            ),
+        )?
+        else {
+            return Ok(());
+        };
+        let query_result = crate::change::query_result_from_envelope(&envelope)?;
+        debug_assert_eq!(query_result.sequence, next_sequence);
+        state.apply_diffs(&query_result.results);
 
         let result = state.advance_sequence_and_push(query_result);
 
@@ -522,6 +475,8 @@ async fn dispatch_query_results(
             debug!("Failed to dispatch result for query '{query_id}': {e}");
         }
     }
+
+    Ok(())
 }
 
 pub struct DrasiQuery {
@@ -2183,8 +2138,48 @@ impl Query for DrasiQuery {
 
                         // Dequeue events from priority queue (blocks until available)
                         arc_event = priority_queue.dequeue() => {
-                            // Try to extract without cloning if we have sole ownership (zero-copy path).
-                            let parts =
+                            let parts = if matches!(&arc_event.event, SourceEvent::Change(_)) {
+                                let envelope = match crate::change::source_event_to_envelope(
+                                    arc_event.as_ref(),
+                                    crate::change::SystemMetadataExtensions::default(),
+                                ) {
+                                    Ok(envelope) => envelope,
+                                    Err(e) => {
+                                        error!(
+                                            "Query '{query_id}' failed to adapt source event to a change envelope: {e}"
+                                        );
+                                        continue;
+                                    }
+                                };
+                                let source_change =
+                                    match crate::change::source_change_from_envelope(&envelope) {
+                                        Ok(change) => change,
+                                        Err(e) => {
+                                            error!(
+                                                "Query '{query_id}' failed to read graph change envelope: {e}"
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                let system = envelope.system();
+                                let Some(source_id) = system.source_id() else {
+                                    error!(
+                                        "Query '{query_id}' received a graph change envelope without a source ID"
+                                    );
+                                    continue;
+                                };
+
+                                crate::channels::events::SourceEventParts {
+                                    source_id: source_id.to_string(),
+                                    event: SourceEvent::Change(source_change),
+                                    timestamp: system.timestamp(),
+                                    profiling: system.profiling().cloned(),
+                                    sequence: system.sequence(),
+                                    source_position: system.source_position().cloned(),
+                                }
+                            } else {
+                                // Control events stay on the legacy path and retain their
+                                // priority-queue ordering.
                                 match SourceEventWrapper::try_unwrap_arc(arc_event) {
                                     Ok(parts) => parts,
                                     Err(arc) => {
@@ -2197,7 +2192,8 @@ impl Query for DrasiQuery {
                                             source_position: arc.source_position.clone(),
                                         }
                                     }
-                                };
+                                }
+                            };
                             let source_id = parts.source_id;
                             let event = parts.event;
                             let profiling_opt = parts.profiling;
@@ -2224,7 +2220,7 @@ impl Query for DrasiQuery {
                                             Ok(Some(due_result)) => {
                                                 if !due_result.results.is_empty() {
                                                     let profiling = crate::profiling::ProfilingMetadata::new();
-                                                    dispatch_query_results(
+                                                    if let Err(e) = dispatch_query_results(
                                                         &due_result.results,
                                                         &due_result.source_id,
                                                         &query_id,
@@ -2237,7 +2233,12 @@ impl Query for DrasiQuery {
                                                         profiling,
                                                         &output_metrics_for_processor,
                                                     )
-                                                    .await;
+                                                    .await
+                                                    {
+                                                        error!(
+                                                            "Query '{query_id}' failed to adapt due-future results: {e}"
+                                                        );
+                                                    }
                                                 }
                                             }
                                             Ok(None) => break,
@@ -2296,7 +2297,7 @@ impl Query for DrasiQuery {
 
                                             if !results.is_empty() {
                                                 profiling.query_send_ns = Some(crate::profiling::timestamp_ns());
-                                                dispatch_query_results(
+                                                if let Err(e) = dispatch_query_results(
                                                     &results,
                                                     &source_id,
                                                     &query_id,
@@ -2309,7 +2310,12 @@ impl Query for DrasiQuery {
                                                     profiling,
                                                     &output_metrics_for_processor,
                                                 )
-                                                .await;
+                                                .await
+                                                {
+                                                    error!(
+                                                        "Query '{query_id}' failed to adapt query results: {e}"
+                                                    );
+                                                }
                                             }
                                         }
                                         Err(e) => {

@@ -496,11 +496,12 @@ impl CharacterizationSource {
         }
     }
 
-    async fn inject(
+    async fn inject_with_profiling(
         &self,
         change: SourceChange,
         sequence: u64,
         source_position: Bytes,
+        profiling: ProfilingMetadata,
     ) -> anyhow::Result<()> {
         let timestamp =
             chrono::DateTime::from_timestamp_millis(change.get_realtime() as i64).unwrap();
@@ -509,7 +510,7 @@ impl CharacterizationSource {
             SourceEvent::Change(change),
             timestamp,
             sequence,
-            Some(ProfilingMetadata::default()),
+            Some(profiling),
         );
         event.set_source_position(source_position);
         self.base.dispatch_event(event).await
@@ -696,6 +697,22 @@ impl PipelineHarness {
     }
 
     async fn inject(&self, change: SourceChange, sequence: u64, source_position: Bytes) {
+        self.inject_with_profiling(
+            change,
+            sequence,
+            source_position,
+            ProfilingMetadata::default(),
+        )
+        .await;
+    }
+
+    async fn inject_with_profiling(
+        &self,
+        change: SourceChange,
+        sequence: u64,
+        source_position: Bytes,
+        profiling: ProfilingMetadata,
+    ) {
         let source = self
             .source_manager
             .get_source_instance(SOURCE_ID)
@@ -705,7 +722,7 @@ impl PipelineHarness {
             .as_any()
             .downcast_ref::<CharacterizationSource>()
             .unwrap()
-            .inject(change, sequence, source_position)
+            .inject_with_profiling(change, sequence, source_position, profiling)
             .await
             .unwrap();
     }
@@ -754,6 +771,53 @@ fn variables(entries: &[(&str, VariableValue)]) -> QueryVariables {
     entries
         .iter()
         .map(|(key, value)| ((*key).into(), value.clone()))
+        .collect()
+}
+
+fn legacy_result_diffs(results: &[QueryPartEvaluationContext]) -> Vec<ResultDiff> {
+    results
+        .iter()
+        .filter_map(|context| match context {
+            QueryPartEvaluationContext::Adding {
+                after,
+                row_signature,
+            } => Some(ResultDiff::Add {
+                data: convert_query_variables_to_json(after),
+                row_signature: *row_signature,
+            }),
+            QueryPartEvaluationContext::Updating {
+                before,
+                after,
+                row_signature,
+            } => {
+                let after = convert_query_variables_to_json(after);
+                Some(ResultDiff::Update {
+                    data: after.clone(),
+                    before: convert_query_variables_to_json(before),
+                    after,
+                    grouping_keys: None,
+                    row_signature: *row_signature,
+                })
+            }
+            QueryPartEvaluationContext::Removing {
+                before,
+                row_signature,
+            } => Some(ResultDiff::Delete {
+                data: convert_query_variables_to_json(before),
+                row_signature: *row_signature,
+            }),
+            QueryPartEvaluationContext::Aggregation {
+                before,
+                after,
+                row_signature,
+                ..
+            } => Some(ResultDiff::Aggregation {
+                before: before.as_ref().map(convert_query_variables_to_json),
+                after: convert_query_variables_to_json(after),
+                row_signature: *row_signature,
+            }),
+            QueryPartEvaluationContext::Noop => None,
+        })
         .collect()
 }
 
@@ -823,7 +887,8 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
         ProfilingMetadata::default(),
         &output_metrics,
     )
-    .await;
+    .await
+    .unwrap();
 
     let result = next_result(&mut result_rx).await;
     assert_eq!(result.query_id, "query-a");
@@ -921,7 +986,8 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
         ProfilingMetadata::default(),
         &output_metrics,
     )
-    .await;
+    .await
+    .unwrap();
 
     let second = next_result(&mut result_rx).await;
     assert_eq!(second.sequence, 2);
@@ -936,6 +1002,116 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
+}
+
+#[tokio::test]
+async fn live_source_change_envelope_path_preserves_legacy_result_metadata() {
+    let backend = Arc::new(CharacterizationBackend::new(false));
+    let mut harness = PipelineHarness::new(backend.clone()).await;
+    let (query, mut result_rx) = harness.start_query(backend.trace.clone()).await;
+    let subscription = harness.next_subscription().await;
+    assert_eq!(subscription.resume_sequence, None);
+    assert_eq!(subscription.resume_from, None);
+    backend.trace.clear();
+
+    let source_position = Bytes::from_static(b"envelope-position-7");
+    let source_profiling = ProfilingMetadata {
+        source_ns: Some(10),
+        reactivator_start_ns: Some(20),
+        reactivator_end_ns: Some(30),
+        source_receive_ns: Some(40),
+        source_send_ns: Some(50),
+        ..Default::default()
+    };
+    harness
+        .inject_with_profiling(
+            person_insert("person-envelope", "Envelope", 1_000),
+            7,
+            source_position.clone(),
+            source_profiling.clone(),
+        )
+        .await;
+
+    let delivered = next_result(&mut result_rx).await;
+    assert_eq!(delivered.query_id, QUERY_ID);
+    assert_eq!(delivered.sequence, 1);
+    assert_eq!(delivered.results.len(), 1);
+    assert!(matches!(
+        &delivered.results[0],
+        ResultDiff::Add { data, .. } if data == &json!({ "name": "Envelope" })
+    ));
+    assert_eq!(
+        delivered.metadata,
+        HashMap::from([
+            ("source_id".to_string(), json!(SOURCE_ID)),
+            ("processed_by".to_string(), json!("drasi-core")),
+            ("result_count".to_string(), json!(1)),
+        ])
+    );
+
+    let delivered_profiling = delivered
+        .profiling
+        .as_ref()
+        .expect("live results retain source profiling");
+    assert_eq!(delivered_profiling.source_ns, source_profiling.source_ns);
+    assert_eq!(
+        delivered_profiling.reactivator_start_ns,
+        source_profiling.reactivator_start_ns
+    );
+    assert_eq!(
+        delivered_profiling.reactivator_end_ns,
+        source_profiling.reactivator_end_ns
+    );
+    assert_eq!(
+        delivered_profiling.source_receive_ns,
+        source_profiling.source_receive_ns
+    );
+    assert_eq!(
+        delivered_profiling.source_send_ns,
+        source_profiling.source_send_ns
+    );
+    assert!(delivered_profiling.query_receive_ns.is_some());
+    assert!(delivered_profiling.query_core_call_ns.is_some());
+    assert!(delivered_profiling.query_core_return_ns.is_some());
+    assert!(delivered_profiling.query_send_ns.is_some());
+
+    assert_eq!(
+        backend.trace.snapshot(),
+        vec![
+            TraceEvent::SessionBegin,
+            TraceEvent::CheckpointStaged {
+                source_id: SOURCE_ID.to_string(),
+                sequence: 7,
+                source_position: Some(source_position),
+            },
+            TraceEvent::SessionCommit,
+            TraceEvent::OutboxAppendAttempt {
+                query_id: QUERY_ID.to_string(),
+                sequence: 1,
+            },
+            TraceEvent::LiveResultsApplyAttempt {
+                query_id: QUERY_ID.to_string(),
+                mutation_count: 1,
+            },
+            TraceEvent::ResultSequenceWritten {
+                query_id: QUERY_ID.to_string(),
+                sequence: 1,
+            },
+            TraceEvent::ReactionDispatch { sequence: 1 },
+        ]
+    );
+    assert_eq!(
+        backend.output_store.read_from(QUERY_ID, 0).await.unwrap()[0].1,
+        rmp_serde::to_vec(delivered.as_ref()).unwrap()
+    );
+
+    query.stop().await.unwrap();
+    harness
+        .source_manager
+        .stop_source(SOURCE_ID.to_string())
+        .await
+        .unwrap();
+    drop(harness.graph);
 }
 
 #[tokio::test]
@@ -1191,6 +1367,13 @@ async fn due_future_output_is_dispatched_after_core_commit() {
     let live_results_writer: Option<Arc<dyn LiveResultsWriter>> = Some(output_store);
     let checkpoint_writer: Option<Arc<dyn CheckpointStore>> = Some(checkpoint_store);
 
+    let profiling = ProfilingMetadata {
+        source_ns: Some(101),
+        source_receive_ns: Some(202),
+        source_send_ns: Some(303),
+        ..Default::default()
+    };
+    let expected_results = legacy_result_diffs(&due.results);
     dispatch_query_results(
         &due.results,
         &due.source_id,
@@ -1201,12 +1384,24 @@ async fn due_future_output_is_dispatched_after_core_commit() {
         &live_results_writer,
         &checkpoint_writer,
         16,
-        ProfilingMetadata::default(),
+        profiling.clone(),
         &output_metrics,
     )
-    .await;
+    .await
+    .unwrap();
     let dispatched = next_result(&mut result_rx).await;
-    assert_eq!(dispatched.metadata["source_id"], json!("future-source"));
+    assert_eq!(dispatched.query_id, "future-query");
+    assert_eq!(dispatched.sequence, 1);
+    assert_eq!(dispatched.results, expected_results);
+    assert_eq!(
+        dispatched.metadata,
+        HashMap::from([
+            ("source_id".to_string(), json!("future-source")),
+            ("processed_by".to_string(), json!("drasi-core")),
+            ("result_count".to_string(), json!(dispatched.results.len()),),
+        ])
+    );
+    assert_eq!(dispatched.profiling, Some(profiling));
     assert_eq!(
         trace.snapshot(),
         vec![

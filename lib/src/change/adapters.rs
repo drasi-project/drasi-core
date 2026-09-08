@@ -183,54 +183,7 @@ pub(crate) fn source_event_to_envelope(
 pub(crate) fn source_event_from_envelope(
     envelope: &ChangeEnvelope,
 ) -> Result<SourceEventWrapper, ChangeAdapterError> {
-    if envelope.change_set().schema().kind() != super::ChangeSchemaKind::GraphChange {
-        return Err(ChangeAdapterError::WrongSchema {
-            expected: "graph-change",
-        });
-    }
-
-    let change_set = envelope.change_set();
-    let change = match (
-        change_set.added().first(),
-        change_set.updated().first(),
-        change_set.deleted().first(),
-        change_set.added().len() + change_set.updated().len() + change_set.deleted().len(),
-    ) {
-        (Some(added), None, None, 1) => match added.after() {
-            RecordData::Graph(GraphRecord::Element(element)) => SourceChange::Insert {
-                element: element.as_ref().clone(),
-            },
-            _ => return Err(ChangeAdapterError::InvalidGraphEnvelope),
-        },
-        (None, Some(updated), None, 1) => match updated.after() {
-            RecordData::Graph(GraphRecord::Element(element))
-                if updated.semantics() == UpdateSemantics::Patch =>
-            {
-                SourceChange::Update {
-                    element: element.as_ref().clone(),
-                }
-            }
-            RecordData::Graph(GraphRecord::Future(future))
-                if updated.semantics() == UpdateSemantics::Patch =>
-            {
-                SourceChange::Future {
-                    future_ref: future.as_ref().clone(),
-                }
-            }
-            _ => return Err(ChangeAdapterError::InvalidGraphEnvelope),
-        },
-        (None, None, Some(deleted), 1) => match deleted.before() {
-            Some(RecordData::Graph(GraphRecord::Metadata(metadata))) => SourceChange::Delete {
-                metadata: metadata.as_ref().clone(),
-            },
-            Some(RecordData::Graph(GraphRecord::Element(element))) => SourceChange::Delete {
-                metadata: element.get_metadata().clone(),
-            },
-            _ => return Err(ChangeAdapterError::InvalidGraphEnvelope),
-        },
-        _ => return Err(ChangeAdapterError::InvalidGraphEnvelope),
-    };
-
+    let change = source_change_from_envelope(envelope)?;
     let system = envelope.system();
     let source_id = system
         .source_id()
@@ -244,6 +197,58 @@ pub(crate) fn source_event_from_envelope(
         sequence: system.sequence(),
         source_position: system.source_position().cloned(),
     })
+}
+
+pub(crate) fn source_change_from_envelope(
+    envelope: &ChangeEnvelope,
+) -> Result<SourceChange, ChangeAdapterError> {
+    if envelope.change_set().schema().kind() != super::ChangeSchemaKind::GraphChange {
+        return Err(ChangeAdapterError::WrongSchema {
+            expected: "graph-change",
+        });
+    }
+
+    let change_set = envelope.change_set();
+    match (
+        change_set.added().first(),
+        change_set.updated().first(),
+        change_set.deleted().first(),
+        change_set.added().len() + change_set.updated().len() + change_set.deleted().len(),
+    ) {
+        (Some(added), None, None, 1) => match added.after() {
+            RecordData::Graph(GraphRecord::Element(element)) => Ok(SourceChange::Insert {
+                element: element.as_ref().clone(),
+            }),
+            _ => Err(ChangeAdapterError::InvalidGraphEnvelope),
+        },
+        (None, Some(updated), None, 1) => match updated.after() {
+            RecordData::Graph(GraphRecord::Element(element))
+                if updated.semantics() == UpdateSemantics::Patch =>
+            {
+                Ok(SourceChange::Update {
+                    element: element.as_ref().clone(),
+                })
+            }
+            RecordData::Graph(GraphRecord::Future(future))
+                if updated.semantics() == UpdateSemantics::Patch =>
+            {
+                Ok(SourceChange::Future {
+                    future_ref: future.as_ref().clone(),
+                })
+            }
+            _ => Err(ChangeAdapterError::InvalidGraphEnvelope),
+        },
+        (None, None, Some(deleted), 1) => match deleted.before() {
+            Some(RecordData::Graph(GraphRecord::Metadata(metadata))) => Ok(SourceChange::Delete {
+                metadata: metadata.as_ref().clone(),
+            }),
+            Some(RecordData::Graph(GraphRecord::Element(element))) => Ok(SourceChange::Delete {
+                metadata: element.get_metadata().clone(),
+            }),
+            _ => Err(ChangeAdapterError::InvalidGraphEnvelope),
+        },
+        _ => Err(ChangeAdapterError::InvalidGraphEnvelope),
+    }
 }
 
 pub(crate) fn query_evaluation_to_envelope(
