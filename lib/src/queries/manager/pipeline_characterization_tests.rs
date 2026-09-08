@@ -14,10 +14,10 @@
 
 //! Characterization tests for the fixed Source -> Continuous Query -> Reaction pipeline.
 //!
-//! These tests intentionally pin the current transaction and output boundaries. In
-//! particular, they document the known durability gap where source progress commits
-//! before query output is persisted. A later stack layer will intentionally invert
-//! that behavior by staging output inside the core transaction.
+//! These tests intentionally pin the legacy transaction and output boundaries. Their
+//! non-domain backend remains in legacy mode and documents the weaker durability gap
+//! where source progress commits before query output is persisted. Fully capable
+//! bundles use the atomic `QueryCompositeHost` path instead.
 
 use std::{
     collections::{BTreeMap, HashMap},

@@ -53,6 +53,7 @@ use crate::queries::output_state::{
 use crate::queries::query_composite_host::dispatch_query_results;
 use crate::queries::query_composite_host::{
     QueryCompositeHost, QueryHostRuntime, QueryLiveDependencies, QueryOutputDependencies,
+    QueryProcessingMode,
 };
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
@@ -586,6 +587,7 @@ impl Query for DrasiQuery {
         let result_index: Option<Arc<dyn drasi_core::interface::ResultIndex>>;
         let future_queue: Option<Arc<dyn drasi_core::interface::FutureQueue>>;
         let session_control: Option<Arc<dyn drasi_core::interface::SessionControl>>;
+        let processing_mode: QueryProcessingMode;
 
         if let Some(backend_ref) = self
             .base
@@ -612,6 +614,12 @@ impl Query for DrasiQuery {
                 .build(backend_ref, &self.base.config.id)
                 .await
                 .context("Failed to build indexes")?;
+            processing_mode = QueryProcessingMode::from_created_indexes(&created);
+            debug!(
+                "Query '{}' selected {} result processing",
+                self.base.config.id,
+                processing_mode.diagnostic_name()
+            );
 
             // Use backend-provided checkpoint store, or create in-memory fallback
             checkpoint_store = match created.checkpoint_store {
@@ -652,6 +660,7 @@ impl Query for DrasiQuery {
             result_index = None;
             future_queue = None;
             session_control = None;
+            processing_mode = QueryProcessingMode::legacy();
         };
 
         // Persist the checkpoint_store for future stop/start cycles
@@ -1822,6 +1831,7 @@ impl Query for DrasiQuery {
                 self.base.status_handle(),
                 future_queue_source,
             ),
+            processing_mode,
             QueryLiveDependencies::new(
                 continuous_query,
                 checkpoint_store.clone(),

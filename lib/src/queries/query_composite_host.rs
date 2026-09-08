@@ -22,15 +22,20 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
+    time::{Instant, SystemTime},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core::{
     evaluation::context::QueryPartEvaluationContext,
-    interface::{CheckpointStore, LiveResultsWriter, OutboxWriter},
+    interface::{
+        AtomicResultTransaction, CheckpointStore, CreatedIndexes, IndexError, LiveResultsWriter,
+        OutboxWriter, RowMutation,
+    },
     models::SourceChange,
     query::ContinuousQuery,
 };
@@ -104,7 +109,79 @@ impl QueryLiveDependencies {
     }
 }
 
-/// Dependencies for preparing, persisting, and publishing legacy query output.
+/// Explicit processing capability for the fixed query host.
+///
+/// `Atomic` owns the validated token and the exact writer instances used to
+/// mint it. Missing or mismatched bundles remain `Legacy`; the host never
+/// infers atomicity from an individual writer.
+#[derive(Clone)]
+pub(super) enum QueryProcessingMode {
+    Atomic(AtomicQueryResources),
+    Legacy,
+}
+
+#[derive(Clone)]
+pub(super) struct AtomicQueryResources {
+    transaction: AtomicResultTransaction,
+    checkpoint_store: Arc<dyn CheckpointStore>,
+    outbox_writer: Arc<dyn OutboxWriter>,
+    live_results_writer: Arc<dyn LiveResultsWriter>,
+}
+
+impl QueryProcessingMode {
+    pub(super) const fn legacy() -> Self {
+        Self::Legacy
+    }
+
+    /// Capture the bundle-level capability before `CreatedIndexes` is distributed.
+    pub(super) fn from_created_indexes(created: &CreatedIndexes) -> Self {
+        let Some(transaction) = created.atomic_result_transaction() else {
+            return Self::Legacy;
+        };
+
+        let (Some(checkpoint_store), Some(outbox_writer), Some(live_results_writer)) = (
+            created.checkpoint_store.as_ref(),
+            created.outbox_writer.as_ref(),
+            created.live_results_writer.as_ref(),
+        ) else {
+            error!(
+                "Atomic result capability was issued without every persistent output writer; \
+                 falling back to legacy processing"
+            );
+            return Self::Legacy;
+        };
+
+        Self::Atomic(AtomicQueryResources {
+            transaction,
+            checkpoint_store: checkpoint_store.clone(),
+            outbox_writer: outbox_writer.clone(),
+            live_results_writer: live_results_writer.clone(),
+        })
+    }
+
+    pub(super) const fn diagnostic_name(&self) -> &'static str {
+        match self {
+            Self::Atomic(_) => "atomic",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
+/// Deterministic crate-private seam for transaction-boundary tests.
+#[async_trait]
+pub(super) trait QueryProcessingObserver: Send + Sync {
+    async fn after_output_staged(&self) -> std::result::Result<(), IndexError> {
+        Ok(())
+    }
+
+    async fn after_commit_before_publish(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn after_source_acknowledged(&self) {}
+}
+
+/// Dependencies for preparing and publishing query output.
 pub(super) struct QueryOutputDependencies {
     query_id: String,
     output_state: Arc<RwLock<QueryOutputState>>,
@@ -114,6 +191,7 @@ pub(super) struct QueryOutputDependencies {
     checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     outbox_capacity: usize,
     output_metrics: Arc<QueryOutputMetrics>,
+    observer: Option<Arc<dyn QueryProcessingObserver>>,
 }
 
 impl QueryOutputDependencies {
@@ -137,7 +215,14 @@ impl QueryOutputDependencies {
             checkpoint_store,
             outbox_capacity,
             output_metrics,
+            observer: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_observer(mut self, observer: Arc<dyn QueryProcessingObserver>) -> Self {
+        self.observer = Some(observer);
+        self
     }
 }
 
@@ -155,6 +240,7 @@ pub(super) struct QueryCompositeHost {
 impl QueryCompositeHost {
     pub(super) fn new(
         runtime: QueryHostRuntime,
+        mode: QueryProcessingMode,
         live: QueryLiveDependencies,
         output: QueryOutputDependencies,
     ) -> Self {
@@ -167,10 +253,12 @@ impl QueryCompositeHost {
                 continuous_query: continuous_query.clone(),
                 checkpoint_store: live.checkpoint_store,
                 output: output.clone(),
+                mode: mode.clone(),
             },
             future_processing: FutureProcessingStage {
                 continuous_query,
                 output,
+                mode,
             },
             source_acknowledgement: SourceAcknowledgement::new(
                 live.checkpoint_sequences,
@@ -289,7 +377,23 @@ impl QueryCompositeHost {
                 }
 
                 arc_event = self.runtime.priority_queue.dequeue() => {
-                    self.process_event(arc_event).await;
+                    if let Err(e) = self.process_event(arc_event).await {
+                        let detail = format!("{e:#}");
+                        error!(
+                            "Query '{}' fenced after recoverable atomic processing failure: {detail}",
+                            self.runtime.query_id
+                        );
+                        self.runtime
+                            .status_handle
+                            .set_status(
+                                ComponentStatus::Error,
+                                Some(format!(
+                                    "Atomic query processing failed; restart can recover durable work: {detail}"
+                                )),
+                            )
+                            .await;
+                        break;
+                    }
                 }
             }
         }
@@ -298,9 +402,9 @@ impl QueryCompositeHost {
         info!("Query '{}' processing task exited", self.runtime.query_id);
     }
 
-    async fn process_event(&mut self, arc_event: Arc<SourceEventWrapper>) {
+    async fn process_event(&mut self, arc_event: Arc<SourceEventWrapper>) -> Result<()> {
         let Some(input) = LiveInput::from_wrapper(arc_event, &self.runtime.query_id) else {
-            return;
+            return Ok(());
         };
 
         debug!(
@@ -322,12 +426,12 @@ impl QueryCompositeHost {
                     .checkpoint_for(input.source_id.as_ref())
                     .unwrap_or(0)
             );
-            return;
+            return Ok(());
         }
 
         match input.event {
             SourceEvent::Control(SourceControl::FuturesDue) => {
-                self.future_processing.drain_due().await;
+                self.future_processing.drain_due().await?;
             }
             SourceEvent::Change(source_change) => {
                 self.live_input
@@ -341,7 +445,7 @@ impl QueryCompositeHost {
                         },
                         &mut self.source_acknowledgement,
                     )
-                    .await;
+                    .await?;
             }
             SourceEvent::Control(_) => {
                 debug!(
@@ -350,6 +454,8 @@ impl QueryCompositeHost {
                 );
             }
         }
+
+        Ok(())
     }
 }
 
@@ -452,10 +558,31 @@ struct LiveInputStage {
     continuous_query: Arc<ContinuousQuery>,
     checkpoint_store: Arc<dyn CheckpointStore>,
     output: Arc<OutputPublicationStage>,
+    mode: QueryProcessingMode,
 }
 
 impl LiveInputStage {
-    async fn process(&self, input: LiveChangeContext, acknowledgement: &mut SourceAcknowledgement) {
+    async fn process(
+        &self,
+        input: LiveChangeContext,
+        acknowledgement: &mut SourceAcknowledgement,
+    ) -> Result<()> {
+        match &self.mode {
+            QueryProcessingMode::Atomic(resources) => {
+                self.process_atomic(input, acknowledgement, resources).await
+            }
+            QueryProcessingMode::Legacy => {
+                self.process_legacy(input, acknowledgement).await;
+                Ok(())
+            }
+        }
+    }
+
+    async fn process_legacy(
+        &self,
+        input: LiveChangeContext,
+        acknowledgement: &mut SourceAcknowledgement,
+    ) {
         let mut profiling = match input.profiling {
             Some(profiling) => profiling,
             None => ProfilingMetadata::new(),
@@ -463,8 +590,8 @@ impl LiveInputStage {
         profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
         profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
 
-        // The checkpoint hook intentionally remains pre-commit. A later layer changes
-        // transaction/output ordering; this host only gives the existing hook an owner.
+        // Legacy mode intentionally retains the A1 ordering. Atomic mode stages
+        // checkpoint and output together in its result-aware hook.
         let checkpoint_store = self.checkpoint_store.clone();
         let checkpoint_source_id = input.source_id.clone();
         let checkpoint_position = input.source_position.clone();
@@ -519,6 +646,121 @@ impl LiveInputStage {
             }
         }
     }
+
+    async fn process_atomic(
+        &self,
+        input: LiveChangeContext,
+        acknowledgement: &mut SourceAcknowledgement,
+        resources: &AtomicQueryResources,
+    ) -> Result<()> {
+        let mut profiling = match input.profiling {
+            Some(profiling) => profiling,
+            None => ProfilingMetadata::new(),
+        };
+        profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
+        profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
+
+        let prepared_slot: Arc<Mutex<Option<PreparedQueryOutput>>> = Arc::new(Mutex::new(None));
+        let hook_slot = prepared_slot.clone();
+        let output = self.output.clone();
+        let staging_resources = resources.clone();
+        let checkpoint_source_id = input.source_id.clone();
+        let output_source_id = input.source_id.clone();
+        let checkpoint_position = input.source_position.clone();
+        let sequence = input.sequence;
+
+        let committed_results = self
+            .continuous_query
+            .process_source_change_with_result_hook(
+                input.source_change,
+                &resources.transaction,
+                move |results| async move {
+                    profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
+
+                    if let Some(sequence) = sequence {
+                        staging_resources
+                            .checkpoint_store
+                            .stage_checkpoint(
+                                checkpoint_source_id.as_ref(),
+                                sequence,
+                                valid_checkpoint_position(checkpoint_position.as_ref()),
+                            )
+                            .await?;
+                    }
+
+                    if has_query_output(&results) {
+                        // In atomic mode this timestamp marks durable output staging,
+                        // not post-commit dispatch. One materialized QueryResult is
+                        // persisted and later dispatched unchanged.
+                        profiling.query_send_ns = Some(crate::profiling::timestamp_ns());
+                        let prepared = output
+                            .prepare_atomic(&results, output_source_id.as_ref(), profiling)
+                            .await
+                            .map_err(index_error)?;
+                        output.stage_atomic(&staging_resources, &prepared).await?;
+                        let mut slot = hook_slot.lock().map_err(|_| {
+                            IndexError::other(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "prepared query output slot was poisoned",
+                            ))
+                        })?;
+                        *slot = Some(prepared);
+                    }
+
+                    output.observe_output_staged().await
+                },
+            )
+            .await
+            .context("atomic source transaction failed before commit")?;
+
+        self.output
+            .observe_commit_before_publish()
+            .await
+            .context("atomic source transaction committed before publication was interrupted")?;
+
+        let prepared = prepared_slot
+            .lock()
+            .map_err(|_| anyhow::anyhow!("prepared query output slot was poisoned"))?
+            .take();
+        anyhow::ensure!(
+            has_query_output(&committed_results) == prepared.is_some(),
+            "committed source output did not match the prepared output slot"
+        );
+
+        let committed_result = match prepared {
+            Some(prepared) => Some(self.output.apply_committed(prepared).await.context(
+                "durable source output committed but in-memory publication invariant failed",
+            )?),
+            None => None,
+        };
+
+        acknowledgement.advance(input.source_id.as_ref(), input.sequence);
+        self.output.observe_source_acknowledged();
+        if let Some(result) = committed_result {
+            self.output.dispatch(result).await;
+        }
+
+        Ok(())
+    }
+}
+
+fn valid_checkpoint_position(position: Option<&Bytes>) -> Option<&Bytes> {
+    position.filter(|position| {
+        position.len() <= crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES
+    })
+}
+
+fn has_query_output(results: &[QueryPartEvaluationContext]) -> bool {
+    results
+        .iter()
+        .any(|result| !matches!(result, QueryPartEvaluationContext::Noop))
+}
+
+fn index_error(error: anyhow::Error) -> IndexError {
+    IndexError::other(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        error.to_string(),
+    ))
 }
 
 struct SourceAcknowledgement {
@@ -560,10 +802,21 @@ impl SourceAcknowledgement {
 struct FutureProcessingStage {
     continuous_query: Arc<ContinuousQuery>,
     output: Arc<OutputPublicationStage>,
+    mode: QueryProcessingMode,
 }
 
 impl FutureProcessingStage {
-    async fn drain_due(&self) {
+    async fn drain_due(&self) -> Result<()> {
+        match &self.mode {
+            QueryProcessingMode::Atomic(resources) => self.drain_due_atomic(resources).await,
+            QueryProcessingMode::Legacy => {
+                self.drain_due_legacy().await;
+                Ok(())
+            }
+        }
+    }
+
+    async fn drain_due_legacy(&self) {
         loop {
             match self.continuous_query.process_due_futures().await {
                 Ok(Some(due_result)) => {
@@ -592,6 +845,101 @@ impl FutureProcessingStage {
             }
         }
     }
+
+    async fn drain_due_atomic(&self, resources: &AtomicQueryResources) -> Result<()> {
+        loop {
+            let next_due_time = self
+                .continuous_query
+                .future_queue()
+                .peek_due_time()
+                .await
+                .context("failed to inspect the next atomic due future")?;
+            let Some(next_due_time) = next_due_time else {
+                break;
+            };
+            if next_due_time > current_time_millis() {
+                break;
+            }
+
+            let prepared_slot: Arc<Mutex<Option<PreparedQueryOutput>>> = Arc::new(Mutex::new(None));
+            let hook_slot = prepared_slot.clone();
+            let output = self.output.clone();
+            let staging_resources = resources.clone();
+            let mut profiling = ProfilingMetadata::new();
+            profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
+
+            let due_result = self
+                .continuous_query
+                .process_due_futures_with_result_hook(
+                    &resources.transaction,
+                    move |due_result| async move {
+                        profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
+
+                        if has_query_output(&due_result.results) {
+                            profiling.query_send_ns = Some(crate::profiling::timestamp_ns());
+                            let prepared = output
+                                .prepare_atomic(
+                                    &due_result.results,
+                                    &due_result.source_id,
+                                    profiling,
+                                )
+                                .await
+                                .map_err(index_error)?;
+                            output.stage_atomic(&staging_resources, &prepared).await?;
+                            let mut slot = hook_slot.lock().map_err(|_| {
+                                IndexError::other(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    "prepared due-future output slot was poisoned",
+                                ))
+                            })?;
+                            *slot = Some(prepared);
+                        }
+
+                        output.observe_output_staged().await
+                    },
+                )
+                .await
+                .context("atomic due-future transaction failed before commit")?;
+
+            let Some(due_result) = due_result else {
+                break;
+            };
+
+            self.output.observe_commit_before_publish().await.context(
+                "atomic due-future transaction committed before publication was interrupted",
+            )?;
+
+            let prepared = prepared_slot
+                .lock()
+                .map_err(|_| anyhow::anyhow!("prepared due-future output slot was poisoned"))?
+                .take();
+            anyhow::ensure!(
+                has_query_output(&due_result.results) == prepared.is_some(),
+                "committed due-future output did not match the prepared output slot"
+            );
+
+            if let Some(prepared) = prepared {
+                let result = self
+                        .output
+                        .apply_committed(prepared)
+                        .await
+                        .context(
+                            "durable due-future output committed but in-memory publication invariant failed",
+                        )?;
+                self.output.dispatch(result).await;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn current_time_millis() -> u64 {
+    let elapsed = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    u64::try_from(elapsed).unwrap_or(u64::MAX)
 }
 
 #[derive(Clone)]
@@ -604,6 +952,7 @@ struct OutputPublicationStage {
     checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     outbox_capacity: usize,
     output_metrics: Arc<QueryOutputMetrics>,
+    observer: Option<Arc<dyn QueryProcessingObserver>>,
 }
 
 impl OutputPublicationStage {
@@ -617,6 +966,7 @@ impl OutputPublicationStage {
             checkpoint_store: dependencies.checkpoint_store,
             outbox_capacity: dependencies.outbox_capacity,
             output_metrics: dependencies.output_metrics,
+            observer: dependencies.observer,
         }
     }
 
@@ -641,6 +991,236 @@ impl OutputPublicationStage {
         )
         .await
     }
+
+    async fn prepare_atomic(
+        &self,
+        results: &[QueryPartEvaluationContext],
+        source_id: &str,
+        profiling: ProfilingMetadata,
+    ) -> Result<PreparedQueryOutput> {
+        // A7 will hydrate this state from durable output during startup. A6
+        // intentionally preserves the existing in-memory sequence origin.
+        let expected_sequence = self.output_state.read().await.next_sequence();
+        let mut prepared = PreparedQueryOutput::from_evaluation(
+            results,
+            source_id,
+            &self.query_id,
+            expected_sequence,
+            profiling,
+            Instant::now(),
+        )?
+        .ok_or_else(|| anyhow::anyhow!("non-Noop query evaluation produced no change envelope"))?;
+        prepared.materialize_atomic()?;
+        Ok(prepared)
+    }
+
+    async fn stage_atomic(
+        &self,
+        resources: &AtomicQueryResources,
+        prepared: &PreparedQueryOutput,
+    ) -> std::result::Result<(), IndexError> {
+        let outbox_data = prepared
+            .outbox_data
+            .as_deref()
+            .ok_or(IndexError::CorruptedData)?;
+        let live_result_data = prepared
+            .live_result_data
+            .as_ref()
+            .ok_or(IndexError::CorruptedData)?;
+
+        resources
+            .outbox_writer
+            .append(&self.query_id, prepared.result.sequence, outbox_data)
+            .await?;
+        resources
+            .outbox_writer
+            .trim_to_capacity(&self.query_id, self.outbox_capacity)
+            .await?;
+
+        let row_mutations: Vec<RowMutation<'_>> = live_result_data
+            .iter()
+            .map(|(signature, data)| RowMutation {
+                row_signature: *signature,
+                data: data.as_deref(),
+            })
+            .collect();
+        if !row_mutations.is_empty() {
+            resources
+                .live_results_writer
+                .apply_mutations(&self.query_id, &row_mutations)
+                .await?;
+        }
+
+        resources
+            .checkpoint_store
+            .write_result_sequence(&self.query_id, prepared.result.sequence)
+            .await
+    }
+
+    async fn observe_output_staged(&self) -> std::result::Result<(), IndexError> {
+        match &self.observer {
+            Some(observer) => observer.after_output_staged().await,
+            None => Ok(()),
+        }
+    }
+
+    async fn observe_commit_before_publish(&self) -> Result<()> {
+        match &self.observer {
+            Some(observer) => observer.after_commit_before_publish().await,
+            None => Ok(()),
+        }
+    }
+
+    fn observe_source_acknowledged(&self) {
+        if let Some(observer) = &self.observer {
+            observer.after_source_acknowledged();
+        }
+    }
+
+    async fn apply_committed(&self, prepared: PreparedQueryOutput) -> Result<Arc<QueryResult>> {
+        let PreparedQueryOutput {
+            result, started_at, ..
+        } = prepared;
+        let mut state = self.output_state.write().await;
+        let result = state.apply_committed_result(result)?;
+
+        let duration_ns = u64::try_from(started_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.output_metrics
+            .record_transaction_duration_ns(duration_ns);
+        self.output_metrics.record_seq_advance();
+        self.output_metrics
+            .record_live_results_count(state.results_len());
+        let earliest_seq = state.outbox_earliest_seq().unwrap_or(0);
+        self.output_metrics
+            .update_outbox(state.outbox_len(), earliest_seq, state.as_of_sequence());
+
+        Ok(result)
+    }
+
+    async fn dispatch(&self, result: Arc<QueryResult>) {
+        debug!(
+            "Query '{}' sending {} results to reactions (seq={})",
+            self.query_id,
+            result.results.len(),
+            result.sequence
+        );
+
+        let dispatchers = self.dispatchers.read().await;
+        for dispatcher in dispatchers.iter() {
+            if let Err(e) = dispatcher.dispatch_change(result.clone()).await {
+                debug!(
+                    "Failed to dispatch result for query '{}': {e}",
+                    self.query_id
+                );
+            }
+        }
+    }
+}
+
+struct PreparedQueryOutput {
+    result: QueryResult,
+    started_at: Instant,
+    outbox_data: Option<Vec<u8>>,
+    live_result_data: Option<Vec<(u64, Option<Vec<u8>>)>>,
+}
+
+impl PreparedQueryOutput {
+    fn from_evaluation(
+        results: &[QueryPartEvaluationContext],
+        source_id: &str,
+        query_id: &str,
+        sequence: u64,
+        profiling: ProfilingMetadata,
+        started_at: Instant,
+    ) -> Result<Option<Self>> {
+        let result_count = results
+            .iter()
+            .filter(|result| !matches!(result, QueryPartEvaluationContext::Noop))
+            .count();
+        if result_count == 0 {
+            return Ok(None);
+        }
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "source_id".to_string(),
+            serde_json::Value::String(source_id.to_string()),
+        );
+        metadata.insert(
+            "processed_by".to_string(),
+            serde_json::Value::String("drasi-core".to_string()),
+        );
+        metadata.insert(
+            "result_count".to_string(),
+            serde_json::Value::Number(result_count.into()),
+        );
+        let envelope = crate::change::query_evaluation_to_envelope(
+            results,
+            crate::change::QueryEnvelopeMetadata::new(
+                Arc::<str>::from(query_id),
+                Some(Arc::<str>::from(source_id)),
+                sequence,
+                chrono::Utc::now(),
+                metadata,
+                Some(profiling),
+            ),
+        )?
+        .ok_or_else(|| anyhow::anyhow!("non-Noop query evaluation produced no change envelope"))?;
+
+        Ok(Some(Self {
+            result: crate::change::query_result_from_envelope(&envelope)?,
+            started_at,
+            outbox_data: None,
+            live_result_data: None,
+        }))
+    }
+
+    fn materialize_atomic(&mut self) -> Result<()> {
+        self.outbox_data = Some(
+            rmp_serde::to_vec(&self.result)
+                .context("failed to serialize prepared query result for the atomic outbox")?,
+        );
+
+        let mut live_result_data = Vec::with_capacity(self.result.results.len());
+        for diff in &self.result.results {
+            match diff {
+                ResultDiff::Add {
+                    data,
+                    row_signature,
+                } => live_result_data.push((
+                    *row_signature,
+                    Some(rmp_serde::to_vec(data).with_context(|| {
+                        format!(
+                            "failed to serialize prepared Add row (sig={row_signature}) for atomic live results"
+                        )
+                    })?),
+                )),
+                ResultDiff::Update {
+                    after,
+                    row_signature,
+                    ..
+                }
+                | ResultDiff::Aggregation {
+                    after,
+                    row_signature,
+                    ..
+                } => live_result_data.push((
+                    *row_signature,
+                    Some(rmp_serde::to_vec(after).with_context(|| {
+                        format!(
+                            "failed to serialize prepared row (sig={row_signature}) for atomic live results"
+                        )
+                    })?),
+                )),
+                ResultDiff::Delete { row_signature, .. } => {
+                    live_result_data.push((*row_signature, None));
+                }
+                ResultDiff::Noop => {}
+            }
+        }
+        self.live_result_data = Some(live_result_data);
+        Ok(())
+    }
 }
 
 /// Prepare, persist, and dispatch a legacy `QueryResult`.
@@ -660,46 +1240,22 @@ pub(super) async fn dispatch_query_results(
     profiling: ProfilingMetadata,
     output_metrics: &Arc<QueryOutputMetrics>,
 ) -> Result<()> {
-    let result_count = results
-        .iter()
-        .filter(|result| !matches!(result, QueryPartEvaluationContext::Noop))
-        .count();
-    if result_count == 0 {
-        return Ok(());
-    }
-
-    let tx_start = std::time::Instant::now();
-    let query_identity = Arc::<str>::from(query_id);
-    let source_identity = Arc::<str>::from(source_id);
-    let mut metadata = HashMap::new();
-    metadata.insert(
-        "source_id".to_string(),
-        serde_json::Value::String(source_id.to_string()),
-    );
-    metadata.insert(
-        "processed_by".to_string(),
-        serde_json::Value::String("drasi-core".to_string()),
-    );
-    metadata.insert(
-        "result_count".to_string(),
-        serde_json::Value::Number(result_count.into()),
-    );
+    let tx_start = Instant::now();
 
     let arc_result = loop {
         let expected_sequence = output_state.read().await.next_sequence();
-        let envelope = crate::change::query_evaluation_to_envelope(
+        let Some(prepared) = PreparedQueryOutput::from_evaluation(
             results,
-            crate::change::QueryEnvelopeMetadata::new(
-                query_identity.clone(),
-                Some(source_identity.clone()),
-                expected_sequence,
-                chrono::Utc::now(),
-                metadata.clone(),
-                Some(profiling.clone()),
-            ),
+            source_id,
+            query_id,
+            expected_sequence,
+            profiling.clone(),
+            tx_start,
         )?
-        .ok_or_else(|| anyhow::anyhow!("non-Noop query evaluation produced no change envelope"))?;
-        let query_result = crate::change::query_result_from_envelope(&envelope)?;
+        else {
+            return Ok(());
+        };
+        let query_result = prepared.result;
 
         let mut state = output_state.write().await;
         let result = match state.try_apply_prepared_result(query_result) {
@@ -965,6 +1521,7 @@ mod tests {
                 base.status_handle(),
                 future_queue_source.clone(),
             ),
+            QueryProcessingMode::legacy(),
             QueryLiveDependencies::new(
                 continuous_query,
                 checkpoint_store.clone(),
@@ -1446,3 +2003,6 @@ mod tests {
         assert!(fixture.base.shutdown_tx.read().await.is_none());
     }
 }
+
+#[cfg(test)]
+mod atomic_tests;

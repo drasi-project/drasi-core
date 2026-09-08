@@ -68,6 +68,13 @@ pub struct QueryOutputState {
     outbox_capacity: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("prepared query result sequence {prepared} does not match expected sequence {expected}")]
+pub(crate) struct PreparedSequenceMismatch {
+    pub(crate) expected: u64,
+    pub(crate) prepared: u64,
+}
+
 impl QueryOutputState {
     /// Maximum allowed outbox capacity to prevent memory exhaustion from misconfiguration.
     const MAX_OUTBOX_CAPACITY: usize = 1_000_000;
@@ -166,6 +173,29 @@ impl QueryOutputState {
         let result = self.advance_sequence_and_push(result);
         debug_assert_eq!(result.sequence, expected_sequence);
         Some(result)
+    }
+
+    /// Apply a result prepared by the query host's sole output writer.
+    ///
+    /// Atomic processing has already committed the prepared sequence durably, so a
+    /// stale sequence is a recoverable fatal invariant violation rather than a
+    /// reason to rebuild the result under a different sequence.
+    pub(crate) fn apply_committed_result(
+        &mut self,
+        result: QueryResult,
+    ) -> Result<Arc<QueryResult>, PreparedSequenceMismatch> {
+        let expected = self.next_sequence();
+        if result.sequence != expected {
+            return Err(PreparedSequenceMismatch {
+                expected,
+                prepared: result.sequence,
+            });
+        }
+
+        self.apply_diffs(&result.results);
+        let result = self.advance_sequence_and_push(result);
+        debug_assert_eq!(result.sequence, expected);
+        Ok(result)
     }
 
     /// Return the live result set as a `Vec` for backward compatibility with `get_current_results`.
@@ -719,6 +749,26 @@ mod tests {
         result.sequence = state.next_sequence();
 
         let applied = state.try_apply_prepared_result(result).unwrap();
+        assert_eq!(applied.sequence, u64::MAX);
+        assert_eq!(state.as_of_sequence(), u64::MAX);
+        assert_eq!(state.outbox.back().unwrap().sequence, u64::MAX);
+    }
+
+    #[test]
+    fn test_committed_result_preserves_saturating_sequence_behavior() {
+        let mut state = QueryOutputState::new(3);
+        state.as_of_sequence = u64::MAX;
+
+        let mut result = make_query_result(
+            "q1",
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"name": "max"}),
+                row_signature: 1,
+            }],
+        );
+        result.sequence = state.next_sequence();
+
+        let applied = state.apply_committed_result(result).unwrap();
         assert_eq!(applied.sequence, u64::MAX);
         assert_eq!(state.as_of_sequence(), u64::MAX);
         assert_eq!(state.outbox.back().unwrap().sequence, u64::MAX);

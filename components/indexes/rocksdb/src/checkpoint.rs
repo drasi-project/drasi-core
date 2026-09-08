@@ -386,17 +386,16 @@ impl CheckpointStore for RocksDbCheckpointStore {
 
     async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
         let db = self.db.clone();
-        let session_state = self.session_state.clone();
         let key = format!("{RESULT_SEQUENCE_PREFIX}{query_id}");
 
         let task = task::spawn_blocking(move || {
             let cf = db
                 .cf_handle(STREAM_STATE_CF)
                 .expect("stream_state cf not found");
-            let data = session_state.with_txn_or_db(
-                |txn| txn.get_cf(&cf, &key).map_err(IndexError::other),
-                |db| db.get_cf(&cf, &key).map_err(IndexError::other),
-            )?;
+            // Recovery and snapshot readers must never observe a sequence staged
+            // by an in-flight transaction while live rows are still committed at
+            // the previous sequence.
+            let data = db.get_cf(&cf, &key).map_err(IndexError::other)?;
             match data {
                 Some(v) => {
                     let bytes: [u8; 8] = v
