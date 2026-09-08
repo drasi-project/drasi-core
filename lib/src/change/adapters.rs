@@ -29,6 +29,7 @@ use crate::{
 };
 
 use super::{
+    canonical::{encode_query_variables, CanonicalEncodingError},
     graph_change_schema, query_result_schema, AddedRecord, ChangeContractError, ChangeEnvelope,
     ChangeSet, ChangeSetId, DeletedRecord, GraphRecord, RecordData, RecordIdentity,
     StableIdBuilder, SystemMetadata, SystemMetadataExtensions, UpdateMetadata, UpdateSemantics,
@@ -55,6 +56,8 @@ pub(crate) enum ChangeAdapterError {
     MissingQueryBeforeImage { ordinal: usize },
     #[error("record at ordinal {ordinal} is incompatible with the boundary codec")]
     IncompatibleRecord { ordinal: usize },
+    #[error(transparent)]
+    CanonicalEncoding(#[from] CanonicalEncodingError),
 }
 
 #[derive(Debug, Clone)]
@@ -278,7 +281,7 @@ pub(crate) fn query_evaluation_to_envelope(
                 identity.u64("result-ordinal", ordinal as u64);
                 identity.string("result-kind", "add");
                 identity.u64("row-signature", *row_signature);
-                hash_query_variables(&mut identity, "after", after);
+                hash_query_variables(&mut identity, "after", after)?;
                 added.push(AddedRecord::new(
                     ordinal,
                     RecordIdentity::QueryRow(*row_signature),
@@ -293,8 +296,8 @@ pub(crate) fn query_evaluation_to_envelope(
                 identity.u64("result-ordinal", ordinal as u64);
                 identity.string("result-kind", "update");
                 identity.u64("row-signature", *row_signature);
-                hash_query_variables(&mut identity, "before", before);
-                hash_query_variables(&mut identity, "after", after);
+                hash_query_variables(&mut identity, "before", before)?;
+                hash_query_variables(&mut identity, "after", after)?;
                 updated.push(UpdatedRecord::new(
                     ordinal,
                     RecordIdentity::QueryRow(*row_signature),
@@ -313,7 +316,7 @@ pub(crate) fn query_evaluation_to_envelope(
                 identity.u64("result-ordinal", ordinal as u64);
                 identity.string("result-kind", "delete");
                 identity.u64("row-signature", *row_signature);
-                hash_query_variables(&mut identity, "before", before);
+                hash_query_variables(&mut identity, "before", before)?;
                 deleted.push(DeletedRecord::new(
                     ordinal,
                     RecordIdentity::QueryRow(*row_signature),
@@ -333,9 +336,9 @@ pub(crate) fn query_evaluation_to_envelope(
                 identity.u64("row-signature", *row_signature);
                 identity.bool("before-present", before.is_some());
                 if let Some(before) = before {
-                    hash_query_variables(&mut identity, "before", before);
+                    hash_query_variables(&mut identity, "before", before)?;
                 }
-                hash_query_variables(&mut identity, "after", after);
+                hash_query_variables(&mut identity, "after", after)?;
                 identity.u64("grouping-key-count", grouping_keys.len() as u64);
                 for grouping_key in grouping_keys {
                     identity.string("grouping-key", grouping_key);
@@ -393,15 +396,13 @@ pub(crate) fn query_evaluation_to_envelope(
     )))
 }
 
-fn hash_query_variables(identity: &mut StableIdBuilder, section: &str, variables: &QueryVariables) {
-    identity.string("query-variable-section", section);
-    identity.u64("query-variable-count", variables.len() as u64);
-    // QueryVariables and every object-valued VariableValue use BTreeMap, so key
-    // iteration is canonical. VariableValue's typed Hash preserves variant data.
-    for (key, value) in variables {
-        identity.string("query-variable-key", key);
-        identity.typed_hash("query-variable-value", value);
-    }
+fn hash_query_variables(
+    identity: &mut StableIdBuilder,
+    section: &str,
+    variables: &QueryVariables,
+) -> Result<(), CanonicalEncodingError> {
+    identity.bytes(section, &encode_query_variables(variables)?);
+    Ok(())
 }
 
 pub(crate) fn query_result_from_envelope(

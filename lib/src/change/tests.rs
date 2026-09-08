@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use chrono::NaiveDate;
@@ -458,6 +461,99 @@ fn query_change_set_ids_include_typed_result_content() {
         typed_date.change_set().id(),
         legacy_equivalent_string.change_set().id(),
         "typed values that share a legacy JSON representation must remain distinct"
+    );
+}
+
+#[test]
+fn canonical_integer_encoding_distinguishes_sign_variants() {
+    let positive = variables(&[("value", VariableValue::Integer(u64::MAX.into()))]);
+    let negative = variables(&[("value", VariableValue::Integer((-1_i64).into()))]);
+
+    assert_ne!(
+        encode_query_variables(&positive).unwrap(),
+        encode_query_variables(&negative).unwrap()
+    );
+
+    let positive_envelope = query_evaluation_to_envelope(
+        &[QueryPartEvaluationContext::Adding {
+            after: positive,
+            row_signature: 11,
+        }],
+        query_metadata(1),
+    )
+    .unwrap()
+    .unwrap();
+    let negative_envelope = query_evaluation_to_envelope(
+        &[QueryPartEvaluationContext::Adding {
+            after: negative,
+            row_signature: 11,
+        }],
+        query_metadata(1),
+    )
+    .unwrap()
+    .unwrap();
+    assert_ne!(
+        positive_envelope.change_set().id(),
+        negative_envelope.change_set().id()
+    );
+}
+
+#[test]
+fn canonical_nested_values_ignore_map_insertion_order() {
+    let mut first_object = BTreeMap::new();
+    first_object.insert(
+        "z".to_string(),
+        VariableValue::List(vec![
+            VariableValue::Integer(1.into()),
+            VariableValue::Bool(true),
+        ]),
+    );
+    first_object.insert("a".to_string(), VariableValue::String("first".to_string()));
+
+    let mut second_object = BTreeMap::new();
+    second_object.insert("a".to_string(), VariableValue::String("first".to_string()));
+    second_object.insert(
+        "z".to_string(),
+        VariableValue::List(vec![
+            VariableValue::Integer(1.into()),
+            VariableValue::Bool(true),
+        ]),
+    );
+
+    let first = variables(&[
+        ("nested", VariableValue::Object(first_object)),
+        ("tail", VariableValue::Null),
+    ]);
+    let second = variables(&[
+        ("tail", VariableValue::Null),
+        ("nested", VariableValue::Object(second_object)),
+    ]);
+
+    assert_eq!(
+        encode_query_variables(&first).unwrap(),
+        encode_query_variables(&second).unwrap()
+    );
+}
+
+#[test]
+fn canonical_integer_bytes_are_fixed_width_and_versioned() {
+    let values = variables(&[
+        ("positive", VariableValue::Integer(u64::MAX.into())),
+        ("negative", VariableValue::Integer((-1_i64).into())),
+    ]);
+    let encoded = encode_query_variables(&values).unwrap();
+    let encoded_hex = encoded
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    assert_eq!(
+        encoded_hex,
+        concat!(
+            "44524153492d5156010000000000000002",
+            "00000000000000086e6567617469766504ffffffffffffffff",
+            "0000000000000008706f73697469766503ffffffffffffffff",
+        )
     );
 }
 

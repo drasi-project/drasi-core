@@ -18,16 +18,18 @@
 //! not connected to the live pipeline until the next migration layer.
 
 mod adapters;
+mod canonical;
 
 pub(crate) use adapters::{
     query_evaluation_to_envelope, query_result_from_envelope, source_event_from_envelope,
     source_event_to_envelope, ChangeAdapterError, QueryEnvelopeMetadata,
 };
+#[cfg(test)]
+pub(crate) use canonical::encode_query_variables;
 
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    hash::{Hash, Hasher},
     sync::{Arc, OnceLock},
 };
 
@@ -936,12 +938,6 @@ impl StableIdBuilder {
 
     pub(super) fn bool(&mut self, label: &str, value: bool) {
         self.bytes(label, &[u8::from(value)]);
-    }
-
-    pub(super) fn typed_hash<T: Hash>(&mut self, label: &str, value: &T) {
-        let mut hasher = fnv::FnvHasher::default();
-        value.hash(&mut hasher);
-        self.u64(label, hasher.finish());
     }
 
     fn system(&mut self, system: &SystemMetadata) {
