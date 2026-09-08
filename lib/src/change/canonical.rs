@@ -244,7 +244,6 @@ impl CanonicalEncoder {
     fn fixed_datetime(&mut self, value: &chrono::DateTime<chrono::FixedOffset>) {
         self.i64(value.timestamp());
         self.u32(value.timestamp_subsec_nanos());
-        self.i32(value.offset().local_minus_utc());
     }
 
     fn list_range(&mut self, value: &ListRange) {

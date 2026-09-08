@@ -18,11 +18,14 @@ use std::{
 };
 
 use bytes::Bytes;
-use chrono::NaiveDate;
+use chrono::{FixedOffset, NaiveDate, NaiveTime, TimeZone};
 use drasi_core::{
     evaluation::{
         context::{QueryPartEvaluationContext, QueryVariables},
-        variable_value::{float::Float, VariableValue},
+        variable_value::{
+            float::Float, zoned_datetime::ZonedDateTime as VarZonedDateTime,
+            zoned_time::ZonedTime as VarZonedTime, VariableValue,
+        },
     },
     interface::FutureElementRef,
     models::{
@@ -701,6 +704,112 @@ fn canonical_element_float_encoding_matches_ordered_float_semantics() {
     assert_ne!(
         positive_infinity_bytes,
         encode_source_change(change(&negative_infinity)).unwrap()
+    );
+}
+
+#[test]
+fn canonical_fixed_datetimes_follow_temporal_equality() {
+    fn query_value_envelope(value: VariableValue) -> ChangeEnvelope {
+        query_evaluation_to_envelope(
+            &[QueryPartEvaluationContext::Adding {
+                after: variables(&[("value", value)]),
+                row_signature: 11,
+            }],
+            query_metadata(1),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    fn source_change(wrapper: &SourceEventWrapper) -> &SourceChange {
+        let SourceEvent::Change(change) = &wrapper.event else {
+            panic!("expected source change");
+        };
+        change
+    }
+
+    fn graph_datetime(value: chrono::DateTime<FixedOffset>) -> SourceEventWrapper {
+        let mut properties = ElementPropertyMap::new();
+        properties.insert("value", ElementValue::ZonedDateTime(value));
+        wrapper(SourceChange::Insert {
+            element: element(properties, 1_000),
+        })
+    }
+
+    let utc = FixedOffset::east_opt(0)
+        .unwrap()
+        .with_ymd_and_hms(2020, 1, 1, 0, 0, 0)
+        .single()
+        .unwrap();
+    let plus_one = FixedOffset::east_opt(3_600)
+        .unwrap()
+        .with_ymd_and_hms(2020, 1, 1, 1, 0, 0)
+        .single()
+        .unwrap();
+    assert_eq!(utc, plus_one);
+
+    let utc_graph = graph_datetime(utc);
+    let plus_one_graph = graph_datetime(plus_one);
+    assert_eq!(
+        encode_source_change(source_change(&utc_graph)).unwrap(),
+        encode_source_change(source_change(&plus_one_graph)).unwrap()
+    );
+    assert_eq!(
+        source_event_to_envelope(&utc_graph, SystemMetadataExtensions::default())
+            .unwrap()
+            .change_set()
+            .id(),
+        source_event_to_envelope(&plus_one_graph, SystemMetadataExtensions::default())
+            .unwrap()
+            .change_set()
+            .id()
+    );
+
+    let utc_zoned =
+        VariableValue::ZonedDateTime(VarZonedDateTime::new(utc, Some("Etc/UTC".to_string())));
+    let plus_one_zoned =
+        VariableValue::ZonedDateTime(VarZonedDateTime::new(plus_one, Some("Etc/UTC".to_string())));
+    assert_eq!(utc_zoned, plus_one_zoned);
+    assert_eq!(
+        encode_query_variables(&variables(&[("value", utc_zoned.clone())])).unwrap(),
+        encode_query_variables(&variables(&[("value", plus_one_zoned.clone())])).unwrap()
+    );
+    assert_eq!(
+        query_value_envelope(utc_zoned).change_set().id(),
+        query_value_envelope(plus_one_zoned).change_set().id()
+    );
+
+    let utc_named =
+        VariableValue::ZonedDateTime(VarZonedDateTime::new(utc, Some("Etc/UTC".to_string())));
+    let differently_named =
+        VariableValue::ZonedDateTime(VarZonedDateTime::new(utc, Some("UTC".to_string())));
+    assert_ne!(utc_named, differently_named);
+    assert_ne!(
+        encode_query_variables(&variables(&[("value", utc_named.clone())])).unwrap(),
+        encode_query_variables(&variables(&[("value", differently_named.clone())])).unwrap()
+    );
+    assert_ne!(
+        query_value_envelope(utc_named).change_set().id(),
+        query_value_envelope(differently_named).change_set().id()
+    );
+
+    let local_time = NaiveTime::from_hms_nano_opt(12, 30, 45, 123_456_789).unwrap();
+    let utc_time = VariableValue::ZonedTime(VarZonedTime::new(
+        local_time,
+        FixedOffset::east_opt(0).unwrap(),
+    ));
+    let plus_one_time = VariableValue::ZonedTime(VarZonedTime::new(
+        local_time,
+        FixedOffset::east_opt(3_600).unwrap(),
+    ));
+    assert_ne!(utc_time, plus_one_time);
+    assert_ne!(
+        encode_query_variables(&variables(&[("value", utc_time.clone())])).unwrap(),
+        encode_query_variables(&variables(&[("value", plus_one_time.clone())])).unwrap()
+    );
+    assert_ne!(
+        query_value_envelope(utc_time).change_set().id(),
+        query_value_envelope(plus_one_time).change_set().id()
     );
 }
 
