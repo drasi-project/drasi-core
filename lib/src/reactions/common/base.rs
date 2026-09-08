@@ -308,6 +308,20 @@ impl ReactionBase {
     ///
     /// This should be called before spawning the processing task.
     pub async fn create_shutdown_channel(&self) -> tokio::sync::oneshot::Receiver<()> {
+        // Every start owns a fresh queue generation. Closing first prevents a
+        // producer from crossing the drain/reopen boundary.
+        self.priority_queue.close().await;
+        let stale_events = self.priority_queue.drain().await;
+        if !stale_events.is_empty() {
+            warn!(
+                "[{}] Discarded {} stale results before starting a new generation",
+                self.id,
+                stale_events.len()
+            );
+        }
+        self.result_ordering.lock().await.clear();
+        self.priority_queue.reopen().await;
+
         let (tx, rx) = tokio::sync::oneshot::channel();
         *self.shutdown_tx.write().await = Some(tx);
         rx
@@ -376,7 +390,7 @@ impl ReactionBase {
             .map_or(timestamp, |last| last.max(timestamp));
         self.priority_queue
             .enqueue_wait_with_ordering_timestamp(Arc::new(result), ordering_timestamp)
-            .await;
+            .await?;
 
         cursor.last_ordering_timestamp = Some(ordering_timestamp);
         if sequence != 0 {
@@ -455,6 +469,10 @@ impl ReactionBase {
     /// 4. Draining the priority queue
     pub async fn stop_common(&self) -> Result<()> {
         info!("Stopping reaction: {}", self.id);
+
+        // Reject and wake producers before stopping the consumer. A producer
+        // may hold the per-query ordering lock while waiting for queue space.
+        self.priority_queue.close().await;
 
         // Send shutdown signal to processing task (if it's using tokio::select!)
         if let Some(tx) = self.shutdown_tx.write().await.take() {
@@ -723,15 +741,15 @@ mod tests {
         ));
         let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
 
-        base.enqueue_query_result(query_result("q1", 6, timestamp))
-            .await
-            .unwrap();
-        base.enqueue_query_result(query_result("q1", 7, timestamp))
-            .await
-            .unwrap();
+        for sequence in 1..=8 {
+            base.enqueue_query_result(query_result("q1", sequence, timestamp))
+                .await
+                .unwrap();
+        }
 
-        assert_eq!(base.priority_queue.dequeue().await.sequence, 6);
-        assert_eq!(base.priority_queue.dequeue().await.sequence, 7);
+        for expected in 1..=8 {
+            assert_eq!(base.priority_queue.dequeue().await.sequence, expected);
+        }
     }
 
     #[tokio::test]
@@ -838,6 +856,52 @@ mod tests {
             "unexpected error: {error:#}"
         );
         assert_eq!(base.priority_queue.depth().await, 1);
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_blocked_enqueue_and_next_start_reopens_queue() {
+        let base = ReactionBase::new(
+            ReactionBaseParams::new("stop-blocked-enqueue", vec!["q1".to_string()])
+                .with_priority_queue_capacity(1),
+        );
+        let _shutdown_rx = base.create_shutdown_channel().await;
+        let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        base.enqueue_query_result(query_result("q1", 1, timestamp))
+            .await
+            .unwrap();
+
+        let producer_base = base.clone_shared();
+        let producer = tokio::spawn(async move {
+            producer_base
+                .enqueue_query_result(query_result("q1", 2, timestamp))
+                .await
+        });
+        while base.priority_queue.metrics().await.blocked_enqueue_count == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), base.stop_common())
+            .await
+            .expect("stop deadlocked behind blocked producer")
+            .expect("stop failed");
+        let error = tokio::time::timeout(Duration::from_secs(1), producer)
+            .await
+            .expect("producer did not exit after stop")
+            .expect("producer task panicked")
+            .expect_err("closed queue must reject the blocked result");
+        assert!(
+            error
+                .downcast_ref::<crate::channels::priority_queue::PriorityQueueClosed>()
+                .is_some(),
+            "unexpected producer error: {error:#}"
+        );
+        assert_eq!(base.priority_queue.depth().await, 0);
+
+        let _next_shutdown_rx = base.create_shutdown_channel().await;
+        base.enqueue_query_result(query_result("q1", 1, timestamp))
+            .await
+            .expect("new start generation should accept results");
+        assert_eq!(base.priority_queue.dequeue().await.sequence, 1);
     }
 
     #[tokio::test]
@@ -1251,6 +1315,7 @@ mod tests {
                     config_hash: 42,
                 },
             )]);
+            let shutdown_rx = base.create_shutdown_channel().await;
 
             // Equal timestamps exercise the old heap tie that could put 7 before 6.
             // Sequences 3 and 5 are legitimate replay duplicates.
@@ -1264,7 +1329,6 @@ mod tests {
             let completed = Arc::new(tokio::sync::Notify::new());
             let processed_clone = processed.clone();
             let completed_clone = completed.clone();
-            let shutdown_rx = base.create_shutdown_channel().await;
             let base_clone = base.clone_shared();
 
             let loop_handle = tokio::spawn(async move {

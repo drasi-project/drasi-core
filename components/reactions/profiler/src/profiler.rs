@@ -505,6 +505,7 @@ impl Reaction for ProfilerReaction {
         let stats = self.stats.clone();
         let report_interval = self.report_interval_secs;
         let priority_queue = self.base.priority_queue.clone();
+        let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
         let processing_task = tokio::spawn(async move {
             let mut report_timer =
@@ -513,6 +514,10 @@ impl Reaction for ProfilerReaction {
 
             loop {
                 tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => {
+                        break;
+                    }
                     query_result = priority_queue.dequeue() => {
                         // Extract and store profiling data
                         if let Some(profiling) = query_result.profiling.clone() {

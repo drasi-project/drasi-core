@@ -1225,6 +1225,7 @@ pub(super) fn is_valid_relationship(
 /// Reconfiguring ──→ Stopped | Starting | Error
 ///
 /// Error ──→ Starting (retry) | Stopping (cleanup) | Stopped (reset)
+/// Stopped ──→ Error (failed-start cleanup)
 ///
 /// Note: Added and Removed are set by the graph on add/remove_component()
 /// and are NOT valid targets for validate_and_transition().
@@ -1250,6 +1251,7 @@ pub(super) fn is_valid_transition(from: &ComponentStatus, to: &ComponentStatus) 
             | (Error, Starting) // retry
             | (Error, Stopping) // operator cleanup
             | (Error, Stopped) // reset
+            | (Stopped, Error) // failed-start cleanup completed
             // Reconfiguration (from any stable state)
             | (Added, Reconfiguring)
             | (Stopped, Reconfiguring)

@@ -528,6 +528,10 @@ fn test_valid_state_transitions() {
         &ComponentStatus::Error,
         &ComponentStatus::Stopped
     ));
+    assert!(is_valid_transition(
+        &ComponentStatus::Stopped,
+        &ComponentStatus::Error
+    ));
 }
 
 #[test]

@@ -67,6 +67,11 @@ struct BroadcastGapContext<'a> {
     received_sequence: Option<u64>,
 }
 
+struct ReactionSubscriptionTasks {
+    forwarder_abort_handles: Vec<tokio::task::AbortHandle>,
+    supervisor: tokio::task::JoinHandle<()>,
+}
+
 pub struct ReactionManager {
     instance_id: String,
     /// Query provider for reactions to access queries (injected after DrasiLib is constructed)
@@ -77,8 +82,8 @@ pub struct ReactionManager {
     identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
     /// Log registry for component log streaming
     log_registry: Arc<ComponentLogRegistry>,
-    /// Abort handles to subscription forwarder + supervisor tasks per reaction
-    subscription_tasks: Arc<RwLock<HashMap<String, Vec<tokio::task::AbortHandle>>>>,
+    /// Subscription forwarders and their reaping supervisor per reaction.
+    subscription_tasks: Arc<RwLock<HashMap<String, ReactionSubscriptionTasks>>>,
     /// Shared component graph — the single source of truth for component metadata,
     /// state, relationships, runtime instances, AND event history.
     graph: Arc<RwLock<ComponentGraph>>,
@@ -215,40 +220,113 @@ impl ReactionManager {
         // --- §3 Startup validation ---
         self.validate_startup_config(&reaction).await?;
 
-        crate::managers::lifecycle_helpers::start_component(
+        self.prepare_start_generation(&id, &reaction).await?;
+
+        if let Err(error) = crate::managers::lifecycle_helpers::start_component(
             &self.graph,
             &id,
             "reaction",
             &reaction,
         )
-        .await?;
+        .await
+        {
+            self.cleanup_failed_start(&id, &reaction, format!("Start failed: {error}"))
+                .await;
+            return Err(error);
+        }
 
         // Create the bootstrap gate — forwarders wait on this before processing.
         // Using a watch channel (not Notify) so late subscribers see the current value
         // and cannot miss the notification.
         let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
 
-        if let Err(e) = self
+        if let Err(error) = self
             .subscribe_and_bootstrap(&id, reaction.clone(), gate_rx)
             .await
         {
-            // Abort any forwarder/supervisor tasks spawned during wire_subscriptions.
-            Self::abort_subscription_tasks_static(&self.subscription_tasks, &id).await;
-
-            // Revert to Error since the reaction can't receive data without subscriptions
-            let mut graph = self.graph.write().await;
-            let _ = graph.validate_and_transition(
-                &id,
-                ComponentStatus::Error,
-                Some(format!("Bootstrap failed: {e}")),
-            );
-            return Err(e);
+            self.cleanup_failed_start(&id, &reaction, format!("Bootstrap failed: {error}"))
+                .await;
+            return Err(error);
         }
 
         // Open the gate — forwarders begin draining buffered events.
         let _ = gate_tx.send(true);
 
         Ok(())
+    }
+
+    async fn prepare_start_generation(
+        &self,
+        reaction_id: &str,
+        reaction: &Arc<dyn Reaction>,
+    ) -> Result<()> {
+        Self::abort_subscription_tasks_static(&self.subscription_tasks, reaction_id).await;
+
+        let status = self
+            .graph
+            .read()
+            .await
+            .get_component(reaction_id)
+            .map(|node| node.status)
+            .ok_or_else(|| anyhow::anyhow!("Reaction '{reaction_id}' not found"))?;
+        if status != ComponentStatus::Error {
+            return Ok(());
+        }
+
+        reaction
+            .stop()
+            .await
+            .with_context(|| format!("Failed to clean prior generation for '{reaction_id}'"))?;
+        crate::component_graph::wait_for_status(
+            &self.graph,
+            reaction_id,
+            &[ComponentStatus::Stopped],
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        .with_context(|| {
+            format!("Reaction '{reaction_id}' did not stop before retrying its start")
+        })?;
+        Ok(())
+    }
+
+    async fn cleanup_failed_start(
+        &self,
+        reaction_id: &str,
+        reaction: &Arc<dyn Reaction>,
+        message: String,
+    ) {
+        {
+            let mut graph = self.graph.write().await;
+            let _ = graph.validate_and_transition(
+                reaction_id,
+                ComponentStatus::Error,
+                Some(message.clone()),
+            );
+        }
+
+        Self::abort_subscription_tasks_static(&self.subscription_tasks, reaction_id).await;
+        if let Err(cleanup_error) = reaction.stop().await {
+            log::error!(
+                "[{reaction_id}] Failed to clean reaction after start failure: {cleanup_error}"
+            );
+            return;
+        }
+
+        if let Err(wait_error) = crate::component_graph::wait_for_status(
+            &self.graph,
+            reaction_id,
+            &[ComponentStatus::Stopped],
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        {
+            log::error!("[{reaction_id}] Failed-start cleanup did not reach Stopped: {wait_error}");
+            return;
+        }
+
+        let mut graph = self.graph.write().await;
+        let _ = graph.validate_and_transition(reaction_id, ComponentStatus::Error, Some(message));
     }
 
     /// Validate the reaction's startup configuration (§3 compatibility rules).
@@ -1220,9 +1298,21 @@ impl ReactionManager {
         let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
         for query_id in query_ids {
-            let query = query_provider.get_query_instance(query_id).await?;
+            let query = match query_provider.get_query_instance(query_id).await {
+                Ok(query) => query,
+                Err(error) => {
+                    Self::abort_and_reap_forwarders(abort_handles, join_handles).await;
+                    return Err(error);
+                }
+            };
 
-            let subscription = query.subscribe(reaction_id.to_string()).await?;
+            let subscription = match query.subscribe(reaction_id.to_string()).await {
+                Ok(subscription) => subscription,
+                Err(error) => {
+                    Self::abort_and_reap_forwarders(abort_handles, join_handles).await;
+                    return Err(error);
+                }
+            };
             let mut receiver = subscription.receiver;
 
             // Create or retrieve per-(reaction, query) metrics
@@ -1478,13 +1568,14 @@ impl ReactionManager {
             }
         });
 
-        abort_handles.push(supervisor.abort_handle());
-
-        // Store abort handles so stop_reaction/teardown can cancel everything.
-        self.subscription_tasks
-            .write()
-            .await
-            .insert(reaction_id.to_string(), abort_handles);
+        // Store the forwarder abort handles with the supervisor that reaps them.
+        self.subscription_tasks.write().await.insert(
+            reaction_id.to_string(),
+            ReactionSubscriptionTasks {
+                forwarder_abort_handles: abort_handles,
+                supervisor,
+            },
+        );
 
         Ok(())
     }
@@ -1646,13 +1737,31 @@ impl ReactionManager {
     }
 
     async fn abort_subscription_tasks_static(
-        tasks: &Arc<RwLock<HashMap<String, Vec<tokio::task::AbortHandle>>>>,
+        tasks: &Arc<RwLock<HashMap<String, ReactionSubscriptionTasks>>>,
         reaction_id: &str,
     ) {
-        if let Some(handles) = tasks.write().await.remove(reaction_id) {
-            for handle in handles {
+        let task_set = { tasks.write().await.remove(reaction_id) };
+        if let Some(task_set) = task_set {
+            for handle in task_set.forwarder_abort_handles {
                 handle.abort();
             }
+            if let Err(error) = task_set.supervisor.await {
+                log::debug!(
+                    "[{reaction_id}] Subscription supervisor ended during cleanup: {error}"
+                );
+            }
+        }
+    }
+
+    async fn abort_and_reap_forwarders(
+        abort_handles: Vec<tokio::task::AbortHandle>,
+        join_handles: Vec<tokio::task::JoinHandle<()>>,
+    ) {
+        for handle in abort_handles {
+            handle.abort();
+        }
+        for handle in join_handles {
+            let _ = handle.await;
         }
     }
 
@@ -1712,12 +1821,17 @@ mod tests {
         config: QueryConfig,
         snapshot: tokio::sync::RwLock<SnapshotResponse>,
         outbox_response: tokio::sync::RwLock<Result<OutboxResponse, FetchError>>,
+        subscriptions: Mutex<Vec<tokio::sync::mpsc::Sender<Arc<QueryResult>>>>,
     }
 
     impl MockQuery {
         fn new(config_hash: u64, snapshot_seq: u64) -> Self {
+            Self::with_id("q1", config_hash, snapshot_seq)
+        }
+
+        fn with_id(id: &str, config_hash: u64, snapshot_seq: u64) -> Self {
             let config = QueryConfig {
-                id: "q1".to_string(),
+                id: id.to_string(),
                 query: "MATCH (n) RETURN n".to_string(),
                 query_language: crate::config::schema::QueryLanguage::Cypher,
                 middleware: vec![],
@@ -1743,6 +1857,7 @@ mod tests {
                     latest_sequence: snapshot_seq,
                     config_hash,
                 })),
+                subscriptions: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1765,13 +1880,152 @@ mod tests {
             self
         }
         async fn subscribe(&self, _reaction_id: String) -> Result<QuerySubscriptionResponse> {
-            Err(anyhow::anyhow!("MockQuery does not support subscribe"))
+            let (sender, receiver) = tokio::sync::mpsc::channel(16);
+            self.subscriptions.lock().await.push(sender);
+            Ok(QuerySubscriptionResponse {
+                query_id: self.config.id.clone(),
+                receiver: Box::new(crate::channels::ChannelChangeReceiver::new(receiver)),
+            })
         }
         async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError> {
             Ok(self.snapshot.read().await.clone())
         }
         async fn fetch_outbox(&self, _after_sequence: u64) -> Result<OutboxResponse, FetchError> {
             self.outbox_response.read().await.clone()
+        }
+    }
+
+    struct MockQueryProvider {
+        queries: HashMap<String, Arc<dyn crate::queries::Query>>,
+    }
+
+    #[async_trait]
+    impl QueryProvider for MockQueryProvider {
+        async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn crate::queries::Query>> {
+            self.queries
+                .get(id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Query '{id}' not found"))
+        }
+    }
+
+    struct FailingCheckpointStore {
+        inner: crate::state_store::MemoryStateStoreProvider,
+        target_reaction: String,
+        target_query: String,
+        target_sequence: u64,
+        remaining_failures: AtomicUsize,
+    }
+
+    impl FailingCheckpointStore {
+        fn new(
+            target_reaction: &str,
+            target_query: &str,
+            target_sequence: u64,
+            failures: usize,
+        ) -> Self {
+            Self {
+                inner: crate::state_store::MemoryStateStoreProvider::new(),
+                target_reaction: target_reaction.to_string(),
+                target_query: target_query.to_string(),
+                target_sequence,
+                remaining_failures: AtomicUsize::new(failures),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl StateStoreProvider for FailingCheckpointStore {
+        async fn get(
+            &self,
+            store_id: &str,
+            key: &str,
+        ) -> crate::state_store::StateStoreResult<Option<Vec<u8>>> {
+            self.inner.get(store_id, key).await
+        }
+
+        async fn set(
+            &self,
+            store_id: &str,
+            key: &str,
+            value: Vec<u8>,
+        ) -> crate::state_store::StateStoreResult<()> {
+            let target_key = format!("checkpoint:{}", self.target_query);
+            let should_fail = store_id == self.target_reaction
+                && key == target_key
+                && bincode::deserialize::<ReactionCheckpoint>(&value)
+                    .is_ok_and(|checkpoint| checkpoint.sequence == self.target_sequence)
+                && self
+                    .remaining_failures
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok();
+            if should_fail {
+                return Err(crate::state_store::StateStoreError::StorageError(
+                    "injected checkpoint write failure".to_string(),
+                ));
+            }
+            self.inner.set(store_id, key, value).await
+        }
+
+        async fn delete(
+            &self,
+            store_id: &str,
+            key: &str,
+        ) -> crate::state_store::StateStoreResult<bool> {
+            self.inner.delete(store_id, key).await
+        }
+
+        async fn contains_key(
+            &self,
+            store_id: &str,
+            key: &str,
+        ) -> crate::state_store::StateStoreResult<bool> {
+            self.inner.contains_key(store_id, key).await
+        }
+
+        async fn get_many(
+            &self,
+            store_id: &str,
+            keys: &[&str],
+        ) -> crate::state_store::StateStoreResult<HashMap<String, Vec<u8>>> {
+            self.inner.get_many(store_id, keys).await
+        }
+
+        async fn set_many(
+            &self,
+            store_id: &str,
+            entries: &[(&str, &[u8])],
+        ) -> crate::state_store::StateStoreResult<()> {
+            self.inner.set_many(store_id, entries).await
+        }
+
+        async fn delete_many(
+            &self,
+            store_id: &str,
+            keys: &[&str],
+        ) -> crate::state_store::StateStoreResult<usize> {
+            self.inner.delete_many(store_id, keys).await
+        }
+
+        async fn clear_store(&self, store_id: &str) -> crate::state_store::StateStoreResult<usize> {
+            self.inner.clear_store(store_id).await
+        }
+
+        async fn list_keys(
+            &self,
+            store_id: &str,
+        ) -> crate::state_store::StateStoreResult<Vec<String>> {
+            self.inner.list_keys(store_id).await
+        }
+
+        async fn store_exists(&self, store_id: &str) -> crate::state_store::StateStoreResult<bool> {
+            self.inner.store_exists(store_id).await
+        }
+
+        async fn key_count(&self, store_id: &str) -> crate::state_store::StateStoreResult<usize> {
+            self.inner.key_count(store_id).await
         }
     }
 
@@ -1898,9 +2152,14 @@ mod tests {
 
     impl QueueBackedReaction {
         fn new(id: &str, queries: Vec<String>) -> Self {
+            Self::with_capacity(id, queries, 10_000)
+        }
+
+        fn with_capacity(id: &str, queries: Vec<String>, capacity: usize) -> Self {
             Self {
                 base: crate::reactions::common::base::ReactionBase::new(
-                    crate::reactions::common::base::ReactionBaseParams::new(id, queries),
+                    crate::reactions::common::base::ReactionBaseParams::new(id, queries)
+                        .with_priority_queue_capacity(capacity),
                 ),
             }
         }
@@ -1933,6 +2192,7 @@ mod tests {
         }
 
         async fn start(&self) -> Result<()> {
+            let _shutdown_rx = self.base.create_shutdown_channel().await;
             self.base.set_status(ComponentStatus::Running, None).await;
             Ok(())
         }
@@ -2029,6 +2289,46 @@ mod tests {
         }
         // Give the query time to process events.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+
+    async fn provision_queue_backed_manager(
+        queries: HashMap<String, Arc<dyn crate::queries::Query>>,
+        state_store: Arc<dyn StateStoreProvider>,
+        reaction: QueueBackedReaction,
+    ) -> (
+        Arc<ReactionManager>,
+        Arc<RwLock<crate::component_graph::ComponentGraph>>,
+    ) {
+        let log_registry = crate::managers::get_or_init_global_registry();
+        let (mut graph, mut update_rx) =
+            crate::component_graph::ComponentGraph::new("ordering-tests");
+        let update_tx = graph.update_sender();
+        for query_id in queries.keys() {
+            graph.register_query(query_id, HashMap::new(), &[]).unwrap();
+        }
+        graph
+            .register_reaction(reaction.id(), HashMap::new(), &reaction.query_ids())
+            .unwrap();
+        let graph = Arc::new(RwLock::new(graph));
+        let update_graph = graph.clone();
+        tokio::spawn(async move {
+            while let Some(update) = update_rx.recv().await {
+                update_graph.write().await.apply_update(update);
+            }
+        });
+
+        let manager = Arc::new(ReactionManager::new(
+            "ordering-tests",
+            log_registry,
+            graph.clone(),
+            update_tx,
+        ));
+        manager
+            .inject_query_provider(Arc::new(MockQueryProvider { queries }))
+            .await;
+        manager.inject_state_store(state_store).await;
+        manager.provision_reaction(reaction).await.unwrap();
+        (manager, graph)
     }
 
     // ========================================================================
@@ -2573,6 +2873,234 @@ mod tests {
             sequences.push(reaction.base.priority_queue.dequeue().await.sequence);
         }
         assert_eq!(sequences, vec![5, 6, 7]);
+    }
+
+    #[tokio::test]
+    async fn failed_catchup_generations_are_clean_and_retryable() {
+        let reaction_id = "retry-ordering";
+        let store = Arc::new(FailingCheckpointStore::new(reaction_id, "q1", 10, 2));
+        let q1 = Arc::new(MockQuery::with_id("q1", 0, 10));
+        let q2 = Arc::new(MockQuery::with_id("q2", 0, 4));
+        let q1_hash = crate::queries::compute_config_hash(q1.get_config());
+        let q2_hash = crate::queries::compute_config_hash(q2.get_config());
+        let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+
+        *q1.outbox_response.write().await = Ok(OutboxResponse {
+            results: (5..=10)
+                .map(|sequence| {
+                    Arc::new(QueryResult::new(
+                        "q1".to_string(),
+                        sequence,
+                        timestamp - chrono::Duration::seconds(sequence as i64),
+                        Vec::new(),
+                        HashMap::new(),
+                    ))
+                })
+                .collect(),
+            latest_sequence: 10,
+            config_hash: q1_hash,
+        });
+        *q2.outbox_response.write().await = Ok(OutboxResponse {
+            results: (1..=4)
+                .map(|sequence| {
+                    Arc::new(QueryResult::new(
+                        "q2".to_string(),
+                        sequence,
+                        timestamp + chrono::Duration::seconds(sequence as i64),
+                        Vec::new(),
+                        HashMap::new(),
+                    ))
+                })
+                .collect(),
+            latest_sequence: 4,
+            config_hash: q2_hash,
+        });
+        crate::reactions::checkpoint::write_checkpoint(
+            store.as_ref(),
+            reaction_id,
+            "q1",
+            &ReactionCheckpoint {
+                sequence: 4,
+                config_hash: q1_hash,
+            },
+        )
+        .await
+        .unwrap();
+        crate::reactions::checkpoint::write_checkpoint(
+            store.as_ref(),
+            reaction_id,
+            "q2",
+            &ReactionCheckpoint {
+                sequence: 0,
+                config_hash: q2_hash,
+            },
+        )
+        .await
+        .unwrap();
+
+        let reaction =
+            QueueBackedReaction::new(reaction_id, vec!["q1".to_string(), "q2".to_string()]);
+        let base = reaction.base.clone_shared();
+        let queries: HashMap<String, Arc<dyn crate::queries::Query>> = HashMap::from([
+            ("q1".to_string(), q1 as Arc<dyn crate::queries::Query>),
+            ("q2".to_string(), q2 as Arc<dyn crate::queries::Query>),
+        ]);
+        let (manager, graph) =
+            provision_queue_backed_manager(queries, store.clone(), reaction).await;
+
+        for _ in 0..2 {
+            let error = manager
+                .start_reaction(reaction_id.to_string())
+                .await
+                .expect_err("injected checkpoint write should fail startup");
+            assert!(
+                format!("{error:#}").contains("injected checkpoint write failure"),
+                "unexpected startup error: {error:#}"
+            );
+            assert_eq!(
+                graph
+                    .read()
+                    .await
+                    .get_component(reaction_id)
+                    .unwrap()
+                    .status,
+                ComponentStatus::Error
+            );
+            assert_eq!(base.priority_queue.depth().await, 0);
+            assert_eq!(
+                crate::reactions::checkpoint::read_checkpoint(store.as_ref(), reaction_id, "q1")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .sequence,
+                4,
+                "failed generation must not advance the durable checkpoint"
+            );
+        }
+
+        manager
+            .start_reaction(reaction_id.to_string())
+            .await
+            .expect("third generation should replay from checkpoint 4");
+
+        let depth = base.priority_queue.depth().await;
+        assert_eq!(depth, 10);
+        let mut by_query: HashMap<String, Vec<u64>> = HashMap::new();
+        for _ in 0..depth {
+            let result = base.priority_queue.try_dequeue().await.unwrap();
+            by_query
+                .entry(result.query_id.clone())
+                .or_default()
+                .push(result.sequence);
+        }
+        assert_eq!(by_query["q1"], vec![5, 6, 7, 8, 9, 10]);
+        assert_eq!(by_query["q2"], vec![1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_full_queue_bootstrap_and_restart_succeeds() {
+        let reaction_id = "stop-full-bootstrap";
+        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let query = Arc::new(MockQuery::with_id("q1", 0, 6));
+        let config_hash = crate::queries::compute_config_hash(query.get_config());
+        let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        *query.outbox_response.write().await = Ok(OutboxResponse {
+            results: vec![
+                Arc::new(QueryResult::new(
+                    "q1".to_string(),
+                    5,
+                    timestamp,
+                    Vec::new(),
+                    HashMap::new(),
+                )),
+                Arc::new(QueryResult::new(
+                    "q1".to_string(),
+                    6,
+                    timestamp,
+                    Vec::new(),
+                    HashMap::new(),
+                )),
+            ],
+            latest_sequence: 6,
+            config_hash,
+        });
+        crate::reactions::checkpoint::write_checkpoint(
+            store.as_ref(),
+            reaction_id,
+            "q1",
+            &ReactionCheckpoint {
+                sequence: 4,
+                config_hash,
+            },
+        )
+        .await
+        .unwrap();
+
+        let reaction = QueueBackedReaction::with_capacity(reaction_id, vec!["q1".to_string()], 1);
+        let base = reaction.base.clone_shared();
+        let queries: HashMap<String, Arc<dyn crate::queries::Query>> = HashMap::from([(
+            "q1".to_string(),
+            query.clone() as Arc<dyn crate::queries::Query>,
+        )]);
+        let (manager, _graph) =
+            provision_queue_backed_manager(queries, store.clone(), reaction).await;
+
+        let start_manager = manager.clone();
+        let start_task =
+            tokio::spawn(
+                async move { start_manager.start_reaction(reaction_id.to_string()).await },
+            );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while base.priority_queue.metrics().await.blocked_enqueue_count == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("bootstrap did not block on the full reaction queue");
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            manager.stop_reaction(reaction_id.to_string()),
+        )
+        .await
+        .expect("stop deadlocked with a blocked bootstrap enqueue")
+        .expect("stop failed");
+        let start_error = tokio::time::timeout(std::time::Duration::from_secs(1), start_task)
+            .await
+            .expect("bootstrap producer did not exit after stop")
+            .expect("start task panicked")
+            .expect_err("stopped bootstrap generation must not report success");
+        assert!(
+            format!("{start_error:#}").contains("priority queue is closed"),
+            "unexpected start error: {start_error:#}"
+        );
+        assert_eq!(base.priority_queue.depth().await, 0);
+        assert_eq!(
+            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), reaction_id, "q1")
+                .await
+                .unwrap()
+                .unwrap()
+                .sequence,
+            4
+        );
+
+        *query.outbox_response.write().await = Ok(OutboxResponse {
+            results: vec![Arc::new(QueryResult::new(
+                "q1".to_string(),
+                5,
+                timestamp,
+                Vec::new(),
+                HashMap::new(),
+            ))],
+            latest_sequence: 5,
+            config_hash,
+        });
+        manager
+            .start_reaction(reaction_id.to_string())
+            .await
+            .expect("restart should reopen a clean reaction queue generation");
+        assert_eq!(base.priority_queue.depth().await, 1);
+        assert_eq!(base.priority_queue.try_dequeue().await.unwrap().sequence, 5);
     }
 
     #[tokio::test]
