@@ -858,6 +858,27 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
     assert_eq!(result.metadata["result_count"], json!(4));
     assert_eq!(result.profiling, Some(ProfilingMetadata::default()));
 
+    let envelope = crate::change::query_evaluation_to_envelope(
+        &contexts,
+        crate::change::QueryEnvelopeMetadata::new(
+            result.query_id.clone(),
+            Some(Arc::from("source-a")),
+            result.sequence,
+            result.timestamp,
+            result.metadata.clone(),
+            result.profiling.clone(),
+        ),
+    )
+    .unwrap()
+    .expect("non-Noop evaluation results should produce an envelope");
+    let adapted = crate::change::query_result_from_envelope(&envelope).unwrap();
+    assert_eq!(adapted.query_id, result.query_id);
+    assert_eq!(adapted.sequence, result.sequence);
+    assert_eq!(adapted.timestamp, result.timestamp);
+    assert_eq!(adapted.results, result.results);
+    assert_eq!(adapted.metadata, result.metadata);
+    assert_eq!(adapted.profiling, result.profiling);
+
     let state = output_state.read().await;
     assert_eq!(state.as_of_sequence(), 1);
     assert_eq!(state.outbox_len(), 1);
