@@ -74,6 +74,7 @@ enum BackendFault {
     CheckpointStageAfterOne,
     OutboxStage,
     LiveResultsStage,
+    ResultSequenceWrite,
 }
 
 struct FailingCommitSessionControl {
@@ -164,6 +165,10 @@ struct FailingSecondCheckpointStore {
     stage_calls: AtomicUsize,
 }
 
+struct FailingResultSequenceCheckpointStore {
+    inner: Arc<dyn CheckpointStore>,
+}
+
 #[async_trait]
 impl CheckpointStore for FailingSecondCheckpointStore {
     fn transaction_domain(&self) -> Option<TransactionDomain> {
@@ -219,6 +224,70 @@ impl CheckpointStore for FailingSecondCheckpointStore {
         sequence: u64,
     ) -> std::result::Result<(), IndexError> {
         self.inner.write_result_sequence(query_id, sequence).await
+    }
+
+    async fn read_result_sequence(
+        &self,
+        query_id: &str,
+    ) -> std::result::Result<Option<u64>, IndexError> {
+        self.inner.read_result_sequence(query_id).await
+    }
+}
+
+#[async_trait]
+impl CheckpointStore for FailingResultSequenceCheckpointStore {
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        self.inner.transaction_domain()
+    }
+
+    fn is_persistent(&self) -> bool {
+        self.inner.is_persistent()
+    }
+
+    async fn stage_checkpoint(
+        &self,
+        source_id: &str,
+        sequence: u64,
+        source_position: Option<&Bytes>,
+    ) -> std::result::Result<(), IndexError> {
+        self.inner
+            .stage_checkpoint(source_id, sequence, source_position)
+            .await
+    }
+
+    async fn read_checkpoint(
+        &self,
+        source_id: &str,
+    ) -> std::result::Result<Option<SourceCheckpoint>, IndexError> {
+        self.inner.read_checkpoint(source_id).await
+    }
+
+    async fn read_all_checkpoints(
+        &self,
+    ) -> std::result::Result<HashMap<String, SourceCheckpoint>, IndexError> {
+        self.inner.read_all_checkpoints().await
+    }
+
+    async fn clear_checkpoints(&self) -> std::result::Result<(), IndexError> {
+        self.inner.clear_checkpoints().await
+    }
+
+    async fn write_config_hash(&self, hash: u64) -> std::result::Result<(), IndexError> {
+        self.inner.write_config_hash(hash).await
+    }
+
+    async fn read_config_hash(&self) -> std::result::Result<Option<u64>, IndexError> {
+        self.inner.read_config_hash().await
+    }
+
+    async fn write_result_sequence(
+        &self,
+        _query_id: &str,
+        _sequence: u64,
+    ) -> std::result::Result<(), IndexError> {
+        Err(IndexError::other(std::io::Error::other(
+            "injected Legacy result-sequence write failure",
+        )))
     }
 
     async fn read_result_sequence(
@@ -420,6 +489,15 @@ async fn build_host_with_bootstrap(
                 .expect("RocksDB live-results writer")
                 .clone();
             created.live_results_writer = Some(Arc::new(FailingLiveResultsWriter { inner }));
+        }
+        BackendFault::ResultSequenceWrite => {
+            let inner = created
+                .checkpoint_store
+                .as_ref()
+                .expect("RocksDB checkpoint store")
+                .clone();
+            created.checkpoint_store =
+                Some(Arc::new(FailingResultSequenceCheckpointStore { inner }));
         }
     }
 
@@ -1956,13 +2034,13 @@ async fn due_future_post_commit_failure_requires_output_reconciliation() {
 }
 
 #[tokio::test]
-async fn explicit_legacy_mode_keeps_a1_loss_window_and_skips_atomic_observers() {
+async fn explicit_legacy_mode_preserves_a1_ordering_and_skips_atomic_observers() {
     let temp_dir = tempfile::TempDir::new().expect("create temp directory");
     let observer = Arc::new(CountingObserver::default());
     let (host, mut fixture) = build_host(
         temp_dir.path(),
         "MATCH (n:Person) RETURN n.name AS name",
-        BackendFault::OutboxStage,
+        BackendFault::None,
         true,
         Some(observer.clone()),
     )
@@ -1993,25 +2071,125 @@ async fn explicit_legacy_mode_keeps_a1_loss_window_and_skips_atomic_observers() 
             .sequence,
         19
     );
-    assert!(fixture
-        .outbox_writer
-        .read_from(QUERY_ID, 0)
-        .await
-        .expect("read failed legacy outbox")
-        .is_empty());
+    assert_eq!(
+        fixture
+            .outbox_writer
+            .read_from(QUERY_ID, 0)
+            .await
+            .expect("read legacy outbox")
+            .len(),
+        1
+    );
     assert_eq!(
         fixture
             .checkpoint_store
             .read_result_sequence(QUERY_ID)
             .await
             .expect("read legacy result sequence"),
-        None
+        Some(1)
     );
     assert_eq!(observer.staged.load(Ordering::Acquire), 0);
     assert_eq!(observer.committed.load(Ordering::Acquire), 0);
     assert_eq!(fixture.dispatch_count.load(Ordering::Acquire), 1);
 
     stop_host(&fixture).await;
+}
+
+#[tokio::test]
+async fn persistent_legacy_output_failures_fence_immediately_and_strict_restart_rejects() {
+    for (name, fault, expected_stage) in [
+        ("outbox", BackendFault::OutboxStage, "outbox"),
+        (
+            "live-results",
+            BackendFault::LiveResultsStage,
+            "live-result",
+        ),
+        (
+            "result-sequence",
+            BackendFault::ResultSequenceWrite,
+            "result sequence",
+        ),
+    ] {
+        let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+        let (host, fixture) = build_host(
+            temp_dir.path(),
+            "MATCH (n:Person) RETURN n.name AS name",
+            fault,
+            true,
+            None,
+        )
+        .await;
+        start_host(host, &fixture).await;
+
+        enqueue_source_change(
+            &fixture,
+            &format!("legacy-{name}-first"),
+            "First",
+            1,
+            Bytes::from(format!("legacy-{name}-position-1")),
+        )
+        .await;
+        enqueue_source_change(
+            &fixture,
+            &format!("legacy-{name}-later"),
+            "Later",
+            2,
+            Bytes::from(format!("legacy-{name}-position-2")),
+        )
+        .await;
+        wait_for_status(&fixture.base, ComponentStatus::Error).await;
+
+        assert_eq!(
+            fixture
+                .checkpoint_store
+                .read_checkpoint(SOURCE_ID)
+                .await
+                .expect("read Legacy checkpoint")
+                .expect("causative Legacy checkpoint")
+                .sequence,
+            1,
+            "{name}: later source sequence advanced after the persistence failure"
+        );
+        assert_eq!(
+            fixture.position_handle.load(Ordering::Acquire),
+            u64::MAX,
+            "{name}: failed Legacy output was acknowledged"
+        );
+        assert_eq!(
+            fixture.dispatch_count.load(Ordering::Acquire),
+            0,
+            "{name}: failed Legacy output was dispatched"
+        );
+        assert!(
+            fixture.publication_recovery.is_required(),
+            "{name}: persistent Legacy failure did not arm recovery"
+        );
+
+        let fresh_state = Arc::new(RwLock::new(QueryOutputState::new(16)));
+        let dependencies = QueryOutputDependencies::new(
+            QUERY_ID.to_string(),
+            fresh_state,
+            Arc::new(RwLock::new(Vec::new())),
+            Some(fixture.outbox_writer.clone()),
+            Some(fixture.live_results_writer.clone()),
+            Some(fixture.checkpoint_store.clone()),
+            16,
+            Arc::new(QueryOutputMetrics::new()),
+        );
+        let error = QueryCompositeHost::reconcile_output_state(
+            &QueryProcessingMode::legacy(),
+            &dependencies,
+        )
+        .await
+        .expect_err("Strict restart must reject partial Legacy output");
+        assert!(
+            format!("{error:#}").contains(expected_stage)
+                || format!("{error:#}").contains("durable output is inconsistent"),
+            "{name}: unexpected reconciliation error: {error:#}"
+        );
+
+        stop_host(&fixture).await;
+    }
 }
 
 #[tokio::test]

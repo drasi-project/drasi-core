@@ -200,7 +200,7 @@ impl AtomicPublicationRecovery {
             .is_some()
     }
 
-    fn require(&self, result: Arc<QueryResult>) {
+    pub(super) fn require(&self, result: Arc<QueryResult>) {
         *self
             .pending
             .lock()
@@ -492,7 +492,7 @@ impl QueryBootstrapScope {
                 .await
                 .context("failed to persist the bootstrap in-progress marker")?;
         } else {
-            output.reset_bootstrap_state().await;
+            output.reset_bootstrap_projection().await;
         }
         output
             .dispatch_bootstrap_control("bootstrapStarted", Some(self.inputs.len()))
@@ -1124,9 +1124,8 @@ impl QueryCompositeHost {
                         self.runtime.ingress_fence.close().await;
                         let status_detail = if self.publication_recovery.is_required() {
                             format!(
-                                "Atomic output committed before in-memory publication; \
-                                 ingress is fenced and will be reconciled from durable \
-                                 output before restart: {detail}"
+                                "Durable query output requires reconciliation; ingress is \
+                                 fenced and AutoReset may be required before restart: {detail}"
                             )
                         } else {
                             format!(
@@ -1325,10 +1324,7 @@ impl LiveInputStage {
             QueryProcessingMode::Atomic(resources) => {
                 self.process_atomic(input, acknowledgement, resources).await
             }
-            QueryProcessingMode::Legacy => {
-                self.process_legacy(input, acknowledgement).await;
-                Ok(())
-            }
+            QueryProcessingMode::Legacy => self.process_legacy(input, acknowledgement).await,
         }
     }
 
@@ -1336,7 +1332,7 @@ impl LiveInputStage {
         &self,
         input: LiveChangeContext,
         acknowledgement: &mut SourceAcknowledgement,
-    ) {
+    ) -> Result<()> {
         let mut profiling = match input.profiling {
             Some(profiling) => profiling,
             None => ProfilingMetadata::new(),
@@ -1376,21 +1372,14 @@ impl LiveInputStage {
             Ok(results) => {
                 profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
 
-                acknowledgement.advance(input.source_id.as_ref(), input.sequence);
-
                 if !results.is_empty() {
                     profiling.query_send_ns = Some(crate::profiling::timestamp_ns());
-                    if let Err(e) = self
-                        .output
+                    self.output
                         .publish(&results, input.source_id.as_ref(), profiling)
                         .await
-                    {
-                        error!(
-                            "Query '{}' failed to adapt query results: {e}",
-                            self.output.query_id
-                        );
-                    }
+                        .context("Legacy query output publication failed")?;
                 }
+                acknowledgement.advance(input.source_id.as_ref(), input.sequence);
             }
             Err(e) => {
                 error!(
@@ -1399,6 +1388,7 @@ impl LiveInputStage {
                 );
             }
         }
+        Ok(())
     }
 
     async fn process_atomic(
@@ -1584,29 +1574,20 @@ impl FutureProcessingStage {
     async fn drain_due(&self) -> Result<()> {
         match &self.mode {
             QueryProcessingMode::Atomic(resources) => self.drain_due_atomic(resources).await,
-            QueryProcessingMode::Legacy => {
-                self.drain_due_legacy().await;
-                Ok(())
-            }
+            QueryProcessingMode::Legacy => self.drain_due_legacy().await,
         }
     }
 
-    async fn drain_due_legacy(&self) {
+    async fn drain_due_legacy(&self) -> Result<()> {
         loop {
             match self.continuous_query.process_due_futures().await {
                 Ok(Some(due_result)) => {
                     if !due_result.results.is_empty() {
                         let profiling = ProfilingMetadata::new();
-                        if let Err(e) = self
-                            .output
+                        self.output
                             .publish(&due_result.results, &due_result.source_id, profiling)
                             .await
-                        {
-                            error!(
-                                "Query '{}' failed to adapt due-future results: {e}",
-                                self.output.query_id
-                            );
-                        }
+                            .context("Legacy due-future output publication failed")?;
                     }
                 }
                 Ok(None) => break,
@@ -1619,6 +1600,7 @@ impl FutureProcessingStage {
                 }
             }
         }
+        Ok(())
     }
 
     async fn drain_due_atomic(&self, resources: &AtomicQueryResources) -> Result<()> {
@@ -1755,6 +1737,19 @@ struct OutputPublicationStage {
     publication_recovery: AtomicPublicationRecovery,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "persistent Legacy output write failed for query '{query_id}' at sequence {sequence} \
+     during {stage}; query is fenced and AutoReset may be required: {source}"
+)]
+struct LegacyOutputPersistenceError {
+    query_id: String,
+    sequence: u64,
+    stage: &'static str,
+    #[source]
+    source: anyhow::Error,
+}
+
 impl OutputPublicationStage {
     fn new(dependencies: QueryOutputDependencies) -> Self {
         Self {
@@ -1799,10 +1794,13 @@ impl OutputPublicationStage {
         }
     }
 
-    async fn reset_bootstrap_state(&self) {
-        self.output_state.write().await.reset();
+    async fn reset_bootstrap_projection(&self) {
+        let mut state = self.output_state.write().await;
+        state.clear_results();
         self.output_metrics.record_live_results_count(0);
-        self.output_metrics.update_outbox(0, 0, 0);
+        let earliest = state.outbox_earliest_seq().unwrap_or(0);
+        self.output_metrics
+            .update_outbox(state.outbox_len(), earliest, state.as_of_sequence());
     }
 
     async fn stage_bootstrap_live_results(
@@ -1824,9 +1822,30 @@ impl OutputPublicationStage {
         };
         let diffs = result_diffs_from_evaluation(results);
         let serialized = materialize_live_result_data(&diffs)?;
-        apply_live_result_data(writer.as_ref(), &self.query_id, &serialized)
-            .await
-            .map_err(anyhow::Error::from)
+        match apply_live_result_data(writer.as_ref(), &self.query_id, &serialized).await {
+            Ok(()) => Ok(()),
+            Err(error)
+                if self
+                    .checkpoint_store
+                    .as_ref()
+                    .is_some_and(|store| store.is_persistent()) =>
+            {
+                Err(LegacyOutputPersistenceError {
+                    query_id: self.query_id.clone(),
+                    sequence: self.output_state.read().await.next_sequence(),
+                    stage: "bootstrap live-result mutation",
+                    source: error.into(),
+                }
+                .into())
+            }
+            Err(error) => {
+                warn!(
+                    "Query '{}' failed optional volatile bootstrap live-result persistence: {error}",
+                    self.query_id
+                );
+                Ok(())
+            }
+        }
     }
 
     async fn apply_bootstrap_results(&self, results: &[QueryPartEvaluationContext]) {
@@ -1859,6 +1878,7 @@ impl OutputPublicationStage {
             self.outbox_capacity,
             profiling,
             &self.output_metrics,
+            Some(&self.publication_recovery),
         )
         .await
     }
@@ -1869,8 +1889,6 @@ impl OutputPublicationStage {
         source_id: &str,
         profiling: ProfilingMetadata,
     ) -> Result<PreparedQueryOutput> {
-        // A7 will hydrate this state from durable output during startup. A6
-        // intentionally preserves the existing in-memory sequence origin.
         let expected_sequence = self.output_state.read().await.next_sequence();
         let mut prepared = PreparedQueryOutput::from_evaluation(
             results,
@@ -2247,6 +2265,7 @@ pub(super) async fn dispatch_query_results(
     outbox_capacity: usize,
     profiling: ProfilingMetadata,
     output_metrics: &Arc<QueryOutputMetrics>,
+    publication_recovery: Option<&AtomicPublicationRecovery>,
 ) -> Result<()> {
     let tx_start = Instant::now();
 
@@ -2281,8 +2300,175 @@ pub(super) async fn dispatch_query_results(
         break result;
     };
 
-    // Keep the characterized ordering: core/checkpoint commit precedes these
-    // best-effort output writes, and delivery still occurs after persistence attempts.
+    let persistent_output = checkpoint_store
+        .as_ref()
+        .is_some_and(|store| store.is_persistent());
+    if persistent_output {
+        if let Some(recovery) = publication_recovery {
+            recovery.require(arc_result.clone());
+        }
+        persist_required_legacy_output(
+            query_id,
+            &arc_result,
+            outbox_writer,
+            live_results_writer,
+            checkpoint_store
+                .as_ref()
+                .expect("persistent output requires a checkpoint store"),
+            outbox_capacity,
+        )
+        .await?;
+        if let Some(recovery) = publication_recovery {
+            recovery.reconcile_in_memory();
+        }
+    } else {
+        persist_optional_legacy_output(
+            query_id,
+            &arc_result,
+            outbox_writer,
+            live_results_writer,
+            checkpoint_store,
+            outbox_capacity,
+        )
+        .await;
+    }
+
+    debug!(
+        "Query '{query_id}' sending {} results to reactions (seq={})",
+        arc_result.results.len(),
+        arc_result.sequence
+    );
+
+    let dispatchers = dispatchers.read().await;
+    for dispatcher in dispatchers.iter() {
+        if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
+            debug!("Failed to dispatch result for query '{query_id}': {e}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn persist_required_legacy_output(
+    query_id: &str,
+    result: &Arc<QueryResult>,
+    outbox_writer: &Option<Arc<dyn OutboxWriter>>,
+    live_results_writer: &Option<Arc<dyn LiveResultsWriter>>,
+    checkpoint_store: &Arc<dyn CheckpointStore>,
+    outbox_capacity: usize,
+) -> Result<()> {
+    if let Some(writer) = outbox_writer {
+        let data = match rmp_serde::to_vec(result.as_ref()) {
+            Ok(data) => data,
+            Err(error) => {
+                return Err(legacy_output_failure(
+                    query_id,
+                    result.sequence,
+                    "outbox serialization",
+                    error.into(),
+                    checkpoint_store,
+                )
+                .await
+                .into());
+            }
+        };
+        if let Err(error) = writer.append(query_id, result.sequence, &data).await {
+            return Err(legacy_output_failure(
+                query_id,
+                result.sequence,
+                "outbox append",
+                error.into(),
+                checkpoint_store,
+            )
+            .await
+            .into());
+        }
+        if let Err(error) = writer.trim_to_capacity(query_id, outbox_capacity).await {
+            return Err(legacy_output_failure(
+                query_id,
+                result.sequence,
+                "outbox trim",
+                error.into(),
+                checkpoint_store,
+            )
+            .await
+            .into());
+        }
+    }
+
+    if let Some(writer) = live_results_writer {
+        let serialized = match materialize_live_result_data(&result.results) {
+            Ok(serialized) => serialized,
+            Err(error) => {
+                return Err(legacy_output_failure(
+                    query_id,
+                    result.sequence,
+                    "live-result serialization",
+                    error,
+                    checkpoint_store,
+                )
+                .await
+                .into());
+            }
+        };
+        if let Err(error) = apply_live_result_data(writer.as_ref(), query_id, &serialized).await {
+            return Err(legacy_output_failure(
+                query_id,
+                result.sequence,
+                "live-result mutation",
+                error.into(),
+                checkpoint_store,
+            )
+            .await
+            .into());
+        }
+    }
+
+    checkpoint_store
+        .write_result_sequence(query_id, result.sequence)
+        .await
+        .map_err(|error| LegacyOutputPersistenceError {
+            query_id: query_id.to_string(),
+            sequence: result.sequence,
+            stage: "result-sequence write",
+            source: error.into(),
+        })?;
+    Ok(())
+}
+
+async fn legacy_output_failure(
+    query_id: &str,
+    sequence: u64,
+    stage: &'static str,
+    source: anyhow::Error,
+    checkpoint_store: &Arc<dyn CheckpointStore>,
+) -> LegacyOutputPersistenceError {
+    if let Err(marker_error) = checkpoint_store
+        .write_result_sequence(query_id, sequence)
+        .await
+    {
+        error!(
+            "Query '{query_id}' could not persist failed Legacy output sequence {sequence} \
+             after {stage} failed: {marker_error}"
+        );
+    }
+    LegacyOutputPersistenceError {
+        query_id: query_id.to_string(),
+        sequence,
+        stage,
+        source,
+    }
+}
+
+async fn persist_optional_legacy_output(
+    query_id: &str,
+    arc_result: &Arc<QueryResult>,
+    outbox_writer: &Option<Arc<dyn OutboxWriter>>,
+    live_results_writer: &Option<Arc<dyn LiveResultsWriter>>,
+    checkpoint_store: &Option<Arc<dyn CheckpointStore>>,
+    outbox_capacity: usize,
+) {
+    // Volatile/optional writers retain the pre-A7 best-effort behavior.
     let mut outbox_ok = true;
     if let Some(writer) = outbox_writer {
         match rmp_serde::to_vec(arc_result.as_ref()) {
@@ -2394,21 +2580,6 @@ pub(super) async fn dispatch_query_results(
             }
         }
     }
-
-    debug!(
-        "Query '{query_id}' sending {} results to reactions (seq={})",
-        arc_result.results.len(),
-        arc_result.sequence
-    );
-
-    let dispatchers = dispatchers.read().await;
-    for dispatcher in dispatchers.iter() {
-        if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
-            debug!("Failed to dispatch result for query '{query_id}': {e}");
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -2422,6 +2593,7 @@ mod tests {
     use async_trait::async_trait;
     use drasi_core::{
         evaluation::{
+            context::QueryVariables,
             functions::{Function, FunctionRegistry, ScalarFunction},
             variable_value::VariableValue,
             ExpressionEvaluationContext, FunctionError, FunctionEvaluationError,
@@ -2429,6 +2601,7 @@ mod tests {
         in_memory_index::{
             in_memory_checkpoint_store::InMemoryCheckpointStore,
             in_memory_future_queue::InMemoryFutureQueue,
+            in_memory_outbox_writer::InMemoryOutboxWriter,
         },
         interface::{FutureElementRef, FutureQueue, IndexError, PushType, SourceCheckpoint},
         models::{
@@ -2480,6 +2653,51 @@ mod tests {
                 function_name: expression.name.to_string(),
                 error: FunctionEvaluationError::InvalidArgumentCount,
             })
+        }
+    }
+
+    struct OptionalFailingOutbox {
+        inner: InMemoryOutboxWriter,
+    }
+
+    #[async_trait]
+    impl OutboxWriter for OptionalFailingOutbox {
+        async fn append(
+            &self,
+            _query_id: &str,
+            _sequence: u64,
+            _data: &[u8],
+        ) -> std::result::Result<(), IndexError> {
+            Err(IndexError::other(std::io::Error::other(
+                "injected optional outbox failure",
+            )))
+        }
+
+        async fn read_from(
+            &self,
+            query_id: &str,
+            after_sequence: u64,
+        ) -> std::result::Result<Vec<(u64, Vec<u8>)>, IndexError> {
+            self.inner.read_from(query_id, after_sequence).await
+        }
+
+        async fn read_latest_sequence(
+            &self,
+            query_id: &str,
+        ) -> std::result::Result<Option<u64>, IndexError> {
+            self.inner.read_latest_sequence(query_id).await
+        }
+
+        async fn clear(&self, query_id: &str) -> std::result::Result<(), IndexError> {
+            self.inner.clear(query_id).await
+        }
+
+        async fn trim_to_capacity(
+            &self,
+            query_id: &str,
+            capacity: usize,
+        ) -> std::result::Result<usize, IndexError> {
+            self.inner.trim_to_capacity(query_id, capacity).await
         }
     }
 
@@ -2723,6 +2941,55 @@ mod tests {
         assert_eq!(fixture.priority_queue.metrics().await.total_dequeued, 1);
 
         stop_host(&fixture).await;
+    }
+
+    #[tokio::test]
+    async fn volatile_optional_output_writer_failure_remains_best_effort() {
+        let output_state = RwLock::new(QueryOutputState::new(4));
+        let output_metrics = Arc::new(QueryOutputMetrics::new());
+        let dispatcher = ChannelChangeDispatcher::<QueryResult>::new(4);
+        let mut result_rx = dispatcher
+            .create_receiver()
+            .await
+            .expect("create optional writer result receiver");
+        let dispatchers: RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>> =
+            RwLock::new(vec![Box::new(dispatcher)]);
+        let outbox_writer: Option<Arc<dyn OutboxWriter>> = Some(Arc::new(OptionalFailingOutbox {
+            inner: InMemoryOutboxWriter::new(),
+        }));
+        let checkpoint_store: Option<Arc<dyn CheckpointStore>> =
+            Some(Arc::new(InMemoryCheckpointStore::new()));
+        let recovery = AtomicPublicationRecovery::default();
+
+        dispatch_query_results(
+            &[QueryPartEvaluationContext::Adding {
+                after: QueryVariables::from([(
+                    Box::<str>::from("name"),
+                    VariableValue::String("volatile".to_string()),
+                )]),
+                row_signature: 1,
+            }],
+            SOURCE_ID,
+            QUERY_ID,
+            &output_state,
+            &dispatchers,
+            &outbox_writer,
+            &None,
+            &checkpoint_store,
+            4,
+            ProfilingMetadata::default(),
+            &output_metrics,
+            Some(&recovery),
+        )
+        .await
+        .expect("optional volatile persistence remains best effort");
+
+        assert_eq!(
+            receive_result(&mut result_rx).await.sequence,
+            1,
+            "optional volatile persistence failure must not suppress live output"
+        );
+        assert!(!recovery.is_required());
     }
 
     #[tokio::test]

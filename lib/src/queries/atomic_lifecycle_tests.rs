@@ -15,7 +15,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -25,7 +25,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_core::{
-    interface::{IndexBackendPlugin, IndexError},
+    interface::{
+        CheckpointStore, CreatedIndexes, IndexBackendPlugin, IndexError, LiveResultsWriter,
+        OutboxWriter, RowMutation, SourceCheckpoint,
+    },
     middleware::MiddlewareTypeRegistry,
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
 };
@@ -289,6 +292,204 @@ impl QueryProcessingObserver for FailAfterCommit {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegacyFailureStage {
+    Outbox,
+    LiveResults,
+    ResultSequence,
+}
+
+struct LegacyFailureProvider {
+    inner: RocksDbIndexProvider,
+    stage: LegacyFailureStage,
+    failed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl IndexBackendPlugin for LegacyFailureProvider {
+    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
+        let mut created = self.inner.create_indexes(query_id).await?;
+        let outbox = created.outbox_writer.take().expect("RocksDB outbox");
+        created.outbox_writer = Some(Arc::new(LegacyFailureOutbox {
+            inner: outbox,
+            stage: self.stage,
+            failed: self.failed.clone(),
+        }));
+        let live_results = created
+            .live_results_writer
+            .take()
+            .expect("RocksDB live-results writer");
+        created.live_results_writer = Some(Arc::new(LegacyFailureLiveResults {
+            inner: live_results,
+            stage: self.stage,
+            failed: self.failed.clone(),
+        }));
+        let checkpoints = created
+            .checkpoint_store
+            .take()
+            .expect("RocksDB checkpoint store");
+        created.checkpoint_store = Some(Arc::new(LegacyFailureCheckpointStore {
+            inner: checkpoints,
+            stage: self.stage,
+            failed: self.failed.clone(),
+        }));
+        Ok(created)
+    }
+
+    fn is_volatile(&self) -> bool {
+        false
+    }
+}
+
+struct LegacyFailureOutbox {
+    inner: Arc<dyn OutboxWriter>,
+    stage: LegacyFailureStage,
+    failed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl OutboxWriter for LegacyFailureOutbox {
+    fn transaction_domain(&self) -> Option<drasi_core::interface::TransactionDomain> {
+        None
+    }
+
+    async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
+        if self.stage == LegacyFailureStage::Outbox && !self.failed.swap(true, Ordering::AcqRel) {
+            return Err(IndexError::other(std::io::Error::other(
+                "injected persistent Legacy outbox failure",
+            )));
+        }
+        self.inner.append(query_id, sequence, data).await
+    }
+
+    async fn read_from(
+        &self,
+        query_id: &str,
+        after_sequence: u64,
+    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        self.inner.read_from(query_id, after_sequence).await
+    }
+
+    async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+        self.inner.read_latest_sequence(query_id).await
+    }
+
+    async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+        self.inner.clear(query_id).await
+    }
+
+    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
+        self.inner.trim_to_capacity(query_id, capacity).await
+    }
+}
+
+struct LegacyFailureLiveResults {
+    inner: Arc<dyn LiveResultsWriter>,
+    stage: LegacyFailureStage,
+    failed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl LiveResultsWriter for LegacyFailureLiveResults {
+    fn transaction_domain(&self) -> Option<drasi_core::interface::TransactionDomain> {
+        self.inner.transaction_domain()
+    }
+
+    async fn apply_mutations(
+        &self,
+        query_id: &str,
+        mutations: &[RowMutation<'_>],
+    ) -> Result<(), IndexError> {
+        if self.stage == LegacyFailureStage::LiveResults
+            && !self.failed.swap(true, Ordering::AcqRel)
+        {
+            return Err(IndexError::other(std::io::Error::other(
+                "injected persistent Legacy live-result failure",
+            )));
+        }
+        self.inner.apply_mutations(query_id, mutations).await
+    }
+
+    async fn read_snapshot(&self, query_id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+        self.inner.read_snapshot(query_id).await
+    }
+
+    async fn clear(&self, query_id: &str) -> Result<(), IndexError> {
+        self.inner.clear(query_id).await
+    }
+
+    async fn row_count(&self, query_id: &str) -> Result<usize, IndexError> {
+        self.inner.row_count(query_id).await
+    }
+}
+
+struct LegacyFailureCheckpointStore {
+    inner: Arc<dyn CheckpointStore>,
+    stage: LegacyFailureStage,
+    failed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl CheckpointStore for LegacyFailureCheckpointStore {
+    fn transaction_domain(&self) -> Option<drasi_core::interface::TransactionDomain> {
+        self.inner.transaction_domain()
+    }
+
+    fn is_persistent(&self) -> bool {
+        true
+    }
+
+    async fn stage_checkpoint(
+        &self,
+        source_id: &str,
+        sequence: u64,
+        source_position: Option<&Bytes>,
+    ) -> Result<(), IndexError> {
+        self.inner
+            .stage_checkpoint(source_id, sequence, source_position)
+            .await
+    }
+
+    async fn read_checkpoint(
+        &self,
+        source_id: &str,
+    ) -> Result<Option<SourceCheckpoint>, IndexError> {
+        self.inner.read_checkpoint(source_id).await
+    }
+
+    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
+        self.inner.read_all_checkpoints().await
+    }
+
+    async fn clear_checkpoints(&self) -> Result<(), IndexError> {
+        self.inner.clear_checkpoints().await
+    }
+
+    async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError> {
+        self.inner.write_config_hash(hash).await
+    }
+
+    async fn read_config_hash(&self) -> Result<Option<u64>, IndexError> {
+        self.inner.read_config_hash().await
+    }
+
+    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+        if self.stage == LegacyFailureStage::ResultSequence
+            && sequence > 0
+            && !self.failed.swap(true, Ordering::AcqRel)
+        {
+            return Err(IndexError::other(std::io::Error::other(
+                "injected persistent Legacy result-sequence failure",
+            )));
+        }
+        self.inner.write_result_sequence(query_id, sequence).await
+    }
+
+    async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+        self.inner.read_result_sequence(query_id).await
+    }
+}
+
 struct LifecycleHarness {
     manager: Arc<QueryManager>,
     source_manager: Arc<SourceManager>,
@@ -298,6 +499,10 @@ struct LifecycleHarness {
 
 impl LifecycleHarness {
     async fn new(path: &std::path::Path) -> Self {
+        Self::new_with_provider(Arc::new(RocksDbIndexProvider::new(path, true, false))).await
+    }
+
+    async fn new_with_provider(provider: Arc<dyn IndexBackendPlugin>) -> Self {
         let log_registry = get_or_init_global_registry();
         let (graph, mut update_rx) = ComponentGraph::new("atomic-lifecycle");
         let update_tx = graph.update_sender();
@@ -315,8 +520,6 @@ impl LifecycleHarness {
             graph.clone(),
             update_tx.clone(),
         ));
-        let provider: Arc<dyn IndexBackendPlugin> =
-            Arc::new(RocksDbIndexProvider::new(path, true, false));
         let index_factory = Arc::new(IndexFactory::new(
             vec![],
             HashMap::from([(BACKEND_NAME.to_string(), provider)]),
@@ -866,6 +1069,196 @@ async fn auto_reset_clears_inconsistent_durable_output_before_live_processing() 
         .stop_source(SOURCE_ID.to_string())
         .await
         .expect("stop lifecycle source");
+}
+
+#[tokio::test]
+async fn persistent_legacy_write_failures_make_strict_restart_fail_closed() {
+    for stage in [
+        LegacyFailureStage::Outbox,
+        LegacyFailureStage::LiveResults,
+        LegacyFailureStage::ResultSequence,
+    ] {
+        let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+        let provider: Arc<dyn IndexBackendPlugin> = Arc::new(LegacyFailureProvider {
+            inner: RocksDbIndexProvider::new(temp_dir.path(), true, false),
+            stage,
+            failed: Arc::new(AtomicBool::new(false)),
+        });
+        let harness = LifecycleHarness::new_with_provider(provider).await;
+        let query_id = format!("legacy-strict-{stage:?}");
+        let query = harness
+            .add_query_config(query_config_with_policy(
+                &query_id,
+                crate::recovery::RecoveryPolicy::Strict,
+            ))
+            .await;
+        let mut results = query
+            .subscribe(format!("{query_id}-results"))
+            .await
+            .expect("subscribe Legacy output")
+            .receiver;
+        harness.start_query(&query_id).await;
+
+        harness
+            .source
+            .inject(1, "failed-output")
+            .await
+            .expect("inject Legacy output failure");
+        wait_for_status(&harness.manager, &query_id, ComponentStatus::Error).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), results.recv())
+                .await
+                .is_err(),
+            "{stage:?}: failed persistent output was delivered"
+        );
+        let concrete = concrete_query(&query);
+        assert!(concrete.publication_recovery_required());
+        assert_eq!(
+            concrete
+                .get_checkpoint_store()
+                .await
+                .expect("Legacy checkpoint store")
+                .read_checkpoint(SOURCE_ID)
+                .await
+                .expect("read causative Legacy checkpoint")
+                .expect("causative Legacy checkpoint")
+                .sequence,
+            1
+        );
+
+        harness
+            .manager
+            .stop_query(query_id.clone())
+            .await
+            .expect("stop failed Legacy query");
+        wait_for_status(&harness.manager, &query_id, ComponentStatus::Stopped).await;
+        let error = harness
+            .manager
+            .start_query(query_id.clone())
+            .await
+            .expect_err("Strict restart must reject partial Legacy output");
+        assert!(
+            format!("{error:#}").contains("durable output reconciliation failed"),
+            "{stage:?}: unexpected Strict restart error: {error:#}"
+        );
+        assert!(concrete.publication_recovery_required());
+
+        harness
+            .manager
+            .stop_query(query_id)
+            .await
+            .expect("stop Strict query from Error");
+        harness
+            .source_manager
+            .stop_source(SOURCE_ID.to_string())
+            .await
+            .expect("stop lifecycle source");
+    }
+}
+
+#[tokio::test]
+async fn persistent_legacy_write_failures_auto_reset_and_resume() {
+    for stage in [
+        LegacyFailureStage::Outbox,
+        LegacyFailureStage::LiveResults,
+        LegacyFailureStage::ResultSequence,
+    ] {
+        let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+        let provider: Arc<dyn IndexBackendPlugin> = Arc::new(LegacyFailureProvider {
+            inner: RocksDbIndexProvider::new(temp_dir.path(), true, false),
+            stage,
+            failed: Arc::new(AtomicBool::new(false)),
+        });
+        let harness = LifecycleHarness::new_with_provider(provider).await;
+        let query_id = format!("legacy-reset-{stage:?}");
+        let query = harness
+            .add_query_config(query_config_with_policy(
+                &query_id,
+                crate::recovery::RecoveryPolicy::AutoReset,
+            ))
+            .await;
+        let mut results = query
+            .subscribe(format!("{query_id}-results"))
+            .await
+            .expect("subscribe Legacy reset output")
+            .receiver;
+        harness.start_query(&query_id).await;
+        harness
+            .source
+            .inject(1, "failed-output")
+            .await
+            .expect("inject Legacy output failure");
+        wait_for_status(&harness.manager, &query_id, ComponentStatus::Error).await;
+        let concrete = concrete_query(&query);
+        assert!(concrete.publication_recovery_required());
+
+        harness
+            .manager
+            .stop_query(query_id.clone())
+            .await
+            .expect("stop failed Legacy query");
+        wait_for_status(&harness.manager, &query_id, ComponentStatus::Stopped).await;
+        harness
+            .manager
+            .start_query(query_id.clone())
+            .await
+            .expect("AutoReset restart should clear partial Legacy output");
+        wait_for_status(&harness.manager, &query_id, ComponentStatus::Running).await;
+        assert!(!concrete.publication_recovery_required());
+        assert_eq!(concrete.output_sequence_for_test().await, 0);
+        let checkpoint_store = concrete
+            .get_checkpoint_store()
+            .await
+            .expect("reopened Legacy checkpoint store");
+        assert!(checkpoint_store
+            .read_checkpoint(QUERY_BOOTSTRAP_MARKER_V1)
+            .await
+            .expect("read cleared bootstrap marker")
+            .is_none());
+
+        harness
+            .source
+            .inject(2, "after-reset")
+            .await
+            .expect("inject after Legacy AutoReset");
+        let delivered = receive_result(&mut results).await;
+        assert_eq!(delivered.sequence, 1);
+        assert_eq!(
+            checkpoint_store
+                .read_checkpoint(SOURCE_ID)
+                .await
+                .expect("read resumed source checkpoint")
+                .expect("resumed source checkpoint")
+                .sequence,
+            2
+        );
+        let outbox = concrete
+            .get_outbox_writer()
+            .await
+            .expect("Legacy outbox after reset")
+            .read_from(&query_id, 0)
+            .await
+            .expect("read Legacy outbox after reset");
+        assert_eq!(
+            outbox
+                .iter()
+                .map(|(sequence, _)| *sequence)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "{stage:?}: stale or reused outbox entries survived AutoReset"
+        );
+
+        harness
+            .manager
+            .stop_query(query_id)
+            .await
+            .expect("stop recovered Legacy query");
+        harness
+            .source_manager
+            .stop_source(SOURCE_ID.to_string())
+            .await
+            .expect("stop lifecycle source");
+    }
 }
 
 #[tokio::test]

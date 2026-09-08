@@ -493,8 +493,37 @@ struct PersistentQueryState {
     live_results_writer: Option<Arc<dyn LiveResultsWriter>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryRecoveryResetReason {
+    ConfigChanged,
+    ConfigHashReadFailed,
+    IncompleteBootstrap,
+    CheckpointReadFailed,
+    InvalidBootstrapMarker,
+    OutputReconciliationFailed,
+    PositionUnavailable,
+    Deprovision,
+}
+
 impl PersistentQueryState {
-    async fn clear(&self, config_hash: Option<u64>) -> anyhow::Result<()> {
+    async fn clear_recovery_state(
+        &self,
+        output_state: &RwLock<QueryOutputState>,
+        publication_recovery: &AtomicPublicationRecovery,
+        config_hash: Option<u64>,
+        reason: QueryRecoveryResetReason,
+    ) -> anyhow::Result<()> {
+        info!(
+            "Query '{}' clearing persistent and process-local recovery state ({reason:?})",
+            self.query_id
+        );
+        self.clear_persistent(config_hash).await?;
+        output_state.write().await.reset();
+        publication_recovery.reconcile_in_memory();
+        Ok(())
+    }
+
+    async fn clear_persistent(&self, config_hash: Option<u64>) -> anyhow::Result<()> {
         clear_persistent_indexes(
             &self.query_id,
             &self.element_index,
@@ -590,6 +619,175 @@ async fn clear_persistent_indexes(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod recovery_reset_tests {
+    use super::*;
+    use drasi_core::interface::{IndexBackendPlugin, RowMutation};
+    use drasi_index_rocksdb::RocksDbIndexProvider;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn every_destructive_reset_clears_output_and_publication_recovery() {
+        let reasons = [
+            QueryRecoveryResetReason::ConfigChanged,
+            QueryRecoveryResetReason::ConfigHashReadFailed,
+            QueryRecoveryResetReason::IncompleteBootstrap,
+            QueryRecoveryResetReason::CheckpointReadFailed,
+            QueryRecoveryResetReason::InvalidBootstrapMarker,
+            QueryRecoveryResetReason::OutputReconciliationFailed,
+            QueryRecoveryResetReason::PositionUnavailable,
+            QueryRecoveryResetReason::Deprovision,
+        ];
+
+        let temp_dir = tempfile::TempDir::new().expect("create reset temp directory");
+        let provider = RocksDbIndexProvider::new(temp_dir.path(), true, false);
+        for (index, reason) in reasons.into_iter().enumerate() {
+            let query_id = format!("reset-reason-{index}");
+            let created = provider
+                .create_indexes(&query_id)
+                .await
+                .expect("create reset indexes");
+            let checkpoint_store = created
+                .checkpoint_store
+                .as_ref()
+                .expect("checkpoint store")
+                .clone();
+            let outbox_writer = created
+                .outbox_writer
+                .as_ref()
+                .expect("outbox writer")
+                .clone();
+            let live_results_writer = created
+                .live_results_writer
+                .as_ref()
+                .expect("live-results writer")
+                .clone();
+            let result = Arc::new(QueryResult::new(
+                query_id.clone(),
+                1,
+                chrono::Utc::now(),
+                vec![ResultDiff::Add {
+                    data: json!({ "name": "stale" }),
+                    row_signature: 7,
+                }],
+                HashMap::new(),
+            ));
+            outbox_writer
+                .append(
+                    &query_id,
+                    1,
+                    &rmp_serde::to_vec(result.as_ref()).expect("serialize stale output"),
+                )
+                .await
+                .expect("seed stale outbox");
+            let row =
+                rmp_serde::to_vec(&json!({ "name": "stale" })).expect("serialize stale live row");
+            live_results_writer
+                .apply_mutations(
+                    &query_id,
+                    &[RowMutation {
+                        row_signature: 7,
+                        data: Some(&row),
+                    }],
+                )
+                .await
+                .expect("seed stale live row");
+            checkpoint_store
+                .write_result_sequence(&query_id, 1)
+                .await
+                .expect("seed stale result sequence");
+            created
+                .set
+                .session_control
+                .begin()
+                .await
+                .expect("begin stale marker transaction");
+            checkpoint_store
+                .stage_checkpoint(QUERY_BOOTSTRAP_MARKER_V1, 0, None)
+                .await
+                .expect("seed stale bootstrap marker");
+            created
+                .set
+                .session_control
+                .commit()
+                .await
+                .expect("commit stale marker");
+
+            let output_state = Arc::new(RwLock::new(QueryOutputState::new(8)));
+            output_state
+                .write()
+                .await
+                .apply_committed_arc(result.clone())
+                .expect("seed process-local output");
+            let publication_recovery = AtomicPublicationRecovery::default();
+            publication_recovery.require(result);
+            let state = PersistentQueryState {
+                query_id: query_id.clone(),
+                element_index: Some(created.set.element_index.clone()),
+                archive_index: Some(created.set.archive_index.clone()),
+                result_index: Some(created.set.result_index.clone()),
+                future_queue: Some(created.set.future_queue.clone()),
+                checkpoint_store: checkpoint_store.clone(),
+                outbox_writer: Some(outbox_writer.clone()),
+                live_results_writer: Some(live_results_writer.clone()),
+            };
+            let config_hash = (reason != QueryRecoveryResetReason::Deprovision).then_some(99);
+
+            state
+                .clear_recovery_state(&output_state, &publication_recovery, config_hash, reason)
+                .await
+                .expect("clear recovery state");
+
+            let output = output_state.read().await;
+            assert_eq!(output.as_of_sequence(), 0, "{reason:?}");
+            assert_eq!(output.results_len(), 0, "{reason:?}");
+            assert_eq!(output.outbox_len(), 0, "{reason:?}");
+            drop(output);
+            assert!(!publication_recovery.is_required(), "{reason:?}");
+            assert!(
+                outbox_writer
+                    .read_from(&query_id, 0)
+                    .await
+                    .expect("read cleared outbox")
+                    .is_empty(),
+                "{reason:?}"
+            );
+            assert!(
+                live_results_writer
+                    .read_snapshot(&query_id)
+                    .await
+                    .expect("read cleared live rows")
+                    .is_empty(),
+                "{reason:?}"
+            );
+            assert_eq!(
+                checkpoint_store
+                    .read_result_sequence(&query_id)
+                    .await
+                    .expect("read reset sequence"),
+                Some(0),
+                "{reason:?}"
+            );
+            assert!(
+                checkpoint_store
+                    .read_checkpoint(QUERY_BOOTSTRAP_MARKER_V1)
+                    .await
+                    .expect("read cleared marker")
+                    .is_none(),
+                "{reason:?}"
+            );
+            assert_eq!(
+                checkpoint_store
+                    .read_config_hash()
+                    .await
+                    .expect("read reset config hash"),
+                config_hash,
+                "{reason:?}"
+            );
+        }
+    }
 }
 
 impl DrasiQuery {
@@ -883,7 +1081,15 @@ impl DrasiQuery {
                         "Query '{}' config hash changed ({stored_hash} -> {current_hash}), clearing all persistent state for full bootstrap",
                         self.base.config.id
                     );
-                    if let Err(e) = persistent_state.clear(Some(current_hash)).await {
+                    if let Err(e) = persistent_state
+                        .clear_recovery_state(
+                            &self.output_state,
+                            &self.publication_recovery,
+                            Some(current_hash),
+                            QueryRecoveryResetReason::ConfigChanged,
+                        )
+                        .await
+                    {
                         let msg = format!(
                             "Query '{}' failed to clear persistent state on config change: {e:#}",
                             self.base.config.id
@@ -894,7 +1100,6 @@ impl DrasiQuery {
                             .await;
                         return Err(anyhow::anyhow!(msg));
                     }
-                    self.output_state.write().await.reset();
                     false
                 }
                 Ok(None) => {
@@ -915,7 +1120,15 @@ impl DrasiQuery {
                         "Query '{}' failed to read config hash, clearing persistent state and starting fresh: {e}",
                         self.base.config.id
                     );
-                    if let Err(reset_error) = persistent_state.clear(Some(current_hash)).await {
+                    if let Err(reset_error) = persistent_state
+                        .clear_recovery_state(
+                            &self.output_state,
+                            &self.publication_recovery,
+                            Some(current_hash),
+                            QueryRecoveryResetReason::ConfigHashReadFailed,
+                        )
+                        .await
+                    {
                         let msg = format!(
                             "Query '{}' failed to clear persistent state after config hash read failure: {reset_error:#}",
                             self.base.config.id
@@ -926,7 +1139,6 @@ impl DrasiQuery {
                             .await;
                         return Err(anyhow::anyhow!(msg));
                     }
-                    self.output_state.write().await.reset();
                     false
                 }
             };
@@ -941,10 +1153,14 @@ impl DrasiQuery {
                             self.base.config.id
                         );
                         persistent_state
-                            .clear(Some(current_hash))
+                            .clear_recovery_state(
+                                &self.output_state,
+                                &self.publication_recovery,
+                                Some(current_hash),
+                                QueryRecoveryResetReason::IncompleteBootstrap,
+                            )
                             .await
                             .context("failed to clear an incomplete bootstrap")?;
-                        self.output_state.write().await.reset();
                     }
                     Ok(
                         QueryBootstrapRecoveryState::Absent | QueryBootstrapRecoveryState::Complete,
@@ -980,8 +1196,14 @@ impl DrasiQuery {
                                 }
                                 crate::recovery::RecoveryPolicy::AutoReset => {
                                     warn!("{detail}; AutoReset is clearing persistent state");
-                                    persistent_state.clear(Some(current_hash)).await?;
-                                    self.output_state.write().await.reset();
+                                    persistent_state
+                                        .clear_recovery_state(
+                                            &self.output_state,
+                                            &self.publication_recovery,
+                                            Some(current_hash),
+                                            QueryRecoveryResetReason::CheckpointReadFailed,
+                                        )
+                                        .await?;
                                 }
                             }
                         }
@@ -1000,8 +1222,14 @@ impl DrasiQuery {
                             }
                             crate::recovery::RecoveryPolicy::AutoReset => {
                                 warn!("{detail}; AutoReset is clearing persistent state");
-                                persistent_state.clear(Some(current_hash)).await?;
-                                self.output_state.write().await.reset();
+                                persistent_state
+                                    .clear_recovery_state(
+                                        &self.output_state,
+                                        &self.publication_recovery,
+                                        Some(current_hash),
+                                        QueryRecoveryResetReason::InvalidBootstrapMarker,
+                                    )
+                                    .await?;
                             }
                         }
                     }
@@ -1047,9 +1275,13 @@ impl DrasiQuery {
                 crate::recovery::RecoveryPolicy::AutoReset => {
                     warn!("{detail}; AutoReset is clearing persistent state");
                     persistent_state
-                        .clear(Some(super::compute_config_hash(&self.base.config)))
+                        .clear_recovery_state(
+                            &self.output_state,
+                            &self.publication_recovery,
+                            Some(super::compute_config_hash(&self.base.config)),
+                            QueryRecoveryResetReason::OutputReconciliationFailed,
+                        )
                         .await?;
-                    self.output_state.write().await.reset();
                     checkpoint_sequences_per_source.clear();
                     for settings in &mut subscription_settings {
                         settings.resume_from = None;
@@ -1310,9 +1542,14 @@ impl DrasiQuery {
                                             // fails, abort rather than mixing old and fresh state.
                                             if has_persistent_backend {
                                                 if let Err(reset_error) = persistent_state
-                                                    .clear(Some(super::compute_config_hash(
-                                                        &self.base.config,
-                                                    )))
+                                                    .clear_recovery_state(
+                                                        &self.output_state,
+                                                        &self.publication_recovery,
+                                                        Some(super::compute_config_hash(
+                                                            &self.base.config,
+                                                        )),
+                                                        QueryRecoveryResetReason::PositionUnavailable,
+                                                    )
                                                     .await
                                                 {
                                                     let msg = format!(
@@ -1330,8 +1567,6 @@ impl DrasiQuery {
                                                         "AutoReset aborted: {reset_error:#}",
                                                     ));
                                                 }
-                                                self.output_state.write().await.reset();
-                                                self.publication_recovery.reconcile_in_memory();
                                             }
 
                                             auto_reset_retry = true;
@@ -2043,12 +2278,13 @@ impl QueryManager {
         // Before teardown: grab the query config to determine if persistent
         // state cleanup is needed. After teardown_component, the runtime is
         // removed from the graph and we can no longer inspect it.
-        let query_config = {
+        let query_runtime = {
             let graph = self.graph.read().await;
-            graph
-                .get_runtime::<Arc<dyn Query>>(&id)
-                .map(|q| q.get_config().clone())
+            graph.get_runtime::<Arc<dyn Query>>(&id).cloned()
         };
+        let query_config = query_runtime
+            .as_ref()
+            .map(|query| query.get_config().clone());
 
         self.label_cache.write().await.remove(&id);
         crate::managers::lifecycle_helpers::teardown_component::<Arc<dyn Query>, _, _>(
@@ -2062,6 +2298,9 @@ impl QueryManager {
             || async {},
         )
         .await?;
+        if let Some(query) = &query_runtime {
+            query.release_persistent_handles().await;
+        }
 
         // After teardown: clear persistent indexes + checkpoints so a future
         // query with the same ID starts fresh. Only needed for persistent backends.
@@ -2088,7 +2327,23 @@ impl QueryManager {
                                     outbox_writer: created.outbox_writer.clone(),
                                     live_results_writer: created.live_results_writer.clone(),
                                 };
-                                if let Err(error) = state.clear(None).await {
+                                let reset_result = match query_runtime
+                                    .as_ref()
+                                    .and_then(|query| query.as_any().downcast_ref::<DrasiQuery>())
+                                {
+                                    Some(query) => {
+                                        state
+                                            .clear_recovery_state(
+                                                &query.output_state,
+                                                &query.publication_recovery,
+                                                None,
+                                                QueryRecoveryResetReason::Deprovision,
+                                            )
+                                            .await
+                                    }
+                                    None => state.clear_persistent(None).await,
+                                };
+                                if let Err(error) = reset_result {
                                     warn!(
                                         "Query '{id}' failed to clear persistent state on removal: {error:#}"
                                     );

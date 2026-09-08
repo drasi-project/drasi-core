@@ -21,18 +21,27 @@
 mod mock_source;
 
 use anyhow::Result;
-use drasi_lib::channels::{ComponentStatus, QueryResult};
+use async_trait::async_trait;
+use drasi_core::models::{
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+};
+use drasi_lib::bootstrap::{
+    BootstrapContext as SourceBootstrapContext, BootstrapProvider, BootstrapRequest,
+    BootstrapResult,
+};
+use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender, ComponentStatus, QueryResult};
+use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::reactions::ReactionCheckpoint;
+use drasi_lib::reactions::{BootstrapContext as ReactionBootstrapContext, ReactionCheckpoint};
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::state_store::StateStoreProvider;
-use drasi_lib::{DispatchMode, DrasiLib, MemoryStateStoreProvider, Query, Reaction};
+use drasi_lib::{DispatchMode, DrasiLib, MemoryStateStoreProvider, Query, Reaction, Source};
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::timeout;
 
 // ============================================================================
@@ -149,6 +158,134 @@ struct RecordingReaction {
     recovery_policy: ReactionRecoveryPolicy,
     durable: bool,
     snapshot_on_fresh: bool,
+}
+
+struct StableSnapshotBootstrapProvider {
+    attempts: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl BootstrapProvider for StableSnapshotBootstrapProvider {
+    async fn bootstrap(
+        &self,
+        _request: BootstrapRequest,
+        context: &SourceBootstrapContext,
+        event_tx: BootstrapEventSender,
+        _settings: Option<&SourceSubscriptionSettings>,
+    ) -> Result<BootstrapResult> {
+        self.attempts
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        event_tx
+            .send(BootstrapEvent {
+                source_id: context.source_id.clone(),
+                change: SourceChange::Insert {
+                    element: Element::Node {
+                        metadata: ElementMetadata {
+                            reference: ElementReference::new(
+                                &context.source_id,
+                                "bootstrap-person",
+                            ),
+                            labels: vec![Arc::from("Person")].into(),
+                            effective_from: 1_000,
+                        },
+                        properties: ElementPropertyMap::from(serde_json::json!({
+                            "name": "Bootstrap",
+                            "age": 40
+                        })),
+                    },
+                },
+                timestamp: chrono::Utc::now(),
+                sequence: context.next_sequence(),
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("bootstrap receiver closed"))?;
+        Ok(BootstrapResult {
+            event_count: 1,
+            source_position: None,
+        })
+    }
+}
+
+struct SnapshotRecordingReaction {
+    base: ReactionBase,
+    snapshot_tx: Mutex<Option<oneshot::Sender<(u64, Vec<serde_json::Value>)>>>,
+}
+
+impl SnapshotRecordingReaction {
+    fn new(id: &str, query_id: &str) -> (Self, oneshot::Receiver<(u64, Vec<serde_json::Value>)>) {
+        let (snapshot_tx, snapshot_rx) = oneshot::channel();
+        (
+            Self {
+                base: ReactionBase::new(ReactionBaseParams::new(id, vec![query_id.to_string()])),
+                snapshot_tx: Mutex::new(Some(snapshot_tx)),
+            },
+            snapshot_rx,
+        )
+    }
+}
+
+#[async_trait]
+impl Reaction for SnapshotRecordingReaction {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "snapshot-recording"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        HashMap::new()
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.queries.clone()
+    }
+
+    async fn initialize(&self, context: ReactionRuntimeContext) {
+        self.base.initialize(context).await;
+    }
+
+    async fn start(&self) -> Result<()> {
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("Snapshot reaction started".into()),
+            )
+            .await;
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.base
+            .set_status(
+                ComponentStatus::Stopped,
+                Some("Snapshot reaction stopped".into()),
+            )
+            .await;
+        Ok(())
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.base.get_status().await
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        true
+    }
+
+    async fn bootstrap(&self, context: ReactionBootstrapContext) -> Result<()> {
+        let snapshot = context
+            .fetch_snapshot()
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let as_of_sequence = snapshot.as_of_sequence;
+        let rows = snapshot.collect_vec().await;
+        if let Some(sender) = self.snapshot_tx.lock().await.take() {
+            let _ = sender.send((as_of_sequence, rows));
+        }
+        Ok(())
+    }
 }
 
 /// Receiver side of the recording reaction.
@@ -328,9 +465,115 @@ async fn stop_reaction_and_wait(core: &DrasiLib, id: &str) -> Result<()> {
     anyhow::bail!("Reaction {id} did not reach Stopped state within timeout");
 }
 
+async fn wait_for_query_status(
+    core: &DrasiLib,
+    query_id: &str,
+    expected: ComponentStatus,
+) -> Result<()> {
+    for _ in 0..100 {
+        if core.get_query_status(query_id).await? == expected {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    anyhow::bail!("Query {query_id} did not reach {expected:?} within timeout");
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[tokio::test]
+async fn volatile_query_rebootstrap_preserves_reaction_sequence_and_current_snapshot() -> Result<()>
+{
+    let (mock_source, handle) = MockSource::new("volatile-bootstrap-source")?;
+    let bootstrap_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    mock_source
+        .set_bootstrap_provider(Box::new(StableSnapshotBootstrapProvider {
+            attempts: bootstrap_attempts.clone(),
+        }))
+        .await;
+    let query = Query::cypher("volatile-query")
+        .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+        .from_source("volatile-bootstrap-source")
+        .enable_bootstrap(true)
+        .with_outbox_capacity(16)
+        .auto_start(true)
+        .build();
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let (reaction, mut receiver) = recording_reaction(
+        "surviving-reaction",
+        vec!["volatile-query".into()],
+        ReactionRecoveryPolicy::Strict,
+        true,
+        false,
+    );
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("volatile-rebootstrap-test")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_state_store_provider(state_store.clone())
+            .build()
+            .await?,
+    );
+    core.start().await?;
+    wait_for_query_status(&core, "volatile-query", ComponentStatus::Running).await?;
+
+    insert_person(&handle, "live-before-restart", "Before", 30).await?;
+    let first = receiver.wait_for_count(1, Duration::from_secs(5)).await;
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].sequence, 1);
+    let config_hash =
+        drasi_lib::queries::compute_config_hash(&core.get_query_config("volatile-query").await?);
+    persist_reaction_checkpoint(
+        state_store.as_ref(),
+        "surviving-reaction",
+        "volatile-query",
+        1,
+        config_hash,
+    )
+    .await?;
+
+    core.stop_query("volatile-query").await?;
+    wait_for_query_status(&core, "volatile-query", ComponentStatus::Stopped).await?;
+    core.start_query("volatile-query").await?;
+    wait_for_query_status(&core, "volatile-query", ComponentStatus::Running).await?;
+    assert_eq!(
+        bootstrap_attempts.load(std::sync::atomic::Ordering::Acquire),
+        2
+    );
+
+    insert_person(&handle, "live-after-restart", "After", 31).await?;
+    let after_restart = receiver.wait_for_count(1, Duration::from_secs(5)).await;
+    assert_eq!(
+        after_restart.len(),
+        1,
+        "surviving reaction silently dropped the first post-rebootstrap result"
+    );
+    assert_eq!(after_restart[0].sequence, 2);
+
+    let (snapshot_reaction, snapshot_rx) =
+        SnapshotRecordingReaction::new("new-snapshot-reaction", "volatile-query");
+    core.add_reaction(snapshot_reaction).await?;
+    let (as_of_sequence, snapshot) = timeout(Duration::from_secs(5), snapshot_rx)
+        .await
+        .expect("new reaction snapshot timed out")
+        .expect("new reaction snapshot channel closed");
+    assert_eq!(as_of_sequence, 2);
+    assert_eq!(snapshot.len(), 2);
+    let names: Vec<_> = snapshot
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    assert!(names.contains(&"Bootstrap"));
+    assert!(names.contains(&"After"));
+    assert!(!names.contains(&"Before"));
+
+    core.stop().await?;
+    Ok(())
+}
 
 /// Test 1: Reaction replays missed events from outbox after restart.
 #[tokio::test]

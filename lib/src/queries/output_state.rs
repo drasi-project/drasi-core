@@ -182,6 +182,14 @@ impl QueryOutputState {
         self.outbox.clear();
     }
 
+    /// Clear only the current row projection before rebuilding it from bootstrap.
+    ///
+    /// Volatile stop/start reuses this `QueryOutputState`, so its sequence and
+    /// outbox remain the reaction recovery timeline across re-bootstrap.
+    pub(crate) fn clear_results(&mut self) {
+        self.results.clear();
+    }
+
     /// Apply a result prepared for the current next sequence.
     ///
     /// Returns `None` when another writer advanced the state while the result was
@@ -732,6 +740,37 @@ mod tests {
         let arc = state.advance_sequence_and_push(result);
         assert_eq!(arc.sequence, 2);
         assert_eq!(state.outbox.len(), 2);
+    }
+
+    #[test]
+    fn clear_results_preserves_sequence_and_outbox_history() {
+        let mut state = QueryOutputState::new(4);
+        state.apply_diffs(&[ResultDiff::Add {
+            data: serde_json::json!({"name": "bootstrap"}),
+            row_signature: 1,
+        }]);
+        state.advance_sequence_and_push(make_query_result(
+            "q1",
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"name": "live"}),
+                row_signature: 2,
+            }],
+        ));
+
+        state.clear_results();
+
+        assert_eq!(state.results_len(), 0);
+        assert_eq!(state.as_of_sequence(), 1);
+        assert_eq!(state.outbox_len(), 1);
+        assert_eq!(
+            state
+                .fetch_outbox_after(0)
+                .expect("preserved outbox")
+                .first()
+                .expect("preserved result")
+                .sequence,
+            1
+        );
     }
 
     #[test]

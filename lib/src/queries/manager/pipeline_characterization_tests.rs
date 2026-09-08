@@ -886,6 +886,7 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
         16,
         ProfilingMetadata::default(),
         &output_metrics,
+        None,
     )
     .await
     .unwrap();
@@ -985,6 +986,7 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
         16,
         ProfilingMetadata::default(),
         &output_metrics,
+        None,
     )
     .await
     .unwrap();
@@ -1015,6 +1017,7 @@ async fn evaluation_results_map_to_ordered_query_result_and_sequence() {
         16,
         ProfilingMetadata::default(),
         &output_metrics,
+        None,
     )
     .await
     .unwrap();
@@ -1140,7 +1143,7 @@ async fn live_source_change_envelope_path_preserves_legacy_result_metadata() {
 }
 
 #[tokio::test]
-async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
+async fn persistent_legacy_output_failure_fences_before_delivery() {
     let backend = Arc::new(CharacterizationBackend::new(true));
     let mut harness = PipelineHarness::new(backend.clone()).await;
 
@@ -1158,15 +1161,18 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             first_position.clone(),
         )
         .await;
-    let delivered = next_result(&mut result_rx).await;
-    assert_eq!(delivered.sequence, 1);
-    assert_eq!(delivered.results.len(), 1);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while query.status().await != ComponentStatus::Error {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("persistent Legacy write failure should fence the query");
     assert!(
-        matches!(
-            &delivered.results[0],
-            ResultDiff::Add { data, .. } if data == &json!({ "name": "Alice" })
-        ),
-        "the committed input should produce Alice's Add result"
+        tokio::time::timeout(Duration::from_millis(100), result_rx.recv())
+            .await
+            .is_err(),
+        "a persistent Legacy write failure must not be delivered"
     );
 
     assert_eq!(
@@ -1183,13 +1189,13 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
                 query_id: QUERY_ID.to_string(),
                 sequence: 1,
             },
-            TraceEvent::LiveResultsApplyAttempt {
+            TraceEvent::ResultSequenceWritten {
                 query_id: QUERY_ID.to_string(),
-                mutation_count: 1,
+                sequence: 1,
             },
-            TraceEvent::ReactionDispatch { sequence: 1 },
         ],
-        "current DrasiQuery commits input progress before best-effort output persistence and dispatch"
+        "the Legacy checkpoint commit remains visible, but persistent output failure \
+         is marked and fenced before later persistence or dispatch"
     );
 
     assert!(
@@ -1234,75 +1240,11 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             .read_result_sequence(QUERY_ID)
             .await
             .unwrap(),
-        None,
-        "failed output writes must not claim a durable result sequence"
+        Some(1),
+        "the attempted result sequence must expose the partial durable bundle on restart"
     );
-
+    assert!(query.publication_recovery_required());
     query.stop().await.unwrap();
-
-    let (restarted_query, mut restarted_result_rx) =
-        harness.start_query(backend.trace.clone()).await;
-    let resumed_subscription = harness.next_subscription().await;
-    assert_eq!(resumed_subscription.resume_sequence, Some(1));
-    assert_eq!(resumed_subscription.resume_from, Some(first_position));
-
-    let recovered_snapshot = restarted_query.fetch_snapshot().await.unwrap();
-    assert_eq!(recovered_snapshot.as_of_sequence, 0);
-    assert!(
-        recovered_snapshot.is_empty(),
-        "after a fresh host starts from committed input position 1, output 1 cannot be recovered"
-    );
-
-    backend.trace.clear();
-    harness
-        .inject(
-            person_insert("person-1", "Alice", 1_000),
-            1,
-            Bytes::from_static(b"position-2"),
-        )
-        .await;
-    harness
-        .inject(
-            person_insert("person-2", "Bob", 2_000),
-            2,
-            Bytes::from_static(b"position-3"),
-        )
-        .await;
-
-    let after_restart = next_result(&mut restarted_result_rx).await;
-    assert_eq!(after_restart.sequence, 1);
-    assert_eq!(after_restart.results.len(), 1);
-    assert!(
-        matches!(
-            &after_restart.results[0],
-            ResultDiff::Add { data, .. } if data == &json!({ "name": "Bob" })
-        ),
-        "checkpoint-seeded dedup must suppress replayed source sequence 1",
-    );
-    assert_eq!(
-        backend.trace.snapshot(),
-        vec![
-            TraceEvent::SessionBegin,
-            TraceEvent::CheckpointStaged {
-                source_id: SOURCE_ID.to_string(),
-                sequence: 2,
-                source_position: Some(Bytes::from_static(b"position-3")),
-            },
-            TraceEvent::SessionCommit,
-            TraceEvent::OutboxAppendAttempt {
-                query_id: QUERY_ID.to_string(),
-                sequence: 1,
-            },
-            TraceEvent::LiveResultsApplyAttempt {
-                query_id: QUERY_ID.to_string(),
-                mutation_count: 1,
-            },
-            TraceEvent::ReactionDispatch { sequence: 1 },
-        ],
-        "the replayed sequence is skipped before a core session begins"
-    );
-
-    restarted_query.stop().await.unwrap();
     harness
         .source_manager
         .stop_source(SOURCE_ID.to_string())
@@ -1411,6 +1353,7 @@ async fn due_future_output_is_dispatched_after_core_commit() {
         16,
         profiling.clone(),
         &output_metrics,
+        None,
     )
     .await
     .unwrap();
