@@ -181,6 +181,7 @@ This runs automatically during the release process - no manual invocation needed
 
 - `GITHUB_TOKEN`: Automatically provided, used for creating PRs and releases
 - `CARGO_REGISTRY_TOKEN`: Must be configured in repository secrets for publishing to crates.io
+- `PACKAGES_ADMIN_TOKEN`: PAT classic with package administration access, validated before publishing and used to make GHCR plugin packages public
 
 ### [scorecard.yaml](scorecard.yaml)
 - **Purpose**: Runs OpenSSF Scorecard analysis to evaluate repository security and best practices.
