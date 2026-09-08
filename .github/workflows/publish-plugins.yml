@@ -75,6 +75,10 @@ on:
         required: false
         type: string
         default: ''
+    secrets:
+      PACKAGES_ADMIN_TOKEN:
+        description: 'PAT classic with access to administer Drasi container packages'
+        required: false
 
 permissions:
   packages: write
@@ -85,8 +89,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  visibility-preflight:
+    name: Validate Package Visibility Access
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Validate package visibility access
+        if: ${{ !inputs.dry_run && !inputs.skip_visibility }}
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN }}
+        run: .github/scripts/package-visibility.sh check drasi-plugin-directory
+
   build-and-publish:
     name: Build & Publish (${{ matrix.arch_suffix }})
+    needs: visibility-preflight
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -359,6 +377,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
 
       - name: Install system dependencies
@@ -376,48 +395,19 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
+      - name: List plugin packages
+        run: |
+          {
+            echo "drasi-plugin-directory"
+            cargo run -p xtask -- list-plugins \
+              | { grep -E '^[[:space:]]+[a-z-]+/[^[:space:]]+ v[0-9]' || true; } \
+              | awk '{print $1}'
+          } > "$RUNNER_TEMP/plugin-packages"
+
       - name: Set packages to public
         env:
-          # The default GITHUB_TOKEN cannot administer org-level container
-          # package visibility (those endpoints return 404). A PAT (classic)
-          # with write:packages, or a GitHub App token with org packages:write,
-          # is required. Configure a PACKAGES_ADMIN_TOKEN secret; we fall back
-          # to GITHUB_TOKEN only so the step doesn't fail to start.
-          GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
-          ORG="drasi-project"
-
-          FAILED=0
-
-          set_public() {
-            local pkg="$1"
-            local encoded
-            encoded=$(printf '%s' "$pkg" | sed 's|/|%2F|g')
-            echo "Setting ${ORG}/${pkg} to public..."
-            if ! gh api --method PATCH \
-              "/orgs/${ORG}/packages/container/${encoded}" \
-              -f visibility=public; then
-              echo "::error::Failed to set ${ORG}/${pkg} to public"
-              FAILED=1
-            fi
-          }
-
-          # Set plugin directory to public
-          set_public "drasi-plugin-directory"
-
-          # Set each plugin package to public. list-plugins prints plugin lines
-          # as "  <type>/<kind> v<version> (<path>)"; match only those so the
-          # indented "SDK: ..." summary line is excluded.
-          PLUGINS=$(cargo run -p xtask -- list-plugins \
-            | { grep -E '^[[:space:]]+[a-z-]+/[^[:space:]]+ v[0-9]' || true; } \
-            | awk '{print $1}')
-          for PLUGIN in $PLUGINS; do
-            set_public "$PLUGIN"
-          done
-
-          if [ "$FAILED" -ne 0 ]; then
-            echo "::error::One or more packages could not be set to public."
-            echo "If these are 404/permission errors, ensure PACKAGES_ADMIN_TOKEN is set to a token that can administer org packages."
-            exit 1
-          fi
+          mapfile -t packages < "$RUNNER_TEMP/plugin-packages"
+          .github/scripts/package-visibility.sh set-public "${packages[@]}"
