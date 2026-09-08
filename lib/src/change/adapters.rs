@@ -252,39 +252,74 @@ pub(crate) fn query_evaluation_to_envelope(
     let mut added = Vec::new();
     let mut updated = Vec::new();
     let mut deleted = Vec::new();
+    let mut identity = StableIdBuilder::new("drasi.internal.query-change-set/v2");
+    identity.string("query-id", &metadata.query_id);
+    identity.u64("sequence", metadata.sequence);
+    identity.u64(
+        "schema-fingerprint",
+        query_result_schema().fingerprint().value(),
+    );
+    identity.optional_u64("graph-epoch", metadata.extensions.graph_epoch());
+    identity.optional_u64("config-epoch", metadata.extensions.config_epoch());
+    identity.u64(
+        "result-count",
+        results
+            .iter()
+            .filter(|result| !matches!(result, QueryPartEvaluationContext::Noop))
+            .count() as u64,
+    );
 
     for (ordinal, result) in results.iter().enumerate() {
         match result {
             QueryPartEvaluationContext::Adding {
                 after,
                 row_signature,
-            } => added.push(AddedRecord::new(
-                ordinal,
-                RecordIdentity::QueryRow(*row_signature),
-                RecordData::QueryRow(Arc::new(after.clone())),
-            )),
+            } => {
+                identity.u64("result-ordinal", ordinal as u64);
+                identity.string("result-kind", "add");
+                identity.u64("row-signature", *row_signature);
+                hash_query_variables(&mut identity, "after", after);
+                added.push(AddedRecord::new(
+                    ordinal,
+                    RecordIdentity::QueryRow(*row_signature),
+                    RecordData::QueryRow(Arc::new(after.clone())),
+                ));
+            }
             QueryPartEvaluationContext::Updating {
                 before,
                 after,
                 row_signature,
-            } => updated.push(UpdatedRecord::new(
-                ordinal,
-                RecordIdentity::QueryRow(*row_signature),
-                Some(RecordData::QueryRow(Arc::new(before.clone()))),
-                RecordData::QueryRow(Arc::new(after.clone())),
-                UpdateSemantics::Replace,
-                UpdateMetadata::QueryUpdate {
-                    grouping_keys: None,
-                },
-            )),
+            } => {
+                identity.u64("result-ordinal", ordinal as u64);
+                identity.string("result-kind", "update");
+                identity.u64("row-signature", *row_signature);
+                hash_query_variables(&mut identity, "before", before);
+                hash_query_variables(&mut identity, "after", after);
+                updated.push(UpdatedRecord::new(
+                    ordinal,
+                    RecordIdentity::QueryRow(*row_signature),
+                    Some(RecordData::QueryRow(Arc::new(before.clone()))),
+                    RecordData::QueryRow(Arc::new(after.clone())),
+                    UpdateSemantics::Replace,
+                    UpdateMetadata::QueryUpdate {
+                        grouping_keys: None,
+                    },
+                ));
+            }
             QueryPartEvaluationContext::Removing {
                 before,
                 row_signature,
-            } => deleted.push(DeletedRecord::new(
-                ordinal,
-                RecordIdentity::QueryRow(*row_signature),
-                Some(RecordData::QueryRow(Arc::new(before.clone()))),
-            )),
+            } => {
+                identity.u64("result-ordinal", ordinal as u64);
+                identity.string("result-kind", "delete");
+                identity.u64("row-signature", *row_signature);
+                hash_query_variables(&mut identity, "before", before);
+                deleted.push(DeletedRecord::new(
+                    ordinal,
+                    RecordIdentity::QueryRow(*row_signature),
+                    Some(RecordData::QueryRow(Arc::new(before.clone()))),
+                ));
+            }
             QueryPartEvaluationContext::Aggregation {
                 before,
                 after,
@@ -292,24 +327,40 @@ pub(crate) fn query_evaluation_to_envelope(
                 default_before,
                 default_after,
                 row_signature,
-            } => updated.push(UpdatedRecord::new(
-                ordinal,
-                RecordIdentity::QueryRow(*row_signature),
-                before
-                    .as_ref()
-                    .map(|before| RecordData::QueryRow(Arc::new(before.clone()))),
-                RecordData::QueryRow(Arc::new(after.clone())),
-                UpdateSemantics::Replace,
-                UpdateMetadata::QueryAggregation {
-                    grouping_keys: grouping_keys
-                        .iter()
-                        .map(|key| Arc::from(key.as_str()))
-                        .collect::<Vec<_>>()
-                        .into(),
-                    default_before: *default_before,
-                    default_after: *default_after,
-                },
-            )),
+            } => {
+                identity.u64("result-ordinal", ordinal as u64);
+                identity.string("result-kind", "aggregation");
+                identity.u64("row-signature", *row_signature);
+                identity.bool("before-present", before.is_some());
+                if let Some(before) = before {
+                    hash_query_variables(&mut identity, "before", before);
+                }
+                hash_query_variables(&mut identity, "after", after);
+                identity.u64("grouping-key-count", grouping_keys.len() as u64);
+                for grouping_key in grouping_keys {
+                    identity.string("grouping-key", grouping_key);
+                }
+                identity.bool("default-before", *default_before);
+                identity.bool("default-after", *default_after);
+                updated.push(UpdatedRecord::new(
+                    ordinal,
+                    RecordIdentity::QueryRow(*row_signature),
+                    before
+                        .as_ref()
+                        .map(|before| RecordData::QueryRow(Arc::new(before.clone()))),
+                    RecordData::QueryRow(Arc::new(after.clone())),
+                    UpdateSemantics::Replace,
+                    UpdateMetadata::QueryAggregation {
+                        grouping_keys: grouping_keys
+                            .iter()
+                            .map(|key| Arc::from(key.as_str()))
+                            .collect::<Vec<_>>()
+                            .into(),
+                        default_before: *default_before,
+                        default_after: *default_after,
+                    },
+                ));
+            }
             QueryPartEvaluationContext::Noop => {}
         }
     }
@@ -318,9 +369,6 @@ pub(crate) fn query_evaluation_to_envelope(
         return Ok(None);
     }
 
-    let mut identity = StableIdBuilder::new("drasi.internal.query-change-set/v1");
-    identity.string("query-id", &metadata.query_id);
-    identity.u64("sequence", metadata.sequence);
     let change_set = ChangeSet::try_new(
         ChangeSetId::new(identity.finish()),
         query_result_schema(),
@@ -343,6 +391,17 @@ pub(crate) fn query_evaluation_to_envelope(
         system,
         metadata.metadata,
     )))
+}
+
+fn hash_query_variables(identity: &mut StableIdBuilder, section: &str, variables: &QueryVariables) {
+    identity.string("query-variable-section", section);
+    identity.u64("query-variable-count", variables.len() as u64);
+    // QueryVariables and every object-valued VariableValue use BTreeMap, so key
+    // iteration is canonical. VariableValue's typed Hash preserves variant data.
+    for (key, value) in variables {
+        identity.string("query-variable-key", key);
+        identity.typed_hash("query-variable-value", value);
+    }
 }
 
 pub(crate) fn query_result_from_envelope(

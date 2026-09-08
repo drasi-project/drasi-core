@@ -370,7 +370,7 @@ fn envelopes_share_immutable_changes_and_append_context_persistently() {
 }
 
 #[test]
-fn boundary_ids_are_deterministic_and_distinct() {
+fn boundary_ids_are_deterministic_for_identical_batches() {
     let input = wrapper(SourceChange::Insert {
         element: element(ElementPropertyMap::from(json!({ "name": "Alice" })), 1_000),
     });
@@ -384,7 +384,10 @@ fn boundary_ids_are_deterministic_and_distinct() {
 
     let query_one = query_evaluation_to_envelope(
         &[QueryPartEvaluationContext::Adding {
-            after: variables(&[("name", VariableValue::String("Alice".to_string()))]),
+            after: variables(&[
+                ("name", VariableValue::String("Alice".to_string())),
+                ("age", VariableValue::Integer(42.into())),
+            ]),
             row_signature: 11,
         }],
         query_metadata(1),
@@ -393,15 +396,110 @@ fn boundary_ids_are_deterministic_and_distinct() {
     .unwrap();
     let query_two = query_evaluation_to_envelope(
         &[QueryPartEvaluationContext::Adding {
-            after: variables(&[("name", VariableValue::String("Alice".to_string()))]),
+            after: variables(&[
+                ("age", VariableValue::Integer(42.into())),
+                ("name", VariableValue::String("Alice".to_string())),
+            ]),
             row_signature: 11,
         }],
-        query_metadata(2),
+        query_metadata(1),
     )
     .unwrap()
     .unwrap();
-    assert_ne!(query_one.change_set().id(), query_two.change_set().id());
-    assert_ne!(query_one.id(), query_two.id());
+    assert_eq!(query_one.change_set().id(), query_two.change_set().id());
+    assert_eq!(query_one.id(), query_two.id());
+}
+
+#[test]
+fn query_change_set_ids_include_typed_result_content() {
+    let alice = query_evaluation_to_envelope(
+        &[QueryPartEvaluationContext::Adding {
+            after: variables(&[("name", VariableValue::String("Alice".to_string()))]),
+            row_signature: 11,
+        }],
+        query_metadata(1),
+    )
+    .unwrap()
+    .unwrap();
+    let bob = query_evaluation_to_envelope(
+        &[QueryPartEvaluationContext::Adding {
+            after: variables(&[("name", VariableValue::String("Bob".to_string()))]),
+            row_signature: 11,
+        }],
+        query_metadata(1),
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_ne!(alice.change_set().id(), bob.change_set().id());
+
+    let typed_date = query_evaluation_to_envelope(
+        &[QueryPartEvaluationContext::Adding {
+            after: variables(&[(
+                "value",
+                VariableValue::Date(NaiveDate::from_ymd_opt(2026, 9, 8).unwrap()),
+            )]),
+            row_signature: 11,
+        }],
+        query_metadata(1),
+    )
+    .unwrap()
+    .unwrap();
+    let legacy_equivalent_string = query_evaluation_to_envelope(
+        &[QueryPartEvaluationContext::Adding {
+            after: variables(&[("value", VariableValue::String("2026-09-08".to_string()))]),
+            row_signature: 11,
+        }],
+        query_metadata(1),
+    )
+    .unwrap()
+    .unwrap();
+    assert_ne!(
+        typed_date.change_set().id(),
+        legacy_equivalent_string.change_set().id(),
+        "typed values that share a legacy JSON representation must remain distinct"
+    );
+}
+
+#[test]
+fn query_change_set_ids_include_available_epochs() {
+    let contexts = [QueryPartEvaluationContext::Adding {
+        after: variables(&[("name", VariableValue::String("Alice".to_string()))]),
+        row_signature: 11,
+    }];
+    let baseline = query_evaluation_to_envelope(
+        &contexts,
+        query_metadata(1).with_extensions(
+            SystemMetadataExtensions::default()
+                .with_graph_epoch(5)
+                .with_config_epoch(8),
+        ),
+    )
+    .unwrap()
+    .unwrap();
+    let graph_changed = query_evaluation_to_envelope(
+        &contexts,
+        query_metadata(1).with_extensions(
+            SystemMetadataExtensions::default()
+                .with_graph_epoch(6)
+                .with_config_epoch(8),
+        ),
+    )
+    .unwrap()
+    .unwrap();
+    let config_changed = query_evaluation_to_envelope(
+        &contexts,
+        query_metadata(1).with_extensions(
+            SystemMetadataExtensions::default()
+                .with_graph_epoch(5)
+                .with_config_epoch(9),
+        ),
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_ne!(baseline.change_set().id(), graph_changed.change_set().id());
+    assert_ne!(baseline.change_set().id(), config_changed.change_set().id());
 }
 
 #[test]

@@ -27,6 +27,7 @@ pub(crate) use adapters::{
 use std::{
     collections::{HashMap, HashSet},
     fmt,
+    hash::{Hash, Hasher},
     sync::{Arc, OnceLock},
 };
 
@@ -579,6 +580,14 @@ impl SystemMetadataExtensions {
         self.config_epoch = Some(config_epoch);
         self
     }
+
+    pub(crate) const fn graph_epoch(&self) -> Option<u64> {
+        self.graph_epoch
+    }
+
+    pub(crate) const fn config_epoch(&self) -> Option<u64> {
+        self.config_epoch
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -925,8 +934,14 @@ impl StableIdBuilder {
         self.bytes(label, &value.to_le_bytes());
     }
 
-    fn bool(&mut self, label: &str, value: bool) {
+    pub(super) fn bool(&mut self, label: &str, value: bool) {
         self.bytes(label, &[u8::from(value)]);
+    }
+
+    pub(super) fn typed_hash<T: Hash>(&mut self, label: &str, value: &T) {
+        let mut hasher = fnv::FnvHasher::default();
+        value.hash(&mut hasher);
+        self.u64(label, hasher.finish());
     }
 
     fn system(&mut self, system: &SystemMetadata) {
