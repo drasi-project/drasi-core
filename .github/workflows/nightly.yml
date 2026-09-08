@@ -90,7 +90,6 @@ jobs:
       # Nightly test packages are already pullable; skip the org-admin visibility
       # step (it needs a token that can administer org package visibility).
       skip_visibility: true
-    secrets: inherit
 
   # If any job in the nightly failed, open (or update) a tracking issue so the
   # failure is visible without watching Actions.
