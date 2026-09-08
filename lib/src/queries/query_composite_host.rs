@@ -21,7 +21,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{Instant, SystemTime},
@@ -40,7 +40,10 @@ use drasi_core::{
     query::ContinuousQuery,
 };
 use log::{debug, error, info, warn};
-use tokio::sync::{oneshot, Notify, RwLock};
+use tokio::{
+    sync::{oneshot, Mutex as AsyncMutex, Notify, RwLock},
+    task::JoinHandle,
+};
 use tracing::Instrument;
 
 use super::{PriorityQueue, QueryBase, QueryOutputState, SequenceDedup};
@@ -55,6 +58,151 @@ use crate::{
     sources::FutureQueueSource,
 };
 
+/// Shared owner for every task that can enqueue into one query's priority queue.
+///
+/// Fatal atomic processing, normal stop, and restart preparation all use this
+/// single serialized cleanup path. The processor task itself is intentionally
+/// not stored here, so it can fence ingress without aborting itself.
+#[derive(Clone)]
+pub(super) struct QueryIngressFence {
+    subscription_tasks: Arc<RwLock<Vec<JoinHandle<()>>>>,
+    priority_queue: PriorityQueue,
+    cleanup_lock: Arc<AsyncMutex<()>>,
+}
+
+struct AbortTasksOnDrop {
+    tasks: Vec<JoinHandle<()>>,
+}
+
+impl AbortTasksOnDrop {
+    fn new(tasks: Vec<JoinHandle<()>>) -> Self {
+        Self { tasks }
+    }
+
+    fn take(&mut self) -> Vec<JoinHandle<()>> {
+        std::mem::take(&mut self.tasks)
+    }
+}
+
+impl Drop for AbortTasksOnDrop {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+impl QueryIngressFence {
+    pub(super) fn new(priority_queue: PriorityQueue) -> Self {
+        Self {
+            subscription_tasks: Arc::new(RwLock::new(Vec::new())),
+            priority_queue,
+            cleanup_lock: Arc::new(AsyncMutex::new(())),
+        }
+    }
+
+    pub(super) async fn install(&self, tasks: Vec<JoinHandle<()>>) {
+        let mut pending = AbortTasksOnDrop::new(tasks);
+        let _cleanup = self.cleanup_lock.lock().await;
+        let mut old_tasks = AbortTasksOnDrop::new({
+            let mut installed = self.subscription_tasks.write().await;
+            let old_tasks = installed.drain(..).collect();
+            *installed = pending.take();
+            old_tasks
+        });
+        Self::abort_and_reap(old_tasks.take()).await;
+    }
+
+    pub(super) async fn push(&self, task: JoinHandle<()>) {
+        let mut pending = AbortTasksOnDrop::new(vec![task]);
+        let _cleanup = self.cleanup_lock.lock().await;
+        self.subscription_tasks
+            .write()
+            .await
+            .push(pending.take().pop().expect("pending query ingress task"));
+    }
+
+    pub(super) async fn close(&self) {
+        let _cleanup = self.cleanup_lock.lock().await;
+        let tasks = {
+            let mut installed = self.subscription_tasks.write().await;
+            installed.drain(..).collect()
+        };
+        Self::abort_and_reap(tasks).await;
+
+        let drained = self.priority_queue.drain().await.len();
+        if drained > 0 {
+            debug!("Discarded {drained} queued events while fencing query ingress");
+        }
+    }
+
+    async fn abort_and_reap(tasks: Vec<JoinHandle<()>>) {
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+    }
+
+    pub(super) async fn task_count(&self) -> usize {
+        self.subscription_tasks.read().await.len()
+    }
+}
+
+/// In-process fence for an output that committed durably but was not applied
+/// to the host's in-memory output state.
+#[derive(Clone, Default)]
+pub(super) struct AtomicPublicationRecovery {
+    required: Arc<AtomicBool>,
+}
+
+impl AtomicPublicationRecovery {
+    pub(super) fn is_required(&self) -> bool {
+        self.required.load(Ordering::Acquire)
+    }
+
+    fn require(&self) {
+        self.required.store(true, Ordering::Release);
+    }
+
+    fn reconcile_in_memory(&self) {
+        self.required.store(false, Ordering::Release);
+    }
+}
+
+struct CommittedPublicationGuard {
+    recovery: AtomicPublicationRecovery,
+    armed: bool,
+}
+
+impl CommittedPublicationGuard {
+    fn new(recovery: AtomicPublicationRecovery, has_output: bool) -> Self {
+        if has_output {
+            recovery.require();
+        }
+        Self {
+            recovery,
+            armed: has_output,
+        }
+    }
+
+    fn complete(mut self) {
+        if self.armed {
+            self.recovery.reconcile_in_memory();
+            self.armed = false;
+        }
+    }
+}
+
+impl Drop for CommittedPublicationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.recovery.require();
+        }
+    }
+}
+
 /// Dependencies that define the lifecycle and ingress boundary of the fixed query host.
 pub(super) struct QueryHostRuntime {
     instance_id: String,
@@ -63,6 +211,7 @@ pub(super) struct QueryHostRuntime {
     bootstrap_gate: Arc<Notify>,
     status_handle: ComponentStatusHandle,
     future_queue_source: Arc<FutureQueueSource>,
+    ingress_fence: QueryIngressFence,
 }
 
 impl QueryHostRuntime {
@@ -73,6 +222,7 @@ impl QueryHostRuntime {
         bootstrap_gate: Arc<Notify>,
         status_handle: ComponentStatusHandle,
         future_queue_source: Arc<FutureQueueSource>,
+        ingress_fence: QueryIngressFence,
     ) -> Self {
         Self {
             instance_id,
@@ -81,6 +231,7 @@ impl QueryHostRuntime {
             bootstrap_gate,
             status_handle,
             future_queue_source,
+            ingress_fence,
         }
     }
 }
@@ -192,6 +343,7 @@ pub(super) struct QueryOutputDependencies {
     outbox_capacity: usize,
     output_metrics: Arc<QueryOutputMetrics>,
     observer: Option<Arc<dyn QueryProcessingObserver>>,
+    publication_recovery: AtomicPublicationRecovery,
 }
 
 impl QueryOutputDependencies {
@@ -216,7 +368,16 @@ impl QueryOutputDependencies {
             outbox_capacity,
             output_metrics,
             observer: None,
+            publication_recovery: AtomicPublicationRecovery::default(),
         }
+    }
+
+    pub(super) fn with_publication_recovery(
+        mut self,
+        publication_recovery: AtomicPublicationRecovery,
+    ) -> Self {
+        self.publication_recovery = publication_recovery;
+        self
     }
 
     #[cfg(test)]
@@ -235,6 +396,7 @@ pub(super) struct QueryCompositeHost {
     live_input: LiveInputStage,
     future_processing: FutureProcessingStage,
     source_acknowledgement: SourceAcknowledgement,
+    publication_recovery: AtomicPublicationRecovery,
 }
 
 impl QueryCompositeHost {
@@ -244,6 +406,7 @@ impl QueryCompositeHost {
         live: QueryLiveDependencies,
         output: QueryOutputDependencies,
     ) -> Self {
+        let publication_recovery = output.publication_recovery.clone();
         let output = Arc::new(OutputPublicationStage::new(output));
         let continuous_query = live.continuous_query;
 
@@ -264,6 +427,7 @@ impl QueryCompositeHost {
                 live.checkpoint_sequences,
                 live.position_handles,
             ),
+            publication_recovery,
         }
     }
 
@@ -340,6 +504,8 @@ impl QueryCompositeHost {
                 "Query '{}' failed to start FutureQueueSource: {e}",
                 self.runtime.query_id
             );
+            self.runtime.ingress_fence.close().await;
+            self.runtime.future_queue_source.stop().await;
             self.runtime
                 .status_handle
                 .set_status(
@@ -379,17 +545,28 @@ impl QueryCompositeHost {
                 arc_event = self.runtime.priority_queue.dequeue() => {
                     if let Err(e) = self.process_event(arc_event).await {
                         let detail = format!("{e:#}");
+                        self.runtime.ingress_fence.close().await;
+                        let status_detail = if self.publication_recovery.is_required() {
+                            format!(
+                                "Atomic output committed before in-memory publication; \
+                                 ingress is fenced and in-process restart requires A7 \
+                                 output reconciliation: {detail}"
+                            )
+                        } else {
+                            format!(
+                                "Atomic query processing failed before publication; \
+                                 ingress is fenced and a clean stop/start can replay it: {detail}"
+                            )
+                        };
                         error!(
-                            "Query '{}' fenced after recoverable atomic processing failure: {detail}",
+                            "Query '{}' {status_detail}",
                             self.runtime.query_id
                         );
                         self.runtime
                             .status_handle
                             .set_status(
                                 ComponentStatus::Error,
-                                Some(format!(
-                                    "Atomic query processing failed; restart can recover durable work: {detail}"
-                                )),
+                                Some(status_detail),
                             )
                             .await;
                         break;
@@ -398,6 +575,7 @@ impl QueryCompositeHost {
             }
         }
 
+        self.runtime.ingress_fence.close().await;
         self.runtime.future_queue_source.stop().await;
         info!("Query '{}' processing task exited", self.runtime.query_id);
     }
@@ -669,7 +847,7 @@ impl LiveInputStage {
         let checkpoint_position = input.source_position.clone();
         let sequence = input.sequence;
 
-        let committed_results = self
+        let transaction_result = self
             .continuous_query
             .process_source_change_with_result_hook(
                 input.source_change,
@@ -707,12 +885,30 @@ impl LiveInputStage {
                         *slot = Some(prepared);
                     }
 
-                    output.observe_output_staged().await
+                    output.observe_output_staged().await?;
+                    if has_query_output(&results) {
+                        // Arm before the cancellable backend commit begins.
+                        output.arm_publication_recovery();
+                    }
+                    Ok(())
                 },
             )
-            .await
-            .context("atomic source transaction failed before commit")?;
+            .await;
+        let committed_results = match transaction_result {
+            Ok(results) => results,
+            Err(error) => {
+                // A returned error means SessionGuard completed rollback. An abort
+                // during commit never reaches here and leaves the fence armed.
+                self.output.clear_publication_recovery();
+                return Err(error).context("atomic source transaction failed before commit");
+            }
+        };
 
+        // Keep this synchronous with the completed commit: cancellation must
+        // never observe durable output before the recovery fence is armed.
+        let publication_guard = self
+            .output
+            .committed_publication_guard(has_query_output(&committed_results));
         self.output
             .observe_commit_before_publish()
             .await
@@ -733,6 +929,8 @@ impl LiveInputStage {
             )?),
             None => None,
         };
+        // `apply_committed` is the only await between arming and clearing.
+        publication_guard.complete();
 
         acknowledgement.advance(input.source_id.as_ref(), input.sequence);
         self.output.observe_source_acknowledged();
@@ -868,7 +1066,7 @@ impl FutureProcessingStage {
             let mut profiling = ProfilingMetadata::new();
             profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
 
-            let due_result = self
+            let transaction_result = self
                 .continuous_query
                 .process_due_futures_with_result_hook(
                     &resources.transaction,
@@ -895,16 +1093,35 @@ impl FutureProcessingStage {
                             *slot = Some(prepared);
                         }
 
-                        output.observe_output_staged().await
+                        output.observe_output_staged().await?;
+                        if has_query_output(&due_result.results) {
+                            // Arm before the cancellable backend commit begins.
+                            output.arm_publication_recovery();
+                        }
+                        Ok(())
                     },
                 )
-                .await
-                .context("atomic due-future transaction failed before commit")?;
+                .await;
+            let due_result = match transaction_result {
+                Ok(result) => result,
+                Err(error) => {
+                    // A returned error means SessionGuard completed rollback. An
+                    // abort during commit leaves this recovery fence armed.
+                    self.output.clear_publication_recovery();
+                    return Err(error)
+                        .context("atomic due-future transaction failed before commit");
+                }
+            };
 
             let Some(due_result) = due_result else {
                 break;
             };
 
+            // Keep this synchronous with the completed commit: cancellation must
+            // never observe durable output before the recovery fence is armed.
+            let publication_guard = self
+                .output
+                .committed_publication_guard(has_query_output(&due_result.results));
             self.output.observe_commit_before_publish().await.context(
                 "atomic due-future transaction committed before publication was interrupted",
             )?;
@@ -926,7 +1143,11 @@ impl FutureProcessingStage {
                         .context(
                             "durable due-future output committed but in-memory publication invariant failed",
                         )?;
+                // `apply_committed` is the only await between arming and clearing.
+                publication_guard.complete();
                 self.output.dispatch(result).await;
+            } else {
+                publication_guard.complete();
             }
         }
 
@@ -953,6 +1174,7 @@ struct OutputPublicationStage {
     outbox_capacity: usize,
     output_metrics: Arc<QueryOutputMetrics>,
     observer: Option<Arc<dyn QueryProcessingObserver>>,
+    publication_recovery: AtomicPublicationRecovery,
 }
 
 impl OutputPublicationStage {
@@ -967,6 +1189,7 @@ impl OutputPublicationStage {
             outbox_capacity: dependencies.outbox_capacity,
             output_metrics: dependencies.output_metrics,
             observer: dependencies.observer,
+            publication_recovery: dependencies.publication_recovery,
         }
     }
 
@@ -1069,6 +1292,18 @@ impl OutputPublicationStage {
             Some(observer) => observer.after_commit_before_publish().await,
             None => Ok(()),
         }
+    }
+
+    fn committed_publication_guard(&self, has_output: bool) -> CommittedPublicationGuard {
+        CommittedPublicationGuard::new(self.publication_recovery.clone(), has_output)
+    }
+
+    fn arm_publication_recovery(&self) {
+        self.publication_recovery.require();
+    }
+
+    fn clear_publication_recovery(&self) {
+        self.publication_recovery.reconcile_in_memory();
     }
 
     fn observe_source_acknowledged(&self) {
@@ -1520,6 +1755,7 @@ mod tests {
                 bootstrap_gate.clone(),
                 base.status_handle(),
                 future_queue_source.clone(),
+                QueryIngressFence::new(priority_queue.clone()),
             ),
             QueryProcessingMode::legacy(),
             QueryLiveDependencies::new(

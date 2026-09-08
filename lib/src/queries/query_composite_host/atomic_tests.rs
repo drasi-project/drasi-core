@@ -65,10 +65,11 @@ impl QueryConfiguration for AtomicTestQueryConfig {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum BackendFault {
     None,
     Commit,
+    CommitThenBlock(Arc<CommitBlock>),
     OutboxStage,
     LiveResultsStage,
 }
@@ -90,6 +91,57 @@ impl SessionControl for FailingCommitSessionControl {
 
     async fn commit(&self) -> std::result::Result<(), IndexError> {
         Err(IndexError::CorruptedData)
+    }
+
+    fn rollback(&self) -> std::result::Result<(), IndexError> {
+        self.inner.rollback()
+    }
+}
+
+struct CommitBlock {
+    committed_tx: Mutex<Option<oneshot::Sender<()>>>,
+    commits_before_block: AtomicUsize,
+}
+
+struct CommitThenBlockSessionControl {
+    inner: Arc<dyn SessionControl>,
+    transaction_domain: TransactionDomain,
+    block: Arc<CommitBlock>,
+}
+
+#[async_trait]
+impl SessionControl for CommitThenBlockSessionControl {
+    fn transaction_domain(&self) -> Option<TransactionDomain> {
+        Some(self.transaction_domain.clone())
+    }
+
+    async fn begin(&self) -> std::result::Result<(), IndexError> {
+        self.inner.begin().await
+    }
+
+    async fn commit(&self) -> std::result::Result<(), IndexError> {
+        if self
+            .block
+            .commits_before_block
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return self.inner.commit().await;
+        }
+
+        self.inner.commit().await?;
+        if let Some(committed_tx) = self
+            .block
+            .committed_tx
+            .lock()
+            .expect("commit-block signal lock poisoned")
+            .take()
+        {
+            let _ = committed_tx.send(());
+        }
+        std::future::pending().await
     }
 
     fn rollback(&self) -> std::result::Result<(), IndexError> {
@@ -219,6 +271,7 @@ struct AtomicHostFixture {
     session_control: Arc<dyn SessionControl>,
     continuous_query: Arc<ContinuousQuery>,
     position_handle: Arc<AtomicU64>,
+    publication_recovery: AtomicPublicationRecovery,
 }
 
 async fn build_host(
@@ -244,6 +297,17 @@ async fn build_host(
             created.set.session_control = Arc::new(FailingCommitSessionControl {
                 inner,
                 transaction_domain,
+            });
+        }
+        BackendFault::CommitThenBlock(block) => {
+            let inner = created.set.session_control.clone();
+            let transaction_domain = inner
+                .transaction_domain()
+                .expect("RocksDB session transaction domain");
+            created.set.session_control = Arc::new(CommitThenBlockSessionControl {
+                inner,
+                transaction_domain,
+                block,
             });
         }
         BackendFault::OutboxStage => {
@@ -344,6 +408,8 @@ async fn build_host(
     ));
     let position_handle = Arc::new(AtomicU64::new(u64::MAX));
     let position_handles = HashMap::from([(SOURCE_ID.to_string(), position_handle.clone())]);
+    let ingress_fence = QueryIngressFence::new(priority_queue.clone());
+    let publication_recovery = AtomicPublicationRecovery::default();
 
     let output_dependencies = QueryOutputDependencies::new(
         QUERY_ID.to_string(),
@@ -354,7 +420,8 @@ async fn build_host(
         Some(checkpoint_store.clone()),
         16,
         Arc::new(QueryOutputMetrics::new()),
-    );
+    )
+    .with_publication_recovery(publication_recovery.clone());
     let output_dependencies = match observer {
         Some(observer) => output_dependencies.with_observer(observer),
         None => output_dependencies,
@@ -368,6 +435,7 @@ async fn build_host(
             bootstrap_gate.clone(),
             base.status_handle(),
             future_queue_source.clone(),
+            ingress_fence,
         ),
         mode,
         QueryLiveDependencies::new(
@@ -397,6 +465,7 @@ async fn build_host(
             session_control,
             continuous_query,
             position_handle,
+            publication_recovery,
         },
     )
 }
@@ -597,6 +666,32 @@ impl QueryProcessingObserver for FailAfterCommitObserver {
     }
 }
 
+struct BlockAfterCommitObserver {
+    committed_tx: Mutex<Option<oneshot::Sender<()>>>,
+    release_rx: AsyncMutex<Option<oneshot::Receiver<()>>>,
+}
+
+#[async_trait]
+impl QueryProcessingObserver for BlockAfterCommitObserver {
+    async fn after_commit_before_publish(&self) -> anyhow::Result<()> {
+        if let Some(committed_tx) = self
+            .committed_tx
+            .lock()
+            .expect("commit signal lock poisoned")
+            .take()
+        {
+            let _ = committed_tx.send(());
+        }
+        self.release_rx
+            .lock()
+            .await
+            .take()
+            .expect("commit release receiver already consumed")
+            .await
+            .map_err(|_| anyhow::anyhow!("commit release signal dropped"))
+    }
+}
+
 struct StaleSequenceAfterCommitObserver {
     output_state: Mutex<Option<Arc<RwLock<QueryOutputState>>>>,
 }
@@ -743,6 +838,7 @@ async fn rocksdb_atomic_source_commits_every_resource_before_ack_and_dispatch() 
     assert_eq!(fixture.position_handle.load(Ordering::Acquire), 1);
     assert_eq!(fixture.dispatch_count.load(Ordering::Acquire), 1);
     assert!(element_exists(&fixture, "person-success").await);
+    assert!(!fixture.publication_recovery.is_required());
 
     stop_host(&fixture).await;
 }
@@ -800,6 +896,10 @@ async fn rocksdb_atomic_source_fault_matrix_rolls_back_and_fences() {
             fixture.dispatch_count.load(Ordering::Acquire),
             0,
             "{name}: result was dispatched"
+        );
+        assert!(
+            !fixture.publication_recovery.is_required(),
+            "{name}: pre-commit failure incorrectly requires output reconciliation"
         );
         assert!(
             !element_exists(&fixture, &format!("person-{name}")).await,
@@ -884,6 +984,190 @@ async fn cancellation_during_atomic_hook_rolls_back_without_ack_or_dispatch() {
 }
 
 #[tokio::test]
+async fn cancellation_after_commit_marks_output_recovery_required() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let (committed_tx, committed_rx) = oneshot::channel();
+    let (_release_tx, release_rx) = oneshot::channel();
+    let observer = Arc::new(BlockAfterCommitObserver {
+        committed_tx: Mutex::new(Some(committed_tx)),
+        release_rx: AsyncMutex::new(Some(release_rx)),
+    });
+    let (host, fixture) = build_host(
+        temp_dir.path(),
+        "MATCH (n:Person) RETURN n.name AS name",
+        BackendFault::None,
+        false,
+        Some(observer),
+    )
+    .await;
+    start_host(host, &fixture).await;
+
+    enqueue_source_change(
+        &fixture,
+        "person-post-commit-cancelled",
+        "Committed",
+        10,
+        Bytes::from_static(b"post-commit-cancelled-position"),
+    )
+    .await;
+    committed_rx
+        .await
+        .expect("observer should report committed output");
+    assert!(fixture.publication_recovery.is_required());
+
+    let task = fixture
+        .base
+        .task_handle
+        .write()
+        .await
+        .take()
+        .expect("host task handle");
+    task.abort();
+    assert!(task
+        .await
+        .expect_err("aborted host task should not complete")
+        .is_cancelled());
+
+    assert!(fixture.publication_recovery.is_required());
+    assert_eq!(fixture.output_state.read().await.as_of_sequence(), 0);
+    assert_eq!(fixture.position_handle.load(Ordering::Acquire), u64::MAX);
+    assert_eq!(fixture.dispatch_count.load(Ordering::Acquire), 0);
+    assert_eq!(
+        fixture
+            .checkpoint_store
+            .read_result_sequence(QUERY_ID)
+            .await
+            .expect("read committed result sequence"),
+        Some(1)
+    );
+    fixture.future_queue_source.stop().await;
+}
+
+#[tokio::test]
+async fn cancellation_while_source_commit_returns_late_keeps_recovery_fence_armed() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let (committed_tx, committed_rx) = oneshot::channel();
+    let commit_block = Arc::new(CommitBlock {
+        committed_tx: Mutex::new(Some(committed_tx)),
+        commits_before_block: AtomicUsize::new(0),
+    });
+    let (host, fixture) = build_host(
+        temp_dir.path(),
+        "MATCH (n:Person) RETURN n.name AS name",
+        BackendFault::CommitThenBlock(commit_block),
+        false,
+        None,
+    )
+    .await;
+    start_host(host, &fixture).await;
+    enqueue_source_change(
+        &fixture,
+        "person-commit-cancelled",
+        "Committed",
+        12,
+        Bytes::from_static(b"commit-cancelled-position"),
+    )
+    .await;
+    committed_rx.await.expect("source commit should complete");
+    assert!(fixture.publication_recovery.is_required());
+
+    let task = fixture
+        .base
+        .task_handle
+        .write()
+        .await
+        .take()
+        .expect("host task handle");
+    task.abort();
+    assert!(task
+        .await
+        .expect_err("aborted host task should not complete")
+        .is_cancelled());
+
+    assert!(fixture.publication_recovery.is_required());
+    assert_eq!(fixture.output_state.read().await.as_of_sequence(), 0);
+    assert_eq!(fixture.position_handle.load(Ordering::Acquire), u64::MAX);
+    assert_eq!(fixture.dispatch_count.load(Ordering::Acquire), 0);
+    assert_eq!(
+        fixture
+            .checkpoint_store
+            .read_result_sequence(QUERY_ID)
+            .await
+            .expect("read committed result sequence"),
+        Some(1)
+    );
+    assert_eq!(
+        fixture
+            .outbox_writer
+            .read_from(QUERY_ID, 0)
+            .await
+            .expect("read committed outbox")
+            .len(),
+        1
+    );
+    fixture.future_queue_source.stop().await;
+}
+
+#[tokio::test]
+async fn cancellation_while_future_commit_returns_late_keeps_recovery_fence_armed() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let (committed_tx, committed_rx) = oneshot::channel();
+    let commit_block = Arc::new(CommitBlock {
+        committed_tx: Mutex::new(Some(committed_tx)),
+        commits_before_block: AtomicUsize::new(1),
+    });
+    let (host, fixture) = build_host(
+        temp_dir.path(),
+        "MATCH (n:Person) WHERE drasi.trueLater(true, 2000) RETURN n.name AS name",
+        BackendFault::CommitThenBlock(commit_block),
+        false,
+        None,
+    )
+    .await;
+    seed_due_future(&fixture).await;
+    start_host(host, &fixture).await;
+    enqueue_futures_due(&fixture).await;
+    committed_rx
+        .await
+        .expect("due-future commit should complete");
+    assert!(fixture.publication_recovery.is_required());
+
+    let task = fixture
+        .base
+        .task_handle
+        .write()
+        .await
+        .take()
+        .expect("host task handle");
+    task.abort();
+    assert!(task
+        .await
+        .expect_err("aborted host task should not complete")
+        .is_cancelled());
+
+    assert!(fixture.publication_recovery.is_required());
+    assert_eq!(fixture.output_state.read().await.as_of_sequence(), 0);
+    assert_eq!(fixture.dispatch_count.load(Ordering::Acquire), 0);
+    assert_eq!(
+        fixture
+            .future_queue
+            .peek_due_time()
+            .await
+            .expect("peek committed future"),
+        None
+    );
+    assert_eq!(
+        fixture
+            .checkpoint_store
+            .read_result_sequence(QUERY_ID)
+            .await
+            .expect("read future result sequence"),
+        Some(1)
+    );
+    fixture.future_queue_source.stop().await;
+}
+
+#[tokio::test]
 async fn failure_after_commit_leaves_authoritative_output_without_publication() {
     let temp_dir = tempfile::TempDir::new().expect("create temp directory");
     let (host, fixture) = build_host(
@@ -945,6 +1229,7 @@ async fn failure_after_commit_leaves_authoritative_output_without_publication() 
     assert_eq!(fixture.output_state.read().await.as_of_sequence(), 0);
     assert_eq!(fixture.position_handle.load(Ordering::Acquire), u64::MAX);
     assert_eq!(fixture.dispatch_count.load(Ordering::Acquire), 0);
+    assert!(fixture.publication_recovery.is_required());
 
     stop_host(&fixture).await;
 }
@@ -990,6 +1275,7 @@ async fn stale_prepared_sequence_after_commit_is_fatal_and_not_acknowledged() {
     assert_eq!(fixture.position_handle.load(Ordering::Acquire), u64::MAX);
     assert_eq!(fixture.dispatch_count.load(Ordering::Acquire), 0);
     assert_eq!(fixture.output_state.read().await.as_of_sequence(), 1);
+    assert!(fixture.publication_recovery.is_required());
 
     stop_host(&fixture).await;
 }
@@ -1207,6 +1493,55 @@ async fn due_future_stage_failure_retains_future_and_publishes_nothing() {
     assert_no_durable_output(&fixture).await;
     assert_eq!(fixture.output_state.read().await.as_of_sequence(), 0);
     assert_eq!(fixture.dispatch_count.load(Ordering::Acquire), 0);
+
+    stop_host(&fixture).await;
+}
+
+#[tokio::test]
+async fn due_future_post_commit_failure_requires_output_reconciliation() {
+    let temp_dir = tempfile::TempDir::new().expect("create temp directory");
+    let (host, fixture) = build_host(
+        temp_dir.path(),
+        "MATCH (n:Person) WHERE drasi.trueLater(true, 2000) RETURN n.name AS name",
+        BackendFault::None,
+        false,
+        Some(Arc::new(FailAfterCommitObserver)),
+    )
+    .await;
+    seed_due_future(&fixture).await;
+    start_host(host, &fixture).await;
+    enqueue_futures_due(&fixture).await;
+    wait_for_status(&fixture.base, ComponentStatus::Error).await;
+
+    assert_eq!(
+        fixture
+            .future_queue
+            .peek_due_time()
+            .await
+            .expect("peek committed future"),
+        None,
+        "the future pop committed before publication failed"
+    );
+    assert_eq!(
+        fixture
+            .checkpoint_store
+            .read_result_sequence(QUERY_ID)
+            .await
+            .expect("read future result sequence"),
+        Some(1)
+    );
+    assert_eq!(
+        fixture
+            .outbox_writer
+            .read_from(QUERY_ID, 0)
+            .await
+            .expect("read future outbox")
+            .len(),
+        1
+    );
+    assert_eq!(fixture.output_state.read().await.as_of_sequence(), 0);
+    assert_eq!(fixture.dispatch_count.load(Ordering::Acquire), 0);
+    assert!(fixture.publication_recovery.is_required());
 
     stop_host(&fixture).await;
 }

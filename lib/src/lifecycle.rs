@@ -199,7 +199,7 @@ impl LifecycleManager {
             };
             if !matches!(
                 live_status,
-                ComponentStatus::Running | ComponentStatus::Starting
+                ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Error
             ) {
                 continue;
             }
@@ -329,6 +329,40 @@ mod tests {
 
         let status = core.get_source_status("stop-src").await.unwrap();
         assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn stop_all_components_cleans_up_error_components() {
+        let source = TestMockSource::with_auto_start("error-src".to_string(), true).unwrap();
+        let core = build_with_sources(vec![source]).await;
+        let mut event_rx = core.component_graph.read().await.subscribe();
+        core.start().await.unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "error-src",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
+        core.component_graph
+            .write()
+            .await
+            .validate_and_transition("error-src", ComponentStatus::Error, None)
+            .unwrap();
+
+        core.stop().await.unwrap();
+
+        wait_for_component_status(
+            &mut event_rx,
+            "error-src",
+            ComponentStatus::Stopped,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            core.get_source_status("error-src").await.unwrap(),
+            ComponentStatus::Stopped
+        );
     }
 
     #[tokio::test]

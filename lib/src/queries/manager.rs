@@ -17,8 +17,9 @@ use async_trait::async_trait;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::Arc;
-use tokio::sync::{Notify, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::{oneshot, Mutex, Notify, RwLock};
 
 // Import drasi-core components
 use drasi_core::{
@@ -52,8 +53,8 @@ use crate::queries::output_state::{
 #[cfg(test)]
 use crate::queries::query_composite_host::dispatch_query_results;
 use crate::queries::query_composite_host::{
-    QueryCompositeHost, QueryHostRuntime, QueryLiveDependencies, QueryOutputDependencies,
-    QueryProcessingMode,
+    AtomicPublicationRecovery, QueryCompositeHost, QueryHostRuntime, QueryIngressFence,
+    QueryLiveDependencies, QueryOutputDependencies, QueryProcessingMode, QueryProcessingObserver,
 };
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
@@ -271,6 +272,66 @@ enum BootstrapPhase {
     Completed,
 }
 
+#[derive(Default)]
+struct PendingBootstrapAborts {
+    handles: Vec<tokio::task::AbortHandle>,
+}
+
+impl PendingBootstrapAborts {
+    fn push(&mut self, handle: tokio::task::AbortHandle) {
+        self.handles.push(handle);
+    }
+
+    fn into_handles(mut self) -> Vec<tokio::task::AbortHandle> {
+        std::mem::take(&mut self.handles)
+    }
+}
+
+impl Drop for PendingBootstrapAborts {
+    fn drop(&mut self) {
+        for handle in &self.handles {
+            handle.abort();
+        }
+    }
+}
+
+struct StartupCancellationRegistration {
+    slot: Arc<StdMutex<Option<oneshot::Sender<()>>>>,
+}
+
+impl StartupCancellationRegistration {
+    fn install(slot: Arc<StdMutex<Option<oneshot::Sender<()>>>>) -> (Self, oneshot::Receiver<()>) {
+        let (sender, receiver) = oneshot::channel();
+        let mut current = slot
+            .lock()
+            .expect("query startup cancellation lock poisoned");
+        debug_assert!(
+            current.is_none(),
+            "query startup cancellation was not cleared"
+        );
+        *current = Some(sender);
+        drop(current);
+        (Self { slot }, receiver)
+    }
+}
+
+impl Drop for StartupCancellationRegistration {
+    fn drop(&mut self) {
+        self.slot
+            .lock()
+            .expect("query startup cancellation lock poisoned")
+            .take();
+    }
+}
+
+struct StopRequestReset(Arc<AtomicBool>);
+
+impl Drop for StopRequestReset {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 pub struct DrasiQuery {
     // DrasiLib instance ID for log routing isolation
     instance_id: String,
@@ -283,8 +344,16 @@ pub struct DrasiQuery {
     priority_queue: PriorityQueue,
     // Reference to SourceManager for direct subscription
     source_manager: Arc<SourceManager>,
-    // Track subscription tasks for cleanup
-    subscription_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
+    // Own every source/future forwarder that can enqueue into the query.
+    ingress_fence: QueryIngressFence,
+    // Serialize start/stop so task handles cannot be replaced during cleanup.
+    lifecycle_lock: Arc<Mutex<()>>,
+    // Lets stop cancel a source subscription before waiting for lifecycle serialization.
+    startup_cancel: Arc<StdMutex<Option<oneshot::Sender<()>>>>,
+    // Level-triggered stop intent closes the gap before startup registers its sender.
+    stop_requested: Arc<AtomicBool>,
+    // Blocks unsafe in-process restart after committed output missed in-memory apply.
+    publication_recovery: AtomicPublicationRecovery,
     // Abort handles for bootstrap + supervisor tasks (for cleanup on stop)
     bootstrap_abort_handles: Arc<RwLock<Vec<tokio::task::AbortHandle>>>,
     // Track bootstrap state per source
@@ -309,6 +378,8 @@ pub struct DrasiQuery {
     subscribed_source_ids: Arc<RwLock<Vec<String>>>,
     // Per-query output metrics (outbox, sequence, snapshot health)
     output_metrics: Arc<QueryOutputMetrics>,
+    #[cfg(test)]
+    processing_observer: Arc<RwLock<Option<Arc<dyn QueryProcessingObserver>>>>,
 }
 
 impl DrasiQuery {
@@ -323,6 +394,7 @@ impl DrasiQuery {
         // Create priority queue with configured capacity (fallback to 10000 if not set)
         let priority_capacity = config.priority_queue_capacity.unwrap_or(10000);
         let priority_queue = PriorityQueue::new(priority_capacity);
+        let ingress_fence = QueryIngressFence::new(priority_queue.clone());
         let outbox_capacity = config.outbox_capacity;
         let bootstrap_timeout = std::time::Duration::from_secs(config.bootstrap_timeout_secs);
         let config_hash = crate::queries::compute_config_hash(&config);
@@ -343,7 +415,11 @@ impl DrasiQuery {
             config_hash,
             priority_queue,
             source_manager,
-            subscription_tasks: Arc::new(RwLock::new(Vec::new())),
+            ingress_fence,
+            lifecycle_lock: Arc::new(Mutex::new(())),
+            startup_cancel: Arc::new(StdMutex::new(None)),
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            publication_recovery: AtomicPublicationRecovery::default(),
             bootstrap_abort_handles: Arc::new(RwLock::new(Vec::new())),
             bootstrap_state: Arc::new(RwLock::new(HashMap::new())),
             index_factory,
@@ -356,6 +432,8 @@ impl DrasiQuery {
             resolved_recovery_policy,
             subscribed_source_ids: Arc::new(RwLock::new(Vec::new())),
             output_metrics: Arc::new(QueryOutputMetrics::new()),
+            #[cfg(test)]
+            processing_observer: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -365,6 +443,57 @@ impl DrasiQuery {
     /// pattern as Source and Reaction initialization.
     pub async fn initialize(&self, context: crate::context::QueryRuntimeContext) {
         self.base.initialize(context).await;
+    }
+
+    async fn abort_bootstrap_tasks(&self) {
+        let bootstrap_aborts: Vec<_> = {
+            let mut handles = self.bootstrap_abort_handles.write().await;
+            handles.drain(..).collect()
+        };
+        for handle in bootstrap_aborts {
+            handle.abort();
+        }
+    }
+
+    async fn stop_future_queue_source(&self) {
+        if let Some(source) = self.future_queue_source.write().await.take() {
+            source.stop().await;
+        }
+    }
+
+    async fn release_position_handles(&self) {
+        let source_ids = {
+            let mut source_ids = self.subscribed_source_ids.write().await;
+            std::mem::take(&mut *source_ids)
+        };
+        for source_id in source_ids {
+            if let Some(source) = self.source_manager.get_source_instance(&source_id).await {
+                source.remove_position_handle(&self.base.config.id).await;
+                debug!(
+                    "Query '{}' released position handle for source '{}'",
+                    self.base.config.id, source_id
+                );
+            }
+        }
+    }
+
+    async fn reap_previous_runtime(&self) {
+        self.ingress_fence.close().await;
+        self.abort_bootstrap_tasks().await;
+        self.stop_future_queue_source().await;
+        self.base.reap_task().await;
+        self.release_position_handles().await;
+    }
+
+    fn cancel_startup(&self) {
+        if let Some(cancel) = self
+            .startup_cancel
+            .lock()
+            .expect("query startup cancellation lock poisoned")
+            .take()
+        {
+            let _ = cancel.send(());
+        }
     }
 
     pub async fn get_current_results(&self) -> Vec<serde_json::Value> {
@@ -419,13 +548,38 @@ impl DrasiQuery {
 impl DrasiQuery {
     /// Count active subscription forwarder tasks (testing helper)
     pub async fn subscription_task_count(&self) -> usize {
-        self.subscription_tasks.read().await.len()
+        self.ingress_fence.task_count().await
     }
 
     /// Access the checkpoint store (for internal/test use only).
     #[doc(hidden)]
     pub async fn get_checkpoint_store(&self) -> Option<Arc<dyn CheckpointStore>> {
         self.checkpoint_store.read().await.clone()
+    }
+
+    pub(super) async fn set_processing_observer(
+        &self,
+        observer: Option<Arc<dyn QueryProcessingObserver>>,
+    ) {
+        *self.processing_observer.write().await = observer;
+    }
+
+    pub(crate) fn publication_recovery_required(&self) -> bool {
+        self.publication_recovery.is_required()
+    }
+
+    pub(crate) async fn get_outbox_writer(&self) -> Option<Arc<dyn OutboxWriter>> {
+        self.outbox_writer.read().await.clone()
+    }
+
+    pub(super) async fn set_local_status_for_test(&self, status: ComponentStatus) {
+        self.base
+            .set_status(status, Some("test transition".to_string()))
+            .await;
+    }
+
+    pub(super) async fn output_sequence_for_test(&self) -> u64 {
+        self.output_state.read().await.as_of_sequence()
     }
 }
 
@@ -489,10 +643,24 @@ async fn clear_persistent_indexes(
     Ok(())
 }
 
-#[async_trait]
-impl Query for DrasiQuery {
-    async fn start(&self) -> Result<()> {
+impl DrasiQuery {
+    async fn start_inner(&self) -> Result<()> {
         log_component_start("Query", &self.base.config.id);
+
+        self.reap_previous_runtime().await;
+        if self.publication_recovery.is_required() {
+            let message = format!(
+                "Query '{}' cannot restart in process because atomic output committed before \
+                 in-memory publication; A7 output reconciliation is required to preserve the \
+                 durable result sequence",
+                self.base.config.id
+            );
+            error!("{message}");
+            self.base
+                .set_status(ComponentStatus::Error, Some(message.clone()))
+                .await;
+            return Err(anyhow::anyhow!(message));
+        }
 
         self.bootstrap_state.write().await.clear();
 
@@ -954,8 +1122,6 @@ impl Query for DrasiQuery {
                 tokio::sync::oneshot::Receiver<anyhow::Result<crate::bootstrap::BootstrapResult>>,
             >,
         )> = Vec::new();
-        let mut subscription_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-
         // Build list of sources to subscribe to
         let mut sources_to_subscribe: Vec<(String, Arc<dyn Source>, SourceSubscriptionSettings)> =
             Vec::new();
@@ -977,10 +1143,7 @@ impl Query for DrasiQuery {
                         self.base.config.id, source_id
                     );
                     // Cleanup already-spawned tasks before returning error
-                    for handle in subscription_tasks.drain(..) {
-                        handle.abort();
-                        let _ = handle.await;
-                    }
+                    self.ingress_fence.close().await;
                     self.base
                         .set_status(
                             ComponentStatus::Error,
@@ -1027,6 +1190,13 @@ impl Query for DrasiQuery {
             }
         }
 
+        // Register every intended source before the first cancellable subscribe.
+        // Stop/restart cleanup can then remove partial-start position/replay state.
+        *self.subscribed_source_ids.write().await = sources_to_subscribe
+            .iter()
+            .map(|(id, _, _)| id.clone())
+            .collect();
+
         let mut position_handles: std::collections::HashMap<
             String,
             Arc<std::sync::atomic::AtomicU64>,
@@ -1052,7 +1222,7 @@ impl Query for DrasiQuery {
                 }
                 // Reset per-loop accumulators
                 bootstrap_channels.clear();
-                subscription_tasks.clear();
+                self.ingress_fence.close().await;
                 position_handles.clear();
                 self.bootstrap_state.write().await.clear();
                 checkpoint_sequences_per_source.clear();
@@ -1074,10 +1244,7 @@ impl Query for DrasiQuery {
                                             );
                                             error!("{msg}");
                                             // Cleanup already-spawned tasks
-                                            for handle in subscription_tasks.drain(..) {
-                                                handle.abort();
-                                                let _ = handle.await;
-                                            }
+                                            self.ingress_fence.close().await;
                                             // Release position handles for already-subscribed sources
                                             for (sid, _, _) in &sources_to_subscribe {
                                                 if let Some(src) = self
@@ -1106,10 +1273,7 @@ impl Query for DrasiQuery {
                                                     self.base.config.id, source_id
                                                 );
                                                 error!("{msg}");
-                                                for handle in subscription_tasks.drain(..) {
-                                                    handle.abort();
-                                                    let _ = handle.await;
-                                                }
+                                                self.ingress_fence.close().await;
                                                 // Release position handles for already-subscribed sources
                                                 for (sid, _, _) in &sources_to_subscribe {
                                                     if let Some(src) = self
@@ -1137,10 +1301,7 @@ impl Query for DrasiQuery {
                                             );
 
                                             // Abort already-spawned subscription tasks from this loop iteration
-                                            for handle in subscription_tasks.drain(..) {
-                                                handle.abort();
-                                                let _ = handle.await;
-                                            }
+                                            self.ingress_fence.close().await;
 
                                             // Drain queued events so stale pre-reset events don't
                                             // get processed after re-bootstrap.
@@ -1278,10 +1439,7 @@ impl Query for DrasiQuery {
                             self.base.config.id, source_id, e
                         );
                         // Cleanup already-spawned tasks before returning error
-                        for handle in subscription_tasks.drain(..) {
-                            handle.abort();
-                            let _ = handle.await;
-                        }
+                        self.ingress_fence.close().await;
                         // Release position handles for already-subscribed sources
                         for (sid, _, _) in &sources_to_subscribe {
                             if let Some(src) = self.source_manager.get_source_instance(sid).await {
@@ -1393,19 +1551,12 @@ impl Query for DrasiQuery {
                     .instrument(span),
                 );
 
-                subscription_tasks.push(task);
+                self.ingress_fence.push(task).await;
             }
 
             // All sources subscribed successfully — break out of the retry loop
             break;
         }
-
-        // Store subscription tasks and record subscribed source IDs for cleanup in stop()
-        *self.subscription_tasks.write().await = subscription_tasks;
-        *self.subscribed_source_ids.write().await = sources_to_subscribe
-            .iter()
-            .map(|(id, _, _)| id.clone())
-            .collect();
 
         // Wrap continuous_query in Arc for sharing across tasks
         let continuous_query = Arc::new(continuous_query);
@@ -1457,7 +1608,7 @@ impl Query for DrasiQuery {
             let bootstrap_output_state = self.output_state.clone();
 
             let mut bootstrap_handles = Vec::new();
-            let mut abort_handles = Vec::new();
+            let mut abort_handles = PendingBootstrapAborts::default();
 
             for (source_id, mut bootstrap_rx, bootstrap_result_rx) in bootstrap_channels {
                 // Mark source bootstrap as in progress
@@ -1800,7 +1951,7 @@ impl Query for DrasiQuery {
             }
 
             // Store abort handles for cleanup on stop()
-            *self.bootstrap_abort_handles.write().await = abort_handles;
+            *self.bootstrap_abort_handles.write().await = abort_handles.into_handles();
         } else {
             info!(
                 "Query '{}' no bootstrap channels, skipping bootstrap",
@@ -1819,8 +1970,25 @@ impl Query for DrasiQuery {
                     fq_priority_queue.enqueue_wait(event).await;
                 }
             });
-            self.subscription_tasks.write().await.push(fq_forwarder);
+            self.ingress_fence.push(fq_forwarder).await;
         }
+
+        let output_dependencies = QueryOutputDependencies::new(
+            self.base.config.id.clone(),
+            self.output_state.clone(),
+            self.base.dispatchers.clone(),
+            self.outbox_writer.read().await.clone(),
+            self.live_results_writer.read().await.clone(),
+            Some(checkpoint_store.clone()),
+            self.output_state.read().await.outbox_capacity(),
+            self.output_metrics.clone(),
+        )
+        .with_publication_recovery(self.publication_recovery.clone());
+        #[cfg(test)]
+        let output_dependencies = match self.processing_observer.read().await.clone() {
+            Some(observer) => output_dependencies.with_observer(observer),
+            None => output_dependencies,
+        };
 
         let host = QueryCompositeHost::new(
             QueryHostRuntime::new(
@@ -1830,6 +1998,7 @@ impl Query for DrasiQuery {
                 bootstrap_gate,
                 self.base.status_handle(),
                 future_queue_source,
+                self.ingress_fence.clone(),
             ),
             processing_mode,
             QueryLiveDependencies::new(
@@ -1838,23 +2007,74 @@ impl Query for DrasiQuery {
                 checkpoint_sequences_per_source,
                 position_handles,
             ),
-            QueryOutputDependencies::new(
-                self.base.config.id.clone(),
-                self.output_state.clone(),
-                self.base.dispatchers.clone(),
-                self.outbox_writer.read().await.clone(),
-                self.live_results_writer.read().await.clone(),
-                Some(checkpoint_store),
-                self.output_state.read().await.outbox_capacity(),
-                self.output_metrics.clone(),
-            ),
+            output_dependencies,
         );
         host.start(&self.base).await;
 
         Ok(())
     }
+}
+
+#[async_trait]
+impl Query for DrasiQuery {
+    async fn start(&self) -> Result<()> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        if self.stop_requested.load(Ordering::Acquire) {
+            return Err(anyhow::anyhow!(
+                "Query '{}' startup was cancelled by stop",
+                self.base.config.id
+            ));
+        }
+        let current_status = self.base.status_handle().get_status().await;
+        let processor_installed = self.base.task_handle.read().await.is_some();
+        if processor_installed
+            && matches!(
+                current_status,
+                ComponentStatus::Starting | ComponentStatus::Running
+            )
+        {
+            debug!(
+                "Query '{}' start is already in progress or complete",
+                self.base.config.id
+            );
+            return Ok(());
+        }
+        if current_status == ComponentStatus::Stopping {
+            return Err(anyhow::anyhow!(
+                "Query '{}' cannot start while cleanup is in progress",
+                self.base.config.id
+            ));
+        }
+        let (_startup_registration, mut startup_cancel) =
+            StartupCancellationRegistration::install(self.startup_cancel.clone());
+        if self.stop_requested.load(Ordering::Acquire) {
+            return Err(anyhow::anyhow!(
+                "Query '{}' startup was cancelled by stop",
+                self.base.config.id
+            ));
+        }
+
+        tokio::select! {
+            biased;
+            _ = &mut startup_cancel => {
+                // The losing startup future has been dropped, so all locally
+                // pending task guards have fired. Reap anything already
+                // transferred to shared ownership before releasing the lock.
+                self.reap_previous_runtime().await;
+                Err(anyhow::anyhow!(
+                    "Query '{}' startup was cancelled by stop",
+                    self.base.config.id
+                ))
+            }
+            result = self.start_inner() => result,
+        }
+    }
 
     async fn stop(&self) -> Result<()> {
+        self.stop_requested.store(true, Ordering::Release);
+        let _stop_request = StopRequestReset(self.stop_requested.clone());
+        self.cancel_startup();
+        let _lifecycle = self.lifecycle_lock.lock().await;
         log_component_stop("Query", &self.base.config.id);
 
         // Set Stopping on the local status handle. The manager has already validated
@@ -1866,58 +2086,27 @@ impl Query for DrasiQuery {
         debug_assert!(
             matches!(
                 self.base.status_handle().get_status().await,
-                ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Stopping
+                ComponentStatus::Running
+                    | ComponentStatus::Starting
+                    | ComponentStatus::Stopping
+                    | ComponentStatus::Error
+                    | ComponentStatus::Stopped
             ),
             "DrasiQuery::stop() called but local handle is not in expected pre-stop state"
         );
-        self.base
-            .set_status(
-                ComponentStatus::Stopping,
-                Some("Stopping query".to_string()),
-            )
-            .await;
-
-        // Abort bootstrap tasks and supervisor
-        let bootstrap_aborts: Vec<_> = {
-            let mut handles = self.bootstrap_abort_handles.write().await;
-            handles.drain(..).collect()
-        };
-        for handle in bootstrap_aborts {
-            handle.abort();
+        if self.base.status_handle().get_status().await != ComponentStatus::Stopped {
+            self.base
+                .set_status(
+                    ComponentStatus::Stopping,
+                    Some("Stopping query".to_string()),
+                )
+                .await;
         }
 
-        // Drain and abort source subscription forwarders so they don't leak across restarts
-        let subscription_handles: Vec<_> = {
-            let mut tasks = self.subscription_tasks.write().await;
-            tasks.drain(..).collect()
-        };
-
-        for handle in subscription_handles {
-            handle.abort();
-            let _ = handle.await;
-        }
-
-        // Stop the FutureQueueSource polling task
-        if let Some(fq) = self.future_queue_source.write().await.take() {
-            fq.stop().await;
-        }
-
-        // Release position handles so sources can advance their min-watermark.
-        // Each subscribed source may hold a position handle for this query.
-        {
-            let source_ids = self.subscribed_source_ids.read().await;
-            for source_id in source_ids.iter() {
-                if let Some(source) = self.source_manager.get_source_instance(source_id).await {
-                    source.remove_position_handle(&self.base.config.id).await;
-                    debug!(
-                        "Query '{}' released position handle for source '{}'",
-                        self.base.config.id, source_id
-                    );
-                }
-            }
-        }
-        // Clear tracked source IDs
-        self.subscribed_source_ids.write().await.clear();
+        self.ingress_fence.close().await;
+        self.abort_bootstrap_tasks().await;
+        self.stop_future_queue_source().await;
+        self.release_position_handles().await;
 
         // Finish shutting down the host-owned processor task through QueryBase.
         QueryCompositeHost::stop(&self.base).await?;
@@ -1945,7 +2134,7 @@ impl Query for DrasiQuery {
     }
 
     async fn subscription_count(&self) -> usize {
-        self.subscription_tasks.read().await.len()
+        self.ingress_fence.task_count().await
     }
 
     async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse> {
@@ -2333,6 +2522,8 @@ impl QueryManager {
                     id
                 ));
             }
+            let recovery_query = old_query.clone();
+            let recovery_id = id.clone();
 
             crate::managers::lifecycle_helpers::reconfigure_component::<Arc<dyn Query>, _, _, _>(
                 &self.graph,
@@ -2340,7 +2531,20 @@ impl QueryManager {
                 "query",
                 &old_query,
                 || async {},
-                || self.provision_query(new_config),
+                || async move {
+                    if recovery_query
+                        .as_any()
+                        .downcast_ref::<DrasiQuery>()
+                        .is_some_and(|query| query.publication_recovery.is_required())
+                    {
+                        return Err(anyhow::anyhow!(
+                            "Query '{recovery_id}' cannot be reconfigured because atomic output \
+                             committed before in-memory publication; A7 output reconciliation is \
+                             required first"
+                        ));
+                    }
+                    self.provision_query(new_config).await
+                },
                 || self.start_query(id.clone()),
             )
             .await
@@ -2558,7 +2762,7 @@ impl QueryManager {
         .await
     }
 
-    /// Stop all currently running or starting queries.
+    /// Stop all currently running, starting, or errored queries.
     ///
     /// # Errors
     /// Returns an error listing any queries that failed to stop.
@@ -2582,7 +2786,9 @@ impl QueryManager {
                     .map(|n| {
                         matches!(
                             n.status,
-                            ComponentStatus::Running | ComponentStatus::Starting
+                            ComponentStatus::Running
+                                | ComponentStatus::Starting
+                                | ComponentStatus::Error
                         )
                     })
                     .unwrap_or(false)
