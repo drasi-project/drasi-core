@@ -62,6 +62,9 @@ struct BroadcastGapContext<'a> {
     checkpoints: &'a Arc<RwLock<HashMap<String, ReactionCheckpoint>>>,
     bootstrap_mutex: &'a Arc<tokio::sync::Mutex<()>>,
     metrics: &'a Arc<ReactionMetrics>,
+    /// The live event that exposed a sequence gap. `None` when the receiver
+    /// reported lag before yielding the next retained event.
+    received_sequence: Option<u64>,
 }
 
 pub struct ReactionManager {
@@ -1182,8 +1185,8 @@ impl ReactionManager {
                                 // §6: Detect sequence gaps (incoming seq > expected next).
                                 // This catches drops that don't manifest as broadcast lag
                                 // (e.g., outbox overflow while reaction was stopping).
-                                if last_forwarded_seq > 0
-                                    && query_result.sequence > last_forwarded_seq.saturating_add(1)
+                                if query_result.sequence
+                                    > last_forwarded_seq.saturating_add(1)
                                 {
                                     forwarder_metrics.record_gap_detection();
                                     forwarder_metrics.record_recovery_trigger(to_policy_kind(&policy));
@@ -1203,6 +1206,7 @@ impl ReactionManager {
                                         checkpoints: &checkpoints,
                                         bootstrap_mutex: &bootstrap_mutex,
                                         metrics: &forwarder_metrics,
+                                        received_sequence: Some(query_result.sequence),
                                     };
                                     match Self::handle_broadcast_gap(&gap_ctx)
                                     .await
@@ -1230,36 +1234,24 @@ impl ReactionManager {
                                     }
                                 }
 
-                                let seq = query_result.sequence;
-                                let result = Arc::try_unwrap(query_result)
-                                    .unwrap_or_else(|arc| (*arc).clone());
-                                if let Err(e) = reaction.enqueue_query_result(result).await {
-                                    log::error!(
-                                        "[{reaction_id_owned}] Failed to enqueue result from query '{query_id_clone}': {e}"
-                                    );
-                                    break;
-                                } else {
-                                    last_forwarded_seq = seq;
-                                    // Advance in-memory checkpoint so forwarder tracks
-                                    // position (skip stale events on reconnect).
-                                    // NOTE: We do NOT persist to durable storage here.
-                                    // The reaction should persist its checkpoint after
-                                    // successfully processing the event. This prevents
-                                    // permanent skipping if the process crashes between
-                                    // enqueue and handler processing.
-                                    let config_hash = {
-                                        let cps = checkpoints.read().await;
-                                        cps.get(&query_id_clone).map(|cp| cp.config_hash).unwrap_or(0)
-                                    };
-                                    let cp = ReactionCheckpoint { sequence: seq, config_hash };
-                                    checkpoints.write().await.insert(query_id_clone.clone(), cp);
-
-                                    // Update reaction metrics: checkpoint position
-                                    let query_latest = query_clone
-                                        .output_metrics()
-                                        .map(|m| m.load_outbox_latest_seq())
-                                        .unwrap_or(seq);
-                                    forwarder_metrics.record_checkpoint(seq, query_latest);
+                                match Self::enqueue_forwarded_result(
+                                    &reaction,
+                                    &query_clone,
+                                    &query_id_clone,
+                                    &checkpoints,
+                                    &forwarder_metrics,
+                                    query_result,
+                                )
+                                .await
+                                {
+                                    Ok(sequence) => last_forwarded_seq = sequence,
+                                    Err(error) => {
+                                        log::error!(
+                                            "[{reaction_id_owned}] Failed to enqueue result from query \
+                                             '{query_id_clone}': {error}"
+                                        );
+                                        break;
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -1281,6 +1273,7 @@ impl ReactionManager {
                                         checkpoints: &checkpoints,
                                         bootstrap_mutex: &bootstrap_mutex,
                                         metrics: &forwarder_metrics,
+                                        received_sequence: None,
                                     };
                                     match Self::handle_broadcast_gap(&gap_ctx)
                                     .await
@@ -1359,12 +1352,47 @@ impl ReactionManager {
         Ok(())
     }
 
+    async fn enqueue_forwarded_result(
+        reaction: &Arc<dyn Reaction>,
+        query: &Arc<dyn Query>,
+        query_id: &str,
+        checkpoints: &Arc<RwLock<HashMap<String, ReactionCheckpoint>>>,
+        metrics: &Arc<ReactionMetrics>,
+        query_result: Arc<QueryResult>,
+    ) -> Result<u64> {
+        let sequence = query_result.sequence;
+        let result = Arc::try_unwrap(query_result).unwrap_or_else(|result| (*result).clone());
+        reaction.enqueue_query_result(result).await?;
+
+        // This checkpoint is process-local. Durable reactions persist their
+        // checkpoint only after successful handling of the enqueued result.
+        let config_hash = checkpoints
+            .read()
+            .await
+            .get(query_id)
+            .map(|checkpoint| checkpoint.config_hash)
+            .unwrap_or(0);
+        checkpoints.write().await.insert(
+            query_id.to_string(),
+            ReactionCheckpoint {
+                sequence,
+                config_hash,
+            },
+        );
+        let query_latest = query
+            .output_metrics()
+            .map(|metrics| metrics.load_outbox_latest_seq())
+            .unwrap_or(sequence);
+        metrics.record_checkpoint(sequence, query_latest);
+        Ok(sequence)
+    }
+
     /// Handle a broadcast gap (§6): `RecvError::Lagged` in the forwarder loop.
     ///
     /// Applies the reaction's recovery policy:
     /// - `Strict`: return error (forwarder will break)
     /// - `AutoReset`: re-bootstrap from snapshot, update checkpoint (serialized via mutex)
-    /// - `AutoSkipGap`: jump to current sequence, update checkpoint
+    /// - `AutoSkipGap`: persist only the missing floor before the triggering event
     async fn handle_broadcast_gap(ctx: &BroadcastGapContext<'_>) -> Result<()> {
         let config_hash = crate::queries::compute_config_hash(ctx.query.get_config());
 
@@ -1431,31 +1459,27 @@ impl ReactionManager {
                     ctx.reaction_id,
                     ctx.query_id
                 );
-                ctx.metrics.record_fetch_outbox();
-                let current_seq = match ctx.query.fetch_outbox(0).await {
-                    Ok(resp) => resp.latest_sequence,
-                    Err(FetchError::OutboxGap(gap)) => gap.latest_sequence,
-                    Err(FetchError::NotRunning { .. } | FetchError::TimedOut) => {
-                        // Query not running — fall back to existing checkpoint sequence.
-                        let existing_seq = ctx
-                            .checkpoints
-                            .read()
-                            .await
-                            .get(ctx.query_id)
-                            .map(|cp| cp.sequence)
-                            .unwrap_or(0);
-                        log::info!(
-                            "[{}] AutoSkipGap: query '{}' not running, \
-                             keeping checkpoint at seq={existing_seq}",
-                            ctx.reaction_id,
-                            ctx.query_id
-                        );
-                        existing_seq
-                    }
+                let Some(received_sequence) = ctx.received_sequence else {
+                    log::debug!(
+                        "[{}] AutoSkipGap for query '{}' is waiting for the next retained \
+                         event to determine the exact missing range",
+                        ctx.reaction_id,
+                        ctx.query_id
+                    );
+                    return Ok(());
                 };
+                let skipped_floor = received_sequence.saturating_sub(1);
+                let existing_sequence = ctx
+                    .checkpoints
+                    .read()
+                    .await
+                    .get(ctx.query_id)
+                    .map(|checkpoint| checkpoint.sequence)
+                    .unwrap_or(0);
+                let skipped_floor = skipped_floor.max(existing_sequence);
 
                 let cp = ReactionCheckpoint {
-                    sequence: current_seq,
+                    sequence: skipped_floor,
                     config_hash,
                 };
 
@@ -1627,6 +1651,7 @@ mod tests {
         status_handle: ComponentStatusHandle,
         enqueued: Arc<Mutex<Vec<QueryResult>>>,
         bootstrap_count: Arc<AtomicUsize>,
+        enqueue_failures: AtomicUsize,
     }
 
     impl MockReaction {
@@ -1640,6 +1665,7 @@ mod tests {
                 status_handle: ComponentStatusHandle::new(id),
                 enqueued: Arc::new(Mutex::new(Vec::new())),
                 bootstrap_count: Arc::new(AtomicUsize::new(0)),
+                enqueue_failures: AtomicUsize::new(0),
             }
         }
 
@@ -1656,6 +1682,10 @@ mod tests {
         fn with_policy(mut self, p: ReactionRecoveryPolicy) -> Self {
             self.policy = p;
             self
+        }
+
+        fn fail_next_enqueue(&self) {
+            self.enqueue_failures.store(1, Ordering::Release);
         }
     }
 
@@ -1704,6 +1734,15 @@ mod tests {
             self.policy
         }
         async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+            if self
+                .enqueue_failures
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                anyhow::bail!("injected reaction enqueue failure");
+            }
             self.enqueued.lock().await.push(result);
             Ok(())
         }
@@ -2090,6 +2129,7 @@ mod tests {
             checkpoints: &checkpoints,
             bootstrap_mutex: &bootstrap_mutex,
             metrics: &Arc::new(ReactionMetrics::new()),
+            received_sequence: None,
         })
         .await;
 
@@ -2124,6 +2164,7 @@ mod tests {
             checkpoints: &checkpoints,
             bootstrap_mutex: &bootstrap_mutex,
             metrics: &Arc::new(ReactionMetrics::new()),
+            received_sequence: None,
         })
         .await;
 
@@ -2154,7 +2195,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcast_gap_auto_skip_gap_jumps_to_current_seq() {
+    async fn broadcast_gap_auto_skip_gap_skips_only_missing_range() {
         let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 50));
         let reaction = Arc::new(
             MockReaction::new("r1", vec!["q1".into()])
@@ -2174,6 +2215,7 @@ mod tests {
             checkpoints: &checkpoints,
             bootstrap_mutex: &bootstrap_mutex,
             metrics: &Arc::new(ReactionMetrics::new()),
+            received_sequence: Some(42),
         })
         .await;
 
@@ -2183,16 +2225,235 @@ mod tests {
             result.err()
         );
 
-        // Checkpoint should jump to current sequence.
+        // The triggering event (42) is still deliverable, so only its missing
+        // predecessor range may be checkpointed as skipped.
         let cps = checkpoints.read().await;
         let cp = cps.get("q1").expect("Checkpoint for q1 should exist");
-        assert_eq!(cp.sequence, 50, "Checkpoint should jump to latest sequence");
+        assert_eq!(cp.sequence, 41);
 
         // bootstrap() should NOT be called for AutoSkipGap.
         assert_eq!(
             reaction.bootstrap_count.load(Ordering::SeqCst),
             0,
             "bootstrap() should not be called for AutoSkipGap"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_skip_gap_persists_missing_floor_not_moving_query_latest() {
+        let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 100));
+        let reaction: Arc<dyn Reaction> = Arc::new(
+            MockReaction::new("r1", vec!["q1".into()])
+                .with_policy(ReactionRecoveryPolicy::AutoSkipGap),
+        );
+        let store: Arc<dyn StateStoreProvider> =
+            Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let state_store = Some(store.clone());
+        let checkpoints = Arc::new(RwLock::new(HashMap::from([(
+            "q1".to_string(),
+            ReactionCheckpoint {
+                sequence: 10,
+                config_hash: 42,
+            },
+        )])));
+        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
+
+        ReactionManager::handle_broadcast_gap(&BroadcastGapContext {
+            reaction_id: "r1",
+            query_id: "q1",
+            reaction: &reaction,
+            query: &query,
+            policy: ReactionRecoveryPolicy::AutoSkipGap,
+            state_store: &state_store,
+            checkpoints: &checkpoints,
+            bootstrap_mutex: &bootstrap_mutex,
+            metrics: &Arc::new(ReactionMetrics::new()),
+            received_sequence: Some(42),
+        })
+        .await
+        .expect("AutoSkipGap should persist the missing floor");
+
+        assert_eq!(checkpoints.read().await["q1"].sequence, 41);
+        assert_eq!(
+            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r1", "q1")
+                .await
+                .expect("read persisted skipped floor")
+                .expect("persisted skipped floor")
+                .sequence,
+            41,
+            "query latest 100 must not checkpoint deliverable results 42..=100"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_skip_gap_waits_for_retained_event_before_advancing() {
+        let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 100));
+        let reaction: Arc<dyn Reaction> = Arc::new(
+            MockReaction::new("r1", vec!["q1".into()])
+                .with_policy(ReactionRecoveryPolicy::AutoSkipGap),
+        );
+        let checkpoints = Arc::new(RwLock::new(HashMap::from([(
+            "q1".to_string(),
+            ReactionCheckpoint {
+                sequence: 10,
+                config_hash: 42,
+            },
+        )])));
+        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
+
+        ReactionManager::handle_broadcast_gap(&BroadcastGapContext {
+            reaction_id: "r1",
+            query_id: "q1",
+            reaction: &reaction,
+            query: &query,
+            policy: ReactionRecoveryPolicy::AutoSkipGap,
+            state_store: &None,
+            checkpoints: &checkpoints,
+            bootstrap_mutex: &bootstrap_mutex,
+            metrics: &Arc::new(ReactionMetrics::new()),
+            received_sequence: None,
+        })
+        .await
+        .expect("lag notification alone should not advance a checkpoint");
+
+        assert_eq!(checkpoints.read().await["q1"].sequence, 10);
+    }
+
+    #[tokio::test]
+    async fn auto_skip_gap_enqueue_failure_keeps_current_event_recoverable() {
+        let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 100));
+        let reaction = Arc::new(
+            MockReaction::new("r1", vec!["q1".into()])
+                .with_policy(ReactionRecoveryPolicy::AutoSkipGap),
+        );
+        let reaction_trait: Arc<dyn Reaction> = reaction.clone();
+        let checkpoints = Arc::new(RwLock::new(HashMap::from([(
+            "q1".to_string(),
+            ReactionCheckpoint {
+                sequence: 10,
+                config_hash: 42,
+            },
+        )])));
+        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
+        let metrics = Arc::new(ReactionMetrics::new());
+
+        ReactionManager::handle_broadcast_gap(&BroadcastGapContext {
+            reaction_id: "r1",
+            query_id: "q1",
+            reaction: &reaction_trait,
+            query: &query,
+            policy: ReactionRecoveryPolicy::AutoSkipGap,
+            state_store: &None,
+            checkpoints: &checkpoints,
+            bootstrap_mutex: &bootstrap_mutex,
+            metrics: &metrics,
+            received_sequence: Some(42),
+        })
+        .await
+        .expect("skip missing range");
+        reaction.fail_next_enqueue();
+        let current = Arc::new(QueryResult::new(
+            "q1".to_string(),
+            42,
+            chrono::Utc::now(),
+            Vec::new(),
+            HashMap::new(),
+        ));
+        assert!(ReactionManager::enqueue_forwarded_result(
+            &reaction_trait,
+            &query,
+            "q1",
+            &checkpoints,
+            &metrics,
+            current.clone(),
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            checkpoints.read().await["q1"].sequence,
+            41,
+            "failed enqueue must leave the current event above the checkpoint"
+        );
+        assert!(reaction.enqueued.lock().await.is_empty());
+
+        ReactionManager::enqueue_forwarded_result(
+            &reaction_trait,
+            &query,
+            "q1",
+            &checkpoints,
+            &metrics,
+            current,
+        )
+        .await
+        .expect("restart/retry should deliver the current event");
+        assert_eq!(checkpoints.read().await["q1"].sequence, 42);
+        assert_eq!(reaction.enqueued.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_skip_gap_repeated_episodes_advance_only_after_delivery() {
+        let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 100));
+        let reaction = Arc::new(
+            MockReaction::new("r1", vec!["q1".into()])
+                .with_policy(ReactionRecoveryPolicy::AutoSkipGap),
+        );
+        let reaction_trait: Arc<dyn Reaction> = reaction.clone();
+        let checkpoints = Arc::new(RwLock::new(HashMap::from([(
+            "q1".to_string(),
+            ReactionCheckpoint {
+                sequence: 1,
+                config_hash: 42,
+            },
+        )])));
+        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
+        let metrics = Arc::new(ReactionMetrics::new());
+
+        for received_sequence in [10, 20] {
+            ReactionManager::handle_broadcast_gap(&BroadcastGapContext {
+                reaction_id: "r1",
+                query_id: "q1",
+                reaction: &reaction_trait,
+                query: &query,
+                policy: ReactionRecoveryPolicy::AutoSkipGap,
+                state_store: &None,
+                checkpoints: &checkpoints,
+                bootstrap_mutex: &bootstrap_mutex,
+                metrics: &metrics,
+                received_sequence: Some(received_sequence),
+            })
+            .await
+            .expect("skip one missing range");
+            assert_eq!(
+                checkpoints.read().await["q1"].sequence,
+                received_sequence - 1
+            );
+            ReactionManager::enqueue_forwarded_result(
+                &reaction_trait,
+                &query,
+                "q1",
+                &checkpoints,
+                &metrics,
+                Arc::new(QueryResult::new(
+                    "q1".to_string(),
+                    received_sequence,
+                    chrono::Utc::now(),
+                    Vec::new(),
+                    HashMap::new(),
+                )),
+            )
+            .await
+            .expect("deliver retained gap-triggering event");
+            assert_eq!(checkpoints.read().await["q1"].sequence, received_sequence);
+        }
+        assert_eq!(
+            reaction
+                .enqueued
+                .lock()
+                .await
+                .iter()
+                .map(|result| result.sequence)
+                .collect::<Vec<_>>(),
+            vec![10, 20]
         );
     }
 
@@ -2344,6 +2605,7 @@ mod tests {
             checkpoints: &checkpoints,
             bootstrap_mutex: &bootstrap_mutex,
             metrics: &Arc::new(ReactionMetrics::new()),
+            received_sequence: None,
         })
         .await;
 
@@ -2472,6 +2734,7 @@ mod tests {
             checkpoints: &checkpoints,
             bootstrap_mutex: &bootstrap_mutex,
             metrics: &Arc::new(ReactionMetrics::new()),
+            received_sequence: None,
         })
         .await;
 
@@ -2524,6 +2787,7 @@ mod tests {
             checkpoints: &checkpoints,
             bootstrap_mutex: &bootstrap_mutex,
             metrics: &metrics_q1,
+            received_sequence: None,
         };
         let ctx_q2 = BroadcastGapContext {
             reaction_id: "r1",
@@ -2535,6 +2799,7 @@ mod tests {
             checkpoints: &checkpoints,
             bootstrap_mutex: &bootstrap_mutex,
             metrics: &metrics_q2,
+            received_sequence: None,
         };
         let (r1, r2) = tokio::join!(
             ReactionManager::handle_broadcast_gap(&ctx_q1),

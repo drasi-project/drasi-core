@@ -502,6 +502,7 @@ enum QueryRecoveryResetReason {
     IncompleteBootstrap,
     CheckpointReadFailed,
     InvalidBootstrapMarker,
+    InvalidLegacyPendingMarker,
     LegacyPublicationPending,
     OutputReconciliationFailed,
     PositionUnavailable,
@@ -524,8 +525,12 @@ impl PersistentQueryState {
             None
         } else {
             Some(
-                self.safe_output_high_water(output_state, publication_recovery)
-                    .await?,
+                self.safe_output_high_water(
+                    output_state,
+                    publication_recovery,
+                    reason == QueryRecoveryResetReason::InvalidLegacyPendingMarker,
+                )
+                .await?,
             )
         };
         self.clear_persistent(config_hash, preserved_sequence)
@@ -542,6 +547,7 @@ impl PersistentQueryState {
         &self,
         output_state: &RwLock<QueryOutputState>,
         publication_recovery: &AtomicPublicationRecovery,
+        ignore_invalid_legacy_marker: bool,
     ) -> anyhow::Result<u64> {
         let in_memory = output_state.read().await.as_of_sequence();
         let durable = self
@@ -559,10 +565,18 @@ impl PersistentQueryState {
             None => 0,
         };
         let atomic_pending = publication_recovery.pending_sequence().unwrap_or(0);
-        let legacy_pending = match read_legacy_pending_state(self.checkpoint_store.as_ref()).await?
-        {
-            LegacyPendingState::Absent => 0,
-            LegacyPendingState::Pending { output_sequence } => output_sequence.unwrap_or(0),
+        let legacy_pending = match read_legacy_pending_state(self.checkpoint_store.as_ref()).await {
+            Ok(LegacyPendingState::Absent) => 0,
+            Ok(LegacyPendingState::Pending { output_sequence }) => output_sequence.unwrap_or(0),
+            Err(error) if ignore_invalid_legacy_marker => {
+                warn!(
+                    "Query '{}' ignoring unreadable Legacy pending marker while computing \
+                     reset high-water: {error:#}",
+                    self.query_id
+                );
+                0
+            }
+            Err(error) => return Err(error),
         };
         let reset_baseline = read_output_reset_high_water(self.checkpoint_store.as_ref())
             .await?
@@ -710,6 +724,7 @@ mod recovery_reset_tests {
             QueryRecoveryResetReason::IncompleteBootstrap,
             QueryRecoveryResetReason::CheckpointReadFailed,
             QueryRecoveryResetReason::InvalidBootstrapMarker,
+            QueryRecoveryResetReason::InvalidLegacyPendingMarker,
             QueryRecoveryResetReason::LegacyPublicationPending,
             QueryRecoveryResetReason::OutputReconciliationFailed,
             QueryRecoveryResetReason::PositionUnavailable,
@@ -1172,6 +1187,61 @@ impl DrasiQuery {
             std::collections::HashMap::new();
         if has_persistent_backend {
             let current_hash = super::compute_config_hash(&self.base.config);
+            match processing_mode.read_legacy_pending_state().await {
+                Ok(LegacyPendingState::Absent) => {}
+                Ok(LegacyPendingState::Pending { output_sequence }) => {
+                    let detail = format!(
+                        "Query '{}' has an unfinished persistent Legacy publication \
+                         (output sequence {output_sequence:?})",
+                        self.base.config.id
+                    );
+                    match self.resolved_recovery_policy {
+                        crate::recovery::RecoveryPolicy::Strict => {
+                            self.base
+                                .set_status(ComponentStatus::Error, Some(detail.clone()))
+                                .await;
+                            return Err(anyhow::anyhow!(detail));
+                        }
+                        crate::recovery::RecoveryPolicy::AutoReset => {
+                            warn!("{detail}; AutoReset is clearing persistent state");
+                            persistent_state
+                                .clear_recovery_state(
+                                    &self.output_state,
+                                    &self.publication_recovery,
+                                    Some(current_hash),
+                                    QueryRecoveryResetReason::LegacyPublicationPending,
+                                )
+                                .await?;
+                        }
+                    }
+                }
+                Err(error) => {
+                    let detail = format!(
+                        "Query '{}' has an invalid persistent Legacy pending-publication \
+                         marker: {error:#}",
+                        self.base.config.id
+                    );
+                    match self.resolved_recovery_policy {
+                        crate::recovery::RecoveryPolicy::Strict => {
+                            self.base
+                                .set_status(ComponentStatus::Error, Some(detail.clone()))
+                                .await;
+                            return Err(anyhow::anyhow!(detail));
+                        }
+                        crate::recovery::RecoveryPolicy::AutoReset => {
+                            warn!("{detail}; AutoReset is clearing persistent state");
+                            persistent_state
+                                .clear_recovery_state(
+                                    &self.output_state,
+                                    &self.publication_recovery,
+                                    Some(current_hash),
+                                    QueryRecoveryResetReason::InvalidLegacyPendingMarker,
+                                )
+                                .await?;
+                        }
+                    }
+                }
+            }
             let config_matches = match checkpoint_store.read_config_hash().await {
                 Ok(Some(stored_hash)) if stored_hash == current_hash => {
                     debug!(
@@ -1342,40 +1412,6 @@ impl DrasiQuery {
 
             for settings in &mut subscription_settings {
                 settings.request_position_handle = true;
-            }
-        }
-
-        if let LegacyPendingState::Pending { output_sequence } =
-            processing_mode.read_legacy_pending_state().await?
-        {
-            let detail = format!(
-                "Query '{}' has an unfinished persistent Legacy publication \
-                 (output sequence {output_sequence:?})",
-                self.base.config.id
-            );
-            match self.resolved_recovery_policy {
-                crate::recovery::RecoveryPolicy::Strict => {
-                    self.base
-                        .set_status(ComponentStatus::Error, Some(detail.clone()))
-                        .await;
-                    return Err(anyhow::anyhow!(detail));
-                }
-                crate::recovery::RecoveryPolicy::AutoReset => {
-                    warn!("{detail}; AutoReset is clearing persistent state");
-                    persistent_state
-                        .clear_recovery_state(
-                            &self.output_state,
-                            &self.publication_recovery,
-                            Some(super::compute_config_hash(&self.base.config)),
-                            QueryRecoveryResetReason::OutputReconciliationFailed,
-                        )
-                        .await?;
-                    checkpoint_sequences_per_source.clear();
-                    for settings in &mut subscription_settings {
-                        settings.resume_from = None;
-                        settings.resume_sequence = None;
-                    }
-                }
             }
         }
 

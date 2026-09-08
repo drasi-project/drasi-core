@@ -33,7 +33,9 @@ use drasi_lib::bootstrap::{
     BootstrapContext as SourceBootstrapContext, BootstrapProvider, BootstrapRequest,
     BootstrapResult,
 };
-use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender, ComponentStatus, QueryResult};
+use drasi_lib::channels::{
+    BootstrapEvent, BootstrapEventSender, ComponentStatus, QueryResult, ResultDiff,
+};
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
@@ -355,6 +357,31 @@ impl RecordingReceiver {
                 Ok(Some(result)) if result.sequence == 0 => controls.push(result),
                 Ok(Some(result)) => return (controls, Some(result)),
                 Ok(None) | Err(_) => return (controls, None),
+            }
+        }
+    }
+
+    async fn wait_through_name(&mut self, name: &str, dur: Duration) -> Vec<QueryResult> {
+        let deadline = tokio::time::Instant::now() + dur;
+        let mut results = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match timeout(remaining, self.rx.recv()).await {
+                Ok(Some(result)) => {
+                    let found = result.results.iter().any(|diff| match diff {
+                        ResultDiff::Add { data, .. } | ResultDiff::Delete { data, .. } => {
+                            data["name"] == name
+                        }
+                        ResultDiff::Update { after, .. }
+                        | ResultDiff::Aggregation { after, .. } => after["name"] == name,
+                        ResultDiff::Noop => false,
+                    });
+                    results.push(result);
+                    if found {
+                        return results;
+                    }
+                }
+                Ok(None) | Err(_) => return results,
             }
         }
     }
@@ -1306,15 +1333,79 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
         insert_person(&handle, &format!("p-flood-{i}"), &format!("Flood-{i}"), i).await?;
     }
 
-    // Verify that live delivery still works after the gap.
-    // With AutoSkipGap, the forwarder skips the gap and resumes.
-    // wait_for_count has its own timeout — no bare sleep needed.
+    // The newest retained event must remain deliverable even though the query's
+    // moving latest sequence already includes it.
     insert_person(&handle, "p-after-gap", "AfterGap", 99).await?;
-    let after = receiver.wait_for_count(1, Duration::from_secs(5)).await;
+    let first_episode = receiver
+        .wait_through_name("AfterGap", Duration::from_secs(5))
+        .await;
     assert_eq!(
-        after.len(),
+        first_episode
+            .iter()
+            .filter(|result| result.results.iter().any(|diff| matches!(
+                diff,
+                ResultDiff::Add { data, .. } if data["name"] == "AfterGap"
+            )))
+            .count(),
         1,
-        "Should receive live event after gap recovery"
+        "the newest post-gap event must be delivered exactly once"
+    );
+
+    // Repeat the lag episode, then send one event after the burst has gone idle.
+    for i in 0..20 {
+        insert_person(
+            &handle,
+            &format!("p-repeat-{i}"),
+            &format!("Repeat-{i}"),
+            100 + i,
+        )
+        .await?;
+    }
+    insert_person(&handle, "p-after-gap-2", "AfterGap2", 199).await?;
+    let second_episode = receiver
+        .wait_through_name("AfterGap2", Duration::from_secs(5))
+        .await;
+    assert_eq!(
+        second_episode
+            .iter()
+            .filter(|result| result.results.iter().any(|diff| matches!(
+                diff,
+                ResultDiff::Add { data, .. } if data["name"] == "AfterGap2"
+            )))
+            .count(),
+        1
+    );
+    assert!(
+        !second_episode
+            .iter()
+            .any(|result| result.results.iter().any(|diff| matches!(
+                diff,
+                ResultDiff::Add { data, .. } if data["name"] == "AfterGap"
+            ))),
+        "the prior gap-triggering event was delivered twice"
+    );
+
+    insert_person(&handle, "p-idle", "IdleAfterGap", 299).await?;
+    let idle = receiver
+        .wait_through_name("IdleAfterGap", Duration::from_secs(5))
+        .await;
+    assert_eq!(
+        idle.iter()
+            .filter(|result| result.results.iter().any(|diff| matches!(
+                diff,
+                ResultDiff::Add { data, .. } if data["name"] == "IdleAfterGap"
+            )))
+            .count(),
+        1
+    );
+    assert!(
+        !idle
+            .iter()
+            .any(|result| result.results.iter().any(|diff| matches!(
+                diff,
+                ResultDiff::Add { data, .. } if data["name"] == "AfterGap2"
+            ))),
+        "the second gap-triggering event was delivered twice"
     );
 
     core.stop().await?;

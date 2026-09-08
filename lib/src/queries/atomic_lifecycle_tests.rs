@@ -629,6 +629,85 @@ fn query_config_with_policy(
     config
 }
 
+#[derive(Clone, Copy, Debug)]
+enum InvalidLegacyMarker {
+    MalformedPayload,
+    UnknownVersion,
+    MissingPayload,
+}
+
+async fn seed_invalid_legacy_marker(
+    path: &std::path::Path,
+    query_id: &str,
+    marker: InvalidLegacyMarker,
+) {
+    let provider = RocksDbIndexProvider::new(path, true, false);
+    let created = provider
+        .create_indexes(query_id)
+        .await
+        .expect("create invalid-marker indexes");
+    let checkpoint_store = created.checkpoint_store.clone().expect("checkpoint store");
+    let outbox = created.outbox_writer.clone().expect("outbox writer");
+    let live_results = created
+        .live_results_writer
+        .clone()
+        .expect("live-results writer");
+    let result = QueryResult::new(
+        query_id.to_string(),
+        5,
+        chrono::Utc::now(),
+        vec![ResultDiff::Add {
+            data: json!({ "name": "preserved" }),
+            row_signature: 5,
+        }],
+        HashMap::new(),
+    );
+    outbox
+        .append(
+            query_id,
+            5,
+            &rmp_serde::to_vec(&result).expect("serialize preserved result"),
+        )
+        .await
+        .expect("seed preserved outbox");
+    let row = rmp_serde::to_vec(&json!({ "name": "preserved" })).expect("serialize preserved row");
+    live_results
+        .apply_mutations(
+            query_id,
+            &[RowMutation {
+                row_signature: 5,
+                data: Some(&row),
+            }],
+        )
+        .await
+        .expect("seed preserved live row");
+    checkpoint_store
+        .write_result_sequence(query_id, 5)
+        .await
+        .expect("seed preserved result sequence");
+    created
+        .set
+        .session_control
+        .begin()
+        .await
+        .expect("begin invalid marker transaction");
+    let (version, payload) = match marker {
+        InvalidLegacyMarker::MalformedPayload => (1, Some(Bytes::from_static(b"bad"))),
+        InvalidLegacyMarker::UnknownVersion => (99, None),
+        InvalidLegacyMarker::MissingPayload => (1, None),
+    };
+    checkpoint_store
+        .stage_checkpoint(LEGACY_OUTPUT_PENDING_MARKER_V1, version, payload.as_ref())
+        .await
+        .expect("seed invalid Legacy marker");
+    created
+        .set
+        .session_control
+        .commit()
+        .await
+        .expect("commit invalid Legacy marker");
+}
+
 fn query_config_with_sources(query_id: &str, source_ids: &[&str]) -> QueryConfig {
     QueryConfig {
         id: query_id.to_string(),
@@ -1377,6 +1456,137 @@ async fn fresh_process_auto_reset_recovers_legacy_pending_marker_high_water() {
         .stop_source(SOURCE_ID.to_string())
         .await
         .expect("stop second-process source");
+}
+
+#[tokio::test]
+async fn invalid_legacy_pending_markers_follow_strict_and_auto_reset_policy() {
+    for marker in [
+        InvalidLegacyMarker::MalformedPayload,
+        InvalidLegacyMarker::UnknownVersion,
+        InvalidLegacyMarker::MissingPayload,
+    ] {
+        let strict_dir = tempfile::TempDir::new().expect("create Strict marker temp directory");
+        let strict_id = format!("legacy-invalid-strict-{marker:?}");
+        seed_invalid_legacy_marker(strict_dir.path(), &strict_id, marker).await;
+        let strict_provider: Arc<dyn IndexBackendPlugin> = Arc::new(LegacyFailureProvider {
+            inner: RocksDbIndexProvider::new(strict_dir.path(), true, false),
+            stage: LegacyFailureStage::Outbox,
+            failed: Arc::new(AtomicBool::new(true)),
+        });
+        let strict_harness = LifecycleHarness::new_with_provider(strict_provider).await;
+        let strict_query = strict_harness
+            .add_query_config(query_config_with_policy(
+                &strict_id,
+                crate::recovery::RecoveryPolicy::Strict,
+            ))
+            .await;
+        let error = strict_harness
+            .manager
+            .start_query(strict_id.clone())
+            .await
+            .expect_err("Strict must reject an invalid Legacy pending marker");
+        assert!(
+            format!("{error:#}").contains("invalid persistent Legacy pending-publication marker"),
+            "{marker:?}: unexpected Strict error: {error:#}"
+        );
+        let strict_store = concrete_query(&strict_query)
+            .get_checkpoint_store()
+            .await
+            .expect("Strict invalid-marker checkpoint store");
+        assert_eq!(
+            strict_store
+                .read_result_sequence(&strict_id)
+                .await
+                .expect("read unmodified Strict sequence"),
+            Some(5)
+        );
+        assert!(strict_store
+            .read_checkpoint(LEGACY_OUTPUT_PENDING_MARKER_V1)
+            .await
+            .expect("read unmodified Strict marker")
+            .is_some());
+        strict_harness
+            .manager
+            .stop_query(strict_id)
+            .await
+            .expect("stop Strict invalid-marker query");
+        strict_harness
+            .source_manager
+            .stop_source(SOURCE_ID.to_string())
+            .await
+            .expect("stop Strict source");
+
+        let reset_dir = tempfile::TempDir::new().expect("create AutoReset marker temp directory");
+        let reset_id = format!("legacy-invalid-reset-{marker:?}");
+        seed_invalid_legacy_marker(reset_dir.path(), &reset_id, marker).await;
+        let reset_provider: Arc<dyn IndexBackendPlugin> = Arc::new(LegacyFailureProvider {
+            inner: RocksDbIndexProvider::new(reset_dir.path(), true, false),
+            stage: LegacyFailureStage::Outbox,
+            failed: Arc::new(AtomicBool::new(true)),
+        });
+        let reset_harness = LifecycleHarness::new_with_provider(reset_provider).await;
+        let reset_query = reset_harness
+            .add_query_config(query_config_with_policy(
+                &reset_id,
+                crate::recovery::RecoveryPolicy::AutoReset,
+            ))
+            .await;
+        let mut results = reset_query
+            .subscribe(format!("{reset_id}-results"))
+            .await
+            .expect("subscribe AutoReset invalid-marker output")
+            .receiver;
+        reset_harness.start_query(&reset_id).await;
+        let reset_concrete = concrete_query(&reset_query);
+        assert_eq!(reset_concrete.output_sequence_for_test().await, 5);
+        let reset_store = reset_concrete
+            .get_checkpoint_store()
+            .await
+            .expect("AutoReset invalid-marker checkpoint store");
+        assert_eq!(
+            read_legacy_pending_state(reset_store.as_ref())
+                .await
+                .expect("read cleared invalid marker"),
+            LegacyPendingState::Absent
+        );
+        reset_harness
+            .source
+            .inject(1, "after-invalid-marker-reset")
+            .await
+            .expect("inject after invalid-marker reset");
+        assert_eq!(receive_result(&mut results).await.sequence, 6);
+
+        reset_harness
+            .manager
+            .stop_query(reset_id.clone())
+            .await
+            .expect("stop reset invalid-marker query");
+        wait_for_status(&reset_harness.manager, &reset_id, ComponentStatus::Stopped).await;
+        drop(reset_store);
+        reset_harness
+            .manager
+            .start_query(reset_id.clone())
+            .await
+            .expect("subsequent invalid-marker restart should be clean");
+        wait_for_status(&reset_harness.manager, &reset_id, ComponentStatus::Running).await;
+        reset_harness
+            .source
+            .inject(2, "after-clean-restart")
+            .await
+            .expect("inject after clean marker restart");
+        assert_eq!(receive_result(&mut results).await.sequence, 7);
+
+        reset_harness
+            .manager
+            .stop_query(reset_id)
+            .await
+            .expect("stop recovered invalid-marker query");
+        reset_harness
+            .source_manager
+            .stop_source(SOURCE_ID.to_string())
+            .await
+            .expect("stop AutoReset source");
+    }
 }
 
 #[tokio::test]
