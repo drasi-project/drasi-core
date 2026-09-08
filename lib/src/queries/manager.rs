@@ -49,6 +49,11 @@ use crate::queries::label_extractor::{LabelExtractor, QueryLabels};
 use crate::queries::output_state::{
     FetchError, OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse,
 };
+#[cfg(test)]
+use crate::queries::query_composite_host::dispatch_query_results;
+use crate::queries::query_composite_host::{
+    QueryCompositeHost, QueryHostRuntime, QueryLiveDependencies, QueryOutputDependencies,
+};
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
 use crate::sources::FutureQueueSource;
@@ -263,225 +268,6 @@ enum BootstrapPhase {
     NotStarted,
     InProgress,
     Completed,
-}
-
-/// Dispatch query evaluation results to the current result set and all subscribed reactions.
-///
-/// Shared between the regular event processing path and the future queue drain path.
-/// Converts the core evaluation into a typed change envelope before exposing the
-/// legacy `QueryResult`, then updates `QueryOutputState` and the outbox.
-#[allow(clippy::too_many_arguments)]
-async fn dispatch_query_results(
-    results: &[QueryPartEvaluationContext],
-    source_id: &str,
-    query_id: &str,
-    output_state: &RwLock<QueryOutputState>,
-    dispatchers: &RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>,
-    outbox_writer: &Option<Arc<dyn OutboxWriter>>,
-    live_results_writer: &Option<Arc<dyn LiveResultsWriter>>,
-    checkpoint_store: &Option<Arc<dyn CheckpointStore>>,
-    outbox_capacity: usize,
-    profiling: crate::profiling::ProfilingMetadata,
-    output_metrics: &Arc<QueryOutputMetrics>,
-) -> Result<()> {
-    let result_count = results
-        .iter()
-        .filter(|result| !matches!(result, QueryPartEvaluationContext::Noop))
-        .count();
-    if result_count == 0 {
-        return Ok(());
-    }
-
-    let tx_start = std::time::Instant::now();
-    let query_identity = Arc::<str>::from(query_id);
-    let source_identity = Arc::<str>::from(source_id);
-    let mut metadata = HashMap::new();
-    metadata.insert(
-        "source_id".to_string(),
-        serde_json::Value::String(source_id.to_string()),
-    );
-    metadata.insert(
-        "processed_by".to_string(),
-        serde_json::Value::String("drasi-core".to_string()),
-    );
-    metadata.insert(
-        "result_count".to_string(),
-        serde_json::Value::Number(result_count.into()),
-    );
-
-    // Canonicalization and legacy JSON projection happen outside the write lock.
-    // If another writer advances the sequence before commit, rebuild against the
-    // new sequence and retry without changing state.
-    let arc_result = loop {
-        let expected_sequence = output_state.read().await.next_sequence();
-        let envelope = crate::change::query_evaluation_to_envelope(
-            results,
-            crate::change::QueryEnvelopeMetadata::new(
-                query_identity.clone(),
-                Some(source_identity.clone()),
-                expected_sequence,
-                chrono::Utc::now(),
-                metadata.clone(),
-                Some(profiling.clone()),
-            ),
-        )?
-        .ok_or_else(|| anyhow::anyhow!("non-Noop query evaluation produced no change envelope"))?;
-        let query_result = crate::change::query_result_from_envelope(&envelope)?;
-
-        let mut state = output_state.write().await;
-        let result = match state.try_apply_prepared_result(query_result) {
-            Some(result) => result,
-            None => continue,
-        };
-
-        // Update query output metrics
-        let duration_ns = u64::try_from(tx_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        output_metrics.record_transaction_duration_ns(duration_ns);
-        output_metrics.record_seq_advance();
-        output_metrics.record_live_results_count(state.results_len());
-        let earliest_seq = state.outbox_earliest_seq().unwrap_or(0);
-        output_metrics.update_outbox(state.outbox_len(), earliest_seq, state.as_of_sequence());
-
-        break result;
-    };
-
-    // Persist to outbox and live results writers if available (best-effort).
-    // These writes are NOT transactional with the index updates — on crash between
-    // index commit and outbox write, reactions will re-read from checkpoint sequence.
-    let mut outbox_ok = true;
-    if let Some(writer) = outbox_writer {
-        // Serialize the QueryResult for the outbox using MessagePack (compact binary)
-        match rmp_serde::to_vec(arc_result.as_ref()) {
-            Ok(data) => {
-                if let Err(e) = writer.append(query_id, arc_result.sequence, &data).await {
-                    warn!(
-                        "Query '{query_id}' failed to persist result seq={} to outbox: {e}",
-                        arc_result.sequence
-                    );
-                    outbox_ok = false;
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "Query '{query_id}' failed to serialize result seq={} for outbox: {e}",
-                    arc_result.sequence
-                );
-                outbox_ok = false;
-            }
-        }
-
-        // Trim the persistent outbox to the configured capacity
-        if outbox_ok {
-            if let Err(e) = writer.trim_to_capacity(query_id, outbox_capacity).await {
-                warn!("Query '{query_id}' failed to trim persistent outbox: {e}");
-            }
-        }
-    }
-
-    let mut live_results_ok = true;
-    if let Some(writer) = live_results_writer {
-        use drasi_core::interface::RowMutation;
-
-        // Build serialized row data from the QueryResult's results (the diffs were moved
-        // into arc_result, so we read from there).
-        let serialized_data: Vec<(u64, Option<Vec<u8>>)> = arc_result
-            .results
-            .iter()
-            .filter_map(|diff| match diff {
-                ResultDiff::Add {
-                    data,
-                    row_signature,
-                } => match rmp_serde::to_vec(data) {
-                    Ok(serialized) => Some((*row_signature, Some(serialized))),
-                    Err(e) => {
-                        warn!(
-                            "Query '{query_id}' failed to serialize Add row (sig={row_signature}) for live results: {e}"
-                        );
-                        None
-                    }
-                },
-                ResultDiff::Update {
-                    after,
-                    row_signature,
-                    ..
-                } => match rmp_serde::to_vec(after) {
-                    Ok(serialized) => Some((*row_signature, Some(serialized))),
-                    Err(e) => {
-                        warn!(
-                            "Query '{query_id}' failed to serialize Update row (sig={row_signature}) for live results: {e}"
-                        );
-                        None
-                    }
-                },
-                ResultDiff::Aggregation {
-                    after,
-                    row_signature,
-                    ..
-                } => match rmp_serde::to_vec(after) {
-                    Ok(serialized) => Some((*row_signature, Some(serialized))),
-                    Err(e) => {
-                        warn!(
-                            "Query '{query_id}' failed to serialize Aggregation row (sig={row_signature}) for live results: {e}"
-                        );
-                        None
-                    }
-                },
-                ResultDiff::Delete { row_signature, .. } => Some((*row_signature, None)),
-                ResultDiff::Noop => None,
-            })
-            .collect();
-
-        let row_mutations: Vec<RowMutation<'_>> = serialized_data
-            .iter()
-            .map(|(sig, data)| RowMutation {
-                row_signature: *sig,
-                data: data.as_deref(),
-            })
-            .collect();
-
-        if !row_mutations.is_empty() {
-            if let Err(e) = writer.apply_mutations(query_id, &row_mutations).await {
-                warn!(
-                    "Query '{query_id}' failed to persist live results for seq={}: {e}",
-                    arc_result.sequence
-                );
-                live_results_ok = false;
-            }
-        }
-    }
-
-    // Record the last persisted result sequence only if BOTH the outbox and
-    // live-results writes succeeded. Otherwise recovery may see this sequence
-    // as durable while the actual data is missing.
-    if outbox_ok && live_results_ok {
-        if let Some(store) = checkpoint_store {
-            if let Err(e) = store
-                .write_result_sequence(query_id, arc_result.sequence)
-                .await
-            {
-                warn!(
-                    "Query '{query_id}' failed to write result sequence {}: {e}",
-                    arc_result.sequence
-                );
-            }
-        }
-    }
-
-    debug!(
-        "Query '{query_id}' sending {} results to reactions (seq={})",
-        arc_result.results.len(),
-        arc_result.sequence
-    );
-
-    // Dispatch query result to all subscribed reactions
-    let dispatchers = dispatchers.read().await;
-    for dispatcher in dispatchers.iter() {
-        if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
-            debug!("Failed to dispatch result for query '{query_id}': {e}");
-        }
-    }
-
-    Ok(())
 }
 
 pub struct DrasiQuery {
@@ -2027,343 +1813,33 @@ impl Query for DrasiQuery {
             self.subscription_tasks.write().await.push(fq_forwarder);
         }
 
-        // Spawn event processor task that reads from priority queue
-        let continuous_query_for_processor = continuous_query.clone();
-        let checkpoint_store_for_processor = checkpoint_store.clone();
-        let checkpoint_store_for_dispatch: Option<Arc<dyn CheckpointStore>> =
-            Some(checkpoint_store.clone());
-        let base_dispatchers = self.base.dispatchers.clone();
-        let query_id = self.base.config.id.clone();
-        let output_state = self.output_state.clone();
-        let task_handle_clone = self.base.task_handle.clone();
-        let priority_queue = self.priority_queue.clone();
-        let instance_id = self.instance_id.clone();
-        let reporter_for_processor = self.base.status_handle();
-        let fq_source_for_processor = Arc::clone(&future_queue_source);
-        let position_handles_for_processor = position_handles;
-        let outbox_writer_for_processor = self.outbox_writer.read().await.clone();
-        let live_results_writer_for_processor = self.live_results_writer.read().await.clone();
-        let outbox_capacity_for_processor = self.output_state.read().await.outbox_capacity();
-        let output_metrics_for_processor = self.output_metrics.clone();
-        let source_ids_for_processor: Vec<String> = self
-            .base
-            .config
-            .sources
-            .iter()
-            .map(|s| s.source_id.clone())
-            .collect();
-
-        // Create shutdown channel for graceful termination
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-        self.base.set_shutdown_tx(shutdown_tx).await;
-
-        let span = tracing::info_span!(
-            "query_processor",
-            instance_id = %instance_id,
-            component_id = %query_id,
-            component_type = "query"
+        let host = QueryCompositeHost::new(
+            QueryHostRuntime::new(
+                self.instance_id.clone(),
+                self.base.config.id.clone(),
+                self.priority_queue.clone(),
+                bootstrap_gate,
+                self.base.status_handle(),
+                future_queue_source,
+            ),
+            QueryLiveDependencies::new(
+                continuous_query,
+                checkpoint_store.clone(),
+                checkpoint_sequences_per_source,
+                position_handles,
+            ),
+            QueryOutputDependencies::new(
+                self.base.config.id.clone(),
+                self.output_state.clone(),
+                self.base.dispatchers.clone(),
+                self.outbox_writer.read().await.clone(),
+                self.live_results_writer.read().await.clone(),
+                Some(checkpoint_store),
+                self.output_state.read().await.outbox_capacity(),
+                self.output_metrics.clone(),
+            ),
         );
-        let handle = tokio::spawn(
-            async move {
-                info!("Query '{query_id}' waiting for bootstrap gate before processing events");
-
-                // Wait for bootstrap to complete (or immediate signal if no bootstrap).
-                // If shutdown arrives while waiting, exit cleanly.
-                tokio::select! {
-                    biased;
-
-                    _ = &mut shutdown_rx => {
-                        info!(
-                            "Query '{query_id}' received shutdown during bootstrap wait, exiting"
-                        );
-                        return;
-                    }
-
-                    _ = bootstrap_gate.notified() => {
-                        info!("Query '{query_id}' bootstrap gate opened, starting event processing");
-                    }
-                }
-
-                // Bootstrap complete — transition to Running only if still Starting.
-                // If stop() was called during bootstrap, status may already be
-                // Stopping and we must not overwrite it.
-                let should_run = matches!(reporter_for_processor.get_status().await, ComponentStatus::Starting);
-
-                if should_run {
-                    reporter_for_processor.set_status(
-                        ComponentStatus::Running,
-                        Some("Query started successfully".to_string()),
-                    ).await;
-                } else {
-                    let current = reporter_for_processor.get_status().await;
-                    warn!(
-                        "Query '{query_id}' bootstrap completed but status is {current:?}, \
-                         skipping transition to Running"
-                    );
-                }
-
-                // Start FutureQueueSource after bootstrap completes
-                if let Err(e) = fq_source_for_processor.start().await {
-                    error!("Query '{query_id}' failed to start FutureQueueSource: {e}");
-                    reporter_for_processor
-                        .set_status(
-                            ComponentStatus::Error,
-                            Some(format!("Future queue start failed: {e}")),
-                        )
-                        .await;
-                    return;
-                }
-
-                info!("Query '{query_id}' starting priority queue event processor");
-
-                // Initialize the crash-recovery dedup filter from stored checkpoints
-                // (if resuming) so buffered streaming events at or below the
-                // checkpoint sequence are filtered on replay.
-                let mut dedup = super::SequenceDedup::new(checkpoint_sequences_per_source.clone());
-
-                loop {
-                    // Check if query is still running
-                    let current_status = reporter_for_processor.get_status().await;
-                    if !matches!(current_status, ComponentStatus::Running) {
-                        info!(
-                            "Query '{query_id}' status changed to non-running ({current_status:?}), exiting processing loop"
-                        );
-                        break;
-                    }
-
-                    tokio::select! {
-                        biased;
-
-                        _ = &mut shutdown_rx => {
-                            info!(
-                                "Query '{query_id}' received shutdown signal, exiting processing loop"
-                            );
-                            break;
-                        }
-
-                        // Dequeue events from priority queue (blocks until available)
-                        arc_event = priority_queue.dequeue() => {
-                            let (source_id, event, profiling_opt, sequence, source_position) =
-                                if matches!(&arc_event.event, SourceEvent::Change(_)) {
-                                // Move sole-owned channel events through the envelope. Shared
-                                // broadcast events retain the existing single-clone fallback.
-                                let envelope_result =
-                                    match SourceEventWrapper::try_unwrap_arc(arc_event) {
-                                        Ok(parts) => crate::change::source_event_parts_to_envelope(
-                                            parts,
-                                            crate::change::SystemMetadataExtensions::default(),
-                                        ),
-                                        Err(shared) => crate::change::source_event_to_envelope(
-                                            shared.as_ref(),
-                                            crate::change::SystemMetadataExtensions::default(),
-                                        ),
-                                    };
-                                let envelope = match envelope_result {
-                                    Ok(envelope) => envelope,
-                                    Err(e) => {
-                                        error!(
-                                            "Query '{query_id}' failed to adapt source event to a change envelope: {e}"
-                                        );
-                                        continue;
-                                    }
-                                };
-                                let (source_id, profiling, sequence, source_position) = {
-                                    let system = envelope.system();
-                                    let Some(source_id) = system.source_id_arc().cloned() else {
-                                        error!(
-                                            "Query '{query_id}' received a graph change envelope without a source ID"
-                                        );
-                                        continue;
-                                    };
-                                    (
-                                        source_id,
-                                        system.profiling().cloned(),
-                                        system.sequence(),
-                                        system.source_position().cloned(),
-                                    )
-                                };
-                                let source_change = match crate::change::source_change_from_envelope_owned(envelope) {
-                                    Ok(change) => change,
-                                    Err(e) => {
-                                        error!(
-                                            "Query '{query_id}' failed to read graph change envelope: {e}"
-                                        );
-                                        continue;
-                                    }
-                                };
-                                (
-                                    source_id,
-                                    SourceEvent::Change(source_change),
-                                    profiling,
-                                    sequence,
-                                    source_position,
-                                )
-                            } else {
-                                // Control events stay on the legacy path and retain their
-                                // priority-queue ordering.
-                                let parts = match SourceEventWrapper::try_unwrap_arc(arc_event) {
-                                    Ok(parts) => parts,
-                                    Err(arc) => {
-                                        crate::channels::events::SourceEventParts {
-                                            source_id: arc.source_id.clone(),
-                                            event: arc.event.clone(),
-                                            timestamp: arc.timestamp,
-                                            profiling: arc.profiling.clone(),
-                                            sequence: arc.sequence,
-                                            source_position: arc.source_position.clone(),
-                                        }
-                                    }
-                                };
-                                (
-                                    Arc::<str>::from(parts.source_id),
-                                    parts.event,
-                                    parts.profiling,
-                                    parts.sequence,
-                                    parts.source_position,
-                                )
-                            };
-
-                            debug!("Query '{query_id}' processing event from source '{source_id}'");
-
-                            // Dedup: skip events already processed for this source
-                            if dedup.should_skip(source_id.as_ref(), sequence) {
-                                debug!(
-                                    "Query '{query_id}' skipping duplicate event from '{source_id}' (seq={seq}, checkpoint={cp})",
-                                    seq = sequence.unwrap_or(0),
-                                    cp = dedup.checkpoint_for(source_id.as_ref()).unwrap_or(0)
-                                );
-                                continue;
-                            }
-
-                            match event {
-                                SourceEvent::Control(SourceControl::FuturesDue) => {
-                                    // Drain all due futures atomically within sessions
-                                    loop {
-                                        match continuous_query_for_processor.process_due_futures().await {
-                                            Ok(Some(due_result)) => {
-                                                if !due_result.results.is_empty() {
-                                                    let profiling = crate::profiling::ProfilingMetadata::new();
-                                                    if let Err(e) = dispatch_query_results(
-                                                        &due_result.results,
-                                                        &due_result.source_id,
-                                                        &query_id,
-                                                        &output_state,
-                                                        &base_dispatchers,
-                                                        &outbox_writer_for_processor,
-                                                        &live_results_writer_for_processor,
-                                                        &checkpoint_store_for_dispatch,
-                                                        outbox_capacity_for_processor,
-                                                        profiling,
-                                                        &output_metrics_for_processor,
-                                                    )
-                                                    .await
-                                                    {
-                                                        error!(
-                                                            "Query '{query_id}' failed to adapt due-future results: {e}"
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                            Ok(None) => break,
-                                            Err(e) => {
-                                                error!("Query '{query_id}' failed to process due futures: {e}");
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    continue;
-                                }
-                                SourceEvent::Change(source_change) => {
-                                    let mut profiling =
-                                        profiling_opt.unwrap_or_else(crate::profiling::ProfilingMetadata::new);
-                                    profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
-                                    profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
-
-                                    // Stage checkpoint inside the session via pre-commit hook.
-                                    // This ensures checkpoint persistence is atomic with index updates.
-                                    let cp_store = checkpoint_store_for_processor.clone();
-                                    let cp_source_id = source_id.clone();
-                                    let cp_position = source_position.clone();
-                                    let hook = move || {
-                                        async move {
-                                            if let Some(seq) = sequence {
-                                                // Enforce position size limit at checkpoint time:
-                                                // oversized positions are skipped to preserve the
-                                                // last known good position in the store.
-                                                let pos_ref = match &cp_position {
-                                                    Some(p) if p.len() <= crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES => Some(p),
-                                                    _ => None,
-                                                };
-                                                cp_store
-                                                    .stage_checkpoint(cp_source_id.as_ref(), seq, pos_ref)
-                                                    .await?;
-                                            }
-                                            Ok(())
-                                        }
-                                    };
-
-                                    match continuous_query_for_processor
-                                        .process_source_change_with_hook(source_change, hook)
-                                        .await
-                                    {
-                                        Ok(results) => {
-                                            profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
-
-                                            // Advance dedup and notify source on successful commit
-                                            if let Some(seq) = sequence {
-                                                dedup.advance(source_id.as_ref(), seq);
-
-                                                if let Some(handle) = position_handles_for_processor.get(source_id.as_ref()) {
-                                                    handle.store(seq, std::sync::atomic::Ordering::Release);
-                                                }
-                                            }
-
-                                            if !results.is_empty() {
-                                                profiling.query_send_ns = Some(crate::profiling::timestamp_ns());
-                                                if let Err(e) = dispatch_query_results(
-                                                    &results,
-                                                    source_id.as_ref(),
-                                                    &query_id,
-                                                    &output_state,
-                                                    &base_dispatchers,
-                                                    &outbox_writer_for_processor,
-                                                    &live_results_writer_for_processor,
-                                                    &checkpoint_store_for_dispatch,
-                                                    outbox_capacity_for_processor,
-                                                    profiling,
-                                                    &output_metrics_for_processor,
-                                                )
-                                                .await
-                                                {
-                                                    error!(
-                                                        "Query '{query_id}' failed to adapt query results: {e}"
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("Query '{query_id}' failed to process source change: {e}");
-                                        }
-                                    }
-                                }
-                                SourceEvent::Control(_) => {
-                                    debug!("Query '{query_id}' ignoring control event from source '{source_id}'");
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                fq_source_for_processor.stop().await;
-
-            info!("Query '{query_id}' processing task exited");
-        }
-        .instrument(span),
-    );
-
-        // Store the task handle
-        *task_handle_clone.write().await = Some(handle);
+        host.start(&self.base).await;
 
         Ok(())
     }
@@ -2433,8 +1909,8 @@ impl Query for DrasiQuery {
         // Clear tracked source IDs
         self.subscribed_source_ids.write().await.clear();
 
-        // Use QueryBase common stop behavior to finish shutting down the processor task
-        self.base.stop_common().await?;
+        // Finish shutting down the host-owned processor task through QueryBase.
+        QueryCompositeHost::stop(&self.base).await?;
 
         self.base
             .set_status(

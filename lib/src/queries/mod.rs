@@ -18,6 +18,7 @@ pub mod label_extractor;
 pub mod manager;
 pub mod output_state;
 pub mod priority_queue;
+mod query_composite_host;
 pub mod sequence_dedup;
 pub mod subscription_builder;
 
