@@ -29,14 +29,15 @@ use drasi_core::{
 use drasi_query_ast::ast::{
     BinaryExpression, Expression as AstExpression, Literal, UnaryExpression,
 };
+use std::hash::{Hash, Hasher};
 
 const MAGIC: &[u8] = b"DRASI-QV";
 const VERSION: u8 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CanonicalEncodingError {
-    #[error("query float has no canonical IEEE-754 representation: {value}")]
-    InvalidFloat { value: String },
+    #[error("query Float did not expose exactly one semantic IEEE-754 bit pattern")]
+    InvalidFloat,
     #[error("query integer has no signed or unsigned representation")]
     InvalidInteger,
 }
@@ -575,25 +576,51 @@ impl CanonicalEncoder {
 fn query_float_bits(
     value: &drasi_core::evaluation::variable_value::float::Float,
 ) -> Result<u64, CanonicalEncodingError> {
-    let display = value.to_string();
-    let value = match display.as_str() {
-        "NaN" => f64::NAN,
-        "inf" => f64::INFINITY,
-        "-inf" => f64::NEG_INFINITY,
-        _ => display
-            .parse::<f64>()
-            .map_err(|_| CanonicalEncodingError::InvalidFloat { value: display })?,
-    };
-    Ok(canonical_f64_bits(value))
+    // Float's explicit Hash implementation is its only lossless public projection:
+    // it emits one u64 containing raw bits, except that equal signed zeros normalize.
+    let mut capture = FloatBitsCapture::default();
+    value.hash(&mut capture);
+    capture
+        .into_bits()
+        .ok_or(CanonicalEncodingError::InvalidFloat)
 }
 
 fn canonical_f64_bits(value: f64) -> u64 {
-    // Signed zero compares equal; NaN payload bits are not exposed by the query value API.
     if value == 0.0 {
         0.0f64.to_bits()
-    } else if value.is_nan() {
-        f64::NAN.to_bits()
     } else {
         value.to_bits()
+    }
+}
+
+#[derive(Default)]
+struct FloatBitsCapture {
+    bits: Option<u64>,
+    invalid_write: bool,
+}
+
+impl FloatBitsCapture {
+    fn into_bits(self) -> Option<u64> {
+        if self.invalid_write {
+            None
+        } else {
+            self.bits
+        }
+    }
+}
+
+impl Hasher for FloatBitsCapture {
+    fn finish(&self) -> u64 {
+        self.bits.unwrap_or_default()
+    }
+
+    fn write(&mut self, _bytes: &[u8]) {
+        self.invalid_write = true;
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        if self.bits.replace(value).is_some() {
+            self.invalid_write = true;
+        }
     }
 }

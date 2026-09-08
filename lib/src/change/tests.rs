@@ -22,7 +22,7 @@ use chrono::NaiveDate;
 use drasi_core::{
     evaluation::{
         context::{QueryPartEvaluationContext, QueryVariables},
-        variable_value::VariableValue,
+        variable_value::{float::Float, VariableValue},
     },
     interface::FutureElementRef,
     models::{
@@ -555,6 +555,88 @@ fn canonical_integer_bytes_are_fixed_width_and_versioned() {
             "0000000000000008706f73697469766503ffffffffffffffff",
         )
     );
+}
+
+#[test]
+fn canonical_float_encoding_preserves_nan_payloads_and_semantics() {
+    let first_nan_bits = 0x7ff8_0000_0000_0001;
+    let second_nan_bits = 0xfff8_0000_0000_0002;
+    let first_nan = variables(&[(
+        "value",
+        VariableValue::Float(Float::from(f64::from_bits(first_nan_bits))),
+    )]);
+    let second_nan = variables(&[(
+        "value",
+        VariableValue::Float(Float::from(f64::from_bits(second_nan_bits))),
+    )]);
+
+    let first_bytes = encode_query_variables(&first_nan).unwrap();
+    assert_eq!(first_bytes, encode_query_variables(&first_nan).unwrap());
+    assert!(first_bytes.ends_with(&first_nan_bits.to_be_bytes()));
+    assert!(encode_query_variables(&second_nan)
+        .unwrap()
+        .ends_with(&second_nan_bits.to_be_bytes()));
+    assert_ne!(first_bytes, encode_query_variables(&second_nan).unwrap());
+
+    let first_envelope = query_evaluation_to_envelope(
+        &[QueryPartEvaluationContext::Adding {
+            after: first_nan,
+            row_signature: 11,
+        }],
+        query_metadata(1),
+    )
+    .unwrap()
+    .unwrap();
+    let second_envelope = query_evaluation_to_envelope(
+        &[QueryPartEvaluationContext::Adding {
+            after: second_nan,
+            row_signature: 11,
+        }],
+        query_metadata(1),
+    )
+    .unwrap()
+    .unwrap();
+    assert_ne!(
+        first_envelope.change_set().id(),
+        second_envelope.change_set().id()
+    );
+
+    let positive_zero = variables(&[("value", VariableValue::Float(Float::from(0.0)))]);
+    let negative_zero = variables(&[("value", VariableValue::Float(Float::from(-0.0)))]);
+    assert_eq!(
+        encode_query_variables(&positive_zero).unwrap(),
+        encode_query_variables(&negative_zero).unwrap(),
+        "signed zero compares equal in Float and must have one canonical encoding"
+    );
+    let positive_zero_envelope = query_evaluation_to_envelope(
+        &[QueryPartEvaluationContext::Adding {
+            after: positive_zero,
+            row_signature: 11,
+        }],
+        query_metadata(1),
+    )
+    .unwrap()
+    .unwrap();
+    let negative_zero_envelope = query_evaluation_to_envelope(
+        &[QueryPartEvaluationContext::Adding {
+            after: negative_zero,
+            row_signature: 11,
+        }],
+        query_metadata(1),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        positive_zero_envelope.change_set().id(),
+        negative_zero_envelope.change_set().id()
+    );
+
+    for value in [1.5, f64::INFINITY, f64::NEG_INFINITY] {
+        let variables = variables(&[("value", VariableValue::Float(Float::from(value)))]);
+        let encoded = encode_query_variables(&variables).unwrap();
+        assert_eq!(encoded, encode_query_variables(&variables).unwrap());
+        assert!(encoded.ends_with(&value.to_bits().to_be_bytes()));
+    }
 }
 
 #[test]
