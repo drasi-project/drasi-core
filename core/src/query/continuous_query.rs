@@ -17,6 +17,7 @@ use std::{
     fmt::Debug,
     future::Future,
     hash::{Hash, Hasher},
+    pin::Pin,
     sync::Arc,
     time::Duration,
 };
@@ -56,6 +57,12 @@ pub struct DueFutureResult {
     /// The source_id from the popped future's element_ref.
     pub source_id: Arc<str>,
 }
+
+/// Boxed future returned by a result-aware pre-commit hook.
+///
+/// The future may borrow the core-computed result for the duration of the hook,
+/// avoiding a deep clone before related writes are staged.
+pub type ResultHookFuture<'a> = Pin<Box<dyn Future<Output = Result<(), IndexError>> + Send + 'a>>;
 
 pub struct ContinuousQuery {
     expression_evaluator: Arc<ExpressionEvaluator>,
@@ -143,6 +150,32 @@ impl ContinuousQuery {
         Ok(result)
     }
 
+    /// Process a source change with a result-aware pre-commit hook.
+    ///
+    /// The hook borrows the exact result produced by middleware and evaluation.
+    /// It runs after index updates but before the session commits, while the
+    /// change lock remains held. If the hook fails, its [`IndexError`] is
+    /// returned as an [`EvaluationError`] and the session is rolled back.
+    #[tracing::instrument(skip_all, err, level = "debug")]
+    pub async fn process_source_change_with_result_hook<F>(
+        &self,
+        change: SourceChange,
+        pre_commit_hook: F,
+    ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError>
+    where
+        F: for<'a> FnOnce(&'a [QueryPartEvaluationContext]) -> ResultHookFuture<'a> + Send,
+    {
+        let _lock = self.change_lock.lock().await;
+        let guard = SessionGuard::begin(self.session_control.clone()).await?;
+
+        let changes = self.execute_source_middleware(change).await?;
+        let result = self.process_changes_inner(changes).await?;
+
+        pre_commit_hook(&result).await?;
+        guard.commit().await?;
+        Ok(result)
+    }
+
     /// Atomically pop a due future from the queue and process it within a single session.
     ///
     /// Returns `Ok(None)` when the queue is empty (stale peek).
@@ -170,6 +203,43 @@ impl ContinuousQuery {
         let results = self.process_changes_inner(changes).await?;
         guard.commit().await?;
         Ok(Some(DueFutureResult { results, source_id }))
+    }
+
+    /// Atomically process a due future with a result-aware pre-commit hook.
+    ///
+    /// The hook borrows the exact [`DueFutureResult`] after evaluation and runs
+    /// before the session commits. It is called only when a future was popped;
+    /// an empty queue commits the session and returns `Ok(None)` without calling
+    /// the hook. Hook failure rolls back the future pop and all evaluation writes.
+    #[tracing::instrument(skip_all, err, level = "debug")]
+    pub async fn process_due_futures_with_result_hook<F>(
+        &self,
+        pre_commit_hook: F,
+    ) -> Result<Option<DueFutureResult>, EvaluationError>
+    where
+        F: for<'a> FnOnce(&'a DueFutureResult) -> ResultHookFuture<'a> + Send,
+    {
+        let _lock = self.change_lock.lock().await;
+        let guard = SessionGuard::begin(self.session_control.clone()).await?;
+
+        let future_ref = match self.future_queue.pop().await {
+            Ok(Some(fr)) => fr,
+            Ok(None) => {
+                guard.commit().await?;
+                return Ok(None);
+            }
+            Err(e) => return Err(EvaluationError::from(e)),
+        };
+
+        let source_id = future_ref.element_ref.source_id.clone();
+        let change = SourceChange::Future { future_ref };
+        let changes = self.execute_source_middleware(change).await?;
+        let results = self.process_changes_inner(changes).await?;
+        let result = DueFutureResult { results, source_id };
+
+        pre_commit_hook(&result).await?;
+        guard.commit().await?;
+        Ok(Some(result))
     }
 
     /// Expose the ContinuousQuery's future queue for external polling.

@@ -57,6 +57,7 @@ anyhow = { version = "1.0", optional = true }
 plugin-descriptor = ["dep:drasi-plugin-sdk", "dep:utoipa", "dep:anyhow"]
 
 [dev-dependencies]
+drasi-query-cypher.workspace = true
 shared-tests = { path = "../../../shared-tests" }
 uuid = { version = "0.8.2", features = ["serde", "v4"] }
 serial_test = "3"
