@@ -24,14 +24,17 @@ use drasi_core::{
         context::QueryVariables,
         variable_value::{ListRange, RangeBound, VariableValue},
     },
-    models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue},
+    models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+    },
 };
 use drasi_query_ast::ast::{
     BinaryExpression, Expression as AstExpression, Literal, UnaryExpression,
 };
 use std::hash::{Hash, Hasher};
 
-const MAGIC: &[u8] = b"DRASI-QV";
+const QUERY_MAGIC: &[u8] = b"DRASI-QV";
+const GRAPH_MAGIC: &[u8] = b"DRASI-GC";
 const VERSION: u8 = 1;
 
 #[derive(Debug, thiserror::Error)]
@@ -46,9 +49,19 @@ pub(crate) fn encode_query_variables(
     variables: &QueryVariables,
 ) -> Result<Vec<u8>, CanonicalEncodingError> {
     let mut encoder = CanonicalEncoder::default();
-    encoder.raw(MAGIC);
+    encoder.raw(QUERY_MAGIC);
     encoder.u8(VERSION);
     encoder.query_variables(variables)?;
+    Ok(encoder.into_bytes())
+}
+
+pub(crate) fn encode_source_change(
+    change: &SourceChange,
+) -> Result<Vec<u8>, CanonicalEncodingError> {
+    let mut encoder = CanonicalEncoder::default();
+    encoder.raw(GRAPH_MAGIC);
+    encoder.u8(VERSION);
+    encoder.source_change(change)?;
     Ok(encoder.into_bytes())
 }
 
@@ -249,6 +262,31 @@ impl CanonicalEncoder {
         }
     }
 
+    fn source_change(&mut self, value: &SourceChange) -> Result<(), CanonicalEncodingError> {
+        match value {
+            SourceChange::Insert { element } => {
+                self.u8(0x00);
+                self.element(element)?;
+            }
+            SourceChange::Update { element } => {
+                self.u8(0x01);
+                self.element(element)?;
+            }
+            SourceChange::Delete { metadata } => {
+                self.u8(0x02);
+                self.element_metadata(metadata);
+            }
+            SourceChange::Future { future_ref } => {
+                self.u8(0x03);
+                self.element_reference(&future_ref.element_ref);
+                self.u64(future_ref.original_time);
+                self.u64(future_ref.due_time);
+                self.u64(future_ref.group_signature);
+            }
+        }
+        Ok(())
+    }
+
     fn element(&mut self, value: &Element) -> Result<(), CanonicalEncodingError> {
         match value {
             Element::Node {
@@ -313,7 +351,7 @@ impl CanonicalEncoder {
             }
             ElementValue::Float(value) => {
                 self.u8(0x02);
-                self.u64(canonical_f64_bits(value.into_inner()));
+                self.u64(canonical_ordered_f64_bits(value.into_inner()));
             }
             ElementValue::Integer(value) => {
                 self.u8(0x03);
@@ -518,7 +556,7 @@ impl CanonicalEncoder {
             }
             Literal::Real(value) => {
                 self.u8(0x01);
-                self.u64(canonical_f64_bits(*value));
+                self.u64(canonical_raw_f64_bits(*value));
             }
             Literal::Boolean(value) => {
                 self.u8(0x02);
@@ -585,11 +623,19 @@ fn query_float_bits(
         .ok_or(CanonicalEncodingError::InvalidFloat)
 }
 
-fn canonical_f64_bits(value: f64) -> u64 {
+fn canonical_raw_f64_bits(value: f64) -> u64 {
     if value == 0.0 {
         0.0f64.to_bits()
     } else {
         value.to_bits()
+    }
+}
+
+fn canonical_ordered_f64_bits(value: f64) -> u64 {
+    if value.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        canonical_raw_f64_bits(value)
     }
 }
 

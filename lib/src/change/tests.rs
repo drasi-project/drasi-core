@@ -640,6 +640,71 @@ fn canonical_float_encoding_preserves_nan_payloads_and_semantics() {
 }
 
 #[test]
+fn canonical_element_float_encoding_matches_ordered_float_semantics() {
+    fn graph_float(value: f64) -> SourceEventWrapper {
+        let mut properties = ElementPropertyMap::new();
+        properties.insert("value", ElementValue::Float(OrderedFloat(value)));
+        wrapper(SourceChange::Insert {
+            element: element(properties, 1_000),
+        })
+    }
+
+    fn change(wrapper: &SourceEventWrapper) -> &SourceChange {
+        let SourceEvent::Change(change) = &wrapper.event else {
+            panic!("expected source change");
+        };
+        change
+    }
+
+    let first_nan = graph_float(f64::from_bits(0x7ff8_0000_0000_0001));
+    let second_nan = graph_float(f64::from_bits(0xfff8_0000_0000_0002));
+    assert_eq!(first_nan.event, second_nan.event);
+    assert_eq!(
+        encode_source_change(change(&first_nan)).unwrap(),
+        encode_source_change(change(&second_nan)).unwrap()
+    );
+    assert_eq!(
+        source_event_to_envelope(&first_nan, SystemMetadataExtensions::default())
+            .unwrap()
+            .change_set()
+            .id(),
+        source_event_to_envelope(&second_nan, SystemMetadataExtensions::default())
+            .unwrap()
+            .change_set()
+            .id()
+    );
+
+    let positive_zero = graph_float(0.0);
+    let negative_zero = graph_float(-0.0);
+    assert_eq!(
+        encode_source_change(change(&positive_zero)).unwrap(),
+        encode_source_change(change(&negative_zero)).unwrap()
+    );
+    assert_eq!(
+        source_event_to_envelope(&positive_zero, SystemMetadataExtensions::default())
+            .unwrap()
+            .change_set()
+            .id(),
+        source_event_to_envelope(&negative_zero, SystemMetadataExtensions::default())
+            .unwrap()
+            .change_set()
+            .id()
+    );
+
+    let positive_infinity = graph_float(f64::INFINITY);
+    let negative_infinity = graph_float(f64::NEG_INFINITY);
+    let positive_infinity_bytes = encode_source_change(change(&positive_infinity)).unwrap();
+    assert_eq!(
+        positive_infinity_bytes,
+        encode_source_change(change(&positive_infinity)).unwrap()
+    );
+    assert_ne!(
+        positive_infinity_bytes,
+        encode_source_change(change(&negative_infinity)).unwrap()
+    );
+}
+
+#[test]
 fn query_change_set_ids_include_available_epochs() {
     let contexts = [QueryPartEvaluationContext::Adding {
         after: variables(&[("name", VariableValue::String("Alice".to_string()))]),

@@ -25,7 +25,7 @@ pub(crate) use adapters::{
     source_event_to_envelope, ChangeAdapterError, QueryEnvelopeMetadata,
 };
 #[cfg(test)]
-pub(crate) use canonical::encode_query_variables;
+pub(crate) use canonical::{encode_query_variables, encode_source_change};
 
 use std::{
     collections::{HashMap, HashSet},

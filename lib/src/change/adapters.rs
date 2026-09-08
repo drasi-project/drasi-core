@@ -29,7 +29,7 @@ use crate::{
 };
 
 use super::{
-    canonical::{encode_query_variables, CanonicalEncodingError},
+    canonical::{encode_query_variables, encode_source_change, CanonicalEncodingError},
     graph_change_schema, query_result_schema, AddedRecord, ChangeContractError, ChangeEnvelope,
     ChangeSet, ChangeSetId, DeletedRecord, GraphRecord, RecordData, RecordIdentity,
     StableIdBuilder, SystemMetadata, SystemMetadataExtensions, UpdateMetadata, UpdateSemantics,
@@ -42,8 +42,6 @@ pub(crate) enum ChangeAdapterError {
     Contract(#[from] ChangeContractError),
     #[error("source control events cannot be represented as graph changes")]
     UnsupportedSourceControl,
-    #[error("failed to encode source change identity: {0}")]
-    SourceIdentityEncoding(#[from] rmp_serde::encode::Error),
     #[error("expected a {expected} change envelope")]
     WrongSchema { expected: &'static str },
     #[error("graph envelope must contain exactly one supported source change")]
@@ -153,7 +151,7 @@ pub(crate) fn source_event_to_envelope(
         ),
     };
 
-    let encoded_change = rmp_serde::to_vec_named(change)?;
+    let encoded_change = encode_source_change(change)?;
     let mut identity = StableIdBuilder::new("drasi.internal.graph-change-set/v1");
     identity.string("source-id", &wrapper.source_id);
     identity.optional_u64("sequence", wrapper.sequence);
