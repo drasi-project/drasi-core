@@ -631,17 +631,31 @@ mod tests {
     #[test]
     fn test_source_event_wrapper_into_parts() {
         let change = create_test_source_change();
-        let wrapper = SourceEventWrapper::new(
+        let timestamp = chrono::DateTime::from_timestamp_millis(1_700_000_000_123).unwrap();
+        let profiling = ProfilingMetadata {
+            source_ns: Some(10),
+            source_receive_ns: Some(20),
+            source_send_ns: Some(30),
+            ..Default::default()
+        };
+        let mut wrapper = SourceEventWrapper::with_sequence(
             "test-source".to_string(),
-            SourceEvent::Change(change),
-            chrono::Utc::now(),
+            SourceEvent::Change(change.clone()),
+            timestamp,
+            42,
+            Some(profiling.clone()),
         );
+        let source_position = Bytes::from_static(b"offset-42");
+        wrapper.set_source_position(source_position.clone());
 
         let parts = wrapper.into_parts();
 
         assert_eq!(parts.source_id, "test-source");
-        assert!(matches!(parts.event, SourceEvent::Change(_)));
-        assert!(parts.profiling.is_none());
+        assert_eq!(parts.event, SourceEvent::Change(change));
+        assert_eq!(parts.timestamp, timestamp);
+        assert_eq!(parts.profiling, Some(profiling));
+        assert_eq!(parts.sequence, Some(42));
+        assert_eq!(parts.source_position, Some(source_position));
     }
 
     #[test]

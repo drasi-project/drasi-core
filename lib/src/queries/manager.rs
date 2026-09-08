@@ -3168,3 +3168,6 @@ impl crate::reactions::QueryProvider for QueryManager {
             .map_err(|e| anyhow::anyhow!(e))
     }
 }
+
+#[cfg(test)]
+mod pipeline_characterization_tests;
