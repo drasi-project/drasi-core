@@ -645,6 +645,10 @@ impl GarnetSessionControl {
 
 #[async_trait]
 impl SessionControl for GarnetSessionControl {
+    fn supports_atomic_sessions(&self) -> bool {
+        true
+    }
+
     async fn begin(&self) -> Result<(), IndexError> {
         self.state.begin()
     }

@@ -31,7 +31,7 @@ use drasi_core::{
         CheckpointStore, ElementIndex, FutureQueue, IndexBackendPlugin, IndexError, SessionControl,
     },
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
-    query::{ContinuousQuery, QueryBuilder, ResultHookFuture},
+    query::{ContinuousQuery, QueryBuilder},
 };
 use drasi_index_rocksdb::RocksDbIndexProvider;
 use drasi_query_cypher::CypherParser;
@@ -146,18 +146,17 @@ async fn source_result_hook_commits_or_rolls_back_core_and_staged_writes_togethe
         functions,
     )
     .await;
+    assert!(fixture.query.supports_atomic_result_hooks());
 
     let checkpoint_store = fixture.checkpoint_store.clone();
     let committed = fixture
         .query
         .process_source_change_with_result_hook(
             person_change("alice", "Alice", 1_000),
-            move |results| -> ResultHookFuture<'_> {
-                Box::pin(async move {
-                    checkpoint_store.stage_checkpoint("people", 1, None).await?;
-                    assert_count_transition(results, 0, 1);
-                    Ok(())
-                })
+            move |results| async move {
+                checkpoint_store.stage_checkpoint("people", 1, None).await?;
+                assert_count_transition(&results, 0, 1);
+                Ok(())
             },
         )
         .await
@@ -179,12 +178,10 @@ async fn source_result_hook_commits_or_rolls_back_core_and_staged_writes_togethe
         .query
         .process_source_change_with_result_hook(
             person_change("bob", "Bob", 2_000),
-            move |results| -> ResultHookFuture<'_> {
-                Box::pin(async move {
-                    checkpoint_store.stage_checkpoint("people", 2, None).await?;
-                    assert_count_transition(results, 1, 2);
-                    Err(IndexError::CorruptedData)
-                })
+            move |results| async move {
+                checkpoint_store.stage_checkpoint("people", 2, None).await?;
+                assert_count_transition(&results, 1, 2);
+                Err(IndexError::CorruptedData)
             },
         )
         .await;
@@ -238,6 +235,7 @@ async fn due_future_result_hook_observes_replays_and_skips_empty_queue() {
         Arc::new(FunctionRegistry::new()),
     )
     .await;
+    assert!(fixture.query.supports_atomic_result_hooks());
 
     let initial = fixture
         .query
@@ -259,18 +257,16 @@ async fn due_future_result_hook_observes_replays_and_skips_empty_queue() {
     let checkpoint_store = fixture.checkpoint_store.clone();
     let failed = fixture
         .query
-        .process_due_futures_with_result_hook(move |due_result| -> ResultHookFuture<'_> {
-            Box::pin(async move {
-                checkpoint_store
-                    .stage_checkpoint("future-output", 1, None)
-                    .await?;
-                assert_eq!(due_result.source_id.as_ref(), "people");
-                hook_signature.store(
-                    assert_added_name(&due_result.results, "Alice"),
-                    Ordering::Relaxed,
-                );
-                Err(IndexError::CorruptedData)
-            })
+        .process_due_futures_with_result_hook(move |due_result| async move {
+            checkpoint_store
+                .stage_checkpoint("future-output", 1, None)
+                .await?;
+            assert_eq!(due_result.source_id.as_ref(), "people");
+            hook_signature.store(
+                assert_added_name(&due_result.results, "Alice"),
+                Ordering::Relaxed,
+            );
+            Err(IndexError::CorruptedData)
         })
         .await;
     assert!(matches!(
@@ -301,18 +297,16 @@ async fn due_future_result_hook_observes_replays_and_skips_empty_queue() {
     let checkpoint_store = fixture.checkpoint_store.clone();
     let replayed = fixture
         .query
-        .process_due_futures_with_result_hook(move |due_result| -> ResultHookFuture<'_> {
-            Box::pin(async move {
-                checkpoint_store
-                    .stage_checkpoint("future-output", 2, None)
-                    .await?;
-                hook_pointer.store(due_result.results.as_ptr() as usize, Ordering::Relaxed);
-                assert_eq!(
-                    assert_added_name(&due_result.results, "Alice"),
-                    failed_signature.load(Ordering::Relaxed)
-                );
-                Ok(())
-            })
+        .process_due_futures_with_result_hook(move |due_result| async move {
+            checkpoint_store
+                .stage_checkpoint("future-output", 2, None)
+                .await?;
+            hook_pointer.store(due_result.results.as_ptr() as usize, Ordering::Relaxed);
+            assert_eq!(
+                assert_added_name(&due_result.results, "Alice"),
+                failed_signature.load(Ordering::Relaxed)
+            );
+            Ok(())
         })
         .await
         .expect("replayed future should commit")
@@ -320,7 +314,7 @@ async fn due_future_result_hook_observes_replays_and_skips_empty_queue() {
     assert_eq!(
         observed_pointer.load(Ordering::Relaxed),
         replayed.results.as_ptr() as usize,
-        "the hook must borrow the returned due-future result allocation"
+        "the hook and caller must share the due-future result allocation"
     );
     assert_eq!(
         fixture
@@ -345,9 +339,9 @@ async fn due_future_result_hook_observes_replays_and_skips_empty_queue() {
     let hook_called = no_due_hook_called.clone();
     let no_due = fixture
         .query
-        .process_due_futures_with_result_hook(move |_| -> ResultHookFuture<'_> {
+        .process_due_futures_with_result_hook(move |_| async move {
             hook_called.store(true, Ordering::Relaxed);
-            Box::pin(async { Ok(()) })
+            Ok(())
         })
         .await
         .expect("empty queue should succeed");

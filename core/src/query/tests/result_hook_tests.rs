@@ -32,24 +32,49 @@ use crate::{
             aggregation::RegisterAggregationFunctions, Function, FunctionRegistry, ScalarFunction,
         },
         variable_value::VariableValue,
-        ExpressionEvaluationContext, FunctionError, FunctionEvaluationError,
+        EvaluationError, ExpressionEvaluationContext, FunctionError, FunctionEvaluationError,
+    },
+    in_memory_index::{
+        in_memory_element_index::InMemoryElementIndex, in_memory_future_queue::InMemoryFutureQueue,
     },
     interface::{
-        ElementIndex, IndexError, MiddlewareError, MiddlewareSetupError, SessionControl,
-        SourceMiddleware, SourceMiddlewareFactory,
+        ElementIndex, FutureQueue, IndexError, MiddlewareError, MiddlewareSetupError,
+        SessionControl, SourceMiddleware, SourceMiddlewareFactory,
     },
     middleware::MiddlewareTypeRegistry,
     models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
         SourceMiddlewareConfig,
     },
-    query::{ContinuousQuery, QueryBuilder, ResultHookFuture},
+    query::{ContinuousQuery, QueryBuilder},
 };
+
+struct AtomicTestSessionControl;
+
+#[async_trait]
+impl SessionControl for AtomicTestSessionControl {
+    fn supports_atomic_sessions(&self) -> bool {
+        true
+    }
+
+    async fn begin(&self) -> Result<(), IndexError> {
+        Ok(())
+    }
+
+    async fn commit(&self) -> Result<(), IndexError> {
+        Ok(())
+    }
+
+    fn rollback(&self) -> Result<(), IndexError> {
+        Ok(())
+    }
+}
 
 async fn build_query(query: &str, functions: Arc<FunctionRegistry>) -> ContinuousQuery {
     let parser = Arc::new(CypherParser::new(functions.clone()));
     QueryBuilder::new(query, parser)
         .with_function_registry(functions)
+        .with_session_control(Arc::new(AtomicTestSessionControl))
         .build()
         .await
 }
@@ -81,7 +106,7 @@ fn value<'a>(variables: &'a QueryVariables, key: &str) -> &'a VariableValue {
 }
 
 #[tokio::test]
-async fn result_hook_borrows_exact_add_update_delete_and_aggregation_results() {
+async fn result_hook_shares_exact_add_update_delete_and_aggregation_results() {
     let query = build_query(
         "MATCH (n:Person) RETURN n.name AS name",
         Arc::new(FunctionRegistry::new()),
@@ -93,16 +118,14 @@ async fn result_hook_borrows_exact_add_update_delete_and_aggregation_results() {
     let added = query
         .process_source_change_with_result_hook(
             person_change("person-1", "Alice", 1_000, false),
-            move |results| -> ResultHookFuture<'_> {
-                Box::pin(async move {
-                    tokio::task::yield_now().await;
-                    hook_pointer.store(results.as_ptr() as usize, Ordering::Relaxed);
-                    let [QueryPartEvaluationContext::Adding { after, .. }] = results else {
-                        panic!("expected one adding result, got {results:?}");
-                    };
-                    assert_eq!(value(after, "name"), &VariableValue::from("Alice"));
-                    Ok(())
-                })
+            move |results| async move {
+                tokio::task::yield_now().await;
+                hook_pointer.store(results.as_ptr() as usize, Ordering::Relaxed);
+                let [QueryPartEvaluationContext::Adding { after, .. }] = results.as_ref() else {
+                    panic!("expected one adding result, got {results:?}");
+                };
+                assert_eq!(value(after, "name"), &VariableValue::from("Alice"));
+                Ok(())
             },
         )
         .await
@@ -110,29 +133,27 @@ async fn result_hook_borrows_exact_add_update_delete_and_aggregation_results() {
     assert_eq!(
         observed_pointer.load(Ordering::Relaxed),
         added.as_ptr() as usize,
-        "the hook must borrow the returned result allocation"
+        "the hook and caller must share the result allocation"
     );
 
     let updated = query
         .process_source_change_with_result_hook(
             person_change("person-1", "Alicia", 2_000, true),
-            |results| -> ResultHookFuture<'_> {
-                Box::pin(async move {
-                    tokio::task::yield_now().await;
-                    let [QueryPartEvaluationContext::Updating { before, after, .. }] = results
-                    else {
-                        panic!("expected one updating result, got {results:?}");
-                    };
-                    assert_eq!(value(before, "name"), &VariableValue::from("Alice"));
-                    assert_eq!(value(after, "name"), &VariableValue::from("Alicia"));
-                    Ok(())
-                })
+            |results| async move {
+                tokio::task::yield_now().await;
+                let [QueryPartEvaluationContext::Updating { before, after, .. }] = results.as_ref()
+                else {
+                    panic!("expected one updating result, got {results:?}");
+                };
+                assert_eq!(value(before, "name"), &VariableValue::from("Alice"));
+                assert_eq!(value(after, "name"), &VariableValue::from("Alicia"));
+                Ok(())
             },
         )
         .await
         .expect("update should succeed");
     assert!(matches!(
-        updated.as_slice(),
+        updated.as_ref(),
         [QueryPartEvaluationContext::Updating { .. }]
     ));
 
@@ -145,21 +166,19 @@ async fn result_hook_borrows_exact_add_update_delete_and_aggregation_results() {
                     effective_from: 3_000,
                 },
             },
-            |results| -> ResultHookFuture<'_> {
-                Box::pin(async move {
-                    tokio::task::yield_now().await;
-                    let [QueryPartEvaluationContext::Removing { before, .. }] = results else {
-                        panic!("expected one removing result, got {results:?}");
-                    };
-                    assert_eq!(value(before, "name"), &VariableValue::from("Alicia"));
-                    Ok(())
-                })
+            |results| async move {
+                tokio::task::yield_now().await;
+                let [QueryPartEvaluationContext::Removing { before, .. }] = results.as_ref() else {
+                    panic!("expected one removing result, got {results:?}");
+                };
+                assert_eq!(value(before, "name"), &VariableValue::from("Alicia"));
+                Ok(())
             },
         )
         .await
         .expect("delete should succeed");
     assert!(matches!(
-        removed.as_slice(),
+        removed.as_ref(),
         [QueryPartEvaluationContext::Removing { .. }]
     ));
 
@@ -169,36 +188,34 @@ async fn result_hook_borrows_exact_add_update_delete_and_aggregation_results() {
     let aggregated = aggregate_query
         .process_source_change_with_result_hook(
             person_change("person-2", "Grace", 4_000, false),
-            |results| -> ResultHookFuture<'_> {
-                Box::pin(async move {
-                    tokio::task::yield_now().await;
-                    let [QueryPartEvaluationContext::Aggregation {
-                        before,
-                        after,
-                        grouping_keys,
-                        default_before,
-                        default_after,
-                        ..
-                    }] = results
-                    else {
-                        panic!("expected one aggregation result, got {results:?}");
-                    };
-                    assert_eq!(
-                        value(before.as_ref().expect("default count result"), "total"),
-                        &VariableValue::Integer(0.into())
-                    );
-                    assert!(grouping_keys.is_empty());
-                    assert!(*default_before);
-                    assert!(!default_after);
-                    assert_eq!(value(after, "total"), &VariableValue::Integer(1.into()));
-                    Ok(())
-                })
+            |results| async move {
+                tokio::task::yield_now().await;
+                let [QueryPartEvaluationContext::Aggregation {
+                    before,
+                    after,
+                    grouping_keys,
+                    default_before,
+                    default_after,
+                    ..
+                }] = results.as_ref()
+                else {
+                    panic!("expected one aggregation result, got {results:?}");
+                };
+                assert_eq!(
+                    value(before.as_ref().expect("default count result"), "total"),
+                    &VariableValue::Integer(0.into())
+                );
+                assert!(grouping_keys.is_empty());
+                assert!(*default_before);
+                assert!(!default_after);
+                assert_eq!(value(after, "total"), &VariableValue::Integer(1.into()));
+                Ok(())
             },
         )
         .await
         .expect("aggregation should succeed");
     assert!(matches!(
-        aggregated.as_slice(),
+        aggregated.as_ref(),
         [QueryPartEvaluationContext::Aggregation { .. }]
     ));
 }
@@ -216,6 +233,10 @@ impl RecordingSessionControl {
 
 #[async_trait]
 impl SessionControl for RecordingSessionControl {
+    fn supports_atomic_sessions(&self) -> bool {
+        true
+    }
+
     async fn begin(&self) -> Result<(), IndexError> {
         self.calls
             .lock()
@@ -275,9 +296,9 @@ async fn result_hook_is_not_called_when_evaluation_fails() {
     let result = query
         .process_source_change_with_result_hook(
             person_change("person-1", "Alice", 1_000, false),
-            move |_| -> ResultHookFuture<'_> {
+            move |_| async move {
                 hook_called_inside.store(true, Ordering::Relaxed);
-                Box::pin(async { Ok(()) })
+                Ok(())
             },
         )
         .await;
@@ -341,13 +362,11 @@ async fn result_hook_preserves_empty_and_middleware_fan_out_results() {
     let empty = no_result_query
         .process_source_change_with_result_hook(
             person_change("person-1", "Alice", 1_000, false),
-            move |results| -> ResultHookFuture<'_> {
-                Box::pin(async move {
-                    tokio::task::yield_now().await;
-                    assert!(results.is_empty());
-                    empty_hook_called_inside.store(true, Ordering::Relaxed);
-                    Ok(())
-                })
+            move |results| async move {
+                tokio::task::yield_now().await;
+                assert!(results.is_empty());
+                empty_hook_called_inside.store(true, Ordering::Relaxed);
+                Ok(())
             },
         )
         .await
@@ -368,33 +387,170 @@ async fn result_hook_preserves_empty_and_middleware_fan_out_results() {
             serde_json::Map::new(),
         )))
         .with_source_pipeline("people", &["fan-out".to_string()])
+        .with_session_control(Arc::new(AtomicTestSessionControl))
         .build()
         .await;
 
     let results = query
         .process_source_change_with_result_hook(
             person_change("ignored", "ignored", 2_000, false),
-            |results| -> ResultHookFuture<'_> {
-                Box::pin(async move {
-                    tokio::task::yield_now().await;
-                    let names = results
-                        .iter()
-                        .map(|result| match result {
-                            QueryPartEvaluationContext::Adding { after, .. } => {
-                                value(after, "name").to_string()
-                            }
-                            other => panic!("expected adding result, got {other:?}"),
-                        })
-                        .collect::<BTreeSet<_>>();
-                    assert_eq!(
-                        names,
-                        BTreeSet::from(["first".to_string(), "second".to_string()])
-                    );
-                    Ok(())
-                })
+            |results| async move {
+                tokio::task::yield_now().await;
+                let names = results
+                    .iter()
+                    .map(|result| match result {
+                        QueryPartEvaluationContext::Adding { after, .. } => {
+                            value(after, "name").to_string()
+                        }
+                        other => panic!("expected adding result, got {other:?}"),
+                    })
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(
+                    names,
+                    BTreeSet::from(["first".to_string(), "second".to_string()])
+                );
+                Ok(())
             },
         )
         .await
         .expect("fan-out evaluation should succeed");
     assert_eq!(results.len(), 2);
+}
+
+struct BorrowingHost {
+    expected_name: String,
+    hook_called: AtomicBool,
+}
+
+impl BorrowingHost {
+    async fn run(
+        &self,
+        query: &ContinuousQuery,
+        change: SourceChange,
+    ) -> Result<Arc<[QueryPartEvaluationContext]>, EvaluationError> {
+        query
+            .process_source_change_with_result_hook(change, |results| async move {
+                tokio::task::yield_now().await;
+                let [QueryPartEvaluationContext::Adding { after, .. }] = results.as_ref() else {
+                    panic!("expected one adding result, got {results:?}");
+                };
+                assert_eq!(
+                    value(after, "name"),
+                    &VariableValue::from(self.expected_name.as_str())
+                );
+                self.hook_called.store(true, Ordering::Relaxed);
+                Ok(())
+            })
+            .await
+    }
+}
+
+#[tokio::test]
+async fn result_hook_can_borrow_host_state_across_await() {
+    let query = build_query(
+        "MATCH (n:Person) RETURN n.name AS name",
+        Arc::new(FunctionRegistry::new()),
+    )
+    .await;
+    let host = BorrowingHost {
+        expected_name: "Ada".to_string(),
+        hook_called: AtomicBool::new(false),
+    };
+
+    let results = host
+        .run(&query, person_change("person-1", "Ada", 1_000, false))
+        .await
+        .expect("borrowed host hook should compile and run");
+
+    assert_eq!(results.len(), 1);
+    assert!(host.hook_called.load(Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn result_hooks_reject_non_atomic_sessions_before_mutation_or_pop() {
+    let functions = Arc::new(FunctionRegistry::new());
+    let parser = Arc::new(CypherParser::new(functions.clone()));
+    let element_index = Arc::new(InMemoryElementIndex::new());
+    let query = QueryBuilder::new("MATCH (n:Person) RETURN n.name AS name", parser)
+        .with_function_registry(functions)
+        .with_element_index(element_index.clone())
+        .with_archive_index(element_index.clone())
+        .build()
+        .await;
+    assert!(!query.supports_atomic_result_hooks());
+
+    let source_hook_called = Arc::new(AtomicBool::new(false));
+    let called = source_hook_called.clone();
+    let source_result = query
+        .process_source_change_with_result_hook(
+            person_change("person-1", "Alice", 1_000, false),
+            move |_| async move {
+                called.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .await;
+    assert!(matches!(
+        source_result,
+        Err(EvaluationError::IndexError(
+            IndexError::AtomicSessionNotSupported
+        ))
+    ));
+    assert!(!source_hook_called.load(Ordering::Relaxed));
+    assert!(
+        element_index
+            .get_element(&ElementReference::new("people", "person-1"))
+            .await
+            .expect("read in-memory element")
+            .is_none(),
+        "rejection must happen before core mutation"
+    );
+
+    let functions = Arc::new(FunctionRegistry::new());
+    let parser = Arc::new(CypherParser::new(functions.clone()));
+    let element_index = Arc::new(InMemoryElementIndex::new());
+    let future_queue = Arc::new(InMemoryFutureQueue::new());
+    let future_query = QueryBuilder::new(
+        "MATCH (n:Person) WHERE drasi.trueLater(true, 2000) RETURN n.name AS name",
+        parser,
+    )
+    .with_function_registry(functions)
+    .with_element_index(element_index.clone())
+    .with_archive_index(element_index)
+    .with_future_queue(future_queue.clone())
+    .build()
+    .await;
+    let initial = future_query
+        .process_source_change(person_change("future-person", "Grace", 1_000, false))
+        .await
+        .expect("legacy processing should queue a future");
+    assert!(initial.is_empty());
+    assert_eq!(
+        future_queue.peek_due_time().await.expect("peek future"),
+        Some(2_000)
+    );
+
+    let future_hook_called = Arc::new(AtomicBool::new(false));
+    let called = future_hook_called.clone();
+    let due_result = future_query
+        .process_due_futures_with_result_hook(move |_| async move {
+            called.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .await;
+    assert!(matches!(
+        due_result,
+        Err(EvaluationError::IndexError(
+            IndexError::AtomicSessionNotSupported
+        ))
+    ));
+    assert!(!future_hook_called.load(Ordering::Relaxed));
+    assert_eq!(
+        future_queue
+            .peek_due_time()
+            .await
+            .expect("peek retained future"),
+        Some(2_000),
+        "rejection must happen before the future pop"
+    );
 }

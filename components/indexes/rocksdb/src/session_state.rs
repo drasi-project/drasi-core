@@ -260,6 +260,10 @@ impl RocksDbSessionControl {
 
 #[async_trait]
 impl SessionControl for RocksDbSessionControl {
+    fn supports_atomic_sessions(&self) -> bool {
+        true
+    }
+
     async fn begin(&self) -> Result<(), IndexError> {
         let state = self.state.clone();
         tokio::task::spawn_blocking(move || state.begin())

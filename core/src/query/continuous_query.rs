@@ -17,7 +17,6 @@ use std::{
     fmt::Debug,
     future::Future,
     hash::{Hash, Hasher},
-    pin::Pin,
     sync::Arc,
     time::Duration,
 };
@@ -57,12 +56,6 @@ pub struct DueFutureResult {
     /// The source_id from the popped future's element_ref.
     pub source_id: Arc<str>,
 }
-
-/// Boxed future returned by a result-aware pre-commit hook.
-///
-/// The future may borrow the core-computed result for the duration of the hook,
-/// avoiding a deep clone before related writes are staged.
-pub type ResultHookFuture<'a> = Pin<Box<dyn Future<Output = Result<(), IndexError>> + Send + 'a>>;
 
 pub struct ContinuousQuery {
     expression_evaluator: Arc<ExpressionEvaluator>,
@@ -108,6 +101,14 @@ impl ContinuousQuery {
         }
     }
 
+    /// Whether the configured session can safely run result-aware hooks.
+    ///
+    /// A hook-staged write is atomic with core index mutations only when it uses
+    /// a backend resource that shares this query's session state.
+    pub fn supports_atomic_result_hooks(&self) -> bool {
+        self.session_control.supports_atomic_sessions()
+    }
+
     #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_source_change(
         &self,
@@ -126,9 +127,13 @@ impl ContinuousQuery {
     /// Process a source change with a pre-commit hook that runs inside the session.
     ///
     /// The hook executes after index updates but before the session commits,
-    /// allowing callers to stage additional writes (e.g. checkpoint data) into
-    /// the same atomic transaction. The change_lock is held for the entire
-    /// duration, preserving serialization.
+    /// allowing callers to stage additional writes (e.g. checkpoint data). The
+    /// change lock is held for the entire duration, preserving serialization.
+    ///
+    /// This legacy API does not require an atomic [`SessionControl`]. Hook and
+    /// index rollback is therefore backend-dependent; use
+    /// [`Self::process_source_change_with_result_hook`] when atomic rollback is
+    /// required.
     #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_source_change_with_hook<F, Fut>(
         &self,
@@ -152,37 +157,46 @@ impl ContinuousQuery {
 
     /// Process a source change with a result-aware pre-commit hook.
     ///
-    /// The hook borrows the exact result produced by middleware and evaluation.
-    /// It runs after index updates but before the session commits, while the
-    /// change lock remains held. If the hook fails, its [`IndexError`] is
-    /// returned as an [`EvaluationError`] and the session is rolled back.
+    /// The hook receives an immutable [`Arc`] containing the exact typed result
+    /// produced by middleware and evaluation. Cloning the `Arc` does not clone
+    /// its result values, and an ordinary async closure may borrow caller state.
+    ///
+    /// This method requires an atomic session and rejects unsupported backends
+    /// before middleware or evaluation begins. The hook runs after index updates
+    /// but before commit, while the change lock remains held. If it fails, its
+    /// [`IndexError`] is returned as an [`EvaluationError`] and the transaction
+    /// rolls back.
     #[tracing::instrument(skip_all, err, level = "debug")]
-    pub async fn process_source_change_with_result_hook<F>(
+    pub async fn process_source_change_with_result_hook<F, Fut>(
         &self,
         change: SourceChange,
         pre_commit_hook: F,
-    ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError>
+    ) -> Result<Arc<[QueryPartEvaluationContext]>, EvaluationError>
     where
-        F: for<'a> FnOnce(&'a [QueryPartEvaluationContext]) -> ResultHookFuture<'a> + Send,
+        F: FnOnce(Arc<[QueryPartEvaluationContext]>) -> Fut + Send,
+        Fut: Future<Output = Result<(), IndexError>> + Send,
     {
+        self.require_atomic_result_hooks()?;
         let _lock = self.change_lock.lock().await;
         let guard = SessionGuard::begin(self.session_control.clone()).await?;
 
         let changes = self.execute_source_middleware(change).await?;
-        let result = self.process_changes_inner(changes).await?;
+        let result: Arc<[QueryPartEvaluationContext]> =
+            self.process_changes_inner(changes).await?.into();
 
-        pre_commit_hook(&result).await?;
+        pre_commit_hook(result.clone()).await?;
         guard.commit().await?;
         Ok(result)
     }
 
-    /// Atomically pop a due future from the queue and process it within a single session.
+    /// Pop a due future from the queue and process it within a single session.
     ///
     /// Returns `Ok(None)` when the queue is empty (stale peek).
     /// Returns `Ok(Some(DueFutureResult))` with results and the original source_id.
     ///
-    /// Pop happens inside the session → atomic with all downstream index writes.
-    /// If a crash occurs before commit, the pop rolls back and the item stays in the queue.
+    /// With an atomic [`SessionControl`], the pop and downstream index writes
+    /// commit or roll back together. The legacy API does not reject non-atomic
+    /// sessions.
     #[tracing::instrument(skip_all, err, level = "debug")]
     pub async fn process_due_futures(&self) -> Result<Option<DueFutureResult>, EvaluationError> {
         let _lock = self.change_lock.lock().await;
@@ -207,18 +221,24 @@ impl ContinuousQuery {
 
     /// Atomically process a due future with a result-aware pre-commit hook.
     ///
-    /// The hook borrows the exact [`DueFutureResult`] after evaluation and runs
-    /// before the session commits. It is called only when a future was popped;
-    /// an empty queue commits the session and returns `Ok(None)` without calling
-    /// the hook. Hook failure rolls back the future pop and all evaluation writes.
+    /// The hook receives an immutable [`Arc`] containing the exact
+    /// [`DueFutureResult`] and may borrow caller state in its async operation.
+    ///
+    /// This method requires an atomic session and rejects unsupported backends
+    /// before popping the queue. The hook runs before commit and is called only
+    /// when a future was popped; an empty queue commits the session and returns
+    /// `Ok(None)` without calling it. Hook failure rolls back the future pop and
+    /// all evaluation writes.
     #[tracing::instrument(skip_all, err, level = "debug")]
-    pub async fn process_due_futures_with_result_hook<F>(
+    pub async fn process_due_futures_with_result_hook<F, Fut>(
         &self,
         pre_commit_hook: F,
-    ) -> Result<Option<DueFutureResult>, EvaluationError>
+    ) -> Result<Option<Arc<DueFutureResult>>, EvaluationError>
     where
-        F: for<'a> FnOnce(&'a DueFutureResult) -> ResultHookFuture<'a> + Send,
+        F: FnOnce(Arc<DueFutureResult>) -> Fut + Send,
+        Fut: Future<Output = Result<(), IndexError>> + Send,
     {
+        self.require_atomic_result_hooks()?;
         let _lock = self.change_lock.lock().await;
         let guard = SessionGuard::begin(self.session_control.clone()).await?;
 
@@ -235,11 +255,19 @@ impl ContinuousQuery {
         let change = SourceChange::Future { future_ref };
         let changes = self.execute_source_middleware(change).await?;
         let results = self.process_changes_inner(changes).await?;
-        let result = DueFutureResult { results, source_id };
+        let result = Arc::new(DueFutureResult { results, source_id });
 
-        pre_commit_hook(&result).await?;
+        pre_commit_hook(result.clone()).await?;
         guard.commit().await?;
         Ok(Some(result))
+    }
+
+    fn require_atomic_result_hooks(&self) -> Result<(), EvaluationError> {
+        if self.supports_atomic_result_hooks() {
+            Ok(())
+        } else {
+            Err(IndexError::AtomicSessionNotSupported.into())
+        }
     }
 
     /// Expose the ContinuousQuery's future queue for external polling.

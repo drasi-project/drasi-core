@@ -66,6 +66,8 @@ use crate::evaluation::EvaluationError;
 pub enum IndexError {
     IOError,
     NotSupported,
+    /// A result-aware hook requires a session that can atomically roll back index writes.
+    AtomicSessionNotSupported,
     /// A temporal read was attempted on an index whose archive is not enabled.
     ArchiveNotEnabled,
     CorruptedData,
@@ -79,6 +81,7 @@ impl PartialEq for IndexError {
         match (self, other) {
             (IndexError::IOError, IndexError::IOError) => true,
             (IndexError::NotSupported, IndexError::NotSupported) => true,
+            (IndexError::AtomicSessionNotSupported, IndexError::AtomicSessionNotSupported) => true,
             (IndexError::ArchiveNotEnabled, IndexError::ArchiveNotEnabled) => true,
             (IndexError::CorruptedData, IndexError::CorruptedData) => true,
             (IndexError::ConnectionFailed(a), IndexError::ConnectionFailed(b)) => {
@@ -99,6 +102,9 @@ impl PartialEq for IndexError {
 impl Display for IndexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            IndexError::AtomicSessionNotSupported => {
+                write!(f, "result-aware hooks require atomic session support")
+            }
             IndexError::ArchiveNotEnabled => write!(
                 f,
                 "archive index not enabled for this query; set enable_archive to use past()"
